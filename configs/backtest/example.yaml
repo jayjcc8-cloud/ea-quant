@@ -1,0 +1,20 @@
+run:
+  name: example-backtest
+  mode: backtest
+  timezone: UTC
+
+data:
+  source: local
+  format: parquet
+  path: data/processed/example.parquet
+
+strategy:
+  name: buy_and_hold
+  parameters:
+    symbol: EXAMPLE:SPY
+
+risk:
+  max_position_notional: 10000
+  max_daily_loss: 500
+  live_trading_enabled: false
+

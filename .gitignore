@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+
+# Quant data and generated artifacts
+data/raw/
+data/processed/
+data/features/
+reports/
+notebooks/.ipynb_checkpoints/
+*.parquet
+*.duckdb
+*.db
+*.sqlite
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
