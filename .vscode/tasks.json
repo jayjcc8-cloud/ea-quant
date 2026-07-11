@@ -16,6 +16,13 @@
       "problemMatcher": []
     },
     {
+      "label": "EA: format check",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m ruff format --check .",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
       "label": "EA: typecheck",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/bin/python -m mypy",

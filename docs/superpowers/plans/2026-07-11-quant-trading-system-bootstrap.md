@@ -1,6 +1,9 @@
 # Quant Trading System Bootstrap Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical plan:** This file preserves the original Phase 0 implementation plan. Current work
+> follows `AGENTS.md` and `CONTRIBUTING.md`; Issues, pull requests, and CI are the live status
+> sources. Unchecked steps below must not be interpreted as unfinished work or retroactively marked
+> complete when that exact historical step was not recorded.
 
 **Goal:** Build the Phase 0 foundation for a long-running quantitative trading system with architecture docs, Python project skeleton, Git/GitHub workflow, and a testable CLI entrypoint.
 
@@ -18,7 +21,10 @@
 - [x] VSCode interpreter, tasks, extensions, and debug configuration added.
 - [x] GitHub Actions quality gate and locked Python dependency graph added.
 - [x] Local `ea doctor` entrypoint verified with Python 3.12.
-- [ ] Draft PR checks pass and Phase 0 is merged to `main`.
+- [x] Bootstrap commit `405e3ba` passed Draft PR #1 CI.
+- [x] Expert collaboration and version governance are defined in the repository.
+
+Final PR, merge, and release status is recorded in GitHub rather than this historical plan.
 
 The detailed task checkboxes below preserve the original TDD execution plan. Phase 0 delivery is
 consolidated into one bootstrap commit instead of the task-by-task commits shown in the plan.
@@ -105,7 +111,9 @@ def doctor() -> None:
     """Print local project health information."""
     typer.echo("EA system doctor")
     typer.echo(f"python: {platform.python_version()}")
-    typer.echo("config: not loaded")
+    typer.echo("config: development")
+    typer.echo("paper trading: enabled")
+    typer.echo("live trading: disabled")
 ```
 
 - [ ] **Step 4: Run the test and verify it passes**
@@ -350,9 +358,11 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
       - name: Lint
         run: uv run ruff check .
+      - name: Format
+        run: uv run ruff format --check .
       - name: Typecheck
         run: uv run mypy
       - name: Test
