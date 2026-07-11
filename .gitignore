@@ -37,5 +37,8 @@ notebooks/.ipynb_checkpoints/
 # OS / editor
 .DS_Store
 .idea/
-.vscode/
-
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
