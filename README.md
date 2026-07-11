@@ -16,8 +16,8 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
 - 本地 Git 仓库已初始化，当前分支为 `main`。
 - GitHub CLI 已登录账号 `jayjcc8-cloud`。
 - 本机 SSH 公钥已添加到 GitHub，SSH 认证已通过。
-- 当前仓库尚未连接 GitHub remote，目标新仓库为 `jayjcc8-cloud/ea-quant`。
-- 本仓库还未配置 `user.name` / `user.email`，首次 commit 前将设置 repo-local Git 身份。
+- 当前仓库已通过 SSH remote 连接到 `jayjcc8-cloud/ea-quant`。
+- 本仓库已配置 repo-local Git 身份。
 
 ## 顶层模块
 
@@ -70,10 +70,11 @@ src/ea/
 
 ## GitHub 接入待确认
 
-默认使用以下信息继续配置本地 Git 身份、创建首次 commit、连接 GitHub remote 并 push：
+当前 Git/GitHub 配置：
 
 - GitHub 仓库名称：`ea-quant`
 - 仓库归属：`jayjcc8-cloud`
 - 可见性：`private`
 - Git 身份：`jayjcc8-cloud <275956764+jayjcc8-cloud@users.noreply.github.com>`
 - Remote 协议：SSH
+- Remote URL：`git@github.com:jayjcc8-cloud/ea-quant.git`
