@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ea-quant"
 version = "0.1.0"
@@ -28,6 +32,9 @@ dev = [
 [project.scripts]
 ea = "ea.cli.app:app"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -44,4 +51,3 @@ python_version = "3.12"
 strict = true
 warn_unused_configs = true
 files = ["src/ea", "tests"]
-

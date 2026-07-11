@@ -10,6 +10,21 @@
 
 ---
 
+## Execution status
+
+- [x] Architecture, ADR, Git identity, SSH remote, and private GitHub repository established.
+- [x] CLI, settings, and initial domain models implemented.
+- [x] Unit tests, Ruff, and strict mypy checks pass locally.
+- [x] VSCode interpreter, tasks, extensions, and debug configuration added.
+- [x] GitHub Actions quality gate and locked Python dependency graph added.
+- [x] Local `ea doctor` entrypoint verified with Python 3.12.
+- [ ] Draft PR checks pass and Phase 0 is merged to `main`.
+
+The detailed task checkboxes below preserve the original TDD execution plan. Phase 0 delivery is
+consolidated into one bootstrap commit instead of the task-by-task commits shown in the plan.
+
+---
+
 ## File structure
 
 - Create: `src/ea/__init__.py` package marker.
@@ -430,4 +445,3 @@ shows `origin`, and GitHub contains the `main` branch.
 - Spec coverage: architecture-first workflow, mature open-source references, Git/GitHub requirement, and phased implementation are covered.
 - Placeholder scan: the only placeholder-like strings are `USER_CONFIRMED_NAME`, `USER_CONFIRMED_EMAIL`, `OWNER`, and `REPO`, which require user-provided identity and repository choices before external GitHub writes.
 - Type consistency: tests and implementation use the same names: `Instrument`, `Bar`, `OrderSide`, `Settings`, and `doctor`.
-

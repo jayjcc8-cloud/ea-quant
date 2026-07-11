@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "EA: test",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m pytest -q",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "EA: lint",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m ruff check .",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "EA: typecheck",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m mypy",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "EA: doctor",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m ea.cli.app doctor",
+      "options": {
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}/src"
+        }
+      },
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

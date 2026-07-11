@@ -13,11 +13,12 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
 
 ## 当前状态
 
-- 本地 Git 仓库已初始化，当前分支为 `main`。
+- 本地 Git 仓库已初始化，主分支为 `main`，功能开发使用独立分支。
 - GitHub CLI 已登录账号 `jayjcc8-cloud`。
 - 本机 SSH 公钥已添加到 GitHub，SSH 认证已通过。
 - 当前仓库已通过 SSH remote 连接到 `jayjcc8-cloud/ea-quant`。
 - 本仓库已配置 repo-local Git 身份。
+- Phase 0 已具备 Python 项目骨架、配置、领域模型、CLI、测试、VSCode 配置和 CI 质量门禁。
 
 ## 顶层模块
 
@@ -59,6 +60,41 @@ src/ea/
 6. Phase 5：小规模生产化  
    多策略、多环境、监控告警、日报周报、备份恢复、部署手册。
 
+## 本机 VSCode 开发环境
+
+项目固定使用 Python 3.12，并以仓库内 `.venv` 作为本机 VSCode 运行环境。
+
+首次设置：
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install '.[dev]'
+.venv/bin/ea doctor
+```
+
+如果本机还没有 `python3.12`，可以先安装 Python 3.12，或临时使用 Codex bundled Python 创建 `.venv`。VSCode 会通过 `.vscode/settings.json` 自动指向：
+
+```text
+${workspaceFolder}/.venv/bin/python
+```
+
+常用质量门禁：
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check .
+.venv/bin/python -m mypy
+.venv/bin/ea doctor
+```
+
+VSCode 已提供：
+
+- Python 解释器配置
+- pytest 发现配置
+- Ruff formatter/linter 配置
+- `EA: test`、`EA: lint`、`EA: typecheck`、`EA: doctor` tasks
+- `EA doctor` debug configuration
+
 ## 参考框架
 
 - [QuantConnect LEAN](https://github.com/QuantConnect/Lean)：参考 Universe / Alpha / Portfolio / Risk / Execution 的模块边界。
@@ -68,7 +104,7 @@ src/ea/
 - [vectorbt](https://github.com/polakowo/vectorbt)：用于研究阶段参数扫描，不作为实盘核心。
 - [Backtrader](https://github.com/mementum/backtrader) 与 [Zipline Reloaded](https://github.com/stefan-jansen/zipline-reloaded)：参考回测 API 与研究工作流。
 
-## GitHub 接入待确认
+## GitHub 接入
 
 当前 Git/GitHub 配置：
 

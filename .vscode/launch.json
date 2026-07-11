@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "EA doctor",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ea.cli.app",
+      "args": ["doctor"],
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "justMyCode": true
+    }
+  ]
+}
