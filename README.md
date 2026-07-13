@@ -61,29 +61,42 @@ src/ea/
 
 ## 本机 VSCode 开发环境
 
-项目固定使用 Python 3.12，并以仓库内 `.venv` 作为本机 VSCode 运行环境。
+项目固定使用 Python 3.12，并以仓库内真实、非隐藏的 `venv/` 目录作为本机 VSCode 运行环境。
+不要创建 `.venv -> venv` 符号链接；所有 uv 项目命令都显式指定
+`UV_PROJECT_ENVIRONMENT=venv`。
 
-首次设置（需要已安装 `uv`）：
+macOS 首次设置先安装全局 `uv`：
 
 ```bash
-uv sync --locked --extra dev
-uv run ea doctor
+brew install uv
+python3 scripts/bootstrap_local.py
 ```
 
-`uv` 会依据 `.python-version` 安装 Python 3.12 并创建 `.venv`。VSCode 会通过 `.vscode/settings.json` 自动指向：
+其他安装方式见 [uv 官方安装文档](https://docs.astral.sh/uv/getting-started/installation/)。
+bootstrap 会依据 `.python-version` 创建 `venv/`、执行 locked editable sync，并从仓库外验证
+isolated import、真实 `ea` console entrypoint 与 `uv run`。若旧 `.venv` 仍存在，脚本只提示其已废弃，
+不会修改或删除它。
+
+VSCode 会通过 `.vscode/settings.json` 自动指向：
 
 ```text
-${workspaceFolder}/.venv/bin/python
+${workspaceFolder}/venv/bin/python
 ```
+
+若 VSCode 已为该工作区缓存过旧解释器，请执行 `Python: Select Interpreter`，选择
+`venv/bin/python`，然后执行 `Developer: Reload Window`。
 
 常用质量门禁：
 
 ```bash
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy
-uv run ea doctor
+UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev
+venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
+venv/bin/ea doctor
+UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q
+UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff check .
+UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .
+UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy
+UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor
 ```
 
 VSCode 已提供：

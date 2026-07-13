@@ -36,16 +36,25 @@ published.
 ## Required checks
 
 ```bash
-uv sync --locked --extra dev
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy
-uv run pytest -q
-uv run ea doctor
+UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev
+venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
+venv/bin/ea doctor
+UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff check .
+UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .
+UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy
+UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q
+UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor
+UV_PROJECT_ENVIRONMENT=venv uv build --wheel
 ```
 
 Tests must be deterministic and must not depend on private local market data. Secrets, broker
 credentials, tokens, and non-versionable datasets must never enter Git.
+
+Packaging changes must additionally install the built wheel with `--no-deps` into an independently
+created environment whose runtime dependencies came from `uv sync --locked --no-install-project`.
+Run an isolated import that compares distribution metadata with `ea.__version__`, then run the
+installed `ea doctor` from outside the repository. The CI workflow is the executable reference for
+this clean-wheel smoke test.
 
 ## Definition of Done
 

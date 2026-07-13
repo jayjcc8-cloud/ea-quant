@@ -16,6 +16,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      UV_PROJECT_ENVIRONMENT: venv
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
@@ -23,13 +25,30 @@ jobs:
         run: uv python install 3.12
       - name: Install dependencies
         run: uv sync --locked --extra dev
+      - name: Installed project smoke
+        run: |
+          venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
+          venv/bin/ea doctor
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --locked ruff check .
       - name: Format
-        run: uv run ruff format --check .
+        run: uv run --locked ruff format --check .
       - name: Typecheck
-        run: uv run mypy
+        run: uv run --locked mypy
       - name: Test
-        run: uv run pytest -q
+        run: uv run --locked pytest -q
       - name: Doctor
-        run: uv run ea doctor
+        run: uv run --locked ea doctor
+      - name: Build wheel
+        run: uv build --wheel
+      - name: Create clean wheel environment from locked dependencies
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/ea-wheel-venv
+        run: uv sync --locked --no-install-project
+      - name: Install wheel without resolving dependencies
+        run: uv pip install --python "${{ runner.temp }}/ea-wheel-venv/bin/python" --no-deps dist/*.whl
+      - name: Smoke test wheel outside repository
+        working-directory: ${{ runner.temp }}
+        run: |
+          "${{ runner.temp }}/ea-wheel-venv/bin/python" -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
+          "${{ runner.temp }}/ea-wheel-venv/bin/ea" doctor
