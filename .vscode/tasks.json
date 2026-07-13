@@ -4,40 +4,35 @@
     {
       "label": "EA: test",
       "type": "shell",
-      "command": "${workspaceFolder}/.venv/bin/python -m pytest -q",
+      "command": "${workspaceFolder}/venv/bin/python -m pytest -q",
       "group": "test",
       "problemMatcher": []
     },
     {
       "label": "EA: lint",
       "type": "shell",
-      "command": "${workspaceFolder}/.venv/bin/python -m ruff check .",
+      "command": "${workspaceFolder}/venv/bin/python -m ruff check .",
       "group": "build",
       "problemMatcher": []
     },
     {
       "label": "EA: format check",
       "type": "shell",
-      "command": "${workspaceFolder}/.venv/bin/python -m ruff format --check .",
+      "command": "${workspaceFolder}/venv/bin/python -m ruff format --check .",
       "group": "build",
       "problemMatcher": []
     },
     {
       "label": "EA: typecheck",
       "type": "shell",
-      "command": "${workspaceFolder}/.venv/bin/python -m mypy",
+      "command": "${workspaceFolder}/venv/bin/python -m mypy",
       "group": "build",
       "problemMatcher": []
     },
     {
       "label": "EA: doctor",
       "type": "shell",
-      "command": "${workspaceFolder}/.venv/bin/python -m ea.cli.app doctor",
-      "options": {
-        "env": {
-          "PYTHONPATH": "${workspaceFolder}/src"
-        }
-      },
+      "command": "${workspaceFolder}/venv/bin/ea doctor",
       "group": "build",
       "problemMatcher": []
     }

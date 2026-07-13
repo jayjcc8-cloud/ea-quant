@@ -35,12 +35,16 @@
 
 ## Verification
 
-- [ ] `uv sync --locked --extra dev`
-- [ ] `uv run ruff check .`
-- [ ] `uv run ruff format --check .`
-- [ ] `uv run mypy`
-- [ ] `uv run pytest -q`
-- [ ] `uv run ea doctor`
+- [ ] `UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev`
+- [ ] Installed metadata and `ea.__version__` both report the target version under `python -I`
+- [ ] `venv/bin/ea doctor`
+- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff check .`
+- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .`
+- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy`
+- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q`
+- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor`
+- [ ] `UV_PROJECT_ENVIRONMENT=venv uv build --wheel`
+- [ ] Clean wheel install and outside-repository smoke (when packaging changes)
 - CI result:
 
 ## Expert review
