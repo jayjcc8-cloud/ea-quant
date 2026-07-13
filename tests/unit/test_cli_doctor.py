@@ -4,13 +4,14 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import ea
 from ea.cli.app import app
 
 
-def test_doctor_reports_project_health() -> None:
+def test_doctor_reports_project_health(isolated_ea_environment: None) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["doctor"])
 
@@ -22,10 +23,27 @@ def test_doctor_reports_project_health() -> None:
     assert "live trading: disabled" in result.stdout
 
 
-def _environment_without_pythonpath() -> dict[str, str]:
-    env = os.environ.copy()
-    env.pop("PYTHONPATH", None)
-    return env
+def _isolated_subprocess_environment() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() != "PYTHONPATH" and not name.upper().startswith("EA_")
+    }
+
+
+def test_subprocess_environment_removes_ambient_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EA_ENV", "production")
+    monkeypatch.setenv("EA_FUTURE_SETTING", "must-not-leak")
+    monkeypatch.setenv("ea_future_lowercase", "must-not-leak")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/must-not-leak")
+    monkeypatch.setenv("pythonpath", "/tmp/must-not-leak-either")
+
+    env = _isolated_subprocess_environment()
+
+    assert "PYTHONPATH" not in {name.upper() for name in env}
+    assert not any(name.upper().startswith("EA_") for name in env)
 
 
 def test_source_and_distribution_versions_match() -> None:
@@ -38,7 +56,7 @@ def test_doctor_runs_as_installed_python_module(tmp_path: Path) -> None:
         capture_output=True,
         check=False,
         cwd=tmp_path,
-        env=_environment_without_pythonpath(),
+        env=_isolated_subprocess_environment(),
         text=True,
     )
 
@@ -56,7 +74,7 @@ def test_doctor_runs_as_installed_console_script(tmp_path: Path) -> None:
         capture_output=True,
         check=False,
         cwd=tmp_path,
-        env=_environment_without_pythonpath(),
+        env=_isolated_subprocess_environment(),
         text=True,
     )
 
