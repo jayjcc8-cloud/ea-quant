@@ -36,6 +36,9 @@ published.
 ## Required checks
 
 ```bash
+uv --version
+uv lock --check
+git diff --exit-code HEAD -- uv.lock
 UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev
 venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
 venv/bin/ea doctor
@@ -44,17 +47,28 @@ UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .
 UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy
 UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q
 UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor
-UV_PROJECT_ENVIRONMENT=venv uv build --wheel
+export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+UV_PROJECT_ENVIRONMENT=venv uv build --wheel --clear \
+  --build-constraints build-constraints.txt --require-hashes --out-dir build/wheel-a
+UV_PROJECT_ENVIRONMENT=venv uv build --wheel --clear \
+  --build-constraints build-constraints.txt --require-hashes --out-dir build/wheel-b
+cmp build/wheel-a/*.whl build/wheel-b/*.whl
+venv/bin/python -c "import hashlib, pathlib; p = next(pathlib.Path('build/wheel-a').glob('*.whl')); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
 ```
 
 Tests must be deterministic and must not depend on private local market data. Secrets, broker
 credentials, tokens, and non-versionable datasets must never enter Git.
 
+The supported frontend version is declared once by `[tool.uv].required-version` in
+`pyproject.toml`. The isolated PEP 517 backend closure is separately pinned and hash-verified by
+`build-constraints.txt`; `uv.lock` does not replace that build constraint. Never use
+`--no-build-isolation` for the canonical build.
+
 Packaging changes must additionally install the built wheel with `--no-deps` into an independently
 created environment whose runtime dependencies came from `uv sync --locked --no-install-project`.
-Run an isolated import that compares distribution metadata with `ea.__version__`, then run the
-installed `ea doctor` from outside the repository. The CI workflow is the executable reference for
-this clean-wheel smoke test.
+Run `uv pip check`, an isolated import that compares distribution metadata with `ea.__version__`,
+then the installed `ea doctor` from outside the repository. The CI workflow is the executable
+reference for this clean-wheel smoke test.
 
 ## Definition of Done
 
