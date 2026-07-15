@@ -37,8 +37,10 @@ def find_uv() -> str:
         return str(uv_path)
 
     print(
-        "uv was not found on PATH. Install it with `brew install uv` on macOS, or follow "
-        "https://docs.astral.sh/uv/getting-started/installation/ and rerun this script.",
+        "uv was not found on PATH. Install the exact version declared by "
+        "[tool.uv].required-version in pyproject.toml using "
+        "https://docs.astral.sh/uv/getting-started/installation/#standalone-installer "
+        "and rerun this script.",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -71,6 +73,7 @@ def main() -> int:
     env.pop("PYTHONPATH", None)
     env.pop("VIRTUAL_ENV", None)
 
+    run([uv, "--version"], cwd=PROJECT_ROOT, env=env)
     run([uv, "sync", "--locked", "--extra", "dev"], cwd=PROJECT_ROOT, env=env)
 
     scripts_dir = ENVIRONMENT_DIR / ("Scripts" if os.name == "nt" else "bin")

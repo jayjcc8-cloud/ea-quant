@@ -61,18 +61,24 @@ src/ea/
 
 ## 本机 VSCode 开发环境
 
-项目固定使用 Python 3.12，并以仓库内真实、非隐藏的 `venv/` 目录作为本机 VSCode 运行环境。
-不要创建 `.venv -> venv` 符号链接；所有 uv 项目命令都显式指定
+项目固定使用 Python 3.12 和 uv 0.11.28，并以仓库内真实、非隐藏的 `venv/` 目录作为本机 VSCode 运行环境。
+不要创建 `.venv -> venv` 符号链接；所有创建或使用项目环境的 uv 命令都显式指定
 `UV_PROJECT_ENVIRONMENT=venv`。
 
-macOS 首次设置先安装全局 `uv`：
+macOS 首次设置使用 uv 官方的版本化安装器安装项目要求的全局版本；若 `uv --version`
+已经报告 0.11.28，可跳过安装命令：
 
 ```bash
-brew install uv
+curl -LsSf https://astral.sh/uv/0.11.28/install.sh | sh
+uv --version
 python3 scripts/bootstrap_local.py
 ```
 
-其他安装方式见 [uv 官方安装文档](https://docs.astral.sh/uv/getting-started/installation/)。
+首次运行 standalone installer 后，若当前 shell 尚未找到 `uv`，请按安装器提示加载其环境文件
+或重启终端，再执行 `uv --version`。
+
+`pyproject.toml` 会拒绝不匹配的 uv 版本。其他安装方式见
+[uv 官方 standalone installer 文档](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer)。
 bootstrap 会依据 `.python-version` 创建 `venv/`、执行 locked editable sync，并从仓库外验证
 isolated import、真实 `ea` console entrypoint 与 `uv run`。若旧 `.venv` 仍存在，脚本只提示其已废弃，
 不会修改或删除它。
@@ -89,6 +95,9 @@ ${workspaceFolder}/venv/bin/python
 常用质量门禁：
 
 ```bash
+uv --version
+uv lock --check
+git diff --exit-code HEAD -- uv.lock
 UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev
 venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
 venv/bin/ea doctor
@@ -98,6 +107,21 @@ UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .
 UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy
 UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor
 ```
+
+可复现 wheel 使用独立于 `uv.lock` 的哈希构建约束，并保持 PEP 517 构建隔离：
+
+```bash
+export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+UV_PROJECT_ENVIRONMENT=venv uv build --wheel --clear \
+  --build-constraints build-constraints.txt --require-hashes --out-dir build/wheel-a
+UV_PROJECT_ENVIRONMENT=venv uv build --wheel --clear \
+  --build-constraints build-constraints.txt --require-hashes --out-dir build/wheel-b
+cmp build/wheel-a/*.whl build/wheel-b/*.whl
+venv/bin/python -c "import hashlib, pathlib; p = next(pathlib.Path('build/wheel-a').glob('*.whl')); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
+```
+
+不要使用 `--no-build-isolation`，也不要把 setuptools 或 wheel 加入应用/dev 依赖来替代
+`build-constraints.txt`。
 
 VSCode 已提供：
 

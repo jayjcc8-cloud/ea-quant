@@ -35,6 +35,8 @@
 
 ## Verification
 
+- [ ] `uv --version` matches `[tool.uv].required-version`
+- [ ] `uv lock --check` and `git diff --exit-code HEAD -- uv.lock`
 - [ ] `UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev`
 - [ ] Installed metadata and `ea.__version__` both report the target version under `python -I`
 - [ ] `venv/bin/ea doctor`
@@ -43,8 +45,8 @@
 - [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy`
 - [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q`
 - [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor`
-- [ ] `UV_PROJECT_ENVIRONMENT=venv uv build --wheel`
-- [ ] Clean wheel install and outside-repository smoke (when packaging changes)
+- [ ] Commit-derived `SOURCE_DATE_EPOCH` plus two isolated, hashed wheel builds compare byte-identically
+- [ ] Clean `--no-deps` wheel install, `uv pip check`, and outside-repository smoke (when packaging changes)
 - CI result:
 
 ## Expert review
