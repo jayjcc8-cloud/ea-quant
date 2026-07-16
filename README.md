@@ -24,20 +24,27 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
 ```text
 src/ea/
   core/          # 领域模型、事件、时间、资产标识、错误类型
+  runtime/       # 统一 coordinator、事件顺序、生命周期和 composition boundary
   config/        # 配置加载、校验、环境变量、密钥引用
   cli/           # ea doctor/data/backtest/paper/live/report
   data/          # 数据接入、清洗、存储、质量检查
   features/      # 因子、指标、特征工程
-  strategy/      # 策略接口、信号、调仓目标
-  portfolio/     # 组合构建、资金分配、绩效归因
-  backtest/      # 回测引擎、撮合、滑点、手续费、报告
-  paper/         # 纸交易模式
-  execution/     # OMS、订单路由、状态机、对账
-  brokers/       # broker/exchange adapter
-  risk/          # 风控规则、熔断、kill switch
+  strategy/      # 策略接口、策略状态和 Signal
+  portfolio/     # PortfolioTarget、OrderIntent、canonical ledger、绩效归因
+  backtest/      # 历史 feed、虚拟时钟、模拟 venue 和结果 adapter profile
+  paper/         # 实时/replay feed、模拟 venue adapter profile
+  execution/     # 所有模式共享的 OMS、订单状态机、report normalize 和对账
+  brokers/       # live broker/exchange SDK adapter（当前不可用）
+  risk/          # risk decision、限仓、限损、熔断、kill switch
   monitoring/    # 日志、指标、告警、审计 trail
   experiments/   # 实验追踪、参数、数据版本、模型版本
 ```
+
+所有产生订单或 P&L 的模式都必须复用
+`strategy -> portfolio -> risk -> shared execution/OMS`，只替换 clock、feed、venue、audit、result
+等 adapters。拟议契约见
+[ADR 0003](docs/adr/0003-shared-runtime-ports-and-adapters.md)，完整 ownership、mode matrix
+与生命周期见 [架构文档](docs/architecture.md)。
 
 ## 阶段路线
 
