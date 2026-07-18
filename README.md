@@ -42,7 +42,7 @@ src/ea/
 
 所有产生订单或 P&L 的模式都必须复用
 `strategy -> portfolio -> risk -> shared execution/OMS`，只替换 clock、feed、venue、audit、result
-等 adapters。拟议契约见
+等 adapters。已接受的运行契约见
 [ADR 0003](docs/adr/0003-shared-runtime-ports-and-adapters.md)，完整 ownership、mode matrix
 与生命周期见 [架构文档](docs/architecture.md)。
 
