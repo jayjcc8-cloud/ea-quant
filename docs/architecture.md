@@ -27,7 +27,7 @@ EA 的目标是成为一个长期运行、持续迭代的量化交易系统，�
 
 ## 3. 统一运行契约
 
-拟议决策见 [ADR 0003](adr/0003-shared-runtime-ports-and-adapters.md)。所有会产生订单、成交、持仓、P&L 或交易结果的工作流都必须复用同一条逻辑链：
+已接受的决策见 [ADR 0003](adr/0003-shared-runtime-ports-and-adapters.md)。所有会产生订单、成交、持仓、P&L 或交易结果的工作流都必须复用同一条逻辑链：
 
 `market event -> strategy -> portfolio -> risk -> shared execution/OMS -> venue adapter`
 
@@ -102,8 +102,8 @@ flowchart LR
 
 | 对象 / 能力 | 语义或状态权威 | 生产 / 来源 | 下游交接 | 强制规则 |
 |---|---|---|---|---|
-| `Instrument` | `core` 共享 identity 语义 | data adapter 解析为 canonical identity | data/features/strategy | 具体 `core` 子模块位置、字段 schema 与 precision 由 #12 决定；vendor identity 不得穿透 adapter |
-| `Bar` / `Tick` / market event | data domain 的 canonical semantics | feed adapter 按 clock/as-of 顺序产生 | runtime 投递给 features/strategy | 跨 stage definition 的 `core` 子模块位置、schema、时间与排序由 #12 决定；feed 不得暴露未来事件 |
+| `Instrument` | `core` 共享 identity 语义 | data adapter 解析为 canonical identity | data/features/strategy | `(venue, symbol)` 与 namespace 规则由 [ADR 0004](adr/0004-canonical-market-data-time-and-visibility.md) 定义；vendor identity 不得穿透 adapter |
+| `Bar` / `Tick` / market event | data domain 的 canonical semantics | feed adapter 按 clock/as-of 顺序产生 | runtime 投递给 features/strategy | `Bar`、envelope、revision、UTC、visibility 与 market admission ordering 由 [ADR 0004](adr/0004-canonical-market-data-time-and-visibility.md) 定义；feed 不得暴露未来事件；其他 event kind 仍待后续契约 |
 | `Signal` | strategy | strategy 只根据已投递数据与自身状态产生 | runtime 交给 portfolio | immutable；不能包含 SDK 调用、Order 或 Fill |
 | `PortfolioTarget` / planning outcome | portfolio policy | portfolio 根据 signal、ledger snapshot 和约束产生 | portfolio planner / runtime | target 表示 desired state；每个 target 记录 planning outcome，可产生零个或多个 intent |
 | `OrderIntent` | portfolio planning | target 与 canonical current state 的差额 | runtime 连同 canonical snapshot 仅交给 risk | 不能绕过 risk；每个 emitted intent 都需显式 risk outcome |
