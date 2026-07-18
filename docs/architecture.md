@@ -127,7 +127,7 @@ External execution/reconciliation facts 只记录真实 origin 以及已知的 v
 |---|---|---|
 | `core` | 领域值、identity、event envelope、跨 stage immutable message definition、时间抽象、错误 | orchestration、I/O、配置、vendor 类型 |
 | `runtime` | mode-neutral coordinator、queue、sequencing、lifecycle、audit routing、outbound pre-effect/inbound-owner acknowledgement gates；逻辑 composition boundary | 策略、组合、风险、撮合、账务或 audit persistence policy |
-| `config` | outer-boundary typed configuration、校验、secret reference | inner components 的 ambient config 读取 |
+| `config` | outer-boundary typed immutable snapshot、source precedence、校验、secret reference boundary | inner components 的 ambient config 读取、raw credential resolution |
 | `data` | 数据接入、清洗、质量检查、存储与 feed adapters | 策略调用或交易决策 |
 | `features` | 只基于 as-of 数据的因子、指标、特征工程 | 订单、风险、venue 或未来数据读取 |
 | `strategy` | strategy contract、strategy-local state、Signal | PortfolioTarget、OrderIntent、Order、Fill、SDK |
@@ -195,6 +195,20 @@ Composition root 是生产图的唯一装配点：
 5. 拥有所有 component lifetime；component 不能自行查找或创建 peer。
 
 这一定义不决定配置字段或 live enablement 规则。Live profile 仅保留 substitution boundary，当前不可构建、不可连接。
+
+Issue #13 与 [Proposed ADR 0005](adr/0005-strict-typed-configuration.md) 将配置收敛为 outer
+boundary contract：
+
+- v1 `Settings` 包含 `schema_version`、typed `environment` 与唯一 `run.mode`，并传递性冻结；
+- defaults、单一 versioned YAML、process environment、CLI 按确定顺序覆盖；
+- `EA_CONFIG_PATH` 只选择 YAML，不进入 normalized snapshot；
+- YAML 是 single-document closed schema，重复/未知 key 失败；未知/旧版/歧义 `EA_*` 名称也失败；
+- raw credential 不进入 config、CLI diagnostic、runtime message 或 audit；
+- `SecretRef` 只表示 opaque identifier，不解析 payload；
+- `live` vocabulary 被保留，但所有来源合并后由最终 snapshot fail closed，现有配置不能构建 live graph。
+
+只有 composition root 接收完整 snapshot。Inner runtime 与 policy 只能接收装配后的 narrow value /
+capability，不得回读 snapshot、environment、filesystem 或 CLI。
 
 ## 8. Mode adapter matrix
 
@@ -291,8 +305,10 @@ Position 也不能因为“可能成交”而被静默修改。
 
 ### Phase 1 入口门禁
 
-- Issue #11 / ADR 0003：shared runtime、dependency direction、composition root 和 mode profile contract。
-- Issues #12 至 #15：进入实现所需的最小 market/time、configuration、run manifest、execution/reconciliation 语义。
+- Issue #11 / ADR 0003（已完成）：shared runtime、dependency direction、composition root 和 mode profile contract。
+- Issue #12 / ADR 0004（已完成）：market/time、revision、as-of visibility 和 deterministic admission 语义。
+- Issue #13 / Proposed ADR 0005：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
+- Issues #14、#15（待完成）：run manifest、execution/reconciliation 语义。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP

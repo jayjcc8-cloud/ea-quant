@@ -32,23 +32,30 @@ execution and reconciliation semantics.
 
 ### One immutable snapshot
 
-The outer configuration module owns a frozen `Settings` model. Its initial fields are:
+The outer configuration module owns a transitively frozen, versioned `Settings` model. Its initial
+fields are:
 
-- `environment`: one of `development`, `test`, `staging`, or `production`;
-- `run_mode`: one of `backtest`, `paper`, or `live`.
+- `schema_version`: exactly integer `1`;
+- `environment`: one of `development`, `staging`, or `production`;
+- `run.mode`: one of `backtest`, `paper`, or `live`.
 
 The snapshot is the only configuration value passed to the composition root. Inner components
 receive narrow capabilities or values derived by the composition root and cannot load or retain
 configuration sources.
 
-`run_mode` is the sole mode selector. The legacy `paper_trading_enabled` and
+`run.mode` is the sole mode selector. The legacy `paper_trading_enabled` and
 `live_trading_enabled` booleans are removed without aliases. `live` remains part of the stable
 vocabulary, but current configuration loading rejects it because ADR 0003 declares the live
 profile unavailable. Enabling live construction requires a future superseding decision with an
-independent authorization contract; a boolean in YAML, dotenv, environment, or CLI is insufficient.
+independent authorization contract; a boolean in YAML, environment, or CLI is insufficient.
 
 The validated model is immutable. Issue #14 may later define canonical serialization and hashing,
 but it must consume this validated snapshot rather than raw source dictionaries.
+
+Every source is structurally validated before merging, but live availability is evaluated exactly
+once on the final merged snapshot. A valid lower-priority `live` value can therefore be safely
+overridden by a higher-priority `backtest`; invalid names, shapes, schema versions, or enum values
+in any source still fail.
 
 ### Explicit source selection and precedence
 
@@ -57,21 +64,25 @@ priority:
 
 1. typed model defaults;
 2. one explicitly selected YAML file;
-3. an optional `.env` file in the current working directory;
-4. the current process environment;
-5. explicit CLI value overrides.
+3. the current process environment;
+4. explicit CLI value overrides.
 
 A higher-priority source replacing a lower-priority value is normal precedence, not a conflict.
 Sources are not deep-merged after validation, and no component may reload them during a run.
 
-The YAML path is selected by the CLI `--config` option when present, otherwise by
-`EA_CONFIG_PATH` after dotenv/process-environment precedence. A relative path is resolved from the
-current working directory. The selector is loader metadata and is not a field in the normalized
-snapshot. A missing, unreadable, malformed, empty-invalid, or non-mapping selected file fails
+The YAML path is selected by the CLI `--config` option when present, otherwise by the exact process
+environment name `EA_CONFIG_PATH`. A relative path is resolved from the invocation working
+directory. The selector is loader metadata and is not a field in the normalized snapshot. A
+supplied empty, missing, unreadable, non-file, malformed, empty-invalid, or non-mapping path fails
 before a snapshot is returned.
 
-YAML is parsed with safe loading only. Custom object tags and executable constructors are not
-allowed.
+YAML is a single versioned document with a mapping root. It must declare integer
+`schema_version: 1`. Duplicate mapping keys, unknown keys at any depth, custom object tags, and
+executable constructors are rejected before a snapshot is produced.
+
+The application does not implicitly read `.env`. `.env.example` documents supported process
+environment names that a user or process manager may explicitly export; hidden file discovery is
+not a configuration source.
 
 ### Strict names and diagnostics
 
@@ -86,7 +97,7 @@ Every source is closed by default:
 - invalid values and source errors produce concise configuration diagnostics without raw values,
   secret material, or a Python traceback.
 
-The configuration API does not infer aliases such as `env`, `mode`, or live/paper booleans.
+The configuration API does not infer aliases such as `env`, root-level `mode`, or live/paper booleans.
 Changing the public names is an explicit compatibility decision, not silent coercion.
 
 ### CLI boundary
@@ -103,14 +114,15 @@ mappings or future resolved credentials.
 ### Secret-reference boundary
 
 Raw credentials, tokens, signatures, private keys, and vendor authentication objects are not
-application settings and must not enter YAML, dotenv, the normalized snapshot, CLI diagnostics, or
-audit data. Issue #13 does not choose or implement a secret store.
+application settings and must not enter YAML, supported `EA_*` process environment, the normalized
+snapshot, CLI diagnostics, or audit data. Issue #13 does not choose or implement a secret store.
 
-A future adapter may receive a typed opaque secret reference plus a resolver at the outer adapter
-boundary. Resolution occurs only when constructing that adapter, and the resolved value never
-returns to the snapshot or domain/runtime messages. Because no current adapter needs credentials,
-the minimum Issue #13 schema contains no secret-reference field and rejects raw broker credential
-names as unknown input.
+`SecretRef` is a frozen, validated opaque identifier value independent of a broker schema. A future
+adapter may receive that value plus a resolver at the outer adapter boundary. Resolution occurs
+only when constructing that adapter, and the resolved payload never returns to the snapshot or
+domain/runtime messages. Because no current adapter needs credentials, the minimum Issue #13
+settings root contains no secret-reference field and rejects raw broker credential names as
+unknown input.
 
 ## Consequences
 
@@ -119,7 +131,7 @@ Positive:
 - misspelled, removed, or future-looking settings fail instead of being ignored;
 - one mode value replaces contradictory booleans;
 - live behavior remains unavailable and fail-closed;
-- CLI, YAML, dotenv, and process-environment behavior is deterministic and testable;
+- CLI, YAML, and process-environment behavior is deterministic and testable;
 - the composition root receives an immutable value suitable for the future #14 lineage boundary;
 - raw secrets stay outside configuration and diagnostics.
 
@@ -128,8 +140,8 @@ Negative:
 - the Phase 0 `EA_ENV`, `EA_PAPER_TRADING_ENABLED`, and `EA_LIVE_TRADING_ENABLED` names are breaking
   removals before Phase 1;
 - the existing example YAML must be reduced to fields that have an accepted contract;
-- optional ambient `.env` remains a source, so reproducible runs must later record the normalized
-  snapshot and selected-file evidence under #14;
+- users who want dotenv-style local development must explicitly export/process that file rather
+  than relying on hidden application discovery;
 - future configuration sections require explicit typed schema additions rather than arbitrary
   dictionaries.
 
@@ -158,13 +170,18 @@ would move ambiguity rather than remove it.
 
 Issue #13 must include tests proving:
 
-- default, YAML, dotenv, process-environment, and CLI precedence;
+- default, YAML, process-environment, and CLI precedence;
 - CLI-over-environment YAML path selection and relative-path behavior;
+- required schema version, single-document safe YAML, duplicate-key rejection, and recursive
+  closed-schema validation;
 - missing, malformed, custom-tagged, empty-invalid, and non-mapping YAML failure;
 - rejection of unknown YAML fields, unknown or duplicate `EA_*` names, removed aliases, and invalid
   enum values;
+- proof that `.env` is not read implicitly;
 - immutable snapshots and isolated repeated loads;
-- `live` rejection with no constructible live profile;
+- final-snapshot `live` rejection with no constructible live profile, including safe
+  higher-precedence override behavior;
+- independent frozen `SecretRef` validation without any raw credential field;
 - CLI diagnostics contain no traceback or raw unknown values;
 - examples and `ea doctor` match the public contract; and
 - the full repository quality and reproducible-build gates remain green.

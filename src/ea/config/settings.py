@@ -1,12 +1,70 @@
 from __future__ import annotations
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from enum import StrEnum
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="EA_", env_file=".env", extra="ignore")
+class Environment(StrEnum):
+    DEVELOPMENT = "development"
+    STAGING = "staging"
+    PRODUCTION = "production"
 
-    env: str = Field(default="development")
-    paper_trading_enabled: bool = Field(default=True)
-    live_trading_enabled: bool = Field(default=False)
+
+class RunMode(StrEnum):
+    BACKTEST = "backtest"
+    PAPER = "paper"
+    LIVE = "live"
+
+
+class SecretRef(BaseModel):
+    """Opaque identifier resolved only by a future outer adapter boundary."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    identifier: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_.:/-]*$",
+    )
+
+
+class RunSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: RunMode = RunMode.BACKTEST
+
+
+class _SettingsInput(BaseModel):
+    """Structurally valid settings before the final live-availability gate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: StrictInt = 1
+    environment: Environment = Environment.DEVELOPMENT
+    run: RunSettings = Field(default_factory=RunSettings)
+
+    @field_validator("schema_version")
+    @classmethod
+    def require_v1_schema(cls, value: int) -> int:
+        if value != 1:
+            raise PydanticCustomError(
+                "unsupported_schema_version",
+                "only schema version 1 is supported",
+            )
+        return value
+
+
+class Settings(_SettingsInput):
+    """Transitively immutable snapshot handed to the composition boundary."""
+
+    @model_validator(mode="after")
+    def reject_unavailable_live_mode(self) -> Self:
+        if self.run.mode is RunMode.LIVE:
+            raise PydanticCustomError(
+                "live_mode_unavailable",
+                "live mode is unavailable in this build",
+            )
+        return self
