@@ -36,6 +36,13 @@ class RunSettings(BaseModel):
 
     mode: RunMode = RunMode.BACKTEST
 
+    @field_validator("mode", mode="before")
+    @classmethod
+    def require_string_mode(cls, value: object) -> object:
+        if not isinstance(value, str):
+            raise PydanticCustomError("string_type", "Input should be a valid string")
+        return value
+
 
 class _SettingsInput(BaseModel):
     """Structurally valid settings before the final live-availability gate."""
@@ -45,6 +52,13 @@ class _SettingsInput(BaseModel):
     schema_version: StrictInt = 1
     environment: Environment = Environment.DEVELOPMENT
     run: RunSettings = Field(default_factory=RunSettings)
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def require_string_environment(cls, value: object) -> object:
+        if not isinstance(value, str):
+            raise PydanticCustomError("string_type", "Input should be a valid string")
+        return value
 
     @field_validator("schema_version")
     @classmethod

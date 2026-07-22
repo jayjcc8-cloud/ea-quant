@@ -9,7 +9,9 @@ from ea.config import (
     ConfigurationError,
     Environment,
     RunMode,
+    RunSettings,
     SecretRef,
+    Settings,
     load_configuration,
 )
 
@@ -62,6 +64,43 @@ def test_selected_yaml_is_loaded_and_resolved(
     assert loaded.config_path == config_path.resolve()
     assert loaded.snapshot.environment is Environment.STAGING
     assert loaded.snapshot.run.mode is RunMode.PAPER
+
+
+@pytest.mark.parametrize(
+    ("field", "content"),
+    [
+        (
+            "environment",
+            "schema_version: 1\nenvironment: !!binary ZGV2ZWxvcG1lbnQ=\nrun:\n  mode: backtest\n",
+        ),
+        (
+            "run.mode",
+            "schema_version: 1\nenvironment: development\nrun:\n  mode: !!binary cGFwZXI=\n",
+        ),
+    ],
+)
+def test_yaml_enum_fields_reject_binary_scalars(
+    isolated_ea_environment: None,
+    tmp_path: Path,
+    field: str,
+    content: str,
+) -> None:
+    config_path = tmp_path / "binary-enum.yaml"
+    config_path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=rf"invalid field '{field}'"):
+        load_configuration(config_path=config_path)
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [b"development", bytearray(b"development")],
+)
+def test_model_enum_fields_reject_non_string_inputs(invalid_value: object) -> None:
+    with pytest.raises(ValidationError, match="string_type"):
+        Settings.model_validate({"environment": invalid_value})
+    with pytest.raises(ValidationError, match="string_type"):
+        RunSettings.model_validate({"mode": invalid_value})
 
 
 def test_relative_cli_config_path_resolves_from_invocation_cwd(
