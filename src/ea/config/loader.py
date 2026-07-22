@@ -14,6 +14,7 @@ from yaml.constructor import ConstructorError
 from yaml.nodes import MappingNode
 from yaml.resolver import BaseResolver
 
+from ea.config.diagnostics import escape_diagnostic_label
 from ea.config.settings import Environment, RunMode, Settings, _SettingsInput
 
 _APPLICATION_ENVIRONMENT_NAMES = frozenset(
@@ -84,7 +85,7 @@ class LoadedConfiguration:
 def _safe_validation_message(source: str, error: ValidationError) -> str:
     problems: list[str] = []
     for item in error.errors(include_url=False):
-        location = ".".join(str(part) for part in item["loc"]) or "<root>"
+        location = ".".join(escape_diagnostic_label(part) for part in item["loc"]) or "<root>"
         if item["type"] == "extra_forbidden":
             problems.append(f"unknown field '{location}'")
         elif item["type"] == "live_mode_unavailable":
@@ -115,11 +116,14 @@ def _validate_process_environment_names(environ: Mapping[str, str]) -> None:
 
     problems: list[str] = []
     if unknown:
-        problems.append(f"unknown names: {', '.join(sorted(unknown))}")
+        labels = ", ".join(escape_diagnostic_label(name) for name in sorted(unknown))
+        problems.append(f"unknown names: {labels}")
     if noncanonical:
-        problems.append(f"non-canonical names: {', '.join(sorted(noncanonical))}")
+        labels = ", ".join(escape_diagnostic_label(name) for name in sorted(noncanonical))
+        problems.append(f"non-canonical names: {labels}")
     if duplicates:
-        problems.append(f"ambiguous duplicates: {', '.join(sorted(duplicates))}")
+        labels = ", ".join(escape_diagnostic_label(name) for name in sorted(duplicates))
+        problems.append(f"ambiguous duplicates: {labels}")
     if problems:
         raise ConfigurationError(f"process environment: {'; '.join(problems)}")
 
@@ -147,32 +151,34 @@ def _validate_settings_layer(source: str, values: Mapping[str, Any]) -> None:
     try:
         _SettingsInput.model_validate(values)
     except ValidationError as error:
-        raise ConfigurationError(_safe_validation_message(source, error)) from error
+        raise ConfigurationError(_safe_validation_message(source, error)) from None
 
 
 def _resolve_config_path(path: str | Path) -> Path:
     try:
         resolved = Path(path).expanduser().resolve()
         is_file = resolved.is_file()
-    except (OSError, RuntimeError, ValueError) as error:
-        raise ConfigurationError("cannot resolve selected config path") from error
+    except (OSError, RuntimeError, ValueError):
+        raise ConfigurationError("cannot resolve selected config path") from None
     if not is_file:
-        raise ConfigurationError(f"selected config path is not a file: {resolved}")
+        label = escape_diagnostic_label(resolved)
+        raise ConfigurationError(f"selected config path is not a file: {label}")
     return resolved
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     try:
         content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise ConfigurationError(f"cannot read selected config file: {path}") from error
+    except (OSError, UnicodeError):
+        label = escape_diagnostic_label(path)
+        raise ConfigurationError(f"cannot read selected config file: {label}") from None
 
     try:
         document = yaml.load(content, Loader=_UniqueKeySafeLoader)
     except (yaml.YAMLError, ValueError, RecursionError) as error:
         mark = getattr(error, "problem_mark", None)
         location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
-        raise ConfigurationError(f"selected config file contains invalid YAML{location}") from error
+        raise ConfigurationError(f"selected config file contains invalid YAML{location}") from None
 
     if document is None:
         raise ConfigurationError("selected config file is empty")
@@ -220,6 +226,6 @@ def load_configuration(
     try:
         snapshot = Settings.model_validate(merged)
     except ValidationError as error:
-        raise ConfigurationError(_safe_validation_message("configuration", error)) from error
+        raise ConfigurationError(_safe_validation_message("configuration", error)) from None
 
     return LoadedConfiguration(snapshot=snapshot, config_path=resolved_path)

@@ -170,6 +170,20 @@ def test_doctor_rejects_unknown_cli_option_without_value_leak(
     assert "Traceback" not in plain_output
 
 
+def test_doctor_escapes_control_characters_in_unknown_option() -> None:
+    unsafe_option = "--future-\x1b[2J"
+    secret_value = "must-not-be-echoed"
+    runner = CliRunner()
+
+    result = runner.invoke(app, [unsafe_option, secret_value, "doctor"])
+    plain_output = Text.from_ansi(result.output).plain
+
+    assert result.exit_code == 2
+    assert "\x1b[2J" not in result.output
+    assert r"--future-\x1b[2J" in plain_output
+    assert secret_value not in plain_output
+
+
 def test_doctor_rejects_unexpected_positional_value_without_value_leak(
     isolated_ea_environment: None,
 ) -> None:
@@ -182,6 +196,24 @@ def test_doctor_rejects_unexpected_positional_value_without_value_leak(
     assert "configuration error: unexpected positional arguments" in result.output
     assert secret_value not in result.output
     assert "Traceback" not in result.output
+
+
+def test_doctor_escapes_control_characters_in_selected_path(
+    isolated_ea_environment: None,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "settings_\x1b[2J.yaml"
+    config_path.write_text(
+        "schema_version: 1\nenvironment: development\nrun:\n  mode: backtest\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["--config", str(config_path), "doctor"])
+
+    assert result.exit_code == 0
+    assert "\x1b[2J" not in result.output
+    assert r"settings_\x1b[2J.yaml" in result.output
 
 
 def test_doctor_rejects_unavailable_live_mode(

@@ -7,8 +7,12 @@ from typing import Annotated, cast
 import typer
 
 from ea.config import ConfigurationError, load_configuration
+from ea.config.diagnostics import escape_diagnostic_label
 
-app = typer.Typer(help="EA quantitative trading system CLI.")
+app = typer.Typer(
+    help="EA quantitative trading system CLI.",
+    context_settings={"token_normalize_func": escape_diagnostic_label},
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +85,10 @@ def doctor(context: typer.Context) -> None:
 
     typer.echo("EA system doctor")
     typer.echo(f"python: {platform.python_version()}")
-    typer.echo(f"config file: {loaded.config_path if loaded.config_path else '<defaults>'}")
+    config_label = (
+        escape_diagnostic_label(loaded.config_path) if loaded.config_path else "<defaults>"
+    )
+    typer.echo(f"config file: {config_label}")
     typer.echo(f"schema version: {loaded.snapshot.schema_version}")
     typer.echo(f"environment: {loaded.snapshot.environment.value}")
     typer.echo(f"run mode: {loaded.snapshot.run.mode.value}")

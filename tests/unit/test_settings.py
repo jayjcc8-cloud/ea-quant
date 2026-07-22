@@ -1,3 +1,4 @@
+import traceback
 from pathlib import Path
 from typing import Any, cast
 
@@ -172,6 +173,24 @@ def test_invalid_yaml_documents_fail_concisely(
         load_configuration(config_path=config_path)
 
 
+def test_invalid_yaml_error_suppresses_source_exception_details(
+    isolated_ea_environment: None,
+    tmp_path: Path,
+) -> None:
+    secret_value = "must-not-be-echoed"
+    config_path = tmp_path / "invalid.yaml"
+    config_path.write_text(
+        f"schema_version: 1\nenvironment: [{secret_value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_configuration(config_path=config_path)
+
+    formatted = "".join(traceback.format_exception(captured.value))
+    assert secret_value not in formatted
+
+
 def test_recursively_nested_yaml_fails_concisely(
     isolated_ea_environment: None,
     tmp_path: Path,
@@ -260,6 +279,24 @@ def test_unresolvable_selected_path_fails_concisely(
     assert invalid_path not in str(captured.value)
 
 
+def test_path_error_suppresses_source_exception_details(
+    isolated_ea_environment: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_value = "must-not-be-echoed"
+
+    def fail_to_expand_path(_path: Path) -> Path:
+        raise RuntimeError(secret_value)
+
+    monkeypatch.setattr(Path, "expanduser", fail_to_expand_path)
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_configuration(config_path="settings.yaml")
+
+    formatted = "".join(traceback.format_exception(captured.value))
+    assert secret_value not in formatted
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -307,6 +344,40 @@ def test_unknown_process_environment_name_fails_without_value_leak(
 
     assert "EA_FUTURE_SETTING" in str(captured.value)
     assert secret_value not in str(captured.value)
+
+
+def test_control_characters_in_process_names_are_escaped(
+    isolated_ea_environment: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsafe_name = "EA_FUTURE_\x1b[2J"
+    monkeypatch.setenv(unsafe_name, "must-not-be-echoed")
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_configuration()
+
+    message = str(captured.value)
+    assert "\x1b[2J" not in message
+    assert r"EA_FUTURE_\x1b[2J" in message
+
+
+def test_control_characters_in_yaml_field_names_are_escaped(
+    isolated_ea_environment: None,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "unsafe-label.yaml"
+    config_path.write_text(
+        "schema_version: 1\nenvironment: development\nrun:\n  mode: backtest\n"
+        '"future_\\u001b[2J": true\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_configuration(config_path=config_path)
+
+    message = str(captured.value)
+    assert "\x1b[2J" not in message
+    assert r"future_\x1b[2J" in message
 
 
 def test_noncanonical_and_duplicate_process_names_fail(
@@ -362,6 +433,8 @@ def test_invalid_typed_values_fail_without_echoing_value(
     expected_field = "run.mode" if source == "run_mode" else source
     assert expected_field in str(captured.value)
     assert value not in str(captured.value)
+    formatted = "".join(traceback.format_exception(captured.value))
+    assert value not in formatted
 
 
 def test_live_mode_is_unavailable_and_fails_closed(
