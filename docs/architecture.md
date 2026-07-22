@@ -210,6 +210,22 @@ boundary contract：
 只有 composition root 接收完整 snapshot。Inner runtime 与 policy 只能接收装配后的 narrow value /
 capability，不得回读 snapshot、environment、filesystem 或 CLI。
 
+Issue #14 与 [Proposed ADR 0006](adr/0006-reproducible-run-manifest-and-audit-lineage.md)
+定义 run preparation 与 lineage boundary：
+
+- UUID4 `run_id` 标识单次执行尝试，deterministic `lineage_sha256` 标识等价的可复现输入；
+- lineage 覆盖 clean commit、normalized configuration、完整 point-in-time data fingerprint、
+  UTC replay window、effective parameters、runtime/dependencies 和 explicit seed；
+- exact `MarketDataEnvelope` tuple 按 ADR 0004 校验/排序，以 `available_at` 的半开区间选择并
+  fingerprint，同一 tuple 才能交给 historical feed；
+- outer experiments boundary 原子占有 `results/<run_id>/`，在 audit/feed/output 启动前一次性
+  写入 immutable manifest；现有路径永不复用或覆盖；
+- runtime、audit 和 result 只接收同一个 narrow `RunReference(run_id, lineage_sha256)`，不接收
+  manifest serializer、configuration、data adapter 或 result-root path。
+
+Prepared manifest 不等于 completed reproducibility claim；terminal audit/output evidence 保持为
+独立 write-once record，避免改写 manifest 或形成 audit hash cycle。
+
 ## 8. Mode adapter matrix
 
 | 关注点 | Backtest | Paper | Live（未来 contract） |
@@ -308,7 +324,8 @@ Position 也不能因为“可能成交”而被静默修改。
 - Issue #11 / ADR 0003（已完成）：shared runtime、dependency direction、composition root 和 mode profile contract。
 - Issue #12 / ADR 0004（已完成）：market/time、revision、as-of visibility 和 deterministic admission 语义。
 - Issue #13 / Accepted ADR 0005：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
-- Issues #14、#15（待完成）：run manifest、execution/reconciliation 语义。
+- Issue #14 / Proposed ADR 0006（进行中）：reproducible run manifest、data fingerprint 和 audit/result lineage。
+- Issue #15（待完成）：execution/reconciliation 语义。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
