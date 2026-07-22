@@ -150,6 +150,10 @@ def test_dotenv_is_not_loaded_implicitly(
         ("environment: [\n", "contains invalid YAML"),
         ("value: !!python/object:builtins.str {}\n", "contains invalid YAML"),
         (
+            "schema_version: 1\nenvironment: 2020-99-99\nrun:\n  mode: backtest\n",
+            "contains invalid YAML",
+        ),
+        (
             "schema_version: 1\nenvironment: development\n---\nschema_version: 1\n",
             "contains invalid YAML",
         ),
@@ -165,6 +169,17 @@ def test_invalid_yaml_documents_fail_concisely(
     config_path.write_text(content, encoding="utf-8")
 
     with pytest.raises(ConfigurationError, match=message):
+        load_configuration(config_path=config_path)
+
+
+def test_recursively_nested_yaml_fails_concisely(
+    isolated_ea_environment: None,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "recursive.yaml"
+    config_path.write_text("[" * 1_200 + "null" + "]" * 1_200, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="contains invalid YAML"):
         load_configuration(config_path=config_path)
 
 
@@ -231,6 +246,18 @@ def test_missing_selected_file_fails_concisely(
 
     with pytest.raises(ConfigurationError, match="selected config path is not a file"):
         load_configuration(config_path=missing_path)
+
+
+@pytest.mark.parametrize("invalid_path", ["a\0b.yaml", "\ud800.yaml"])
+def test_unresolvable_selected_path_fails_concisely(
+    isolated_ea_environment: None,
+    invalid_path: str,
+) -> None:
+    with pytest.raises(ConfigurationError) as captured:
+        load_configuration(config_path=Path(invalid_path))
+
+    assert str(captured.value) == "cannot resolve selected config path"
+    assert invalid_path not in str(captured.value)
 
 
 @pytest.mark.parametrize(

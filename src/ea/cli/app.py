@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Annotated, cast
 
 import typer
@@ -14,7 +13,7 @@ app = typer.Typer(help="EA quantitative trading system CLI.")
 
 @dataclass(frozen=True, slots=True)
 class CliConfiguration:
-    config_path: Path | None
+    config_path: str | None
     environment: str | None
     run_mode: str | None
 
@@ -38,7 +37,7 @@ def _single_cli_option[T](
 def main(
     context: typer.Context,
     config_path: Annotated[
-        list[Path] | None,
+        list[str] | None,
         typer.Option(
             "--config",
             help="YAML configuration path; overrides EA_CONFIG_PATH.",
@@ -62,9 +61,13 @@ def main(
     )
 
 
-@app.command()
+@app.command(context_settings={"allow_extra_args": True})
 def doctor(context: typer.Context) -> None:
     """Print local project health information."""
+    if context.args:
+        typer.echo("configuration error: unexpected positional arguments", err=True)
+        raise typer.Exit(code=2)
+
     cli_configuration = cast(CliConfiguration, context.obj)
     try:
         loaded = load_configuration(

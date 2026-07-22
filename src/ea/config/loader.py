@@ -154,7 +154,7 @@ def _resolve_config_path(path: str | Path) -> Path:
     try:
         resolved = Path(path).expanduser().resolve()
         is_file = resolved.is_file()
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         raise ConfigurationError("cannot resolve selected config path") from error
     if not is_file:
         raise ConfigurationError(f"selected config path is not a file: {resolved}")
@@ -169,7 +169,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
     try:
         document = yaml.load(content, Loader=_UniqueKeySafeLoader)
-    except yaml.YAMLError as error:
+    except (yaml.YAMLError, ValueError, RecursionError) as error:
         mark = getattr(error, "problem_mark", None)
         location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
         raise ConfigurationError(f"selected config file contains invalid YAML{location}") from error
@@ -188,7 +188,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 def load_configuration(
     *,
-    config_path: Path | None = None,
+    config_path: str | Path | None = None,
     environment: str | Environment | None = None,
     run_mode: str | RunMode | None = None,
 ) -> LoadedConfiguration:

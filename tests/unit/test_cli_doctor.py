@@ -5,6 +5,7 @@ from importlib import metadata
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 from typer.testing import CliRunner
 
 import ea
@@ -108,6 +109,21 @@ def test_doctor_reports_path_resolution_failure_safely(
     assert "Traceback" not in result.output
 
 
+@pytest.mark.parametrize("invalid_path", ["a\0b.yaml", "\ud800.yaml"])
+def test_doctor_reports_invalid_path_safely(
+    isolated_ea_environment: None,
+    invalid_path: str,
+) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["--config", invalid_path, "doctor"])
+
+    assert result.exit_code == 2
+    assert "configuration error: cannot resolve selected config path" in result.output
+    assert invalid_path not in result.output
+    assert "Traceback" not in result.output
+
+
 @pytest.mark.parametrize(
     ("option_name", "first_value"),
     [
@@ -141,10 +157,29 @@ def test_doctor_rejects_unknown_cli_option_without_value_leak(
     secret_value = "must-not-be-echoed"
     runner = CliRunner()
 
-    result = runner.invoke(app, ["--future-setting", secret_value, "doctor"])
+    result = runner.invoke(
+        app,
+        ["--future-setting", secret_value, "doctor"],
+        color=True,
+    )
+    plain_output = Text.from_ansi(result.output).plain
 
     assert result.exit_code == 2
-    assert "No such option: --future-setting" in result.output
+    assert "No such option: --future-setting" in plain_output
+    assert secret_value not in plain_output
+    assert "Traceback" not in plain_output
+
+
+def test_doctor_rejects_unexpected_positional_value_without_value_leak(
+    isolated_ea_environment: None,
+) -> None:
+    secret_value = "must-not-be-echoed"
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["doctor", secret_value])
+
+    assert result.exit_code == 2
+    assert "configuration error: unexpected positional arguments" in result.output
     assert secret_value not in result.output
     assert "Traceback" not in result.output
 
