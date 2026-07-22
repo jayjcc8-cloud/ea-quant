@@ -99,6 +99,39 @@ ${workspaceFolder}/venv/bin/python
 若 VSCode 已为该工作区缓存过旧解释器，请执行 `Python: Select Interpreter`，选择
 `venv/bin/python`，然后执行 `Developer: Reload Window`。
 
+## 严格配置边界
+
+配置只在 CLI / composition boundary 加载一次，并形成可传递不可变的 typed snapshot。来源优先级从低到高为：
+
+```text
+typed defaults < versioned YAML < process environment < CLI
+```
+
+支持的环境变量只有：
+
+- `EA_CONFIG_PATH`：YAML 路径；相对路径从当前工作目录解析；
+- `EA_ENVIRONMENT`：`development | staging | production`；
+- `EA_RUN_MODE`：`backtest | paper | live`。
+
+未知、旧版或大小写不规范的 `EA_*` 名称会失败，不会静默忽略。`live` 是保留 vocabulary，
+但当前 live profile 不可构建，最终 snapshot 会 fail closed。YAML 必须声明
+`schema_version: 1`，使用 `run.mode`，且重复/未知 key 会失败。项目不会自动读取 `.env`；
+`.env.example` 只记录可显式导出的 process-environment 名称。CLI override 必须位于子命令之前：
+
+```bash
+export EA_CONFIG_PATH=configs/backtest/example.yaml
+export EA_ENVIRONMENT=development
+export EA_RUN_MODE=backtest
+venv/bin/ea doctor
+venv/bin/ea --config configs/backtest/example.yaml \
+  --environment development --run-mode backtest doctor
+```
+
+YAML、CLI、normalized snapshot 和日志都不得包含 broker/exchange raw credential。当前 schema
+没有 secret 字段；`SecretRef` 只定义 opaque identifier，未来 adapter 只能在 outer boundary
+解析它，resolved payload 不得返回 snapshot、runtime message 或 audit。
+完整决策见 [Accepted ADR 0005](docs/adr/0005-strict-typed-configuration.md)。
+
 常用质量门禁：
 
 ```bash
