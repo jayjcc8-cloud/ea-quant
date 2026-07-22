@@ -196,7 +196,7 @@ Composition root 是生产图的唯一装配点：
 
 这一定义不决定配置字段或 live enablement 规则。Live profile 仅保留 substitution boundary，当前不可构建、不可连接。
 
-Issue #13 与 [Proposed ADR 0005](adr/0005-strict-typed-configuration.md) 将配置收敛为 outer
+Issue #13 与 [Accepted ADR 0005](adr/0005-strict-typed-configuration.md) 将配置收敛为 outer
 boundary contract：
 
 - v1 `Settings` 包含 `schema_version`、typed `environment` 与唯一 `run.mode`，并传递性冻结；
@@ -307,7 +307,7 @@ Position 也不能因为“可能成交”而被静默修改。
 
 - Issue #11 / ADR 0003（已完成）：shared runtime、dependency direction、composition root 和 mode profile contract。
 - Issue #12 / ADR 0004（已完成）：market/time、revision、as-of visibility 和 deterministic admission 语义。
-- Issue #13 / Proposed ADR 0005：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
+- Issue #13 / Accepted ADR 0005：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
 - Issues #14、#15（待完成）：run manifest、execution/reconciliation 语义。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 

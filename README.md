@@ -130,7 +130,7 @@ venv/bin/ea --config configs/backtest/example.yaml \
 YAML、CLI、normalized snapshot 和日志都不得包含 broker/exchange raw credential。当前 schema
 没有 secret 字段；`SecretRef` 只定义 opaque identifier，未来 adapter 只能在 outer boundary
 解析它，resolved payload 不得返回 snapshot、runtime message 或 audit。
-完整决策见 [Proposed ADR 0005](docs/adr/0005-strict-typed-configuration.md)。
+完整决策见 [Accepted ADR 0005](docs/adr/0005-strict-typed-configuration.md)。
 
 常用质量门禁：
 
