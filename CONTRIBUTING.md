@@ -42,6 +42,7 @@ git diff --exit-code HEAD -- uv.lock
 UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev
 venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
 venv/bin/ea doctor
+venv/bin/python -I -B scripts/reproducible_run.py
 UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff check .
 UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .
 UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy

@@ -39,6 +39,8 @@ jobs:
         run: |
           venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
           venv/bin/ea doctor
+      - name: Reproducible preparation gate
+        run: venv/bin/python -I -B scripts/reproducible_run.py
       - name: Lint
         run: uv run --locked ruff check .
       - name: Format

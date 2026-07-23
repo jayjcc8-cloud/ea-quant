@@ -24,6 +24,7 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
 ```text
 src/ea/
   core/          # 领域模型、事件、时间、资产标识、错误类型
+  composition/   # 唯一 outer composition root；绑定配置、数据、provenance 与运行能力
   runtime/       # 统一 coordinator、事件顺序、生命周期和 composition boundary
   config/        # 配置加载、校验、环境变量、密钥引用
   cli/           # ea doctor/data/backtest/paper/live/report
@@ -154,6 +155,29 @@ Manifest 必须在 audit、feed 和 output 启动前持久写入 `results/<run_i
 `available_at`、interval、identity、adjustment 和 float64 bits，而不是文件路径或 final bars。
 Raw secrets 不得出现在 manifest 的任何字段中，因此也不可能进入其 hash。
 
+受支持的生产路径必须从 tracked `scripts/reproducible_run.py` 开始：launcher 在 pre-import
+检查成功后的 bootstrap stack frame 内创建一次性 grant（模块不暴露可重放的 constructor、
+issuer seal 或 publisher），登记 exact process-local object identity 后才动态导入
+`ea.composition.run`。Composition 立即兑换并清除该 pending grant，签发一次性 preflight
+session。Preparation 强制消费该 session，从中取得不可由 caller 改写的 repository/commit，
+再重新采集
+Git/runtime/lock evidence，把同一个 `MarketDataSelection` 的 window、events 与重算 fingerprint
+绑定到 lineage并持久化 manifest。首条 mandatory audit acknowledgement 返回后，它才把 exact
+event tuple、`RunReference`、lineage-bound RNG 与 numeric capability 交给 feed/runtime。
+直接导入 composition、调用底层 manifest builder 或 result store 都不能形成 reproducibility
+claim。
+
+干净分支上可单独验证 tracked、stdlib-only 的 pre-import launcher：
+
+```bash
+venv/bin/python -I -B scripts/reproducible_run.py
+```
+
+这个入口会在任何 `ea` 模块执行前检查 clean HEAD、完整 `src/` import surface、source-backed
+cache、symlink/shadow、locked editable environment 与 import topology，然后通过 exact pending
+grant 进入 composition 并建立一次性的 preparation gate；当前 Issue #14 不启动尚未实现的
+Phase 1 historical runtime。
+
 常用质量门禁：
 
 ```bash
@@ -163,6 +187,7 @@ git diff --exit-code HEAD -- uv.lock
 UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev
 venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
 venv/bin/ea doctor
+venv/bin/python -I -B scripts/reproducible_run.py
 UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q
 UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff check .
 UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .

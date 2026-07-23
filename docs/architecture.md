@@ -221,16 +221,30 @@ Issue #14 与 [Proposed ADR 0006](adr/0006-reproducible-run-manifest-and-audit-l
   fingerprint，同一 tuple 才能交给 historical feed；
 - outer experiments boundary 原子占有 `results/<run_id>/`，durably 写入 immutable manifest
   后才公开 prepared context；现有/poisoned 路径永不复用、清理或覆盖；
-- composition 只把不重叠的 `audit/` 和 `outputs/` child capability 分别交给 monitoring/result
-  adapter；adapter 与 policy 都不能取得或遍历 run root；
+- store registry 将每个 pathless child capability 绑定到 exact store、attempt 与 role；
+  composition 只把不重叠的 `audit/` 和 `outputs/` capability 分别交给 monitoring/result
+  adapter，跨 store/attempt/role 替换在构造 binding 时失败，adapter 与 policy 都不能取得或
+  遍历 run root；
 - composition 使用同一个 narrow `RunReference(run_id, lineage_sha256)`、manifest-file digest
   与各自 child capability 预绑定 concrete audit/result adapter；inner runtime 只接收
   `RunReference` 与已绑定 ports。任何一方都不接收 manifest serializer、configuration、
   data adapter 或 result-root path。
+- production path 必须从 tracked stdlib-only launcher 开始；它在任何 `ea` import 前完成检查，
+  只在成功后的 bootstrap stack frame 内创建一次性 grant，且 module 不暴露 constructor、
+  issuer seal 或 publisher；登记 exact process-local pending identity 后才动态导入
+  `ea.composition.run`。Composition 仅兑换同一 object identity、立即清除 pending grant并
+  签发一次性 preflight session；structural fake 或 direct-loaded launcher module 都不能自行
+  mint grant。Preparation 强制消费该 session，从中取得 repository/commit，重新建立 evidence；
+  `LocalResultStore`
+  durable 返回后才构造 adapter，并在首条 mandatory audit acknowledgement 后才交出 exact
+  event tuple、lineage-bound RNG 与 ordered-float64 capability。直接导入 composition 或单独
+  调用 manifest/store helper 不构成可复现完成或运行声明。
 
 Prepared manifest 不等于 completed reproducibility claim；terminal audit/output evidence 保持为
 独立 write-once record，避免改写 manifest 或形成 audit hash cycle。Editable-checkout run 在
-terminal claim 前必须重新验证相同 clean HEAD、lock/runtime evidence 与 prepared data tuple。
+terminal claim 前必须通过 store-owned manifest capability 以 no-follow 方式重读原文件并核对
+file identity、canonical bytes、digest 与 `RunReference`，同时重新验证相同 clean HEAD、
+lock/runtime evidence 与 prepared data tuple。
 
 ## 8. Mode adapter matrix
 

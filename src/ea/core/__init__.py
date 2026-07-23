@@ -17,6 +17,24 @@ from ea.core.market_data import (
     validate_market_data_batch,
 )
 from ea.core.models import OrderSide
+from ea.core.numeric import (
+    DETERMINISTIC_FLOAT64_POLICY,
+    NumericPolicyError,
+    OrderedFloat64Policy,
+)
+from ea.core.run import (
+    DataFingerprint,
+    ReplayWindow,
+    RunBinding,
+    RunBindingMismatchError,
+    RunContractError,
+    RunId,
+    RunReference,
+    Sha256Digest,
+    derive_component_seed,
+    require_run_binding,
+    validate_stream_label,
+)
 from ea.core.time import Clock, TimeValidationError, require_utc
 
 __all__ = [
@@ -24,20 +42,34 @@ __all__ = [
     "Adjustment",
     "Bar",
     "Clock",
+    "DataFingerprint",
+    "DETERMINISTIC_FLOAT64_POLICY",
     "IdentityValidationError",
     "Instrument",
     "MarketDataEnvelope",
     "MarketDataKind",
     "MarketDataValidationError",
+    "NumericPolicyError",
     "OrderSide",
+    "OrderedFloat64Policy",
+    "ReplayWindow",
+    "RunBinding",
+    "RunBindingMismatchError",
+    "RunContractError",
+    "RunId",
+    "RunReference",
+    "Sha256Digest",
     "SourceId",
     "TimeValidationError",
     "VenueId",
     "admission_order_key",
     "admit_market_data",
+    "derive_component_seed",
     "is_visible_as_of",
     "latest_as_of",
     "order_market_data",
     "require_utc",
+    "require_run_binding",
     "validate_market_data_batch",
+    "validate_stream_label",
 ]
