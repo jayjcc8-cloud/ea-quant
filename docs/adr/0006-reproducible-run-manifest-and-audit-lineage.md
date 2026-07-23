@@ -220,13 +220,16 @@ The runtime collector therefore enforces all of these rules before constructing 
    source and the active `sys.implementation.cache_tag`. The preflight checks the exact interpreter
    magic, loads one code object with no trailing bytes, recompiles the tracked source bytes with
    their resolved filename using `mode="exec"`, `flags=0`, `dont_inherit=True`, and `optimize=0`,
-   then requires `marshal.dumps(loaded_code) == marshal.dumps(recompiled_code)`. Comparing
+   then requires
+   `marshal.dumps(loaded_code, 2) == marshal.dumps(recompiled_code, 2)`. Marshal format version 2 is
+   fixed here because versions 3 and later preserve reference/interning identity that can differ
+   between semantically identical compilations; version 2 still covers the complete nested code
+   structure and observable filename, qualname, line-table, and exception-table fields. Comparing
    `CodeType` values with `==` is forbidden because it omits observable fields; comparing the
-   original cache payload is also forbidden because valid marshal encodings need not be byte-equal
-   before both objects are re-marshalled. Any mismatch, optimized/legacy/top-level/sourceless
-   bytecode, cache for an untracked source, or parse failure is rejected. Every ignored source or
-   extension-module candidate likewise fails, and tracked extension/source candidates are allowed
-   only inside the bound `ea` package.
+   original cache payload or using the default marshal version is also forbidden. Any mismatch,
+   optimized/legacy/top-level/sourceless bytecode, cache for an untracked source, or parse failure is
+   rejected. Every ignored source or extension-module candidate likewise fails, and tracked
+   extension/source candidates are allowed only inside the bound `ea` package.
 9. The tracked outer launcher first requires that `sys.modules` contain neither `ea` nor any
    `ea.*` name, then performs the repository, source, cache, symlink, and shadow parts of rules 5–8
    before any `ea` import. Thus an unverified source cache or shadow candidate cannot execute first.
@@ -598,7 +601,8 @@ Issue #14 must prove this decision with:
   of unordered, parallel, backend-dispatched, or schedule-dependent economic computation;
 - ignored/top-level source, extension, tampered/source-equivalent cache, sourceless-bytecode,
   file-symlink, and directory-symlink shadow tests across the complete repository `src/` import
-  root, including proof that preflight occurs before any `ea` import;
+  root, including observable nested-code tampering, marshal reference/interning noise, and proof that
+  preflight occurs before any `ea` import;
 - atomic directory collision, root/target symlink, traversal, concurrency, durability-failure,
   poisoned-directory retention, and no-overwrite tests;
 - ordered-spy proof that manifest persistence precedes audit/feed/output start;
