@@ -456,6 +456,23 @@ result root directory. No `PreparedRun` or run-bound adapter capability escapes 
 succeeds. Direct creation is atomic at the API boundary because the reserved directory is not
 published to any consumer until completion.
 
+V1 operational filesystem identity is the `(st_dev, st_ino)` tuple obtained from descriptor
+`fstat`. The store captures that tuple for the trusted result root, reserved attempt directory, and
+published manifest, then compares it with no-follow descriptor snapshots during later manifest
+verification. File type and mode, canonical bytes, manifest digest, schema, and `RunReference` are
+verified independently. These comparisons prove identity and content at the preparation and
+verification observations; they do not preserve descriptors for the attempt lifetime or attest
+that no namespace replacement ever occurred between observations. In particular, V1 does not
+promise detection of a deliberate delete/recreate ABA that restores identical bytes while the
+filesystem also reuses the same inode. The result root is therefore a trusted, unshared local
+boundary rather than adversarial WORM storage.
+
+`ctime` or `ctime_ns` is not part of identity: its update and resolution semantics vary by
+filesystem, it changes for non-identity metadata operations, and it does not prove uninterrupted
+object history. A future requirement for hostile namespace-tamper evidence must define a stronger
+storage contract—such as bounded descriptor pinning, immutable storage, or signed external
+attestation—in a new ADR rather than silently expanding V1.
+
 Any failure after reservation retains a poisoned incomplete directory and any partial evidence;
 the store never cleans, adopts, or retries it, and returns no prepared context. A retry constructs a
 new attempt with a new UUID even when lineage is unchanged. The trusted result-root location is
@@ -605,6 +622,8 @@ Issue #14 must prove this decision with:
   preflight occurs before any `ea` import;
 - atomic directory collision, root/target symlink, traversal, concurrency, durability-failure,
   poisoned-directory retention, and no-overwrite tests;
+- deterministic same-byte manifest replacement using a coexisting sibling plus `os.replace`, proving
+  that a changed `(st_dev, st_ino)` identity fails independently of content;
 - ordered-spy proof that manifest persistence precedes audit/feed/output start;
 - audit/output reference mismatch failures;
 - full repository quality, reproducible-wheel, clean-wheel, expert, and exact-head CI gates.

@@ -139,20 +139,30 @@ def test_manifest_verification_detects_content_identity_and_symlink_tampering(
     prepared = store.prepare(_spec(), lambda: RUN_UUID)
     manifest_path = root / str(RUN_UUID) / "manifest.json"
     original = manifest_path.read_bytes()
+    original_stat = manifest_path.stat()
 
     if mutation == "same-inode-content":
         manifest_path.write_bytes(original + b"\n")
+        expected_message = "manifest bytes no longer match the prepared digest"
     elif mutation == "same-bytes-replacement":
-        manifest_path.unlink()
-        manifest_path.write_bytes(original)
-        manifest_path.chmod(0o600)
+        replacement = manifest_path.with_name("manifest-replacement")
+        replacement.write_bytes(original)
+        replacement.chmod(0o600)
+        replacement_stat = replacement.stat()
+        assert (replacement_stat.st_dev, replacement_stat.st_ino) != (
+            original_stat.st_dev,
+            original_stat.st_ino,
+        )
+        os.replace(replacement, manifest_path)
+        expected_message = "manifest file identity changed after preparation"
     else:
         canary = tmp_path / "manifest-canary"
         canary.write_bytes(original)
         manifest_path.unlink()
         manifest_path.symlink_to(canary)
+        expected_message = "manifest could not be re-opened without following links"
 
-    with pytest.raises(StoreError):
+    with pytest.raises(StoreError, match=expected_message):
         store.verify_manifest(prepared.manifest_verification)
 
 

@@ -243,8 +243,11 @@ Issue #14 与 [Proposed ADR 0006](adr/0006-reproducible-run-manifest-and-audit-l
 Prepared manifest 不等于 completed reproducibility claim；terminal audit/output evidence 保持为
 独立 write-once record，避免改写 manifest 或形成 audit hash cycle。Editable-checkout run 在
 terminal claim 前必须通过 store-owned manifest capability 以 no-follow 方式重读原文件并核对
-file identity、canonical bytes、digest 与 `RunReference`，同时重新验证相同 clean HEAD、
-lock/runtime evidence 与 prepared data tuple。
+`fstat` 的 `(st_dev, st_ino)` 时点 identity、mode、canonical bytes、digest 与
+`RunReference`，同时重新验证相同 clean HEAD、lock/runtime evidence 与 prepared data tuple。
+V1 的 trusted/unshared local result root 不提供连续文件历史或 adversarial inode-reuse ABA
+证明；`ctime` 不属于 identity。更强保证需要未来 ADR 定义 descriptor pinning、immutable
+storage 或 external attestation。
 
 ## 8. Mode adapter matrix
 
