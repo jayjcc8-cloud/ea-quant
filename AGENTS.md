@@ -24,6 +24,29 @@ agent or person allowed to edit the active checkout, stage, commit, push, or cha
 state on GitHub. A coordinator may perform those actions only when it is also the recorded
 Implementation Owner.
 
+## Reuse before build
+
+Every new requirement is screened for reuse before design or implementation starts. Prefer a
+maintained, mature open-source capability, an existing project dependency, or a small adapter when
+it satisfies the requirement better than new bespoke code. Reuse is not automatic: a dependency
+must earn its place by fitting the contract and risk profile.
+
+The Issue records a bounded reuse assessment:
+
+- the capability needed and the search sources or existing dependencies inspected
+- up to three serious candidates, with supported/locked version, license, maintenance/activity,
+  supply-chain and security posture, and technical fit
+- integration, transitive-dependency, operational, migration, and lock-in costs
+- the decision: reuse directly, wrap with an adapter, or build locally
+- rejection reasons for candidates not selected
+
+Tier 0 may record `N/A` with a reason. Tier 1 and Tier 2 require the assessment before
+implementation; if no credible candidate exists, record the search date, sources, and why local
+implementation is the smaller or safer choice. Do not perform an unbounded survey, add a
+dependency only because it is popular, or replace a simple standard-library solution with a
+third-party package. Material dependency or boundary decisions receive Architecture Owner review
+and, when long-lived, an ADR.
+
 ## Controlled expert lifecycle
 
 Every expert activation follows this lifecycle:

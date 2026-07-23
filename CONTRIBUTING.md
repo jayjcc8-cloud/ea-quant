@@ -13,19 +13,23 @@
 
 1. Create one Issue with risk tier and reason, owners, scope, non-goals, base SHA, risks, and
    acceptance criteria.
-2. Record the Implementation Owner's writer lease: branch, checkout/worktree identity, base SHA,
+2. Before design or code, complete the bounded open-source reuse assessment required by
+   [AGENTS.md](AGENTS.md): inspect existing dependencies and up to three serious mature candidates,
+   then record the reuse, adapter, or local-build decision and rejection reasons. Tier 0 may record
+   `N/A` with a reason.
+3. Record the Implementation Owner's writer lease: branch, checkout/worktree identity, base SHA,
    start state, and merge order when other work is active.
-3. Create one branch for that Issue, for example `codex/12-data-schema`.
-4. Open a Draft pull request early and keep its scope limited to the Issue.
-5. Use Conventional Commits and keep every commit logically focused.
-6. Activate only the experts required by the Issue risk tier, at the gates defined in
+4. Create one branch for that Issue, for example `codex/12-data-schema`.
+5. Open a Draft pull request early and keep its scope limited to the Issue.
+6. Use Conventional Commits and keep every commit logically focused.
+7. Activate only the experts required by the Issue risk tier, at the gates defined in
    [AGENTS.md](AGENTS.md).
-7. Run the repository verification entry point and record its exact-HEAD result in the pull
+8. Run the repository verification entry point and record its exact-HEAD result in the pull
    request.
-8. Resolve every finding blocker, refresh stale SHA-bound verdicts, and wait for CI to pass.
-9. Extract durable expert knowledge into the Issue, ADR, pull request, tests, or follow-up Issues;
+9. Resolve every finding blocker, refresh stale SHA-bound verdicts, and wait for CI to pass.
+10. Extract durable expert knowledge into the Issue, ADR, pull request, tests, or follow-up Issues;
    release completed experts.
-10. After user approval, squash merge to `main` and delete the branch.
+11. After user approval, squash merge to `main` and delete the branch.
 
 Direct pushes to `main` are not allowed. The Phase 0 bootstrap predates the Issue requirement;
 all iterations after `v0.1.0` must link an Issue.
@@ -35,6 +39,13 @@ all iterations after `v0.1.0` must link an Issue.
 Create an ADR for decisions that change module boundaries, data or time semantics, execution or
 risk behavior, reproducibility guarantees, or long-lived external interfaces. Do not create ADRs
 for small, reversible implementation details.
+
+For Tier 1 and Tier 2 work, the reuse assessment is part of the Issue's acceptance evidence, not
+an informal chat note. Prefer an already locked dependency when it fits. New dependencies require
+the same supported/locked version, license, maintenance, supply-chain, security, integration,
+migration, and lock-in evidence as other candidates. A local implementation must state why it is
+smaller or safer to own. Revisit the decision only when the requirement or material candidate
+evidence changes.
 
 After the first baseline tag `v0.1.0`, Accepted ADRs are immutable. Replace a decision with a new
 ADR that marks the old ADR as superseded. Phase 0 may correct its own ADRs before that baseline is
@@ -88,6 +99,7 @@ active checkout.
 An iteration is complete only when:
 
 - Issue acceptance criteria are satisfied and the diff remains in scope.
+- required reuse assessment and dependency decision evidence are recorded.
 - required tests, documentation, ADRs, configuration, and lock files are synchronized.
 - local checks and pull request CI pass.
 - required exact-HEAD expert evidence is current and blockers are zero.

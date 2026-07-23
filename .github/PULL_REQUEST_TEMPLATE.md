@@ -30,6 +30,21 @@
 - New assumptions:
 - Data/config/dependency impact, or N/A with reason:
 
+## Reuse assessment
+
+Complete before implementation for Tier 1/2. Tier 0 may use `N/A` with a reason.
+
+- Capability needed:
+- Existing project/standard-library capability inspected:
+- Search sources and date:
+
+| Candidate and supported/locked version | License | Maintenance / supply-chain / security evidence | Technical fit | Integration / migration / lock-in cost | Decision or rejection reason |
+|---|---|---|---|---|---|
+| | | | | | |
+
+- Decision: reuse directly / adapter / local build / N/A
+- Why this is the smallest safe ownership choice:
+
 ## Quant and operational risk
 
 - Look-ahead bias / time semantics, or N/A with reason:
@@ -74,6 +89,7 @@ Every verdict is valid only for its exact `reviewed_sha`.
 - [ ] All blockers are resolved.
 - [ ] Every required verdict binds the final candidate HEAD.
 - [ ] Documentation and ADRs are synchronized.
+- [ ] Required reuse assessment and dependency decision evidence are recorded.
 - [ ] No unrelated changes are included.
 - [ ] Follow-up work is recorded as Issues.
 - [ ] Useful expert knowledge is extracted and completed agents are released.
