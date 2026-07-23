@@ -176,9 +176,13 @@ unrelated source tree to shadow the reviewed code.
 The runtime collector therefore enforces all of these rules before constructing evidence:
 
 1. The interpreter has `sys.flags.isolated == 1`, `sys.flags.safe_path == 1`,
-   `sys.flags.no_user_site == 1`, and `sys.dont_write_bytecode is True`, and
-   `sys.prefix != sys.base_prefix`. The supported launcher is an isolated, no-bytecode interpreter
-   invocation; `PYTHONPATH`, the current directory, and the user site are not import roots.
+   `sys.flags.no_user_site == 1`, `sys.flags.no_site == 0`,
+   `sys.flags.dont_write_bytecode == 1`, `sys.dont_write_bytecode is True`,
+   `sys.flags.optimize == 0`, `sys.pycache_prefix is None`, and
+   `sys.prefix != sys.base_prefix`. A tracked standard-library-only outer launcher started with the
+   equivalent of `python -I -B` performs the source/import preflight below before importing `ea` and
+   then enters preparation. `PYTHONPATH`, the current directory, the user site, optimized mode, an
+   external bytecode-cache prefix, and site-disabled startup are unsupported.
 2. The collector, not a caller, obtains `purelib` and `platlib` from the active interpreter's
    `sysconfig.get_paths()`. Both values must be absolute existing real directories. It resolves
    them strictly, deduplicates physical aliases before discovery, and fails on an empty set.
@@ -203,16 +207,27 @@ The runtime collector therefore enforces all of these rules before constructing 
    repository's resolved `src/` directory. Any other current-directory, user-site, editable,
    injected, relative, or empty import root fails.
 7. The collector scans that entire repository `src/` import root, not only `src/ea`. `ea` is the
-   only importable top-level package or module allowed in V1. Every regular package-data file and
-   every source or extension-module candidate below `src/ea` must be tracked at the reviewed HEAD;
-   every already-loaded `ea` module must originate at one of those tracked files. Source-tree
-   `ea_quant.egg-info` is permitted only as the already validated non-importable metadata projection.
-   Every other top-level importable candidate fails even if ignored or tracked.
-8. Every file matching an `importlib.machinery.BYTECODE_SUFFIXES` suffix anywhere below `src/`
-   fails, including ordinary `__pycache__` entries. The no-bytecode launcher prevents new source-tree
-   caches; preparation requires stale caches to be absent. Every ignored source or extension-module
-   candidate likewise fails, and tracked extension/source candidates are allowed only inside the
-   bound `ea` package described by rule 7.
+   only importable top-level package or module allowed in V1. Other than bytecode accepted by rule
+   8, every regular package-data file and every source or extension-module candidate below
+   `src/ea` must be tracked at the reviewed HEAD; every already-loaded `ea` module must originate at
+   one of those tracked files. Source-tree `ea_quant.egg-info` is permitted only as the already
+   validated non-importable metadata projection. Every other top-level importable candidate fails
+   even if ignored or tracked. The scan uses `lstat`, never follows links, and rejects every symlink
+   or other non-regular file/directory below `src/`; every resolved allowed import or package entry
+   must remain below the real `src/ea` tree, except the non-importable metadata projection.
+8. A file matching an `importlib.machinery.BYTECODE_SUFFIXES` suffix is allowed only at the exact
+   unoptimized `importlib.util.cache_from_source()` path for a corresponding tracked `src/ea/*.py`
+   source and the active `sys.implementation.cache_tag`. The preflight checks the exact interpreter
+   magic, loads one code object with no trailing bytes, recompiles the tracked source bytes with
+   their resolved filename, `dont_inherit=True`, and `optimize=0`, and requires code-object equality.
+   Any mismatch, optimized/legacy/top-level/sourceless bytecode, cache for an untracked source, or
+   parse failure is rejected. Every ignored source or extension-module candidate likewise fails,
+   and tracked extension/source candidates are allowed only inside the bound `ea` package.
+9. The tracked outer launcher first requires that `sys.modules` contain neither `ea` nor any
+   `ea.*` name, then performs the repository, source, cache, symlink, and shadow parts of rules 5–8
+   before any `ea` import. Thus an unverified source cache or shadow candidate cannot execute first.
+   The runtime collector repeats the complete checks after import while bytecode writes remain
+   disabled. Neither layer deletes, rewrites, or adopts a source-tree artifact.
 
 These locations are operational verification inputs and never enter the manifest or lineage.
 Repository evidence binds the resolved repository to the same clean commit before and after runtime
@@ -566,6 +581,8 @@ Issue #14 must prove this decision with:
 - isolated editable-runtime tests for deduplicated `purelib`/`platlib`, unique active
   distributions, direct-URL/current-repository binding, imported-EA origin, and rejection of
   ambient/path/user-site metadata or import roots;
+- outer-launcher tests proving source/cache/symlink preflight occurs before any `ea` import and
+  rejecting optimized, site-disabled, writable-bytecode, or external-pycache-prefix startup;
 - pre-effect `backtest` acceptance plus `paper` and `live` builder/reader/verifier rejection;
 - cross-process lineage stability across different Python hash seeds, timezone, CWD, and result
   roots;
@@ -574,8 +591,9 @@ Issue #14 must prove this decision with:
   not consume or alter the simulation RNG;
 - numeric-policy conformance tests proving canonical economic iteration/aggregation and rejection
   of unordered, parallel, backend-dispatched, or schedule-dependent economic computation;
-- ignored/top-level source, extension, source-backed-cache, and sourceless-bytecode shadow tests
-  across the complete repository `src/` import root;
+- ignored/top-level source, extension, tampered/source-equivalent cache, sourceless-bytecode,
+  file-symlink, and directory-symlink shadow tests across the complete repository `src/` import
+  root, including proof that preflight occurs before any `ea` import;
 - atomic directory collision, root/target symlink, traversal, concurrency, durability-failure,
   poisoned-directory retention, and no-overwrite tests;
 - ordered-spy proof that manifest persistence precedes audit/feed/output start;

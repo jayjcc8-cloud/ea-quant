@@ -139,11 +139,14 @@ Phase 1 的最小 run manifest：UUID4 `run_id` 标识一次执行尝试，deter
 `lineage_sha256` 标识相同的 clean code、normalized config、point-in-time data、UTC replay
 window、effective parameters、runtime/dependencies 与 seed。
 
-V1 只接受有界 `backtest`，并由 isolated、no-bytecode Python 进程验证当前 clean Git
-checkout、locked editable `venv`、实际导入的 `ea` 源码和 active-environment distribution
-inventory；repository `src/` 中不能残留 bytecode 或隐藏 import artifact。`paper`/`live`
-需要后续 schema。经济因果链使用固定顺序的 binary64 运算与独占、串行消费的 PCG64 raw-word
-stream，不把无法证明的“整个进程只有一个线程”写成 lineage 承诺。
+V1 只接受有界 `backtest`。一个 tracked outer launcher 会在导入 `ea` 前，用
+`python -I -B` 等价的 isolated Python 验证当前 clean Git checkout、locked editable
+`venv`、实际源码、active-environment distribution inventory 与完整 `src/` import surface，
+并在 preparation 期间禁写 bytecode。普通 source-backed cache 只有在 code object 与对应
+tracked source 重新编译后完全一致时才允许；sourceless/tampered cache、隐藏 import artifact
+与 symlink 全部失败，collector 不会静默清理。`paper`/`live` 需要后续 schema。经济因果链
+使用固定顺序的 binary64 运算与独占、串行消费的 PCG64 raw-word stream，不把无法证明的
+“整个进程只有一个线程”写成 lineage 承诺。
 
 Manifest 必须在 audit、feed 和 output 启动前持久写入 `results/<run_id>/manifest.json`，且不可改写；
 相同 lineage 的重跑使用新 UUID 和新目录。路径、hostname、wall-clock、raw secret 与 UUID
