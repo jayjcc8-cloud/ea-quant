@@ -23,57 +23,7 @@ jobs:
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version-file: pyproject.toml
-      - name: Verify uv and dependency lock
-        run: |
-          uv --version
-          uv lock --check
-          git diff --exit-code HEAD -- uv.lock
       - name: Set up Python
         run: uv python install 3.12
-      - name: Install dependencies
-        run: uv sync --locked --extra dev
-      - name: Verify build tools are isolated
-        run: |
-          venv/bin/python -I -c "import importlib.util as u; assert u.find_spec('setuptools') is None; assert u.find_spec('wheel') is None"
-      - name: Installed project smoke
-        run: |
-          venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
-          venv/bin/ea doctor
-      - name: Lint
-        run: uv run --locked ruff check .
-      - name: Format
-        run: uv run --locked ruff format --check .
-      - name: Typecheck
-        run: uv run --locked mypy
-      - name: Test
-        run: uv run --locked pytest -q
-      - name: Doctor
-        run: uv run --locked ea doctor
-      - name: Build reproducible wheel
-        run: |
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
-          echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
-          uv build --wheel --clear --verbose \
-            --build-constraints build-constraints.txt \
-            --require-hashes \
-            --out-dir build/wheel-a
-          uv build --wheel --clear \
-            --build-constraints build-constraints.txt \
-            --require-hashes \
-            --out-dir build/wheel-b
-          cmp build/wheel-a/*.whl build/wheel-b/*.whl
-          venv/bin/python -c "import hashlib, pathlib; p = next(pathlib.Path('build/wheel-a').glob('*.whl')); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
-          venv/bin/python -c "import pathlib, zipfile; p = next(pathlib.Path('build/wheel-a').glob('*.whl')); z = zipfile.ZipFile(p); n = next(n for n in z.namelist() if n.endswith('.dist-info/WHEEL')); print(z.read(n).decode())"
-      - name: Create clean wheel environment from locked dependencies
-        env:
-          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/ea-wheel-venv
-        run: uv sync --locked --no-install-project
-      - name: Install wheel without resolving dependencies
-        run: uv pip install --python "${{ runner.temp }}/ea-wheel-venv/bin/python" --no-deps build/wheel-a/*.whl
-      - name: Check clean wheel environment
-        run: uv pip check --python "${{ runner.temp }}/ea-wheel-venv/bin/python"
-      - name: Smoke test wheel outside repository
-        working-directory: ${{ runner.temp }}
-        run: |
-          "${{ runner.temp }}/ea-wheel-venv/bin/python" -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
-          "${{ runner.temp }}/ea-wheel-venv/bin/ea" doctor
+      - name: Verify exact checkout
+        run: uv run --no-project --python 3.12 python scripts/verify.py --profile full

@@ -9,16 +9,39 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
+from typing import cast
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENVIRONMENT_DIR = PROJECT_ROOT / "venv"
 LEGACY_ENVIRONMENT_DIR = PROJECT_ROOT / ".venv"
-VERSION_SMOKE = (
-    "import importlib.metadata as metadata; import ea; "
-    "assert metadata.version('ea-quant') == ea.__version__ == '0.1.1'; "
-    "print(ea.__version__)"
-)
+
+
+def _mapping(value: object, field: str) -> dict[str, object]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise RuntimeError(f"pyproject.toml {field} must be a table")
+    return cast(dict[str, object], value)
+
+
+def project_version() -> str:
+    """Read the package version from the project metadata source of truth."""
+    with (PROJECT_ROOT / "pyproject.toml").open("rb") as handle:
+        document = _mapping(tomllib.load(handle), "document")
+    project = _mapping(document.get("project"), "project")
+    version = project.get("version")
+    if not isinstance(version, str) or not version:
+        raise RuntimeError("pyproject.toml project.version must be a non-empty string")
+    return version
+
+
+def version_smoke(version: str) -> str:
+    """Build the installed-version assertion from project metadata."""
+    return (
+        "import importlib.metadata as metadata; import ea; "
+        f"assert metadata.version('ea-quant') == ea.__version__ == {version!r}; "
+        "print(ea.__version__)"
+    )
 
 
 def find_uv() -> str:
@@ -55,6 +78,7 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
 def main() -> int:
     """Synchronize venv and verify imports and entrypoints without source-path bypasses."""
     uv = find_uv()
+    version = project_version()
     if ENVIRONMENT_DIR.is_symlink():
         print(
             "error: venv must be a real directory, not a symlink; replace it before retrying.",
@@ -83,7 +107,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ea-bootstrap-") as temporary_directory:
         outside_repository = Path(temporary_directory)
         run(
-            [str(python), "-I", "-c", VERSION_SMOKE],
+            [str(python), "-I", "-c", version_smoke(version)],
             cwd=outside_repository,
             env=env,
         )

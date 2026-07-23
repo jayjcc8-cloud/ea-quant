@@ -41,8 +41,8 @@
 ## Verification
 
 - Candidate HEAD SHA:
-- [ ] `python3 scripts/verify.py --profile quality`
-- [ ] `python3 scripts/verify.py --profile full`
+- [ ] `uv run --no-project --python 3.12 python scripts/verify.py --profile quality`
+- [ ] `uv run --no-project --python 3.12 python scripts/verify.py --profile full`
 - CI result:
 - Verification worktree / CI run:
 

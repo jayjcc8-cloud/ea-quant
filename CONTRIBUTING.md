@@ -45,8 +45,8 @@ published.
 The repository-owned verification entry point is the source of truth for executable checks:
 
 ```bash
-python3 scripts/verify.py --profile quality
-python3 scripts/verify.py --profile full
+uv run --no-project --python 3.12 python scripts/verify.py --profile quality
+uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
 `quality` verifies the supported uv version, lock immutability, locked environment, isolated
@@ -65,9 +65,9 @@ The supported frontend version is declared once by `[tool.uv].required-version` 
 `build-constraints.txt`; `uv.lock` does not replace that build constraint. Never use
 `--no-build-isolation` for the canonical build.
 
-`scripts/verify.py --profile full` installs the built wheel with `--no-deps` into an independently
-created environment whose runtime dependencies came from `uv sync --locked --no-install-project`.
-It runs `uv pip check`, compares distribution metadata with `ea.__version__`, and runs the installed
+The `full` profile installs the built wheel with `--no-deps` into an independently created
+environment whose runtime dependencies came from `uv sync --locked --no-install-project`. It runs
+`uv pip check`, compares distribution metadata with `ea.__version__`, and runs the installed
 `ea doctor` outside the repository.
 
 ## Expert review gates

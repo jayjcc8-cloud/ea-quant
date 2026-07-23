@@ -135,32 +135,17 @@ YAML、CLI、normalized snapshot 和日志都不得包含 broker/exchange raw cr
 常用质量门禁：
 
 ```bash
-uv --version
-uv lock --check
-git diff --exit-code HEAD -- uv.lock
-UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev
-venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
-venv/bin/ea doctor
-UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q
-UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff check .
-UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .
-UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy
-UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor
+uv run --no-project --python 3.12 python scripts/verify.py --profile quality
 ```
 
-可复现 wheel 使用独立于 `uv.lock` 的哈希构建约束，并保持 PEP 517 构建隔离：
+提交前完整验证会在上述质量门禁之后构建并比较两个隔离 wheel，再用独立环境验证成品：
 
 ```bash
-export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
-UV_PROJECT_ENVIRONMENT=venv uv build --wheel --clear \
-  --build-constraints build-constraints.txt --require-hashes --out-dir build/wheel-a
-UV_PROJECT_ENVIRONMENT=venv uv build --wheel --clear \
-  --build-constraints build-constraints.txt --require-hashes --out-dir build/wheel-b
-cmp build/wheel-a/*.whl build/wheel-b/*.whl
-venv/bin/python -c "import hashlib, pathlib; p = next(pathlib.Path('build/wheel-a').glob('*.whl')); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
+uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
-不要使用 `--no-build-isolation`，也不要把 setuptools 或 wheel 加入应用/dev 依赖来替代
+脚本从 `pyproject.toml` 读取项目和 uv 版本；CI 也调用同一入口。不要使用
+`--no-build-isolation`，也不要把 setuptools 或 wheel 加入应用/dev 依赖来替代
 `build-constraints.txt`。
 
 VSCode 已提供：
