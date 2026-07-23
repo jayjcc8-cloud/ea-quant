@@ -11,14 +11,21 @@
 
 ## Iteration workflow
 
-1. Create one Issue with owners, scope, non-goals, base SHA, risks, and acceptance criteria.
-2. Create one branch for that Issue, for example `codex/12-data-schema`.
-3. Open a Draft pull request early and keep its scope limited to the Issue.
-4. Use Conventional Commits and keep every commit logically focused.
-5. Run the required local checks and record the results in the pull request.
-6. Obtain the required read-only expert and independent verification conclusions.
-7. Resolve every blocker and wait for CI to pass.
-8. After user approval, squash merge to `main` and delete the branch.
+1. Create one Issue with risk tier and reason, owners, scope, non-goals, base SHA, risks, and
+   acceptance criteria.
+2. Record the Implementation Owner's writer lease: branch, checkout/worktree identity, base SHA,
+   start state, and merge order when other work is active.
+3. Create one branch for that Issue, for example `codex/12-data-schema`.
+4. Open a Draft pull request early and keep its scope limited to the Issue.
+5. Use Conventional Commits and keep every commit logically focused.
+6. Activate only the experts required by the Issue risk tier, at the gates defined in
+   [AGENTS.md](AGENTS.md).
+7. Run the repository verification entry point and record its exact-HEAD result in the pull
+   request.
+8. Resolve every finding blocker, refresh stale SHA-bound verdicts, and wait for CI to pass.
+9. Extract durable expert knowledge into the Issue, ADR, pull request, tests, or follow-up Issues;
+   release completed experts.
+10. After user approval, squash merge to `main` and delete the branch.
 
 Direct pushes to `main` are not allowed. The Phase 0 bootstrap predates the Issue requirement;
 all iterations after `v0.1.0` must link an Issue.
@@ -35,26 +42,20 @@ published.
 
 ## Required checks
 
+The repository-owned verification entry point is the source of truth for executable checks:
+
 ```bash
-uv --version
-uv lock --check
-git diff --exit-code HEAD -- uv.lock
-UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev
-venv/bin/python -I -c "import importlib.metadata as m; import ea; assert m.version('ea-quant') == ea.__version__ == '0.1.1'"
-venv/bin/ea doctor
-UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff check .
-UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .
-UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy
-UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q
-UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor
-export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
-UV_PROJECT_ENVIRONMENT=venv uv build --wheel --clear \
-  --build-constraints build-constraints.txt --require-hashes --out-dir build/wheel-a
-UV_PROJECT_ENVIRONMENT=venv uv build --wheel --clear \
-  --build-constraints build-constraints.txt --require-hashes --out-dir build/wheel-b
-cmp build/wheel-a/*.whl build/wheel-b/*.whl
-venv/bin/python -c "import hashlib, pathlib; p = next(pathlib.Path('build/wheel-a').glob('*.whl')); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
+python3 scripts/verify.py --profile quality
+python3 scripts/verify.py --profile full
 ```
+
+`quality` verifies the supported uv version, lock immutability, locked environment, isolated
+installed metadata, CLI, lint, formatting, types, tests, and doctor. `full` includes `quality` and
+adds byte-identical isolated wheel builds plus a clean-wheel installation and outside-repository
+smoke test. Pull requests and CI use `full`; `quality` is the faster implementation loop.
+
+The script reads the project version and required uv version from `pyproject.toml`; contributor
+documentation and CI must not duplicate those values or maintain a second command list.
 
 Tests must be deterministic and must not depend on private local market data. Secrets, broker
 credentials, tokens, and non-versionable datasets must never enter Git.
@@ -64,11 +65,23 @@ The supported frontend version is declared once by `[tool.uv].required-version` 
 `build-constraints.txt`; `uv.lock` does not replace that build constraint. Never use
 `--no-build-isolation` for the canonical build.
 
-Packaging changes must additionally install the built wheel with `--no-deps` into an independently
+`scripts/verify.py --profile full` installs the built wheel with `--no-deps` into an independently
 created environment whose runtime dependencies came from `uv sync --locked --no-install-project`.
-Run `uv pip check`, an isolated import that compares distribution metadata with `ea.__version__`,
-then the installed `ea doctor` from outside the repository. The CI workflow is the executable
-reference for this clean-wheel smoke test.
+It runs `uv pip check`, compares distribution metadata with `ea.__version__`, and runs the installed
+`ea doctor` outside the repository.
+
+## Expert review gates
+
+- Tier 0 activates the Verification Owner only for the final candidate SHA.
+- Tier 1 activates the Architecture Owner once the design/diff is reviewable and the Verification
+  Owner only for the final candidate SHA.
+- Tier 2 follows Tier 1 and adds the relevant domain expert at the decision or implementation gate
+  named by the Issue.
+
+Reports and finding closures are recorded in the pull request. Any new commit makes earlier
+verdicts stale; re-review is scoped to the old-to-new SHA delta and open finding IDs. File-producing
+verification runs in CI or an isolated verification worktree, never in the Implementation Owner's
+active checkout.
 
 ## Definition of Done
 
@@ -77,7 +90,8 @@ An iteration is complete only when:
 - Issue acceptance criteria are satisfied and the diff remains in scope.
 - required tests, documentation, ADRs, configuration, and lock files are synchronized.
 - local checks and pull request CI pass.
-- expert evidence is recorded and blockers are zero.
+- required exact-HEAD expert evidence is current and blockers are zero.
+- useful expert knowledge is recorded and completed agents are released.
 - no secrets or inappropriate data are present.
 - the user has approved and the pull request is merged into `main`.
 

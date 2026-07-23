@@ -1,11 +1,16 @@
 ## Iteration
 
 - Issue:
+- Risk tier and reason:
 - Milestone / target version:
 - Base branch and base SHA:
+- Branch and checkout/worktree:
+- Merge order with other active work:
 - Architecture Owner:
 - Implementation Owner:
 - Verification Owner:
+- Domain expert(s), or N/A:
+- Writer lease started / handoff status:
 
 ## Goal
 
@@ -35,33 +40,42 @@
 
 ## Verification
 
-- [ ] `uv --version` matches `[tool.uv].required-version`
-- [ ] `uv lock --check` and `git diff --exit-code HEAD -- uv.lock`
-- [ ] `UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra dev`
-- [ ] Installed metadata and `ea.__version__` both report the target version under `python -I`
-- [ ] `venv/bin/ea doctor`
-- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff check .`
-- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked ruff format --check .`
-- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked mypy`
-- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked pytest -q`
-- [ ] `UV_PROJECT_ENVIRONMENT=venv uv run --locked ea doctor`
-- [ ] Commit-derived `SOURCE_DATE_EPOCH` plus two isolated, hashed wheel builds compare byte-identically
-- [ ] Clean `--no-deps` wheel install, `uv pip check`, and outside-repository smoke (when packaging changes)
+- Candidate HEAD SHA:
+- [ ] `python3 scripts/verify.py --profile quality`
+- [ ] `python3 scripts/verify.py --profile full`
 - CI result:
+- Verification worktree / CI run:
 
 ## Expert review
 
-| Role | Reviewer | HEAD SHA | Verdict | Blockers |
+Every verdict is valid only for its exact `reviewed_sha`.
+
+| Role | Reviewer | reviewed_sha | Evidence | Finding IDs | Verdict |
+|---|---|---|---|---|---|
+| Architecture Owner, if required | | | | | |
+| Verification Owner | | | | | |
+| Domain expert, if required | | | | | |
+
+### Finding closure
+
+| Finding ID | Severity | Owner | Resolution evidence | Status |
 |---|---|---|---|---|
-| Architecture Owner | | | | |
-| Verification Owner | | | | |
-| Domain expert, if required | | | | |
+| | | | | |
+
+### Knowledge extraction and agent release
+
+- Durable decisions/evidence recorded in:
+- Follow-up Issues:
+- Completed experts released:
+- Stale verdicts after the final HEAD: none / list
 
 ## Completion
 
 - [ ] All blockers are resolved.
+- [ ] Every required verdict binds the final candidate HEAD.
 - [ ] Documentation and ADRs are synchronized.
 - [ ] No unrelated changes are included.
 - [ ] Follow-up work is recorded as Issues.
+- [ ] Useful expert knowledge is extracted and completed agents are released.
 - [ ] Version impact is declared: none / patch / minor / major.
 - [ ] Worktree is clean and the PR diff has been reviewed.
