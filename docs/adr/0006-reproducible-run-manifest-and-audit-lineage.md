@@ -48,6 +48,12 @@ receive this value from the prepared run context rather than constructing identi
 
 The lineage preimage is a closed, versioned value containing all of the following:
 
+V1 is exclusively a bounded Phase 1 backtest contract. Its normalized configuration must contain
+the literal `run.mode: backtest`; the builder, strict reader, and external evidence verifier reject
+`paper` and `live`. Rejection occurs before UUID generation, result-directory reservation, or any
+other runtime effect. A bounded paper replay or live-feed paper manifest requires a future schema
+and ADR because it cannot claim the complete immutable input tuple required here.
+
 1. **Code provenance**
    - the full 40-character lowercase Git commit;
    - an exact `worktree_clean: true` assertion collected from the repository;
@@ -82,7 +88,8 @@ The lineage preimage is a closed, versioned value containing all of the followin
    - values originate from typed non-secret component schemas. Credentials, tokens, signatures,
      private keys, and resolved `SecretRef` payloads never enter any manifest field or hash.
 6. **Runtime and dependencies**
-   - `ea_version` from `importlib.metadata.version("ea-quant")`;
+   - `ea_version` from the unique active-environment `ea-quant` distribution described below,
+     exactly equal to both `importlib.metadata.version("ea-quant")` and `ea.__version__`;
    - `python_implementation` from `sys.implementation.name`, `python_version` from the decimal
      `sys.version_info[:3]`, `python_cache_tag` from `sys.implementation.cache_tag`, `sys_platform`
      from `sys.platform`, and `platform_tag` from `sysconfig.get_platform()`;
@@ -91,8 +98,8 @@ The lineage preimage is a closed, versioned value containing all of the followin
      containing no `Cc` or `Cs` code point;
    - every other collected runtime token matches
      `[A-Za-z0-9][A-Za-z0-9._+-]{0,127}`;
-   - fixed `numeric_policy: deterministic-single-thread-v1`, which forbids nondeterministic
-     parallel floating-point reductions for a reproducible v1 run;
+   - fixed `numeric_policy: deterministic-ordered-float64-v1`, whose exact economic-computation
+     semantics are defined below;
    - duplicate normalized package names, inconsistent EA versions, missing metadata, executable or
      install paths, `platform.platform()`, compiler text, hostname, and other host-local free text
      fail or are excluded.
@@ -120,8 +127,74 @@ The injected RNG capability owns this derivation; a caller label without the mat
 not provenance. `PYTHONHASHSEED` is deliberately excluded: v1 canonical ordering and economic
 behavior must be invariant across separately started interpreters with different hash seeds.
 
+Each stream label has exactly one component owner. A PCG64 generator is never shared between
+components or invoked concurrently. Draws occur serially in deterministic runtime-dispatch order;
+their count and order may depend only on prior deterministic state, never task scheduling or worker
+completion. A retry constructs every stream again from the same master seed and label.
+
+`deterministic-ordered-float64-v1` does not claim that the entire process has one thread. It covers
+the complete economic causal cone: any computation capable of changing a feature, signal, target,
+intent, risk decision, order, match/fill, position, cash, ledger/P&L, later-consumed runtime state,
+or mandatory deterministic result. Within that cone, binary64 arithmetic, comparison, iteration,
+tie-breaking, and aggregation use one code-defined total order and serial evaluation. Phase 1
+allows exact Python `float` basic arithmetic in that order and the specified PCG64 outputs; it
+forbids BLAS, NumPy, Polars, DuckDB, GPU, architecture-dispatched math, fused operations, and any
+parallel or unordered floating-point reduction from influencing economic behavior. A component
+whose operations are not proven bit-stable under this policy cannot claim compatibility and needs a
+new policy whose backend identity enters lineage.
+
+Parallel work is permitted only when each item is independently deterministic, completion order
+cannot feed back into the economic causal cone, and outputs are canonically merged before any
+consumer sees them. Sorting the output of a nondeterministic floating-point reduction does not make
+that reduction valid. Optional telemetry that cannot feed back into decisions or mandatory results
+is outside this numeric claim.
+
 Paths, hostname, PID, username, branch, remote URL, wall-clock creation/completion time, Python hash
 seed, result status, output artifacts, and `run_id` do not enter the lineage preimage.
+
+### Supported editable runtime evidence
+
+Phase 1 reproducible runs use the repository's locked editable virtual environment, but metadata
+discovery must not count its source-tree `egg-info` as a second installed dependency or allow an
+unrelated source tree to shadow the reviewed code.
+
+The runtime collector therefore enforces all of these rules before constructing evidence:
+
+1. The interpreter has `sys.flags.isolated == 1`, `sys.flags.safe_path == 1`, and
+   `sys.flags.no_user_site == 1`, and `sys.prefix != sys.base_prefix`. The supported launcher is an
+   isolated interpreter invocation; `PYTHONPATH`, the current directory, and the user site are not
+   import roots.
+2. The collector, not a caller, obtains `purelib` and `platlib` from the active interpreter's
+   `sysconfig.get_paths()`. Both values must be absolute existing real directories. It resolves
+   them strictly, deduplicates physical aliases before discovery, and fails on an empty set.
+3. It calls `importlib.metadata.distributions(path=active_roots)` exactly once over that deduplicated
+   root list. The resolved `distribution.locate_file("")` for each result must be one of those
+   directories. Names are PEP 503 normalized, sorted, and unique; duplicate normalized names fail
+   even when versions are equal.
+4. Ambient `importlib.metadata.distributions()` may contain no distribution rooted outside the
+   active roots except zero or one source-tree `ea-quant` projection rooted at the reviewed
+   repository's exact `src/` directory. That projection, when present, must have the same normalized
+   name and exact version as the unique active-root `ea-quant`; every other editable, path,
+   user-site, or ambient distribution fails.
+5. The active-root inventory contains exactly one `ea-quant`. Its `direct_url.json` is a closed
+   object with exactly `url` and `dir_info`; `dir_info` is exactly `{"editable":true}`. `url` has
+   the `file` scheme, empty authority, and no credentials, query, or fragment, and its decoded
+   absolute path resolves to the same Git repository. The imported regular `ea` package has exactly
+   the resolved `<repository>/src/ea` search location and
+   `<repository>/src/ea/__init__.py` origin. Every already-loaded `ea` module originates at a file
+   tracked below that package tree, and every importable source or extension-module file below the
+   tree, excluding bytecode caches, must be tracked at the reviewed HEAD.
+6. Every non-empty `sys.path` entry is absolute and unique after non-strict resolution. It must be
+   either below the resolved `sys.base_prefix` without traversing a `site-packages` or
+   `dist-packages` directory, exactly one active metadata root, or exactly the reviewed
+   repository's resolved `src/` directory. Any other current-directory, user-site, editable,
+   injected, relative, or empty import root fails.
+
+These locations are operational verification inputs and never enter the manifest or lineage.
+Repository evidence binds the resolved repository to the same clean commit before and after runtime
+collection so the check cannot be redirected mid-collection. The inventory and lock digest prove
+the declared locked environment identity; V1 is not an adversarial attestation that trusted
+site-packages files were not modified in place.
 
 ### Knowledge-time data fingerprint
 
@@ -221,7 +294,7 @@ the stated grammar, not optional fields. All arrays shown as sorted are stored i
       {"name": "ea-quant", "version": "0.1.1"}
     ],
     "ea_version": "0.1.1",
-    "numeric_policy": "deterministic-single-thread-v1",
+    "numeric_policy": "deterministic-ordered-float64-v1",
     "platform_tag": "macosx-11.0-arm64",
     "python_cache_tag": "cpython-312",
     "python_implementation": "cpython",
@@ -236,6 +309,9 @@ Parameter entries are an array rather than a JSON object so type tags are explic
 sorted by their unique `name`. Their exact `type` vocabulary is `boolean`, `float64`, `integer`, and
 `string`, with the matching `value` representation shown above. Arbitrary nested values, null,
 lists, mappings, paths, and user-defined objects are not part of v1.
+
+The normalized configuration's `run` object is likewise closed to the literal
+`{"mode":"backtest"}`. Another otherwise valid ADR 0005 mode is not a v1 manifest value.
 
 The persisted manifest is the closed object
 
@@ -436,8 +512,11 @@ lineage hashes unstable and allow hidden behavioral inputs.
 - Full experiment tracking, artifact registry, cloud storage, retention, aliases, or cache reuse.
 - Performance-report, strategy, matcher, execution, Fill, ledger, or reconciliation schemas.
 - Historical feed, runtime coordinator, audit adapter, or result adapter implementation.
-- Warm-up/decision-window splitting or distributed execution. Reproducible v1 runs use the fixed
-  single-thread numeric policy; a future parallel policy requires a superseding decision.
+- Warm-up/decision-window splitting, live-feed paper runs, or distributed economic execution.
+  Reproducible v1 runs use the fixed ordered-float64 policy; a broader numeric/backend policy
+  requires a superseding decision.
+- Adversarial executable or installed-file attestation. V1 binds a clean editable source checkout,
+  isolated import topology, locked dependency identity, and exact runtime inventory.
 - Making fabricated upstream `available_at` values honest; source adapters remain responsible for
   ADR 0004 lineage.
 - Generic manifest depth/size limits beyond the bounded v1 parameter, distribution, and data-count
@@ -460,10 +539,16 @@ Issue #14 must prove this decision with:
 - transitive immutability and caller-owned-input mutation tests;
 - temporary-Git dirty/staged/untracked and changing-HEAD failures at preparation and terminal
   evidence verification;
+- isolated editable-runtime tests for deduplicated `purelib`/`platlib`, unique active
+  distributions, direct-URL/current-repository binding, imported-EA origin, and rejection of
+  ambient/path/user-site metadata or import roots;
+- pre-effect `backtest` acceptance plus `paper` and `live` builder/reader/verifier rejection;
 - cross-process lineage stability across different Python hash seeds, timezone, CWD, and result
   roots;
-- fixed RNG derivation vectors, duplicate-label failures, and proof UUID generation does not consume
-  or alter the simulation RNG;
+- fixed RNG derivation vectors, duplicate-label/owner failures, serial draw-order invariance, and
+  proof UUID generation does not consume or alter the simulation RNG;
+- numeric-policy conformance tests proving canonical economic iteration/aggregation and rejection
+  of unordered, parallel, backend-dispatched, or schedule-dependent economic computation;
 - atomic directory collision, root/target symlink, traversal, concurrency, durability-failure,
   poisoned-directory retention, and no-overwrite tests;
 - ordered-spy proof that manifest persistence precedes audit/feed/output start;

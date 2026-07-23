@@ -214,6 +214,7 @@ Issue #14 与 [Proposed ADR 0006](adr/0006-reproducible-run-manifest-and-audit-l
 定义 run preparation 与 lineage boundary：
 
 - UUID4 `run_id` 标识单次执行尝试，deterministic `lineage_sha256` 标识等价的可复现输入；
+- v1 preparation 只接受 bounded `backtest`，paper/live 需要未来 manifest schema；
 - lineage 覆盖 clean commit、normalized configuration、完整 point-in-time data fingerprint、
   UTC replay window、effective parameters、runtime/dependencies 和 explicit seed；
 - exact `MarketDataEnvelope` tuple 按 ADR 0004 校验/排序，以 `available_at` 的半开区间选择并
@@ -222,8 +223,10 @@ Issue #14 与 [Proposed ADR 0006](adr/0006-reproducible-run-manifest-and-audit-l
   后才公开 prepared context；现有/poisoned 路径永不复用、清理或覆盖；
 - composition 只把不重叠的 `audit/` 和 `outputs/` child capability 分别交给 monitoring/result
   adapter；adapter 与 policy 都不能取得或遍历 run root；
-- runtime、audit 和 result 只接收同一个 narrow `RunReference(run_id, lineage_sha256)`，不接收
-  manifest serializer、configuration、data adapter 或 result-root path。
+- composition 使用同一个 narrow `RunReference(run_id, lineage_sha256)`、manifest-file digest
+  与各自 child capability 预绑定 concrete audit/result adapter；inner runtime 只接收
+  `RunReference` 与已绑定 ports。任何一方都不接收 manifest serializer、configuration、
+  data adapter 或 result-root path。
 
 Prepared manifest 不等于 completed reproducibility claim；terminal audit/output evidence 保持为
 独立 write-once record，避免改写 manifest 或形成 audit hash cycle。Editable-checkout run 在

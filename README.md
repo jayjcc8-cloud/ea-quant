@@ -139,6 +139,11 @@ Phase 1 的最小 run manifest：UUID4 `run_id` 标识一次执行尝试，deter
 `lineage_sha256` 标识相同的 clean code、normalized config、point-in-time data、UTC replay
 window、effective parameters、runtime/dependencies 与 seed。
 
+V1 只接受有界 `backtest`，并由 isolated Python 进程验证当前 clean Git checkout、locked
+editable `venv`、实际导入的 `ea` 源码和 active-environment distribution inventory；
+`paper`/`live` 需要后续 schema。经济因果链使用固定顺序的 binary64 运算与独占、串行消费的
+PCG64 stream，不把无法证明的“整个进程只有一个线程”写成 lineage 承诺。
+
 Manifest 必须在 audit、feed 和 output 启动前持久写入 `results/<run_id>/manifest.json`，且不可改写；
 相同 lineage 的重跑使用新 UUID 和新目录。路径、hostname、wall-clock、raw secret 与 UUID
 本身不进入 lineage hash。数据指纹覆盖 ADR 0004 的 source、sequence、revision、
