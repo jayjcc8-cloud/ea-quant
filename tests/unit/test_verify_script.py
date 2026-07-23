@@ -8,9 +8,19 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import bootstrap_local, verify  # noqa: E402
+
+
+def test_ci_checks_out_and_asserts_the_event_commit() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    expected_sha = "${{ github.event.pull_request.head.sha || github.sha }}"
+
+    assert f"ref: {expected_sha}" in workflow
+    assert f"EXPECTED_SHA: {expected_sha}" in workflow
+    assert 'run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in workflow
 
 
 def test_project_versions_come_from_pyproject() -> None:
