@@ -28,6 +28,7 @@ data/raw/
 data/processed/
 data/features/
 reports/
+results/
 notebooks/.ipynb_checkpoints/
 *.parquet
 *.duckdb

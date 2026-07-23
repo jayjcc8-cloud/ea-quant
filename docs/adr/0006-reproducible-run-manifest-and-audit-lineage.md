@@ -52,7 +52,10 @@ The lineage preimage is a closed, versioned value containing all of the followin
    - the full 40-character lowercase Git commit;
    - an exact `worktree_clean: true` assertion collected from the repository;
    - staged, unstaged, or non-ignored untracked changes, an unavailable commit, or a changing HEAD
-     fail before preparation.
+     fail before preparation;
+   - because Phase 1 runs from an editable checkout, a future terminal reproducibility verifier must
+     recheck the same HEAD and clean state. Any drift leaves the attempt incomplete. Execution from
+     a separately identified immutable build artifact may replace this recheck in a future ADR.
 2. **Configuration provenance**
    - the fully materialized normalized ADR 0005 values: `schema_version`, `environment`, and
      `run.mode`;
@@ -67,25 +70,58 @@ The lineage preimage is a closed, versioned value containing all of the followin
 4. **Replay window**
    - exact UTC `[start_inclusive, end_exclusive)` values with literal timezone `UTC`;
    - selection field `available_at` and initial state `empty` are fixed in v1;
-   - no implicit pre-start warm-up is allowed.
+   - `start_inclusive < end_exclusive`; exact `datetime` values are required;
+   - no implicit pre-start warm-up is allowed, and an empty selected tuple cannot claim a first
+     Phase 1 backtest.
 5. **Effective parameters**
    - complete namespaced component selections and materialized tunables;
-   - unique names sorted canonically;
-   - v1 accepts only exact booleans, signed 64-bit integers, finite binary64 values, and safe NFC
-     strings. Floats serialize as tagged 16-hex-digit big-endian IEEE-754 bits, preserving `-0.0`.
+   - unique ASCII names matching `[a-z][a-z0-9_.-]{0,127}`, sorted by name;
+   - v1 accepts only exact booleans, signed 64-bit integers, finite binary64 values, and 1–256
+     Unicode-scalar NFC strings containing no `Cc` or `Cs` category code point. Floats serialize as
+     tagged 16-hex-digit lowercase big-endian IEEE-754 bits, preserving `-0.0`;
+   - values originate from typed non-secret component schemas. Credentials, tokens, signatures,
+     private keys, and resolved `SecretRef` payloads never enter any manifest field or hash.
 6. **Runtime and dependencies**
-   - EA distribution version, Python implementation and exact version, ABI/cache tag, platform,
-     a domain-separated `uv.lock` digest, and a sorted PEP 503-normalized installed-distribution
-     inventory;
-   - duplicate normalized package names, missing metadata, or host-local free text fail.
+   - `ea_version` from `importlib.metadata.version("ea-quant")`;
+   - `python_implementation` from `sys.implementation.name`, `python_version` from the decimal
+     `sys.version_info[:3]`, `python_cache_tag` from `sys.implementation.cache_tag`, `sys_platform`
+     from `sys.platform`, and `platform_tag` from `sysconfig.get_platform()`;
+   - a domain-separated `uv.lock` digest and a sorted installed-distribution inventory whose names
+     use PEP 503 normalization and whose exact metadata versions are 1–128-character NFC strings
+     containing no `Cc` or `Cs` code point;
+   - every other collected runtime token matches
+     `[A-Za-z0-9][A-Za-z0-9._+-]{0,127}`;
+   - fixed `numeric_policy: deterministic-single-thread-v1`, which forbids nondeterministic
+     parallel floating-point reductions for a reproducible v1 run;
+   - duplicate normalized package names, inconsistent EA versions, missing metadata, executable or
+     install paths, `platform.platform()`, compiler text, hostname, and other host-local free text
+     fail or are excluded.
 7. **Randomness**
    - an exact unsigned 64-bit master seed;
-   - a named generator and versioned component-stream derivation scheme;
-   - a fixed recorded `PYTHONHASHSEED` in the supported integer range;
+   - fixed `generator: numpy-pcg64` and
+     `stream_derivation: ea-sha256-component-label-v1` identifiers;
+   - a unique sorted tuple of required stream labels, each matching
+     `[a-z][a-z0-9_.-]{0,127}`;
    - global or unseeded randomness and order-dependent stream allocation are forbidden.
 
-Paths, hostname, PID, username, branch, remote URL, wall-clock creation/completion time, result
-status, output artifacts, and `run_id` do not enter the lineage preimage.
+For label bytes `L`, a component PCG64 seed is the unsigned big-endian integer represented by the
+first 16 bytes of:
+
+```text
+SHA256(
+  b"ea.rng-stream.v1\0" +
+  master_seed.to_bytes(8, "big") +
+  len(L).to_bytes(2, "big") +
+  L
+)
+```
+
+The injected RNG capability owns this derivation; a caller label without the matching capability is
+not provenance. `PYTHONHASHSEED` is deliberately excluded: v1 canonical ordering and economic
+behavior must be invariant across separately started interpreters with different hash seeds.
+
+Paths, hostname, PID, username, branch, remote URL, wall-clock creation/completion time, Python hash
+seed, result status, output artifacts, and `run_id` do not enter the lineage preimage.
 
 ### Knowledge-time data fingerprint
 
@@ -108,13 +144,133 @@ bars or OHLCV payloads is forbidden because it discards revision, source, and kn
 lineage. A correction exactly at `end_exclusive` is excluded; a late correction before that bound
 is included even when its bar interval is older.
 
+Every record is exactly this closed object; `event_time` is omitted because ADR 0004 derives it from
+`interval_end`. The example values are normative for names, nesting, timestamp form, and binary64
+encoding:
+
+```json
+{
+  "adjustment": "raw",
+  "available_at": "2026-01-02T09:31:00.000000Z",
+  "close_bits": "4059200000000000",
+  "high_bits": "4059400000000000",
+  "interval_end": "2026-01-02T09:31:00.000000Z",
+  "interval_start": "2026-01-02T09:30:00.000000Z",
+  "kind": "bar",
+  "low_bits": "4058c00000000000",
+  "open_bits": "4059000000000000",
+  "revision": 0,
+  "source": "primary.raw",
+  "source_sequence": 0,
+  "symbol": "AAPL",
+  "venue": "XNAS",
+  "volume_bits": "4024000000000000"
+}
+```
+
+Each `*_bits` value is exactly 16 lowercase hexadecimal digits from `struct.pack(">d", value)`.
+`record_count` is an exact integer in `1..2**64-1`; booleans are never integers.
+
+### Normative v1 manifest schema
+
+The complete lineage specification has exactly this closed shape. Ellipses below denote values of
+the stated grammar, not optional fields. All arrays shown as sorted are stored in that order.
+
+```json
+{
+  "code": {
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "worktree_clean": true
+  },
+  "configuration": {
+    "canonicalization": "ea-settings-v1",
+    "normalized": {
+      "environment": "development",
+      "run": {"mode": "backtest"},
+      "schema_version": 1
+    },
+    "sha256": "<64 lowercase hexadecimal digits>"
+  },
+  "data": {
+    "canonicalization": "ea-market-data-envelope-v1",
+    "record_count": 1,
+    "sha256": "<64 lowercase hexadecimal digits>"
+  },
+  "lineage_schema_version": 1,
+  "parameters": [
+    {"name": "matcher.enabled", "type": "boolean", "value": true},
+    {"name": "strategy.label", "type": "string", "value": "baseline"},
+    {"name": "strategy.lookback", "type": "integer", "value": 20},
+    {"name": "strategy.threshold", "type": "float64", "value": "3fb999999999999a"}
+  ],
+  "randomness": {
+    "generator": "numpy-pcg64",
+    "master_seed": 0,
+    "stream_derivation": "ea-sha256-component-label-v1",
+    "stream_labels": ["matcher.primary", "strategy.primary"]
+  },
+  "replay_window": {
+    "end_exclusive": "2026-02-01T00:00:00.000000Z",
+    "initial_state": "empty",
+    "selection_field": "available_at",
+    "start_inclusive": "2026-01-01T00:00:00.000000Z",
+    "timezone": "UTC"
+  },
+  "runtime": {
+    "distributions": [
+      {"name": "ea-quant", "version": "0.1.1"}
+    ],
+    "ea_version": "0.1.1",
+    "numeric_policy": "deterministic-single-thread-v1",
+    "platform_tag": "macosx-11.0-arm64",
+    "python_cache_tag": "cpython-312",
+    "python_implementation": "cpython",
+    "python_version": "3.12.13",
+    "sys_platform": "darwin",
+    "uv_lock_sha256": "<64 lowercase hexadecimal digits>"
+  }
+}
+```
+
+Parameter entries are an array rather than a JSON object so type tags are explicit; entries are
+sorted by their unique `name`. Their exact `type` vocabulary is `boolean`, `float64`, `integer`, and
+`string`, with the matching `value` representation shown above. Arbitrary nested values, null,
+lists, mappings, paths, and user-defined objects are not part of v1.
+
+The persisted manifest is the closed object
+
+```text
+{
+  "lineage_sha256": Digest,
+  "manifest_schema_version": 1,
+  "run_id": RunId,
+  "spec": LineageSpec
+}
+```
+
+where `LineageSpec` is the complete object above, `Digest` is exactly 64 lowercase hexadecimal
+digits, and `RunId` is the canonical 36-character lowercase hyphenated UUID4 form. These grammar
+names are explanatory notation and are never serialized as strings or placeholder keys.
+
 ### Canonical bytes and hash domains
 
-Project canonical JSON v1 is UTF-8 without BOM, whitespace, or trailing newline; object keys are
-lexicographically sorted and separators are exactly `,` and `:`. Field names are closed. UTC
-timestamps use exactly six fractional digits followed by `Z`. Unsupported objects, arbitrary
-`repr`, non-string keys, sets, paths, non-finite floats, unpaired surrogates, control characters,
-and non-NFC strings fail instead of being normalized silently.
+Project canonical JSON v1 is UTF-8 without BOM, insignificant whitespace, or trailing newline.
+Every schema key is ASCII and keys are sorted by ascending Unicode code point, which is identical
+to UTF-8 byte order for these keys. Arrays retain their schema-defined order; parameters,
+distributions, and stream labels are validated and sorted before encoding. Separators are exactly
+`,` and `:`.
+
+Strings are emitted as literal UTF-8 (`ensure_ascii=false`): quotation mark and reverse solidus use
+their required two-character JSON escapes, solidus is not escaped, and no `\u` escape is emitted.
+All accepted value strings are NFC and contain no Unicode `Cc` or `Cs` code point, so other control
+escapes are unnecessary. Integers use the shortest base-10 form with no leading plus, leading zero,
+or negative zero. The only JSON booleans are lowercase `true` and `false`; null and JSON numbers
+with a fraction/exponent are absent from the schema. UTC timestamps use exactly six fractional
+digits followed by `Z`.
+
+Unsupported objects, arbitrary `repr`, non-string keys, sets, paths, non-finite floats, unpaired
+surrogates, controls, non-NFC strings, or a value outside its field grammar fail instead of being
+coerced or normalized silently.
 
 Hashes are domain-separated:
 
@@ -124,13 +280,23 @@ uv_lock_sha256 = SHA256(b"ea.uv-lock.v1\0"  + exact_uv_lock_bytes)
 lineage_sha256 = SHA256(b"ea.run-spec.v1\0" + canonical_lineage_spec)
 ```
 
-The manifest envelope contains `manifest_schema_version: 1`, `run_id`, `lineage_sha256`, and the
-complete lineage specification. The run and configuration digests are derived, never accepted as
-unverified caller claims. A strict reader detects duplicate keys, requires exact nested fields,
-recomputes every digest, and requires byte-for-byte canonical reserialization.
+The manifest builder accepts typed evidence objects from the Git/runtime and data collectors, not
+caller-supplied digest strings. It derives configuration and lineage digests. Verification is split
+because the small manifest intentionally does not embed the selected event tuple or `uv.lock`:
 
-The plain SHA-256 of persisted manifest bytes is computed after the write and may be carried by the
-audit header or artifact index. It cannot be embedded inside the file it hashes.
+- `read_manifest(bytes)` detects duplicate keys, requires every exact nested field, validates UUID
+  and digest forms, recomputes the embedded configuration and lineage digests, and requires
+  byte-for-byte canonical reserialization;
+- `verify_manifest_evidence(manifest, data, uv_lock_bytes, repository, runtime)` recomputes data and
+  lock digests, re-establishes code/cleanliness and runtime inventory, and compares all external
+  evidence without mutating the manifest.
+
+Reading structurally valid bytes never by itself grants a verified or completed reproducibility
+claim.
+
+The plain SHA-256 of persisted manifest bytes is computed from the read-back bytes after durable
+publication and is required in the first acknowledged audit record and future artifact index. It
+cannot be embedded inside the file it hashes.
 
 ### Preparation, ownership, and immutability
 
@@ -140,28 +306,62 @@ The outer experiments boundary owns preparation in this order:
    randomness;
 2. compute configuration, data, lock, and lineage digests;
 3. generate one UUID4 `run_id` without touching the simulation RNG;
-4. atomically reserve `resolved_result_root/<run_id>/`;
-5. exclusively persist canonical `manifest.json`, flush it, and never open it for writing again;
-6. return a prepared context containing the path, manifest-file digest, and `RunReference`;
+4. atomically reserve `resolved_result_root/<run_id>/` and its fixed `audit/` and `outputs/`
+   children;
+5. exclusively create canonical `manifest.json`, durably publish and verify it, and never open it
+   for writing again;
+6. return a prepared context containing narrow child capabilities, the manifest-file digest, and
+   `RunReference`;
 7. only then bind/start mandatory audit, result adapters, feed, and runtime.
 
-An existing file, directory, or symlink at the run path is a collision and fails without adoption,
-reuse, deletion, or overwrite. A retry constructs a new attempt with a new UUID, even when lineage
-is unchanged. The trusted result-root location is operational metadata and never enters lineage.
-Policy and runtime components do not receive the filesystem root.
+The trusted result root must already exist, its final directory entry must be a real directory and
+not a symlink, and the store operates on its resolved path. The target is exactly one direct child
+named by the already validated UUID; its resolved parent must equal the resolved root. UUID grammar
+therefore makes absolute, separator, backslash, `..`, NUL, and traversal names unrepresentable.
+
+Reservation uses one atomic directory creation with mode `0700`. An existing file, directory, or
+symlink is a collision and fails without adoption, reuse, deletion, or overwrite. Only the store
+creates root-level files and the fixed `audit/` and `outputs/` children. Composition may grant the
+monitoring adapter only the `audit/` capability and the result adapter only the `outputs/`
+capability; neither receives the run root, creates siblings, or traverses upward.
+
+Within the unshared reserved directory, publication uses direct exclusive no-follow creation of
+`manifest.json` with mode `0600`. The store writes the complete canonical bytes, flushes Python and
+OS buffers, `fsync`s the file, closes it, reopens it read-only/no-follow, verifies byte equality and
+computes the plain manifest digest from those read-back bytes, then `fsync`s the run directory and
+result root directory. No `PreparedRun` or run-bound adapter capability escapes before every step
+succeeds. Direct creation is atomic at the API boundary because the reserved directory is not
+published to any consumer until completion.
+
+Any failure after reservation retains a poisoned incomplete directory and any partial evidence;
+the store never cleans, adopts, or retries it, and returns no prepared context. A retry constructs a
+new attempt with a new UUID even when lineage is unchanged. The trusted result-root location is
+operational metadata and never enters lineage. Policy and runtime components receive neither it nor
+the manifest path.
 
 The prepared manifest is transitively immutable and never gains terminal status or artifacts.
 Completion/failure evidence and a future sorted artifact index are separate write-once records.
 A failed attempt keeps its owned directory and manifest as honest incomplete evidence. A prepared
-manifest alone is not a claim that a backtest completed reproducibly.
+manifest alone is not a claim that a backtest completed reproducibly. Issue #14 exposes no
+`completed_reproducibly` boolean or terminal claim API.
+
+A future terminal verifier must bind the same `RunReference`, manifest digest, exact prepared data
+tuple, mandatory audit/result evidence, and rechecked Git HEAD/clean state, lock digest, and runtime
+inventory. Drift or missing evidence leaves the attempt failed/incomplete without rewriting the
+manifest.
 
 ### Audit and output lineage
 
-Every audit record carries the prepared `RunReference`; every top-level output either embeds it or
-is bound by a write-once artifact index carrying the same reference and manifest-file digest.
+The first mandatory audit append must carry and acknowledge the prepared `RunReference` and
+manifest-file digest before feed/runtime admission. Every later audit record carries the same
+reference; every top-level output either embeds it or is bound by a write-once artifact index
+carrying the same reference and manifest-file digest.
 Missing or mismatched attempt or lineage identity fails before append/write. Runtime may import the
 dependency-neutral `RunReference` but does not import manifest serializers, configuration,
 filesystem stores, or data adapters.
+
+Issue #14 proves this rule with typed reference binders and fake audit/result boundaries. Concrete
+audit payloads and adapters remain deferred and cannot weaken the binder contract.
 
 V1 does not put a final audit-file digest inside the immutable manifest. That would create a cycle
 between manifest completion and the ADR 0003 requirement that audit closes last. Issue #14 freezes
@@ -236,9 +436,12 @@ lineage hashes unstable and allow hidden behavioral inputs.
 - Full experiment tracking, artifact registry, cloud storage, retention, aliases, or cache reuse.
 - Performance-report, strategy, matcher, execution, Fill, ledger, or reconciliation schemas.
 - Historical feed, runtime coordinator, audit adapter, or result adapter implementation.
-- Warm-up/decision-window splitting, parallel floating-point policy, or distributed execution.
+- Warm-up/decision-window splitting or distributed execution. Reproducible v1 runs use the fixed
+  single-thread numeric policy; a future parallel policy requires a superseding decision.
 - Making fabricated upstream `available_at` values honest; source adapters remain responsible for
   ADR 0004 lineage.
+- Generic manifest depth/size limits beyond the bounded v1 parameter, distribution, and data-count
+  fields; those limits may be tightened without accepting arbitrary schema values.
 
 ## Validation
 
@@ -255,9 +458,14 @@ Issue #14 must prove this decision with:
 - exact `[start_inclusive, end_exclusive)` knowledge-time boundary tests;
 - strict-reader duplicate/unknown/tamper/noncanonical-byte failures;
 - transitive immutability and caller-owned-input mutation tests;
-- temporary-Git dirty/staged/untracked and changing-HEAD failures;
-- cross-process stability across Python hash seed, timezone, CWD, and result roots;
-- atomic directory collision, symlink, traversal, concurrency, and no-overwrite tests;
+- temporary-Git dirty/staged/untracked and changing-HEAD failures at preparation and terminal
+  evidence verification;
+- cross-process lineage stability across different Python hash seeds, timezone, CWD, and result
+  roots;
+- fixed RNG derivation vectors, duplicate-label failures, and proof UUID generation does not consume
+  or alter the simulation RNG;
+- atomic directory collision, root/target symlink, traversal, concurrency, durability-failure,
+  poisoned-directory retention, and no-overwrite tests;
 - ordered-spy proof that manifest persistence precedes audit/feed/output start;
 - audit/output reference mismatch failures;
 - full repository quality, reproducible-wheel, clean-wheel, expert, and exact-head CI gates.

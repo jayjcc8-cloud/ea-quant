@@ -218,13 +218,16 @@ Issue #14 与 [Proposed ADR 0006](adr/0006-reproducible-run-manifest-and-audit-l
   UTC replay window、effective parameters、runtime/dependencies 和 explicit seed；
 - exact `MarketDataEnvelope` tuple 按 ADR 0004 校验/排序，以 `available_at` 的半开区间选择并
   fingerprint，同一 tuple 才能交给 historical feed；
-- outer experiments boundary 原子占有 `results/<run_id>/`，在 audit/feed/output 启动前一次性
-  写入 immutable manifest；现有路径永不复用或覆盖；
+- outer experiments boundary 原子占有 `results/<run_id>/`，durably 写入 immutable manifest
+  后才公开 prepared context；现有/poisoned 路径永不复用、清理或覆盖；
+- composition 只把不重叠的 `audit/` 和 `outputs/` child capability 分别交给 monitoring/result
+  adapter；adapter 与 policy 都不能取得或遍历 run root；
 - runtime、audit 和 result 只接收同一个 narrow `RunReference(run_id, lineage_sha256)`，不接收
   manifest serializer、configuration、data adapter 或 result-root path。
 
 Prepared manifest 不等于 completed reproducibility claim；terminal audit/output evidence 保持为
-独立 write-once record，避免改写 manifest 或形成 audit hash cycle。
+独立 write-once record，避免改写 manifest 或形成 audit hash cycle。Editable-checkout run 在
+terminal claim 前必须重新验证相同 clean HEAD、lock/runtime evidence 与 prepared data tuple。
 
 ## 8. Mode adapter matrix
 
