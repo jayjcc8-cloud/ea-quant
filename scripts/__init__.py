@@ -1,1 +1,1 @@
-"""Repository-local operational scripts."""
+"""Repository maintenance scripts."""
