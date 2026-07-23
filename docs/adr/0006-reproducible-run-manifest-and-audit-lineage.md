@@ -219,15 +219,20 @@ The runtime collector therefore enforces all of these rules before constructing 
    unoptimized `importlib.util.cache_from_source()` path for a corresponding tracked `src/ea/*.py`
    source and the active `sys.implementation.cache_tag`. The preflight checks the exact interpreter
    magic, loads one code object with no trailing bytes, recompiles the tracked source bytes with
-   their resolved filename, `dont_inherit=True`, and `optimize=0`, and requires code-object equality.
-   Any mismatch, optimized/legacy/top-level/sourceless bytecode, cache for an untracked source, or
-   parse failure is rejected. Every ignored source or extension-module candidate likewise fails,
-   and tracked extension/source candidates are allowed only inside the bound `ea` package.
+   their resolved filename using `mode="exec"`, `flags=0`, `dont_inherit=True`, and `optimize=0`,
+   then requires `marshal.dumps(loaded_code) == marshal.dumps(recompiled_code)`. Comparing
+   `CodeType` values with `==` is forbidden because it omits observable fields; comparing the
+   original cache payload is also forbidden because valid marshal encodings need not be byte-equal
+   before both objects are re-marshalled. Any mismatch, optimized/legacy/top-level/sourceless
+   bytecode, cache for an untracked source, or parse failure is rejected. Every ignored source or
+   extension-module candidate likewise fails, and tracked extension/source candidates are allowed
+   only inside the bound `ea` package.
 9. The tracked outer launcher first requires that `sys.modules` contain neither `ea` nor any
    `ea.*` name, then performs the repository, source, cache, symlink, and shadow parts of rules 5–8
    before any `ea` import. Thus an unverified source cache or shadow candidate cannot execute first.
-   The runtime collector repeats the complete checks after import while bytecode writes remain
-   disabled. Neither layer deletes, rewrites, or adopts a source-tree artifact.
+   After the authorized import, the runtime collector repeats rules 1–8 including loaded-module
+   origin checks, but does not repeat the launcher-only empty-`sys.modules` predicate. Bytecode
+   writes remain disabled. Neither layer deletes, rewrites, or adopts a source-tree artifact.
 
 These locations are operational verification inputs and never enter the manifest or lineage.
 Repository evidence binds the resolved repository to the same clean commit before and after runtime
