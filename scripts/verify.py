@@ -148,13 +148,22 @@ def run_capture(
     return output
 
 
-def environment_tools(environment: Path) -> tuple[Path, Path]:
-    """Return the project Python and ea entrypoint paths."""
+def environment_python(environment: Path) -> Path:
+    """Return the Python executable from an existing environment."""
     scripts = environment / ("Scripts" if os.name == "nt" else "bin")
     python = scripts / ("python.exe" if os.name == "nt" else "python")
-    entrypoint = scripts / ("ea.exe" if os.name == "nt" else "ea")
-    if not python.is_file() or not entrypoint.is_file():
+    if not python.is_file():
         raise VerificationError(f"project environment is incomplete: {environment}")
+    return python
+
+
+def environment_tools(environment: Path) -> tuple[Path, Path]:
+    """Return the project Python and installed ea entrypoint paths."""
+    python = environment_python(environment)
+    scripts = environment / ("Scripts" if os.name == "nt" else "bin")
+    entrypoint = scripts / ("ea.exe" if os.name == "nt" else "ea")
+    if not entrypoint.is_file():
+        raise VerificationError(f"ea entrypoint is missing from environment: {environment}")
     return python, entrypoint
 
 
@@ -259,11 +268,12 @@ def verify_full(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> None:
         clean_env = verification_environment(temporary_root / "venv")
         clean_environment = Path(clean_env["UV_PROJECT_ENVIRONMENT"])
         run([uv, "sync", "--locked", "--no-install-project"], env=clean_env)
-        clean_python, clean_entrypoint = environment_tools(clean_environment)
+        clean_python = environment_python(clean_environment)
         run(
             [uv, "pip", "install", "--python", str(clean_python), "--no-deps", str(wheel_a)],
             env=clean_env,
         )
+        clean_python, clean_entrypoint = environment_tools(clean_environment)
         run([uv, "pip", "check", "--python", str(clean_python)], env=clean_env)
         outside_repository = temporary_root / "outside"
         outside_repository.mkdir()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -44,6 +45,21 @@ def test_verification_environment_uses_canonical_environment_path(tmp_path: Path
     assert Path(environment["UV_PROJECT_ENVIRONMENT"]) == (tmp_path / "venv").resolve()
     assert "PYTHONPATH" not in environment
     assert "VIRTUAL_ENV" not in environment
+
+
+def test_environment_tools_require_ea_only_after_python(tmp_path: Path) -> None:
+    scripts = tmp_path / ("Scripts" if os.name == "nt" else "bin")
+    scripts.mkdir()
+    python = scripts / ("python.exe" if os.name == "nt" else "python")
+    python.touch()
+
+    assert verify.environment_python(tmp_path) == python
+    with pytest.raises(verify.VerificationError, match="ea entrypoint is missing"):
+        verify.environment_tools(tmp_path)
+
+    entrypoint = scripts / ("ea.exe" if os.name == "nt" else "ea")
+    entrypoint.touch()
+    assert verify.environment_tools(tmp_path) == (python, entrypoint)
 
 
 def test_single_wheel_requires_exactly_one_file(tmp_path: Path) -> None:
