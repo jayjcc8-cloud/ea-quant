@@ -127,21 +127,36 @@ The injected RNG capability owns this derivation; a caller label without the mat
 not provenance. `PYTHONHASHSEED` is deliberately excluded: v1 canonical ordering and economic
 behavior must be invariant across separately started interpreters with different hash seeds.
 
-Each stream label has exactly one component owner. A PCG64 generator is never shared between
-components or invoked concurrently. Draws occur serially in deterministic runtime-dispatch order;
-their count and order may depend only on prior deterministic state, never task scheduling or worker
-completion. A retry constructs every stream again from the same master seed and label.
+Each stream label has exactly one component owner. Its narrow capability wraps exactly
+`numpy.random.PCG64(component_seed).random_raw(size=None)`, exposes one unsigned 64-bit word per
+call, and is never shared between components or invoked concurrently. `numpy.random.Generator`, its
+distribution methods, vector-sized raw draws, another BitGenerator, and global NumPy randomness are
+not V1 APIs. Any integer, uniform, or distribution transform must be a separately specified,
+tracked, code-defined ordered scalar algorithm or a future versioned randomness policy. Draws occur
+serially in deterministic runtime-dispatch order; their count and order may depend only on prior
+deterministic state, never task scheduling or worker completion. A retry constructs every stream
+again from the same master seed and label.
+
+The normative vector for master seed `0` and label `matcher.primary` has component seed
+`148415519428445905247115446051054473768`; its first four raw words are
+`1256042036395257240`, `5315971738016275038`, `8151513107568622237`, and
+`4281872282868094881`.
 
 `deterministic-ordered-float64-v1` does not claim that the entire process has one thread. It covers
 the complete economic causal cone: any computation capable of changing a feature, signal, target,
 intent, risk decision, order, match/fill, position, cash, ledger/P&L, later-consumed runtime state,
 or mandatory deterministic result. Within that cone, binary64 arithmetic, comparison, iteration,
 tie-breaking, and aggregation use one code-defined total order and serial evaluation. Phase 1
-allows exact Python `float` basic arithmetic in that order and the specified PCG64 outputs; it
-forbids BLAS, NumPy, Polars, DuckDB, GPU, architecture-dispatched math, fused operations, and any
-parallel or unordered floating-point reduction from influencing economic behavior. A component
-whose operations are not proven bit-stable under this policy cannot claim compatibility and needs a
-new policy whose backend identity enters lineage.
+allows exact Python `float` basic arithmetic in that order and unsigned words obtained through the
+narrow PCG64 capability above. Except for that raw-word capability, BLAS, NumPy numeric kernels,
+Polars, DuckDB, GPU, architecture-dispatched math, fused operations, and any parallel or unordered
+floating-point reduction cannot influence economic behavior. A component whose operations are not
+proven bit-stable under this policy cannot claim compatibility and needs a new policy whose backend
+identity enters lineage.
+
+This policy governs binary64 operations that occur in the causal cone; it does not authorize
+binary64 storage or arithmetic where Accepted ADR 0004 requires `Decimal` or scaled integers.
+Order, Fill, cash, position, ledger, and P&L values retain that exact-accounting requirement.
 
 Parallel work is permitted only when each item is independently deterministic, completion order
 cannot feed back into the economic causal cone, and outputs are canonically merged before any
@@ -160,10 +175,10 @@ unrelated source tree to shadow the reviewed code.
 
 The runtime collector therefore enforces all of these rules before constructing evidence:
 
-1. The interpreter has `sys.flags.isolated == 1`, `sys.flags.safe_path == 1`, and
-   `sys.flags.no_user_site == 1`, and `sys.prefix != sys.base_prefix`. The supported launcher is an
-   isolated interpreter invocation; `PYTHONPATH`, the current directory, and the user site are not
-   import roots.
+1. The interpreter has `sys.flags.isolated == 1`, `sys.flags.safe_path == 1`,
+   `sys.flags.no_user_site == 1`, and `sys.dont_write_bytecode is True`, and
+   `sys.prefix != sys.base_prefix`. The supported launcher is an isolated, no-bytecode interpreter
+   invocation; `PYTHONPATH`, the current directory, and the user site are not import roots.
 2. The collector, not a caller, obtains `purelib` and `platlib` from the active interpreter's
    `sysconfig.get_paths()`. Both values must be absolute existing real directories. It resolves
    them strictly, deduplicates physical aliases before discovery, and fails on an empty set.
@@ -176,19 +191,28 @@ The runtime collector therefore enforces all of these rules before constructing 
    repository's exact `src/` directory. That projection, when present, must have the same normalized
    name and exact version as the unique active-root `ea-quant`; every other editable, path,
    user-site, or ambient distribution fails.
-5. The active-root inventory contains exactly one `ea-quant`. Its `direct_url.json` is a closed
-   object with exactly `url` and `dir_info`; `dir_info` is exactly `{"editable":true}`. `url` has
-   the `file` scheme, empty authority, and no credentials, query, or fragment, and its decoded
-   absolute path resolves to the same Git repository. The imported regular `ea` package has exactly
-   the resolved `<repository>/src/ea` search location and
-   `<repository>/src/ea/__init__.py` origin. Every already-loaded `ea` module originates at a file
-   tracked below that package tree, and every importable source or extension-module file below the
-   tree, excluding bytecode caches, must be tracked at the reviewed HEAD.
+5. The active-root inventory contains exactly one `ea-quant`. Its UTF-8 `direct_url.json` is parsed
+   with duplicate-key rejection and is a closed object with exactly `url` and `dir_info`;
+   `dir_info` is exactly `{"editable":true}`. `url` has the `file` scheme, empty authority, and no
+   credentials, query, or fragment, and its decoded absolute path resolves to the same Git
+   repository. The imported regular `ea` package has exactly the resolved
+   `<repository>/src/ea` search location and `<repository>/src/ea/__init__.py` origin.
 6. Every non-empty `sys.path` entry is absolute and unique after non-strict resolution. It must be
    either below the resolved `sys.base_prefix` without traversing a `site-packages` or
    `dist-packages` directory, exactly one active metadata root, or exactly the reviewed
    repository's resolved `src/` directory. Any other current-directory, user-site, editable,
    injected, relative, or empty import root fails.
+7. The collector scans that entire repository `src/` import root, not only `src/ea`. `ea` is the
+   only importable top-level package or module allowed in V1. Every regular package-data file and
+   every source or extension-module candidate below `src/ea` must be tracked at the reviewed HEAD;
+   every already-loaded `ea` module must originate at one of those tracked files. Source-tree
+   `ea_quant.egg-info` is permitted only as the already validated non-importable metadata projection.
+   Every other top-level importable candidate fails even if ignored or tracked.
+8. Every file matching an `importlib.machinery.BYTECODE_SUFFIXES` suffix anywhere below `src/`
+   fails, including ordinary `__pycache__` entries. The no-bytecode launcher prevents new source-tree
+   caches; preparation requires stale caches to be absent. Every ignored source or extension-module
+   candidate likewise fails, and tracked extension/source candidates are allowed only inside the
+   bound `ea` package described by rule 7.
 
 These locations are operational verification inputs and never enter the manifest or lineage.
 Repository evidence binds the resolved repository to the same clean commit before and after runtime
@@ -545,10 +569,13 @@ Issue #14 must prove this decision with:
 - pre-effect `backtest` acceptance plus `paper` and `live` builder/reader/verifier rejection;
 - cross-process lineage stability across different Python hash seeds, timezone, CWD, and result
   roots;
-- fixed RNG derivation vectors, duplicate-label/owner failures, serial draw-order invariance, and
-  proof UUID generation does not consume or alter the simulation RNG;
+- fixed RNG seed and initial `random_raw(size=None)` word vectors, duplicate-label/owner failures,
+  rejection of broader NumPy draw APIs, serial draw-order invariance, and proof UUID generation does
+  not consume or alter the simulation RNG;
 - numeric-policy conformance tests proving canonical economic iteration/aggregation and rejection
   of unordered, parallel, backend-dispatched, or schedule-dependent economic computation;
+- ignored/top-level source, extension, source-backed-cache, and sourceless-bytecode shadow tests
+  across the complete repository `src/` import root;
 - atomic directory collision, root/target symlink, traversal, concurrency, durability-failure,
   poisoned-directory retention, and no-overwrite tests;
 - ordered-spy proof that manifest persistence precedes audit/feed/output start;
