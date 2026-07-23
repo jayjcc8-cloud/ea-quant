@@ -256,8 +256,8 @@ def verify_full(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> None:
 
     with tempfile.TemporaryDirectory(prefix="ea-wheel-verify-") as temporary_directory:
         temporary_root = Path(temporary_directory)
-        clean_environment = temporary_root / "venv"
-        clean_env = verification_environment(clean_environment)
+        clean_env = verification_environment(temporary_root / "venv")
+        clean_environment = Path(clean_env["UV_PROJECT_ENVIRONMENT"])
         run([uv, "sync", "--locked", "--no-install-project"], env=clean_env)
         clean_python, clean_entrypoint = environment_tools(clean_environment)
         run(

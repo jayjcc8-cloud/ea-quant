@@ -38,6 +38,14 @@ def test_parse_uv_version_rejects_ambiguous_output(output: str) -> None:
         verify.parse_uv_version(output)
 
 
+def test_verification_environment_uses_canonical_environment_path(tmp_path: Path) -> None:
+    environment = verify.verification_environment(tmp_path / "venv")
+
+    assert Path(environment["UV_PROJECT_ENVIRONMENT"]) == (tmp_path / "venv").resolve()
+    assert "PYTHONPATH" not in environment
+    assert "VIRTUAL_ENV" not in environment
+
+
 def test_single_wheel_requires_exactly_one_file(tmp_path: Path) -> None:
     with pytest.raises(verify.VerificationError, match="expected one wheel"):
         verify.single_wheel(tmp_path)
