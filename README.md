@@ -14,7 +14,13 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
 ## 当前状态
 
 - Git 与 GitHub SSH remote 已建立，主分支为 `main`。
-- Phase 0 已具备 Python 项目骨架、配置、领域模型、CLI、测试、VSCode 配置和 CI 质量门禁。
+- Phase 0 已发布 `v0.1.0`；项目版本的唯一事实源是
+  [`pyproject.toml`](pyproject.toml)，本次状态审查时为 `0.1.1`。
+- Phase 1 的入口门禁完成 4/5：Issue #11–#14 已完成，Issue #15 尚未激活。
+- 本次状态审查基线为
+  `main@1ef3dbb7f8682e3687e76408d66fcbe3b69d0c17`；该提交已具备配置、market/time、
+  run manifest、audit lineage、composition preparation、CLI、测试、VSCode 配置和 CI
+  质量门禁，尚未实现 historical runtime、execution、risk、portfolio、strategy 或 backtest。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -135,7 +141,7 @@ YAML、CLI、normalized snapshot 和日志都不得包含 broker/exchange raw cr
 
 ## 可复现 run lineage（Issue #14）
 
-[Proposed ADR 0006](docs/adr/0006-reproducible-run-manifest-and-audit-lineage.md) 正在冻结
+[Accepted ADR 0006](docs/adr/0006-reproducible-run-manifest-and-audit-lineage.md) 已冻结
 Phase 1 的最小 run manifest：UUID4 `run_id` 标识一次执行尝试，deterministic
 `lineage_sha256` 标识相同的 clean code、normalized config、point-in-time data、UTC replay
 window、effective parameters、runtime/dependencies 与 seed。
@@ -175,8 +181,8 @@ venv/bin/python -I -B scripts/reproducible_run.py
 
 这个入口会在任何 `ea` 模块执行前检查 clean HEAD、完整 `src/` import surface、source-backed
 cache、symlink/shadow、locked editable environment 与 import topology，然后通过 exact pending
-grant 进入 composition 并建立一次性的 preparation gate；当前 Issue #14 不启动尚未实现的
-Phase 1 historical runtime。
+grant 进入 composition 并建立一次性的 preparation gate。Issue #14 已完成，但其范围不包含
+尚未实现的 Phase 1 historical runtime。
 
 常用质量门禁：
 
