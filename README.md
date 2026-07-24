@@ -18,9 +18,12 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   [`pyproject.toml`](pyproject.toml)，本次状态审查时为 `0.1.1`。
 - Phase 1 的入口门禁完成 4/5：Issue #11–#14 已完成，Issue #15 尚未激活。
 - 本次状态审查基线为
-  `main@1ef3dbb7f8682e3687e76408d66fcbe3b69d0c17`；该提交已具备配置、market/time、
+  `main@572a505da9b5eb1383521fd6a5e93d56d589b4f4`；该提交已具备配置、market/time、
   run manifest、audit lineage、composition preparation、CLI、测试、VSCode 配置和 CI
-  质量门禁，尚未实现 historical runtime、execution、risk、portfolio、strategy 或 backtest。
+  质量门禁。Issue #26 已建立 86% line / 71% branch coverage floor 并移除未使用的运行依赖；
+  Issue #28 已将 manifest 的 model、wire、codec 和 evidence 职责分离，同时保持公开与 wire
+  契约不变。该基线通过 406 项测试，尚未实现 historical runtime、execution、risk、
+  portfolio、strategy 或 backtest。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
