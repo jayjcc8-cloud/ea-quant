@@ -66,6 +66,81 @@ Experts must not spawn other agents or expand their scope unless the Issue expli
 it. At most two read-only experts run concurrently with the Implementation Owner, and only when
 their tasks are independent. Repeated monitoring without new evidence is not an expert task.
 
+## Delegated Approval Owner
+
+The user delegates routine pull-request approval to a read-only Approval Owner so that a compliant
+iteration does not require a new chat confirmation at every Ready, merge, and cleanup gate. This
+role is
+activated only after the final candidate HEAD is frozen and every risk-tier expert has reported.
+It does not replace Architecture, Verification, domain, security, risk, or release review.
+
+The bounded evidence package contains:
+
+- the linked Issue, risk tier, acceptance state, scope, non-goals, and writer lease
+- base SHA, exact candidate SHA, and complete PR file/diff scope
+- every required SHA-bound expert report and open finding ID
+- exact-head CI checks, local verification evidence, merge state, reviews, and review threads
+- the requested GitHub mutations and whether any mandatory HOLD condition applies
+
+The Approval Owner is read-only. Approval uses three sequential activations:
+
+1. **Ready gate.** While the PR is Draft, the agent returns `APPROVE` or `HOLD` only for the
+   Draft-to-Ready mutation.
+2. **Merge gate.** After the PR becomes Ready, the agent fetches the current authoritative state
+   again and returns a new `APPROVE` or `HOLD` only for squash merge.
+3. **Cleanup gate.** After merge, the agent fetches the merged PR, merge commit, target branch,
+   linked Issue, source branch, and any enumerated verification worktrees, then returns a new
+   `APPROVE` or `HOLD` for an ordered bounded-cleanup plan.
+
+A Ready decision is consumed and invalid as soon as the PR state changes; it can never authorize
+merge. A merge decision is consumed by the merge and can never authorize cleanup. The
+Implementation Owner remains the only actor allowed to change Git or GitHub state and records each
+Approval Owner report in the PR before acting. A new commit, changed base, changed acceptance state,
+new review thread, changed check result, or any other unexpected reviewed evidence change
+invalidates the current gate decision.
+
+An Approval Owner must return `HOLD` when evidence is missing or contradictory, a blocker is open,
+a required verdict is stale, CI is not successful on the exact candidate, or a review thread is
+unresolved. Ready and merge gates also require a clean pre-merge state. The cleanup gate instead
+requires the PR to be merged and its exact merge commit to be reachable from the expected target
+branch. It must also return `HOLD` for:
+
+- a change to the Approval Owner's own authority, prompt, evidence rules, or prohibited actions
+- live-trading enablement or a real external order-writing path
+- broker/exchange credentials or resolved secret handling
+- a production deployment, release, tag, or package publication
+- an irreversible data operation, destructive recovery, or action outside the repository scope
+- an action that requires a Codex, operating-system, or platform permission prompt
+
+The Approval Owner must obtain mutable PR, review, merge, and CI state through authoritative
+read-only GitHub access. Coordinator-supplied summaries, URLs, or run IDs are context, not proof.
+If authoritative access is unavailable, the decision is `HOLD`.
+
+Immediately before each authorized GitHub write, the Implementation Owner re-fetches the
+authoritative head/base SHA, gate-appropriate PR state, CI conclusions, merge state, reviews, and
+unresolved threads. Any unexpected mismatch aborts the write and requires a new report for that
+gate. A cleanup report contains an ordered action manifest and expected state transition for each
+action; before every cleanup write, completed earlier actions must match that manifest and all
+unconsumed preconditions must remain unchanged.
+
+Those cases still require explicit user authorization. The role cannot waive a HOLD condition,
+approve its own policy, change required expert findings, or bypass platform permissions. Within the
+delegated scope, a recorded Ready-gate `APPROVE` authorizes only Draft-to-Ready. A later recorded
+merge-gate `APPROVE` authorizes only squash merge. After GitHub records the merge, a cleanup-gate
+`APPROVE` may authorize its enumerated deletion of that PR's merged feature branch, removal of
+eligible verification worktrees, and Issue closure when necessary.
+
+Completed verification-worktree cleanup is authorized only when the exact path was enumerated in
+the Issue writer lease or PR before review, the worktree is bound to that Issue and reviewed
+candidate, and its status is clean. Removal must use non-force `git worktree remove`; a dirty,
+missing, shared, unrelated, or ambiguous worktree requires explicit user approval. The user may
+revoke this standing delegation at any time.
+
+The reusable context and report contract live in
+[`.agents/approval-owner.md`](.agents/approval-owner.md).
+The decision and its narrow supersession of ADR 0002 are recorded in
+[ADR 0007](docs/adr/0007-delegated-approval-owner.md).
+
 ## Writer lease and isolation
 
 Before editing, the Issue or Draft pull request records a writer lease containing:
@@ -116,7 +191,8 @@ and the delta between those SHAs; it does not repeat the full context unless the
 the original assumptions. The final Verification Owner verdict must bind the exact candidate HEAD.
 
 A pull request cannot become ready or merge while any blocker remains open or any required verdict
-is stale.
+is stale. A delegated Approval Owner decision cannot be issued until these conditions are already
+satisfied.
 
 ## Iteration handoff
 

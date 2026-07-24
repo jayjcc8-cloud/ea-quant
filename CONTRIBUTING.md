@@ -29,7 +29,10 @@
 9. Resolve every finding blocker, refresh stale SHA-bound verdicts, and wait for CI to pass.
 10. Extract durable expert knowledge into the Issue, ADR, pull request, tests, or follow-up Issues;
    release completed experts.
-11. After user approval, squash merge to `main` and delete the branch.
+11. Obtain either explicit user approval or a SHA-bound Approval Owner decision within the
+    delegated scope defined by [AGENTS.md](AGENTS.md).
+12. Squash merge to `main`, delete the merged feature branch, and synchronize the next iteration
+    from clean `main`.
 
 Direct pushes to `main` are not allowed. The Phase 0 bootstrap predates the Issue requirement;
 all iterations after `v0.1.0` must link an Issue.
@@ -95,6 +98,45 @@ verdicts stale; re-review is scoped to the old-to-new SHA delta and open finding
 verification runs in CI or an isolated verification worktree, never in the Implementation Owner's
 active checkout.
 
+## Delegated approval gate
+
+After all required experts and exact-head checks pass, the Implementation Owner activates the
+read-only Approval Owner with the bounded evidence package defined in
+[AGENTS.md](AGENTS.md). The agent reports separate Ready, merge, and cleanup decisions using
+the repository template in [`.agents/approval-owner.md`](.agents/approval-owner.md).
+
+Approval uses three sequential gates. A Ready-gate `APPROVE` recorded in the pull request authorizes
+only Draft-to-Ready for that exact candidate SHA. After that mutation, the Implementation Owner
+activates the Approval Owner again with freshly fetched authoritative GitHub state. A merge-gate
+`APPROVE` authorizes only squash merge; the Ready decision cannot be reused.
+
+After GitHub records the merge, a third activation reads the merged PR, merge commit, target branch,
+linked Issue, source branch, and any enumerated verification worktrees. Its cleanup-gate `APPROVE`
+authorizes only the recorded ordered cleanup plan. A merge decision cannot authorize cleanup.
+
+The Approval Owner must read current PR, review, merge, and CI state from GitHub directly; a
+coordinator summary is not authoritative evidence. Immediately before each write, the
+Implementation Owner re-fetches head/base SHA, PR state, CI, merge state, reviews, and unresolved
+threads. Any unexpected mismatch aborts the action and requires a new report. For an ordered
+cleanup plan, every earlier action must match its approved expected transition before the next
+action runs.
+
+Ready and merge gates require a clean pre-merge state. Cleanup does not reuse that pre-merge
+condition: it requires a merged PR and the exact merge commit reachable from the expected target
+branch.
+
+A completed verification worktree may be removed only when its exact path is recorded in the Issue
+writer lease or PR, it is bound to that Issue and candidate, its status is clean, and ordinary
+non-force `git worktree remove` succeeds. Otherwise cleanup remains an explicit-user gate.
+
+`HOLD` is final for that evidence package. The Implementation Owner must not reinterpret it or ask
+the same agent to weaken a prohibited condition. Changes to this delegated authority, live trading,
+real order writes, credential handling, production releases/deployments/tags, irreversible data
+operations, destructive recovery, and platform permission prompts remain explicit-user gates.
+
+See [ADR 0007](docs/adr/0007-delegated-approval-owner.md) for the decision that narrowly supersedes
+ADR 0002's per-merge user-confirmation requirement.
+
 ## Definition of Done
 
 An iteration is complete only when:
@@ -106,7 +148,8 @@ An iteration is complete only when:
 - required exact-HEAD expert evidence is current and blockers are zero.
 - useful expert knowledge is recorded and completed agents are released.
 - no secrets or inappropriate data are present.
-- the user has approved and the pull request is merged into `main`.
+- explicit user approval or a valid delegated Approval Owner decision is recorded, and the pull
+  request is merged into `main`.
 
 ## Versioning and releases
 
