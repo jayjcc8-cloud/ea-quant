@@ -24,6 +24,7 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
 ```text
 src/ea/
   core/          # 领域模型、事件、时间、资产标识、错误类型
+  composition/   # 唯一 outer composition root；绑定配置、数据、provenance 与运行能力
   runtime/       # 统一 coordinator、事件顺序、生命周期和 composition boundary
   config/        # 配置加载、校验、环境变量、密钥引用
   cli/           # ea doctor/data/backtest/paper/live/report
@@ -132,6 +133,51 @@ YAML、CLI、normalized snapshot 和日志都不得包含 broker/exchange raw cr
 解析它，resolved payload 不得返回 snapshot、runtime message 或 audit。
 完整决策见 [Accepted ADR 0005](docs/adr/0005-strict-typed-configuration.md)。
 
+## 可复现 run lineage（Issue #14）
+
+[Proposed ADR 0006](docs/adr/0006-reproducible-run-manifest-and-audit-lineage.md) 正在冻结
+Phase 1 的最小 run manifest：UUID4 `run_id` 标识一次执行尝试，deterministic
+`lineage_sha256` 标识相同的 clean code、normalized config、point-in-time data、UTC replay
+window、effective parameters、runtime/dependencies 与 seed。
+
+V1 只接受有界 `backtest`。一个 tracked outer launcher 会在导入 `ea` 前，用
+`python -I -B` 等价的 isolated Python 验证当前 clean Git checkout、locked editable
+`venv`、实际源码、active-environment distribution inventory 与完整 `src/` import surface，
+并在 preparation 期间禁写 bytecode。普通 source-backed cache 只有在 code object 与对应
+tracked source 重新编译后完全一致时才允许；sourceless/tampered cache、隐藏 import artifact
+与 symlink 全部失败，collector 不会静默清理。`paper`/`live` 需要后续 schema。经济因果链
+使用固定顺序的 binary64 运算与独占、串行消费的 PCG64 raw-word stream，不把无法证明的
+“整个进程只有一个线程”写成 lineage 承诺。
+
+Manifest 必须在 audit、feed 和 output 启动前持久写入 `results/<run_id>/manifest.json`，且不可改写；
+相同 lineage 的重跑使用新 UUID 和新目录。路径、hostname、wall-clock、raw secret 与 UUID
+本身不进入 lineage hash。数据指纹覆盖 ADR 0004 的 source、sequence、revision、
+`available_at`、interval、identity、adjustment 和 float64 bits，而不是文件路径或 final bars。
+Raw secrets 不得出现在 manifest 的任何字段中，因此也不可能进入其 hash。
+
+受支持的生产路径必须从 tracked `scripts/reproducible_run.py` 开始：launcher 在 pre-import
+检查成功后的 bootstrap stack frame 内创建一次性 grant（模块不暴露可重放的 constructor、
+issuer seal 或 publisher），登记 exact process-local object identity 后才动态导入
+`ea.composition.run`。Composition 立即兑换并清除该 pending grant，签发一次性 preflight
+session。Preparation 强制消费该 session，从中取得不可由 caller 改写的 repository/commit，
+再重新采集
+Git/runtime/lock evidence，把同一个 `MarketDataSelection` 的 window、events 与重算 fingerprint
+绑定到 lineage并持久化 manifest。首条 mandatory audit acknowledgement 返回后，它才把 exact
+event tuple、`RunReference`、lineage-bound RNG 与 numeric capability 交给 feed/runtime。
+直接导入 composition、调用底层 manifest builder 或 result store 都不能形成 reproducibility
+claim。
+
+干净分支上可单独验证 tracked、stdlib-only 的 pre-import launcher：
+
+```bash
+venv/bin/python -I -B scripts/reproducible_run.py
+```
+
+这个入口会在任何 `ea` 模块执行前检查 clean HEAD、完整 `src/` import surface、source-backed
+cache、symlink/shadow、locked editable environment 与 import topology，然后通过 exact pending
+grant 进入 composition 并建立一次性的 preparation gate；当前 Issue #14 不启动尚未实现的
+Phase 1 historical runtime。
+
 常用质量门禁：
 
 ```bash
@@ -144,9 +190,9 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile quality
 uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
-脚本从 `pyproject.toml` 读取项目和 uv 版本；CI 也调用同一入口。不要使用
-`--no-build-isolation`，也不要把 setuptools 或 wheel 加入应用/dev 依赖来替代
-`build-constraints.txt`。
+质量 profile 包含上述 tracked、stdlib-only 复现准备门禁。脚本从 `pyproject.toml` 读取项目
+和 uv 版本；CI 也调用同一入口。不要使用 `--no-build-isolation`，也不要把 setuptools 或
+wheel 加入应用/dev 依赖来替代 `build-constraints.txt`。
 
 VSCode 已提供：
 

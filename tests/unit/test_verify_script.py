@@ -72,6 +72,37 @@ def test_environment_tools_require_ea_only_after_python(tmp_path: Path) -> None:
     assert verify.environment_tools(tmp_path) == (python, entrypoint)
 
 
+def test_quality_profile_runs_reproducible_gate_before_static_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "python"
+    entrypoint = tmp_path / "ea"
+    python.touch()
+    entrypoint.touch()
+    commands: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(verify, "verify_uv", lambda *_args: None)
+    monkeypatch.setattr(verify, "environment_dir", lambda: tmp_path)
+    monkeypatch.setattr(verify, "environment_tools", lambda _environment: (python, entrypoint))
+    monkeypatch.setattr(
+        verify,
+        "run",
+        lambda command, **_kwargs: commands.append(tuple(str(part) for part in command)),
+    )
+
+    verify.verify_quality(
+        "uv",
+        verify.ProjectConfig(project_version="0.1.1", required_uv_version="0.11.28"),
+        {},
+    )
+
+    gate = (str(python), "-I", "-B", str(verify.REPRODUCIBLE_RUN_PATH))
+    lint = ("uv", "run", "--locked", "ruff", "check", ".")
+    assert gate in commands
+    assert commands.index(gate) < commands.index(lint)
+
+
 def test_single_wheel_requires_exactly_one_file(tmp_path: Path) -> None:
     with pytest.raises(verify.VerificationError, match="expected one wheel"):
         verify.single_wheel(tmp_path)

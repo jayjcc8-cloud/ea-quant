@@ -61,9 +61,10 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
 `quality` verifies the supported uv version, lock immutability, locked environment, isolated
-installed metadata, CLI, lint, formatting, types, tests, and doctor. `full` includes `quality` and
-adds byte-identical isolated wheel builds plus a clean-wheel installation and outside-repository
-smoke test. Pull requests and CI use `full`; `quality` is the faster implementation loop.
+installed metadata, CLI, the reproducible preparation gate, lint, formatting, types, tests, and
+doctor. `full` includes `quality` and adds byte-identical isolated wheel builds plus a clean-wheel
+installation and outside-repository smoke test. Pull requests and CI use `full`; `quality` is the
+faster implementation loop.
 
 The script reads the project version and required uv version from `pyproject.toml`; contributor
 documentation and CI must not duplicate those values or maintain a second command list.

@@ -22,6 +22,7 @@ from typing import cast
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = PROJECT_ROOT / "pyproject.toml"
 BUILD_CONSTRAINTS_PATH = PROJECT_ROOT / "build-constraints.txt"
+REPRODUCIBLE_RUN_PATH = PROJECT_ROOT / "scripts" / "reproducible_run.py"
 UV_VERSION_PATTERN = re.compile(r"==(?P<version>[0-9]+\.[0-9]+\.[0-9]+)")
 UV_OUTPUT_PATTERN = re.compile(r"uv (?P<version>[0-9]+\.[0-9]+\.[0-9]+)(?:\s.*)?")
 
@@ -199,6 +200,7 @@ def verify_quality(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> No
         )
         run([str(entrypoint), "doctor"], cwd=outside_repository, env=env)
 
+    run([str(python), "-I", "-B", str(REPRODUCIBLE_RUN_PATH)], env=env)
     run([uv, "run", "--locked", "ruff", "check", "."], env=env)
     run([uv, "run", "--locked", "ruff", "format", "--check", "."], env=env)
     run([uv, "run", "--locked", "mypy"], env=env)

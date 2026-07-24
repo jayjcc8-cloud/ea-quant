@@ -210,6 +210,45 @@ boundary contract：
 只有 composition root 接收完整 snapshot。Inner runtime 与 policy 只能接收装配后的 narrow value /
 capability，不得回读 snapshot、environment、filesystem 或 CLI。
 
+Issue #14 与 [Proposed ADR 0006](adr/0006-reproducible-run-manifest-and-audit-lineage.md)
+定义 run preparation 与 lineage boundary：
+
+- UUID4 `run_id` 标识单次执行尝试，deterministic `lineage_sha256` 标识等价的可复现输入；
+- v1 preparation 只接受 bounded `backtest`，paper/live 需要未来 manifest schema；
+- lineage 覆盖 clean commit、normalized configuration、完整 point-in-time data fingerprint、
+  UTC replay window、effective parameters、runtime/dependencies 和 explicit seed；
+- exact `MarketDataEnvelope` tuple 按 ADR 0004 校验/排序，以 `available_at` 的半开区间选择并
+  fingerprint，同一 tuple 才能交给 historical feed；
+- outer experiments boundary 原子占有 `results/<run_id>/`，durably 写入 immutable manifest
+  后才公开 prepared context；现有/poisoned 路径永不复用、清理或覆盖；
+- store registry 将每个 pathless child capability 绑定到 exact store、attempt 与 role；
+  composition 只把不重叠的 `audit/` 和 `outputs/` capability 分别交给 monitoring/result
+  adapter，跨 store/attempt/role 替换在构造 binding 时失败，adapter 与 policy 都不能取得或
+  遍历 run root；
+- composition 使用同一个 narrow `RunReference(run_id, lineage_sha256)`、manifest-file digest
+  与各自 child capability 预绑定 concrete audit/result adapter；inner runtime 只接收
+  `RunReference` 与已绑定 ports。任何一方都不接收 manifest serializer、configuration、
+  data adapter 或 result-root path。
+- production path 必须从 tracked stdlib-only launcher 开始；它在任何 `ea` import 前完成检查，
+  只在成功后的 bootstrap stack frame 内创建一次性 grant，且 module 不暴露 constructor、
+  issuer seal 或 publisher；登记 exact process-local pending identity 后才动态导入
+  `ea.composition.run`。Composition 仅兑换同一 object identity、立即清除 pending grant并
+  签发一次性 preflight session；structural fake 或 direct-loaded launcher module 都不能自行
+  mint grant。Preparation 强制消费该 session，从中取得 repository/commit，重新建立 evidence；
+  `LocalResultStore`
+  durable 返回后才构造 adapter，并在首条 mandatory audit acknowledgement 后才交出 exact
+  event tuple、lineage-bound RNG 与 ordered-float64 capability。直接导入 composition 或单独
+  调用 manifest/store helper 不构成可复现完成或运行声明。
+
+Prepared manifest 不等于 completed reproducibility claim；terminal audit/output evidence 保持为
+独立 write-once record，避免改写 manifest 或形成 audit hash cycle。Editable-checkout run 在
+terminal claim 前必须通过 store-owned manifest capability 以 no-follow 方式重读原文件并核对
+`fstat` 的 `(st_dev, st_ino)` 时点 identity、mode、canonical bytes、digest 与
+`RunReference`，同时重新验证相同 clean HEAD、lock/runtime evidence 与 prepared data tuple。
+V1 的 trusted/unshared local result root 不提供连续文件历史或 adversarial inode-reuse ABA
+证明；`ctime` 不属于 identity。更强保证需要未来 ADR 定义 descriptor pinning、immutable
+storage 或 external attestation。
+
 ## 8. Mode adapter matrix
 
 | 关注点 | Backtest | Paper | Live（未来 contract） |
@@ -308,7 +347,8 @@ Position 也不能因为“可能成交”而被静默修改。
 - Issue #11 / ADR 0003（已完成）：shared runtime、dependency direction、composition root 和 mode profile contract。
 - Issue #12 / ADR 0004（已完成）：market/time、revision、as-of visibility 和 deterministic admission 语义。
 - Issue #13 / Accepted ADR 0005：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
-- Issues #14、#15（待完成）：run manifest、execution/reconciliation 语义。
+- Issue #14 / Proposed ADR 0006（进行中）：reproducible run manifest、data fingerprint 和 audit/result lineage。
+- Issue #15（待完成）：execution/reconciliation 语义。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
