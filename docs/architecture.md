@@ -210,7 +210,7 @@ boundary contract：
 只有 composition root 接收完整 snapshot。Inner runtime 与 policy 只能接收装配后的 narrow value /
 capability，不得回读 snapshot、environment、filesystem 或 CLI。
 
-Issue #14 与 [Proposed ADR 0006](adr/0006-reproducible-run-manifest-and-audit-lineage.md)
+Issue #14 与 [Accepted ADR 0006](adr/0006-reproducible-run-manifest-and-audit-lineage.md)
 定义 run preparation 与 lineage boundary：
 
 - UUID4 `run_id` 标识单次执行尝试，deterministic `lineage_sha256` 标识等价的可复现输入；
@@ -344,11 +344,15 @@ Position 也不能因为“可能成交”而被静默修改。
 
 ### Phase 1 入口门禁
 
+截至状态审查基线
+`main@1ef3dbb7f8682e3687e76408d66fcbe3b69d0c17`，入口门禁完成 4/5。项目版本的唯一事实源是
+`pyproject.toml`，该基线对应 `0.1.1`。
+
 - Issue #11 / ADR 0003（已完成）：shared runtime、dependency direction、composition root 和 mode profile contract。
 - Issue #12 / ADR 0004（已完成）：market/time、revision、as-of visibility 和 deterministic admission 语义。
-- Issue #13 / Accepted ADR 0005：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
-- Issue #14 / Proposed ADR 0006（进行中）：reproducible run manifest、data fingerprint 和 audit/result lineage。
-- Issue #15（待完成）：execution/reconciliation 语义。
+- Issue #13 / Accepted ADR 0005（已完成）：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
+- Issue #14 / Accepted ADR 0006（已完成）：reproducible run manifest、data fingerprint 和 audit/result lineage。
+- Issue #15（尚未激活）：execution/reconciliation 语义。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
