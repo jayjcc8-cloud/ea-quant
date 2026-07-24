@@ -159,15 +159,48 @@ pre-effect audit acknowledgement, and canonical request digest immediately befor
 Any intervening economic or state-version change returns through portfolio/risk and requires a new
 pre-effect audit acknowledgement. Adapter wire encoding cannot change economics.
 
-#### `ExecutionFact`
+#### `ExecutionFactIngress` and `ExecutionFact`
 
-A venue or simulator adapter produces a secret-free immutable fact containing:
+A venue or simulator adapter produces a secret-free `ExecutionFactIngress` root containing:
 
-- source namespace, stable external fact ID or source sequence, and fact kind;
-- `occurred_at`, `available_at`, and canonical instrument identity;
+- `available_at`;
+- a canonical source namespace;
+- an exact non-negative `ingress_sequence`, unique for every delivery occurrence in that source
+  namespace; and
+- one immutable `ExecutionFact`.
+
+The ingress sequence comes from a stable upstream delivery sequence or is assigned at one
+serialized adapter receive boundary before parallel decoding. Scheduler completion cannot assign
+it. A redelivery receives a new ingress sequence even when it carries the same economic fact.
+Ingress identity is `(source_namespace, ingress_sequence)` and is validated for uniqueness before
+root sorting.
+
+The nested `ExecutionFact` contains:
+
+- the same source namespace and one stable deduplication identity;
+- fact kind and `occurred_at`;
+- canonical instrument identity when known;
 - every truly known client, venue, order, correlation, and causation identifier;
-- canonical economic payload and provenance; and
-- a canonical content digest.
+- canonical economic payload and stable source provenance; and
+- `fact_sha256`, a domain-separated digest of the other canonical fact fields and excluded from
+  its own preimage.
+
+Its source namespace MUST equal the enclosing ingress namespace; a mismatch returns
+`fact.invalid` before deduplication.
+
+The deduplication identity is a closed tagged union:
+
+```text
+("external_id", canonical_non_empty_ascii_external_id)
+("source_native_sequence", exact_non_negative_integer_stable_across_redelivery)
+```
+
+Transport receipt time, ingress sequence, `available_at`, socket/session metadata, and retry count
+belong only to the ingress envelope and are excluded from canonical fact bytes. When a source
+cannot provide either stable fact identity, the ingress is retained and returns
+`fact.invalid.missing_dedup_identity`; it cannot create a Fill or mutate the ledger. Hashing the
+economic payload is not a substitute because conflict detection requires a stable identity
+independent of content.
 
 Missing ancestry remains absent. It is never fabricated. Supported fact kinds include venue
 acknowledgement, rejection, trade, expiry, cancellation, and explicit submission-query evidence.
@@ -282,7 +315,7 @@ Every suffix is a closed tuple of canonical comparable values:
 | Rank | Closed `domain_specific_suffix` |
 |---:|---|
 | 0 | `(safety_kind_rank, producer_namespace, producer_sequence, subject_kind, subject_id)` |
-| 10 | `(fact_kind_rank, source_namespace, source_sequence, external_fact_id, instrument_venue, instrument_symbol, fact_digest)` |
+| 10 | `(fact_kind_rank, source_namespace, ingress_sequence)` |
 | 20 | `(observation_kind_rank, source_namespace, source_sequence, watermark_namespace, watermark_sequence, observation_id)` |
 | 30 | `(event_time, event_kind_rank, source_code, source_sequence, instrument_venue, instrument_symbol, interval_start, interval_end, adjustment, revision)` |
 | 40 | `(timer_kind_rank, timer_namespace, timer_id, producer_sequence)` |
@@ -302,14 +335,26 @@ source never compares before `event_time`. Frozen local ranks are:
 Namespaces, IDs, subject kinds, and watermark namespaces are canonical non-empty ASCII identifiers;
 sequences and local ranks are exact non-negative integers; digests are fixed lowercase SHA-256
 text; instrument and market fields use ADR 0004 canonical values; times use its exact UTC
-representation. An optional ID, instrument field, subject, or watermark is encoded as a closed
-tagged value `(presence_rank, value)`: absent is `(0, canonical_empty_value)` and present is
-`(1, canonical_non_empty_value)`. Missing and present values therefore remain comparable without
-fabricating provenance. Adding a root or local kind requires a later Accepted decision assigning
-its rank and suffix. Equal complete root keys are an identity collision and fail; arrival order,
-stable-sort fallback, mapping iteration, or producer scheduling is never a tie-breaker. Runtime
-may assign a dispatch sequence after choosing a root to record applied order, but that sequence
-cannot choose among concurrently ready roots.
+representation. Optional values have exact tagged encodings:
+
+- ASCII text: absent `(0, "")`; present `(1, canonical_non_empty_ascii)`;
+- non-negative integer: absent `(0, 0)`; present `(1, exact_non_negative_integer)`;
+- subject: absent `(0, "", "")`; present `(1, subject_kind, subject_id)`;
+- instrument: absent `(0, "", "")`; present `(1, venue, symbol)`; and
+- watermark: absent `(0, "", 0)`; present `(1, namespace, sequence)`.
+
+The absent payload is not a domain value and can occur only under presence rank zero. Missing and
+present values therefore remain comparable without fabricating provenance. In addition to full
+root-key uniqueness, each domain validates its identity before sorting: market identity follows
+ADR 0004, fact-ingress identity is `(source_namespace, ingress_sequence)`, and other domains use
+the closed identity fields in their suffix. A repeated ingress identity is a transport collision,
+not a fact redelivery.
+
+Adding a root or local kind requires a later Accepted decision assigning its rank and suffix.
+Equal complete root keys or duplicate domain ingress identities fail; arrival order, content
+digest, stable-sort fallback, mapping iteration, or producer scheduling is never a tie-breaker.
+Runtime may assign a dispatch sequence after choosing a root to record applied order, but that
+sequence cannot choose among concurrently ready roots.
 
 Causal descendants finish serially inside their parent dispatch unit and are never reinserted
 ahead of their cause. For one market root:
@@ -424,15 +469,23 @@ Every handler is idempotent:
 - when no definitive outcome was durably recorded, recovery marks the existing request uncertain
   and performs query/reconciliation only; the stable client key is correlation evidence, never
   permission to resubmit;
-- fact deduplication uses source namespace plus immutable external fact ID or source sequence;
-- exact duplicate fact returns `fact.duplicate` without mutation;
+- after root ordering, Execution/OMS classifies every admitted Fact ingress by
+  `(source_namespace, fact_deduplication_identity)`;
+- same deduplication identity plus identical canonical `ExecutionFact` bytes returns
+  `fact.duplicate` for that ingress and makes no economic or order-state mutation;
+- same deduplication identity plus different canonical `ExecutionFact` bytes returns
+  `fact.conflict`, halts new submissions, and makes no second mutation;
 - exact duplicate Fill or ledger application returns its original no-op outcome;
 - exact audit retry uses the same record ID and may return the same bound acknowledgement; and
 - result/durability retries use stable record identities.
 
-Same identity or deduplication key with different canonical bytes returns a conflict, halts new
-submissions, performs no conflicting mutation, and fails the run. An acknowledgement bound to a
-different digest, sequence, or run is fatal.
+Ingress envelope fields can legitimately differ across redelivery and do not participate in the
+fact duplicate/conflict comparison. Each ingress still receives its own explicit processing
+outcome and audit attempt. Classifying an ingress only after runtime admits it in full root-key
+order makes the accepted-first and duplicate-later result independent of input container order
+without exposing a future root. Same identity or deduplication key with different canonical core
+bytes returns a conflict, halts new submissions, performs no conflicting mutation, and fails the
+run. An acknowledgement bound to a different digest, sequence, or run is fatal.
 
 Durable recovery reconstructs ID allocation, deduplication, approvals, approval consumption,
 order projection, accepted Fills, ledger application, halt state, and outstanding uncertainty
@@ -515,7 +568,7 @@ Logic branches on closed versioned codes, never exception text. V1 reserves:
 | `durability.*` | `audit_append_failed`, `audit_ack_mismatch`, `result_write_failed` |
 | `risk.*` | `allowed`, `resized`, `rejected`, `evaluation_failed`, `stale_approval` |
 | `submission.*` | `submitted`, `definitely_not_submitted`, `uncertain`, `blocked_by_halt` |
-| `fact.*` | `accepted`, `duplicate`, `invalid`, `conflict`, `unresolved` |
+| `fact.*` | `accepted`, `duplicate`, `invalid`, `invalid.missing_dedup_identity`, `conflict`, `unresolved` |
 | `order.*` | `acknowledged`, `rejected`, `partially_filled`, `filled`, `expired`, `cancelled`, `expired.no_eligible_market_data` |
 | `ledger.*` | `applied`, `duplicate`, `conflict`, `unbalanced`, `rounding_unrepresentable` |
 | `reconciliation.*` | the outcomes defined above plus the five `submission.*` resolutions |
@@ -553,6 +606,8 @@ This ADR cannot be treated as implemented until separate Issues provide all evid
 - equal-availability multi-source market roots in exact ADR 0004 order;
 - execution fact before a market decision at equal `available_at`;
 - exact duplicate fact and Fill with no repeated mutation;
+- two ordered ingress redeliveries of one stable fact, producing one accepted economic application
+  and one explicit duplicate outcome;
 - conflicting duplicate fail-closed;
 - submission replay after a definitive outcome and after missing outcome durability, both with zero
   additional venue calls;
@@ -580,6 +635,8 @@ This ADR cannot be treated as implemented until separate Issues provide all evid
 - every accepted Fill changes the ledger exactly once and postings balance;
 - independently ordered roots are permutation invariant;
 - replay is idempotent and conflicting duplicates fail;
+- fact redelivery results are invariant to input order and process reconstruction while each
+  ingress keeps an explicit processing outcome;
 - after any venue-call attempt, replay and recovery never call submission again;
 - every price, quantity, and fee remains on its declared grid;
 - maximum coefficient products, signed-price policies, signed zero, overflow, half-tick ties, and
