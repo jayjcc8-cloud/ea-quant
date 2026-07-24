@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -8,6 +9,8 @@ from hashlib import sha256
 import pytest
 
 from ea.core import DataFingerprint, ReplayWindow, RunId, Sha256Digest
+from ea.experiments import _manifest_codec, _manifest_evidence, _manifest_model
+from ea.experiments import manifest as manifest_module
 from ea.experiments.manifest import (
     CodeEvidence,
     DistributionIdentity,
@@ -170,6 +173,47 @@ def test_manifest_round_trip_is_strict_and_transitively_immutable() -> None:
         parsed.spec.runtime.ea_version = "changed"  # type: ignore[misc]
 
 
+def test_manifest_facade_preserves_public_object_identity_and_pickle_paths() -> None:
+    expected = {
+        "ManifestError": _manifest_model.ManifestError,
+        "ManifestFormatError": _manifest_model.ManifestFormatError,
+        "EvidenceMismatchError": _manifest_model.EvidenceMismatchError,
+        "NormalizedConfiguration": _manifest_model.NormalizedConfiguration,
+        "CodeEvidence": _manifest_model.CodeEvidence,
+        "DistributionIdentity": _manifest_model.DistributionIdentity,
+        "RuntimeEvidence": _manifest_model.RuntimeEvidence,
+        "ParameterKind": _manifest_model.ParameterKind,
+        "EffectiveParameter": _manifest_model.EffectiveParameter,
+        "LineageInputs": _manifest_model.LineageInputs,
+        "CodeSpec": _manifest_model.CodeSpec,
+        "ConfigurationSpec": _manifest_model.ConfigurationSpec,
+        "RuntimeSpec": _manifest_model.RuntimeSpec,
+        "RandomnessSpec": _manifest_model.RandomnessSpec,
+        "LineageSpec": _manifest_model.LineageSpec,
+        "RunManifest": _manifest_model.RunManifest,
+        "canonical_lineage_bytes": _manifest_model.canonical_lineage_bytes,
+        "canonical_manifest_bytes": _manifest_model.canonical_manifest_bytes,
+        "build_lineage_spec": _manifest_model.build_lineage_spec,
+        "build_manifest": _manifest_model.build_manifest,
+        "read_manifest": _manifest_codec.read_manifest,
+        "verify_manifest_evidence": _manifest_evidence.verify_manifest_evidence,
+    }
+
+    for name, value in expected.items():
+        assert getattr(manifest_module, name) is value
+        assert value.__module__ == "ea.experiments.manifest"
+
+    for value in (CodeEvidence("0" * 40), _manifest_model.ParameterKind.INTEGER):
+        restored = pickle.loads(pickle.dumps(value))
+        assert type(restored) is type(value)
+        assert restored == value
+
+    error = ManifestFormatError("invalid")
+    restored_error = pickle.loads(pickle.dumps(error))
+    assert type(restored_error) is ManifestFormatError
+    assert restored_error.args == error.args
+
+
 @pytest.mark.parametrize(
     "mutated",
     [
@@ -290,6 +334,49 @@ def test_external_evidence_verifier_recomputes_lock_code_runtime_and_data() -> N
             runtime=_runtime(),
             data=DataFingerprint(Sha256Digest("0" * 64), 1),
         )
+
+
+def test_manifest_error_causality_boundaries_remain_stable() -> None:
+    with pytest.raises(ManifestFormatError) as invalid_utf8:
+        read_manifest(b"\xff")
+    assert isinstance(invalid_utf8.value.__cause__, UnicodeDecodeError)
+
+    duplicate = GOLDEN_MANIFEST.replace(
+        b'{"lineage_sha256":',
+        b'{"manifest_schema_version":1,"lineage_sha256":',
+        1,
+    )
+    with pytest.raises(ManifestFormatError) as duplicate_key:
+        read_manifest(duplicate)
+    assert duplicate_key.value.__cause__ is None
+
+    invalid_schema = GOLDEN_MANIFEST.replace(
+        b'"manifest_schema_version":1',
+        b'"manifest_schema_version":true',
+        1,
+    )
+    with pytest.raises(ManifestFormatError) as wrapped_model_error:
+        read_manifest(invalid_schema)
+    assert type(wrapped_model_error.value.__cause__) is ManifestError
+
+    manifest = build_manifest(build_lineage_spec(_inputs()), RUN_ID)
+    with pytest.raises(EvidenceMismatchError) as invalid_runtime:
+        verify_manifest_evidence(
+            manifest,
+            code=_inputs().code,
+            runtime=object(),  # type: ignore[arg-type]
+            data=_inputs().data,
+        )
+    assert isinstance(invalid_runtime.value.__cause__, AttributeError)
+
+    with pytest.raises(EvidenceMismatchError) as ordinary_mismatch:
+        verify_manifest_evidence(
+            manifest,
+            code=CodeEvidence("f" * 40),
+            runtime=_runtime(),
+            data=_inputs().data,
+        )
+    assert ordinary_mismatch.value.__cause__ is None
 
 
 @pytest.mark.parametrize(
