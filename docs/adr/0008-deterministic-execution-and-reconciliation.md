@@ -212,14 +212,16 @@ exponent notation, implicit coercion, or ambient decimal context is forbidden.
 `ea-decimal-v1` canonical text uses:
 
 ```text
-0
--?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?
+0|-?(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9])
 ```
 
-Negative zero, a leading plus, unnecessary leading zeroes, and trailing fractional zeroes fail.
-A value has at most 38 significant digits, at most 20 integer digits, and at most 18 fractional
-digits. Operations use an explicit local 38-digit context with traps; ambient context changes
-cannot affect results. Rounding is permitted only at a named boundary below.
+The grammar itself excludes negative zero. A leading plus, unnecessary leading zeroes, and
+trailing fractional zeroes fail. A value has at most 38 significant digits, at most 20 integer
+digits, and at most 18 fractional digits. Parsing and validation use an explicit local context
+with traps. Economic arithmetic converts canonical values to sign, integer coefficient, and scale
+and uses exact unbounded integer operations; it does not multiply under a fixed-precision Decimal
+context. Ambient context changes cannot affect results. Rounding is permitted only at the named
+settlement boundary below.
 
 Every tradable instrument has one immutable execution specification:
 
@@ -227,11 +229,14 @@ Every tradable instrument has one immutable execution specification:
 - `quantity_quantum`;
 - settlement currency and `currency_quantum`;
 - contract multiplier; and
+- price domain, exactly `positive`, `non_negative`, or `signed`; and
 - immutable specification/version identity.
 
-Price and quantity MUST already be exact positive quantum multiples where applicable. No
-portfolio, risk, OMS, matcher, or adapter silently rounds them. An invalid grid value returns
-`validation.not_quantized`.
+Price quantum, quantity quantum, currency quantum, quantity, and contract multiplier are strictly
+positive. Price is an exact quantum multiple and is accepted only by its lineage-bound price
+domain. A negative market observation can become an execution price only for a `signed`
+instrument; otherwise it returns `validation.price_domain`. No portfolio, risk, OMS, matcher, or
+adapter silently rounds a value. An invalid grid value returns `validation.not_quantized`.
 
 Phase 1 accepts only a versioned, code-defined instrument-spec set selected by
 `execution.instrument_spec_set_id` and
@@ -239,11 +244,15 @@ Phase 1 accepts only a versioned, code-defined instrument-spec set selected by
 the complete set under ADR 0006 without changing its closed manifest schema. External or mutable
 instrument metadata requires a future Accepted lineage extension.
 
-Notional is computed as `price * quantity * contract_multiplier` under the local context and then
-quantized once to `currency_quantum` using `ROUND_HALF_EVEN`. Any non-zero rounding residual is an
-explicit balanced ledger posting to a versioned rounding account; it never disappears. V1 matcher
-fees are exactly zero with explicit currency and fee code. Rebates and non-zero fee models require
-a future versioned policy.
+Notional is computed by exact integer coefficient multiplication and scale addition for
+`price * quantity * contract_multiplier`; three valid 38-digit operands therefore cannot round
+before settlement. The exact result is divided by `currency_quantum` with integer quotient and
+remainder and quantized once using `ROUND_HALF_EVEN`. A result outside the canonical output bounds
+returns `validation.arithmetic_overflow` before a ledger mutation. Any non-zero rounding residual
+is an explicit balanced ledger posting to a versioned rounding account; it never disappears.
+Failure to represent that posting exactly returns `ledger.rounding_unrepresentable` and performs
+no partial append. V1 matcher fees are exactly zero with explicit currency and fee code. Rebates
+and non-zero fee models require a future versioned policy.
 
 ### Deterministic root ordering and causal stages
 
@@ -253,9 +262,7 @@ Runtime admits independent roots by the ascending key:
 (
   available_at,
   stable_domain_rank,
-  source_namespace,
-  source_sequence,
-  canonical_identity_fields,
+  domain_specific_suffix,
 )
 ```
 
@@ -270,10 +277,39 @@ Runtime admits independent roots by the ascending key:
 | 40 | timer |
 | 50 | end of run |
 
-Market roots retain the complete ADR 0004 order inside rank 30. Equal complete root keys are an
-identity collision and fail; arrival order is not a fallback. Runtime may assign a dispatch
-sequence after choosing a root to record applied order, but that sequence cannot choose among
-concurrently ready roots.
+Every suffix is a closed tuple of canonical comparable values:
+
+| Rank | Closed `domain_specific_suffix` |
+|---:|---|
+| 0 | `(safety_kind_rank, producer_namespace, producer_sequence, subject_kind, subject_id)` |
+| 10 | `(fact_kind_rank, source_namespace, source_sequence, external_fact_id, instrument_venue, instrument_symbol, fact_digest)` |
+| 20 | `(observation_kind_rank, source_namespace, source_sequence, watermark_namespace, watermark_sequence, observation_id)` |
+| 30 | `(event_time, event_kind_rank, source_code, source_sequence, instrument_venue, instrument_symbol, interval_start, interval_end, adjustment, revision)` |
+| 40 | `(timer_kind_rank, timer_namespace, timer_id, producer_sequence)` |
+| 50 | `(end_kind_rank, producer_namespace, producer_sequence, run_id)` |
+
+Rank 30 is exactly ADR 0004's accepted market admission key after its leading `available_at`;
+source never compares before `event_time`. Frozen local ranks are:
+
+- safety: `halt=0`, `failure_cutover=10`, `stop_cutover=20`;
+- fact: `trade=0`, `rejection=10`, `acknowledgement=20`, `expiry=30`,
+  `cancellation=40`, `submission_query=50`;
+- reconciliation observation: `trade_detail=0`, `order_detail=10`,
+  `position_snapshot=20`, `cash_snapshot=30`;
+- timer: `safety_deadline=0`, `strategy_timer=10`, `maintenance=20`; and
+- end of run: `bounded_source_exhausted=0`, `requested_end=10`.
+
+Namespaces, IDs, subject kinds, and watermark namespaces are canonical non-empty ASCII identifiers;
+sequences and local ranks are exact non-negative integers; digests are fixed lowercase SHA-256
+text; instrument and market fields use ADR 0004 canonical values; times use its exact UTC
+representation. An optional ID, instrument field, subject, or watermark is encoded as a closed
+tagged value `(presence_rank, value)`: absent is `(0, canonical_empty_value)` and present is
+`(1, canonical_non_empty_value)`. Missing and present values therefore remain comparable without
+fabricating provenance. Adding a root or local kind requires a later Accepted decision assigning
+its rank and suffix. Equal complete root keys are an identity collision and fail; arrival order,
+stable-sort fallback, mapping iteration, or producer scheduling is never a tie-breaker. Runtime
+may assign a dispatch sequence after choosing a root to record applied order, but that sequence
+cannot choose among concurrently ready roots.
 
 Causal descendants finish serially inside their parent dispatch unit and are never reinserted
 ahead of their cause. For one market root:
@@ -292,8 +328,12 @@ Late facts are admitted when `available_at` makes them visible and never rewind 
 The first matcher implementation is intentionally narrow:
 
 - market Orders only;
-- full fill on the first later eligible raw bar for the same instrument;
-- the Order MUST have become eligible before that bar root;
+- full fill on the first later eligible initial raw bar for the same instrument;
+- an execution opportunity requires `adjustment == raw` and `revision == 0`;
+- the Order records `eligible_after_available_at` from its causal root; the candidate root key MUST
+  be later and its `event_time` MUST be strictly later than that timestamp;
+- correction roots and late initial bars whose event time is not strictly later update admitted
+  information but never provide a Phase 1 execution opportunity;
 - price is the deterministic quantized next-bar close proxy;
 - fee, modeled slippage, and modeled latency are zero;
 - no partial fills, cancellation, amendment, volume participation, stop/limit logic, calendar, or
@@ -379,7 +419,11 @@ Every handler is idempotent:
 - exact `OrderIntent` replay returns the original RiskDecision and is not re-risked against newer
   state;
 - exact approval replay returns the original Order and never consumes another sequence;
-- exact submission replay uses the same client key and never creates a second economic Order;
+- after any venue-call attempt, exact submission replay returns the persisted original outcome
+  with zero venue calls;
+- when no definitive outcome was durably recorded, recovery marks the existing request uncertain
+  and performs query/reconciliation only; the stable client key is correlation evidence, never
+  permission to resubmit;
 - fact deduplication uses source namespace plus immutable external fact ID or source sequence;
 - exact duplicate fact returns `fact.duplicate` without mutation;
 - exact duplicate Fill or ledger application returns its original no-op outcome;
@@ -410,7 +454,8 @@ On `submission.uncertain` the system:
    - `reconciliation.submission.still_unknown`.
 
 Confirmed-not-submitted may permit a new, explicit attempt only after a fresh intent, risk
-evaluation, Order, and pre-effect audit acknowledgement. It never triggers automatic retry.
+evaluation, Order, new client key, and pre-effect audit acknowledgement. The prior Order and key
+are never resubmitted. It never triggers automatic retry.
 Still-unknown leaves the run failed/incomplete with possible external exposure.
 
 A discovered real Fill is processed during `failing` and even when audit persistence is
@@ -465,14 +510,14 @@ Logic branches on closed versioned codes, never exception text. V1 reserves:
 
 | Family | Required codes |
 |---|---|
-| `validation.*` | `invalid_type`, `non_finite`, `out_of_range`, `not_quantized`, `conflicting_id` |
+| `validation.*` | `invalid_type`, `non_finite`, `out_of_range`, `not_quantized`, `price_domain`, `arithmetic_overflow`, `conflicting_id` |
 | `preflight.*` | `unsupported_platform`, `provenance_unverified`, `manifest_unverified` |
 | `durability.*` | `audit_append_failed`, `audit_ack_mismatch`, `result_write_failed` |
 | `risk.*` | `allowed`, `resized`, `rejected`, `evaluation_failed`, `stale_approval` |
 | `submission.*` | `submitted`, `definitely_not_submitted`, `uncertain`, `blocked_by_halt` |
 | `fact.*` | `accepted`, `duplicate`, `invalid`, `conflict`, `unresolved` |
 | `order.*` | `acknowledged`, `rejected`, `partially_filled`, `filled`, `expired`, `cancelled`, `expired.no_eligible_market_data` |
-| `ledger.*` | `applied`, `duplicate`, `conflict`, `unbalanced` |
+| `ledger.*` | `applied`, `duplicate`, `conflict`, `unbalanced`, `rounding_unrepresentable` |
 | `reconciliation.*` | the outcomes defined above plus the five `submission.*` resolutions |
 
 Every outcome carries its code, immutable subject identity, correlation/causation when known, and
@@ -504,9 +549,13 @@ This ADR cannot be treated as implemented until separate Issues provide all evid
 - resize with original/effective intent lineage;
 - reject and evaluation failure with zero OMS/venue calls;
 - next-bar-close Fill and end-of-run expiry;
+- post-order correction and pre-order late initial bar with no execution opportunity;
+- equal-availability multi-source market roots in exact ADR 0004 order;
 - execution fact before a market decision at equal `available_at`;
 - exact duplicate fact and Fill with no repeated mutation;
 - conflicting duplicate fail-closed;
+- submission replay after a definitive outcome and after missing outcome durability, both with zero
+  additional venue calls;
 - uncertain submission resolved as submitted, not submitted, filled, and still unknown;
 - complete external Fill with unresolved Order correlation; and
 - reconciliation match, stale, remote-ahead, and same-watermark mismatch.
@@ -531,10 +580,15 @@ This ADR cannot be treated as implemented until separate Issues provide all evid
 - every accepted Fill changes the ledger exactly once and postings balance;
 - independently ordered roots are permutation invariant;
 - replay is idempotent and conflicting duplicates fail;
+- after any venue-call attempt, replay and recovery never call submission again;
 - every price, quantity, and fee remains on its declared grid;
+- maximum coefficient products, signed-price policies, signed zero, overflow, half-tick ties, and
+  rounding residuals have stable outcomes independent of ambient Decimal context;
 - risk reject/evaluation failure cannot reach submission;
 - global halt prevents every new venue call;
-- an Order caused by a market root cannot Fill from that root; and
+- an Order caused by a market root cannot Fill from that root;
+- correction roots and bars with `event_time <= eligible_after_available_at` cannot provide a
+  Phase 1 execution opportunity; and
 - market, matcher, and strategy cannot observe future or unadmitted data.
 
 ### Cross-process and platform evidence
