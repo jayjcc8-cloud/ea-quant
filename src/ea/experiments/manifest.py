@@ -2,6 +2,19 @@
 
 from __future__ import annotations
 
+import json as json
+import re as re
+import struct as struct
+import unicodedata as unicodedata
+from collections.abc import Sequence as Sequence
+from dataclasses import dataclass as dataclass
+from datetime import UTC as UTC
+from datetime import datetime as datetime
+from enum import StrEnum as StrEnum
+from hashlib import sha256 as sha256
+from math import isfinite as isfinite
+from typing import NoReturn as NoReturn
+
 from ea.core.run import (
     DataFingerprint as DataFingerprint,
 )
@@ -88,7 +101,19 @@ from ea.experiments._manifest_model import (
     canonical_manifest_bytes as canonical_manifest_bytes,
 )
 
-_INCIDENTAL_CORE_COMPATIBILITY_OBJECTS = (
+_INCIDENTAL_COMPATIBILITY_OBJECTS = (
+    json,
+    re,
+    struct,
+    unicodedata,
+    Sequence,
+    dataclass,
+    UTC,
+    datetime,
+    StrEnum,
+    sha256,
+    isfinite,
+    NoReturn,
     DataFingerprint,
     ReplayWindow,
     RunContractError,

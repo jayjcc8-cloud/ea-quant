@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import pickle
-from dataclasses import FrozenInstanceError, replace
+import re
+import struct
+import unicodedata
+from collections.abc import Sequence
+from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from hashlib import sha256
+from math import isfinite
+from typing import NoReturn
 
 import pytest
 
@@ -202,6 +209,23 @@ def test_manifest_facade_preserves_public_object_identity_and_pickle_paths() -> 
     for name, value in expected.items():
         assert getattr(manifest_module, name) is value
         assert value.__module__ == "ea.experiments.manifest"
+
+    incidental_compatibility = {
+        "json": json,
+        "re": re,
+        "struct": struct,
+        "unicodedata": unicodedata,
+        "Sequence": Sequence,
+        "dataclass": dataclass,
+        "UTC": UTC,
+        "datetime": datetime,
+        "StrEnum": StrEnum,
+        "sha256": sha256,
+        "isfinite": isfinite,
+        "NoReturn": NoReturn,
+    }
+    for name, value in incidental_compatibility.items():
+        assert getattr(manifest_module, name) is value
 
     for value in (CodeEvidence("0" * 40), _manifest_model.ParameterKind.INTEGER):
         restored = pickle.loads(pickle.dumps(value))
