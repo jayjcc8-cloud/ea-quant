@@ -345,7 +345,7 @@ Position 也不能因为“可能成交”而被静默修改。
 ### Phase 1 入口门禁
 
 截至状态审查基线
-`main@1ef3dbb7f8682e3687e76408d66fcbe3b69d0c17`，入口门禁完成 4/5。项目版本的唯一事实源是
+`main@572a505da9b5eb1383521fd6a5e93d56d589b4f4`，入口门禁完成 4/5。项目版本的唯一事实源是
 `pyproject.toml`，该基线对应 `0.1.1`。
 
 - Issue #11 / ADR 0003（已完成）：shared runtime、dependency direction、composition root 和 mode profile contract。
@@ -353,6 +353,12 @@ Position 也不能因为“可能成交”而被静默修改。
 - Issue #13 / Accepted ADR 0005（已完成）：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
 - Issue #14 / Accepted ADR 0006（已完成）：reproducible run manifest、data fingerprint 和 audit/result lineage。
 - Issue #15（尚未激活）：execution/reconciliation 语义。
+- Issue #26（已完成）：统一 full verification 中的 86% line / 71% branch coverage floor，并移除
+  未使用的运行依赖。
+- Issue #28（已完成）：在保持 ADR 0006 public/wire contract 不变的前提下，分离 manifest
+  model、wire、codec 和 evidence 职责，并建立生产源码零 `type: ignore` 门禁。
+- 当前基线通过 406 项测试；historical runtime、execution、risk、portfolio、strategy 和
+  backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
