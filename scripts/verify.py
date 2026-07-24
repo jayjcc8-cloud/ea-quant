@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -37,12 +38,30 @@ class ProjectConfig:
 
     project_version: str
     required_uv_version: str
+    line_coverage_floor: int
+    branch_coverage_floor: int
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageTotals:
+    """Raw line and branch counts from one Coverage.py JSON report."""
+
+    covered_lines: int
+    num_statements: int
+    covered_branches: int
+    num_branches: int
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise VerificationError(f"{field} must be a TOML table")
     return cast(dict[str, object], value)
+
+
+def _coverage_floor(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+        raise VerificationError(f"{field} must be an integer from 0 through 100")
+    return value
 
 
 def load_project_config(path: Path = PYPROJECT_PATH) -> ProjectConfig:
@@ -64,9 +83,22 @@ def load_project_config(path: Path = PYPROJECT_PATH) -> ProjectConfig:
     if match is None:
         raise VerificationError("tool.uv.required-version must be an exact ==X.Y.Z pin")
 
+    ea = _mapping(tool.get("ea"), "tool.ea")
+    coverage = _mapping(ea.get("coverage"), "tool.ea.coverage")
+    line_coverage_floor = _coverage_floor(
+        coverage.get("line-fail-under"),
+        "tool.ea.coverage.line-fail-under",
+    )
+    branch_coverage_floor = _coverage_floor(
+        coverage.get("branch-fail-under"),
+        "tool.ea.coverage.branch-fail-under",
+    )
+
     return ProjectConfig(
         project_version=project_version,
         required_uv_version=match.group("version"),
+        line_coverage_floor=line_coverage_floor,
+        branch_coverage_floor=branch_coverage_floor,
     )
 
 
@@ -177,7 +209,76 @@ def verify_uv(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> None:
         )
 
 
-def verify_quality(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> None:
+def _coverage_count(totals: Mapping[str, object], field: str) -> int:
+    value = totals.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise VerificationError(f"coverage totals.{field} must be a non-negative integer")
+    return value
+
+
+def load_coverage_totals(path: Path) -> CoverageTotals:
+    """Load fail-closed raw line and branch counts from a Coverage.py JSON report."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            document = _mapping(json.load(handle), "coverage report")
+    except (OSError, json.JSONDecodeError) as error:
+        raise VerificationError(f"coverage report is unavailable or invalid: {path}") from error
+
+    totals = _mapping(document.get("totals"), "coverage report totals")
+    covered_lines = _coverage_count(totals, "covered_lines")
+    num_statements = _coverage_count(totals, "num_statements")
+    missing_lines = _coverage_count(totals, "missing_lines")
+    covered_branches = _coverage_count(totals, "covered_branches")
+    num_branches = _coverage_count(totals, "num_branches")
+    missing_branches = _coverage_count(totals, "missing_branches")
+
+    if num_statements == 0:
+        raise VerificationError("coverage report contains no measured statements")
+    if num_branches == 0:
+        raise VerificationError("coverage report contains no branch measurements")
+    if covered_lines > num_statements or covered_lines + missing_lines != num_statements:
+        raise VerificationError("coverage line totals are internally inconsistent")
+    if covered_branches > num_branches or covered_branches + missing_branches != num_branches:
+        raise VerificationError("coverage branch totals are internally inconsistent")
+
+    return CoverageTotals(
+        covered_lines=covered_lines,
+        num_statements=num_statements,
+        covered_branches=covered_branches,
+        num_branches=num_branches,
+    )
+
+
+def verify_coverage_report(path: Path, config: ProjectConfig) -> None:
+    """Enforce separate line and branch floors using raw integer totals."""
+    totals = load_coverage_totals(path)
+    line_numerator = totals.covered_lines * 100
+    branch_numerator = totals.covered_branches * 100
+    line_percentage = line_numerator / totals.num_statements
+    branch_percentage = branch_numerator / totals.num_branches
+    print(
+        "coverage floors: "
+        f"line {line_percentage:.2f}% >= {config.line_coverage_floor}%; "
+        f"branch {branch_percentage:.2f}% >= {config.branch_coverage_floor}%",
+        flush=True,
+    )
+    if line_numerator < config.line_coverage_floor * totals.num_statements:
+        raise VerificationError(
+            f"line coverage {line_percentage:.2f}% is below {config.line_coverage_floor}%"
+        )
+    if branch_numerator < config.branch_coverage_floor * totals.num_branches:
+        raise VerificationError(
+            f"branch coverage {branch_percentage:.2f}% is below {config.branch_coverage_floor}%"
+        )
+
+
+def verify_quality(
+    uv: str,
+    config: ProjectConfig,
+    env: Mapping[str, str],
+    *,
+    measure_coverage: bool = False,
+) -> None:
     """Run the locked environment, static analysis, test, and CLI quality gates."""
     verify_uv(uv, config, env)
     run([uv, "lock", "--check"], env=env)
@@ -204,7 +305,26 @@ def verify_quality(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> No
     run([uv, "run", "--locked", "ruff", "check", "."], env=env)
     run([uv, "run", "--locked", "ruff", "format", "--check", "."], env=env)
     run([uv, "run", "--locked", "mypy"], env=env)
-    run([uv, "run", "--locked", "pytest", "-q"], env=env)
+    if measure_coverage:
+        with tempfile.TemporaryDirectory(prefix="ea-coverage-") as temporary_directory:
+            coverage_report = Path(temporary_directory) / "coverage.json"
+            run(
+                [
+                    uv,
+                    "run",
+                    "--locked",
+                    "pytest",
+                    "-q",
+                    "--cov=ea",
+                    "--cov-branch",
+                    "--cov-report=term-missing",
+                    f"--cov-report=json:{coverage_report}",
+                ],
+                env=env,
+            )
+            verify_coverage_report(coverage_report, config)
+    else:
+        run([uv, "run", "--locked", "pytest", "-q"], env=env)
     run([uv, "run", "--locked", "ea", "doctor"], env=env)
 
 
@@ -231,7 +351,7 @@ def verify_wheel_metadata(wheel: Path) -> None:
 
 def verify_full(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> None:
     """Run quality plus reproducible-build and clean-wheel verification."""
-    verify_quality(uv, config, env)
+    verify_quality(uv, config, env, measure_coverage=True)
 
     source_date_epoch = run_capture(["git", "show", "-s", "--format=%ct", "HEAD"], env=env)
     if not source_date_epoch.isdecimal():
