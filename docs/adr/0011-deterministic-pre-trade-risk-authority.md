@@ -131,7 +131,7 @@ The field matrix is literal:
 |---|---:|---|---|---|
 | initial | `0` | `null` | both `null` | both `null` |
 | public halt | `1` | non-conflict reason | both present | both `null` |
-| identity-conflict halt | `1` | `intent_identity_conflict` | both present from submitted intent | both present and different |
+| identity-conflict halt | `1` | `intent_identity_conflict` | both present from submitted intent | both present; equality is permitted |
 
 `halted` is `False` only for the initial row and `True` for both halted rows. No other combination
 is constructible. The causal time is exact UTC with microsecond precision. Dispatch sequence is an
@@ -152,8 +152,14 @@ The public command rejects `intent_identity_conflict`. That reason is internal-o
 atomically by the identity-conflict evaluation path using:
 
 - the digest already bound to the occupied intent ID;
-- the different submitted intent digest; and
+- the submitted intent digest, which may equal the existing digest when distinct canonical bytes
+  collide under SHA-256; and
 - the submitted intent's causal-root time and dispatch sequence.
+
+The replay index retains the existing canonical intent bytes and digest. Conflict classification
+compares those authoritative bytes with the submitted canonical bytes before transition; digest
+equality never converts different bytes into an exact replay. Both digests remain mandatory
+conflict evidence even when they are equal.
 
 Passing the internal-only reason to the public command returns
 `RiskAuthorityError(OutcomeCode.OUT_OF_RANGE)` with no mutation. Wrong argument runtime types return
@@ -423,27 +429,32 @@ cardinality. The gate lifecycle is literal:
 1. Portfolio may emit at most one new intent in one serialized dispatch.
 2. Runtime acquires the instrument gate before first risk evaluation. An already-held gate means
    the new intent is not evaluated or assigned any risk ID.
-3. Exact risk replay reuses the existing gate and never acquires a second one.
+3. Exact risk replay leaves the current gate state unchanged. If the original path still holds the
+   gate, replay keeps it held; if a terminal original path already released it, replay does not
+   reacquire it.
 4. Risk reject releases the gate after its semantic outcome is routed.
 5. Risk evaluation failure or identity conflict retains the gate until the run's failing/halt
    transition is recorded; no later intent may be evaluated in that run.
 6. Allow/resize retains the gate through mandatory pre-effect audit and OMS handling.
 7. Audit failure or acknowledgement mismatch occurs before a venue call, retains the gate through
    the recorded run halt, and permits no later evaluation.
-8. `submission.definitely_not_submitted` releases the gate only after its terminal OMS outcome is
+8. Allow/resize followed by `submission.blocked_by_halt` retains the gate through the recorded
+   halt and permits no later intent evaluation in that run.
+9. `submission.definitely_not_submitted` releases the gate only after its terminal OMS outcome is
    recorded; a later intent, if the run is still allowed to continue, is a fresh intent/risk
    decision/order/client key.
-9. `submission.uncertain` retains the gate through query/reconciliation. Only
+10. `submission.uncertain` retains the gate through query/reconciliation. Only
    `confirmed_not_submitted` or `confirmed_rejected` can release it; `confirmed_filled` retains it
    until the discovered Fill is ledger-applied; `still_unknown` retains it through terminal run
    failure.
-10. In the Phase 1 historical matcher, submitted market Orders either full-fill on the first later
+11. In the Phase 1 historical matcher, submitted market Orders either full-fill on the first later
     eligible bar or expire only at end-of-run for no eligible data. Full fill releases the gate
     only after the canonical Fill is applied and the newer portfolio snapshot is published before
     strategy runs. End-of-run expiry needs no release usable by another intent.
-11. Duplicate fact, Fill, ledger, decision, approval, or terminal-outcome replay does not acquire
-    or release an additional gate.
-12. Any late real Fill is ordered before later market strategy work, is economically applied, and
+12. Duplicate fact, Fill, ledger, decision, approval, or terminal-outcome replay leaves the
+    current gate state unchanged: a held gate stays held and an already released gate is not
+    reacquired.
+13. Any late real Fill is ordered before later market strategy work, is economically applied, and
     engages the reconciliation/global halt path before another intent evaluation.
 
 These are executable profile constraints, not assumptions that disappear from evidence. Runtime
@@ -516,16 +527,27 @@ being re-risked while retaining a closed API.
 
 `RiskAuthorityError` is a `ValueError` carrying exactly one `OutcomeCode` from:
 
-- `invalid.type`;
-- `invalid.out_of_range`; or
-- `invalid.conflicting_id`.
+- `validation.invalid_type`;
+- `validation.out_of_range`;
+- `validation.not_quantized`; or
+- `validation.conflicting_id`.
 
 No other outcome code is constructible on this error. Exact-type violations map to
-`invalid.type`; invalid grammar, unsigned-range, canonical-decimal representability, or exhausted
-decision sequence maps to `invalid.out_of_range`; foreign run/spec identity and intent-ID byte
-collision map to `invalid.conflicting_id`. Expected codec/type/range exceptions from existing
-canonical helpers are translated into this closed set before leaving the authority. Programmer
-assertions are not domain outcomes and are not swallowed.
+`validation.invalid_type`; invalid grammar, unsigned-range, canonical-decimal representability,
+or exhausted decision sequence maps to `validation.out_of_range`; quantity-grid failure maps to
+`validation.not_quantized`; foreign run/spec identity and intent-ID byte collision map to
+`validation.conflicting_id`.
+
+The authority exhaustively translates subordinate helper outcomes before they cross its boundary:
+
+- `OutcomeCode.INVALID_TYPE` remains `OutcomeCode.INVALID_TYPE`;
+- `OutcomeCode.NOT_QUANTIZED` remains `OutcomeCode.NOT_QUANTIZED`;
+- `OutcomeCode.CONFLICTING_ID` remains `OutcomeCode.CONFLICTING_ID`; and
+- `OutcomeCode.OUT_OF_RANGE`, `OutcomeCode.NON_FINITE`, `OutcomeCode.PRICE_DOMAIN`, or
+  `OutcomeCode.ARITHMETIC_OVERFLOW` maps to `OutcomeCode.OUT_OF_RANGE`.
+
+No subordinate outcome outside those seven existing canonical validation codes is accepted.
+Programmer assertions are not domain outcomes and are not swallowed.
 
 After replay/conflict classification, a new identity follows this field-by-field matrix in row
 order. “Register failure” means allocate one decision ID, create
@@ -535,11 +557,11 @@ and no result is registered.
 
 | Check | Exact condition | Result | reason | IDs/state |
 |---|---|---|---|---|
-| intent run | intent run differs from authority run | structural error `conflicting_id` | none | no IDs/state |
-| intent spec-set identity | intent set ID/digest differs from bound set | structural error `conflicting_id` | none | no IDs/state |
-| intent specification | instrument absent or specification ID differs | structural error `conflicting_id` | none | no IDs/state |
-| intent canonical economics | quantity/type/grid is not valid under the bound spec | structural error from helper | none | no IDs/state |
-| decision sequence | `decision_next is None` | structural error `out_of_range` | none | no IDs/state |
+| intent run | intent run differs from authority run | structural error `validation.conflicting_id` | none | no IDs/state |
+| intent spec-set identity | intent set ID/digest differs from bound set | structural error `validation.conflicting_id` | none | no IDs/state |
+| intent specification | instrument absent or specification ID differs | structural error `validation.conflicting_id` | none | no IDs/state |
+| intent canonical economics | quantity/type/grid is not valid under the bound spec | structural error `validation.invalid_type`, `validation.out_of_range`, or `validation.not_quantized` under the exhaustive mapping above | none | no IDs/state |
+| decision sequence | `decision_next is None` | structural error `validation.out_of_range` | none | no IDs/state |
 | intent execution policy | ID or digest differs from bound execution policy | register failure | `lineage_mismatch` | decision only |
 | snapshot run | snapshot run differs from authority/intent run | register failure | `lineage_mismatch` | decision only |
 | snapshot spec set | snapshot set ID/digest differs from authority | register failure | `lineage_mismatch` | decision only |
@@ -690,22 +712,26 @@ backtest is accepted.
 ## Design-finding traceability
 
 - `ARCH45-DESIGN-001` / `RISK45-DESIGN-001`: resolved by the literal carrier, enum, JSON,
-  schema/canonicalization/domain, null, timestamp, nested-reference, result-carrier, and error
-  contracts.
+  schema/canonicalization/domain, null, timestamp, nested-reference, result-carrier, and exact
+  four-code structural-error contract with exhaustive subordinate-outcome mapping.
 - `ARCH45-DESIGN-002`: resolved by preserving existing `RiskDecision.outcome_code` as ADR 0008's
   decision-bound reason and defining `RiskReasonCode` as supplemental evidence without changing
   the v1 message digest.
 - `ARCH45-DESIGN-003` / `RISK45-DESIGN-003`: resolved by the integer-or-null next-sequence model
   and exact uint64-boundary transition table.
 - `ARCH45-DESIGN-004`: resolved by the halt field matrix, internal-only conflict transition,
-  public command identity, exact version transition, and repeat behavior.
-- `ARCH45-DESIGN-005`: resolved by the twelve-row per-instrument gate lifecycle assigned to
-  portfolio emission and runtime orchestration.
+  byte-authoritative collision handling with equal digests permitted, public command identity,
+  exact version transition, and repeat behavior.
+- `ARCH45-DESIGN-005`: resolved by the thirteen-row per-instrument gate lifecycle assigned to
+  portfolio emission and runtime orchestration, including gate-neutral replay and
+  `submission.blocked_by_halt`.
 - `RISK45-DESIGN-002`: resolved by the piecewise in-limit/out-of-limit property requirement.
 - `RISK45-DESIGN-004`: resolved by the ordered field-by-field mismatch matrix and closed
   `RiskAuthorityError` mapping.
 - `RISK45-DESIGN-005`: resolved by making exact `RiskEvaluationResult` the mandatory future OMS
   input and requiring decision/evidence/approval/policy/snapshot verification.
+- `RISK45-DESIGN-006`: resolved by using the existing `validation.*` `OutcomeCode` literals and
+  exhaustively mapping every subordinate helper outcome, including `validation.not_quantized`.
 
 ## Consequences
 
