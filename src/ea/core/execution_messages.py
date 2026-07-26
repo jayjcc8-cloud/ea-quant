@@ -2830,18 +2830,14 @@ def _preflight_order_types(document: dict[str, object]) -> None:
     _preflight_policy_types(document["execution_policy"])
 
 
-def _preflight_fact_payload_types(value: object, *, kind: str) -> None:
+def _preflight_fact_payload_types(value: object) -> None:
     _require_wire_type(value, dict, field_name="payload")
     payload = cast(dict[str, object], value)
     if "payload_type" not in payload:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "payload_type is missing")
     _require_wire_type(payload["payload_type"], str, field_name="payload_type")
-    if kind == ExecutionFactKind.TRADE.value:
-        payload = _require_wire_object(
-            payload,
-            _TRADE_PAYLOAD_WIRE_KEYS,
-            field_name="trade payload",
-        )
+    payload_keys = frozenset(payload)
+    if payload_keys == _TRADE_PAYLOAD_WIRE_KEYS:
         for field in (
             "instrument_spec_set_id",
             "instrument_spec_set_sha256",
@@ -2853,22 +2849,17 @@ def _preflight_fact_payload_types(value: object, *, kind: str) -> None:
         ):
             _require_wire_type(payload[field], str, field_name=field)
         _preflight_fees_types(payload["fees"])
-    elif kind == ExecutionFactKind.SUBMISSION_QUERY.value:
-        payload = _require_wire_object(
-            payload,
-            _SUBMISSION_QUERY_PAYLOAD_WIRE_KEYS,
-            field_name="submission query payload",
-        )
+    elif payload_keys in (
+        _LIFECYCLE_PAYLOAD_WIRE_KEYS,
+        _SUBMISSION_QUERY_PAYLOAD_WIRE_KEYS,
+    ):
         for field in ("outcome_code", "payload_type"):
             _require_wire_type(payload[field], str, field_name=field)
-    elif kind in {member.value for member in _LIFECYCLE_CODE_BY_KIND}:
-        payload = _require_wire_object(
-            payload,
-            _LIFECYCLE_PAYLOAD_WIRE_KEYS,
-            field_name="lifecycle payload",
+    else:
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE,
+            "fact payload has no declared key shape",
         )
-        for field in ("outcome_code", "payload_type"):
-            _require_wire_type(payload[field], str, field_name=field)
 
 
 def _preflight_fact_types(document: dict[str, object]) -> None:
@@ -2900,10 +2891,7 @@ def _preflight_fact_types(document: dict[str, object]) -> None:
         if identity is not None:
             _preflight_economic_id_types(identity, field_name=field)
     _preflight_provenance_types(document["provenance"])
-    _preflight_fact_payload_types(
-        document["payload"],
-        kind=cast(str, document["kind"]),
-    )
+    _preflight_fact_payload_types(document["payload"])
 
 
 def _preflight_ingress_types(

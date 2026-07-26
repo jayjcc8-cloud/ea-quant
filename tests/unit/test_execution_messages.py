@@ -1032,6 +1032,20 @@ def test_fact_nested_discriminators_require_exact_string_carriers() -> None:
         _assert_message_code(error, OutcomeCode.INVALID_TYPE)
 
 
+def test_unknown_fact_kind_does_not_skip_known_payload_carrier_preflight() -> None:
+    document = json.loads(canonical_execution_fact_bytes(_trade_fact()))
+    document["kind"] = "unknown_kind"
+    document["payload"]["fees"] = {}
+
+    with pytest.raises(ExecutionMessageError) as error:
+        decode_execution_fact(
+            _json_bytes(document),
+            context=IndependentFactDecodeContext(SPEC_SET),
+        )
+
+    _assert_message_code(error, OutcomeCode.INVALID_TYPE)
+
+
 def test_ingress_propagates_valid_envelope_missing_dedup_after_preflight() -> None:
     fact = _trade_fact()
     ingress = create_execution_fact_ingress(
