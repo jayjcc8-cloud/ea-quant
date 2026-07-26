@@ -16,9 +16,11 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
 - Git 与 GitHub SSH remote 已建立，主分支为 `main`。
 - Phase 0 已发布 `v0.1.0`；项目版本的唯一事实源是
   [`pyproject.toml`](pyproject.toml)，本次状态审查时为 `0.1.1`。
-- Phase 1 的入口门禁完成 4/5：Issue #11–#14 已完成，Issue #15 尚未激活。
+- Phase 1 的入口门禁完成 5/5：Issue #11–#15 均已完成，Issue #15 产出的
+  [Accepted ADR 0008](docs/adr/0008-deterministic-execution-and-reconciliation.md) 已冻结
+  deterministic execution、matching、ledger authority 和 reconciliation 语义。
 - 本次状态审查基线为
-  `main@572a505da9b5eb1383521fd6a5e93d56d589b4f4`；该提交已具备配置、market/time、
+  `main@f93fb89d8b3cab11f4a1dde8f5e95758aef1e914`；该提交已具备配置、market/time、
   run manifest、audit lineage、composition preparation、CLI、测试、VSCode 配置和 CI
   质量门禁。Issue #26 已建立 86% line / 71% branch coverage floor 并移除未使用的运行依赖；
   Issue #28 已将 manifest 的 model、wire、codec 和 evidence 职责分离，同时保持公开与 wire
@@ -54,7 +56,9 @@ src/ea/
 `strategy -> portfolio -> risk -> shared execution/OMS`，只替换 clock、feed、venue、audit、result
 等 adapters。已接受的运行契约见
 [ADR 0003](docs/adr/0003-shared-runtime-ports-and-adapters.md)，完整 ownership、mode matrix
-与生命周期见 [架构文档](docs/architecture.md)。
+与生命周期见 [架构文档](docs/architecture.md)；deterministic execution、matching、ledger
+和 reconciliation 契约见
+[Accepted ADR 0008](docs/adr/0008-deterministic-execution-and-reconciliation.md)。
 
 ## 阶段路线
 
