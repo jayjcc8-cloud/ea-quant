@@ -36,6 +36,17 @@ def test_execution_value_modules_keep_the_frozen_import_boundary() -> None:
                 "ea.core.run",
             }
         ),
+        "execution_messages.py": frozenset(
+            {
+                "ea.core.economics",
+                "ea.core.execution",
+                "ea.core.execution_identity",
+                "ea.core.identity",
+                "ea.core.outcomes",
+                "ea.core.run",
+                "ea.core.time",
+            }
+        ),
     }
 
     for filename, allowed in expected.items():

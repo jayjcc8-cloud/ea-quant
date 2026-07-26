@@ -344,7 +344,7 @@ Position 也不能因为“可能成交”而被静默修改。
 
 ### Phase 1 入口门禁
 
-截至状态审查基线
+Phase 1 入口门禁的历史状态审查基线为
 `main@f93fb89d8b3cab11f4a1dde8f5e95758aef1e914`，入口门禁完成 5/5。项目版本的唯一事实源是
 `pyproject.toml`，该基线对应 `0.1.1`。
 
@@ -358,8 +358,8 @@ Position 也不能因为“可能成交”而被静默修改。
   未使用的运行依赖。
 - Issue #28（已完成）：在保持 ADR 0006 public/wire contract 不变的前提下，分离 manifest
   model、wire、codec 和 evidence 职责，并建立生产源码零 `type: ignore` 门禁。
-- 当前基线通过 406 项测试；historical runtime、execution、risk、portfolio、strategy 和
-  backtest 仍未实现。
+- 当前开发已在该历史基线上继续推进；historical runtime、stateful risk/OMS、ledger、
+  reconciliation、portfolio、strategy 和 backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -368,7 +368,11 @@ Position 也不能因为“可能成交”而被静默修改。
   instrument specification set、exact notional 与 identity-bound settlement（已实现第一切片）。
 - dependency-neutral execution identity/outcome primitives：Accepted ADR 0008 完整 outcome
   registry、run-scoped owner ID、source-scoped fact dedup key、canonical bytes/digest 与纯
-  replay/conflict 分类（已实现；尚不包含 canonical messages、OMS 或 stateful registry）。
+  replay/conflict 分类（已实现）。
+- dependency-neutral canonical execution messages：factory-only immutable `OrderIntent ->
+  RiskDecision -> ExecutionApproval -> Order -> ExecutionFactIngress/ExecutionFact -> Fill`、
+  effective intent / execution request 投影、严格 reader、因果与 lineage 校验、确定性黄金向量
+  （已实现；尚不包含 stateful risk、OMS、ledger、reconciliation、matcher、adapter 或 registry）。
 - 本地 OHLCV 数据导入与质量检查。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。
