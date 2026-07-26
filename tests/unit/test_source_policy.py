@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import tokenize
 from pathlib import Path
 
@@ -16,3 +17,27 @@ def test_production_source_has_no_type_ignore_comments() -> None:
                     violations.append(f"{relative}:{token.start[0]}")
 
     assert violations == []
+
+
+def test_economic_core_modules_keep_the_frozen_import_boundary() -> None:
+    expected = {
+        "economics.py": frozenset(),
+        "execution.py": frozenset(
+            {
+                "ea.core.economics",
+                "ea.core.identity",
+                "ea.core.run",
+            }
+        ),
+    }
+
+    for filename, allowed in expected.items():
+        tree = ast.parse((SOURCE_ROOT / "core" / filename).read_text(encoding="utf-8"))
+        imported_ea_modules = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("ea.")
+        }
+        assert imported_ea_modules == allowed

@@ -364,6 +364,8 @@ Position 也不能因为“可能成交”而被静默修改。
 
 ### Phase 1：回测 MVP
 
+- dependency-neutral economic values：严格 canonical Decimal、grid/domain、versioned
+  instrument specification set、exact notional 与 identity-bound settlement（已实现第一切片）。
 - 本地 OHLCV 数据导入与质量检查。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。

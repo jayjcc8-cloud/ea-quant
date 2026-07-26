@@ -26,6 +26,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   Issue #28 已将 manifest 的 model、wire、codec 和 evidence 职责分离，同时保持公开与 wire
   契约不变。该基线通过 406 项测试，尚未实现 historical runtime、execution、risk、
   portfolio、strategy 或 backtest。
+- Phase 1 实现从 dependency-neutral economic values 开始：`ea.core.economics` 提供严格
+  `ea-decimal-v1`、exact grid 与唯一 settlement rounding boundary；`ea.core.execution`
+  提供 versioned instrument specification set、canonical bytes/digest 和 identity-bound
+  settlement。该切片不代表 OMS、ledger、risk 或 matcher 已实现。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -59,6 +63,11 @@ src/ea/
 与生命周期见 [架构文档](docs/architecture.md)；deterministic execution、matching、ledger
 和 reconciliation 契约见
 [Accepted ADR 0008](docs/adr/0008-deterministic-execution-and-reconciliation.md)。
+
+订单、数量、费用、现金、持仓、风险限制和账本金额不得使用 `float`。当前 economic value
+边界只接受 canonical decimal text，使用无界整数 coefficient/scale 完成精确乘法，并仅在
+currency quantum settlement 处执行一次 signed `ROUND_HALF_EVEN`。Instrument spec set
+使用封闭、版本化 JSON 和 domain-separated SHA-256；调用方不能提供或覆盖 digest。
 
 ## 阶段路线
 
