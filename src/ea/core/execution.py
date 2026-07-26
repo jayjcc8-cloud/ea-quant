@@ -323,6 +323,36 @@ def settle_execution(
     quantity: CanonicalDecimal,
 ) -> ExecutionSettlement:
     """Validate one instrument-bound economic event and settle it atomically."""
+    specification = validate_execution_inputs(
+        spec_set,
+        instrument,
+        price,
+        quantity,
+    )
+    scalar: ScalarSettlement = settle_product(
+        price,
+        quantity,
+        specification.contract_multiplier,
+        specification.currency_quantum,
+    )
+    return _execution_settlement(
+        instrument=specification.instrument,
+        specification_id=specification.specification_id,
+        instrument_spec_set_id=spec_set.identifier,
+        instrument_spec_set_sha256=instrument_spec_set_digest(spec_set),
+        settlement_currency=specification.settlement_currency,
+        amount=scalar.amount,
+        rounding_residual=scalar.rounding_residual,
+    )
+
+
+def validate_execution_inputs(
+    spec_set: InstrumentExecutionSpecSet,
+    instrument: Instrument,
+    price: CanonicalDecimal,
+    quantity: CanonicalDecimal,
+) -> InstrumentExecutionSpec:
+    """Validate execution lineage, grids, domain, and quantity without settlement."""
     if type(spec_set) is not InstrumentExecutionSpecSet:
         raise _fail(
             EconomicErrorCode.INVALID_TYPE,
@@ -340,18 +370,4 @@ def settle_execution(
     require_positive(quantity, field_name="quantity")
     require_quantized(price, specification.price_quantum, field_name="price")
     require_quantized(quantity, specification.quantity_quantum, field_name="quantity")
-    scalar: ScalarSettlement = settle_product(
-        price,
-        quantity,
-        specification.contract_multiplier,
-        specification.currency_quantum,
-    )
-    return _execution_settlement(
-        instrument=specification.instrument,
-        specification_id=specification.specification_id,
-        instrument_spec_set_id=spec_set.identifier,
-        instrument_spec_set_sha256=instrument_spec_set_digest(spec_set),
-        settlement_currency=specification.settlement_currency,
-        amount=scalar.amount,
-        rounding_residual=scalar.rounding_residual,
-    )
+    return specification
