@@ -474,8 +474,17 @@ def test_plan_is_non_empty_factory_only_and_rejects_bad_outer_carriers() -> None
 
 def test_large_sequences_sort_without_decimal_string_conversion() -> None:
     large = 10**4999
-    first = _timer(sequence=large, timer_id="large")
-    second = _timer(sequence=large + 1, timer_id="larger")
+    first = _timer(sequence=large, timer_id="same-timer")
+    second = _timer(sequence=large + 1, timer_id="same-timer")
+
+    first_key = runtime_root_order_key(first).as_tuple()
+    second_key = runtime_root_order_key(second).as_tuple()
+
+    assert first_key[:-1] == second_key[:-1]
+    assert first_key[-1] == large
+    assert second_key[-1] == large + 1
+    assert type(first_key[-1]) is int
+    assert type(second_key[-1]) is int
 
     plan = prepare_bounded_runtime_roots((second, first))
 
