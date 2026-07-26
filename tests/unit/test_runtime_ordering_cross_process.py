@@ -50,7 +50,10 @@ decimal_context.rounding = {
 }[os.environ["DECIMAL_ROUNDING"]]
 assert decimal_context.prec == int(os.environ["DECIMAL_PRECISION"])
 assert decimal_context.rounding == os.environ["DECIMAL_ROUNDING"]
-assert locale.setlocale(locale.LC_ALL, "") == os.environ["EXPECTED_LOCALE"]
+assert (
+    locale.setlocale(locale.LC_ALL, os.environ["RUNTIME_LOCALE"])
+    == os.environ["EXPECTED_LOCALE"]
+)
 assert Path.cwd().name == os.environ["EXPECTED_CWD_NAME"]
 time = datetime(2026, 1, 2, 9, 31, tzinfo=UTC)
 source = SourceNamespace("sim.primary")
@@ -156,6 +159,42 @@ for root in plan.roots:
 print(json.dumps(labels, separators=(",", ":")))
 """
 
+LOCALE_PROBE = r"""
+import locale
+import os
+
+print(locale.setlocale(locale.LC_ALL, os.environ["RUNTIME_LOCALE"]))
+"""
+
+
+def _normalized_locale(locale_name: str) -> str | None:
+    environment = os.environ.copy()
+    environment["RUNTIME_LOCALE"] = locale_name
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", LOCALE_PROBE],
+        env=environment,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.decode().strip()
+
+
+def _alternate_locale(baseline: str) -> tuple[str, str] | None:
+    for candidate in (
+        "",
+        "C.UTF-8",
+        "C.utf8",
+        "en_US.UTF-8",
+        "en_US.utf8",
+        "English_United States.1252",
+    ):
+        normalized = _normalized_locale(candidate)
+        if normalized is not None and normalized != baseline:
+            return candidate, normalized
+    return None
+
 
 def _run(
     working_directory: Path,
@@ -163,6 +202,7 @@ def _run(
     seed: str,
     timezone: str,
     locale_name: str,
+    expected_locale: str,
     decimal_precision: int,
     decimal_rounding: str,
     root_order: str,
@@ -174,9 +214,8 @@ def _run(
         {
             "PYTHONHASHSEED": seed,
             "TZ": timezone,
-            "LC_ALL": locale_name,
-            "LANG": locale_name,
-            "EXPECTED_LOCALE": locale_name,
+            "RUNTIME_LOCALE": locale_name,
+            "EXPECTED_LOCALE": expected_locale,
             "EXPECTED_CWD_NAME": working_directory.name,
             "DECIMAL_PRECISION": str(decimal_precision),
             "DECIMAL_ROUNDING": decimal_rounding,
@@ -192,11 +231,17 @@ def _run(
 
 
 def test_runtime_order_trace_is_cross_process_invariant(tmp_path: Path) -> None:
+    baseline_locale = _normalized_locale("C")
+    assert baseline_locale is not None
+    alternate_locale = _alternate_locale(baseline_locale)
+    varied_locale_name, varied_locale = alternate_locale or ("C", baseline_locale)
+
     expected = _run(
         tmp_path / "forward-cwd",
         seed="1",
         timezone="UTC",
         locale_name="C",
+        expected_locale=baseline_locale,
         decimal_precision=7,
         decimal_rounding="ROUND_DOWN",
         root_order="forward",
@@ -208,7 +253,8 @@ def test_runtime_order_trace_is_cross_process_invariant(tmp_path: Path) -> None:
             tmp_path / "reverse-cwd",
             seed="987654",
             timezone="Asia/Shanghai",
-            locale_name="C.UTF-8",
+            locale_name=varied_locale_name,
+            expected_locale=varied_locale,
             decimal_precision=41,
             decimal_rounding="ROUND_HALF_EVEN",
             root_order="reverse",
@@ -222,6 +268,7 @@ def test_runtime_order_trace_is_cross_process_invariant(tmp_path: Path) -> None:
             seed="0",
             timezone="America/New_York",
             locale_name="C",
+            expected_locale=baseline_locale,
             decimal_precision=19,
             decimal_rounding="ROUND_HALF_EVEN",
             root_order="rotate",
