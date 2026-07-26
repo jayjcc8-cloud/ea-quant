@@ -636,6 +636,30 @@ def test_decision_and_approval_exhaustion_follow_literal_transitions() -> None:
     assert result.evidence.approval_next_after is None
 
 
+def test_unrepresentable_side_capacity_registers_arithmetic_failure_without_approval() -> None:
+    spec_set = _spec_set()
+    maximum = "99999999999999999999"
+    authority = _authority(
+        spec_set,
+        _policy(spec_set, _limit(order="1", position=maximum)),
+    )
+
+    result = authority.evaluate(
+        _intent(
+            spec_set,
+            quantity="1",
+            snapshot_version=1,
+        ),
+        _snapshot(spec_set, position=f"-{maximum}"),
+    )
+
+    assert result.decision.kind is RiskDecisionKind.EVALUATION_FAILED
+    assert result.evidence.reason_code is RiskReasonCode.ARITHMETIC_FAILURE
+    assert result.decision.approval is None
+    assert result.evidence.approval_next_before == 1
+    assert result.evidence.approval_next_after == 1
+
+
 def test_structural_intent_errors_consume_no_ids_or_state() -> None:
     spec_set = _spec_set(_spec(quantity_quantum="1"))
     authority = _authority(spec_set, _policy(spec_set, _limit()))
