@@ -458,6 +458,13 @@ The closed `LedgerFailureStage` and result mapping are:
 | next rounding balance unrepresentable | outcome `ledger.rounding_unrepresentable` | `rounding_balance_overflow` | none |
 | any commodity sum is non-zero | outcome `ledger.unbalanced` | `commodity_unbalanced` | none |
 
+The table order is normative evaluation precedence: conditions are evaluated from top to bottom,
+and the first applicable row is the only returned failure. Candidate construction MUST therefore
+check cash balance, then position balance, then rounding balance, and only then commodity balance,
+even when more than one later condition would also be true. No implementation may select a
+failure by mapping order, exception timing, or whichever candidate value it happens to construct
+first.
+
 The exact allowed outcome-code set is:
 
 - `ledger.applied`;
