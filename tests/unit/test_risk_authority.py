@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -291,6 +292,60 @@ def test_policy_rejects_duplicate_absent_and_non_quantized_limits() -> None:
     with pytest.raises(RiskContractError) as grid_error:
         _policy(spec_set, _limit(order="1.1", position="2"))
     assert grid_error.value.code is OutcomeCode.NOT_QUANTIZED
+
+
+def test_risk_value_factories_reject_wrong_exact_boundary_types() -> None:
+    spec_set = _spec_set()
+    valid_limit = _limit()
+    with pytest.raises(TypeError, match="permitted OutcomeCode"):
+        RiskContractError(OutcomeCode.RISK_ALLOWED, "wrong family")
+    with pytest.raises(RiskContractError) as instrument_error:
+        InstrumentRiskLimit(
+            instrument=cast(Instrument, "XNAS:AAPL"),
+            maximum_order_quantity=CanonicalDecimal("1"),
+            maximum_absolute_position=CanonicalDecimal("1"),
+        )
+    assert instrument_error.value.code is OutcomeCode.INVALID_TYPE
+
+    invalid_calls: tuple[Callable[[], Phase1RiskPolicy], ...] = (
+        lambda: create_phase1_risk_policy(
+            policy_id=cast(RiskPolicyId, "phase1.risk.v1"),
+            spec_set=spec_set,
+            execution_policy=EXECUTION_POLICY,
+            instrument_limits=(valid_limit,),
+        ),
+        lambda: create_phase1_risk_policy(
+            policy_id=RiskPolicyId("phase1.risk.v1"),
+            spec_set=cast(InstrumentExecutionSpecSet, None),
+            execution_policy=EXECUTION_POLICY,
+            instrument_limits=(valid_limit,),
+        ),
+        lambda: create_phase1_risk_policy(
+            policy_id=RiskPolicyId("phase1.risk.v1"),
+            spec_set=spec_set,
+            execution_policy=cast(ExecutionPolicyRef, None),
+            instrument_limits=(valid_limit,),
+        ),
+        lambda: create_phase1_risk_policy(
+            policy_id=RiskPolicyId("phase1.risk.v1"),
+            spec_set=spec_set,
+            execution_policy=EXECUTION_POLICY,
+            instrument_limits=cast(tuple[InstrumentRiskLimit, ...], None),
+        ),
+        lambda: create_phase1_risk_policy(
+            policy_id=RiskPolicyId("phase1.risk.v1"),
+            spec_set=spec_set,
+            execution_policy=EXECUTION_POLICY,
+            instrument_limits=cast(
+                tuple[InstrumentRiskLimit, ...],
+                ("not-a-limit",),
+            ),
+        ),
+    )
+    for invalid_call in invalid_calls:
+        with pytest.raises(RiskContractError) as error:
+            invalid_call()
+        assert error.value.code is OutcomeCode.INVALID_TYPE
 
 
 def test_factory_creates_exact_version_zero_state_and_protected_surface() -> None:
@@ -586,6 +641,13 @@ def test_public_halt_validates_command_and_never_rewrites_first_cause() -> None:
     with pytest.raises(RiskAuthorityError) as wrong_type:
         authority.engage_halt(cast(RiskHaltReason, "kill_switch"), TIME, 1)
     _assert_error(wrong_type, OutcomeCode.INVALID_TYPE)
+    with pytest.raises(RiskAuthorityError) as wrong_time_type:
+        authority.engage_halt(
+            RiskHaltReason.KILL_SWITCH,
+            cast(datetime, "2026-01-02T09:31:00Z"),
+            1,
+        )
+    _assert_error(wrong_time_type, OutcomeCode.INVALID_TYPE)
     with pytest.raises(RiskAuthorityError) as non_utc:
         authority.engage_halt(RiskHaltReason.KILL_SWITCH, datetime(2026, 1, 1), 1)
     _assert_error(non_utc, OutcomeCode.OUT_OF_RANGE)
@@ -725,3 +787,21 @@ def test_authority_factory_rejects_conflicting_bindings() -> None:
     with pytest.raises(RiskAuthorityError) as currency_error:
         _authority(conflicting_quanta, conflicting_policy)
     _assert_error(currency_error, OutcomeCode.CONFLICTING_ID)
+
+
+def test_authority_public_boundary_rejects_wrong_exact_types() -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    snapshot = _snapshot(spec_set)
+    with pytest.raises(TypeError, match="permitted OutcomeCode"):
+        RiskAuthorityError(OutcomeCode.RISK_ALLOWED, "wrong family")
+    with pytest.raises(RiskAuthorityError) as intent_type:
+        authority.evaluate(cast(OrderIntent, None), snapshot)
+    _assert_error(intent_type, OutcomeCode.INVALID_TYPE)
+    with pytest.raises(RiskAuthorityError) as snapshot_type:
+        authority.evaluate(_intent(spec_set), cast(PortfolioSnapshot, None))
+    _assert_error(snapshot_type, OutcomeCode.INVALID_TYPE)
+    forged = _replace_intent(_intent(spec_set), intent_id="portfolio.intent:1")
+    with pytest.raises(RiskAuthorityError) as intent_id_type:
+        authority.evaluate(forged, snapshot)
+    _assert_error(intent_id_type, OutcomeCode.INVALID_TYPE)
