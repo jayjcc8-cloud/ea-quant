@@ -19,21 +19,24 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
 - Phase 1 的入口门禁完成 5/5：Issue #11–#15 均已完成，Issue #15 产出的
   [Accepted ADR 0008](docs/adr/0008-deterministic-execution-and-reconciliation.md) 已冻结
   deterministic execution、matching、ledger authority 和 reconciliation 语义。
-- 本次状态审查基线为
+- Phase 1 入口门禁的历史状态审查基线为
   `main@f93fb89d8b3cab11f4a1dde8f5e95758aef1e914`；该提交已具备配置、market/time、
   run manifest、audit lineage、composition preparation、CLI、测试、VSCode 配置和 CI
   质量门禁。Issue #26 已建立 86% line / 71% branch coverage floor 并移除未使用的运行依赖；
   Issue #28 已将 manifest 的 model、wire、codec 和 evidence 职责分离，同时保持公开与 wire
-  契约不变。该基线通过 406 项测试，尚未实现 historical runtime、execution、risk、
-  portfolio、strategy 或 backtest。
+  契约不变。当前开发已在该历史基线上继续推进；尚未实现 historical runtime、stateful
+  risk/OMS、ledger、reconciliation、portfolio、strategy 或 backtest。
 - Phase 1 实现从 dependency-neutral economic values 开始：`ea.core.economics` 提供严格
   `ea-decimal-v1`、exact grid 与唯一 settlement rounding boundary；`ea.core.execution`
   提供 versioned instrument specification set、canonical bytes/digest 和 identity-bound
   settlement。该切片不代表 OMS、ledger、risk 或 matcher 已实现。
 - `ea.core.outcomes` 提供 Accepted ADR 0008 的完整封闭 outcome registry；
   `ea.core.execution_identity` 提供 run-scoped owner ID、source-scoped fact dedup key、
-  canonical bytes/digest 与纯 replay/conflict 分类。该切片不包含 `OrderIntent`、`Order`、
-  `ExecutionFact`、`Fill`、状态机或持久化 registry。
+  canonical bytes/digest 与纯 replay/conflict 分类。`ea.core.execution_messages` 在同一无依赖
+  边界上提供 factory-only immutable `OrderIntent -> RiskDecision -> ExecutionApproval ->
+  Order -> ExecutionFactIngress/ExecutionFact -> Fill` 消息、effective intent / execution
+  request 投影、严格 canonical codec、因果链、spec/policy lineage 与黄金向量。该切片不包含
+  stateful risk、OMS、ledger、reconciliation、matcher、venue adapter 或持久化 registry。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -188,7 +191,7 @@ issuer seal 或 publisher），登记 exact process-local object identity 后才
 session。Preparation 强制消费该 session，从中取得不可由 caller 改写的 repository/commit，
 再重新采集
 Git/runtime/lock evidence，把同一个 `MarketDataSelection` 的 window、events 与重算 fingerprint
-绑定到 lineage并持久化 manifest。首条 mandatory audit acknowledgement 返回后，它才把 exact
+绑定到 lineage 并持久化 manifest。首条 mandatory audit acknowledgement 返回后，它才把 exact
 event tuple、`RunReference`、lineage-bound RNG 与 numeric capability 交给 feed/runtime。
 直接导入 composition、调用底层 manifest builder 或 result store 都不能形成 reproducibility
 claim。
