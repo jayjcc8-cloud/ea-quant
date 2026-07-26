@@ -37,6 +37,11 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   Order -> ExecutionFactIngress/ExecutionFact -> Fill` 消息、effective intent / execution
   request 投影、严格 canonical codec、因果链、spec/policy lineage 与黄金向量。该切片不包含
   stateful risk、OMS、ledger、reconciliation、matcher、venue adapter 或持久化 registry。
+- `ea.core.runtime` 与 `ea.runtime` 已按
+  [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md) 建立 safety、execution
+  fact、market、timer、end-of-run 的全局 root key、完整有界计划验证和不可插入的单消费者顺序
+  queue；reconciliation rank 仅保留词汇，不存在 opaque placeholder。该切片尚不是 lifecycle
+  coordinator，也不包含 dispatch ID、audit gate、stage callback、feed 或 matcher。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -69,7 +74,9 @@ src/ea/
 [ADR 0003](docs/adr/0003-shared-runtime-ports-and-adapters.md)，完整 ownership、mode matrix
 与生命周期见 [架构文档](docs/architecture.md)；deterministic execution、matching、ledger
 和 reconciliation 契约见
-[Accepted ADR 0008](docs/adr/0008-deterministic-execution-and-reconciliation.md)。
+[Accepted ADR 0008](docs/adr/0008-deterministic-execution-and-reconciliation.md)；root safety
+suffix、sequence authority、factory-only plan 与错误映射的实现澄清见
+[Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md)。
 
 订单、数量、费用、现金、持仓、风险限制和账本金额不得使用 `float`。当前 economic value
 边界只接受 canonical decimal text，使用无界整数 coefficient/scale 完成精确乘法，并仅在
