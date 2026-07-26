@@ -743,6 +743,164 @@ def test_complete_message_family_has_frozen_golden_vectors() -> None:
         assert domain_digest.value == expected_domain_digest
 
 
+def test_all_risk_fact_and_dedup_variants_have_frozen_golden_vectors() -> None:
+    intent = _intent()
+    resize = resize_order_intent(
+        decision_id=_id(EconomicOwnerKind.RISK_DECISION, 8),
+        approval_id=_id(EconomicOwnerKind.RISK_APPROVAL, 9),
+        intent=intent,
+        approved_quantity=CanonicalDecimal("7"),
+        spec_set=SPEC_SET,
+        risk_state_version=12,
+    )
+    reject = reject_order_intent(
+        decision_id=_id(EconomicOwnerKind.RISK_DECISION, 10),
+        intent=intent,
+        spec_set=SPEC_SET,
+        risk_state_version=13,
+    )
+    failed = fail_order_intent_evaluation(
+        decision_id=_id(EconomicOwnerKind.RISK_DECISION, 11),
+        intent=intent,
+        spec_set=SPEC_SET,
+        risk_state_version=14,
+    )
+    assert resize.approval is not None
+
+    lifecycle_facts = {
+        kind.value: create_lifecycle_execution_fact(
+            kind=kind,
+            source_namespace=SOURCE,
+            dedup_identity=ExternalFactId(f"golden-{kind.value}"),
+            occurred_at=CAUSAL_TIME,
+            provenance=PROVENANCE,
+        )
+        for kind in (
+            ExecutionFactKind.ACKNOWLEDGEMENT,
+            ExecutionFactKind.REJECTION,
+            ExecutionFactKind.EXPIRY,
+            ExecutionFactKind.CANCELLATION,
+        )
+    }
+    order = _order()
+    query = create_submission_query_execution_fact(
+        source_namespace=SOURCE,
+        dedup_identity=ExternalFactId("query-golden"),
+        occurred_at=CAUSAL_TIME,
+        provenance=PROVENANCE,
+        outcome_code=OutcomeCode.RECONCILIATION_SUBMISSION_CONFIRMED_SUBMITTED,
+        subject_order=order,
+        venue_order_id=VenueOrderId("venue-order-7"),
+    )
+    native_trade = create_trade_execution_fact(
+        source_namespace=SOURCE,
+        dedup_identity=SourceNativeSequence(42),
+        occurred_at=CAUSAL_TIME + timedelta(minutes=1),
+        provenance=PROVENANCE,
+        spec_set=SPEC_SET,
+        instrument=INSTRUMENT,
+        side=OrderSide.BUY,
+        quantity=CanonicalDecimal("10"),
+        price=CanonicalDecimal("101.25"),
+        client_submission_key=order.client_submission_key,
+        venue_order_id=VenueOrderId("venue-order-7"),
+        order_id=order.order_id,
+        correlation_id=order.correlation_id,
+        causation_id=order.order_id,
+    )
+    vectors = {
+        "risk_resize": (
+            canonical_risk_decision_bytes(resize),
+            risk_decision_digest(resize),
+        ),
+        "risk_reject": (
+            canonical_risk_decision_bytes(reject),
+            risk_decision_digest(reject),
+        ),
+        "risk_failed": (
+            canonical_risk_decision_bytes(failed),
+            risk_decision_digest(failed),
+        ),
+        "resize_approval": (
+            canonical_execution_approval_bytes(resize.approval),
+            execution_approval_digest(resize.approval),
+        ),
+        **{
+            f"fact_{name}": (
+                canonical_execution_fact_bytes(fact),
+                execution_fact_digest(fact),
+            )
+            for name, fact in lifecycle_facts.items()
+        },
+        "fact_submission_query": (
+            canonical_execution_fact_bytes(query),
+            execution_fact_digest(query),
+        ),
+        "fact_source_native_trade": (
+            canonical_execution_fact_bytes(native_trade),
+            execution_fact_digest(native_trade),
+        ),
+    }
+    expected = {
+        "risk_resize": (
+            2050,
+            "b291d4433cbb6a1ea38802facd314f7cb42b31c1bb42bc89ae460b4372f55550",
+            "3dec4771ec147de4499c1bd14d877095a641a69a9fd2d0dfee0ae8db3c78f3be",
+        ),
+        "risk_reject": (
+            935,
+            "7d45c2406225a768617800e4566dabe61394463f1f0e6ab2932ac0ddafaba336",
+            "3b343e93f769d0be1375d799057836ded69d4162159ba4bbe7b429512a6cce71",
+        ),
+        "risk_failed": (
+            955,
+            "87983a825f0e012a6dba809b4215118446339e399a095c135747cbe4ba12081a",
+            "224a9aed82d61fe4d406898d185d0bb5ac9497c46a6e4dff74de38a1b68836d4",
+        ),
+        "resize_approval": (
+            1060,
+            "f5f6c34769d264cf6e7b27dea50150ed7403baf8c45d9292f58b18861994e116",
+            "e6f1edd9ee033601a538780d127321bad1c7eb89f2cd2888337b5e4643bf3916",
+        ),
+        "fact_acknowledgement": (
+            696,
+            "63783d54574ccef063308dccba3f02b0928a2ccf9c4e222b52251e9079d87027",
+            "a75cb64f46044ca155c41e1331603d9932402ee1d926ad3889385cc7a8ba2826",
+        ),
+        "fact_rejection": (
+            680,
+            "f39bca75eb09473c7507d970f7c7b59543e556534238a9728b66e513ef77dbf3",
+            "a2db519a16266efd5b45b82f66ad03216ab2fc749b1c95e9f73991fac07ec492",
+        ),
+        "fact_expiry": (
+            673,
+            "d34014cf289d8a4a2b2e1fa3be97345d5b591c28dc1b806653bbf091c10fda5a",
+            "99f0a09bf122a740dec4010faebbc3f3276708461ea91cede75ac8047ab69f0d",
+        ),
+        "fact_cancellation": (
+            687,
+            "0e045a394c81ad2090d5161d8c27b362d323bd4ad942cb1a3c64246341a5432c",
+            "a36c0fe37f06c3a91f09ab3441980aae8c979580be576aa2e8ed34f8ebfdcace",
+        ),
+        "fact_submission_query": (
+            1107,
+            "6006962fabf38a998401401456e9eab2a216902f58d8f6fbf557d136d4582a07",
+            "41acf0020dd1b80f0817a4ae4493a3270b05a7f72fbcd2296921aa3300def0a9",
+        ),
+        "fact_source_native_trade": (
+            1322,
+            "5038865146866e186d7d222af346c44dbf70ed1cc56ee198c77ca56c35568058",
+            "083871b3990cbc9bc8f982121c9814af7784b87b311803f495ba50e4ddd8184c",
+        ),
+    }
+
+    for name, (payload, domain_digest) in vectors.items():
+        expected_length, expected_wire_sha, expected_domain_digest = expected[name]
+        assert len(payload) == expected_length
+        assert hashlib.sha256(payload).hexdigest() == expected_wire_sha
+        assert domain_digest.value == expected_domain_digest
+
+
 def test_submission_query_reader_requires_exact_order_context() -> None:
     order = _order()
     fact = create_submission_query_execution_fact(
@@ -800,6 +958,101 @@ def test_fact_reader_missing_identity_precedence_is_reachable() -> None:
             context=IndependentFactDecodeContext(SPEC_SET),
         )
     _assert_message_code(unknown, OutcomeCode.OUT_OF_RANGE)
+
+
+def test_fact_envelope_precedes_missing_dedup_identity() -> None:
+    document = json.loads(canonical_execution_fact_bytes(_trade_fact()))
+    document.pop("dedup_identity")
+    document["schema_version"] = 2
+
+    with pytest.raises(ExecutionMessageError) as error:
+        decode_execution_fact(
+            _json_bytes(document),
+            context=IndependentFactDecodeContext(SPEC_SET),
+        )
+
+    _assert_message_code(error, OutcomeCode.OUT_OF_RANGE)
+
+
+def test_all_nested_carrier_types_precede_earlier_grammar_failures() -> None:
+    document = json.loads(canonical_order_intent_bytes(_intent()))
+    document["run_id"] = "not-a-run-id"
+    document["intent_id"] = []
+
+    with pytest.raises(ExecutionMessageError) as error:
+        decode_order_intent(
+            _json_bytes(document),
+            spec_set=SPEC_SET,
+            target_lineage=TARGET,
+            execution_policy=POLICY,
+        )
+
+    _assert_message_code(error, OutcomeCode.INVALID_TYPE)
+
+
+def test_fact_nested_discriminators_require_exact_string_carriers() -> None:
+    trade_dedup = json.loads(canonical_execution_fact_bytes(_trade_fact()))
+    trade_dedup["dedup_identity"]["kind"] = 1
+    trade_payload = json.loads(canonical_execution_fact_bytes(_trade_fact()))
+    trade_payload["payload"]["payload_type"] = 1
+
+    lifecycle_fact = create_lifecycle_execution_fact(
+        kind=ExecutionFactKind.ACKNOWLEDGEMENT,
+        source_namespace=SOURCE,
+        dedup_identity=ExternalFactId("ack-1"),
+        occurred_at=CAUSAL_TIME,
+        provenance=PROVENANCE,
+    )
+    lifecycle = json.loads(canonical_execution_fact_bytes(lifecycle_fact))
+    lifecycle["payload"]["payload_type"] = 1
+
+    order = _order()
+    query_fact = create_submission_query_execution_fact(
+        source_namespace=SOURCE,
+        dedup_identity=ExternalFactId("query-1"),
+        occurred_at=CAUSAL_TIME,
+        provenance=PROVENANCE,
+        outcome_code=OutcomeCode.RECONCILIATION_SUBMISSION_STILL_UNKNOWN,
+        subject_order=order,
+    )
+    query = json.loads(canonical_execution_fact_bytes(query_fact))
+    query["payload"]["payload_type"] = 1
+
+    for document, context in (
+        (trade_dedup, IndependentFactDecodeContext(SPEC_SET)),
+        (trade_payload, IndependentFactDecodeContext(SPEC_SET)),
+        (lifecycle, IndependentFactDecodeContext(SPEC_SET)),
+        (query, SubmissionQueryFactDecodeContext(SPEC_SET, order)),
+    ):
+        with pytest.raises(ExecutionMessageError) as error:
+            decode_execution_fact(
+                _json_bytes(document),
+                context=context,
+            )
+        _assert_message_code(error, OutcomeCode.INVALID_TYPE)
+
+
+def test_ingress_propagates_valid_envelope_missing_dedup_after_preflight() -> None:
+    fact = _trade_fact()
+    ingress = create_execution_fact_ingress(
+        available_at=fact.occurred_at,
+        source_namespace=SOURCE,
+        ingress_sequence=1,
+        fact=fact,
+    )
+    document = json.loads(canonical_execution_fact_ingress_bytes(ingress))
+    document["fact"].pop("dedup_identity")
+
+    with pytest.raises(ExecutionMessageError) as error:
+        decode_execution_fact_ingress(
+            _json_bytes(document),
+            context=IndependentFactDecodeContext(SPEC_SET),
+        )
+
+    _assert_message_code(
+        error,
+        OutcomeCode.FACT_INVALID_MISSING_DEDUP_IDENTITY,
+    )
 
 
 def test_strict_readers_reject_duplicate_unknown_and_noncanonical_wire() -> None:

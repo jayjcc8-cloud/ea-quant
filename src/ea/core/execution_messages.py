@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
-from typing import NoReturn, final
+from typing import NoReturn, cast, final
 
 from ea.core.economics import (
     CanonicalDecimal,
@@ -2100,7 +2100,7 @@ def _decode_json(payload: bytes) -> dict[str, object]:
     return decoded
 
 
-def _require_keys(
+def _require_envelope(
     document: dict[str, object],
     expected: frozenset[str],
     *,
@@ -2110,15 +2110,34 @@ def _require_keys(
     unknown = set(document).difference(expected)
     if unknown:
         raise _fail(OutcomeCode.OUT_OF_RANGE, f"unknown message fields: {sorted(unknown)!r}")
-    missing = expected.difference(document)
-    if missing:
-        raise _fail(OutcomeCode.OUT_OF_RANGE, f"missing message fields: {sorted(missing)!r}")
     if (
-        document.get("message_type") != message_type
+        not {"message_type", "canonicalization", "schema_version"}.issubset(document)
+        or type(document.get("message_type")) is not str
+        or type(document.get("canonicalization")) is not str
+        or type(document.get("schema_version")) is not int
+        or document.get("message_type") != message_type
         or document.get("canonicalization") != canonicalization
         or document.get("schema_version") != MESSAGE_SCHEMA_VERSION
     ):
         raise _fail(OutcomeCode.OUT_OF_RANGE, "message envelope is not the declared version")
+
+
+def _require_keys(
+    document: dict[str, object],
+    expected: frozenset[str],
+    *,
+    message_type: str,
+    canonicalization: str,
+) -> None:
+    _require_envelope(
+        document,
+        expected,
+        message_type=message_type,
+        canonicalization=canonicalization,
+    )
+    missing = expected.difference(document)
+    if missing:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"missing message fields: {sorted(missing)!r}")
 
 
 def _require_round_trip(
@@ -2497,6 +2516,449 @@ _FILL_KEYS = frozenset(
     }
 )
 
+_ECONOMIC_ID_WIRE_KEYS = frozenset({"owner_kind", "owner_sequence", "run_id"})
+_INSTRUMENT_WIRE_KEYS = frozenset({"symbol", "venue"})
+_TARGET_LINEAGE_WIRE_KEYS = frozenset({"target_id", "target_sha256"})
+_POLICY_WIRE_KEYS = frozenset({"execution_policy_id", "execution_policy_sha256"})
+_PROVENANCE_WIRE_KEYS = frozenset({"provenance_id", "source_payload_sha256"})
+_DEDUP_WIRE_KEYS = frozenset({"kind", "value"})
+_FEE_WIRE_KEYS = frozenset({"amount", "currency", "fee_code"})
+_LIFECYCLE_PAYLOAD_WIRE_KEYS = frozenset({"outcome_code", "payload_type"})
+_TRADE_PAYLOAD_WIRE_KEYS = frozenset(
+    {
+        "fees",
+        "instrument_spec_set_id",
+        "instrument_spec_set_sha256",
+        "instrument_specification_id",
+        "payload_type",
+        "price",
+        "quantity",
+        "side",
+    }
+)
+_SUBMISSION_QUERY_PAYLOAD_WIRE_KEYS = frozenset({"outcome_code", "payload_type"})
+
+
+def _require_wire_type(
+    value: object,
+    expected: type[object],
+    *,
+    field_name: str,
+) -> None:
+    if type(value) is not expected:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            f"{field_name} must have exact runtime type {expected.__name__} on wire",
+        )
+
+
+def _require_optional_wire_type(
+    value: object,
+    expected: type[object],
+    *,
+    field_name: str,
+) -> None:
+    if value is not None:
+        _require_wire_type(value, expected, field_name=field_name)
+
+
+def _require_wire_object(
+    value: object,
+    expected_keys: frozenset[str],
+    *,
+    field_name: str,
+) -> dict[str, object]:
+    _require_wire_type(value, dict, field_name=field_name)
+    document = cast(dict[str, object], value)
+    if set(document) != expected_keys:
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE,
+            f"{field_name} has invalid keys",
+        )
+    return document
+
+
+def _preflight_economic_id_types(value: object, *, field_name: str) -> None:
+    document = _require_wire_object(
+        value,
+        _ECONOMIC_ID_WIRE_KEYS,
+        field_name=field_name,
+    )
+    _require_wire_type(
+        document["owner_kind"],
+        str,
+        field_name=f"{field_name}.owner_kind",
+    )
+    _require_wire_type(
+        document["owner_sequence"],
+        int,
+        field_name=f"{field_name}.owner_sequence",
+    )
+    _require_wire_type(
+        document["run_id"],
+        str,
+        field_name=f"{field_name}.run_id",
+    )
+
+
+def _preflight_instrument_types(value: object, *, field_name: str) -> None:
+    document = _require_wire_object(
+        value,
+        _INSTRUMENT_WIRE_KEYS,
+        field_name=field_name,
+    )
+    _require_wire_type(document["symbol"], str, field_name=f"{field_name}.symbol")
+    _require_wire_type(document["venue"], str, field_name=f"{field_name}.venue")
+
+
+def _preflight_target_lineage_types(value: object) -> None:
+    document = _require_wire_object(
+        value,
+        _TARGET_LINEAGE_WIRE_KEYS,
+        field_name="target_lineage",
+    )
+    _preflight_economic_id_types(document["target_id"], field_name="target_id")
+    _require_wire_type(
+        document["target_sha256"],
+        str,
+        field_name="target_sha256",
+    )
+
+
+def _preflight_policy_types(value: object) -> None:
+    document = _require_wire_object(
+        value,
+        _POLICY_WIRE_KEYS,
+        field_name="execution_policy",
+    )
+    _require_wire_type(
+        document["execution_policy_id"],
+        str,
+        field_name="execution_policy_id",
+    )
+    _require_wire_type(
+        document["execution_policy_sha256"],
+        str,
+        field_name="execution_policy_sha256",
+    )
+
+
+def _preflight_provenance_types(value: object) -> None:
+    document = _require_wire_object(
+        value,
+        _PROVENANCE_WIRE_KEYS,
+        field_name="provenance",
+    )
+    _require_wire_type(
+        document["provenance_id"],
+        str,
+        field_name="provenance_id",
+    )
+    _require_wire_type(
+        document["source_payload_sha256"],
+        str,
+        field_name="source_payload_sha256",
+    )
+
+
+def _preflight_dedup_types(value: object) -> None:
+    document = _require_wire_object(
+        value,
+        _DEDUP_WIRE_KEYS,
+        field_name="dedup_identity",
+    )
+    _require_wire_type(document["kind"], str, field_name="dedup_identity.kind")
+    kind = document["kind"]
+    if kind == "external_id":
+        _require_wire_type(
+            document["value"],
+            str,
+            field_name="dedup_identity.value",
+        )
+    elif kind == "source_native_sequence":
+        _require_wire_type(
+            document["value"],
+            int,
+            field_name="dedup_identity.value",
+        )
+    elif type(document["value"]) not in (str, int):
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "dedup_identity.value must be exact str or int on wire",
+        )
+
+
+def _preflight_fee_types(value: object, *, index: int) -> None:
+    document = _require_wire_object(
+        value,
+        _FEE_WIRE_KEYS,
+        field_name=f"fees[{index}]",
+    )
+    for field in ("amount", "currency", "fee_code"):
+        _require_wire_type(
+            document[field],
+            str,
+            field_name=f"fees[{index}].{field}",
+        )
+
+
+def _preflight_fees_types(value: object) -> None:
+    _require_wire_type(value, list, field_name="fees")
+    for index, fee in enumerate(cast(list[object], value)):
+        _preflight_fee_types(fee, index=index)
+
+
+def _preflight_approval_types(document: dict[str, object]) -> None:
+    _require_keys(
+        document,
+        _APPROVAL_KEYS,
+        message_type="execution_approval",
+        canonicalization=EXECUTION_APPROVAL_CANONICALIZATION,
+    )
+    for field in (
+        "run_id",
+        "original_intent_sha256",
+        "effective_intent_sha256",
+        "approved_quantity",
+        "causal_root_available_at",
+    ):
+        _require_wire_type(document[field], str, field_name=field)
+    for field in (
+        "portfolio_snapshot_version",
+        "risk_state_version",
+        "dispatch_sequence",
+    ):
+        _require_wire_type(document[field], int, field_name=field)
+    for field in (
+        "approval_id",
+        "decision_id",
+        "intent_id",
+        "correlation_id",
+        "causation_id",
+    ):
+        _preflight_economic_id_types(document[field], field_name=field)
+
+
+def _preflight_order_intent_types(document: dict[str, object]) -> None:
+    for field in (
+        "run_id",
+        "side",
+        "quantity",
+        "order_kind",
+        "time_in_force",
+        "causal_root_available_at",
+        "instrument_specification_id",
+        "instrument_spec_set_id",
+        "instrument_spec_set_sha256",
+    ):
+        _require_wire_type(document[field], str, field_name=field)
+    for field in ("portfolio_snapshot_version", "dispatch_sequence"):
+        _require_wire_type(document[field], int, field_name=field)
+    for field in ("intent_id", "correlation_id", "causation_id"):
+        _preflight_economic_id_types(document[field], field_name=field)
+    _preflight_target_lineage_types(document["target_lineage"])
+    _preflight_instrument_types(document["instrument"], field_name="instrument")
+    _preflight_policy_types(document["execution_policy"])
+
+
+def _preflight_risk_decision_types(document: dict[str, object]) -> None:
+    for field in (
+        "run_id",
+        "intent_sha256",
+        "kind",
+        "outcome_code",
+        "causal_root_available_at",
+    ):
+        _require_wire_type(document[field], str, field_name=field)
+    for field in (
+        "portfolio_snapshot_version",
+        "risk_state_version",
+        "dispatch_sequence",
+    ):
+        _require_wire_type(document[field], int, field_name=field)
+    for field in ("decision_id", "intent_id", "correlation_id", "causation_id"):
+        _preflight_economic_id_types(document[field], field_name=field)
+    _require_optional_wire_type(
+        document["approved_quantity"],
+        str,
+        field_name="approved_quantity",
+    )
+    _require_optional_wire_type(
+        document["effective_intent_sha256"],
+        str,
+        field_name="effective_intent_sha256",
+    )
+    approval = document["approval"]
+    _require_optional_wire_type(approval, dict, field_name="approval")
+    if approval is not None:
+        _preflight_approval_types(cast(dict[str, object], approval))
+
+
+def _preflight_order_types(document: dict[str, object]) -> None:
+    for field in (
+        "run_id",
+        "original_intent_sha256",
+        "effective_intent_sha256",
+        "risk_decision_sha256",
+        "approval_sha256",
+        "side",
+        "quantity",
+        "order_kind",
+        "time_in_force",
+        "instrument_specification_id",
+        "instrument_spec_set_id",
+        "instrument_spec_set_sha256",
+        "eligible_after_available_at",
+    ):
+        _require_wire_type(document[field], str, field_name=field)
+    for field in (
+        "portfolio_snapshot_version",
+        "risk_state_version",
+        "dispatch_sequence",
+    ):
+        _require_wire_type(document[field], int, field_name=field)
+    for field in (
+        "order_id",
+        "intent_id",
+        "correlation_id",
+        "causation_id",
+        "decision_id",
+        "approval_id",
+    ):
+        _preflight_economic_id_types(document[field], field_name=field)
+    _preflight_instrument_types(document["instrument"], field_name="instrument")
+    _preflight_policy_types(document["execution_policy"])
+
+
+def _preflight_fact_payload_types(value: object, *, kind: str) -> None:
+    _require_wire_type(value, dict, field_name="payload")
+    payload = cast(dict[str, object], value)
+    if "payload_type" not in payload:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "payload_type is missing")
+    _require_wire_type(payload["payload_type"], str, field_name="payload_type")
+    if kind == ExecutionFactKind.TRADE.value:
+        payload = _require_wire_object(
+            payload,
+            _TRADE_PAYLOAD_WIRE_KEYS,
+            field_name="trade payload",
+        )
+        for field in (
+            "instrument_spec_set_id",
+            "instrument_spec_set_sha256",
+            "instrument_specification_id",
+            "payload_type",
+            "price",
+            "quantity",
+            "side",
+        ):
+            _require_wire_type(payload[field], str, field_name=field)
+        _preflight_fees_types(payload["fees"])
+    elif kind == ExecutionFactKind.SUBMISSION_QUERY.value:
+        payload = _require_wire_object(
+            payload,
+            _SUBMISSION_QUERY_PAYLOAD_WIRE_KEYS,
+            field_name="submission query payload",
+        )
+        for field in ("outcome_code", "payload_type"):
+            _require_wire_type(payload[field], str, field_name=field)
+    elif kind in {member.value for member in _LIFECYCLE_CODE_BY_KIND}:
+        payload = _require_wire_object(
+            payload,
+            _LIFECYCLE_PAYLOAD_WIRE_KEYS,
+            field_name="lifecycle payload",
+        )
+        for field in ("outcome_code", "payload_type"):
+            _require_wire_type(payload[field], str, field_name=field)
+
+
+def _preflight_fact_types(document: dict[str, object]) -> None:
+    for field in (
+        "source_namespace",
+        "kind",
+        "occurred_at",
+        "fact_sha256",
+    ):
+        _require_wire_type(document[field], str, field_name=field)
+    _preflight_dedup_types(document["dedup_identity"])
+    _require_optional_wire_type(
+        document["client_submission_key"],
+        str,
+        field_name="client_submission_key",
+    )
+    _require_optional_wire_type(
+        document["venue_order_id"],
+        str,
+        field_name="venue_order_id",
+    )
+    instrument = document["instrument"]
+    _require_optional_wire_type(instrument, dict, field_name="instrument")
+    if instrument is not None:
+        _preflight_instrument_types(instrument, field_name="instrument")
+    for field in ("order_id", "correlation_id", "causation_id"):
+        identity = document[field]
+        _require_optional_wire_type(identity, dict, field_name=field)
+        if identity is not None:
+            _preflight_economic_id_types(identity, field_name=field)
+    _preflight_provenance_types(document["provenance"])
+    _preflight_fact_payload_types(
+        document["payload"],
+        kind=cast(str, document["kind"]),
+    )
+
+
+def _preflight_ingress_types(
+    document: dict[str, object],
+    fact_document: dict[str, object],
+) -> None:
+    _require_wire_type(document["available_at"], str, field_name="available_at")
+    _require_wire_type(
+        document["source_namespace"],
+        str,
+        field_name="source_namespace",
+    )
+    _require_wire_type(
+        document["ingress_sequence"],
+        int,
+        field_name="ingress_sequence",
+    )
+    _preflight_fact_types(fact_document)
+
+
+def _preflight_fill_types(document: dict[str, object]) -> None:
+    for field in (
+        "run_id",
+        "source_namespace",
+        "fact_sha256",
+        "occurred_at",
+        "side",
+        "quantity",
+        "price",
+        "instrument_specification_id",
+        "instrument_spec_set_id",
+        "instrument_spec_set_sha256",
+    ):
+        _require_wire_type(document[field], str, field_name=field)
+    _preflight_economic_id_types(document["fill_id"], field_name="fill_id")
+    _preflight_dedup_types(document["dedup_identity"])
+    _preflight_provenance_types(document["provenance"])
+    _preflight_instrument_types(document["instrument"], field_name="instrument")
+    _preflight_fees_types(document["fees"])
+    _require_optional_wire_type(
+        document["client_submission_key"],
+        str,
+        field_name="client_submission_key",
+    )
+    _require_optional_wire_type(
+        document["venue_order_id"],
+        str,
+        field_name="venue_order_id",
+    )
+    for field in ("order_id", "correlation_id", "causation_id"):
+        identity = document[field]
+        _require_optional_wire_type(identity, dict, field_name=field)
+        if identity is not None:
+            _preflight_economic_id_types(identity, field_name=field)
+
 
 def decode_order_intent(
     payload: bytes,
@@ -2522,6 +2984,7 @@ def decode_order_intent(
         message_type="order_intent",
         canonicalization=ORDER_INTENT_CANONICALIZATION,
     )
+    _preflight_order_intent_types(document)
     run_id = _parse_run_id(document["run_id"])
     intent_id = _parse_economic_id(document["intent_id"], field_name="intent_id")
     correlation_id = _parse_economic_id(
@@ -2653,6 +3116,7 @@ def decode_risk_decision(
         message_type="risk_decision",
         canonicalization=RISK_DECISION_CANONICALIZATION,
     )
+    _preflight_risk_decision_types(document)
     _parse_run_id(document["run_id"])
     decision_id = _parse_economic_id(document["decision_id"], field_name="decision_id")
     for field in ("intent_id", "correlation_id", "causation_id"):
@@ -2770,6 +3234,7 @@ def decode_execution_approval(
             "non-executable decision has no approval",
         )
     document = _decode_json(payload)
+    _preflight_approval_types(document)
     _validate_approval_document_types(document)
     approval = decision.approval
     if decision.intent_id != intent.intent_id or decision.intent_sha256 != order_intent_digest(
@@ -2810,6 +3275,7 @@ def decode_order(
         message_type="order",
         canonicalization=ORDER_CANONICALIZATION,
     )
+    _preflight_order_types(document)
     _parse_run_id(document["run_id"])
     order_id = _parse_economic_id(document["order_id"], field_name="order_id")
     for field in (
@@ -2903,9 +3369,12 @@ FactDecodeContext = IndependentFactDecodeContext | SubmissionQueryFactDecodeCont
 
 
 def _require_fact_keys(document: dict[str, object]) -> None:
-    unknown = set(document).difference(_FACT_KEYS)
-    if unknown:
-        raise _fail(OutcomeCode.OUT_OF_RANGE, f"unknown fact fields: {sorted(unknown)!r}")
+    _require_envelope(
+        document,
+        _FACT_KEYS,
+        message_type="execution_fact",
+        canonicalization=EXECUTION_FACT_CANONICALIZATION,
+    )
     if "dedup_identity" not in document or document["dedup_identity"] is None:
         raise _fail(
             OutcomeCode.FACT_INVALID_MISSING_DEDUP_IDENTITY,
@@ -2914,12 +3383,6 @@ def _require_fact_keys(document: dict[str, object]) -> None:
     missing = _FACT_KEYS.difference(document)
     if missing:
         raise _fail(OutcomeCode.OUT_OF_RANGE, f"missing fact fields: {sorted(missing)!r}")
-    if (
-        document.get("message_type") != "execution_fact"
-        or document.get("canonicalization") != EXECUTION_FACT_CANONICALIZATION
-        or document.get("schema_version") != MESSAGE_SCHEMA_VERSION
-    ):
-        raise _fail(OutcomeCode.OUT_OF_RANGE, "fact envelope is not the declared version")
 
 
 def _parse_lifecycle_payload(
@@ -3043,6 +3506,7 @@ def decode_execution_fact(
         raise _fail(OutcomeCode.INVALID_TYPE, "fact decode context has unsupported type")
     document = _decode_json(payload)
     _require_fact_keys(document)
+    _preflight_fact_types(document)
     source = _parse_source_namespace(document["source_namespace"])
     identity = _parse_dedup_identity(document["dedup_identity"])
     kind = _parse_enum(
@@ -3165,6 +3629,8 @@ def decode_execution_fact_ingress(
     fact_document = document["fact"]
     if type(fact_document) is not dict:
         raise _fail(OutcomeCode.INVALID_TYPE, "ingress fact must be an object")
+    _require_fact_keys(fact_document)
+    _preflight_ingress_types(document, fact_document)
     fact = decode_execution_fact(_encode_json(fact_document), context=context)
     source = _parse_source_namespace(document["source_namespace"])
     sequence = _require_non_negative(
@@ -3207,6 +3673,7 @@ def decode_fill(
         message_type="fill",
         canonicalization=FILL_CANONICALIZATION,
     )
+    _preflight_fill_types(document)
     _parse_run_id(document["run_id"])
     fill_id = _parse_economic_id(document["fill_id"], field_name="fill_id")
     _parse_source_namespace(document["source_namespace"])

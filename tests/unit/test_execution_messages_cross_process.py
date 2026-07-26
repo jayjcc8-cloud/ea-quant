@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import random
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 _SCRIPT = """
@@ -251,3 +253,39 @@ def test_execution_message_vectors_ignore_process_environment_and_input_order(
     )
 
     assert first == second
+
+
+def test_complete_vectors_ignore_bounded_shuffled_concurrent_schedules(
+    tmp_path: Path,
+) -> None:
+    jobs: list[tuple[Path, str, str, str, str, str]] = [
+        (
+            tmp_path / f"schedule-{index}",
+            str(1000 + index),
+            "UTC" if index % 2 == 0 else "Asia/Shanghai",
+            "C" if index % 3 else "POSIX",
+            str(1 + index * 7),
+            "forward" if index % 2 == 0 else "reverse",
+        )
+        for index in range(8)
+    ]
+    for cwd, *_ in jobs:
+        cwd.mkdir()
+    random.Random(390047).shuffle(jobs)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(
+                _run,
+                cwd,
+                hash_seed=hash_seed,
+                timezone=timezone,
+                locale=locale,
+                precision=precision,
+                input_order=input_order,
+            )
+            for cwd, hash_seed, timezone, locale, precision, input_order in jobs
+        ]
+        results = [future.result() for future in as_completed(futures)]
+
+    assert len(set(results)) == 1
