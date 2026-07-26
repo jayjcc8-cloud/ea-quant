@@ -59,8 +59,9 @@ composition, experiments, CLI, data/backtest/paper packages, audit or persistenc
 implementations, result adapters, SDKs, filesystem, network, or wall-clock code.
 
 Risk never creates an `Order`, calls a venue, writes an audit sink, or mutates a portfolio
-snapshot. Execution accepts only the `ExecutionApproval` carried by an authority-produced
-`RiskDecision`; it never accepts a bare `OrderIntent`.
+snapshot. The future OMS boundary MUST accept one exact `RiskEvaluationResult`, not a bare
+`OrderIntent`, `RiskDecision`, or `ExecutionApproval`. It must verify the result's decision and
+authority evidence before consuming the nested approval.
 
 ### Exact construction boundary
 
@@ -81,7 +82,9 @@ set requires a different run/authority and reproducible-run evidence.
 
 ### Phase 1 policy values
 
-`RiskPolicyId` is a canonical non-empty ASCII token.
+`RiskPolicyId.value` has exact runtime type `str` and must match the ASCII regular expression
+`[a-z][a-z0-9._-]{0,127}`. No normalization, case folding, trimming, subclass, or coercion is
+accepted.
 
 `InstrumentRiskLimit` contains:
 
@@ -119,22 +122,42 @@ approval.
 - `halted`;
 - an optional closed `RiskHaltReason`;
 - optional halt causal-root time and dispatch sequence; and
-- the digest of the intent whose conflict engaged the halt, when applicable.
+- the existing and submitted intent digests whose collision engaged a conflict halt, when
+  applicable.
 
-Version zero is literal:
+The field matrix is literal:
 
-- `risk_state_version == 0`;
-- `halted is False`; and
-- every halt-evidence field is absent.
+| State | version | reason | causal time/dispatch | existing/submitted conflict digests |
+|---|---:|---|---|---|
+| initial | `0` | `null` | both `null` | both `null` |
+| public halt | `1` | non-conflict reason | both present | both `null` |
+| identity-conflict halt | `1` | `intent_identity_conflict` | both present from submitted intent | both present and different |
+
+`halted` is `False` only for the initial row and `True` for both halted rows. No other combination
+is constructible. The causal time is exact UTC with microsecond precision. Dispatch sequence is an
+exact unsigned 64-bit integer.
 
 Risk-state version changes only when the semantic risk state changes. Evaluating an intent,
 allocating IDs, or extending replay indexes against unchanged policy/halt state does not increment
 it. Engaging halt changes a non-halted state exactly once and advances the version by one.
 
 Halt is monotone for one authority. Phase 1 exposes no clear, resume, replace-policy, or
-state-version override. An exact repeat of the same halt command is a no-op returning the existing
-snapshot. A later different halt cause is retained as non-authoritative supplemental runtime
-evidence outside this state; it cannot rewrite the first canonical halt cause.
+state-version override. The public command identity is the exact tuple
+`(reason, causal_root_available_at, dispatch_sequence)`. On the initial state it creates the public
+halt row and changes version `0 -> 1`. On an already halted authority, an identical command and a
+different command both return the existing state byte-for-byte; later causes are supplemental
+runtime evidence and cannot rewrite the first canonical halt cause.
+
+The public command rejects `intent_identity_conflict`. That reason is internal-only and is created
+atomically by the identity-conflict evaluation path using:
+
+- the digest already bound to the occupied intent ID;
+- the different submitted intent digest; and
+- the submitted intent's causal-root time and dispatch sequence.
+
+Passing the internal-only reason to the public command returns
+`RiskAuthorityError(OutcomeCode.OUT_OF_RANGE)` with no mutation. Wrong argument runtime types return
+`INVALID_TYPE`; a non-UTC time or dispatch outside uint64 returns `OUT_OF_RANGE`.
 
 Closed halt reasons are:
 
@@ -168,8 +191,10 @@ a writable shadow ledger.
 
 ### Closed reason and evaluation evidence
 
-`RiskReasonCode` is separate from the broad `OutcomeCode` carried by `RiskDecision`. It records one
-of:
+The existing broad `OutcomeCode` embedded in canonical `RiskDecision` remains ADR 0008's stable
+decision-bound reason. ADR 0011 does not change the accepted v1 `RiskDecision` fields, canonical
+bytes, or digest. `RiskReasonCode` is supplemental authority evidence with a narrower explanation.
+It records one of:
 
 - `within_limits`;
 - `resized_order_limit`;
@@ -183,6 +208,15 @@ of:
 - `arithmetic_failure`; or
 - `approval_sequence_exhausted`.
 
+Reason/decision coupling is closed:
+
+| Decision kind | Allowed supplemental reasons |
+|---|---|
+| `allow` | `within_limits` |
+| `resize` | `resized_order_limit`, `resized_position_limit`, `resized_order_and_position_limits` |
+| `reject` | `halted`, `instrument_not_configured`, `no_position_capacity` |
+| `evaluation_failed` | `stale_portfolio_snapshot`, `lineage_mismatch`, `arithmetic_failure`, `approval_sequence_exhausted` |
+
 `RiskEvaluationEvidence` binds:
 
 - the canonical intent ID and digest;
@@ -190,13 +224,150 @@ of:
 - the policy ID and digest;
 - the risk-state version used;
 - the resulting canonical `RiskDecision` and decision digest;
+- the approval digest, present exactly for allow/resize and `null` for reject/evaluation-failed;
 - the closed reason code; and
-- before/after decision and approval sequence positions.
+- before/after decision and approval next-sequence states.
 
 Evidence is immutable, canonically encoded, and digestible. It cannot replace or modify the
-`RiskDecision`; it explains which exact authority inputs produced it. Reject and
-evaluation-failed evidence carries no approval digest. Allow and resize evidence carries the
-digest of the exact approval already nested in the decision.
+`RiskDecision`; it explains which exact authority inputs produced it. Approval digest presence
+must agree with decision kind, and a present value must equal the digest of the exact nested
+approval.
+
+`RiskEvaluationResult` is the exact public return carrier:
+
+```text
+RiskEvaluationResult(
+    decision: RiskDecision,
+    evidence: RiskEvaluationEvidence,
+)
+```
+
+It is a frozen, slots-based, factory-only pair. Its evidence decision digest must equal the digest
+of `decision`; every intent, run, decision, approval, policy, state-version, snapshot, and sequence
+binding must agree. The pair adds no second canonical document: the decision and evidence retain
+their already frozen canonical documents and digests. Exact replay returns the original result
+object.
+
+### Literal canonical contracts
+
+All new canonical JSON uses the existing strict project encoder:
+
+- ASCII bytes with non-ASCII escaped by JSON;
+- object keys sorted lexicographically at every level;
+- no insignificant whitespace;
+- exact base-10 integers with no leading zero except `0`;
+- lowercase `true`, `false`, and `null`;
+- enum `.value`, `CanonicalDecimal.text`, and lowercase 64-character SHA-256 text;
+- UTC timestamps exactly `%Y-%m-%dT%H:%M:%S.%fZ`;
+- lists in their already validated canonical tuple order; and
+- every listed field present, including optional fields encoded as `null`.
+
+Digests are exactly `sha256(domain_bytes + canonical_bytes).hexdigest()`.
+
+Literal constants are:
+
+| Value | schema | canonicalization | digest domain bytes |
+|---|---:|---|---|
+| `Phase1RiskPolicy` | `1` | `ea-risk-policy-v1` | `b"ea.risk-policy.v1\0"` |
+| `RiskStateSnapshot` | `1` | `ea-risk-state-v1` | `b"ea.risk-state.v1\0"` |
+| `RiskEvaluationEvidence` | `1` | `ea-risk-evaluation-evidence-v1` | `b"ea.risk-evaluation-evidence.v1\0"` |
+
+The nested instrument document is exactly
+`{"symbol": instrument.symbol, "venue": instrument.venue.code}`. The nested execution-policy
+document is exactly
+`{"execution_policy_id": ref.identifier.value, "execution_policy_sha256": ref.sha256.value}`.
+The nested economic-ID document is exactly
+`{"owner_kind": id.owner_kind.value, "owner_sequence": id.owner_sequence, "run_id": id.run_id.value}`.
+Nested documents do not add their own canonicalization/schema fields.
+
+The exact `Phase1RiskPolicy` document is:
+
+```json
+{
+  "canonicalization": "ea-risk-policy-v1",
+  "default_action": "deny",
+  "execution_policy": {
+    "execution_policy_id": "<token>",
+    "execution_policy_sha256": "<sha256>"
+  },
+  "instrument_limits": [
+    {
+      "instrument": {"symbol": "<symbol>", "venue": "<venue>"},
+      "maximum_absolute_position": "<canonical-decimal>",
+      "maximum_order_quantity": "<canonical-decimal>"
+    }
+  ],
+  "instrument_spec_set_id": "<token>",
+  "instrument_spec_set_sha256": "<sha256>",
+  "message_type": "phase1_risk_policy",
+  "policy_id": "<token>",
+  "schema_version": 1
+}
+```
+
+The exact `RiskStateSnapshot` document is:
+
+```json
+{
+  "canonicalization": "ea-risk-state-v1",
+  "conflict_existing_intent_sha256": null,
+  "conflict_submitted_intent_sha256": null,
+  "halt_causal_root_available_at": null,
+  "halt_dispatch_sequence": null,
+  "halt_reason": null,
+  "halted": false,
+  "message_type": "risk_state_snapshot",
+  "policy_id": "<token>",
+  "policy_sha256": "<sha256>",
+  "risk_state_version": 0,
+  "run_id": "<uuid>",
+  "schema_version": 1
+}
+```
+
+Halted documents replace the five halt/conflict `null` values exactly according to the field
+matrix. They do not add or omit fields.
+
+The exact `RiskEvaluationEvidence` document is:
+
+```json
+{
+  "approval_next_after": null,
+  "approval_next_before": null,
+  "approval_sha256": null,
+  "canonicalization": "ea-risk-evaluation-evidence-v1",
+  "decision_id": {
+    "owner_kind": "risk.decision",
+    "owner_sequence": 1,
+    "run_id": "<uuid>"
+  },
+  "decision_next_after": 2,
+  "decision_next_before": 1,
+  "decision_sha256": "<sha256>",
+  "intent_id": {
+    "owner_kind": "portfolio.intent",
+    "owner_sequence": 1,
+    "run_id": "<uuid>"
+  },
+  "intent_sha256": "<sha256>",
+  "message_type": "risk_evaluation_evidence",
+  "policy_id": "<token>",
+  "policy_sha256": "<sha256>",
+  "portfolio_snapshot_sha256": "<sha256>",
+  "portfolio_snapshot_version": 0,
+  "reason_code": "<risk-reason-code>",
+  "risk_state_version": 0,
+  "run_id": "<uuid>",
+  "schema_version": 1
+}
+```
+
+The numeric/null sequence values in that example are illustrative; the field set and encodings
+are normative. Allow/resize requires non-null `approval_sha256` and uses the exact approval
+before/after states. Reject/evaluation-failed requires `approval_sha256 == null`; its approval
+before/after states are equal. No new canonical document embeds complete decision, approval,
+intent, snapshot, or policy bytes; it references their exact IDs/digests to avoid two competing
+encodings.
 
 ### Exact position-capacity mathematics
 
@@ -246,9 +417,34 @@ reason. Exact equality at a limit is allowed.
 ### Phase 1 outstanding-intent boundary
 
 This authority does not reserve exposure for multiple concurrently outstanding approvals.
-The Phase 1 runtime profile MUST serialize one strategy-originated intent through terminal
-execution/Fill-ledger processing before it evaluates another intent that can affect the same
-instrument. The Phase 1 portfolio planner MUST emit at most one intent per serialized dispatch.
+The Phase 1 runtime owns one per-instrument orchestration gate, while portfolio owns emission
+cardinality. The gate lifecycle is literal:
+
+1. Portfolio may emit at most one new intent in one serialized dispatch.
+2. Runtime acquires the instrument gate before first risk evaluation. An already-held gate means
+   the new intent is not evaluated or assigned any risk ID.
+3. Exact risk replay reuses the existing gate and never acquires a second one.
+4. Risk reject releases the gate after its semantic outcome is routed.
+5. Risk evaluation failure or identity conflict retains the gate until the run's failing/halt
+   transition is recorded; no later intent may be evaluated in that run.
+6. Allow/resize retains the gate through mandatory pre-effect audit and OMS handling.
+7. Audit failure or acknowledgement mismatch occurs before a venue call, retains the gate through
+   the recorded run halt, and permits no later evaluation.
+8. `submission.definitely_not_submitted` releases the gate only after its terminal OMS outcome is
+   recorded; a later intent, if the run is still allowed to continue, is a fresh intent/risk
+   decision/order/client key.
+9. `submission.uncertain` retains the gate through query/reconciliation. Only
+   `confirmed_not_submitted` or `confirmed_rejected` can release it; `confirmed_filled` retains it
+   until the discovered Fill is ledger-applied; `still_unknown` retains it through terminal run
+   failure.
+10. In the Phase 1 historical matcher, submitted market Orders either full-fill on the first later
+    eligible bar or expire only at end-of-run for no eligible data. Full fill releases the gate
+    only after the canonical Fill is applied and the newer portfolio snapshot is published before
+    strategy runs. End-of-run expiry needs no release usable by another intent.
+11. Duplicate fact, Fill, ledger, decision, approval, or terminal-outcome replay does not acquire
+    or release an additional gate.
+12. Any late real Fill is ordered before later market strategy work, is economically applied, and
+    engages the reconciliation/global halt path before another intent evaluation.
 
 These are executable profile constraints, not assumptions that disappear from evidence. Runtime
 and portfolio implementation Issues must test them before the backtest MVP can be complete. A
@@ -263,16 +459,41 @@ Risk owns two independent, run-scoped, monotone sequences:
 - `EconomicOwnerKind.RISK_DECISION`; and
 - `EconomicOwnerKind.RISK_APPROVAL`.
 
-The first allocated sequence for each owner is `1`. Every newly registered intent consumes
-exactly one decision ID. Only allow and resize consume exactly one approval ID. Reject and
-evaluation-failed consume no approval ID.
+Private state stores `decision_next` and `approval_next`, each as `int | None`:
+
+- initial value is exact integer `1`;
+- an integer value is the next owner sequence to allocate and must be in
+  `1..18_446_744_073_709_551_615`;
+- allocating a value below the uint64 maximum changes it to `value + 1`;
+- allocating the uint64 maximum changes it to `None`; and
+- `None` is the only exhausted sentinel and is never passed to `EconomicId`.
+
+Every newly registered intent consumes exactly one decision ID. Only allow and resize consume
+exactly one approval ID. Reject and evaluation-failed consume no approval ID.
+
+Evidence `*_next_before` and `*_next_after` fields contain these exact integer-or-null private
+states, not the last allocated ID. Their transitions are:
+
+| Path | decision before/after | approval before/after |
+|---|---|---|
+| exact replay | original evidence values | original evidence values |
+| identity conflict / structural error | no evidence; current state unchanged | no evidence; current state unchanged |
+| decision exhausted (`before == null`) | no evidence; `null -> null` | unchanged |
+| reject / ordinary evaluation-failed | allocate once | unchanged and equal in evidence |
+| allow / resize | allocate once | allocate once |
+| executable policy result with approval exhausted | allocate decision once for `evaluation_failed` | `null -> null` |
+
+When allocation consumes the uint64 maximum, the evidence after field is `null`. Exact replay
+returns the originally recorded before/after values even when the authority's current counters
+have since advanced.
 
 The replay index is keyed by exact intent economic identity and retains:
 
 - canonical intent digest and bytes;
 - the original canonical portfolio snapshot digest used for evaluation;
-- the original `RiskDecision`; and
-- the original `RiskEvaluationEvidence`.
+- the original `RiskDecision`;
+- the original `RiskEvaluationEvidence`; and
+- the original `RiskEvaluationResult`.
 
 It never evicts.
 
@@ -291,6 +512,55 @@ Exact replay still requires an exact `PortfolioSnapshot` runtime type at the pub
 its content is not used after an exact intent replay is identified. This prevents a replay from
 being re-risked while retaining a closed API.
 
+### Structural errors and mismatch matrix
+
+`RiskAuthorityError` is a `ValueError` carrying exactly one `OutcomeCode` from:
+
+- `invalid.type`;
+- `invalid.out_of_range`; or
+- `invalid.conflicting_id`.
+
+No other outcome code is constructible on this error. Exact-type violations map to
+`invalid.type`; invalid grammar, unsigned-range, canonical-decimal representability, or exhausted
+decision sequence maps to `invalid.out_of_range`; foreign run/spec identity and intent-ID byte
+collision map to `invalid.conflicting_id`. Expected codec/type/range exceptions from existing
+canonical helpers are translated into this closed set before leaving the authority. Programmer
+assertions are not domain outcomes and are not swallowed.
+
+After replay/conflict classification, a new identity follows this field-by-field matrix in row
+order. “Register failure” means allocate one decision ID, create
+`RiskDecisionKind.EVALUATION_FAILED` with no approval, record the listed supplemental reason, and
+atomically register the result. If the decision sequence is exhausted, the exhaustion error wins
+and no result is registered.
+
+| Check | Exact condition | Result | reason | IDs/state |
+|---|---|---|---|---|
+| intent run | intent run differs from authority run | structural error `conflicting_id` | none | no IDs/state |
+| intent spec-set identity | intent set ID/digest differs from bound set | structural error `conflicting_id` | none | no IDs/state |
+| intent specification | instrument absent or specification ID differs | structural error `conflicting_id` | none | no IDs/state |
+| intent canonical economics | quantity/type/grid is not valid under the bound spec | structural error from helper | none | no IDs/state |
+| decision sequence | `decision_next is None` | structural error `out_of_range` | none | no IDs/state |
+| intent execution policy | ID or digest differs from bound execution policy | register failure | `lineage_mismatch` | decision only |
+| snapshot run | snapshot run differs from authority/intent run | register failure | `lineage_mismatch` | decision only |
+| snapshot spec set | snapshot set ID/digest differs from authority | register failure | `lineage_mismatch` | decision only |
+| snapshot behind | snapshot version `<` intent bound version | register failure | `stale_portfolio_snapshot` | decision only |
+| intent behind | snapshot version `>` intent bound version | register failure | `lineage_mismatch` | decision only |
+| snapshot balance lineage | target position has wrong quantum or any balance conflicts with bound spec/currency registry | register failure | `lineage_mismatch` | decision only |
+| snapshot canonical digest | canonical snapshot encoding/digest fails | raised closed structural error | none | no IDs/state |
+| risk halt | current state halted | reject | `halted` | decision only |
+| configured limit | instrument absent from policy | reject | `instrument_not_configured` | decision only |
+| policy arithmetic | exact capacity calculation cannot be represented | register failure | `arithmetic_failure` | decision only |
+| capacity | chosen quantity is zero | reject | `no_position_capacity` | decision only |
+| approval sequence | executable result and `approval_next is None` | register failure | `approval_sequence_exhausted` | decision only |
+| capacity equals request | all prior checks pass | allow | `within_limits` | decision + approval |
+| positive partial capacity | all prior checks pass | resize | closed resize reason | decision + approval |
+
+An exact `PortfolioSnapshot` constructor already rejects malformed tuple types/order/duplicates.
+The balance-lineage row is the additional authority-to-bound-spec validation. Foreign
+execution-policy lineage is a registered failure rather than a structural error because the
+intent is still canonical under this authority's spec and can bind an ADR 0008
+evaluation-failed decision. A foreign run or spec cannot acquire a local decision ID.
+
 ### Failure and outcome precedence
 
 For a new intent identity, the normative order is:
@@ -298,14 +568,15 @@ For a new intent identity, the normative order is:
 1. exact public argument runtime types;
 2. canonical intent bytes/digest;
 3. intent replay or identity-conflict classification;
-4. complete run, snapshot, specification, execution-policy, and grid binding;
+4. structural intent run/spec/grid binding;
 5. decision-sequence availability;
-6. current halt and configured-instrument checks;
-7. exact position-capacity arithmetic;
-8. approval-sequence availability when the policy result would be executable;
-9. complete decision, approval, evaluation evidence, replay index, and next private state;
-10. canonical bytes/digests for policy, risk state, decision, approval when present, and evidence;
-11. one aggregate private-state reference publication.
+6. execution-policy and complete snapshot mismatch classification;
+7. current halt and configured-instrument checks;
+8. exact position-capacity arithmetic;
+9. approval-sequence availability when the policy result would be executable;
+10. complete decision, approval, evaluation evidence, replay index, and next private state;
+11. canonical bytes/digests for policy, risk state, decision, approval when present, and evidence;
+12. one aggregate private-state reference publication.
 
 The following outcomes are literal:
 
@@ -313,8 +584,8 @@ The following outcomes are literal:
 |---|---|---|
 | exact replay | original decision/evidence | none |
 | same intent ID, different bytes | `CONFLICTING_ID` error | engage halt once; no IDs |
-| malformed type or intent not valid under bound spec | closed `RiskAuthorityError` | none |
-| stale/mismatched otherwise-valid snapshot | `evaluation_failed` decision | register decision only |
+| malformed type or intent not valid under bound run/spec | closed `RiskAuthorityError` | none |
+| policy/snapshot mismatch classified by matrix | `evaluation_failed` decision | register decision only |
 | arithmetic/representability failure | `evaluation_failed` decision | register decision only |
 | decision sequence exhausted | closed `RiskAuthorityError(OUT_OF_RANGE)` | none |
 | halted or instrument absent from policy | `reject` decision | register decision only |
@@ -362,7 +633,7 @@ The public Phase 1 API exposes only:
 
 - a factory for one bound authority;
 - immutable policy and risk-state inspection;
-- `evaluate(intent, portfolio_snapshot)`;
+- `evaluate(intent, portfolio_snapshot) -> RiskEvaluationResult`;
 - replay-safe decision/evidence history inspection; and
 - monotone `engage_halt(reason, causal_root_available_at, dispatch_sequence)`.
 
@@ -375,6 +646,21 @@ Low-level immutable message factories in `ea.core.execution_messages` remain con
 primitives, not the production risk authority. The composition/runtime path must receive the
 stateful authority interface and cannot call those factories to bypass policy.
 
+The future OMS callable boundary MUST accept the exact `RiskEvaluationResult`. Before creating an
+Order it must verify:
+
+- decision kind is allow or resize and the broad outcome code agrees;
+- evidence decision digest equals the supplied decision digest;
+- evidence approval digest is present and equals the nested approval digest;
+- decision, approval, evidence, intent, run, portfolio-snapshot version, risk-state version, and
+  dispatch bindings agree;
+- evidence policy ID/digest equals the execution profile's frozen risk policy; and
+- the exact approval has not already been consumed.
+
+A byte-valid `RiskDecision` or `ExecutionApproval` without matching authority evidence is rejected.
+This mandatory future OMS acceptance work preserves the accepted v1 messages while closing the
+low-level-factory bypass. It is not an optional adapter check.
+
 ## Required implementation evidence
 
 The implementation Issue must include:
@@ -383,7 +669,10 @@ The implementation Issue must include:
 - buy/sell and long/short symmetry across zero and both position limits;
 - exact-boundary and one-quantum-inside/outside cases;
 - current positions already beyond either limit and risk-reducing behavior;
-- property tests proving every executable decision satisfies order and projected-position limits;
+- property tests proving every executable quantity is no greater than request/order limits and:
+  an initially in-limit position remains in `[-M, M]`; an out-of-limit position cannot increase
+  its same-side breach, may move toward the interval while remaining outside it, and never crosses
+  beyond the opposite limit;
 - exact replay after newer snapshot and halt state with no new IDs;
 - same-ID/different-bytes conflict with one atomic halt transition;
 - decision/approval sequence exhaustion at each precedence point;
@@ -393,8 +682,30 @@ The implementation Issue must include:
 - AST import-boundary and public-API escape-hatch tests; and
 - full repository verification plus exact-head CI.
 
-The later Phase 1 runtime/portfolio Issues must additionally prove the one-outstanding-intent
-profile constraint before an end-to-end backtest can be accepted.
+The later Phase 1 runtime/portfolio Issues must additionally prove every acquisition/release row
+of the one-outstanding-intent lifecycle. The future OMS Issue must prove the mandatory
+decision-plus-evidence acceptance checks. Neither gate may be omitted before an end-to-end
+backtest is accepted.
+
+## Design-finding traceability
+
+- `ARCH45-DESIGN-001` / `RISK45-DESIGN-001`: resolved by the literal carrier, enum, JSON,
+  schema/canonicalization/domain, null, timestamp, nested-reference, result-carrier, and error
+  contracts.
+- `ARCH45-DESIGN-002`: resolved by preserving existing `RiskDecision.outcome_code` as ADR 0008's
+  decision-bound reason and defining `RiskReasonCode` as supplemental evidence without changing
+  the v1 message digest.
+- `ARCH45-DESIGN-003` / `RISK45-DESIGN-003`: resolved by the integer-or-null next-sequence model
+  and exact uint64-boundary transition table.
+- `ARCH45-DESIGN-004`: resolved by the halt field matrix, internal-only conflict transition,
+  public command identity, exact version transition, and repeat behavior.
+- `ARCH45-DESIGN-005`: resolved by the twelve-row per-instrument gate lifecycle assigned to
+  portfolio emission and runtime orchestration.
+- `RISK45-DESIGN-002`: resolved by the piecewise in-limit/out-of-limit property requirement.
+- `RISK45-DESIGN-004`: resolved by the ordered field-by-field mismatch matrix and closed
+  `RiskAuthorityError` mapping.
+- `RISK45-DESIGN-005`: resolved by making exact `RiskEvaluationResult` the mandatory future OMS
+  input and requiring decision/evidence/approval/policy/snapshot verification.
 
 ## Consequences
 
