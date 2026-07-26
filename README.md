@@ -24,19 +24,27 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   run manifest、audit lineage、composition preparation、CLI、测试、VSCode 配置和 CI
   质量门禁。Issue #26 已建立 86% line / 71% branch coverage floor 并移除未使用的运行依赖；
   Issue #28 已将 manifest 的 model、wire、codec 和 evidence 职责分离，同时保持公开与 wire
-  契约不变。当前开发已在该历史基线上继续推进；尚未实现 historical runtime、stateful
-  risk/OMS、ledger、reconciliation、portfolio、strategy 或 backtest。
+  契约不变。当前开发已在该历史基线上继续推进；尚未实现 historical runtime、OMS、
+  reconciliation、portfolio planning、strategy 或 backtest。
 - Phase 1 实现从 dependency-neutral economic values 开始：`ea.core.economics` 提供严格
   `ea-decimal-v1`、exact grid 与唯一 settlement rounding boundary；`ea.core.execution`
   提供 versioned instrument specification set、canonical bytes/digest 和 identity-bound
-  settlement。该切片不代表 OMS、ledger、risk 或 matcher 已实现。
+  settlement。该切片不代表 OMS 或 matcher 已实现。
 - `ea.core.outcomes` 提供 Accepted ADR 0008 的完整封闭 outcome registry；
   `ea.core.execution_identity` 提供 run-scoped owner ID、source-scoped fact dedup key、
   canonical bytes/digest 与纯 replay/conflict 分类。`ea.core.execution_messages` 在同一无依赖
   边界上提供 factory-only immutable `OrderIntent -> RiskDecision -> ExecutionApproval ->
   Order -> ExecutionFactIngress/ExecutionFact -> Fill` 消息、effective intent / execution
-  request 投影、严格 canonical codec、因果链、spec/policy lineage 与黄金向量。该切片不包含
-  stateful risk、OMS、ledger、reconciliation、matcher、venue adapter 或持久化 registry。
+  request 投影、严格 canonical codec、因果链、spec/policy lineage 与黄金向量。
+- `ea.core.portfolio` 与 `ea.portfolio.ledger` 已按
+  [Accepted ADR 0010](docs/adr/0010-canonical-fill-ledger-and-portfolio-snapshots.md) 实现单一
+  Fill ledger、原子应用/重放/冲突结果，以及供 risk 消费的 immutable canonical
+  `PortfolioSnapshot`。
+- `ea.core.risk` 与 `ea.risk.authority` 已按
+  [Accepted ADR 0011](docs/adr/0011-deterministic-pre-trade-risk-authority.md) 实现 deny-by-default
+  Phase 1 policy、position/order quantity limits、replay-stable allow/resize/reject/
+  evaluation-failed、owner ID、证据摘要和 monotone halt。该边界不创建 Order、不维护 shadow
+  ledger，也不替代尚未实现的 OMS、runtime gate 或 reconciliation。
 - `ea.core.runtime` 与 `ea.runtime` 已按
   [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md) 建立 safety、execution
   fact、market、timer、end-of-run 的全局 root key、完整有界计划验证和不可插入的单消费者顺序
