@@ -19,9 +19,16 @@ def test_production_source_has_no_type_ignore_comments() -> None:
     assert violations == []
 
 
-def test_economic_core_modules_keep_the_frozen_import_boundary() -> None:
+def test_execution_value_modules_keep_the_frozen_import_boundary() -> None:
     expected = {
-        "economics.py": frozenset(),
+        "outcomes.py": frozenset(),
+        "execution_identity.py": frozenset(
+            {
+                "ea.core.outcomes",
+                "ea.core.run",
+            }
+        ),
+        "economics.py": frozenset({"ea.core.outcomes"}),
         "execution.py": frozenset(
             {
                 "ea.core.economics",

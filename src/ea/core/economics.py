@@ -19,9 +19,10 @@ from decimal import (
     Underflow,
     localcontext,
 )
-from enum import StrEnum
 from functools import total_ordering
 from typing import final
+
+from ea.core.outcomes import ECONOMIC_ERROR_CODES, OutcomeCode
 
 EA_DECIMAL_CANONICALIZATION = "ea-decimal-v1"
 MAX_SIGNIFICANT_DIGITS = 38
@@ -49,30 +50,22 @@ _PARSE_TRAPS: tuple[type[DecimalException], ...] = (
 )
 
 
-class EconomicErrorCode(StrEnum):
-    """ADR 0008 outcome codes used by the exact economic-value slice."""
-
-    INVALID_TYPE = "validation.invalid_type"
-    NON_FINITE = "validation.non_finite"
-    OUT_OF_RANGE = "validation.out_of_range"
-    NOT_QUANTIZED = "validation.not_quantized"
-    PRICE_DOMAIN = "validation.price_domain"
-    ARITHMETIC_OVERFLOW = "validation.arithmetic_overflow"
-    CONFLICTING_ID = "validation.conflicting_id"
-    ROUNDING_UNREPRESENTABLE = "ledger.rounding_unrepresentable"
+EconomicErrorCode = OutcomeCode
 
 
 class EconomicValidationError(ValueError):
     """Structured fail-closed economic validation error."""
 
-    code: EconomicErrorCode
+    code: OutcomeCode
 
-    def __init__(self, code: EconomicErrorCode, message: str) -> None:
+    def __init__(self, code: OutcomeCode, message: str) -> None:
+        if type(code) is not OutcomeCode or code not in ECONOMIC_ERROR_CODES:
+            raise TypeError("economic errors require an exact economic OutcomeCode")
         self.code = code
         super().__init__(message)
 
 
-def _fail(code: EconomicErrorCode, message: str) -> EconomicValidationError:
+def _fail(code: OutcomeCode, message: str) -> EconomicValidationError:
     return EconomicValidationError(code, message)
 
 
@@ -272,7 +265,7 @@ def _bounded_scaled(
     coefficient: int,
     scale: int,
     *,
-    failure_code: EconomicErrorCode,
+    failure_code: OutcomeCode,
 ) -> CanonicalDecimal:
     try:
         return CanonicalDecimal(_scaled_text(coefficient, scale))

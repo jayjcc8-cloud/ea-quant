@@ -30,6 +30,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   `ea-decimal-v1`、exact grid 与唯一 settlement rounding boundary；`ea.core.execution`
   提供 versioned instrument specification set、canonical bytes/digest 和 identity-bound
   settlement。该切片不代表 OMS、ledger、risk 或 matcher 已实现。
+- `ea.core.outcomes` 提供 Accepted ADR 0008 的完整封闭 outcome registry；
+  `ea.core.execution_identity` 提供 run-scoped owner ID、source-scoped fact dedup key、
+  canonical bytes/digest 与纯 replay/conflict 分类。该切片不包含 `OrderIntent`、`Order`、
+  `ExecutionFact`、`Fill`、状态机或持久化 registry。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
