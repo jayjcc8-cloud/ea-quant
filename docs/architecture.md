@@ -366,6 +366,9 @@ Position 也不能因为“可能成交”而被静默修改。
 
 - dependency-neutral economic values：严格 canonical Decimal、grid/domain、versioned
   instrument specification set、exact notional 与 identity-bound settlement（已实现第一切片）。
+- dependency-neutral execution identity/outcome primitives：Accepted ADR 0008 完整 outcome
+  registry、run-scoped owner ID、source-scoped fact dedup key、canonical bytes/digest 与纯
+  replay/conflict 分类（已实现；尚不包含 canonical messages、OMS 或 stateful registry）。
 - 本地 OHLCV 数据导入与质量检查。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。
