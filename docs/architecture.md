@@ -345,14 +345,15 @@ Position 也不能因为“可能成交”而被静默修改。
 ### Phase 1 入口门禁
 
 截至状态审查基线
-`main@572a505da9b5eb1383521fd6a5e93d56d589b4f4`，入口门禁完成 4/5。项目版本的唯一事实源是
+`main@f93fb89d8b3cab11f4a1dde8f5e95758aef1e914`，入口门禁完成 5/5。项目版本的唯一事实源是
 `pyproject.toml`，该基线对应 `0.1.1`。
 
 - Issue #11 / ADR 0003（已完成）：shared runtime、dependency direction、composition root 和 mode profile contract。
 - Issue #12 / ADR 0004（已完成）：market/time、revision、as-of visibility 和 deterministic admission 语义。
 - Issue #13 / Accepted ADR 0005（已完成）：strict typed configuration、source precedence、immutable snapshot 和 live fail-closed boundary。
 - Issue #14 / Accepted ADR 0006（已完成）：reproducible run manifest、data fingerprint 和 audit/result lineage。
-- Issue #15（尚未激活）：execution/reconciliation 语义。
+- Issue #15 / Accepted ADR 0008（已完成）：deterministic execution outcome、matching、
+  Decimal/grid arithmetic、ledger authority 和 reconciliation 语义。
 - Issue #26（已完成）：统一 full verification 中的 86% line / 71% branch coverage floor，并移除
   未使用的运行依赖。
 - Issue #28（已完成）：在保持 ADR 0006 public/wire contract 不变的前提下，分离 manifest
@@ -407,4 +408,7 @@ Position 也不能因为“可能成交”而被静默修改。
 - [Issue #12](https://github.com/jayjcc8-cloud/ea-quant/issues/12)：Instrument、market-data、time、as-of visibility 和 deterministic ordering。
 - [Issue #13](https://github.com/jayjcc8-cloud/ea-quant/issues/13)：strict typed configuration、source precedence、secret reference 和 run-mode gate。
 - [Issue #14](https://github.com/jayjcc8-cloud/ea-quant/issues/14)：minimum reproducible run manifest 和 audit lineage。
-- [Issue #15](https://github.com/jayjcc8-cloud/ea-quant/issues/15)：deterministic execution outcome、matcher、Fill 和 reconciliation。
+- [Issue #15](https://github.com/jayjcc8-cloud/ea-quant/issues/15) /
+  [Accepted ADR 0008](adr/0008-deterministic-execution-and-reconciliation.md)：已冻结
+  deterministic execution outcome、matcher、Fill、ledger authority 和 reconciliation；
+  实现由后续 Phase 1 Issues 负责。
