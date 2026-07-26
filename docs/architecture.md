@@ -358,8 +358,9 @@ Phase 1 入口门禁的历史状态审查基线为
   未使用的运行依赖。
 - Issue #28（已完成）：在保持 ADR 0006 public/wire contract 不变的前提下，分离 manifest
   model、wire、codec 和 evidence 职责，并建立生产源码零 `type: ignore` 门禁。
-- 当前开发已在该历史基线上继续推进；historical runtime、stateful risk/OMS、ledger、
-  reconciliation、portfolio、strategy 和 backtest 仍未实现。
+- 当前开发已在该历史基线上继续推进；canonical bounded root ordering 与单消费者计划 queue
+  已实现，historical runtime coordinator、stateful risk/OMS、ledger、reconciliation、
+  portfolio、strategy 和 backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -373,6 +374,10 @@ Phase 1 入口门禁的历史状态审查基线为
   RiskDecision -> ExecutionApproval -> Order -> ExecutionFactIngress/ExecutionFact -> Fill`、
   effective intent / execution request 投影、严格 reader、因果与 lineage 校验、确定性黄金向量
   （已实现；尚不包含 stateful risk、OMS、ledger、reconciliation、matcher、adapter 或 registry）。
+- canonical runtime root ordering：Accepted ADR 0008/0009 的 domain/local ranks、safety/fact/market/
+  timer/end root keys、sequence-authority collision、factory-only bounded plan 与不可插入的
+  single-consumer queue（已实现；尚不包含 reconciliation root payload、dispatch sequence、
+  lifecycle、audit gate、stage orchestration、feed 或 matcher）。
 - 本地 OHLCV 数据导入与质量检查。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。
@@ -421,3 +426,6 @@ Phase 1 入口门禁的历史状态审查基线为
   [Accepted ADR 0008](adr/0008-deterministic-execution-and-reconciliation.md)：已冻结
   deterministic execution outcome、matcher、Fill、ledger authority 和 reconciliation；
   实现由后续 Phase 1 Issues 负责。
+- [Issue #41](https://github.com/jayjcc8-cloud/ea-quant/issues/41) /
+  [Accepted ADR 0009](adr/0009-runtime-root-ordering-clarifications.md)：澄清 safety root key、
+  producer-sequence authority、factory-only bounded plan 与 runtime ordering 错误边界。
