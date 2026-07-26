@@ -28,6 +28,7 @@ from ea.core.execution import (
     canonical_instrument_spec_set_bytes,
     instrument_spec_set_digest,
     settle_execution,
+    validate_execution_inputs,
 )
 from ea.core.execution_identity import (
     ECONOMIC_ID_CANONICALIZATION,
@@ -491,5 +492,6 @@ __all__ = [
     "settle_execution",
     "settle_product",
     "validate_market_data_batch",
+    "validate_execution_inputs",
     "validate_stream_label",
 ]

@@ -44,7 +44,9 @@ def test_stateful_ledger_imports_only_stdlib_and_core_contracts() -> None:
                 calls.add(node.func.attr)
 
     assert all(
-        name == "__future__" or name == "typing" or name == "ea.core" or name.startswith("ea.core.")
+        name in {"__future__", "collections.abc", "dataclasses", "types", "typing"}
+        or name == "ea.core"
+        or name.startswith("ea.core.")
         for name in imports
     )
     assert (

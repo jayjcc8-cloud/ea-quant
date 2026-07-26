@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import final
 
 from ea.core.economics import (
@@ -15,6 +18,7 @@ from ea.core.execution import (
     SettlementCurrency,
     instrument_spec_set_digest,
     settle_execution,
+    validate_execution_inputs,
 )
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind, FactDedupKey
 from ea.core.execution_messages import FeeCode, FeeEntry, Fill, fill_digest
@@ -37,11 +41,29 @@ from ea.core.portfolio import (
     RoundingBalance,
     UnresolvedFillRef,
     _create_ledger_apply_outcome,
+    canonical_ledger_apply_outcome_bytes,
+    canonical_ledger_transaction_bytes,
+    canonical_portfolio_snapshot_bytes,
+    ledger_apply_outcome_digest,
     ledger_transaction_digest,
+    portfolio_snapshot_digest,
 )
 from ea.core.run import RunId, Sha256Digest
 
 _MAX_UINT64 = (1 << 64) - 1
+
+
+@dataclass(frozen=True, slots=True)
+class _LedgerState:
+    cash: Mapping[SettlementCurrency, CanonicalDecimal]
+    positions: Mapping[Instrument, CanonicalDecimal]
+    rounding: Mapping[SettlementCurrency, CanonicalDecimal]
+    unresolved: Mapping[EconomicId, UnresolvedFillRef]
+    fill_index: Mapping[EconomicId, ExistingLedgerBinding]
+    fact_index: Mapping[FactDedupKey, ExistingLedgerBinding]
+    entry_index: Mapping[EconomicId, LedgerTransaction]
+    transactions: tuple[LedgerTransaction, ...]
+    snapshot: PortfolioSnapshot
 
 
 @final
@@ -51,33 +73,17 @@ class PortfolioLedger:
     _run_id: RunId
     _spec_set: InstrumentExecutionSpecSet
     _spec_set_sha256: Sha256Digest
-    _currency_quanta: dict[SettlementCurrency, CanonicalDecimal]
-    _spec_by_instrument: dict[Instrument, InstrumentExecutionSpec]
-    _cash: dict[SettlementCurrency, CanonicalDecimal]
-    _positions: dict[Instrument, CanonicalDecimal]
-    _rounding: dict[SettlementCurrency, CanonicalDecimal]
-    _unresolved: dict[EconomicId, UnresolvedFillRef]
-    _fill_index: dict[EconomicId, ExistingLedgerBinding]
-    _fact_index: dict[FactDedupKey, ExistingLedgerBinding]
-    _entry_index: dict[EconomicId, LedgerTransaction]
-    _transactions: tuple[LedgerTransaction, ...]
-    _snapshot: PortfolioSnapshot
+    _currency_quanta: Mapping[SettlementCurrency, CanonicalDecimal]
+    _spec_by_instrument: Mapping[Instrument, InstrumentExecutionSpec]
+    _state: _LedgerState
 
     __slots__ = (
-        "_cash",
         "_currency_quanta",
-        "_entry_index",
-        "_fact_index",
-        "_fill_index",
-        "_positions",
-        "_rounding",
         "_run_id",
-        "_snapshot",
         "_spec_by_instrument",
         "_spec_set",
         "_spec_set_sha256",
-        "_transactions",
-        "_unresolved",
+        "_state",
     )
 
     def __init__(self) -> None:
@@ -85,11 +91,11 @@ class PortfolioLedger:
 
     @property
     def snapshot(self) -> PortfolioSnapshot:
-        return self._snapshot
+        return self._state.snapshot
 
     @property
     def transactions(self) -> tuple[LedgerTransaction, ...]:
-        return self._transactions
+        return self._state.transactions
 
     def apply_fill(self, fill: Fill) -> LedgerApplyOutcome:
         """Apply one canonical Fill once or return exact immutable replay evidence."""
@@ -104,8 +110,8 @@ class PortfolioLedger:
                 "fill run conflicts with ledger run",
             )
         submitted_digest = fill_digest(fill)
-        fill_binding = self._fill_index.get(fill.fill_id)
-        fact_binding = self._fact_index.get(fill.fact_key)
+        fill_binding = self._state.fill_index.get(fill.fill_id)
+        fact_binding = self._state.fact_index.get(fill.fact_key)
         replay = self._classify_replay(
             fill=fill,
             submitted_digest=submitted_digest,
@@ -115,30 +121,27 @@ class PortfolioLedger:
         if replay is not None:
             return replay
 
-        before_version = self._snapshot.snapshot_version
-        entry_id: EconomicId | None = None
-        if before_version < _MAX_UINT64:
-            entry_id = EconomicId(
-                self._run_id,
-                EconomicOwnerKind.LEDGER_ENTRY,
-                before_version + 1,
-            )
-            occupied = self._entry_index.get(entry_id)
-            if occupied is not None:
-                return self._conflict(
-                    fill=fill,
-                    fill_sha256=submitted_digest,
-                    kind=LedgerConflictKind.ENTRY_ID_OCCUPIED,
-                    entry_binding=_binding_for(occupied),
-                )
-
         self._require_specification(fill)
+        before_version = self._state.snapshot.snapshot_version
         if before_version == _MAX_UINT64:
             return self._failure(
                 fill=fill,
                 fill_sha256=submitted_digest,
                 code=OutcomeCode.OUT_OF_RANGE,
                 stage=LedgerFailureStage.LEDGER_SEQUENCE_EXHAUSTED,
+            )
+        entry_id = EconomicId(
+            self._run_id,
+            EconomicOwnerKind.LEDGER_ENTRY,
+            before_version + 1,
+        )
+        occupied = self._state.entry_index.get(entry_id)
+        if occupied is not None:
+            return self._conflict(
+                fill=fill,
+                fill_sha256=submitted_digest,
+                kind=LedgerConflictKind.ENTRY_ID_OCCUPIED,
+                entry_binding=_binding_for(occupied),
             )
 
         try:
@@ -190,7 +193,7 @@ class PortfolioLedger:
 
         try:
             next_cash = _next_balance(
-                self._cash.get(settlement.settlement_currency),
+                self._state.cash.get(settlement.settlement_currency),
                 cash_delta,
             )
         except EconomicValidationError:
@@ -202,7 +205,7 @@ class PortfolioLedger:
             )
         try:
             next_position = _next_balance(
-                self._positions.get(fill.instrument),
+                self._state.positions.get(fill.instrument),
                 position_delta,
             )
         except EconomicValidationError:
@@ -214,7 +217,7 @@ class PortfolioLedger:
             )
         try:
             next_rounding = _next_balance(
-                self._rounding.get(settlement.settlement_currency),
+                self._state.rounding.get(settlement.settlement_currency),
                 rounding_delta,
             )
         except EconomicValidationError:
@@ -233,20 +236,18 @@ class PortfolioLedger:
             )
 
         next_sequence = before_version + 1
-        if entry_id is None:
-            raise AssertionError("next ledger entry identity must exist")
 
-        next_cash_map = dict(self._cash)
+        next_cash_map = dict(self._state.cash)
         _assign_nonzero(next_cash_map, settlement.settlement_currency, next_cash)
-        next_position_map = dict(self._positions)
+        next_position_map = dict(self._state.positions)
         _assign_nonzero(next_position_map, fill.instrument, next_position)
-        next_rounding_map = dict(self._rounding)
+        next_rounding_map = dict(self._state.rounding)
         _assign_nonzero(next_rounding_map, settlement.settlement_currency, next_rounding)
 
         requires_reconciliation = (
             fill.order_id is None or fill.correlation_id is None or fill.causation_id is None
         )
-        next_unresolved = dict(self._unresolved)
+        next_unresolved = dict(self._state.unresolved)
         if requires_reconciliation:
             next_unresolved[fill.fill_id] = UnresolvedFillRef(
                 fill_id=fill.fill_id,
@@ -254,7 +255,9 @@ class PortfolioLedger:
             )
 
         previous_digest = (
-            None if not self._transactions else ledger_transaction_digest(self._transactions[-1])
+            None
+            if not self._state.transactions
+            else ledger_transaction_digest(self._state.transactions[-1])
         )
         transaction = LedgerTransaction(
             run_id=self._run_id,
@@ -294,13 +297,13 @@ class PortfolioLedger:
             fill_sha256=submitted_digest,
             transaction_sha256=transaction_sha256,
         )
-        next_fill_index = dict(self._fill_index)
+        next_fill_index = dict(self._state.fill_index)
         next_fill_index[fill.fill_id] = binding
-        next_fact_index = dict(self._fact_index)
+        next_fact_index = dict(self._state.fact_index)
         next_fact_index[fill.fact_key] = binding
-        next_entry_index = dict(self._entry_index)
+        next_entry_index = dict(self._state.entry_index)
         next_entry_index[entry_id] = transaction
-        next_transactions = (*self._transactions, transaction)
+        next_transactions = (*self._state.transactions, transaction)
         outcome = _create_ledger_apply_outcome(
             run_id=self._run_id,
             code=OutcomeCode.LEDGER_APPLIED,
@@ -311,16 +314,23 @@ class PortfolioLedger:
             submitted_fill_id=fill.fill_id,
             submitted_fill_sha256=submitted_digest,
         )
-
-        self._cash = next_cash_map
-        self._positions = next_position_map
-        self._rounding = next_rounding_map
-        self._unresolved = next_unresolved
-        self._fill_index = next_fill_index
-        self._fact_index = next_fact_index
-        self._entry_index = next_entry_index
-        self._transactions = next_transactions
-        self._snapshot = next_snapshot
+        next_state = _freeze_state(
+            cash=next_cash_map,
+            positions=next_position_map,
+            rounding=next_rounding_map,
+            unresolved=next_unresolved,
+            fill_index=next_fill_index,
+            fact_index=next_fact_index,
+            entry_index=next_entry_index,
+            transactions=next_transactions,
+            snapshot=next_snapshot,
+        )
+        _preflight_canonical_evidence(
+            transaction=transaction,
+            snapshot=next_snapshot,
+            outcome=outcome,
+        )
+        self._state = next_state
         return outcome
 
     def _require_specification(self, fill: Fill) -> InstrumentExecutionSpec:
@@ -337,6 +347,17 @@ class PortfolioLedger:
                 OutcomeCode.CONFLICTING_ID,
                 "fill specification lineage conflicts with ledger",
             )
+        try:
+            validated = validate_execution_inputs(
+                self._spec_set,
+                fill.instrument,
+                fill.price,
+                fill.quantity,
+            )
+        except EconomicValidationError as error:
+            raise _structural_error(error) from error
+        if validated is not specification:
+            raise AssertionError("execution validation changed the canonical specification")
         if (
             type(fill.fees) is not tuple
             or len(fill.fees) != 1
@@ -418,7 +439,7 @@ class PortfolioLedger:
                 fill_binding=fill_binding,
                 fact_binding=fact_binding,
             )
-        transaction = self._entry_index.get(fill_binding.entry_id)
+        transaction = self._state.entry_index.get(fill_binding.entry_id)
         if transaction is None or _binding_for(transaction) != fill_binding:
             return self._conflict(
                 fill=fill,
@@ -428,13 +449,13 @@ class PortfolioLedger:
                 fact_binding=fact_binding,
             )
         if fill_binding.fill_sha256 == submitted_digest:
-            version = self._snapshot.snapshot_version
+            version = self._state.snapshot.snapshot_version
             return _create_ledger_apply_outcome(
                 run_id=self._run_id,
                 code=OutcomeCode.LEDGER_DUPLICATE,
                 before_snapshot_version=version,
                 after_snapshot_version=version,
-                snapshot=self._snapshot,
+                snapshot=self._state.snapshot,
                 transaction=transaction,
                 submitted_fill_id=fill.fill_id,
                 submitted_fill_sha256=submitted_digest,
@@ -457,13 +478,13 @@ class PortfolioLedger:
         fill_binding: ExistingLedgerBinding | None = None,
         fact_binding: ExistingLedgerBinding | None = None,
     ) -> LedgerApplyOutcome:
-        version = self._snapshot.snapshot_version
+        version = self._state.snapshot.snapshot_version
         return _create_ledger_apply_outcome(
             run_id=self._run_id,
             code=OutcomeCode.LEDGER_CONFLICT,
             before_snapshot_version=version,
             after_snapshot_version=version,
-            snapshot=self._snapshot,
+            snapshot=self._state.snapshot,
             transaction=None,
             submitted_fill_id=fill.fill_id,
             submitted_fill_sha256=fill_sha256,
@@ -481,13 +502,13 @@ class PortfolioLedger:
         code: OutcomeCode,
         stage: LedgerFailureStage,
     ) -> LedgerApplyOutcome:
-        version = self._snapshot.snapshot_version
+        version = self._state.snapshot.snapshot_version
         return _create_ledger_apply_outcome(
             run_id=self._run_id,
             code=code,
             before_snapshot_version=version,
             after_snapshot_version=version,
-            snapshot=self._snapshot,
+            snapshot=self._state.snapshot,
             transaction=None,
             submitted_fill_id=fill.fill_id,
             submitted_fill_sha256=fill_sha256,
@@ -533,18 +554,59 @@ def create_portfolio_ledger(
     ledger._run_id = run_id
     ledger._spec_set = spec_set
     ledger._spec_set_sha256 = spec_set_sha256
-    ledger._currency_quanta = currency_quanta
-    ledger._spec_by_instrument = spec_by_instrument
-    ledger._cash = {}
-    ledger._positions = {}
-    ledger._rounding = {}
-    ledger._unresolved = {}
-    ledger._fill_index = {}
-    ledger._fact_index = {}
-    ledger._entry_index = {}
-    ledger._transactions = ()
-    ledger._snapshot = initial
+    ledger._currency_quanta = MappingProxyType(dict(currency_quanta))
+    ledger._spec_by_instrument = MappingProxyType(dict(spec_by_instrument))
+    ledger._state = _freeze_state(
+        cash={},
+        positions={},
+        rounding={},
+        unresolved={},
+        fill_index={},
+        fact_index={},
+        entry_index={},
+        transactions=(),
+        snapshot=initial,
+    )
     return ledger
+
+
+def _freeze_state(
+    *,
+    cash: Mapping[SettlementCurrency, CanonicalDecimal],
+    positions: Mapping[Instrument, CanonicalDecimal],
+    rounding: Mapping[SettlementCurrency, CanonicalDecimal],
+    unresolved: Mapping[EconomicId, UnresolvedFillRef],
+    fill_index: Mapping[EconomicId, ExistingLedgerBinding],
+    fact_index: Mapping[FactDedupKey, ExistingLedgerBinding],
+    entry_index: Mapping[EconomicId, LedgerTransaction],
+    transactions: tuple[LedgerTransaction, ...],
+    snapshot: PortfolioSnapshot,
+) -> _LedgerState:
+    return _LedgerState(
+        cash=MappingProxyType(dict(cash)),
+        positions=MappingProxyType(dict(positions)),
+        rounding=MappingProxyType(dict(rounding)),
+        unresolved=MappingProxyType(dict(unresolved)),
+        fill_index=MappingProxyType(dict(fill_index)),
+        fact_index=MappingProxyType(dict(fact_index)),
+        entry_index=MappingProxyType(dict(entry_index)),
+        transactions=transactions,
+        snapshot=snapshot,
+    )
+
+
+def _preflight_canonical_evidence(
+    *,
+    transaction: LedgerTransaction,
+    snapshot: PortfolioSnapshot,
+    outcome: LedgerApplyOutcome,
+) -> None:
+    canonical_ledger_transaction_bytes(transaction)
+    ledger_transaction_digest(transaction)
+    canonical_portfolio_snapshot_bytes(snapshot)
+    portfolio_snapshot_digest(snapshot)
+    canonical_ledger_apply_outcome_bytes(outcome)
+    ledger_apply_outcome_digest(outcome)
 
 
 def _snapshot(
@@ -553,10 +615,10 @@ def _snapshot(
     sequence: int,
     last_entry_id: EconomicId,
     last_transaction_sha256: Sha256Digest,
-    cash: dict[SettlementCurrency, CanonicalDecimal],
-    positions: dict[Instrument, CanonicalDecimal],
-    rounding: dict[SettlementCurrency, CanonicalDecimal],
-    unresolved: dict[EconomicId, UnresolvedFillRef],
+    cash: Mapping[SettlementCurrency, CanonicalDecimal],
+    positions: Mapping[Instrument, CanonicalDecimal],
+    rounding: Mapping[SettlementCurrency, CanonicalDecimal],
+    unresolved: Mapping[EconomicId, UnresolvedFillRef],
 ) -> PortfolioSnapshot:
     cash_balances = tuple(
         CashBalance(

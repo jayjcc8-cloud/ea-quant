@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import cast
 
 import pytest
@@ -333,7 +334,10 @@ def test_corrupt_replay_indexes_fail_closed_for_every_matrix_shape() -> None:
 
     missing_fact = create_portfolio_ledger(RUN_ID, spec_set)
     missing_fact.apply_fill(original)
-    missing_fact._fact_index.clear()
+    missing_fact._state = replace(
+        missing_fact._state,
+        fact_index=MappingProxyType({}),
+    )
     first = missing_fact.apply_fill(original)
     assert first.conflict_kind is LedgerConflictKind.INDEX_INCONSISTENT
     assert first.fill_index_binding is not None
@@ -341,12 +345,17 @@ def test_corrupt_replay_indexes_fail_closed_for_every_matrix_shape() -> None:
 
     cross = create_portfolio_ledger(RUN_ID, spec_set)
     cross.apply_fill(original)
-    binding = cross._fill_index[original.fill_id]
-    cross._fact_index[original.fact_key] = ExistingLedgerBinding(
+    binding = cross._state.fill_index[original.fill_id]
+    cross_fact_index = dict(cross._state.fact_index)
+    cross_fact_index[original.fact_key] = ExistingLedgerBinding(
         entry_id=_id(EconomicOwnerKind.LEDGER_ENTRY, 2),
         fill_id=binding.fill_id,
         fill_sha256=binding.fill_sha256,
         transaction_sha256=binding.transaction_sha256,
+    )
+    cross._state = replace(
+        cross._state,
+        fact_index=MappingProxyType(cross_fact_index),
     )
     second = cross.apply_fill(original)
     assert second.conflict_kind is LedgerConflictKind.CROSS_INDEX_COLLISION
@@ -355,12 +364,17 @@ def test_corrupt_replay_indexes_fail_closed_for_every_matrix_shape() -> None:
 
     inconsistent = create_portfolio_ledger(RUN_ID, spec_set)
     inconsistent.apply_fill(original)
-    binding = inconsistent._fill_index[original.fill_id]
-    inconsistent._fact_index[original.fact_key] = ExistingLedgerBinding(
+    binding = inconsistent._state.fill_index[original.fill_id]
+    inconsistent_fact_index = dict(inconsistent._state.fact_index)
+    inconsistent_fact_index[original.fact_key] = ExistingLedgerBinding(
         entry_id=binding.entry_id,
         fill_id=binding.fill_id,
         fill_sha256=binding.fill_sha256,
         transaction_sha256=Sha256Digest("8" * 64),
+    )
+    inconsistent._state = replace(
+        inconsistent._state,
+        fact_index=MappingProxyType(inconsistent_fact_index),
     )
     third = inconsistent.apply_fill(original)
     assert third.conflict_kind is LedgerConflictKind.INDEX_INCONSISTENT
@@ -389,7 +403,12 @@ def test_entry_identity_occupation_is_fail_closed_conflict() -> None:
     occupied = source.transactions[0]
 
     ledger = create_portfolio_ledger(RUN_ID, spec_set)
-    ledger._entry_index[occupied.entry_id] = occupied
+    entry_index = dict(ledger._state.entry_index)
+    entry_index[occupied.entry_id] = occupied
+    ledger._state = replace(
+        ledger._state,
+        entry_index=MappingProxyType(entry_index),
+    )
     baseline = _state_bytes(ledger)
     outcome = ledger.apply_fill(_fill(spec_set, fill_sequence=11, dedup="new"))
     assert outcome.code is OutcomeCode.LEDGER_CONFLICT
@@ -397,6 +416,31 @@ def test_entry_identity_occupation_is_fail_closed_conflict() -> None:
     assert outcome.entry_index_binding is not None
     assert outcome.fill_index_binding is None
     assert outcome.fact_index_binding is None
+    assert _state_bytes(ledger) == baseline
+
+
+def test_invalid_specification_wins_before_entry_identity_occupation() -> None:
+    spec_set = _spec_set()
+    source = create_portfolio_ledger(RUN_ID, spec_set)
+    source.apply_fill(_fill(spec_set, fill_sequence=10, dedup="occupied-source"))
+    occupied = source.transactions[0]
+
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+    entry_index = dict(ledger._state.entry_index)
+    entry_index[occupied.entry_id] = occupied
+    ledger._state = replace(
+        ledger._state,
+        entry_index=MappingProxyType(entry_index),
+    )
+    fill = _fill(spec_set, fill_sequence=11, dedup="invalid-before-occupied")
+    invalid = _replace_fill(
+        fill,
+        instrument_specification_id=InstrumentSpecId("xnas.aapl.other"),
+    )
+    baseline = _state_bytes(ledger)
+    with pytest.raises(PortfolioLedgerError) as error:
+        ledger.apply_fill(invalid)
+    assert error.value.code is OutcomeCode.CONFLICTING_ID
     assert _state_bytes(ledger) == baseline
 
 
@@ -504,11 +548,58 @@ def test_uint64_sequence_exhaustion_is_outcome_and_does_not_mutate() -> None:
         rounding_balances=(),
         unresolved_fills=(),
     )
-    ledger._snapshot = exhausted
+    ledger._state = replace(ledger._state, snapshot=exhausted)
     baseline = _state_bytes(ledger)
     failure = ledger.apply_fill(_fill(spec_set, fill_sequence=10, dedup="exhausted"))
     assert failure.code is OutcomeCode.OUT_OF_RANGE
     assert failure.failure_stage is LedgerFailureStage.LEDGER_SEQUENCE_EXHAUSTED
+    assert _state_bytes(ledger) == baseline
+
+
+@pytest.mark.parametrize(
+    "specification,invalid_price,expected_code",
+    [
+        (_spec(), "1.001", OutcomeCode.NOT_QUANTIZED),
+        (
+            _spec(price_domain=PriceDomain.POSITIVE),
+            "-1",
+            OutcomeCode.PRICE_DOMAIN,
+        ),
+    ],
+)
+def test_invalid_grid_or_domain_wins_before_sequence_exhaustion(
+    specification: InstrumentExecutionSpec,
+    invalid_price: str,
+    expected_code: OutcomeCode,
+) -> None:
+    spec_set = _spec_set(specification)
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+    maximum = (1 << 64) - 1
+    exhausted = PortfolioSnapshot(
+        run_id=RUN_ID,
+        instrument_spec_set_id=spec_set.identifier,
+        instrument_spec_set_sha256=ledger.snapshot.instrument_spec_set_sha256,
+        snapshot_version=maximum,
+        ledger_sequence=maximum,
+        last_entry_id=_id(EconomicOwnerKind.LEDGER_ENTRY, maximum),
+        last_transaction_sha256=Sha256Digest("9" * 64),
+        cash_balances=(),
+        position_balances=(),
+        rounding_balances=(),
+        unresolved_fills=(),
+    )
+    ledger._state = replace(ledger._state, snapshot=exhausted)
+    valid = _fill(
+        spec_set,
+        fill_sequence=10,
+        dedup=f"invalid-{expected_code.name.lower()}",
+        price="1",
+    )
+    invalid = _replace_fill(valid, price=CanonicalDecimal(invalid_price))
+    baseline = _state_bytes(ledger)
+    with pytest.raises(PortfolioLedgerError) as error:
+        ledger.apply_fill(invalid)
+    assert error.value.code is expected_code
     assert _state_bytes(ledger) == baseline
 
 
@@ -590,6 +681,49 @@ def test_settlement_exact_notional_unbalanced_and_encoding_failures_are_atomic(
     with pytest.raises(RuntimeError, match="forced canonical encoding failure"):
         encoding_ledger.apply_fill(encoding_fill)
     assert _state_bytes(encoding_ledger) == baseline
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "ea.portfolio.ledger.canonical_portfolio_snapshot_bytes",
+        "ea.portfolio.ledger.canonical_ledger_apply_outcome_bytes",
+    ],
+)
+def test_snapshot_and_outcome_encoding_failures_do_not_swap_state(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    spec_set = _spec_set()
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+    fill = _fill(spec_set, fill_sequence=10, dedup=target.rsplit(".", 1)[-1])
+    original_state = ledger._state
+    baseline = _state_bytes(ledger)
+
+    def fail_encoding(_: object) -> bytes:
+        raise RuntimeError("forced canonical encoding failure")
+
+    monkeypatch.setattr(target, fail_encoding)
+    with pytest.raises(RuntimeError, match="forced canonical encoding failure"):
+        ledger.apply_fill(fill)
+    assert ledger._state is original_state
+    assert _state_bytes(ledger) == baseline
+
+
+def test_success_replaces_one_frozen_private_state_aggregate() -> None:
+    spec_set = _spec_set()
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+    original_state = ledger._state
+    outcome = ledger.apply_fill(_fill(spec_set, fill_sequence=10, dedup="state-swap"))
+    assert outcome.code is OutcomeCode.LEDGER_APPLIED
+    assert ledger._state is not original_state
+    assert original_state.snapshot.snapshot_version == 0
+    assert original_state.transactions == ()
+    assert original_state.cash == {}
+    with pytest.raises(TypeError):
+        cast(dict[SettlementCurrency, CanonicalDecimal], original_state.cash)[USD] = (
+            CanonicalDecimal("1")
+        )
 
 
 def test_wrong_carrier_and_run_are_structural_errors_without_mutation() -> None:
