@@ -27,7 +27,10 @@ SCALES = st.integers(min_value=0, max_value=6)
 
 
 def _at_scale(value: CanonicalDecimal, scale: int) -> int:
-    return value.coefficient * (10 ** (scale - value.scale))
+    factor = 1
+    for _ in range(scale - value.scale):
+        factor *= 10
+    return value.coefficient * factor
 
 
 @given(coefficient=COEFFICIENTS, scale=SCALES)
