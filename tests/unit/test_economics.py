@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import ROUND_CEILING, Decimal, Inexact, localcontext
+from decimal import ROUND_CEILING, Decimal, Inexact, Rounded, localcontext
 from typing import cast
 
 import pytest
@@ -255,6 +255,8 @@ def test_ambient_decimal_context_cannot_change_parsing_grid_or_settlement() -> N
         context.prec = 1
         context.rounding = ROUND_CEILING
         context.traps[Inexact] = True
+        context.flags[Inexact] = True
+        context.flags[Rounded] = True
         actual = settle_product(
             CanonicalDecimal("1.015"),
             CanonicalDecimal("3"),

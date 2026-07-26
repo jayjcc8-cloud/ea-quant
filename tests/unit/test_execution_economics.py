@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from inspect import signature
 from typing import cast
 
 import pytest
@@ -9,6 +10,7 @@ from ea.core import (
     CanonicalDecimal,
     EconomicErrorCode,
     EconomicValidationError,
+    ExecutionSettlement,
     Instrument,
     InstrumentExecutionSpec,
     InstrumentExecutionSpecSet,
@@ -115,6 +117,20 @@ def test_builder_canonicalizes_input_order_and_digest() -> None:
         forward
     )
     assert instrument_spec_set_digest(reverse) == instrument_spec_set_digest(forward)
+
+
+def test_empty_finite_spec_set_has_deterministic_identity() -> None:
+    spec_set = build_instrument_spec_set(SET_ID, ())
+
+    assert spec_set.specifications == ()
+    assert canonical_instrument_spec_set_bytes(spec_set) == (
+        b'{"canonicalization":"ea-instrument-spec-set-v1",'
+        b'"instrument_spec_set_id":"phase1.us-equities.v1","record_count":0,'
+        b'"schema_version":1,"specs":[]}'
+    )
+    assert instrument_spec_set_digest(spec_set) == instrument_spec_set_digest(
+        InstrumentExecutionSpecSet(identifier=SET_ID, specifications=())
+    )
 
 
 def test_direct_spec_set_constructor_rejects_noncanonical_order() -> None:
@@ -251,6 +267,16 @@ def test_execution_settlement_carries_currency_and_specification_identity() -> N
     assert result.rounding_residual == CanonicalDecimal("0")
 
 
+def test_execution_settlement_has_no_public_raw_construction_path() -> None:
+    assert tuple(signature(ExecutionSettlement).parameters) == ()
+    constructor = cast(Callable[..., ExecutionSettlement], ExecutionSettlement)
+
+    with pytest.raises(TypeError, match="created only by settle_execution"):
+        constructor()
+    with pytest.raises(TypeError):
+        constructor(instrument_spec_set_sha256=instrument_spec_set_digest(_set(_spec())))
+
+
 def test_execution_settlement_rejects_missing_instrument_and_float_inputs() -> None:
     spec_set = _set(_spec())
 
@@ -266,3 +292,25 @@ def test_execution_settlement_rejects_missing_instrument_and_float_inputs() -> N
             CanonicalDecimal("1"),
         )
     _assert_code(float_error, EconomicErrorCode.INVALID_TYPE)
+
+
+def test_execution_input_types_fail_before_domain_and_lookup_logic() -> None:
+    spec_set = _set(_spec(price_domain=PriceDomain.POSITIVE))
+
+    with pytest.raises(EconomicValidationError) as quantity_error:
+        settle_execution(
+            spec_set,
+            AAPL,
+            CanonicalDecimal("-1"),
+            cast(CanonicalDecimal, 1.0),
+        )
+    _assert_code(quantity_error, EconomicErrorCode.INVALID_TYPE)
+
+    with pytest.raises(EconomicValidationError) as instrument_error:
+        settle_execution(
+            spec_set,
+            cast(Instrument, "XNAS:AAPL"),
+            CanonicalDecimal("-1"),
+            CanonicalDecimal("1"),
+        )
+    _assert_code(instrument_error, EconomicErrorCode.INVALID_TYPE)

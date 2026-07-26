@@ -135,7 +135,7 @@ class InstrumentExecutionSpec:
 @final
 @dataclass(frozen=True, slots=True)
 class InstrumentExecutionSpecSet:
-    """One non-empty, canonically ordered, duplicate-free specification set."""
+    """One canonically ordered, duplicate-free specification set."""
 
     identifier: InstrumentSpecSetId
     specifications: tuple[InstrumentExecutionSpec, ...]
@@ -146,10 +146,10 @@ class InstrumentExecutionSpecSet:
                 EconomicErrorCode.INVALID_TYPE,
                 "identifier must be an exact InstrumentSpecSetId",
             )
-        if type(self.specifications) is not tuple or not self.specifications:
+        if type(self.specifications) is not tuple:
             raise _fail(
                 EconomicErrorCode.INVALID_TYPE,
-                "specifications must be a non-empty exact tuple",
+                "specifications must be an exact tuple",
             )
         if any(type(spec) is not InstrumentExecutionSpec for spec in self.specifications):
             raise _fail(
@@ -252,9 +252,9 @@ def instrument_spec_set_digest(spec_set: InstrumentExecutionSpecSet) -> Sha256Di
 
 
 @final
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ExecutionSettlement:
-    """Exact settlement plus every identity needed by later risk and ledger owners."""
+    """Factory-only settlement with every identity needed by later risk and ledger owners."""
 
     instrument: Instrument
     specification_id: InstrumentSpecId
@@ -264,21 +264,40 @@ class ExecutionSettlement:
     amount: CanonicalDecimal
     rounding_residual: CanonicalDecimal
 
-    def __post_init__(self) -> None:
-        expected_types = (
-            (self.instrument, Instrument),
-            (self.specification_id, InstrumentSpecId),
-            (self.instrument_spec_set_id, InstrumentSpecSetId),
-            (self.instrument_spec_set_sha256, Sha256Digest),
-            (self.settlement_currency, SettlementCurrency),
-            (self.amount, CanonicalDecimal),
-            (self.rounding_residual, CanonicalDecimal),
-        )
-        if any(type(value) is not expected for value, expected in expected_types):
-            raise _fail(
-                EconomicErrorCode.INVALID_TYPE,
-                "execution settlement contains a non-canonical identity or value",
-            )
+    def __init__(self) -> None:
+        raise TypeError("ExecutionSettlement values are created only by settle_execution")
+
+
+def _execution_settlement(
+    *,
+    instrument: Instrument,
+    specification_id: InstrumentSpecId,
+    instrument_spec_set_id: InstrumentSpecSetId,
+    instrument_spec_set_sha256: Sha256Digest,
+    settlement_currency: SettlementCurrency,
+    amount: CanonicalDecimal,
+    rounding_residual: CanonicalDecimal,
+) -> ExecutionSettlement:
+    values = (
+        (instrument, Instrument),
+        (specification_id, InstrumentSpecId),
+        (instrument_spec_set_id, InstrumentSpecSetId),
+        (instrument_spec_set_sha256, Sha256Digest),
+        (settlement_currency, SettlementCurrency),
+        (amount, CanonicalDecimal),
+        (rounding_residual, CanonicalDecimal),
+    )
+    if any(type(value) is not expected for value, expected in values):
+        raise AssertionError("internal execution settlement inputs must be canonical")
+    result = object.__new__(ExecutionSettlement)
+    object.__setattr__(result, "instrument", instrument)
+    object.__setattr__(result, "specification_id", specification_id)
+    object.__setattr__(result, "instrument_spec_set_id", instrument_spec_set_id)
+    object.__setattr__(result, "instrument_spec_set_sha256", instrument_spec_set_sha256)
+    object.__setattr__(result, "settlement_currency", settlement_currency)
+    object.__setattr__(result, "amount", amount)
+    object.__setattr__(result, "rounding_residual", rounding_residual)
+    return result
 
 
 def _require_price_domain(
@@ -309,6 +328,13 @@ def settle_execution(
             EconomicErrorCode.INVALID_TYPE,
             "spec_set must be an exact InstrumentExecutionSpecSet",
         )
+    if type(instrument) is not Instrument:
+        raise _fail(EconomicErrorCode.INVALID_TYPE, "instrument must be an exact Instrument")
+    if type(price) is not CanonicalDecimal or type(quantity) is not CanonicalDecimal:
+        raise _fail(
+            EconomicErrorCode.INVALID_TYPE,
+            "price and quantity must be exact CanonicalDecimal values",
+        )
     specification = spec_set.require(instrument)
     _require_price_domain(price, specification.price_domain)
     require_positive(quantity, field_name="quantity")
@@ -320,7 +346,7 @@ def settle_execution(
         specification.contract_multiplier,
         specification.currency_quantum,
     )
-    return ExecutionSettlement(
+    return _execution_settlement(
         instrument=specification.instrument,
         specification_id=specification.specification_id,
         instrument_spec_set_id=spec_set.identifier,

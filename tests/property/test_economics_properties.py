@@ -26,6 +26,10 @@ COEFFICIENTS = st.integers(min_value=-(10**12), max_value=10**12)
 SCALES = st.integers(min_value=0, max_value=6)
 
 
+def _at_scale(value: CanonicalDecimal, scale: int) -> int:
+    return value.coefficient * (10 ** (scale - value.scale))
+
+
 @given(coefficient=COEFFICIENTS, scale=SCALES)
 def test_parser_render_is_bijective_and_zero_is_unique(coefficient: int, scale: int) -> None:
     text = _canonical_text(coefficient, scale)
@@ -77,6 +81,52 @@ def test_settlement_is_sign_symmetric(coefficient: int, scale: int) -> None:
         == -positive_result.rounding_residual.coefficient
     )
     assert negative_result.rounding_residual.scale == positive_result.rounding_residual.scale
+
+
+@given(
+    price_coefficient=st.integers(min_value=-999_999, max_value=999_999),
+    price_scale=st.integers(min_value=0, max_value=5),
+    quantity_coefficient=st.integers(min_value=1, max_value=10_000),
+    quantity_scale=st.integers(min_value=0, max_value=4),
+    multiplier_coefficient=st.integers(min_value=1, max_value=1_000),
+    multiplier_scale=st.integers(min_value=0, max_value=3),
+    quantum_coefficient=st.integers(min_value=1, max_value=1_000),
+    quantum_scale=st.integers(min_value=0, max_value=4),
+)
+def test_settlement_preserves_exact_value_and_nearest_quantum_distance(
+    price_coefficient: int,
+    price_scale: int,
+    quantity_coefficient: int,
+    quantity_scale: int,
+    multiplier_coefficient: int,
+    multiplier_scale: int,
+    quantum_coefficient: int,
+    quantum_scale: int,
+) -> None:
+    price = CanonicalDecimal(_canonical_text(price_coefficient, price_scale))
+    quantity = CanonicalDecimal(_canonical_text(quantity_coefficient, quantity_scale))
+    multiplier = CanonicalDecimal(_canonical_text(multiplier_coefficient, multiplier_scale))
+    quantum = CanonicalDecimal(_canonical_text(quantum_coefficient, quantum_scale))
+
+    result = settle_product(price, quantity, multiplier, quantum)
+    exact_coefficient = price.coefficient * quantity.coefficient * multiplier.coefficient
+    exact_scale = price.scale + quantity.scale + multiplier.scale
+    common_scale = max(
+        exact_scale,
+        result.amount.scale,
+        result.rounding_residual.scale,
+        quantum.scale,
+    )
+
+    exact_at_scale = exact_coefficient * (10 ** (common_scale - exact_scale))
+    assert exact_at_scale == _at_scale(result.amount, common_scale) + _at_scale(
+        result.rounding_residual,
+        common_scale,
+    )
+    assert 2 * abs(_at_scale(result.rounding_residual, common_scale)) <= _at_scale(
+        quantum,
+        common_scale,
+    )
 
 
 @given(

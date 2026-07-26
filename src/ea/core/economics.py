@@ -4,7 +4,21 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import (
+    ROUND_HALF_EVEN,
+    Clamped,
+    Context,
+    DecimalException,
+    DivisionByZero,
+    FloatOperation,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Subnormal,
+    Underflow,
+    localcontext,
+)
 from enum import StrEnum
 from functools import total_ordering
 from typing import final
@@ -21,6 +35,17 @@ _DECIMAL_PATTERN = re.compile(
 _NON_FINITE_PATTERN = re.compile(
     r"[+-]?(?:inf(?:inity)?|s?nan[0-9]*)\Z",
     flags=re.ASCII | re.IGNORECASE,
+)
+_PARSE_TRAPS: tuple[type[DecimalException], ...] = (
+    Clamped,
+    DivisionByZero,
+    FloatOperation,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Subnormal,
+    Underflow,
 )
 
 
@@ -75,19 +100,12 @@ class CanonicalDecimal:
                 "decimal text does not match ea-decimal-v1",
             )
 
-        decimal_tuple = Decimal(self.text).as_tuple()
-        if not isinstance(decimal_tuple.exponent, int):
-            raise _fail(EconomicErrorCode.NON_FINITE, "non-finite decimal input is forbidden")
-        coefficient = int("".join(str(digit) for digit in decimal_tuple.digits))
-        if decimal_tuple.sign:
-            coefficient = -coefficient
-        scale = -decimal_tuple.exponent
-
-        if coefficient == 0:
-            coefficient = 0
-            scale = 0
-        significant_digits = len(str(abs(coefficient))) if coefficient else 1
-        integer_digits = max(significant_digits - scale, 1)
+        unsigned_text = self.text.removeprefix("-")
+        integer_text, separator, fractional_text = unsigned_text.partition(".")
+        coefficient_digits = (integer_text + fractional_text).lstrip("0") or "0"
+        significant_digits = len(coefficient_digits)
+        integer_digits = len(integer_text)
+        scale = len(fractional_text) if separator else 0
         if (
             significant_digits > MAX_SIGNIFICANT_DIGITS
             or integer_digits > MAX_INTEGER_DIGITS
@@ -97,14 +115,38 @@ class CanonicalDecimal:
                 EconomicErrorCode.OUT_OF_RANGE,
                 "decimal value exceeds the 38/20/18 digit limits",
             )
-        if scale > 0 and coefficient % 10 == 0:
+
+        parse_context = Context(
+            prec=MAX_SIGNIFICANT_DIGITS,
+            rounding=ROUND_HALF_EVEN,
+            Emin=-MAX_FRACTIONAL_DIGITS,
+            Emax=MAX_INTEGER_DIGITS - 1,
+        )
+        for signal in _PARSE_TRAPS:
+            parse_context.traps[signal] = True
+        parse_context.clear_flags()
+        with localcontext(parse_context) as context:
+            decimal_tuple = context.create_decimal(self.text).as_tuple()
+        if not isinstance(decimal_tuple.exponent, int):
+            raise _fail(EconomicErrorCode.NON_FINITE, "non-finite decimal input is forbidden")
+        coefficient = int("".join(str(digit) for digit in decimal_tuple.digits))
+        if decimal_tuple.sign:
+            coefficient = -coefficient
+        parsed_scale = -decimal_tuple.exponent
+
+        if coefficient == 0:
+            coefficient = 0
+            parsed_scale = 0
+        if parsed_scale != scale:
+            raise AssertionError("explicit decimal parse changed the canonical scale")
+        if parsed_scale > 0 and coefficient % 10 == 0:
             raise _fail(
                 EconomicErrorCode.OUT_OF_RANGE,
                 "fractional decimal coefficient must not contain trailing zeroes",
             )
 
         object.__setattr__(self, "_coefficient", coefficient)
-        object.__setattr__(self, "_scale", scale)
+        object.__setattr__(self, "_scale", parsed_scale)
 
     @property
     def coefficient(self) -> int:
