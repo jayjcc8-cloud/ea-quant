@@ -34,9 +34,15 @@ the smaller compatible correction is at the risk halt boundary.
 
 ## Decision
 
-This ADR narrowly supersedes ADR 0011 wherever it restricts a halt dispatch sequence to uint64.
-It does not change any other ADR 0011 policy, schema field, canonicalization identifier, digest
-domain, state transition, or precedence rule.
+This ADR narrowly supersedes ADR 0011 in exactly two places:
+
+1. every uint64 restriction on the risk-state and public-halt dispatch sequence becomes the exact
+   non-negative integer domain below; and
+2. ADR 0011's unconditional canonicalize-then-lookup precedence is narrowed only to validate the
+   minimal exact-non-negative halt-provenance dispatch before canonicalization and lookup.
+
+Every remaining ADR 0011 policy, schema field, canonicalization identifier, digest domain, state
+transition, validation order, and precedence rule is unchanged.
 
 ### Exact dispatch domain
 
@@ -129,6 +135,8 @@ Issue #45 must add:
   dispatch before canonicalization and lookup, while retaining every other structural and policy
   check after byte-authoritative replay/conflict classification. Required evidence covers both new
   and occupied IDs with every rejected exact-type category.
+- `ARCH45-ADR12-002`: the Decision now names both narrow supersessions explicitly and preserves
+  every other ADR 0011 validation order and precedence rule.
 
 ## Consequences
 
