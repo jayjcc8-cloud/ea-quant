@@ -50,7 +50,9 @@ from ea.core import (
     execution_request_digest,
     order_client_submission_key,
     order_digest,
+    order_intent_digest,
     phase1_risk_policy_digest,
+    portfolio_snapshot_digest,
     risk_decision_digest,
 )
 from ea.core.execution import InstrumentExecutionSpecSet
@@ -300,6 +302,19 @@ def _assert_error(
     assert error.value.code is code
 
 
+def _assert_execution_state_unchanged(
+    authority: Phase1OrderAuthority,
+    original_state: object,
+) -> None:
+    state = cast(Any, original_state)
+    assert authority._state is state
+    assert authority.next_order_sequence == state.order_next
+    assert authority._state.approval_index is state.approval_index
+    assert authority._state.intent_index is state.intent_index
+    assert authority._state.decision_index is state.decision_index
+    assert authority.orders is state.orders
+
+
 def _raise_injected(*_args: object, **_kwargs: object) -> None:
     raise RuntimeError("injected pre-publication failure")
 
@@ -538,6 +553,135 @@ def test_risk_registry_membership_uses_canonical_bytes_not_object_identity() -> 
         canonical_decision_bytes=decision_bytes,
         canonical_evidence_bytes=evidence_bytes + b" ",
     )
+
+
+@pytest.mark.parametrize("changed_dimension", ["intent", "decision", "evidence"])
+def test_risk_registry_rejects_each_independent_canonical_byte_mismatch(
+    changed_dimension: str,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    assert result.decision.approval is not None
+    intent_bytes = canonical_order_intent_bytes(intent)
+    decision_bytes = canonical_risk_decision_bytes(result.decision)
+    evidence_bytes = canonical_risk_evaluation_evidence_bytes(result.evidence)
+
+    alternate_intent = _intent(spec_set, quantity="3")
+    alternate_decision = allow_order_intent(
+        decision_id=result.decision.decision_id,
+        approval_id=result.decision.approval.approval_id,
+        intent=intent,
+        spec_set=spec_set,
+        risk_state_version=1,
+    )
+    alternate_evidence = _replace_slots(
+        result.evidence,
+        portfolio_snapshot_sha256=Sha256Digest("9" * 64),
+    )
+    candidates = {
+        "intent": canonical_order_intent_bytes(alternate_intent),
+        "decision": canonical_risk_decision_bytes(alternate_decision),
+        "evidence": canonical_risk_evaluation_evidence_bytes(alternate_evidence),
+    }
+    supplied = {
+        "intent": intent_bytes,
+        "decision": decision_bytes,
+        "evidence": evidence_bytes,
+    }
+    supplied[changed_dimension] = candidates[changed_dimension]
+
+    assert (
+        supplied[changed_dimension]
+        != {
+            "intent": intent_bytes,
+            "decision": decision_bytes,
+            "evidence": evidence_bytes,
+        }[changed_dimension]
+    )
+    assert not risk.has_issued_result(
+        intent_id=intent.intent_id,
+        canonical_intent_bytes=supplied["intent"],
+        canonical_decision_bytes=supplied["decision"],
+        canonical_evidence_bytes=supplied["evidence"],
+    )
+
+
+def test_valid_alternate_snapshot_digest_is_rejected_only_by_exact_membership() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    substituted_digest = Sha256Digest("9" * 64)
+    assert substituted_digest != result.evidence.portfolio_snapshot_sha256
+    forged_evidence = _replace_slots(
+        result.evidence,
+        portfolio_snapshot_sha256=substituted_digest,
+    )
+    forged = _result(result.decision, forged_evidence)
+    authority = _order_authority(spec_set, policy, risk)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, forged)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert not risk.has_issued_result(
+        intent_id=intent.intent_id,
+        canonical_intent_bytes=canonical_order_intent_bytes(intent),
+        canonical_decision_bytes=canonical_risk_decision_bytes(result.decision),
+        canonical_evidence_bytes=canonical_risk_evaluation_evidence_bytes(forged_evidence),
+    )
+    _assert_execution_state_unchanged(authority, original_state)
+
+
+def test_coherent_alternate_snapshot_and_risk_state_result_is_not_issued() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    recorded_intent = _intent(spec_set)
+    recorded = risk.evaluate(recorded_intent, _snapshot(spec_set))
+    assert recorded.decision.approval is not None
+    alternate_snapshot = _snapshot(spec_set, position="1")
+    alternate_intent = _intent(
+        spec_set,
+        portfolio_snapshot_version=alternate_snapshot.snapshot_version,
+    )
+    alternate_decision = allow_order_intent(
+        decision_id=recorded.decision.decision_id,
+        approval_id=recorded.decision.approval.approval_id,
+        intent=alternate_intent,
+        spec_set=spec_set,
+        risk_state_version=1,
+    )
+    assert alternate_decision.approval is not None
+    alternate_evidence = _replace_slots(
+        recorded.evidence,
+        intent_sha256=order_intent_digest(alternate_intent),
+        portfolio_snapshot_version=alternate_snapshot.snapshot_version,
+        portfolio_snapshot_sha256=portfolio_snapshot_digest(alternate_snapshot),
+        risk_state_version=1,
+        decision_sha256=risk_decision_digest(alternate_decision),
+        approval_sha256=execution_approval_digest(alternate_decision.approval),
+    )
+    alternate_result = _result(alternate_decision, alternate_evidence)
+    authority = _order_authority(spec_set, policy, risk)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(alternate_intent, alternate_result)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert not risk.has_issued_result(
+        intent_id=alternate_intent.intent_id,
+        canonical_intent_bytes=canonical_order_intent_bytes(alternate_intent),
+        canonical_decision_bytes=canonical_risk_decision_bytes(alternate_decision),
+        canonical_evidence_bytes=canonical_risk_evaluation_evidence_bytes(alternate_evidence),
+    )
+    _assert_execution_state_unchanged(authority, original_state)
 
 
 def test_bound_registry_rejects_an_unissued_but_coherent_result() -> None:
