@@ -207,8 +207,7 @@ class Phase1OrderAuthority:
                 spec_set=self._spec_set,
             )
             if (
-                reconstructed_decision.kind
-                not in (RiskDecisionKind.ALLOW, RiskDecisionKind.RESIZE)
+                reconstructed_decision.kind not in (RiskDecisionKind.ALLOW, RiskDecisionKind.RESIZE)
                 or reconstructed_decision.approval is None
                 or submitted.approval is None
                 or submitted.approval_bytes is None
@@ -320,9 +319,7 @@ class Phase1OrderAuthority:
 
     def _classify_replay(self, submitted: _SubmittedInput) -> Order | None:
         intent_key = (
-            submitted.intent.intent_id
-            if type(submitted.intent.intent_id) is EconomicId
-            else None
+            submitted.intent.intent_id if type(submitted.intent.intent_id) is EconomicId else None
         )
         decision_key = (
             submitted.decision.decision_id
@@ -331,22 +328,15 @@ class Phase1OrderAuthority:
         )
         approval_key = (
             submitted.approval.approval_id
-            if submitted.approval is not None
-            and type(submitted.approval.approval_id) is EconomicId
+            if submitted.approval is not None and type(submitted.approval.approval_id) is EconomicId
             else None
         )
         approval_record = (
-            None
-            if approval_key is None
-            else self._state.approval_index.get(approval_key)
+            None if approval_key is None else self._state.approval_index.get(approval_key)
         )
-        intent_record = (
-            None if intent_key is None else self._state.intent_index.get(intent_key)
-        )
+        intent_record = None if intent_key is None else self._state.intent_index.get(intent_key)
         decision_record = (
-            None
-            if decision_key is None
-            else self._state.decision_index.get(decision_key)
+            None if decision_key is None else self._state.decision_index.get(decision_key)
         )
         if approval_record is intent_record is decision_record is None:
             return None
@@ -488,9 +478,7 @@ def _materialize_submitted_input(
         intent_bytes=canonical_order_intent_bytes(intent),
         decision_bytes=canonical_risk_decision_bytes(decision),
         evidence_bytes=canonical_risk_evaluation_evidence_bytes(evidence),
-        approval_bytes=(
-            None if approval is None else canonical_execution_approval_bytes(approval)
-        ),
+        approval_bytes=(None if approval is None else canonical_execution_approval_bytes(approval)),
     )
 
 
@@ -508,8 +496,7 @@ def _require_submitted_intent_profile(intent: OrderIntent) -> None:
         )
     if (
         intent.order_kind is not OrderKind.MARKET
-        or intent.time_in_force
-        is not TimeInForce.GOOD_FOR_NEXT_ELIGIBLE_MARKET_EVENT
+        or intent.time_in_force is not TimeInForce.GOOD_FOR_NEXT_ELIGIBLE_MARKET_EVENT
         or intent.price_constraint is not None
     ):
         raise ExecutionAuthorityError(
