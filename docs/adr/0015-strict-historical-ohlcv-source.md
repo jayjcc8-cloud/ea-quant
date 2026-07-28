@@ -100,6 +100,31 @@ Quoted and unquoted fields are semantically equivalent after CSV decoding. Embed
 and non-ASCII code points are forbidden in every decoded field. This keeps row evidence bound to
 one logical CSV record and prevents invisible identifier or numeric normalization.
 
+Before calling `csv.reader`, the adapter performs a bounded lexical preflight over the decoded
+text. It tracks logical record, field position, and quote state; rejects a bare CR, embedded
+newline in a quoted field, invalid quote transition, decoded field longer than 1,024 code points,
+and more than 1,000,001 logical records. Consequently the standard reader never receives an
+oversized or multiline field and does not depend on process-global `csv.field_size_limit`.
+
+The reader is constructed over `io.StringIO(text, newline="")` with exactly:
+
+```python
+csv.reader(
+    stream,
+    dialect="excel",
+    delimiter=",",
+    quotechar='"',
+    doublequote=True,
+    escapechar=None,
+    skipinitialspace=False,
+    strict=True,
+    quoting=csv.QUOTE_MINIMAL,
+)
+```
+
+No other dialect option or locale state participates. A decoded empty record and a one-field
+record beginning with `#` are ordinary invalid record shapes; comments are never recognized.
+
 The first logical record is the exact ordered header:
 
 ```text
@@ -206,21 +231,32 @@ path. An empty selected window is an explicit failure.
 The public decoded value is immutable:
 
 ```python
-@dataclass(frozen=True, slots=True)
+@final
+@dataclass(frozen=True, slots=True, init=False)
 class Phase1HistoricalDataset:
     profile: Literal["ea-phase1-ohlcv-csv-v1"]
     replay_window: ReplayWindow
     selection: MarketDataSelection
     source_bytes_sha256: Sha256Digest
     source_byte_count: int
+
+    def __init__(self) -> None:
+        raise TypeError("datasets are issued only by the Phase 1 OHLCV decoder")
 ```
 
 `source_bytes_sha256` is ordinary SHA-256 over the exact captured bytes and is diagnostic lineage.
 It does not replace or alter `selection.fingerprint`, and it is not accepted in place of the ADR
 0006 manifest data fingerprint. `source_byte_count` is in `1..67_108_864`.
 
+The dataset is factory-only and is issued only after the pure decoder has completed byte hashing,
+all parsing, canonical validation, replay-window selection, and semantic fingerprinting. Direct
+construction raises `TypeError`. The source factory requires the exact dataset type and
+revalidates the profile, window/selection equality, selection fingerprint, digest/count types,
+byte-count bound, and every derivable selection invariant before copying history.
+
 The value does not make future events safe to pass inward. It is a composition/data-boundary value
-used to build the manifest and the historical source.
+used to build the manifest and the historical source. Its raw byte fields remain diagnostic
+decoder evidence and are never manifest identity, cursor identity, or source-authority evidence.
 
 ### Public decoder and local-file helper
 
@@ -247,13 +283,23 @@ read_phase1_ohlcv_csv(
 ) -> Phase1HistoricalDataset
 ```
 
-`path` must be a standard `pathlib.Path` value for the current platform. The helper rejects a
-string, bytes, arbitrary `PathLike`, missing path, directory, symlink,
-socket, device, FIFO, or non-regular file. It obtains a pre-read stat, reads at most
-67,108,865 bytes in binary mode, obtains a post-read stat, and rejects the read if device, inode,
-size, or nanosecond modification time changed. It never follows a symlink and never rewrites,
-renames, locks, deletes, or creates the source. Platform or permission failures map to the closed
-I/O failure below without exposing locale-dependent exception text as canonical evidence.
+`path` must be a standard `pathlib.Path` value for the current platform. A string, bytes, or
+arbitrary `PathLike` is invalid. Phase 1 file reading requires POSIX `os.O_NOFOLLOW`; when that
+capability is unavailable the helper fails closed as `source_unreadable`.
+
+The helper uses `lstat`, rejects a missing path, directory, symlink, socket, device, FIFO, or other
+non-regular path, then opens with `os.O_RDONLY | os.O_NOFOLLOW`. It verifies the descriptor with
+`fstat`, reads at most 67,108,865 bytes in binary mode, performs a second `fstat` and path `lstat`,
+and rejects the capture if:
+
+- the descriptor or path is no longer the same regular `(device, inode)`;
+- pre-read, post-read, or path size differs from the captured byte count;
+- nanosecond modification time changed; or
+- the path disappeared or changed identity before the final check.
+
+It never follows a symlink and never rewrites, renames, locks, deletes, or creates the source.
+Platform or permission failures map to the closed I/O matrix below without exposing
+locale-dependent exception text as canonical evidence.
 
 ### Historical source capability
 
@@ -271,7 +317,6 @@ copies the exact immutable selected event tuple. The public surface is only:
 ```python
 source.replay_window -> ReplayWindow
 source.fingerprint -> DataFingerprint
-source.source_bytes_sha256 -> Sha256Digest
 
 source.next_available_at(
     cursor: Phase1HistoricalSourceCursor | None,
@@ -302,19 +347,37 @@ The first three fields exactly bind the existing ADR 0004 `AdmissionCursor` to t
 semantic selection. A cursor from another byte spelling is compatible only when replay window,
 semantic SHA-256, and record count are all identical; raw file SHA is deliberately not cursor
 identity. A cursor with a different binding, a missing last event, or an event outside the bound
-history fails closed. Callers cannot supply a raw `AdmissionCursor`. Read-only `as_of` and
-`last_event` properties delegate to the inner admission cursor for runtime evidence.
+history fails closed. Here “missing last event” means a non-null last event that cannot be
+resolved exactly in the source; a factory-issued initial cursor with `last_event=None` is valid.
+Callers cannot supply a raw `AdmissionCursor`. Read-only `as_of` and `last_event` properties
+delegate to the inner admission cursor for runtime evidence.
+
+For a non-null last event, the source resolves its unique full ADR 0004 admission key in a private
+source-owned map, compares ADR 0006 canonical record bytes byte-for-byte, and reconstructs the
+inner cursor with the source-owned event before any scheduling or admission calculation.
+Dataclass equality is insufficient because binary64 `+0.0` and `-0.0` compare equal but have
+different canonical record bytes. A missing key or byte mismatch is `invalid_cursor`.
+
+For `last_event=None`, the cursor is valid only when no event in the bound selection was visible
+at `cursor.as_of`. This is the exact candidate produced by a successful admission before the first
+availability. If any event was already visible at that cutoff, the cursor could skip evidence and
+is `invalid_cursor`.
 
 `next_available_at` validates that a non-null cursor is exact, carries this source's semantic
-binding, and carries a visible last event. It returns:
+binding, and carries either the valid initial no-event state or one exact visible source-owned
+last event. It returns:
 
 - the first event's `available_at` when `cursor` is null;
-- the `available_at` of the first canonical event whose full admission key is greater than the
-  cursor's last event;
+- `max(cursor.as_of, first_event.available_at)` for a valid initial cursor;
+- `max(cursor.as_of, next_event.available_at)` for the first canonical event whose full admission
+  key is greater than the cursor's last event;
 - `None` after the final event.
 
 Several later events may share the returned timestamp. The timestamp is scheduling metadata, not
-payload visibility or admission. Calling `next_available_at` does not mutate the source or cursor.
+payload visibility or admission. A returned value equal to `cursor.as_of` requires the runtime to
+drain again without advancing its clock; this occurs after a limited batch leaves already-visible
+events. A returned value is never earlier than the committed cutoff. Calling `next_available_at`
+does not mutate the source or cursor.
 
 `admit` reads `clock.now()` exactly once through the existing injected-clock boundary and applies
 ADR 0004 visibility and full admission-key rules to the private selected history using the
@@ -323,11 +386,16 @@ plus currently visible events after the supplied cursor, bounded by a positive e
 when present. It never advances the clock, commits a cursor, or mutates state.
 
 The runtime owns cursor commit. It can obtain a cursor only from this source API and commits the
-returned cursor only after the admitted batch and
-all consequences have been processed successfully. Repeating `admit` with the prior cursor is an
-exact replay of source selection. Repeating it with the candidate cursor continues after the last
-admitted key. A clock earlier than `cursor.as_of`, a cursor from another source/history, or a
-cursor whose last event is missing fails before returning any event.
+returned cursor only after the admitted batch and all consequences have been processed
+successfully. Repeating `admit` with the prior cursor is an exact replay of source selection.
+Repeating it with the candidate cursor continues after the last admitted key.
+
+An admission before the first event returns an empty tuple and a bound cursor with
+`as_of=clock.now()` and `last_event=None`. Replaying the prior cursor returns the same candidate;
+committing the candidate and calling `next_available_at` returns at least its cutoff and normally
+the first event's availability; admitting at that availability starts from the first event. A
+clock earlier than `cursor.as_of`, a cursor from another semantic selection, or an unresolved
+non-null last event fails before returning any event.
 
 The source is immutable and bounded; growing-source late disclosure remains outside Phase 1. A
 future source cannot reuse this contract silently because append authority and committed-key
@@ -359,6 +427,7 @@ invalid_header
 invalid_record_shape
 invalid_field_character
 invalid_schema_version
+invalid_adjustment
 invalid_identity
 invalid_timestamp
 invalid_integer
@@ -367,12 +436,145 @@ invalid_bar
 invalid_envelope
 canonical_batch_conflict
 empty_replay_selection
+invalid_dataset
 invalid_cursor
 clock_regressed
 invalid_limit
 ```
 
-Precedence is:
+The following matrices are normative. `null` means the evidence field is `None`. When a field
+name is shown, it is the literal header name. The first matching row in each operation is the only
+returned failure.
+
+#### Byte decoder matrix
+
+| Condition | Code | `record_number` | `field_name` |
+|---|---|---:|---|
+| `content` or `replay_window` has the wrong exact type | `invalid_type` | null | null |
+| zero bytes | `empty_source` | null | null |
+| more than 67,108,864 bytes | `source_too_large` | null | null |
+| strict UTF-8 decode fails, or decoded text starts with BOM | `invalid_encoding` | null | null |
+| NUL or bare CR outside a CRLF pair | `invalid_file_character` | null | null |
+| lexical quote transition is invalid, or `csv.reader` raises after lexical preflight | `malformed_csv` | next logical record | null |
+| quoted field contains CR/LF | `invalid_field_character` | current logical record | current field, or null in header |
+| decoded field exceeds 1,024 code points | `invalid_record_shape` | current logical record | current field, or null in header |
+| logical record count would exceed 1,000,001 | `invalid_record_shape` | 1,000,002 | null |
+| header differs by value, width, order, quoting result, or case | `invalid_header` | 1 | null |
+| header is the only record | `invalid_record_shape` | 2 | null |
+| data record is blank, comment-shaped, or not exactly 15 fields | `invalid_record_shape` | current logical record | null |
+| decoded data field contains non-ASCII/control character | `invalid_field_character` | current logical record | first offending field in header order |
+| schema token is not exact `1` | `invalid_schema_version` | current logical record | `schema_version` |
+| venue constructor rejects | `invalid_identity` | current logical record | `venue` |
+| symbol/Instrument constructor rejects | `invalid_identity` | current logical record | `symbol` |
+| interval timestamp token/UTC/reformat rejects | `invalid_timestamp` | current logical record | `interval_start`, then `interval_end` |
+| adjustment is not exact `raw` | `invalid_adjustment` | current logical record | `adjustment` |
+| OHLCV grammar/conversion/finite check rejects | `invalid_float` | current logical record | `open`, `high`, `low`, `close`, then `volume` |
+| interval start is not earlier than end | `invalid_bar` | current logical record | `interval_end` |
+| `low > high` | `invalid_bar` | current logical record | `high` |
+| open is outside `[low, high]` | `invalid_bar` | current logical record | `open` |
+| close is outside `[low, high]` | `invalid_bar` | current logical record | `close` |
+| volume is negative | `invalid_bar` | current logical record | `volume` |
+| source constructor rejects | `invalid_identity` | current logical record | `source` |
+| source-sequence grammar/range rejects | `invalid_integer` | current logical record | `source_sequence` |
+| revision grammar/range rejects | `invalid_integer` | current logical record | `revision` |
+| availability timestamp rejects | `invalid_timestamp` | current logical record | `available_at` |
+| availability is earlier than event time | `invalid_envelope` | current logical record | `available_at` |
+| exact `Bar`/envelope construction rejects after all explicit checks | `invalid_bar` / `invalid_envelope` | current logical record | field of the violated explicit invariant |
+| complete history conflict from the matrix below | `canonical_batch_conflict` | as below | as below |
+| no event falls inside the replay window | `empty_replay_selection` | null | null |
+
+Data records are evaluated in file order and fields in the construction order already frozen.
+Header parsing finishes before a field name can appear in evidence. A lexer failure in the header
+therefore uses a null field. “Next logical record” is one plus the count of completely decoded
+records, which is stable across LF and CRLF.
+
+The adapter explicitly checks every `Bar`, envelope, and batch invariant before invoking the
+existing constructor/helper. A structured core failure at the corresponding call is translated
+only by the operation and already-known field. A core failure contradicting completed explicit
+checks is an implementation defect and propagates; text matching is forbidden.
+
+#### Complete-history conflict matrix
+
+During the file-order pass, each row is indexed by record-version key, source-emission key, and
+full admission key in that order. After that pass, logical histories are visited by ascending
+logical key and revision.
+
+| Condition | Record evidence | Field evidence |
+|---|---:|---|
+| repeated record-version key, whether exact duplicate or conflicting payload | later file record | null |
+| repeated source-emission key | later file record | `source_sequence` |
+| repeated full admission key | later file record | null |
+| higher revision has earlier `available_at` | offending higher-revision record | `available_at` |
+| higher revision has non-increasing `source_sequence` | offending higher-revision record | `source_sequence` |
+
+All rows use `canonical_batch_conflict`. File order identifies the later duplicate only; it never
+orders admitted output or changes the semantic fingerprint.
+
+#### Local-file reader matrix
+
+| Condition | Code | Evidence |
+|---|---|---|
+| wrong `path` or replay-window type | `invalid_type` | null/null |
+| `O_NOFOLLOW` unavailable; `lstat`/open/read fails; path missing; symlink; non-regular path or descriptor | `source_unreadable` | null/null |
+| pre-read size exceeds the byte bound, or the bounded read obtains a 67,108,865th byte | `source_too_large` | null/null |
+| descriptor/path identity, regular kind, size, byte count, or nanosecond mtime changes across capture | `source_changed_during_read` | null/null |
+| stable capture succeeds | invoke the byte decoder matrix | unchanged |
+
+An `OSError` during pre-open inspection, open, or read is `source_unreadable`. An `OSError` or
+identity mismatch during post-read descriptor/path stability checks is
+`source_changed_during_read`. The helper closes its descriptor in `finally`; a close failure after
+successful capture propagates as an unexpected implementation/platform error rather than changing
+the captured-data classification.
+
+#### Dataset and source construction matrix
+
+Direct `Phase1HistoricalDataset`, `Phase1HistoricalMarketDataSource`, and
+`Phase1HistoricalSourceCursor` construction raises `TypeError`; it never returns
+`HistoricalMarketDataError`.
+
+| Operation/condition | Code | Evidence |
+|---|---|---|
+| source factory receives a non-exact dataset | `invalid_type` | null/null |
+| exact dataset fails profile, type, byte bound, replay-window/selection equality, semantic fingerprint, ordering, or other derivable invariant | `invalid_dataset` | null/null |
+| all invariants hold | construct source and private admission-key/record-byte indexes | no failure |
+
+The source does not expose or use diagnostic raw-byte SHA/count as cursor or source authority.
+
+#### `next_available_at` matrix
+
+Validation order is exact cursor type, semantic binding, inner cursor shape/UTC, then source-owned
+membership.
+
+| Condition | Code | Evidence |
+|---|---|---|
+| cursor is neither null nor exact `Phase1HistoricalSourceCursor` | `invalid_cursor` | null/null |
+| replay window, data SHA, or record count differs | `invalid_cursor` | null/null |
+| inner cursor is malformed or non-UTC | `invalid_cursor` | null/null |
+| `last_event=None` but an event was visible at `as_of` | `invalid_cursor` | null/null |
+| non-null last admission key is absent or canonical record bytes differ | `invalid_cursor` | null/null |
+| valid cursor or null | return the monotone timestamp/`None` contract above | no failure |
+
+#### `admit` matrix
+
+Static validation completes before `clock.now()` is called: exact clock port shape, cursor using
+the preceding matrix, then limit. The clock is then read exactly once.
+
+| Condition | Code | Evidence |
+|---|---|---|
+| clock lacks a callable `now` attribute | `invalid_type` | null/null |
+| cursor fails the exact matrix above | `invalid_cursor` | null/null |
+| limit is present but is not an exact positive `int` | `invalid_limit` | null/null |
+| `clock.now()` returns a non-exact datetime, naive value, or non-zero UTC offset | `invalid_type` | null/null |
+| clock cutoff is earlier than cursor cutoff | `clock_regressed` | null/null |
+| valid call | return issued bound cursor and visible canonical tuple | no failure |
+
+Attribute access failure or a non-callable `now` is the declared `invalid_type`. Once a callable
+has been obtained, any exception raised by executing `now()` propagates unchanged; it is not
+reclassified. An exact datetime with zero offset is normalized to the standard `UTC` object under
+ADR 0004. The source call publishes nothing before the returned UTC value and complete candidate
+have been validated.
+
+Overall operation precedence is:
 
 1. exact argument types;
 2. filesystem kind/read/stability for the path helper;
@@ -384,7 +586,7 @@ Precedence is:
 8. complete canonical batch validation;
 9. replay-window selection and semantic fingerprint;
 10. dataset/source invariant validation;
-11. cursor, clock, and limit validation for source calls.
+11. method-specific cursor, clock-port, limit, single clock read, and monotonicity validation.
 
 The first applicable failure is the only failure. A decoder, reader, source factory, or source
 call publishes no partial dataset, event tuple, cursor, or mutable state on failure. Existing
@@ -403,9 +605,12 @@ The implementation must provide:
   duplicate/conflict, and equal-admission-key tests;
 - input-row permutation tests proving canonical order and semantic fingerprint independence;
 - replay-window boundary and empty-selection tests;
-- next-availability tests including several events at one availability timestamp;
-- cursor replay, foreign cursor, missing last event, clock regression, limit, exhaustion, and
-  no-clock-advance tests;
+- early-clock/empty-batch candidate, commit, replay, and first-availability traces;
+- next-availability tests including equal timestamps, already-visible limited chunks, arbitrary
+  positive limits, monotone wake-up, and same-cutoff draining;
+- cursor replay, foreign binding, missing key, changed payload with same key, binary64 signed-zero,
+  underflow, clock regression, exhaustion, and no-clock-advance tests;
+- golden tests binding every normative failure-matrix row to exact code/record/field evidence;
 - API tests proving no public future-event/history/path/iterator surface;
 - filesystem symlink, non-regular, oversize, short-read/change-during-read, and read-failure tests
   on supported platforms;
@@ -415,6 +620,26 @@ The implementation must provide:
 
 At final verification, the exact candidate must pass repository `full`, current line/branch
 coverage floors, byte-identical wheels, clean-wheel smoke, and exact-head CI.
+
+### Design-review finding disposition
+
+The first exact-SHA design review at `91b5ae61c2a946e140527dd042d0a50d0141dfde`
+returned HOLD. This revision addresses:
+
+- `ARCH51-001` / `DATA51-002`: dataset construction is factory-only and decoder-issued; the
+  source no longer exposes or treats raw-byte diagnostics as source/cursor authority.
+- `ARCH51-002` / `BACKTEST51-001`: a source-issued bound initial cursor with `last_event=None` has
+  complete validity, commit, replay, scheduling, and first-admission semantics.
+- `BACKTEST51-002`: next wake-up is monotone and same-cutoff draining is mandatory after a limited
+  visible batch.
+- `DATA51-001`: cursor membership resolves by admission key, compares canonical record bytes, and
+  reconstructs with the source-owned event, including signed-zero distinction.
+- `ARCH51-003` / `DATA51-003`: byte decoder, canonical conflict, filesystem, construction,
+  scheduling, cursor, clock, limit, evidence, and unexpected-exception behavior are frozen in
+  normative matrices.
+
+Closure requires new exact-SHA Architecture and Data/Backtest verdicts. This section does not
+accept the ADR or authorize implementation.
 
 ## Consequences
 
