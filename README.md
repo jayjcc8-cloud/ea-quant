@@ -24,8 +24,9 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   run manifest、audit lineage、composition preparation、CLI、测试、VSCode 配置和 CI
   质量门禁。Issue #26 已建立 86% line / 71% branch coverage floor 并移除未使用的运行依赖；
   Issue #28 已将 manifest 的 model、wire、codec 和 evidence 职责分离，同时保持公开与 wire
-  契约不变。当前开发已在该历史基线上继续推进；尚未实现 historical runtime、OMS、
-  reconciliation、portfolio planning、strategy 或 backtest。
+  契约不变。当前开发已在该历史基线上继续推进；尚未实现 historical runtime、OMS 的
+  fact/order-lifecycle 与 submission 部分、reconciliation、portfolio planning、strategy 或
+  backtest。
 - Phase 1 实现从 dependency-neutral economic values 开始：`ea.core.economics` 提供严格
   `ea-decimal-v1`、exact grid 与唯一 settlement rounding boundary；`ea.core.execution`
   提供 versioned instrument specification set、canonical bytes/digest 和 identity-bound
@@ -45,8 +46,13 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   [Accepted ADR 0012](docs/adr/0012-risk-conflict-dispatch-sequence-compatibility.md) 实现
   deny-by-default Phase 1 policy、position/order quantity limits、replay-stable
   allow/resize/reject/evaluation-failed、owner ID、证据摘要和 monotone halt，并保留 v1
-  `OrderIntent` 的 exact non-negative dispatch domain。该边界不创建 Order、不维护 shadow
-  ledger，也不替代尚未实现的 OMS、runtime gate 或 reconciliation。
+  `OrderIntent` 的 exact non-negative dispatch domain。Risk 边界本身不创建 Order、不维护
+  shadow ledger，也不替代 execution、runtime gate 或 reconciliation。
+- `ea.execution.authority` 实现 shared OMS 的 Order-creation authority：只接受完整且重新证明的
+  `OrderIntent + RiskEvaluationResult`，以 approval/intent/decision 三组 identity 保证一次性
+  消费、exact replay 与 conflict，确定性分配 `EXECUTION_ORDER`，并在单次 state publication
+  前预检 canonical Order、execution request、digest 与 client submission key。该切片不提交
+  venue、不处理 raw fact/Fill，也不替代紧邻 submission 的 audit/freshness/halt gate。
 - `ea.core.runtime` 与 `ea.runtime` 已按
   [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md) 建立 safety、execution
   fact、market、timer、end-of-run 的全局 root key、完整有界计划验证和不可插入的单消费者顺序

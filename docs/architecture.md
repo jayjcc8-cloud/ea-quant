@@ -360,8 +360,9 @@ Phase 1 入口门禁的历史状态审查基线为
   model、wire、codec 和 evidence 职责，并建立生产源码零 `type: ignore` 门禁。
 - 当前开发已在该历史基线上继续推进；canonical bounded root ordering 与单消费者计划 queue
   已实现，canonical Fill ledger/PortfolioSnapshot 与 deterministic pre-trade risk authority
-  也已实现；historical runtime coordinator、OMS、reconciliation、portfolio planning、
-  strategy 和 backtest 仍未实现。
+  也已实现；shared OMS 的 deterministic Order-creation/approval-consumption authority 已实现，
+  但 historical runtime coordinator、OMS fact/order-lifecycle 与 submission、reconciliation、
+  portfolio planning、strategy 和 backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -374,13 +375,17 @@ Phase 1 入口门禁的历史状态审查基线为
 - dependency-neutral canonical execution messages：factory-only immutable `OrderIntent ->
   RiskDecision -> ExecutionApproval -> Order -> ExecutionFactIngress/ExecutionFact -> Fill`、
   effective intent / execution request 投影、严格 reader、因果与 lineage 校验、确定性黄金向量
-  （已实现；尚不包含 OMS、reconciliation、matcher 或 adapter）。
+  （已实现；message 模块本身不包含 stateful authority、reconciliation、matcher 或 adapter）。
 - canonical Fill ledger：Accepted ADR 0010 的单一账本权威、原子 replay/conflict、exact
   settlement postings、immutable `PortfolioSnapshot` 与跨进程黄金向量（已实现）。
 - deterministic pre-trade risk：Accepted ADR 0011/0012 的 deny-by-default policy、
   position/order quantity capacity、replay-stable decision/evidence、owner ID allocation、
   identity-conflict halt、monotone public halt 与 exact non-negative dispatch compatibility
-  （已实现；OMS consumption 与 runtime outstanding-intent gate 仍由后续迭代实现）。
+  （已实现；runtime outstanding-intent 与 immediate pre-submission gate 仍由后续迭代实现）。
+- deterministic Order authority：接受 exact `OrderIntent + RiskEvaluationResult`，完整重构
+  intent/decision/approval、逐字段证明 risk evidence 与冻结 lineage，以 approval/intent/decision
+  三索引实现一次性消费、exact replay/conflict，并原子发布 canonical Order 与 request evidence
+  （已实现；不包含 venue submission、fact state machine、Fill normalization 或 reconciliation）。
 - canonical runtime root ordering：Accepted ADR 0008/0009 的 domain/local ranks、safety/fact/market/
   timer/end root keys、sequence-authority collision、factory-only bounded plan 与不可插入的
   single-consumer queue（已实现；尚不包含 reconciliation root payload、dispatch sequence、
