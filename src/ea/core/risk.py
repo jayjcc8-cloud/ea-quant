@@ -264,7 +264,10 @@ def _create_risk_state_snapshot(
             )
         except TimeValidationError as error:
             raise _fail(OutcomeCode.OUT_OF_RANGE, str(error)) from error
-        _require_uint64(halt_dispatch_sequence, field_name="halt_dispatch_sequence")
+        _require_non_negative(
+            halt_dispatch_sequence,
+            field_name="halt_dispatch_sequence",
+        )
         if risk_state_version != 1:
             raise _fail(OutcomeCode.CONFLICTING_ID, "halted state must have version one")
         is_conflict = halt_reason is RiskHaltReason.INTENT_IDENTITY_CONFLICT
@@ -615,11 +618,11 @@ def _require_id(
     return identity
 
 
-def _require_uint64(value: object, *, field_name: str) -> int:
+def _require_non_negative(value: object, *, field_name: str) -> int:
     if type(value) is not int:
         raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} must be an exact int")
-    if value < 0 or value > _MAX_UINT64:
-        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} must be uint64")
+    if value < 0:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} must be non-negative")
     return value
 
 

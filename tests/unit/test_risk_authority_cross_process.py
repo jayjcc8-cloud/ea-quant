@@ -108,7 +108,7 @@ snapshot = PortfolioSnapshot(
 def identity(owner, sequence):
     return EconomicId(run_id, owner, sequence)
 
-def intent(instrument, sequence, quantity):
+def intent(instrument, sequence, quantity, dispatch_sequence=None):
     return create_order_intent(
         run_id=run_id,
         intent_id=identity(EconomicOwnerKind.PORTFOLIO_INTENT, sequence),
@@ -122,15 +122,35 @@ def intent(instrument, sequence, quantity):
         quantity=CanonicalDecimal(quantity),
         portfolio_snapshot_version=0,
         causal_root_available_at=timestamp,
-        dispatch_sequence=sequence,
+        dispatch_sequence=sequence if dispatch_sequence is None else dispatch_sequence,
         spec_set=spec_set,
         execution_policy=execution_policy,
     )
 
-allowed = authority.evaluate(intent(aapl.instrument, 1, "2"), snapshot)
-resized = authority.evaluate(intent(ibm.instrument, 2, "5"), snapshot)
-replay = authority.evaluate(intent(aapl.instrument, 1, "2"), snapshot)
-authority.engage_halt(RiskHaltReason.KILL_SWITCH, timestamp, 3)
+uint64_boundary = 1 << 64
+very_large = (1 << 4096) + 73
+allowed_intent = intent(aapl.instrument, 1, "2", uint64_boundary)
+allowed = authority.evaluate(allowed_intent, snapshot)
+resized = authority.evaluate(intent(ibm.instrument, 2, "5", very_large), snapshot)
+replay = authority.evaluate(allowed_intent, snapshot)
+authority.engage_halt(RiskHaltReason.KILL_SWITCH, timestamp, very_large)
+
+conflict_authority = create_phase1_risk_authority(
+    run_id=run_id,
+    spec_set=spec_set,
+    execution_policy=execution_policy,
+    policy=policy,
+)
+conflict_authority.evaluate(intent(aapl.instrument, 1, "2", 1), snapshot)
+try:
+    conflict_authority.evaluate(
+        intent(aapl.instrument, 1, "3", uint64_boundary),
+        snapshot,
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("identity conflict must fail")
 
 vectors = {
     "evidence": [
@@ -145,9 +165,13 @@ vectors = {
         phase1_risk_policy_digest(policy).value,
     ],
     "replay_identity": replay is allowed,
-    "state": [
+    "public_halt_state": [
         canonical_risk_state_snapshot_bytes(authority.risk_state).hex(),
         risk_state_snapshot_digest(authority.risk_state).value,
+    ],
+    "conflict_halt_state": [
+        canonical_risk_state_snapshot_bytes(conflict_authority.risk_state).hex(),
+        risk_state_snapshot_digest(conflict_authority.risk_state).value,
     ],
 }
 print(json.dumps(vectors, sort_keys=True, separators=(",", ":")))

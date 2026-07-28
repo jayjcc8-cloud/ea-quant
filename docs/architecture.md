@@ -377,10 +377,10 @@ Phase 1 入口门禁的历史状态审查基线为
   （已实现；尚不包含 OMS、reconciliation、matcher 或 adapter）。
 - canonical Fill ledger：Accepted ADR 0010 的单一账本权威、原子 replay/conflict、exact
   settlement postings、immutable `PortfolioSnapshot` 与跨进程黄金向量（已实现）。
-- deterministic pre-trade risk：Accepted ADR 0011 的 deny-by-default policy、position/order
-  quantity capacity、replay-stable decision/evidence、owner ID allocation、identity-conflict
-  halt 与 monotone public halt（已实现；OMS consumption 与 runtime outstanding-intent gate
-  仍由后续迭代实现）。
+- deterministic pre-trade risk：Accepted ADR 0011/0012 的 deny-by-default policy、
+  position/order quantity capacity、replay-stable decision/evidence、owner ID allocation、
+  identity-conflict halt、monotone public halt 与 exact non-negative dispatch compatibility
+  （已实现；OMS consumption 与 runtime outstanding-intent gate 仍由后续迭代实现）。
 - canonical runtime root ordering：Accepted ADR 0008/0009 的 domain/local ranks、safety/fact/market/
   timer/end root keys、sequence-authority collision、factory-only bounded plan 与不可插入的
   single-consumer queue（已实现；尚不包含 reconciliation root payload、dispatch sequence、

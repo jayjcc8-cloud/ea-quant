@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from hypothesis import given, settings
@@ -23,6 +24,7 @@ from ea.core import (
     PositionBalance,
     PriceDomain,
     RiskDecisionKind,
+    RiskHaltReason,
     RiskPolicyId,
     RunId,
     SettlementCurrency,
@@ -30,6 +32,7 @@ from ea.core import (
     TargetLineageRef,
     VenueId,
     build_instrument_spec_set,
+    canonical_risk_state_snapshot_bytes,
     create_order_intent,
     create_phase1_risk_policy,
     instrument_spec_set_digest,
@@ -114,6 +117,7 @@ def _snapshot(position: int) -> PortfolioSnapshot:
 def _intent(
     *,
     sequence: int,
+    dispatch_sequence: int | None = None,
     side: OrderSide,
     quantity: int,
     snapshot_version: int,
@@ -131,7 +135,7 @@ def _intent(
         quantity=CanonicalDecimal(str(quantity)),
         portfolio_snapshot_version=snapshot_version,
         causal_root_available_at=TIME,
-        dispatch_sequence=sequence,
+        dispatch_sequence=sequence if dispatch_sequence is None else dispatch_sequence,
         spec_set=SPEC_SET,
         execution_policy=EXECUTION_POLICY,
     )
@@ -253,3 +257,39 @@ def test_exact_replay_never_allocates_after_any_later_history(later_count: int) 
 
     assert replay is original
     assert authority.results is before
+
+
+@given(
+    dispatch=st.integers(
+        min_value=1 << 64,
+        max_value=(1 << 4096) - 1,
+    )
+)
+@settings(max_examples=40)
+def test_generated_unbounded_dispatch_is_preserved_by_evaluation_and_halt(
+    dispatch: int,
+) -> None:
+    authority = _authority(20, 20)
+    snapshot = _snapshot(0)
+    intent = _intent(
+        sequence=1,
+        dispatch_sequence=dispatch,
+        side=OrderSide.BUY,
+        quantity=1,
+        snapshot_version=0,
+    )
+
+    original = authority.evaluate(intent, snapshot)
+    replay = authority.evaluate(intent, snapshot)
+    state = authority.engage_halt(
+        RiskHaltReason.EXTERNAL_SAFETY_HALT,
+        TIME,
+        dispatch,
+    )
+
+    assert replay is original
+    assert original.decision.dispatch_sequence == dispatch
+    assert state.halt_dispatch_sequence == dispatch
+    assert (
+        json.loads(canonical_risk_state_snapshot_bytes(state))["halt_dispatch_sequence"] == dispatch
+    )

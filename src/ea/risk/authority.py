@@ -187,7 +187,7 @@ class Phase1RiskAuthority:
             )
         except TimeValidationError as error:
             raise RiskAuthorityError(OutcomeCode.OUT_OF_RANGE, str(error)) from error
-        _require_uint64(dispatch_sequence, field_name="dispatch_sequence")
+        _require_non_negative(dispatch_sequence, field_name="dispatch_sequence")
         if self._state.risk_state.halted:
             return self._state.risk_state
 
@@ -229,6 +229,10 @@ class Phase1RiskAuthority:
             raise RiskAuthorityError(OutcomeCode.INVALID_TYPE, "portfolio snapshot must be exact")
         if type(intent.intent_id) is not EconomicId:
             raise RiskAuthorityError(OutcomeCode.INVALID_TYPE, "intent ID must be exact")
+        _require_non_negative(
+            intent.dispatch_sequence,
+            field_name="intent dispatch_sequence",
+        )
         try:
             intent_bytes = canonical_order_intent_bytes(intent)
             intent_sha256 = order_intent_digest(intent)
@@ -239,7 +243,6 @@ class Phase1RiskAuthority:
                 OutcomeCode.INVALID_TYPE,
                 "intent cannot be canonically encoded",
             ) from error
-        _require_uint64(intent.dispatch_sequence, field_name="intent dispatch_sequence")
 
         existing = self._state.replay_index.get(intent.intent_id)
         if existing is not None:
@@ -784,16 +787,16 @@ def _advance(value: int) -> int | None:
     return None if value == _MAX_UINT64 else value + 1
 
 
-def _require_uint64(value: object, *, field_name: str) -> int:
+def _require_non_negative(value: object, *, field_name: str) -> int:
     if type(value) is not int:
         raise RiskAuthorityError(
             OutcomeCode.INVALID_TYPE,
             f"{field_name} must be an exact int",
         )
-    if value < 0 or value > _MAX_UINT64:
+    if value < 0:
         raise RiskAuthorityError(
             OutcomeCode.OUT_OF_RANGE,
-            f"{field_name} must be uint64",
+            f"{field_name} must be non-negative",
         )
     return value
 

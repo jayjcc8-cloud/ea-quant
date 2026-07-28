@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -145,6 +145,7 @@ def _intent(
     spec_set: InstrumentExecutionSpecSet,
     *,
     sequence: int = 1,
+    dispatch_sequence: int | None = None,
     side: OrderSide = OrderSide.BUY,
     quantity: str = "2",
     snapshot_version: int = 0,
@@ -165,7 +166,7 @@ def _intent(
         quantity=CanonicalDecimal(quantity),
         portfolio_snapshot_version=snapshot_version,
         causal_root_available_at=TIME,
-        dispatch_sequence=sequence,
+        dispatch_sequence=sequence if dispatch_sequence is None else dispatch_sequence,
         spec_set=spec_set,
         execution_policy=execution_policy,
     )
@@ -227,6 +228,30 @@ def _replace_intent(intent: OrderIntent, **changes: object) -> OrderIntent:
 
 def _assert_error(error: pytest.ExceptionInfo[RiskAuthorityError], code: OutcomeCode) -> None:
     assert error.value.code is code
+
+
+def _raise_injected(*_args: object, **_kwargs: object) -> None:
+    raise RuntimeError("injected pre-publication failure")
+
+
+def _assert_authority_unchanged(
+    authority: Phase1RiskAuthority,
+    original_state: Any,
+    original_risk_state_bytes: bytes,
+    original_risk_state_digest: Sha256Digest,
+) -> None:
+    current = authority._state
+    assert current is original_state
+    assert current.risk_state is original_state.risk_state
+    assert current.decision_next == original_state.decision_next
+    assert current.approval_next == original_state.approval_next
+    assert current.replay_index is original_state.replay_index
+    assert dict(current.replay_index) == dict(original_state.replay_index)
+    assert current.decisions is original_state.decisions
+    assert current.evidence is original_state.evidence
+    assert current.results is original_state.results
+    assert canonical_risk_state_snapshot_bytes(current.risk_state) == original_risk_state_bytes
+    assert risk_state_snapshot_digest(current.risk_state) == original_risk_state_digest
 
 
 def test_policy_factory_sorts_limits_and_emits_literal_canonical_document() -> None:
@@ -586,6 +611,29 @@ def test_exact_replay_returns_original_object_after_newer_state_and_halt() -> No
     assert authority.risk_state.halted is True
 
 
+def test_unbounded_dispatch_evaluates_and_replays_after_newer_state() -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    dispatch = 1 << 64
+    intent = _intent(spec_set, dispatch_sequence=dispatch)
+    original = authority.evaluate(intent, _snapshot(spec_set))
+    authority.engage_halt(
+        RiskHaltReason.EXTERNAL_SAFETY_HALT,
+        TIME + timedelta(seconds=1),
+        dispatch + 1,
+    )
+    state_before = authority._state
+
+    replay = authority.evaluate(intent, _snapshot(spec_set, position="7"))
+
+    assert replay is original
+    assert authority._state is state_before
+    assert authority.results == (original,)
+    assert original.decision.dispatch_sequence == dispatch
+    assert original.decision.approval is not None
+    assert original.decision.approval.dispatch_sequence == dispatch
+
+
 def test_same_id_different_bytes_engages_one_atomic_conflict_halt() -> None:
     spec_set = _spec_set()
     authority = _authority(spec_set, _policy(spec_set, _limit()))
@@ -608,6 +656,53 @@ def test_same_id_different_bytes_engages_one_atomic_conflict_halt() -> None:
         authority.evaluate(conflicting, _snapshot(spec_set))
     assert authority.risk_state is first_halt
     assert len(authority.decisions) == 1
+
+
+def test_large_submitted_dispatch_engages_exact_conflict_halt() -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    original = _intent(spec_set)
+    authority.evaluate(original, _snapshot(spec_set))
+    submitted_dispatch = 1 << 64
+    conflicting = _replace_intent(
+        original,
+        dispatch_sequence=submitted_dispatch,
+    )
+
+    with pytest.raises(RiskAuthorityError) as error:
+        authority.evaluate(conflicting, _snapshot(spec_set))
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    state = authority.risk_state
+    assert state.halt_reason is RiskHaltReason.INTENT_IDENTITY_CONFLICT
+    assert state.halt_dispatch_sequence == submitted_dispatch
+    assert (
+        json.loads(canonical_risk_state_snapshot_bytes(state))["halt_dispatch_sequence"]
+        == submitted_dispatch
+    )
+
+
+def test_large_conflict_after_existing_halt_never_rewrites_first_state() -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    original = _intent(spec_set)
+    authority.evaluate(original, _snapshot(spec_set))
+    first = authority.engage_halt(RiskHaltReason.KILL_SWITCH, TIME, 7)
+    first_bytes = canonical_risk_state_snapshot_bytes(first)
+    first_digest = risk_state_snapshot_digest(first)
+    state_before = authority._state
+
+    with pytest.raises(RiskAuthorityError) as error:
+        authority.evaluate(
+            _replace_intent(original, dispatch_sequence=1 << 512),
+            _snapshot(spec_set),
+        )
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert authority._state is state_before
+    assert authority.risk_state is first
+    assert canonical_risk_state_snapshot_bytes(authority.risk_state) == first_bytes
+    assert risk_state_snapshot_digest(authority.risk_state) == first_digest
 
 
 def test_digest_collision_does_not_downgrade_different_bytes_to_replay(
@@ -651,18 +746,79 @@ def test_public_halt_validates_command_and_never_rewrites_first_cause() -> None:
     with pytest.raises(RiskAuthorityError) as non_utc:
         authority.engage_halt(RiskHaltReason.KILL_SWITCH, datetime(2026, 1, 1), 1)
     _assert_error(non_utc, OutcomeCode.OUT_OF_RANGE)
-    with pytest.raises(RiskAuthorityError) as dispatch:
-        authority.engage_halt(RiskHaltReason.KILL_SWITCH, TIME, 1 << 64)
-    _assert_error(dispatch, OutcomeCode.OUT_OF_RANGE)
-
-    first = authority.engage_halt(RiskHaltReason.KILL_SWITCH, TIME, 1)
+    first = authority.engage_halt(RiskHaltReason.KILL_SWITCH, TIME, 1 << 64)
+    assert first.halt_dispatch_sequence == 1 << 64
+    expected_bytes = (
+        b'{"canonicalization":"ea-risk-state-v1",'
+        b'"conflict_existing_intent_sha256":null,'
+        b'"conflict_submitted_intent_sha256":null,'
+        b'"halt_causal_root_available_at":"2026-01-02T09:31:00.000000Z",'
+        b'"halt_dispatch_sequence":18446744073709551616,'
+        b'"halt_reason":"kill_switch","halted":true,'
+        b'"message_type":"risk_state_snapshot","policy_id":"phase1.risk.v1",'
+        b'"policy_sha256":'
+        b'"65d973538dc972f7dc566afb676a89548bcc88875e0b10464080bd52c3667be6",'
+        b'"risk_state_version":1,'
+        b'"run_id":"12345678-1234-4234-8234-123456789abc","schema_version":1}'
+    )
+    assert canonical_risk_state_snapshot_bytes(first) == expected_bytes
+    assert (
+        risk_state_snapshot_digest(first).value
+        == "7bd69a50937391d0e900849e08840c2b0ce88ef320d0a56bec48f8a6f54d7a0e"
+    )
     repeated = authority.engage_halt(
         RiskHaltReason.EXTERNAL_SAFETY_HALT,
         TIME + timedelta(days=1),
-        99,
+        1 << 512,
     )
     assert repeated is first
     assert repeated.halt_reason is RiskHaltReason.KILL_SWITCH
+
+
+class _IntSubclass(int):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("dispatch", "code"),
+    [
+        (-1, OutcomeCode.OUT_OF_RANGE),
+        (True, OutcomeCode.INVALID_TYPE),
+        (_IntSubclass(1), OutcomeCode.INVALID_TYPE),
+        (1.0, OutcomeCode.INVALID_TYPE),
+        ("1", OutcomeCode.INVALID_TYPE),
+    ],
+)
+def test_public_halt_rejects_invalid_dispatch_without_coercion_or_mutation(
+    dispatch: object,
+    code: OutcomeCode,
+) -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    original_state = authority._state
+
+    with pytest.raises(RiskAuthorityError) as error:
+        authority.engage_halt(
+            RiskHaltReason.KILL_SWITCH,
+            TIME,
+            cast(int, dispatch),
+        )
+
+    _assert_error(error, code)
+    assert authority._state is original_state
+
+
+def test_public_halt_preserves_very_large_exact_dispatch() -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    dispatch = (1 << 4096) + 73
+
+    state = authority.engage_halt(RiskHaltReason.EXTERNAL_SAFETY_HALT, TIME, dispatch)
+
+    assert state.halt_dispatch_sequence == dispatch
+    assert (
+        json.loads(canonical_risk_state_snapshot_bytes(state))["halt_dispatch_sequence"] == dispatch
+    )
 
 
 def test_decision_and_approval_exhaustion_follow_literal_transitions() -> None:
@@ -735,32 +891,262 @@ def test_structural_intent_errors_consume_no_ids_or_state() -> None:
     assert authority._state is original_state
     assert authority.results == ()
 
-    oversized_dispatch = _replace_intent(
-        _intent(spec_set),
-        dispatch_sequence=1 << 64,
-    )
-    with pytest.raises(RiskAuthorityError) as dispatch_error:
-        authority.evaluate(oversized_dispatch, _snapshot(spec_set))
-    _assert_error(dispatch_error, OutcomeCode.OUT_OF_RANGE)
+
+@pytest.mark.parametrize(
+    ("dispatch", "code"),
+    [
+        (-1, OutcomeCode.OUT_OF_RANGE),
+        (True, OutcomeCode.INVALID_TYPE),
+        (_IntSubclass(1), OutcomeCode.INVALID_TYPE),
+        (1.0, OutcomeCode.INVALID_TYPE),
+        ("1", OutcomeCode.INVALID_TYPE),
+    ],
+)
+@pytest.mark.parametrize("occupied", [False, True])
+def test_forged_dispatch_fails_before_lookup_without_mutation(
+    dispatch: object,
+    code: OutcomeCode,
+    occupied: bool,
+) -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    intent = _intent(spec_set, sequence=1 if occupied else 2)
+    if occupied:
+        authority.evaluate(intent, _snapshot(spec_set))
+    original_state = authority._state
+    malformed = _replace_intent(intent, dispatch_sequence=dispatch)
+
+    with pytest.raises(RiskAuthorityError) as error:
+        authority.evaluate(malformed, _snapshot(spec_set))
+
+    _assert_error(error, code)
     assert authority._state is original_state
+    assert authority.risk_state.halted is False
 
 
-def test_canonicalization_failure_before_publication_preserves_aggregate_identity(
+_EXECUTABLE_REGISTRATION_FAILURE_TARGETS = (
+    ("authority", "canonical_order_intent_bytes"),
+    ("authority", "order_intent_digest"),
+    ("authority", "canonical_portfolio_snapshot_bytes"),
+    ("authority", "portfolio_snapshot_digest"),
+    ("authority", "allow_order_intent"),
+    ("execution_messages", "_make_approval"),
+    ("authority", "_create_risk_evaluation_evidence"),
+    ("authority", "_create_risk_evaluation_result"),
+    ("authority", "_ReplayRecord"),
+    ("authority", "_freeze_state"),
+    ("authority", "canonical_phase1_risk_policy_bytes"),
+    ("authority", "phase1_risk_policy_digest"),
+    ("authority", "canonical_risk_state_snapshot_bytes"),
+    ("authority", "risk_state_snapshot_digest"),
+    ("authority", "canonical_risk_decision_bytes"),
+    ("authority", "risk_decision_digest"),
+    ("authority", "canonical_execution_approval_bytes"),
+    ("authority", "execution_approval_digest"),
+    ("authority", "canonical_risk_evaluation_evidence_bytes"),
+    ("authority", "risk_evaluation_evidence_digest"),
+)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "target"),
+    _EXECUTABLE_REGISTRATION_FAILURE_TARGETS,
+)
+def test_executable_registration_failure_matrix_is_atomic(
     monkeypatch: pytest.MonkeyPatch,
+    module_name: str,
+    target: str,
 ) -> None:
     spec_set = _spec_set()
     authority = _authority(spec_set, _policy(spec_set, _limit()))
     original_state = authority._state
+    original_bytes = canonical_risk_state_snapshot_bytes(authority.risk_state)
+    original_digest = risk_state_snapshot_digest(authority.risk_state)
+    module = authority_module if module_name == "authority" else execution_messages_module
 
-    def fail_digest(_: RiskEvaluationEvidence) -> Sha256Digest:
-        raise RuntimeError("injected evidence digest failure")
+    with monkeypatch.context() as patch:
+        patch.setattr(module, target, _raise_injected)
+        with pytest.raises(RuntimeError, match="injected pre-publication"):
+            authority.evaluate(_intent(spec_set), _snapshot(spec_set))
 
-    monkeypatch.setattr(authority_module, "risk_evaluation_evidence_digest", fail_digest)
-    with pytest.raises(RuntimeError, match="injected"):
-        authority.evaluate(_intent(spec_set), _snapshot(spec_set))
+    _assert_authority_unchanged(
+        authority,
+        original_state,
+        original_bytes,
+        original_digest,
+    )
 
-    assert authority._state is original_state
-    assert authority.results == ()
+
+_NON_EXECUTABLE_REGISTRATION_FAILURE_TARGETS = (
+    "canonical_order_intent_bytes",
+    "order_intent_digest",
+    "canonical_portfolio_snapshot_bytes",
+    "portfolio_snapshot_digest",
+    "reject_order_intent",
+    "_create_risk_evaluation_evidence",
+    "_create_risk_evaluation_result",
+    "_ReplayRecord",
+    "_freeze_state",
+    "canonical_phase1_risk_policy_bytes",
+    "phase1_risk_policy_digest",
+    "canonical_risk_state_snapshot_bytes",
+    "risk_state_snapshot_digest",
+    "canonical_risk_decision_bytes",
+    "risk_decision_digest",
+    "canonical_risk_evaluation_evidence_bytes",
+    "risk_evaluation_evidence_digest",
+)
+
+
+@pytest.mark.parametrize("target", _NON_EXECUTABLE_REGISTRATION_FAILURE_TARGETS)
+def test_non_executable_registration_failure_matrix_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set))
+    original_state = authority._state
+    original_bytes = canonical_risk_state_snapshot_bytes(authority.risk_state)
+    original_digest = risk_state_snapshot_digest(authority.risk_state)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(authority_module, target, _raise_injected)
+        with pytest.raises(RuntimeError, match="injected pre-publication"):
+            authority.evaluate(_intent(spec_set), _snapshot(spec_set))
+
+    _assert_authority_unchanged(
+        authority,
+        original_state,
+        original_bytes,
+        original_digest,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "module_name", "target"),
+    [
+        ("allow", "authority", "allow_order_intent"),
+        ("resize", "authority", "resize_order_intent"),
+        ("reject", "authority", "reject_order_intent"),
+        ("evaluation_failed", "authority", "fail_order_intent_evaluation"),
+        ("approval", "execution_messages", "_make_approval"),
+    ],
+)
+def test_every_decision_and_approval_construction_path_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    module_name: str,
+    target: str,
+) -> None:
+    spec_set = _spec_set()
+    if case == "resize":
+        authority = _authority(
+            spec_set,
+            _policy(spec_set, _limit(order="1", position="10")),
+        )
+        intent = _intent(spec_set, quantity="2")
+    elif case == "reject":
+        authority = _authority(spec_set, _policy(spec_set))
+        intent = _intent(spec_set)
+    elif case == "evaluation_failed":
+        authority = _authority(spec_set, _policy(spec_set, _limit()))
+        intent = _intent(
+            spec_set,
+            execution_policy=ExecutionPolicyRef(
+                ExecutionPolicyId("foreign.execution.v1"),
+                Sha256Digest("9" * 64),
+            ),
+        )
+    else:
+        authority = _authority(spec_set, _policy(spec_set, _limit()))
+        intent = _intent(spec_set)
+    original_state = authority._state
+    original_bytes = canonical_risk_state_snapshot_bytes(authority.risk_state)
+    original_digest = risk_state_snapshot_digest(authority.risk_state)
+    module = authority_module if module_name == "authority" else execution_messages_module
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, target, _raise_injected)
+        with pytest.raises(RuntimeError, match="injected pre-publication"):
+            authority.evaluate(intent, _snapshot(spec_set))
+
+    _assert_authority_unchanged(
+        authority,
+        original_state,
+        original_bytes,
+        original_digest,
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "phase1_risk_policy_digest",
+        "_create_risk_state_snapshot",
+        "_freeze_state",
+        "canonical_risk_state_snapshot_bytes",
+        "risk_state_snapshot_digest",
+    ],
+)
+def test_public_halt_failure_matrix_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    original_state = authority._state
+    original_bytes = canonical_risk_state_snapshot_bytes(authority.risk_state)
+    original_digest = risk_state_snapshot_digest(authority.risk_state)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(authority_module, target, _raise_injected)
+        with pytest.raises(RuntimeError, match="injected pre-publication"):
+            authority.engage_halt(RiskHaltReason.KILL_SWITCH, TIME, 1 << 64)
+
+    _assert_authority_unchanged(
+        authority,
+        original_state,
+        original_bytes,
+        original_digest,
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "phase1_risk_policy_digest",
+        "_create_risk_state_snapshot",
+        "_freeze_state",
+        "canonical_risk_state_snapshot_bytes",
+        "risk_state_snapshot_digest",
+    ],
+)
+def test_identity_conflict_halt_failure_matrix_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    original = _intent(spec_set)
+    authority.evaluate(original, _snapshot(spec_set))
+    original_state = authority._state
+    original_bytes = canonical_risk_state_snapshot_bytes(authority.risk_state)
+    original_digest = risk_state_snapshot_digest(authority.risk_state)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(authority_module, target, _raise_injected)
+        with pytest.raises(RuntimeError, match="injected pre-publication"):
+            authority.evaluate(
+                _replace_intent(original, dispatch_sequence=1 << 64),
+                _snapshot(spec_set),
+            )
+
+    _assert_authority_unchanged(
+        authority,
+        original_state,
+        original_bytes,
+        original_digest,
+    )
 
 
 def test_authority_factory_rejects_conflicting_bindings() -> None:

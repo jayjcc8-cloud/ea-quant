@@ -41,9 +41,11 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   Fill ledger、原子应用/重放/冲突结果，以及供 risk 消费的 immutable canonical
   `PortfolioSnapshot`。
 - `ea.core.risk` 与 `ea.risk.authority` 已按
-  [Accepted ADR 0011](docs/adr/0011-deterministic-pre-trade-risk-authority.md) 实现 deny-by-default
-  Phase 1 policy、position/order quantity limits、replay-stable allow/resize/reject/
-  evaluation-failed、owner ID、证据摘要和 monotone halt。该边界不创建 Order、不维护 shadow
+  [Accepted ADR 0011](docs/adr/0011-deterministic-pre-trade-risk-authority.md) 和
+  [Accepted ADR 0012](docs/adr/0012-risk-conflict-dispatch-sequence-compatibility.md) 实现
+  deny-by-default Phase 1 policy、position/order quantity limits、replay-stable
+  allow/resize/reject/evaluation-failed、owner ID、证据摘要和 monotone halt，并保留 v1
+  `OrderIntent` 的 exact non-negative dispatch domain。该边界不创建 Order、不维护 shadow
   ledger，也不替代尚未实现的 OMS、runtime gate 或 reconciliation。
 - `ea.core.runtime` 与 `ea.runtime` 已按
   [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md) 建立 safety、execution
