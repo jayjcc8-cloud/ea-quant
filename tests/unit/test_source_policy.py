@@ -133,3 +133,31 @@ def test_inner_risk_package_depends_only_on_core_and_itself() -> None:
         )
 
     assert imported_ea_modules == allowed
+
+
+def test_inner_execution_package_depends_only_on_core_and_itself() -> None:
+    allowed = frozenset(
+        {
+            "ea.core.economics",
+            "ea.core.execution",
+            "ea.core.execution_identity",
+            "ea.core.execution_messages",
+            "ea.core.outcomes",
+            "ea.core.risk",
+            "ea.core.run",
+            "ea.core.time",
+            "ea.execution.authority",
+        }
+    )
+    imported_ea_modules: set[str] = set()
+    for source in sorted((SOURCE_ROOT / "execution").rglob("*.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        imported_ea_modules.update(
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("ea.")
+        )
+
+    assert imported_ea_modules == allowed

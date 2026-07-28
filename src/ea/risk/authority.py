@@ -98,7 +98,9 @@ class _ReplayRecord:
     intent_bytes: bytes
     portfolio_snapshot_sha256: Sha256Digest
     decision: RiskDecision
+    decision_bytes: bytes
     evidence: RiskEvaluationEvidence
+    evidence_bytes: bytes
     result: RiskEvaluationResult
 
 
@@ -145,6 +147,18 @@ class Phase1RiskAuthority:
         )
 
     @property
+    def run_id(self) -> RunId:
+        return self._run_id
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self._spec_set
+
+    @property
+    def execution_policy(self) -> ExecutionPolicyRef:
+        return self._execution_policy
+
+    @property
     def policy(self) -> Phase1RiskPolicy:
         return self._policy
 
@@ -163,6 +177,30 @@ class Phase1RiskAuthority:
     @property
     def results(self) -> tuple[RiskEvaluationResult, ...]:
         return self._state.results
+
+    def has_issued_result(
+        self,
+        *,
+        intent_id: EconomicId,
+        canonical_intent_bytes: bytes,
+        canonical_decision_bytes: bytes,
+        canonical_evidence_bytes: bytes,
+    ) -> bool:
+        """Prove exact canonical membership without exposing or mutating Risk state."""
+        if (
+            type(intent_id) is not EconomicId
+            or type(canonical_intent_bytes) is not bytes
+            or type(canonical_decision_bytes) is not bytes
+            or type(canonical_evidence_bytes) is not bytes
+        ):
+            return False
+        record = self._state.replay_index.get(intent_id)
+        return (
+            record is not None
+            and record.intent_bytes == canonical_intent_bytes
+            and record.decision_bytes == canonical_decision_bytes
+            and record.evidence_bytes == canonical_evidence_bytes
+        )
 
     def engage_halt(
         self,
@@ -549,6 +587,8 @@ class Phase1RiskAuthority:
                 approval_next_after=approval_after,
             )
             result = _create_risk_evaluation_result(decision, evidence)
+            decision_bytes = canonical_risk_decision_bytes(decision)
+            evidence_bytes = canonical_risk_evaluation_evidence_bytes(evidence)
         except (ExecutionMessageError, RiskContractError, EconomicValidationError) as error:
             _raise_structural(error)
 
@@ -557,7 +597,9 @@ class Phase1RiskAuthority:
             intent_bytes=intent_bytes,
             portfolio_snapshot_sha256=portfolio_snapshot_sha256,
             decision=decision,
+            decision_bytes=decision_bytes,
             evidence=evidence,
+            evidence_bytes=evidence_bytes,
             result=result,
         )
         next_replay = _copy_replay_index(self._state.replay_index)

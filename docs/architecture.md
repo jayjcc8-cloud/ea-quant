@@ -75,7 +75,9 @@ flowchart LR
   approval proof 并引用 effective intent 才能进入 execution；execution 不接受 bare `OrderIntent`。
 - Runtime 把每个 `OrderIntent` 连同 Portfolio 最新的 immutable canonical `Account` / `Position`
   snapshot 交给 risk；risk 只能派生 exposure，不能维护 shadow ledger。
-- Execution/OMS 是唯一的 Order 创建者和订单状态机权威。
+- Execution/OMS 是唯一的 Order 创建者和订单状态机权威；创建新 Order 前必须按
+  [Accepted ADR 0013](adr/0013-risk-result-issuance-provenance.md) 证明 exact canonical risk
+  result 已由本 run 绑定的 Risk authority 签发，不能把 low-level factory coherence 当作签发。
 - Execution/OMS 先形成 canonical `Order` 与不含密钥的 canonical execution request；Runtime
   只有在 mandatory audit adapter 返回 persisted acknowledgement 后，才授权 execution 提交 venue。
 - Venue 只产生 raw execution facts；Execution/OMS 校验、normalize、去重后发布明确 processing
@@ -360,8 +362,10 @@ Phase 1 入口门禁的历史状态审查基线为
   model、wire、codec 和 evidence 职责，并建立生产源码零 `type: ignore` 门禁。
 - 当前开发已在该历史基线上继续推进；canonical bounded root ordering 与单消费者计划 queue
   已实现，canonical Fill ledger/PortfolioSnapshot 与 deterministic pre-trade risk authority
-  也已实现；historical runtime coordinator、OMS、reconciliation、portfolio planning、
-  strategy 和 backtest 仍未实现。
+  也已实现；shared OMS 的 deterministic Order-creation/approval-consumption authority 已按
+  Accepted ADR 0013 绑定 Risk-owned canonical issuance verifier，coherent low-level factory
+  result 不再等同于 authority issuance。historical runtime coordinator、OMS fact/order-lifecycle
+  与 submission、reconciliation、portfolio planning、strategy 和 backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -374,13 +378,19 @@ Phase 1 入口门禁的历史状态审查基线为
 - dependency-neutral canonical execution messages：factory-only immutable `OrderIntent ->
   RiskDecision -> ExecutionApproval -> Order -> ExecutionFactIngress/ExecutionFact -> Fill`、
   effective intent / execution request 投影、严格 reader、因果与 lineage 校验、确定性黄金向量
-  （已实现；尚不包含 OMS、reconciliation、matcher 或 adapter）。
+  （已实现；message 模块本身不包含 stateful authority、reconciliation、matcher 或 adapter）。
 - canonical Fill ledger：Accepted ADR 0010 的单一账本权威、原子 replay/conflict、exact
   settlement postings、immutable `PortfolioSnapshot` 与跨进程黄金向量（已实现）。
 - deterministic pre-trade risk：Accepted ADR 0011/0012 的 deny-by-default policy、
   position/order quantity capacity、replay-stable decision/evidence、owner ID allocation、
   identity-conflict halt、monotone public halt 与 exact non-negative dispatch compatibility
-  （已实现；OMS consumption 与 runtime outstanding-intent gate 仍由后续迭代实现）。
+  （已实现；runtime outstanding-intent 与 immediate pre-submission gate 仍由后续迭代实现）。
+- deterministic Order authority：接受 exact `OrderIntent + RiskEvaluationResult`，完整重构
+  intent/decision/approval、逐字段证明 risk evidence、冻结 lineage 与静态 policy truth table，
+  并按 Accepted ADR 0013 查询绑定 Risk authority 的 non-evicting canonical issuance registry；
+  approval/intent/decision 三索引实现一次性消费与 exact replay/conflict，canonical Order 与
+  request evidence 原子发布（已实现；不包含 current freshness、venue submission、fact state
+  machine、Fill normalization 或 reconciliation）。
 - canonical runtime root ordering：Accepted ADR 0008/0009 的 domain/local ranks、safety/fact/market/
   timer/end root keys、sequence-authority collision、factory-only bounded plan 与不可插入的
   single-consumer queue（已实现；尚不包含 reconciliation root payload、dispatch sequence、
