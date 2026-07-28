@@ -716,7 +716,10 @@ def _require_projection_context(
         return
     for value in (before, after):
         if value is not None and (
-            value.run_id != run_id or value.order_id != resolved_order.order_id
+            value.run_id != run_id
+            or value.order_id != resolved_order.order_id
+            or value.order_sha256 != order_digest(resolved_order)
+            or value.client_submission_key != resolved_order.client_submission_key
         ):
             raise _fail(
                 OutcomeCode.CONFLICTING_ID,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, cast
@@ -51,6 +51,7 @@ from ea.core import (
     canonical_execution_fact_processing_outcome_bytes,
     canonical_order_projection_snapshot_bytes,
     create_execution_fact_ingress,
+    create_execution_fact_processing_outcome,
     create_lifecycle_execution_fact,
     create_order_intent,
     create_order_projection_snapshot,
@@ -570,6 +571,19 @@ def test_queue_requires_source_issuance_and_one_exact_live_lease() -> None:
     lease = queue.pop()
     assert lease.root is ingress
     assert lease.dispatch_sequence == 1
+    with pytest.raises(FrozenInstanceError):
+        cast(Any, lease)._root = object()
+    with pytest.raises(FrozenInstanceError):
+        cast(Any, lease)._dispatch_sequence = 999
+    object.__setattr__(lease, "_dispatch_sequence", 999)
+    assert (
+        queue.resolve_active_issued_fact_dispatch(
+            ingress_identity=cast(Any, ingress).identity,
+            canonical_ingress_bytes=canonical_execution_fact_ingress_bytes(cast(Any, ingress)),
+            canonical_fact_bytes=canonical_execution_fact_bytes(cast(Any, ingress).fact),
+        )
+        == 1
+    )
     with pytest.raises(Exception) as active:
         queue.pop()
     assert cast(Any, active.value).code is OutcomeCode.CONFLICTING_ID
@@ -579,6 +593,7 @@ def test_queue_requires_source_issuance_and_one_exact_live_lease() -> None:
     assert cast(Any, wrong_lease.value).code is OutcomeCode.CONFLICTING_ID
     queue.acknowledge(lease)
     assert queue.acknowledged_fact_dispatch_count == 1
+    assert queue._state.acknowledged_fact_dispatches[-1].dispatch_sequence == 1
     with pytest.raises(Exception) as repeated:
         queue.acknowledge(lease)
     assert cast(Any, repeated.value).code is OutcomeCode.CONFLICTING_ID
@@ -1750,6 +1765,46 @@ def test_projection_and_outcome_readers_are_strict_and_contextual() -> None:
             projection_after=projection,
             resolved_orders=(orders[0],),
         )
+
+
+def test_outcome_rejects_projection_from_different_order_economics() -> None:
+    spec_set, order_authority, orders = _orders()
+    ingress = _ingress(_lifecycle(orders[0]), sequence=1)
+    _source, queue, authority = _runtime(spec_set, order_authority, (ingress,))
+    _lease, outcome = _process_next(queue, authority)
+    projection = authority.projection_for_order(orders[0].order_id)
+    assert projection is not None
+    alternate_order = _clone_slots(
+        orders[0],
+        quantity=CanonicalDecimal("1"),
+    )
+    alternate_projection = create_order_projection_snapshot(
+        order=alternate_order,
+        spec_set=spec_set,
+        projection_version=projection.projection_version,
+        projection_state=projection.projection_state,
+        projected_executed_quantity=projection.projected_executed_quantity,
+        venue_source_namespace=projection.venue_source_namespace,
+        venue_order_id=projection.venue_order_id,
+        last_fact_key=projection.last_fact_key,
+        last_fact_sha256=projection.last_fact_sha256,
+    )
+
+    with pytest.raises(ExecutionStateError) as error:
+        create_execution_fact_processing_outcome(
+            run_id=RUN_ID,
+            runtime_dispatch_sequence=outcome.runtime_dispatch_sequence,
+            ingress=ingress,
+            action=outcome.action,
+            anomalies=outcome.anomalies,
+            order_resolutions=outcome.order_resolutions,
+            resolved_order=orders[0],
+            fill=None,
+            projection_before=None,
+            projection_after=alternate_projection,
+        )
+
+    assert error.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_outcome_reader_requires_exact_resolved_order_context() -> None:

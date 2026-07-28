@@ -47,13 +47,12 @@ class ExecutionFactIssuanceVerifier(Protocol):
 
 
 @final
+@dataclass(frozen=True, slots=True, init=False)
 class RuntimeDispatchLease:
     """Ephemeral exact in-process capability for one active root dispatch."""
 
     _root: RuntimeRoot
     _dispatch_sequence: int
-
-    __slots__ = ("_dispatch_sequence", "_root")
 
     def __init__(self) -> None:
         raise TypeError(
@@ -72,6 +71,8 @@ class RuntimeDispatchLease:
 @dataclass(frozen=True, slots=True)
 class _ActiveDispatch:
     lease: RuntimeDispatchLease
+    root: RuntimeRoot
+    dispatch_sequence: int
     ingress_identity: IngressIdentity | None
     ingress_bytes: bytes | None
     fact_bytes: bytes | None
@@ -196,10 +197,12 @@ class DeterministicRootQueue:
                     "fact root was not issued by its bound source authority",
                 )
         lease = object.__new__(RuntimeDispatchLease)
-        lease._root = root
-        lease._dispatch_sequence = dispatch_sequence
+        object.__setattr__(lease, "_root", root)
+        object.__setattr__(lease, "_dispatch_sequence", dispatch_sequence)
         active = _ActiveDispatch(
             lease=lease,
+            root=root,
+            dispatch_sequence=dispatch_sequence,
             ingress_identity=ingress_identity,
             ingress_bytes=ingress_bytes,
             fact_bytes=fact_bytes,
@@ -236,7 +239,7 @@ class DeterministicRootQueue:
             history = (
                 *history,
                 _AcknowledgedFactDispatch(
-                    dispatch_sequence=lease.dispatch_sequence,
+                    dispatch_sequence=active.dispatch_sequence,
                     ingress_identity=active.ingress_identity,
                     ingress_bytes=active.ingress_bytes,
                     fact_bytes=active.fact_bytes,
@@ -276,7 +279,7 @@ class DeterministicRootQueue:
             or active.fact_bytes != canonical_fact_bytes
         ):
             return None
-        return active.lease.dispatch_sequence
+        return active.dispatch_sequence
 
 
 def create_deterministic_root_queue(
@@ -412,6 +415,8 @@ def _preflight_pop(
     if (
         state.active is None
         or state.active.lease is not lease
+        or state.active.root is not root
+        or state.active.dispatch_sequence != lease.dispatch_sequence
         or lease.root is not root
         or lease.dispatch_sequence < 1
     ):
@@ -427,7 +432,6 @@ def _preflight_acknowledge(
         raise AssertionError("candidate acknowledgement did not clear active dispatch")
     if active.ingress_identity is not None and (
         not state.acknowledged_fact_dispatches
-        or state.acknowledged_fact_dispatches[-1].dispatch_sequence
-        != active.lease.dispatch_sequence
+        or state.acknowledged_fact_dispatches[-1].dispatch_sequence != active.dispatch_sequence
     ):
         raise AssertionError("candidate acknowledgement lost fact dispatch history")
