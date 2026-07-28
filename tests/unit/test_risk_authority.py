@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -239,6 +239,8 @@ def _assert_authority_unchanged(
     original_state: Any,
     original_risk_state_bytes: bytes,
     original_risk_state_digest: Sha256Digest,
+    *,
+    compare_replay_contents: bool = True,
 ) -> None:
     current = authority._state
     assert current is original_state
@@ -246,12 +248,44 @@ def _assert_authority_unchanged(
     assert current.decision_next == original_state.decision_next
     assert current.approval_next == original_state.approval_next
     assert current.replay_index is original_state.replay_index
-    assert dict(current.replay_index) == dict(original_state.replay_index)
+    if compare_replay_contents:
+        assert dict(current.replay_index) == dict(original_state.replay_index)
     assert current.decisions is original_state.decisions
     assert current.evidence is original_state.evidence
     assert current.results is original_state.results
     assert canonical_risk_state_snapshot_bytes(current.risk_state) == original_risk_state_bytes
     assert risk_state_snapshot_digest(current.risk_state) == original_risk_state_digest
+
+
+class _FailsDuringReplayCopy(Mapping[EconomicId, Any]):
+    def __getitem__(self, key: EconomicId) -> Any:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[EconomicId]:
+        raise RuntimeError("injected replay-index copy failure")
+
+    def __len__(self) -> int:
+        return 0
+
+
+class _FailsDuringReplayFreeze(MutableMapping[EconomicId, Any]):
+    def __init__(self) -> None:
+        self._values: dict[EconomicId, Any] = {}
+
+    def __getitem__(self, key: EconomicId) -> Any:
+        return self._values[key]
+
+    def __setitem__(self, key: EconomicId, value: Any) -> None:
+        self._values[key] = value
+
+    def __delitem__(self, key: EconomicId) -> None:
+        del self._values[key]
+
+    def __iter__(self) -> Iterator[EconomicId]:
+        raise RuntimeError("injected replay-index freeze failure")
+
+    def __len__(self) -> int:
+        return len(self._values)
 
 
 def test_policy_factory_sorts_limits_and_emits_literal_canonical_document() -> None:
@@ -1012,6 +1046,58 @@ def test_non_executable_registration_failure_matrix_is_atomic(
     with monkeypatch.context() as patch:
         patch.setattr(authority_module, target, _raise_injected)
         with pytest.raises(RuntimeError, match="injected pre-publication"):
+            authority.evaluate(_intent(spec_set), _snapshot(spec_set))
+
+    _assert_authority_unchanged(
+        authority,
+        original_state,
+        original_bytes,
+        original_digest,
+    )
+
+
+def test_actual_replay_index_copy_failure_is_atomic() -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    authority._state = replace(
+        authority._state,
+        replay_index=cast(Any, _FailsDuringReplayCopy()),
+    )
+    original_state = authority._state
+    original_bytes = canonical_risk_state_snapshot_bytes(authority.risk_state)
+    original_digest = risk_state_snapshot_digest(authority.risk_state)
+
+    with pytest.raises(RuntimeError, match="injected replay-index copy failure"):
+        authority.evaluate(_intent(spec_set), _snapshot(spec_set))
+
+    _assert_authority_unchanged(
+        authority,
+        original_state,
+        original_bytes,
+        original_digest,
+        compare_replay_contents=False,
+    )
+
+
+def test_real_freeze_state_replay_mapping_copy_failure_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+    original_state = authority._state
+    original_bytes = canonical_risk_state_snapshot_bytes(authority.risk_state)
+    original_digest = risk_state_snapshot_digest(authority.risk_state)
+
+    def return_freeze_failure_mapping(_: object) -> Any:
+        return _FailsDuringReplayFreeze()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            authority_module,
+            "_copy_replay_index",
+            return_freeze_failure_mapping,
+        )
+        with pytest.raises(RuntimeError, match="injected replay-index freeze failure"):
             authority.evaluate(_intent(spec_set), _snapshot(spec_set))
 
     _assert_authority_unchanged(

@@ -552,7 +552,7 @@ class Phase1RiskAuthority:
             evidence=evidence,
             result=result,
         )
-        next_replay = dict(self._state.replay_index)
+        next_replay = _copy_replay_index(self._state.replay_index)
         next_replay[intent.intent_id] = record
         next_state = _freeze_state(
             risk_state=self._state.risk_state,
@@ -686,6 +686,12 @@ def create_phase1_risk_authority(
     canonical_risk_state_snapshot_bytes(initial)
     risk_state_snapshot_digest(initial)
     return authority
+
+
+def _copy_replay_index(
+    replay_index: Mapping[EconomicId, _ReplayRecord],
+) -> dict[EconomicId, _ReplayRecord]:
+    return dict(replay_index)
 
 
 def _freeze_state(
