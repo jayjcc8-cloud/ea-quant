@@ -58,21 +58,28 @@ sentinel, or replacement sequence is permitted.
 
 `evaluate()` performs:
 
-1. exact public `OrderIntent` and `PortfolioSnapshot` runtime-type validation;
-2. canonical intent bytes and digest;
-3. replay-index lookup and byte-authoritative exact-replay or identity-conflict classification;
-4. structural validation only for a new intent identity.
+1. exact public `OrderIntent`, `PortfolioSnapshot`, and intent-ID runtime-type validation;
+2. minimal halt-provenance validation that `dispatch_sequence` is an exact non-negative integer,
+   with no uint64 ceiling;
+3. canonical intent bytes and digest, which also validate that the remaining canonical envelope
+   can be represented;
+4. replay-index lookup and byte-authoritative exact-replay or identity-conflict classification;
+5. all remaining run, specification, grid, policy, snapshot, and balance validation only for a new
+   intent identity.
 
-There is no dispatch-range check between canonical encoding and replay lookup. Exact replay returns
-the original `RiskEvaluationResult` for every dispatch value already accepted by `OrderIntent`.
-Same ID with different canonical bytes always enters the atomic identity-conflict halt path,
-including when the submitted dispatch sequence is unusually large or the two colliding digests
-are equal.
+There is no uint64 range check before replay lookup. Exact replay returns the original
+`RiskEvaluationResult` for every dispatch value accepted by the v1 `OrderIntent` factory and
+decoder. Once the submitted intent has a representable minimal halt-provenance envelope and
+canonical bytes, the same ID with different canonical bytes always enters the atomic
+identity-conflict halt path, including when the submitted dispatch sequence is unusually large or
+the two colliding digests are equal.
 
-Only after a lookup proves that the identity is new does the authority revalidate
-`dispatch_sequence` as an exact non-negative integer before ordinary structural and policy
-evaluation. This protects the public boundary from forged objects without permitting invalid
-new-input structure to bypass byte-authoritative conflict classification.
+A forged negative integer, `bool`, integer subclass, float, string, or other non-exact dispatch
+cannot be copied into an exact-non-negative halt state and therefore fails the minimal envelope
+before canonicalization or lookup. It produces the closed structural error and no state mutation,
+whether its intent ID is new or already occupied. This narrow prerequisite makes conflict halt
+constructible; it does not move any remaining semantic validation ahead of byte-authoritative
+replay/conflict classification.
 
 ### Canonical compatibility
 
@@ -98,8 +105,9 @@ Issue #45 must add:
   that one atomic identity-conflict halt records the submitted integer exactly;
 - an unusually large conflict submitted after the authority is already halted, proving that the
   first halt state remains byte-identical;
-- new-identity rejection of a forged negative or non-exact dispatch only after replay/conflict
-  lookup, without mutation;
+- new and already-occupied intent IDs with forged negative, `bool`, integer-subclass, float, and
+  string dispatch values, proving the specified structural error, no lookup-driven conflict halt,
+  and no mutation;
 - public halt at dispatch `2^64` and a much larger value, plus rejection without coercion of
   negative integers, `bool`, integer subclasses, floats, and strings with the specified outcome
   codes;
@@ -114,6 +122,13 @@ Issue #45 must add:
 - exact-candidate-SHA Architecture Owner and Risk Owner re-review that explicitly closes
   `ARCH45-IMPL-001` and `RISK45-IMPL-001`; owner-ID uint64 behavior remains out of scope and
   unchanged.
+
+## Design-finding traceability
+
+- `ARCH45-ADR12-001`: the minimal halt-provenance check now rejects an unrepresentable forged
+  dispatch before canonicalization and lookup, while retaining every other structural and policy
+  check after byte-authoritative replay/conflict classification. Required evidence covers both new
+  and occupied IDs with every rejected exact-type category.
 
 ## Consequences
 
@@ -133,10 +148,17 @@ Issue #45 must add:
 Rejected for this iteration because it changes an accepted v1 message domain and every producer,
 codec, test vector, and downstream consumer to solve a risk-state mismatch.
 
-### Validate dispatch range before replay lookup
+### Retain the uint64 dispatch ceiling before replay lookup
 
-Rejected because it violates byte-authoritative replay/conflict precedence and creates an
-identity-conflict halt bypass.
+Rejected because it excludes values already accepted by the v1 `OrderIntent` contract and creates
+the identity-conflict halt bypass found at candidate `5113b95`. The required minimal
+exact-non-negative envelope check has no uint64 ceiling.
+
+### Defer every dispatch check until after replay lookup
+
+Rejected because a forged negative or non-exact submitted dispatch cannot be copied into the
+exact-non-negative halt state. Conflict classification applies only after its minimal causal
+provenance is representable.
 
 ### Clamp or hash a large dispatch sequence in risk state
 
