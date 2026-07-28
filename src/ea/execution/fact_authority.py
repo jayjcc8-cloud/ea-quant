@@ -23,6 +23,7 @@ from ea.core.execution_messages import (
     ExecutionFactKind,
     ExecutionMessageError,
     Fill,
+    IndependentFactDecodeContext,
     LifecycleFactPayload,
     Order,
     SubmissionQueryFactPayload,
@@ -33,6 +34,7 @@ from ea.core.execution_messages import (
     canonical_fill_bytes,
     canonical_order_bytes,
     create_fill,
+    decode_execution_fact,
     execution_fact_digest,
     fill_digest,
     order_client_submission_key,
@@ -494,12 +496,22 @@ class Phase1ExecutionFactAuthority:
             bool(resolved) and len(non_null_base) == len(resolved) and len(base_ids) == 1
         )
         staged_venue_key: tuple[SourceNamespace, VenueOrderId] | None = None
+        venue_identity_conflict = False
         if fact.venue_order_id is not None:
             venue_key = (fact.source_namespace, fact.venue_order_id)
             venue_order = self._state.venue_index.get(venue_key)
             if venue_order is None and base_coherent:
-                venue_order = non_null_base[0]
-                staged_venue_key = venue_key
+                candidate_order = non_null_base[0]
+                existing_keys = tuple(
+                    existing_key
+                    for existing_key, mapped_order in self._state.venue_index.items()
+                    if mapped_order.order_id == candidate_order.order_id
+                )
+                if existing_keys and venue_key not in existing_keys:
+                    venue_identity_conflict = True
+                else:
+                    venue_order = candidate_order
+                    staged_venue_key = venue_key
             if venue_order is not None:
                 orders[venue_order.order_id] = venue_order
             resolved.append((OrderResolutionKeyKind.VENUE_ORDER_ID, venue_order))
@@ -519,6 +531,8 @@ class Phase1ExecutionFactAuthority:
         if not non_null_ids:
             anomalies.add(ExecutionFactAnomaly.UNKNOWN_ORDER)
         if len(non_null_ids) > 1:
+            anomalies.add(ExecutionFactAnomaly.ORDER_BINDING_CONFLICT)
+        if venue_identity_conflict:
             anomalies.add(ExecutionFactAnomaly.ORDER_BINDING_CONFLICT)
         base_present = tuple(
             (kind, order)
@@ -631,7 +645,7 @@ class Phase1ExecutionFactAuthority:
                     anomalies.add(ExecutionFactAnomaly.OVERFILL)
         elif fact.kind in _LIFECYCLE_PROJECTION:
             target_state = _LIFECYCLE_PROJECTION[fact.kind]
-            target_quantity = CanonicalDecimal("0")
+            target_quantity = min(observed, order.quantity)
         elif (
             fact.kind is ExecutionFactKind.SUBMISSION_QUERY
             and type(fact.payload) is SubmissionQueryFactPayload
@@ -640,7 +654,7 @@ class Phase1ExecutionFactAuthority:
             target_quantity = (
                 order.quantity
                 if target_state is OrderProjectionState.FILLED
-                else CanonicalDecimal("0")
+                else min(observed, order.quantity)
             )
             if fact.payload.outcome_code is OutcomeCode.RECONCILIATION_SUBMISSION_STILL_UNKNOWN:
                 anomalies.add(ExecutionFactAnomaly.INSUFFICIENT_PROJECTION_EVIDENCE)
@@ -938,40 +952,52 @@ def _is_context_valid(
     spec_set: InstrumentExecutionSpecSet,
     spec_set_sha256: Sha256Digest,
 ) -> bool:
-    fact = ingress.fact
-    if ingress.source_namespace != fact.source_namespace:
-        return False
-    if execution_fact_digest(fact) != fact.fact_sha256:
-        return False
-    identities = tuple(
-        identity
-        for identity in (fact.order_id, fact.correlation_id, fact.causation_id)
-        if identity is not None
-    )
-    if any(identity.run_id != run_id for identity in identities):
-        return False
-    if fact.instrument is not None:
-        try:
-            specification = spec_set.require(fact.instrument)
-        except EconomicValidationError:
+    try:
+        fact = ingress.fact
+        if (
+            ingress.source_namespace != fact.source_namespace
+            or ingress.available_at < fact.occurred_at
+            or execution_fact_digest(fact) != fact.fact_sha256
+        ):
             return False
-    else:
-        specification = None
-    if fact.kind is ExecutionFactKind.TRADE:
-        payload = fact.payload
-        return (
-            type(payload) is TradeFactPayload
-            and fact.instrument is not None
-            and specification is not None
-            and payload.instrument_specification_id == specification.specification_id
-            and payload.instrument_spec_set_id == spec_set.identifier
-            and payload.instrument_spec_set_sha256 == spec_set_sha256
+        identities = tuple(
+            identity
+            for identity in (fact.order_id, fact.correlation_id, fact.causation_id)
+            if identity is not None
         )
-    if fact.kind in _LIFECYCLE_PROJECTION:
-        return type(fact.payload) is LifecycleFactPayload
-    if fact.kind is ExecutionFactKind.SUBMISSION_QUERY:
-        return type(fact.payload) is SubmissionQueryFactPayload
-    return False
+        if any(identity.run_id != run_id for identity in identities):
+            return False
+        specification = spec_set.require(fact.instrument) if fact.instrument is not None else None
+        if fact.kind is ExecutionFactKind.SUBMISSION_QUERY:
+            payload = fact.payload
+            if type(payload) is not SubmissionQueryFactPayload:
+                return False
+            SubmissionQueryFactPayload(payload.outcome_code)
+            return specification is not None
+        if fact.kind is ExecutionFactKind.TRADE and (
+            type(fact.payload) is not TradeFactPayload
+            or fact.instrument is None
+            or specification is None
+            or fact.payload.instrument_spec_set_sha256 != spec_set_sha256
+        ):
+            return False
+        if fact.kind in _LIFECYCLE_PROJECTION and type(fact.payload) is not LifecycleFactPayload:
+            return False
+        decode_execution_fact(
+            canonical_execution_fact_bytes(fact),
+            context=IndependentFactDecodeContext(spec_set),
+        )
+        return True
+    except (
+        EconomicValidationError,
+        ExecutionIdentityError,
+        ExecutionMessageError,
+        RunContractError,
+        TimeValidationError,
+        AttributeError,
+        TypeError,
+    ):
+        return False
 
 
 def _resolve_order_id(

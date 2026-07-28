@@ -517,6 +517,28 @@ def test_source_issuance_is_factory_only_replay_stable_and_conflict_atomic() -> 
     )
 
 
+def test_source_rejects_pre_occurrence_availability_without_publication() -> None:
+    spec_set, _orders_authority, orders = _orders()
+    valid = _ingress(_lifecycle(orders[0]), sequence=1)
+    invalid = _clone_slots(
+        valid,
+        available_at=valid.fact.occurred_at - timedelta(microseconds=1),
+    )
+    source = create_phase1_execution_fact_ingress_authority(
+        run_id=RUN_ID,
+        spec_set=spec_set,
+        source_namespace=SOURCE,
+    )
+    state = source._state
+
+    with pytest.raises(RuntimeOrderingError) as error:
+        source.register_ingress(invalid)
+
+    assert error.value.code is OutcomeCode.OUT_OF_RANGE
+    assert source._state is state
+    assert source.issued_ingresses == ()
+
+
 def test_queue_requires_source_issuance_and_one_exact_live_lease() -> None:
     spec_set, _orders_authority, orders = _orders()
     ingress = _ingress(_lifecycle(orders[0]), sequence=1)
@@ -963,6 +985,98 @@ def test_coherent_trades_preserve_full_overfill_and_bound_projection() -> None:
     queue.acknowledge(second_lease)
 
 
+@pytest.mark.parametrize(
+    ("evidence", "expected_state", "expected_anomalies", "changes_projection"),
+    [
+        ("expiry", OrderProjectionState.EXPIRED, (), True),
+        ("cancellation", OrderProjectionState.CANCELLED, (), True),
+        (
+            "rejection",
+            OrderProjectionState.PARTIALLY_FILLED,
+            (ExecutionFactAnomaly.PROJECTION_TRANSITION_CONFLICT,),
+            False,
+        ),
+        (
+            "query_rejected",
+            OrderProjectionState.PARTIALLY_FILLED,
+            (ExecutionFactAnomaly.PROJECTION_TRANSITION_CONFLICT,),
+            False,
+        ),
+    ],
+)
+def test_partial_fill_terminal_evidence_preserves_cumulative_quantity(
+    evidence: str,
+    expected_state: OrderProjectionState,
+    expected_anomalies: tuple[ExecutionFactAnomaly, ...],
+    changes_projection: bool,
+) -> None:
+    spec_set, order_authority, orders = _orders(quantity="2")
+    order = orders[0]
+    trade = _ingress(
+        _trade(
+            spec_set,
+            order,
+            external_id=f"partial-before-{evidence}",
+            quantity="1",
+        ),
+        sequence=1,
+    )
+    second_time = TIME + timedelta(seconds=1)
+    if evidence == "query_rejected":
+        terminal = _query(
+            order,
+            external_id="query-rejected-after-partial",
+            outcome_code=OutcomeCode.RECONCILIATION_SUBMISSION_CONFIRMED_REJECTED,
+            occurred_at=second_time,
+            sequence=2,
+        )
+    else:
+        kind = {
+            "expiry": ExecutionFactKind.EXPIRY,
+            "cancellation": ExecutionFactKind.CANCELLATION,
+            "rejection": ExecutionFactKind.REJECTION,
+        }[evidence]
+        terminal = _ingress(
+            _lifecycle(
+                order,
+                kind=kind,
+                external_id=f"{evidence}-after-partial",
+                occurred_at=second_time,
+            ),
+            sequence=2,
+            available_at=second_time,
+        )
+    _source, queue, authority = _runtime(
+        spec_set,
+        order_authority,
+        (trade, terminal),
+    )
+    trade_lease, _trade_outcome = _process_next(queue, authority)
+    before = authority.projection_for_order(order.order_id)
+    assert before is not None
+    assert before.projection_state is OrderProjectionState.PARTIALLY_FILLED
+    assert before.projected_executed_quantity == CanonicalDecimal("1")
+    before_digest = order_projection_snapshot_digest(before)
+    queue.acknowledge(trade_lease)
+
+    _terminal_lease, outcome = _process_next(queue, authority)
+    after = authority.projection_for_order(order.order_id)
+
+    assert outcome.anomalies == expected_anomalies
+    assert after is not None
+    assert after.projection_state is expected_state
+    assert after.projected_executed_quantity == CanonicalDecimal("1")
+    assert authority.observed_quantity_for_order(order.order_id) == CanonicalDecimal("1")
+    if changes_projection:
+        assert after is not before
+        assert after.projection_version == 2
+        assert order_projection_snapshot_digest(after) != before_digest
+    else:
+        assert after is before
+        assert after.projection_version == 1
+        assert order_projection_snapshot_digest(after) == before_digest
+
+
 def test_unknown_trade_retains_full_fill_and_missing_ancestry() -> None:
     spec_set, order_authority, _orders_values = _orders()
     ingress = _ingress(
@@ -1167,6 +1281,90 @@ def test_existing_venue_mapping_resolves_alone_and_occupied_other_conflicts() ->
     assert third.anomalies == (ExecutionFactAnomaly.ORDER_BINDING_CONFLICT,)
     assert third.resolved_order_id is None
     assert authority._state.venue_index[(SOURCE, VenueOrderId("shared-venue"))] is orders[0]
+
+
+@pytest.mark.parametrize(
+    "second_source",
+    [SOURCE, SourceNamespace("sim.secondary")],
+)
+def test_order_rejects_second_distinct_venue_identity(
+    second_source: SourceNamespace,
+) -> None:
+    spec_set, order_authority, orders = _orders()
+    order = orders[0]
+    first = _ingress(
+        _lifecycle(
+            order,
+            external_id="first-venue",
+            venue_order_id=VenueOrderId("venue-a"),
+        ),
+        sequence=1,
+        available_at=TIME,
+    )
+    second_fact = create_lifecycle_execution_fact(
+        kind=ExecutionFactKind.ACKNOWLEDGEMENT,
+        source_namespace=second_source,
+        dedup_identity=ExternalFactId("second-venue"),
+        occurred_at=TIME + timedelta(seconds=1),
+        provenance=PROVENANCE,
+        instrument=order.instrument,
+        client_submission_key=order.client_submission_key,
+        venue_order_id=VenueOrderId("venue-b"),
+        order_id=order.order_id,
+        correlation_id=order.correlation_id,
+        causation_id=order.order_id,
+    )
+    second = create_execution_fact_ingress(
+        available_at=second_fact.occurred_at,
+        source_namespace=second_source,
+        ingress_sequence=2,
+        fact=second_fact,
+    )
+    authorities = {
+        source: create_phase1_execution_fact_ingress_authority(
+            run_id=RUN_ID,
+            spec_set=spec_set,
+            source_namespace=source,
+        )
+        for source in {SOURCE, second_source}
+    }
+    authorities[SOURCE].register_ingress(first)
+    authorities[second_source].register_ingress(second)
+    queue = create_deterministic_root_queue(
+        run_id=RUN_ID,
+        spec_set=spec_set,
+        plan=prepare_bounded_runtime_roots((first, second)),
+        fact_issuance_verifiers=tuple(
+            authorities[source] for source in sorted(authorities, key=lambda item: item.value)
+        ),
+    )
+    authority = create_phase1_execution_fact_authority(
+        run_id=RUN_ID,
+        spec_set=spec_set,
+        order_verifier=order_authority,
+        dispatch_verifier=queue,
+    )
+
+    first_lease, _first_outcome = _process_next(queue, authority)
+    first_projection = authority.projection_for_order(order.order_id)
+    assert first_projection is not None
+    first_digest = order_projection_snapshot_digest(first_projection)
+    queue.acknowledge(first_lease)
+    second_lease, outcome = _process_next(queue, authority)
+
+    assert outcome.action is ExecutionFactAction.UNRESOLVED
+    assert outcome.anomalies == (ExecutionFactAnomaly.ORDER_BINDING_CONFLICT,)
+    assert outcome.resolved_order_id == order.order_id
+    assert outcome.order_resolutions[-1].resolved_order_id is None
+    assert authority.projection_for_order(order.order_id) is first_projection
+    assert order_projection_snapshot_digest(first_projection) == first_digest
+    assert authority._state.venue_index == {
+        (SOURCE, VenueOrderId("venue-a")): order,
+    }
+    queue.acknowledge(second_lease)
+    state = authority._state
+    assert authority.process_ingress(second) is outcome
+    assert authority._state is state
 
 
 def test_new_venue_with_unresolved_order_key_is_not_staged() -> None:
@@ -1437,6 +1635,75 @@ def test_cross_run_trade_is_contextual_invalid_without_fill_or_resolution() -> N
     assert authority.halt_requested
 
 
+@pytest.mark.parametrize("invalid_kind", ["off_grid_trade", "lifecycle_mismatch"])
+def test_canonical_context_invalid_fact_publishes_invalid_atomically(
+    invalid_kind: str,
+) -> None:
+    spec_set, order_authority, orders = _orders()
+    order = orders[0]
+    if invalid_kind == "off_grid_trade":
+        valid_fact = _trade(
+            spec_set,
+            order,
+            external_id="off-grid-trade",
+            quantity="1",
+        )
+        invalid_payload = _clone_slots(
+            valid_fact.payload,
+            quantity=CanonicalDecimal("0.5"),
+        )
+        invalid_fact = _clone_slots(valid_fact, payload=invalid_payload)
+    else:
+        acknowledgement = _lifecycle(order, external_id="lifecycle-mismatch")
+        rejection = _lifecycle(
+            order,
+            kind=ExecutionFactKind.REJECTION,
+            external_id="payload-source",
+        )
+        invalid_fact = _clone_slots(acknowledgement, payload=rejection.payload)
+    ingress = _ingress(invalid_fact, sequence=1)
+    _source, queue, authority = _runtime(spec_set, order_authority, (ingress,))
+    before = authority._state
+
+    lease, outcome = _process_next(queue, authority)
+
+    assert outcome.action is ExecutionFactAction.INVALID
+    assert outcome.anomalies == (ExecutionFactAnomaly.CONTEXT_INVALID,)
+    assert outcome.order_resolutions == ()
+    assert outcome.fill_id is None
+    assert outcome.projection_before_sha256 is None
+    assert outcome.projection_after_sha256 is None
+    assert authority.next_fill_sequence == 1
+    assert authority.fills == ()
+    assert authority.projections == ()
+    assert authority.halt_requested
+    assert authority._state is not before
+    assert authority.process_ingress(ingress) is outcome
+    queue.acknowledge(lease)
+
+
+def test_pre_occurrence_ingress_is_defensively_context_invalid() -> None:
+    spec_set, order_authority, orders = _orders()
+    valid = _ingress(_lifecycle(orders[0]), sequence=1)
+    invalid = _clone_slots(
+        valid,
+        available_at=valid.fact.occurred_at - timedelta(microseconds=1),
+    )
+    authority = create_phase1_execution_fact_authority(
+        run_id=RUN_ID,
+        spec_set=spec_set,
+        order_verifier=order_authority,
+        dispatch_verifier=cast(Any, _DispatchStub(spec_set)),
+    )
+
+    outcome = authority.process_ingress(invalid)
+
+    assert outcome.action is ExecutionFactAction.INVALID
+    assert outcome.anomalies == (ExecutionFactAnomaly.CONTEXT_INVALID,)
+    assert outcome.fill_id is None
+    assert authority.halt_requested
+
+
 def test_projection_and_outcome_readers_are_strict_and_contextual() -> None:
     spec_set, order_authority, orders = _orders()
     ingress = _ingress(_lifecycle(orders[0]), sequence=1)
@@ -1483,6 +1750,152 @@ def test_projection_and_outcome_readers_are_strict_and_contextual() -> None:
             projection_after=projection,
             resolved_orders=(orders[0],),
         )
+
+
+def test_outcome_reader_requires_exact_resolved_order_context() -> None:
+    spec_set, order_authority, orders = _orders(3)
+
+    single_ingress = _ingress(_lifecycle(orders[0]), sequence=1)
+    _source, single_queue, single_authority = _runtime(
+        spec_set,
+        order_authority,
+        (single_ingress,),
+    )
+    _single_lease, single_outcome = _process_next(single_queue, single_authority)
+    single_projection = single_authority.projection_for_order(orders[0].order_id)
+    assert single_projection is not None
+    single_bytes = canonical_execution_fact_processing_outcome_bytes(single_outcome)
+    assert (
+        decode_execution_fact_processing_outcome(
+            single_bytes,
+            ingress=single_ingress,
+            fill=None,
+            projection_before=None,
+            projection_after=single_projection,
+            resolved_orders=(orders[0],),
+        )
+        is not None
+    )
+    with pytest.raises(ExecutionStateError):
+        decode_execution_fact_processing_outcome(
+            single_bytes,
+            ingress=single_ingress,
+            fill=None,
+            projection_before=None,
+            projection_after=single_projection,
+            resolved_orders=(orders[0], orders[1]),
+        )
+
+    unknown_fact = create_lifecycle_execution_fact(
+        kind=ExecutionFactKind.ACKNOWLEDGEMENT,
+        source_namespace=SOURCE,
+        dedup_identity=ExternalFactId("reader-unknown"),
+        occurred_at=TIME,
+        provenance=PROVENANCE,
+    )
+    unknown_ingress = _ingress(unknown_fact, sequence=1)
+    _source, unknown_queue, unknown_authority = _runtime(
+        spec_set,
+        order_authority,
+        (unknown_ingress,),
+    )
+    _unknown_lease, unknown_outcome = _process_next(unknown_queue, unknown_authority)
+    unknown_bytes = canonical_execution_fact_processing_outcome_bytes(unknown_outcome)
+    assert (
+        decode_execution_fact_processing_outcome(
+            unknown_bytes,
+            ingress=unknown_ingress,
+            fill=None,
+            projection_before=None,
+            projection_after=None,
+            resolved_orders=(),
+        )
+        == unknown_outcome
+    )
+    with pytest.raises(ExecutionStateError):
+        decode_execution_fact_processing_outcome(
+            unknown_bytes,
+            ingress=unknown_ingress,
+            fill=None,
+            projection_before=None,
+            projection_after=None,
+            resolved_orders=(orders[0],),
+        )
+
+    duplicate_fact = _lifecycle(orders[0], external_id="reader-duplicate")
+    first_duplicate_ingress = _ingress(duplicate_fact, sequence=1)
+    duplicate_ingress = _ingress(duplicate_fact, sequence=2)
+    _source, duplicate_queue, duplicate_authority = _runtime(
+        spec_set,
+        order_authority,
+        (first_duplicate_ingress, duplicate_ingress),
+    )
+    first_lease, _first_outcome = _process_next(duplicate_queue, duplicate_authority)
+    duplicate_queue.acknowledge(first_lease)
+    _duplicate_lease, duplicate_outcome = _process_next(
+        duplicate_queue,
+        duplicate_authority,
+    )
+    duplicate_bytes = canonical_execution_fact_processing_outcome_bytes(duplicate_outcome)
+    assert (
+        decode_execution_fact_processing_outcome(
+            duplicate_bytes,
+            ingress=duplicate_ingress,
+            fill=None,
+            projection_before=None,
+            projection_after=None,
+            resolved_orders=(),
+        )
+        == duplicate_outcome
+    )
+    with pytest.raises(ExecutionStateError):
+        decode_execution_fact_processing_outcome(
+            duplicate_bytes,
+            ingress=duplicate_ingress,
+            fill=None,
+            projection_before=None,
+            projection_after=None,
+            resolved_orders=(orders[0],),
+        )
+
+    conflict_fact = _lifecycle(
+        orders[0],
+        external_id="reader-multi-order",
+        client_submission_key=orders[1].client_submission_key,
+    )
+    conflict_ingress = _ingress(conflict_fact, sequence=1)
+    _source, conflict_queue, conflict_authority = _runtime(
+        spec_set,
+        order_authority,
+        (conflict_ingress,),
+    )
+    _conflict_lease, conflict_outcome = _process_next(
+        conflict_queue,
+        conflict_authority,
+    )
+    conflict_bytes = canonical_execution_fact_processing_outcome_bytes(conflict_outcome)
+    exact_context = (orders[0], orders[1])
+    assert (
+        decode_execution_fact_processing_outcome(
+            conflict_bytes,
+            ingress=conflict_ingress,
+            fill=None,
+            projection_before=None,
+            projection_after=None,
+            resolved_orders=exact_context,
+        )
+        == conflict_outcome
+    )
+    for wrong_context in ((orders[0],), (*exact_context, orders[2])):
+        with pytest.raises(ExecutionStateError):
+            decode_execution_fact_processing_outcome(
+                conflict_bytes,
+                ingress=conflict_ingress,
+                fill=None,
+                projection_before=None,
+                projection_after=None,
+                resolved_orders=wrong_context,
+            )
 
 
 def test_readers_reject_schema_key_rank_enum_digest_and_noncanonical_mutations() -> None:
@@ -1584,6 +1997,43 @@ def test_readers_reject_schema_key_rank_enum_digest_and_noncanonical_mutations()
             order=orders[0],
             spec_set=spec_set,
         )
+
+
+@pytest.mark.parametrize(
+    ("state", "quantity"),
+    [
+        (OrderProjectionState.PARTIALLY_FILLED, "0"),
+        (OrderProjectionState.PARTIALLY_FILLED, "2"),
+        (OrderProjectionState.FILLED, "1"),
+        (OrderProjectionState.SUBMITTED, "1"),
+        (OrderProjectionState.ACKNOWLEDGED, "1"),
+        (OrderProjectionState.REJECTED, "1"),
+        (OrderProjectionState.DEFINITELY_NOT_SUBMITTED, "1"),
+        (OrderProjectionState.EXPIRED, "2"),
+        (OrderProjectionState.CANCELLED, "2"),
+    ],
+)
+def test_projection_factory_rejects_state_quantity_contradictions(
+    state: OrderProjectionState,
+    quantity: str,
+) -> None:
+    spec_set, _order_authority, orders = _orders(quantity="2")
+    fact = _lifecycle(orders[0])
+
+    with pytest.raises(ExecutionStateError) as error:
+        create_order_projection_snapshot(
+            order=orders[0],
+            spec_set=spec_set,
+            projection_version=1,
+            projection_state=state,
+            projected_executed_quantity=CanonicalDecimal(quantity),
+            venue_source_namespace=None,
+            venue_order_id=None,
+            last_fact_key=fact.dedup_key,
+            last_fact_sha256=fact.fact_sha256,
+        )
+
+    assert error.value.code is OutcomeCode.OUT_OF_RANGE
 
 
 def test_fill_exhaustion_is_atomic() -> None:

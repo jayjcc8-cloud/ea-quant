@@ -295,6 +295,49 @@ def create_order_projection_snapshot(
                 OutcomeCode.OUT_OF_RANGE,
                 "projected quantity must be between zero and Order quantity",
             )
+        zero = CanonicalDecimal("0")
+        if (
+            projection_state is OrderProjectionState.PARTIALLY_FILLED
+            and not zero < projected_executed_quantity < order.quantity
+        ):
+            raise _fail(
+                OutcomeCode.OUT_OF_RANGE,
+                "partially-filled projection quantity must be positive and below Order quantity",
+            )
+        if (
+            projection_state is OrderProjectionState.FILLED
+            and projected_executed_quantity != order.quantity
+        ):
+            raise _fail(
+                OutcomeCode.OUT_OF_RANGE,
+                "filled projection quantity must equal Order quantity",
+            )
+        if (
+            projection_state
+            in (
+                OrderProjectionState.SUBMITTED,
+                OrderProjectionState.ACKNOWLEDGED,
+                OrderProjectionState.REJECTED,
+                OrderProjectionState.DEFINITELY_NOT_SUBMITTED,
+            )
+            and projected_executed_quantity != zero
+        ):
+            raise _fail(
+                OutcomeCode.OUT_OF_RANGE,
+                f"{projection_state.value} projection quantity must be zero",
+            )
+        if (
+            projection_state
+            in (
+                OrderProjectionState.EXPIRED,
+                OrderProjectionState.CANCELLED,
+            )
+            and projected_executed_quantity >= order.quantity
+        ):
+            raise _fail(
+                OutcomeCode.OUT_OF_RANGE,
+                f"{projection_state.value} projection quantity must be below Order quantity",
+            )
         _require_venue_pair(venue_source_namespace, venue_order_id)
         if type(last_fact_key) is not FactDedupKey:
             raise _fail(
@@ -985,6 +1028,26 @@ def decode_execution_fact_processing_outcome(
                     ),
                     resolved_order=resolved,
                 )
+            )
+        contextual_order_ids = tuple(order.order_id for order in resolved_orders)
+        referenced_order_ids = tuple(
+            sorted(
+                {
+                    binding.resolved_order_id
+                    for binding in bindings
+                    if binding.resolved_order_id is not None
+                },
+                key=lambda identity: (
+                    identity.run_id.value,
+                    identity.owner_kind.value,
+                    identity.owner_sequence,
+                ),
+            )
+        )
+        if contextual_order_ids != referenced_order_ids:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "resolved_orders must exactly match distinct non-null binding results",
             )
         selected_id = _parse_optional_economic_id(document["resolved_order_id"])
         selected = None if selected_id is None else order_by_id.get(selected_id)

@@ -87,6 +87,11 @@ class Phase1ExecutionFactIngressAuthority:
                     OutcomeCode.CONFLICTING_ID,
                     "ingress source conflicts with the authority source binding",
                 )
+            if ingress.available_at < ingress.fact.occurred_at:
+                raise RuntimeOrderingError(
+                    OutcomeCode.OUT_OF_RANGE,
+                    "available_at cannot precede occurred_at",
+                )
             ingress_bytes = canonical_execution_fact_ingress_bytes(ingress)
             fact_bytes = canonical_execution_fact_bytes(ingress.fact)
             identity = ingress.identity
