@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -527,11 +527,7 @@ def test_forged_non_finite_decimal_preserves_exact_outcome(
     policy = _policy(spec_set)
     intent = _intent(spec_set)
     result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    forged_decimal = object.__new__(CanonicalDecimal)
-    object.__setattr__(forged_decimal, "text", text)
-    object.__setattr__(forged_decimal, "_coefficient", 1)
-    object.__setattr__(forged_decimal, "_scale", 0)
-    forged_intent = _replace_slots(intent, quantity=forged_decimal)
+    forged_intent = _replace_slots(intent, quantity=_forged_decimal(text))
     authority = _order_authority(spec_set, policy)
     original_state = authority._state
 
@@ -540,6 +536,50 @@ def test_forged_non_finite_decimal_preserves_exact_outcome(
 
     _assert_error(error, OutcomeCode.NON_FINITE)
     assert authority._state is original_state
+
+
+@pytest.mark.parametrize("target", ["decision", "approval"])
+@pytest.mark.parametrize("text", ["NaN", "Infinity", "-Infinity"])
+def test_forged_decision_and_approval_non_finite_decimal_preserves_exact_outcome(
+    target: str,
+    text: str,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    intent = _intent(spec_set)
+    valid = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
+    if target == "decision":
+        decision = _replace_slots(
+            valid.decision,
+            approved_quantity=_forged_decimal(text),
+        )
+    else:
+        assert valid.decision.approval is not None
+        approval = _replace_slots(
+            valid.decision.approval,
+            approved_quantity=_forged_decimal(text),
+        )
+        decision = _replace_slots(valid.decision, approval=approval)
+    authority = _order_authority(spec_set, policy)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, _result(decision, valid.evidence))
+
+    _assert_error(error, OutcomeCode.NON_FINITE)
+    assert authority._state is original_state
+    assert authority._state.approval_index is original_state.approval_index
+    assert authority._state.intent_index is original_state.intent_index
+    assert authority._state.decision_index is original_state.decision_index
+    assert authority.orders is original_state.orders
+
+
+def _forged_decimal(text: str) -> CanonicalDecimal:
+    value = object.__new__(CanonicalDecimal)
+    object.__setattr__(value, "text", text)
+    object.__setattr__(value, "_coefficient", 1)
+    object.__setattr__(value, "_scale", 0)
+    return value
 
 
 @pytest.mark.parametrize(
@@ -819,6 +859,83 @@ def test_every_candidate_publication_stage_is_atomic(
     assert authority.orders is original_state.orders
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        "create_order",
+        "canonical_order_bytes",
+        "order_digest",
+        "canonical_execution_request_bytes",
+        "execution_request_digest",
+        "order_client_submission_key",
+    ],
+)
+def test_each_real_order_evidence_construction_boundary_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    intent = _intent(spec_set)
+    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy)
+    original_state = authority._state
+
+    with monkeypatch.context() as patch:
+        patch.setattr(authority_module, target, _raise_injected)
+        with pytest.raises(RuntimeError, match="injected pre-publication"):
+            authority.create_order(intent, result)
+
+    assert authority._state is original_state
+    assert authority._state.approval_index is original_state.approval_index
+    assert authority._state.intent_index is original_state.intent_index
+    assert authority._state.decision_index is original_state.decision_index
+    assert authority.orders is original_state.orders
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "canonical_order_bytes",
+        "order_digest",
+        "canonical_execution_request_bytes",
+        "execution_request_digest",
+        "order_client_submission_key",
+    ],
+)
+def test_each_real_order_evidence_final_repreflight_boundary_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    intent = _intent(spec_set)
+    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy)
+    original_state = authority._state
+    original = cast(Callable[..., Any], getattr(authority_module, target))
+    calls = 0
+
+    def fail_second_call(*args: object, **kwargs: object) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            _raise_injected()
+        return original(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(authority_module, target, fail_second_call)
+        with pytest.raises(RuntimeError, match="injected pre-publication"):
+            authority.create_order(intent, result)
+
+    assert calls == 2
+    assert authority._state is original_state
+    assert authority._state.approval_index is original_state.approval_index
+    assert authority._state.intent_index is original_state.intent_index
+    assert authority._state.decision_index is original_state.decision_index
+    assert authority.orders is original_state.orders
+
+
 class _FailsDuringCopy(Mapping[EconomicId, Any]):
     def __getitem__(self, key: EconomicId) -> Any:
         raise KeyError(key)
@@ -828,6 +945,26 @@ class _FailsDuringCopy(Mapping[EconomicId, Any]):
 
     def __len__(self) -> int:
         return 0
+
+
+class _FailsDuringFreeze(MutableMapping[EconomicId, Any]):
+    def __init__(self) -> None:
+        self._values: dict[EconomicId, Any] = {}
+
+    def __getitem__(self, key: EconomicId) -> Any:
+        return self._values[key]
+
+    def __setitem__(self, key: EconomicId, value: Any) -> None:
+        self._values[key] = value
+
+    def __delitem__(self, key: EconomicId) -> None:
+        del self._values[key]
+
+    def __iter__(self) -> Iterator[EconomicId]:
+        raise RuntimeError("injected real defensive-freeze copy failure")
+
+    def __len__(self) -> int:
+        return len(self._values)
 
 
 @pytest.mark.parametrize(
@@ -886,6 +1023,43 @@ def test_actual_defensive_freeze_operations_copy_the_mapping(
     )
     with pytest.raises(RuntimeError, match="injected real mapping copy failure"):
         freeze(_FailsDuringCopy())
+
+
+@pytest.mark.parametrize(
+    "copy_target",
+    [
+        "_copy_approval_index",
+        "_copy_intent_index",
+        "_copy_decision_index",
+    ],
+)
+def test_each_real_defensive_freeze_failure_is_atomic_inside_create_order(
+    monkeypatch: pytest.MonkeyPatch,
+    copy_target: str,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    intent = _intent(spec_set)
+    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy)
+    original_state = authority._state
+
+    def return_two_stage_mapping(_: object) -> Any:
+        return _FailsDuringFreeze()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(authority_module, copy_target, return_two_stage_mapping)
+        with pytest.raises(
+            RuntimeError,
+            match="injected real defensive-freeze copy failure",
+        ):
+            authority.create_order(intent, result)
+
+    assert authority._state is original_state
+    assert authority._state.approval_index is original_state.approval_index
+    assert authority._state.intent_index is original_state.intent_index
+    assert authority._state.decision_index is original_state.decision_index
+    assert authority.orders is original_state.orders
 
 
 def test_error_class_rejects_non_validation_outcome() -> None:
