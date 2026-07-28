@@ -398,9 +398,10 @@ projection field changes. Compatible additional evidence that causes no projecti
 no new snapshot. Terminal projections never change or reopen.
 
 The optional `venue_order` is learned from the first coherent selected-Order fact that presents
-one. A later absent venue value retains it; the same scoped value is compatible; a different
-scoped value for that Order adds `order_binding_conflict` and leaves projection/mappings
-unchanged. V1 therefore never silently replaces or chooses among multiple venue identities.
+one through the staged resolution rule below. A later absent venue value retains it; the same
+scoped value is compatible; an occupied scoped value mapped to another Order adds
+`order_binding_conflict` and leaves projection/mappings unchanged. V1 therefore never silently
+replaces or chooses among multiple venue identities.
 
 The literal canonical JSON document is:
 
@@ -554,6 +555,26 @@ object. `resolved_order_id` in the outcome is:
 The full binding tuple therefore preserves a multi-Order conflict without choosing or hiding one
 candidate.
 
+Order ID and client-key bindings report only the bound Order authority's lookup result. An
+unresolved presented Order ID or client key is contradictory when another such key independently
+selects an Order.
+
+Venue binding has three states:
+
+1. an existing scoped mapping reports its mapped Order;
+2. an absent mapping is staged to an independently selected Order only when every presented
+   Order-ID/client-key binding is non-null, selects that same Order, and no other binding
+   contradiction exists; the outcome venue binding reports that Order and the mapping publishes
+   atomically with the outcome; or
+3. an existing mapping to another Order reports that other Order and produces
+   `order_binding_conflict`.
+
+An absent venue mapping with no independent selected Order remains null and contributes only to
+`unknown_order`. An absent venue mapping combined with an unresolved/contradictory presented
+Order ID or client key is not staged and remains null. Therefore the first legitimate venue
+binding is not misclassified as a conflict, while a venue key can never create an Order
+association by itself.
+
 The literal canonical JSON document is:
 
 ```text
@@ -704,20 +725,27 @@ key, and previously learned `(source_namespace, venue_order_id)` mapping.
 Resolution follows this closed precedence:
 
 1. Resolve each presented Order ID and client key independently through the bound Order authority.
-2. Resolve a venue key only from the fact authority's own previously learned mapping.
-3. Record one `OrderResolutionBinding` for every presented key before choosing a candidate.
-4. If no presented key resolves, add anomaly `unknown_order`.
-5. If two presented keys resolve to different Orders, add anomaly `order_binding_conflict` and
+2. Determine whether all presented Order-ID/client-key bindings independently and coherently
+   select one Order.
+3. Resolve a venue key from an existing mapping, or stage a first binding only under the exact
+   coherent-independent-selection rule above.
+4. Record one final `OrderResolutionBinding` for every presented key before choosing a candidate.
+5. If no final binding resolves, add anomaly `unknown_order`.
+6. If two non-null final bindings resolve to different Orders, add anomaly
+   `order_binding_conflict` and
    select no Order.
-6. For one resolved Order, require exact run, specification-set ID/digest, client key, Order ID,
+7. If one Order-ID/client-key binding is null while another independently selects an Order, add
+   `order_binding_conflict`; an unoccupied venue key does not use this rule.
+8. For one resolved Order, require exact run, specification-set ID/digest, client key, Order ID,
    instrument, trade side, correlation, and permitted causation equality for every field actually
    presented by the fact.
-7. A well-typed presented value that contradicts the resolved Order or an occupied venue mapping
+9. A well-typed presented value that contradicts the resolved Order or an occupied venue mapping
    adds anomaly `order_binding_conflict`.
-8. Missing identifiers remain absent. Resolution through one known key may drive projection but
+10. Missing identifiers remain absent. Resolution through one known key may drive projection but
    never writes a missing Order/correlation/causation ID into the Fact or Fill.
-9. A venue mapping is learned only from a source-issued coherent fact that resolves exactly one
-   Order. Conflict, invalid, unknown, or insufficient evidence never creates or changes it.
+11. A staged venue mapping publishes only with a source-issued context-valid fact that has no
+   `order_binding_conflict` or `unknown_order`; projection insufficiency or another non-binding
+   anomaly does not erase valid identity evidence.
 
 For a coherent resolved trade whose Fill has missing Order, correlation, or causation ancestry,
 the full Fill is still created and projection may advance from the proved resolved Order, but the
@@ -739,15 +767,15 @@ rank order. Every true compatible predicate is retained:
 | Anomaly | Exact predicate |
 |---|---|
 | `context_invalid` | the kind-independent carrier/digest contract or bound run/specification context is invalid before Order resolution; query-to-Order field contradictions are instead `order_binding_conflict` |
-| `order_binding_conflict` | non-null resolution bindings select different Orders, or a presented run/client/Order/instrument/side/correlation/causation/occupied-venue value contradicts the one selected Order |
+| `order_binding_conflict` | non-null final bindings select different Orders; a presented Order ID/client key is unresolved while another independently selects an Order; or a presented run/client/Order/instrument/side/correlation/causation/occupied-venue value contradicts the selected Order |
 | `unknown_order` | no presented Order ID, client key, or learned venue key resolves |
 | `missing_ancestry` | a created Fill has null Order ID, correlation ID, or causation ID |
-| `insufficient_projection_evidence` | a context-valid lifecycle/query observation cannot prove one declared target; v1 includes `submission.still_unknown` |
-| `confirmed_fill_without_trade` | a query proves filled while coherent observed Fill total for the selected Order is below Order quantity |
+| `insufficient_projection_evidence` | a binding-coherent context-valid lifecycle/query observation cannot prove one declared target; v1 includes `submission.still_unknown` |
+| `confirmed_fill_without_trade` | a binding-coherent query proves filled for one selected Order while coherent observed Fill total is below Order quantity |
 | `overfill` | a coherent selected-Order trade makes exact observed Fill total exceed Order quantity |
 | `late_after_terminal` | a complete coherent selected-Order trade arrives while its before-projection is terminal |
-| `projection_transition_conflict` | context-valid evidence requests a target forbidden from the non-terminal before-state |
-| `terminal_state_conflict` | a non-trade fact/query contradicts the terminal before-state |
+| `projection_transition_conflict` | binding-coherent context-valid evidence requests a target forbidden from the non-terminal before-state |
+| `terminal_state_conflict` | a binding-coherent non-trade fact/query contradicts the terminal before-state |
 
 `context_invalid` is exclusive and stops before Order resolution, Fill allocation, or projection
 lookup. Stable duplicate/conflict actions also stop before those operations.
@@ -821,6 +849,12 @@ Query-confirmed-filled is exhaustive:
 | absent, `submitted`, `acknowledged`, or `partially_filled` | create/update `filled` at projected Order quantity | add `confirmed_fill_without_trade` iff coherent observed Fill total `< Order quantity` |
 | `filled` | retain byte-identical projection | add `confirmed_fill_without_trade` iff coherent observed Fill total `< Order quantity` |
 | `rejected`, `expired`, `cancelled`, or `definitely_not_submitted` | retain byte-identical terminal projection | add `terminal_state_conflict`; also add `confirmed_fill_without_trade` iff observed total `< Order quantity` |
+
+Every projection transition/anomaly table applies only when one selected Order is binding-coherent.
+A query carrying
+`order_binding_conflict` retains its reported evidence and binding tuple, adds no
+projection-derived anomaly, learns no venue mapping, and leaves any selected-Order projection
+byte-identical.
 
 `still_unknown` always adds `insufficient_projection_evidence`; it creates no projection and
 retains any existing projection byte-identically.
@@ -984,6 +1018,11 @@ Issue #49 must prove:
   detail;
 - `still_unknown` is covered with and without an existing projection;
 - Order ID, client key, and venue mapping resolving to different Orders preserve every binding;
+- first venue ID learned through Order ID and through client key, exact staged replay, existing
+  same mapping, occupied-other mapping, and new venue combined with unresolved Order/client keys
+  follow the three-state rule;
+- query-confirmed-filled with a binding contradiction retains evidence but creates no projection,
+  venue mapping, or `confirmed_fill_without_trade` anomaly;
 - every outcome field has one required/forbidden presence result, including multi-Order resolution
   conflict, stable duplicate/conflict, contextual invalidity, and retained projection;
 - literal projection/outcome schemas and readers reject altered keys, nesting, ranks, enum values,
