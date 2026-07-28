@@ -2,20 +2,20 @@ from __future__ import annotations
 
 from hypothesis import given
 from hypothesis import strategies as st
-
-from ea.core import (
-    CanonicalDecimal,
-    ExecutionFactAction,
-    ExecutionFactKind,
-    OrderProjectionState,
-)
-from tests.unit.test_execution_fact_authority import (
+from unit.test_execution_fact_authority import (
     _ingress,
     _lifecycle,
     _orders,
     _process_next,
     _runtime,
     _trade,
+)
+
+from ea.core import (
+    CanonicalDecimal,
+    ExecutionFactAction,
+    ExecutionFactKind,
+    OrderProjectionState,
 )
 
 
