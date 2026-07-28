@@ -352,6 +352,7 @@ def _create_risk_evaluation_evidence(
     *,
     decision: RiskDecision,
     intent_sha256: Sha256Digest,
+    portfolio_snapshot_version: int,
     portfolio_snapshot_sha256: Sha256Digest,
     policy: Phase1RiskPolicy,
     risk_state_version: int,
@@ -363,6 +364,10 @@ def _create_risk_evaluation_evidence(
 ) -> RiskEvaluationEvidence:
     if type(decision) is not RiskDecision:
         raise _fail(OutcomeCode.INVALID_TYPE, "decision must be an exact RiskDecision")
+    if type(portfolio_snapshot_version) is not int:
+        raise _fail(OutcomeCode.INVALID_TYPE, "portfolio snapshot version must be an exact int")
+    if portfolio_snapshot_version < 0:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "portfolio snapshot version must be non-negative")
     if (
         type(intent_sha256) is not Sha256Digest
         or type(portfolio_snapshot_sha256) is not Sha256Digest
@@ -420,7 +425,7 @@ def _create_risk_evaluation_evidence(
     object.__setattr__(
         value,
         "portfolio_snapshot_version",
-        decision.portfolio_snapshot_version,
+        portfolio_snapshot_version,
     )
     object.__setattr__(value, "portfolio_snapshot_sha256", portfolio_snapshot_sha256)
     object.__setattr__(value, "policy_id", policy.policy_id)
@@ -458,7 +463,6 @@ def _create_risk_evaluation_result(
         or evidence.intent_id != decision.intent_id
         or evidence.decision_id != decision.decision_id
         or evidence.decision_sha256 != risk_decision_digest(decision)
-        or evidence.portfolio_snapshot_version != decision.portfolio_snapshot_version
         or evidence.risk_state_version != decision.risk_state_version
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "risk result decision/evidence binding conflicts")

@@ -46,6 +46,7 @@ from ea.core import (
     create_order_intent,
     create_phase1_risk_policy,
     phase1_risk_policy_digest,
+    portfolio_snapshot_digest,
     risk_evaluation_evidence_digest,
     risk_state_snapshot_digest,
 )
@@ -628,6 +629,8 @@ def test_lineage_failures_register_one_evaluation_failed_decision(
     assert result.decision.approval is None
     assert result.evidence.approval_next_before == 1
     assert result.evidence.approval_next_after == 1
+    assert result.evidence.portfolio_snapshot_version == supplied.snapshot_version
+    assert result.evidence.portfolio_snapshot_sha256 == portfolio_snapshot_digest(supplied)
 
 
 def test_exact_replay_returns_original_object_after_newer_state_and_halt() -> None:
