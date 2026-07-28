@@ -94,6 +94,19 @@ requires the verifier to expose the exact structural protocol and proves:
 - verifier execution-policy ID and digest equal the bound execution policy; and
 - verifier risk-policy ID and digest equal the exact frozen risk policy.
 
+Construction has one closed public error matrix:
+
+| Condition | Result |
+|---|---|
+| required protocol property is absent, the membership operation is absent/non-callable, a binding has the wrong exact runtime type, or binding access raises `AttributeError`/`TypeError` | `ExecutionAuthorityError(OutcomeCode.INVALID_TYPE)` |
+| run, specification-set ID/digest, execution-policy ID/digest, or risk-policy ID/digest is well-typed but unequal | `ExecutionAuthorityError(OutcomeCode.CONFLICTING_ID)` |
+| any other unexpected exception occurs while reading a binding | propagate the original exception unchanged |
+
+Every construction failure occurs before an authority aggregate exists and therefore publishes no
+state. Structural typing proves the port's shape, not its trust. The production claim depends on
+the trusted composition root supplying the actual Risk-owned verifier; tests may deliberately
+compose a fake verifier.
+
 The verifier is stored as a private, non-replaceable construction binding. There is no optional
 verifier, permissive fallback, caller-supplied boolean, registry injection, or post-construction
 replacement.
@@ -128,13 +141,8 @@ For one `create_order` call, Execution performs:
 1. exact carrier validation and canonical intent, decision, evidence, and approval materialization;
 2. existing approval/intent/decision triple-index replay or conflict classification;
 3. canonical reconstruction and all ADR 0011 decision/evidence/approval/policy/lineage checks;
-4. defense-in-depth checks for frozen-policy facts that require no portfolio snapshot:
-   - the instrument has one configured limit;
-   - `ALLOW / WITHIN_LIMITS` preserves the intent quantity and cannot exceed
-     `maximum_order_quantity`;
-   - `RESIZE` is positive and below the requested quantity;
-   - order-limit reasons and approved quantity agree with `maximum_order_quantity` wherever that
-     fact is statically decidable;
+4. the exact defense-in-depth truth table below for frozen-policy facts that require no portfolio
+   snapshot;
 5. exact canonical issuance membership through the bound verifier;
 6. Order-sequence availability and allocation;
 7. canonical Order/request construction, copied replay indexes, complete preflight, and one
@@ -151,6 +159,24 @@ exception propagates before allocation and publication; failure atomicity remain
 
 Static checks are defense in depth, not an alternative authority proof. In particular, Execution
 does not attempt to reconstruct `side_capacity` without the historical portfolio position.
+
+Let `I` be the requested intent quantity, `Q` the approved quantity,
+`M` the configured `maximum_order_quantity`, and `C` the historical side capacity calculated only
+by Risk from the evaluation-time position. The mandatory table is:
+
+| Executable result | Required static proof in Execution | Historical fact proved only by issuance membership |
+|---|---|---|
+| `ALLOW / WITHIN_LIMITS` | `Q == I` and `I <= M` | `C >= I` |
+| `RESIZE / RESIZED_ORDER_LIMIT` | `0 < Q < I`, `I > M`, and `Q == M` | `C > M` |
+| `RESIZE / RESIZED_POSITION_LIMIT` | `0 < Q < I` and `Q < M` | `C == Q` |
+| `RESIZE / RESIZED_ORDER_AND_POSITION_LIMITS` | `0 < Q < I`, `I > M`, and `Q == M` | `C == Q` |
+| instrument absent from the frozen policy | no executable result is valid | not applicable |
+
+Failure of a required static predicate returns
+`ExecutionAuthorityError(OutcomeCode.CONFLICTING_ID)` before provenance lookup, Order allocation,
+or publication. Execution must not require `Q <= maximum_absolute_position`: a valid
+risk-reducing or crossing order from an already out-of-limit position can have historical side
+capacity greater than that absolute-position limit.
 
 ### Explicit freshness exclusion
 
@@ -196,8 +222,11 @@ Issue #47 must prove:
 - arbitrary well-formed snapshot digest/version substitution fails;
 - valid-looking policy digests and allocation transitions without a Risk registry record fail;
 - an exact registered identity with different intent, decision, or evidence bytes fails;
-- a result issued by another run, specification set, execution policy, risk policy, or authority
-  fails at construction binding or membership;
+- construction binding rejects a verifier for another run, specification set, execution policy,
+  or risk policy;
+- a result absent from the bound authority's registry fails membership even if another authority
+  issued it; if the bound registry independently contains the exact same canonical tuple,
+  membership succeeds regardless of Python process-object origin;
 - canonical-value membership does not depend on object identity;
 - a valid risk-reducing or crossing order is not rejected by an invalid
   `approved_quantity <= maximum_absolute_position` shortcut;
