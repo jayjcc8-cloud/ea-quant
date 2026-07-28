@@ -47,6 +47,16 @@ def test_execution_value_modules_keep_the_frozen_import_boundary() -> None:
                 "ea.core.time",
             }
         ),
+        "execution_state.py": frozenset(
+            {
+                "ea.core.economics",
+                "ea.core.execution",
+                "ea.core.execution_identity",
+                "ea.core.execution_messages",
+                "ea.core.outcomes",
+                "ea.core.run",
+            }
+        ),
         "runtime.py": frozenset(
             {
                 "ea.core.execution_identity",
@@ -86,8 +96,15 @@ def test_execution_value_modules_keep_the_frozen_import_boundary() -> None:
 def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
     allowed = frozenset(
         {
+            "ea.core.economics",
+            "ea.core.execution",
+            "ea.core.execution_identity",
+            "ea.core.execution_messages",
             "ea.core.outcomes",
+            "ea.core.run",
             "ea.core.runtime",
+            "ea.core.time",
+            "ea.runtime.ingress",
             "ea.runtime.queue",
         }
     )
@@ -142,11 +159,13 @@ def test_inner_execution_package_depends_only_on_core_and_itself() -> None:
             "ea.core.execution",
             "ea.core.execution_identity",
             "ea.core.execution_messages",
+            "ea.core.execution_state",
             "ea.core.outcomes",
             "ea.core.risk",
             "ea.core.run",
             "ea.core.time",
             "ea.execution.authority",
+            "ea.execution.fact_authority",
         }
     )
     imported_ea_modules: set[str] = set()

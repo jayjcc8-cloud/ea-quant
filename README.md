@@ -24,9 +24,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   run manifest、audit lineage、composition preparation、CLI、测试、VSCode 配置和 CI
   质量门禁。Issue #26 已建立 86% line / 71% branch coverage floor 并移除未使用的运行依赖；
   Issue #28 已将 manifest 的 model、wire、codec 和 evidence 职责分离，同时保持公开与 wire
-  契约不变。当前开发已在该历史基线上继续推进；尚未实现 historical runtime、OMS 的
-  fact/order-lifecycle 与 submission 部分、reconciliation、portfolio planning、strategy 或
-  backtest。
+  契约不变。当前开发已在该历史基线上继续推进；Accepted ADR 0014 的 trusted fact
+  ingress/dispatch、canonical Fill allocation 与 observation-derived Order projection 已实现
+  当前切片。尚未实现 historical runtime coordinator、venue submission、ledger/runtime
+  integration、reconciliation correction、portfolio planning、strategy 或 backtest。
 - Phase 1 实现从 dependency-neutral economic values 开始：`ea.core.economics` 提供严格
   `ea-decimal-v1`、exact grid 与唯一 settlement rounding boundary；`ea.core.execution`
   提供 versioned instrument specification set、canonical bytes/digest 和 identity-bound
@@ -54,13 +55,21 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   并要求 exact canonical tuple 已存在于绑定 Risk authority 的非淘汰签发注册表；静态
   order-limit 真值表只是纵深防御。approval/intent/decision 三组 identity 保证一次性消费、
   exact replay 与 conflict，`EXECUTION_ORDER` 确定性分配，并在单次 state publication 前
-  预检 canonical Order、execution request、digest 与 client submission key。该切片不提交
-  venue、不处理 raw fact/Fill，也不替代紧邻 submission 的 audit/freshness/halt gate。
+  预检 canonical Order、execution request、digest 与 client submission key，并提供
+  authority-backed Order ID / client submission key resolution ports。该切片不提交 venue，
+  也不替代紧邻 submission 的 audit/freshness/halt gate。
 - `ea.core.runtime` 与 `ea.runtime` 已按
   [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md) 建立 safety、execution
   fact、market、timer、end-of-run 的全局 root key、完整有界计划验证和不可插入的单消费者顺序
-  queue；reconciliation rank 仅保留词汇，不存在 opaque placeholder。该切片尚不是 lifecycle
-  coordinator，也不包含 dispatch ID、audit gate、stage callback、feed 或 matcher。
+  queue；并按 [Accepted ADR 0014](docs/adr/0014-trusted-execution-fact-dispatch-and-order-projection.md)
+  增加 source issuance、单 active fact dispatch lease、non-evicting dispatch history 与 exact
+  acknowledgement。reconciliation rank 仅保留词汇，不存在 opaque placeholder；该切片尚不是
+  lifecycle coordinator，也不包含 audit gate、stage callback、feed 或 matcher。
+- `ea.core.execution_state` 与 `ea.execution.fact_authority` 已按 Accepted ADR 0014 实现 exact
+  fact replay/conflict、authority-backed Order correlation、staged venue binding、deterministic
+  Fill allocation、coherent observed quantity、bounded immutable Order projection、closed
+  processing outcome 与 monotone halt。它尚未接入 ledger/runtime coordinator，也不实现 venue
+  adapter、reconciliation correction 或 matcher。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -97,7 +106,9 @@ src/ea/
 suffix、sequence authority、factory-only plan 与错误映射的实现澄清见
 [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md)；Risk result 的
 canonical issuance provenance 边界见
-[Accepted ADR 0013](docs/adr/0013-risk-result-issuance-provenance.md)。
+[Accepted ADR 0013](docs/adr/0013-risk-result-issuance-provenance.md)；trusted execution-fact
+dispatch 与 Order projection authority 见
+[Accepted ADR 0014](docs/adr/0014-trusted-execution-fact-dispatch-and-order-projection.md)。
 
 订单、数量、费用、现金、持仓、风险限制和账本金额不得使用 `float`。当前 economic value
 边界只接受 canonical decimal text，使用无界整数 coefficient/scale 完成精确乘法，并仅在

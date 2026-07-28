@@ -160,6 +160,8 @@ class _OrderAuthorityState:
     approval_index: Mapping[EconomicId, _OrderRecord]
     intent_index: Mapping[EconomicId, _OrderRecord]
     decision_index: Mapping[EconomicId, _OrderRecord]
+    order_id_index: Mapping[EconomicId, _OrderRecord]
+    client_submission_key_index: Mapping[Sha256Digest, _OrderRecord]
     orders: tuple[Order, ...]
 
 
@@ -215,6 +217,29 @@ class Phase1OrderAuthority:
     @property
     def orders(self) -> tuple[Order, ...]:
         return self._state.orders
+
+    def resolve_issued_order_by_id(self, order_id: EconomicId) -> Order | None:
+        """Return one exact issued Order by canonical Order ID without mutation."""
+        if type(order_id) is not EconomicId:
+            raise ExecutionAuthorityError(
+                OutcomeCode.INVALID_TYPE,
+                "order_id must be an exact EconomicId",
+            )
+        record = self._state.order_id_index.get(order_id)
+        return None if record is None else record.order
+
+    def resolve_issued_order_by_client_submission_key(
+        self,
+        client_submission_key: Sha256Digest,
+    ) -> Order | None:
+        """Return one exact issued Order by stable client key without mutation."""
+        if type(client_submission_key) is not Sha256Digest:
+            raise ExecutionAuthorityError(
+                OutcomeCode.INVALID_TYPE,
+                "client_submission_key must be an exact Sha256Digest",
+            )
+        record = self._state.client_submission_key_index.get(client_submission_key)
+        return None if record is None else record.order
 
     def create_order(
         self,
@@ -317,6 +342,10 @@ class Phase1OrderAuthority:
             approval_index = _copy_approval_index(self._state.approval_index)
             intent_index = _copy_intent_index(self._state.intent_index)
             decision_index = _copy_decision_index(self._state.decision_index)
+            order_id_index = _copy_order_id_index(self._state.order_id_index)
+            client_key_index = _copy_client_submission_key_index(
+                self._state.client_submission_key_index
+            )
             _insert_approval_record(
                 approval_index,
                 reconstructed_approval.approval_id,
@@ -332,11 +361,19 @@ class Phase1OrderAuthority:
                 reconstructed_decision.decision_id,
                 record,
             )
+            _insert_order_id_record(order_id_index, order.order_id, record)
+            _insert_client_submission_key_record(
+                client_key_index,
+                record.client_submission_key,
+                record,
+            )
             next_state = _OrderAuthorityState(
                 order_next=order_after,
                 approval_index=_freeze_approval_index(approval_index),
                 intent_index=_freeze_intent_index(intent_index),
                 decision_index=_freeze_decision_index(decision_index),
+                order_id_index=_freeze_order_id_index(order_id_index),
+                client_submission_key_index=_freeze_client_submission_key_index(client_key_index),
                 orders=(*self._state.orders, order),
             )
             _preflight_public_record(record)
@@ -491,6 +528,8 @@ def create_phase1_order_authority(
             approval_index=_freeze_approval_index({}),
             intent_index=_freeze_intent_index({}),
             decision_index=_freeze_decision_index({}),
+            order_id_index=_freeze_order_id_index({}),
+            client_submission_key_index=_freeze_client_submission_key_index({}),
             orders=(),
         )
         return authority
@@ -964,6 +1003,8 @@ def _preflight_candidate_state(
         state.approval_index.get(approval_id) is not record
         or state.intent_index.get(intent_id) is not record
         or state.decision_index.get(decision_id) is not record
+        or state.order_id_index.get(record.order.order_id) is not record
+        or state.client_submission_key_index.get(record.client_submission_key) is not record
         or not state.orders
         or state.orders[-1] is not record.order
     ):
@@ -985,6 +1026,18 @@ def _copy_intent_index(
 def _copy_decision_index(
     index: Mapping[EconomicId, _OrderRecord],
 ) -> dict[EconomicId, _OrderRecord]:
+    return dict(index)
+
+
+def _copy_order_id_index(
+    index: Mapping[EconomicId, _OrderRecord],
+) -> dict[EconomicId, _OrderRecord]:
+    return dict(index)
+
+
+def _copy_client_submission_key_index(
+    index: Mapping[Sha256Digest, _OrderRecord],
+) -> dict[Sha256Digest, _OrderRecord]:
     return dict(index)
 
 
@@ -1012,6 +1065,22 @@ def _insert_decision_record(
     index[identity] = record
 
 
+def _insert_order_id_record(
+    index: dict[EconomicId, _OrderRecord],
+    identity: EconomicId,
+    record: _OrderRecord,
+) -> None:
+    index[identity] = record
+
+
+def _insert_client_submission_key_record(
+    index: dict[Sha256Digest, _OrderRecord],
+    identity: Sha256Digest,
+    record: _OrderRecord,
+) -> None:
+    index[identity] = record
+
+
 def _freeze_approval_index(
     index: Mapping[EconomicId, _OrderRecord],
 ) -> Mapping[EconomicId, _OrderRecord]:
@@ -1027,6 +1096,18 @@ def _freeze_intent_index(
 def _freeze_decision_index(
     index: Mapping[EconomicId, _OrderRecord],
 ) -> Mapping[EconomicId, _OrderRecord]:
+    return MappingProxyType(dict(index))
+
+
+def _freeze_order_id_index(
+    index: Mapping[EconomicId, _OrderRecord],
+) -> Mapping[EconomicId, _OrderRecord]:
+    return MappingProxyType(dict(index))
+
+
+def _freeze_client_submission_key_index(
+    index: Mapping[Sha256Digest, _OrderRecord],
+) -> Mapping[Sha256Digest, _OrderRecord]:
     return MappingProxyType(dict(index))
 
 
