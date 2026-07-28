@@ -21,6 +21,7 @@ from ea.core import (
     Adjustment,
     Bar,
     BoundedRuntimeRootPlan,
+    CanonicalDecimal,
     EndOfRunKind,
     EndOfRunRoot,
     ExecutionFactIngress,
@@ -29,9 +30,13 @@ from ea.core import (
     FactProvenance,
     FactProvenanceId,
     Instrument,
+    InstrumentExecutionSpec,
+    InstrumentSpecId,
+    InstrumentSpecSetId,
     MarketDataEnvelope,
     MarketDataKind,
     OutcomeCode,
+    PriceDomain,
     ReconciliationObservationKind,
     RunId,
     RuntimeIdentifier,
@@ -41,6 +46,7 @@ from ea.core import (
     SafetyKind,
     SafetyRoot,
     SafetySubject,
+    SettlementCurrency,
     Sha256Digest,
     SourceId,
     SourceNamespace,
@@ -48,12 +54,13 @@ from ea.core import (
     TimerRoot,
     VenueId,
     admission_order_key,
+    build_instrument_spec_set,
     create_execution_fact_ingress,
     create_lifecycle_execution_fact,
     prepare_bounded_runtime_roots,
     runtime_root_order_key,
 )
-from ea.runtime import DeterministicRootQueue
+from ea.runtime import DeterministicRootQueue, create_deterministic_root_queue
 
 RUN_ID = RunId("12345678-1234-4234-8234-123456789abc")
 ROOT_TIME = datetime(2026, 1, 2, 9, 31, tzinfo=UTC)
@@ -62,6 +69,21 @@ SOURCE_NAMESPACE = SourceNamespace("sim.primary")
 PROVENANCE = FactProvenance(
     FactProvenanceId("phase1.simulator.v1"),
     Sha256Digest("3" * 64),
+)
+SPEC_SET = build_instrument_spec_set(
+    InstrumentSpecSetId("runtime-test-v1"),
+    (
+        InstrumentExecutionSpec(
+            instrument=Instrument(VenueId("XNAS"), "AAPL"),
+            specification_id=InstrumentSpecId("xnas-aapl-v1"),
+            price_quantum=CanonicalDecimal("0.01"),
+            quantity_quantum=CanonicalDecimal("1"),
+            settlement_currency=SettlementCurrency("USD"),
+            currency_quantum=CanonicalDecimal("0.01"),
+            contract_multiplier=CanonicalDecimal("1"),
+            price_domain=PriceDomain.POSITIVE,
+        ),
+    ),
 )
 
 
@@ -493,12 +515,23 @@ def test_large_sequences_sort_without_decimal_string_conversion() -> None:
 
 def test_queue_consumes_exact_plan_once_without_mutating_on_exhaustion() -> None:
     plan = prepare_bounded_runtime_roots((_end(), _safety(), _market()))
-    queue = DeterministicRootQueue(plan)
+    queue = create_deterministic_root_queue(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        plan=plan,
+        fact_issuance_verifiers=(),
+    )
 
     assert queue.remaining == 3
     assert queue.peek() is plan.roots[0]
     assert queue.remaining == 3
-    assert tuple(queue.pop() for _ in range(3)) == plan.roots
+    observed = []
+    for expected_sequence in range(1, 4):
+        lease = queue.pop()
+        observed.append(lease.root)
+        assert lease.dispatch_sequence == expected_sequence
+        queue.acknowledge(lease)
+    assert tuple(observed) == plan.roots
     assert queue.remaining == 0
 
     for operation in (queue.peek, queue.pop):
@@ -509,18 +542,31 @@ def test_queue_consumes_exact_plan_once_without_mutating_on_exhaustion() -> None
 
 
 def test_queue_rejects_duck_typed_or_subclassed_plan() -> None:
+    with pytest.raises(TypeError):
+        DeterministicRootQueue()
+
     class FakePlan:
         roots = (_safety(),)
 
     with pytest.raises(RuntimeOrderingError) as fake:
-        DeterministicRootQueue(cast(BoundedRuntimeRootPlan, FakePlan()))
+        create_deterministic_root_queue(
+            run_id=RUN_ID,
+            spec_set=SPEC_SET,
+            plan=cast(BoundedRuntimeRootPlan, FakePlan()),
+            fact_issuance_verifiers=(),
+        )
     assert fake.value.code is OutcomeCode.INVALID_TYPE
 
     plan = prepare_bounded_runtime_roots((_safety(),))
     forged_exact = object.__new__(BoundedRuntimeRootPlan)
     object.__setattr__(forged_exact, "_roots", plan.roots)
     with pytest.raises(RuntimeOrderingError) as unsealed:
-        DeterministicRootQueue(forged_exact)
+        create_deterministic_root_queue(
+            run_id=RUN_ID,
+            spec_set=SPEC_SET,
+            plan=forged_exact,
+            fact_issuance_verifiers=(),
+        )
     assert unsealed.value.code is OutcomeCode.INVALID_TYPE
 
     class DerivedPlan(BoundedRuntimeRootPlan):  # type: ignore[misc]
@@ -529,7 +575,12 @@ def test_queue_rejects_duck_typed_or_subclassed_plan() -> None:
     derived = object.__new__(DerivedPlan)
     object.__setattr__(derived, "_roots", plan.roots)
     with pytest.raises(RuntimeOrderingError) as subclass:
-        DeterministicRootQueue(derived)
+        create_deterministic_root_queue(
+            run_id=RUN_ID,
+            spec_set=SPEC_SET,
+            plan=derived,
+            fact_issuance_verifiers=(),
+        )
     assert subclass.value.code is OutcomeCode.INVALID_TYPE
 
 

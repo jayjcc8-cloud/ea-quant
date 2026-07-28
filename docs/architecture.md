@@ -81,7 +81,8 @@ flowchart LR
 - Execution/OMS 先形成 canonical `Order` 与不含密钥的 canonical execution request；Runtime
   只有在 mandatory audit adapter 返回 persisted acknowledgement 后，才授权 execution 提交 venue。
 - Venue 只产生 raw execution facts；Execution/OMS 校验、normalize、去重后发布明确 processing
-  outcome，accepted outcome 才可包含 canonical order event / `Fill`。
+  outcome。首次、上下文有效且数量完整的 trade fact 在 accepted 或 unresolved 时可包含
+  canonical `Fill`；duplicate、conflict 和 invalid outcome 不得包含 `Fill`。
 - 每个 inbound raw fact 都由 Execution/OMS 保留真实 source provenance 与 known identifiers，并产出
   immutable processing outcome（包括 accepted、duplicate、invalid/rejected 或 unresolved 结果）；
   正常路径中 Runtime 等到 mandatory audit persisted acknowledgement 后才 dispatch 给 owner，OMS 不直接写 sink。
@@ -112,7 +113,7 @@ flowchart LR
 | risk decision | risk | risk 对成功评估的 intent 给出 allow/resize/reject | runtime；批准结果才交 execution | 必须关联原 intent；reject 是正常结果；不预设 Python schema |
 | `Order` / canonical execution request | shared execution/OMS | execution 依据 approved decision 唯一创建 | runtime pre-effect gate，ack 后由 execution 提交 venue | request 必须可审计且已 redacted；vendor wire/auth material 不得离开 adapter |
 | raw execution report | venue mechanics | matcher、paper simulator 或 broker adapter 产生 canonical、secret-free raw fact | execution/OMS | 不是 canonical Fill；必须保留真实 source provenance/known identifiers，不能直接改 portfolio |
-| `Fill` / canonical order event / processing outcome | execution contract | OMS 校验、normalize、deduplicate raw fact；每个 fact 产生明确 outcome | runtime -> audit acknowledgement（或 failing safety path）-> portfolio/risk/reconciliation | strategy、portfolio、venue 都不能伪造 canonical Fill；duplicate/invalid/unresolved 也不得静默丢弃 |
+| `Fill` / canonical order event / processing outcome | execution contract | OMS 校验、normalize、deduplicate raw fact；每个 fact 产生明确 outcome | runtime -> audit acknowledgement（或 failing safety path）-> portfolio/risk/reconciliation | strategy、portfolio、venue 都不能伪造 canonical Fill；上下文有效且数量完整的 unresolved trade 可保留真实 Fill，但 duplicate/conflict/invalid 不含 Fill，所有非 accepted 结果均不得静默丢弃 |
 | `Position` / `Account` | portfolio ledger | accepted Fill 或显式 reconciliation event | updated immutable snapshot -> runtime -> strategy/portfolio/risk/report | broker snapshot 只是 reconciliation observation；risk 不得维护第二本账 |
 | audit record / acknowledgement | runtime audit contract；adapter owns persistence | domain semantic outcome 由 runtime 包装，或 runtime 产生 lifecycle/failure record | append-only audit adapter 返回 persisted acknowledgement/failure | 不在此定义 #14 schema；adapter 不改变交易政策，但 acknowledgement 是 side-effect gate |
 
@@ -364,8 +365,10 @@ Phase 1 入口门禁的历史状态审查基线为
   已实现，canonical Fill ledger/PortfolioSnapshot 与 deterministic pre-trade risk authority
   也已实现；shared OMS 的 deterministic Order-creation/approval-consumption authority 已按
   Accepted ADR 0013 绑定 Risk-owned canonical issuance verifier，coherent low-level factory
-  result 不再等同于 authority issuance。historical runtime coordinator、OMS fact/order-lifecycle
-  与 submission、reconciliation、portfolio planning、strategy 和 backtest 仍未实现。
+  result 不再等同于 authority issuance。Accepted ADR 0014 的 source-issued fact ingress、
+  single-active runtime dispatch、canonical Fill allocation 与 observation-derived Order
+  projection 已实现当前切片；historical runtime coordinator、venue submission、ledger/runtime
+  integration、reconciliation correction、portfolio planning、strategy 和 backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -389,12 +392,18 @@ Phase 1 入口门禁的历史状态审查基线为
   intent/decision/approval、逐字段证明 risk evidence、冻结 lineage 与静态 policy truth table，
   并按 Accepted ADR 0013 查询绑定 Risk authority 的 non-evicting canonical issuance registry；
   approval/intent/decision 三索引实现一次性消费与 exact replay/conflict，canonical Order 与
-  request evidence 原子发布（已实现；不包含 current freshness、venue submission、fact state
-  machine、Fill normalization 或 reconciliation）。
+  request evidence 原子发布，并提供只读、authority-backed Order ID / client submission key
+  resolution ports（已实现；不包含 current freshness、venue submission 或 reconciliation）。
 - canonical runtime root ordering：Accepted ADR 0008/0009 的 domain/local ranks、safety/fact/market/
   timer/end root keys、sequence-authority collision、factory-only bounded plan 与不可插入的
-  single-consumer queue（已实现；尚不包含 reconciliation root payload、dispatch sequence、
-  lifecycle、audit gate、stage orchestration、feed 或 matcher）。
+  single-consumer queue，以及 Accepted ADR 0014 的 source issuance、单 active fact dispatch
+  lease、non-evicting dispatch history 与 exact acknowledgement（已实现；尚不包含
+  reconciliation root payload、完整 lifecycle、audit gate、stage orchestration、feed 或 matcher）。
+- trusted execution-fact authority：Accepted ADR 0014 的 exact ingress replay/conflict、
+  authority-backed Order correlation、staged venue binding、deterministic Fill allocation、
+  coherent observed quantity、bounded immutable Order projection、closed processing outcome 与
+  monotone halt（已实现；尚未接入 ledger/runtime coordinator，也不实现 venue adapter、
+  reconciliation correction 或 matcher）。
 - 本地 OHLCV 数据导入与质量检查。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。
@@ -446,3 +455,7 @@ Phase 1 入口门禁的历史状态审查基线为
 - [Issue #41](https://github.com/jayjcc8-cloud/ea-quant/issues/41) /
   [Accepted ADR 0009](adr/0009-runtime-root-ordering-clarifications.md)：澄清 safety root key、
   producer-sequence authority、factory-only bounded plan 与 runtime ordering 错误边界。
+- [Issue #49](https://github.com/jayjcc8-cloud/ea-quant/issues/49) /
+  [Accepted ADR 0014](adr/0014-trusted-execution-fact-dispatch-and-order-projection.md)：冻结
+  trusted fact ingress/dispatch、Order correlation、canonical Fill、projection、venue binding
+  与 closed anomaly/action 语义。
