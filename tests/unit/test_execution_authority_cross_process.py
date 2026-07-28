@@ -94,6 +94,7 @@ execution = create_phase1_order_authority(
     spec_set=spec_set,
     execution_policy=execution_policy,
     risk_policy=policy,
+    risk_result_verifier=risk,
 )
 snapshot = PortfolioSnapshot(
     run_id=run_id,

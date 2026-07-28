@@ -24,10 +24,12 @@ from ea.core import (
     OutcomeCode,
     Phase1RiskPolicy,
     PortfolioSnapshot,
+    PositionBalance,
     PriceDomain,
     RiskDecision,
     RiskEvaluationEvidence,
     RiskEvaluationResult,
+    RiskHaltReason,
     RiskPolicyId,
     RiskReasonCode,
     RunId,
@@ -39,12 +41,16 @@ from ea.core import (
     build_instrument_spec_set,
     canonical_execution_request_bytes,
     canonical_order_bytes,
+    canonical_order_intent_bytes,
+    canonical_risk_decision_bytes,
+    canonical_risk_evaluation_evidence_bytes,
     create_order_intent,
     create_phase1_risk_policy,
     execution_approval_digest,
     execution_request_digest,
     order_client_submission_key,
     order_digest,
+    phase1_risk_policy_digest,
     risk_decision_digest,
 )
 from ea.core.execution import InstrumentExecutionSpecSet
@@ -121,6 +127,7 @@ def _intent(
     quantity: str = "2",
     run_id: RunId = RUN_ID,
     execution_policy: ExecutionPolicyRef = EXECUTION_POLICY,
+    portfolio_snapshot_version: int = 0,
 ) -> OrderIntent:
     return create_order_intent(
         run_id=run_id,
@@ -133,7 +140,7 @@ def _intent(
         instrument=INSTRUMENT,
         side=OrderSide.BUY,
         quantity=CanonicalDecimal(quantity),
-        portfolio_snapshot_version=0,
+        portfolio_snapshot_version=portfolio_snapshot_version,
         causal_root_available_at=TIME,
         dispatch_sequence=sequence,
         spec_set=spec_set,
@@ -141,19 +148,34 @@ def _intent(
     )
 
 
-def _snapshot(spec_set: InstrumentExecutionSpecSet) -> PortfolioSnapshot:
+def _snapshot(
+    spec_set: InstrumentExecutionSpecSet,
+    *,
+    position: str | None = None,
+) -> PortfolioSnapshot:
     from ea.core import instrument_spec_set_digest
 
+    version = 0 if position is None else 1
     return PortfolioSnapshot(
         run_id=RUN_ID,
         instrument_spec_set_id=spec_set.identifier,
         instrument_spec_set_sha256=instrument_spec_set_digest(spec_set),
-        snapshot_version=0,
-        ledger_sequence=0,
-        last_entry_id=None,
-        last_transaction_sha256=None,
+        snapshot_version=version,
+        ledger_sequence=version,
+        last_entry_id=(None if version == 0 else _id(EconomicOwnerKind.LEDGER_ENTRY, version)),
+        last_transaction_sha256=None if version == 0 else Sha256Digest("3" * 64),
         cash_balances=(),
-        position_balances=(),
+        position_balances=(
+            ()
+            if position is None
+            else (
+                PositionBalance(
+                    instrument=INSTRUMENT,
+                    quantity_quantum=spec_set.specifications[0].quantity_quantum,
+                    quantity=CanonicalDecimal(position),
+                ),
+            )
+        ),
         rounding_balances=(),
         unresolved_fills=(),
     )
@@ -174,13 +196,79 @@ def _risk_authority(
 def _order_authority(
     spec_set: InstrumentExecutionSpecSet,
     policy: Phase1RiskPolicy,
+    risk_result_verifier: object | None = None,
 ) -> Phase1OrderAuthority:
+    verifier = (
+        _risk_authority(spec_set, policy) if risk_result_verifier is None else risk_result_verifier
+    )
     return create_phase1_order_authority(
         run_id=RUN_ID,
         spec_set=spec_set,
         execution_policy=EXECUTION_POLICY,
         risk_policy=policy,
+        risk_result_verifier=cast(Any, verifier),
     )
+
+
+class _VerifierStub:
+    def __init__(
+        self,
+        spec_set: InstrumentExecutionSpecSet,
+        policy: Phase1RiskPolicy,
+        *,
+        run_id: object = RUN_ID,
+        execution_policy: object = EXECUTION_POLICY,
+        response: object = True,
+        error: Exception | None = None,
+    ) -> None:
+        self.run_id = run_id
+        self.spec_set = spec_set
+        self.execution_policy = execution_policy
+        self.policy = policy
+        self.response = response
+        self.error = error
+        self.calls = 0
+
+    def has_issued_result(
+        self,
+        *,
+        intent_id: EconomicId,
+        canonical_intent_bytes: bytes,
+        canonical_decision_bytes: bytes,
+        canonical_evidence_bytes: bytes,
+    ) -> bool:
+        assert type(intent_id) is EconomicId
+        assert type(canonical_intent_bytes) is bytes
+        assert type(canonical_decision_bytes) is bytes
+        assert type(canonical_evidence_bytes) is bytes
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return cast(bool, self.response)
+
+
+def _coherent_allow_result(
+    *,
+    intent: OrderIntent,
+    spec_set: InstrumentExecutionSpecSet,
+    template: RiskEvaluationResult,
+) -> RiskEvaluationResult:
+    assert template.decision.approval is not None
+    decision = allow_order_intent(
+        decision_id=template.decision.decision_id,
+        approval_id=template.decision.approval.approval_id,
+        intent=intent,
+        spec_set=spec_set,
+        risk_state_version=template.decision.risk_state_version,
+    )
+    assert decision.approval is not None
+    evidence = _replace_slots(
+        template.evidence,
+        decision_sha256=risk_decision_digest(decision),
+        approval_sha256=execution_approval_digest(decision.approval),
+        reason_code=RiskReasonCode.WITHIN_LIMITS,
+    )
+    return _result(decision, evidence)
 
 
 def _replace_slots(value: object, **changes: object) -> Any:
@@ -244,30 +332,35 @@ def test_factory_freezes_contract_bindings_and_initial_state() -> None:
 def test_factory_rejects_wrong_types_and_conflicting_policy_lineage() -> None:
     spec_set = _spec_set()
     policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
     invalid_calls: tuple[Callable[[], Phase1OrderAuthority], ...] = (
         lambda: create_phase1_order_authority(
             run_id=cast(RunId, "run"),
             spec_set=spec_set,
             execution_policy=EXECUTION_POLICY,
             risk_policy=policy,
+            risk_result_verifier=risk,
         ),
         lambda: create_phase1_order_authority(
             run_id=RUN_ID,
             spec_set=cast(InstrumentExecutionSpecSet, None),
             execution_policy=EXECUTION_POLICY,
             risk_policy=policy,
+            risk_result_verifier=risk,
         ),
         lambda: create_phase1_order_authority(
             run_id=RUN_ID,
             spec_set=spec_set,
             execution_policy=cast(ExecutionPolicyRef, None),
             risk_policy=policy,
+            risk_result_verifier=risk,
         ),
         lambda: create_phase1_order_authority(
             run_id=RUN_ID,
             spec_set=spec_set,
             execution_policy=EXECUTION_POLICY,
             risk_policy=cast(Phase1RiskPolicy, None),
+            risk_result_verifier=risk,
         ),
     )
     for invalid_call in invalid_calls:
@@ -288,8 +381,94 @@ def test_factory_rejects_wrong_types_and_conflicting_policy_lineage() -> None:
             spec_set=spec_set,
             execution_policy=EXECUTION_POLICY,
             risk_policy=foreign_policy,
+            risk_result_verifier=risk,
         )
     _assert_error(conflict, OutcomeCode.CONFLICTING_ID)
+
+
+def test_factory_closes_verifier_shape_type_and_binding_error_matrix() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+
+    class NonCallableVerifier:
+        run_id = RUN_ID
+        execution_policy = EXECUTION_POLICY
+        has_issued_result: object = None
+
+        def __init__(self) -> None:
+            self.spec_set = spec_set
+            self.policy = policy
+
+    wrong_policy = _policy(spec_set, order_limit="4")
+    malformed: tuple[object, ...] = (
+        object(),
+        NonCallableVerifier(),
+        _VerifierStub(spec_set, policy, run_id="not-a-run"),
+    )
+    conflicting: tuple[object, ...] = (
+        _VerifierStub(spec_set, policy, run_id=OTHER_RUN_ID),
+        _VerifierStub(_spec_set(quantity_quantum="0.5"), policy),
+        _VerifierStub(
+            spec_set,
+            policy,
+            execution_policy=ExecutionPolicyRef(
+                ExecutionPolicyId("foreign.execution.v1"),
+                Sha256Digest("9" * 64),
+            ),
+        ),
+        _VerifierStub(spec_set, wrong_policy),
+    )
+
+    for verifier in malformed:
+        with pytest.raises(ExecutionAuthorityError) as error:
+            create_phase1_order_authority(
+                run_id=RUN_ID,
+                spec_set=spec_set,
+                execution_policy=EXECUTION_POLICY,
+                risk_policy=policy,
+                risk_result_verifier=cast(Any, verifier),
+            )
+        _assert_error(error, OutcomeCode.INVALID_TYPE)
+
+    for verifier in conflicting:
+        with pytest.raises(ExecutionAuthorityError) as error:
+            create_phase1_order_authority(
+                run_id=RUN_ID,
+                spec_set=spec_set,
+                execution_policy=EXECUTION_POLICY,
+                risk_policy=policy,
+                risk_result_verifier=cast(Any, verifier),
+            )
+        _assert_error(error, OutcomeCode.CONFLICTING_ID)
+
+
+@pytest.mark.parametrize(
+    ("binding_error", "expected_code"),
+    [
+        (AttributeError("missing binding"), OutcomeCode.INVALID_TYPE),
+        (TypeError("invalid binding"), OutcomeCode.INVALID_TYPE),
+        (RuntimeError("unexpected binding failure"), None),
+    ],
+)
+def test_factory_binding_access_error_contract(
+    binding_error: Exception,
+    expected_code: OutcomeCode | None,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+
+    class FailingVerifier:
+        @property
+        def run_id(self) -> RunId:
+            raise binding_error
+
+    if expected_code is None:
+        with pytest.raises(RuntimeError, match="unexpected binding failure"):
+            _order_authority(spec_set, policy, FailingVerifier())
+    else:
+        with pytest.raises(ExecutionAuthorityError) as error:
+            _order_authority(spec_set, policy, FailingVerifier())
+        _assert_error(error, expected_code)
 
 
 def test_allow_creates_one_canonical_order_and_exact_replay_is_identity_stable() -> None:
@@ -298,7 +477,7 @@ def test_allow_creates_one_canonical_order_and_exact_replay_is_identity_stable()
     risk = _risk_authority(spec_set, policy)
     intent = _intent(spec_set)
     result = risk.evaluate(intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    authority = _order_authority(spec_set, policy, risk)
 
     order = authority.create_order(intent, result)
     state = authority._state
@@ -326,14 +505,337 @@ def test_resize_uses_only_the_approved_quantity() -> None:
     spec_set = _spec_set()
     policy = _policy(spec_set, order_limit="1")
     intent = _intent(spec_set, quantity="2")
-    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    risk = _risk_authority(spec_set, policy)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, risk)
 
     order = authority.create_order(intent, result)
 
     assert order.quantity == CanonicalDecimal("1")
     assert order.original_intent_sha256 != order.effective_intent_sha256
     assert authority.orders == (order,)
+
+
+def test_risk_registry_membership_uses_canonical_bytes_not_object_identity() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    intent_bytes = bytes(bytearray(canonical_order_intent_bytes(intent)))
+    decision_bytes = bytes(bytearray(canonical_risk_decision_bytes(result.decision)))
+    evidence_bytes = bytes(bytearray(canonical_risk_evaluation_evidence_bytes(result.evidence)))
+
+    assert risk.has_issued_result(
+        intent_id=intent.intent_id,
+        canonical_intent_bytes=intent_bytes,
+        canonical_decision_bytes=decision_bytes,
+        canonical_evidence_bytes=evidence_bytes,
+    )
+    assert not risk.has_issued_result(
+        intent_id=intent.intent_id,
+        canonical_intent_bytes=intent_bytes,
+        canonical_decision_bytes=decision_bytes,
+        canonical_evidence_bytes=evidence_bytes + b" ",
+    )
+
+
+def test_bound_registry_rejects_an_unissued_but_coherent_result() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    bound_risk = _risk_authority(spec_set, policy)
+    other_risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = other_risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, bound_risk)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, result)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert authority._state is original_state
+
+
+def test_equivalent_result_object_is_accepted_when_bound_registry_has_exact_bytes() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    bound_risk = _risk_authority(spec_set, policy)
+    other_risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    bound_result = bound_risk.evaluate(intent, _snapshot(spec_set))
+    equivalent_result = other_risk.evaluate(intent, _snapshot(spec_set))
+    assert equivalent_result is not bound_result
+    assert canonical_risk_decision_bytes(equivalent_result.decision) == (
+        canonical_risk_decision_bytes(bound_result.decision)
+    )
+    authority = _order_authority(spec_set, policy, bound_risk)
+
+    order = authority.create_order(intent, equivalent_result)
+
+    assert order.intent_id == intent.intent_id
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_code"),
+    [(False, OutcomeCode.CONFLICTING_ID), (1, OutcomeCode.INVALID_TYPE)],
+)
+def test_verifier_false_or_non_boolean_is_fail_closed(
+    response: object,
+    expected_code: OutcomeCode,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    verifier = _VerifierStub(spec_set, policy, response=response)
+    authority = _order_authority(spec_set, policy, verifier)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, result)
+
+    _assert_error(error, expected_code)
+    assert verifier.calls == 1
+    assert authority._state is original_state
+
+
+@pytest.mark.parametrize(
+    "verifier_error",
+    [RuntimeError("provenance failed"), TypeError("provenance type failed")],
+)
+def test_unexpected_verifier_exception_propagates_without_publication(
+    verifier_error: Exception,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    verifier = _VerifierStub(spec_set, policy, error=verifier_error)
+    authority = _order_authority(spec_set, policy, verifier)
+    original_state = authority._state
+
+    with pytest.raises(type(verifier_error), match=str(verifier_error)) as error:
+        authority.create_order(intent, result)
+
+    assert error.value is verifier_error
+    assert authority._state is original_state
+
+
+def test_exact_order_replay_precedes_a_later_verifier_failure() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    verifier = _VerifierStub(spec_set, policy)
+    authority = _order_authority(spec_set, policy, verifier)
+    order = authority.create_order(intent, result)
+    state = authority._state
+    verifier.error = RuntimeError("must not be consulted on replay")
+
+    replay = authority.create_order(intent, result)
+
+    assert replay is order
+    assert verifier.calls == 1
+    assert authority._state is state
+
+
+def test_historical_issuance_remains_valid_after_risk_halt() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    risk.engage_halt(RiskHaltReason.KILL_SWITCH, TIME, 99)
+    authority = _order_authority(spec_set, policy, risk)
+
+    order = authority.create_order(intent, result)
+
+    assert order.intent_id == intent.intent_id
+    assert risk.risk_state.halted
+
+
+def test_provenance_rejection_precedes_order_sequence_exhaustion() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    verifier = _VerifierStub(spec_set, policy, response=False)
+    authority = _order_authority(spec_set, policy, verifier)
+    authority._state = replace(authority._state, order_next=None)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, result)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert authority._state is original_state
+
+
+@pytest.mark.parametrize(
+    ("order_limit", "position", "expected_reason"),
+    [
+        ("5", "9", RiskReasonCode.RESIZED_POSITION_LIMIT),
+        ("1", "9", RiskReasonCode.RESIZED_ORDER_AND_POSITION_LIMITS),
+    ],
+)
+def test_registered_position_resize_truth_table_is_accepted(
+    order_limit: str,
+    position: str,
+    expected_reason: RiskReasonCode,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set, order_limit=order_limit)
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set, quantity="2", portfolio_snapshot_version=1)
+    result = risk.evaluate(intent, _snapshot(spec_set, position=position))
+    authority = _order_authority(spec_set, policy, risk)
+
+    order = authority.create_order(intent, result)
+
+    assert result.evidence.reason_code is expected_reason
+    assert order.quantity == CanonicalDecimal("1")
+
+
+def test_risk_reducing_crossing_order_may_exceed_absolute_position_limit() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set, order_limit="30", position_limit="10")
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set, quantity="20", portfolio_snapshot_version=1)
+    result = risk.evaluate(intent, _snapshot(spec_set, position="-15"))
+    authority = _order_authority(spec_set, policy, risk)
+
+    order = authority.create_order(intent, result)
+
+    assert result.evidence.reason_code is RiskReasonCode.WITHIN_LIMITS
+    assert order.quantity == CanonicalDecimal("20")
+
+
+def test_static_policy_rejects_coherent_oversized_allow_before_provenance() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set, order_limit="5")
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set, quantity="6")
+    resized = risk.evaluate(intent, _snapshot(spec_set))
+    forged = _coherent_allow_result(intent=intent, spec_set=spec_set, template=resized)
+    verifier = _VerifierStub(spec_set, policy)
+    authority = _order_authority(spec_set, policy, verifier)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, forged)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert verifier.calls == 0
+    assert authority._state is original_state
+
+
+def test_membership_rejects_static_valid_allow_when_position_required_resize() -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set, order_limit="5")
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set, quantity="2", portfolio_snapshot_version=1)
+    resized = risk.evaluate(intent, _snapshot(spec_set, position="9"))
+    forged = _coherent_allow_result(intent=intent, spec_set=spec_set, template=resized)
+    authority = _order_authority(spec_set, policy, risk)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, forged)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert authority._state is original_state
+
+
+@pytest.mark.parametrize(
+    "forged_reason",
+    [
+        RiskReasonCode.RESIZED_POSITION_LIMIT,
+        RiskReasonCode.RESIZED_ORDER_AND_POSITION_LIMITS,
+    ],
+)
+def test_order_limit_resize_rejects_forged_position_reason(
+    forged_reason: RiskReasonCode,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set, order_limit="1")
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set, quantity="2")
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    forged = _result(
+        result.decision,
+        _replace_slots(result.evidence, reason_code=forged_reason),
+    )
+    authority = _order_authority(spec_set, policy, risk)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, forged)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert authority._state is original_state
+
+
+@pytest.mark.parametrize(
+    "forged_reason",
+    [
+        RiskReasonCode.RESIZED_ORDER_LIMIT,
+        RiskReasonCode.RESIZED_ORDER_AND_POSITION_LIMITS,
+    ],
+)
+def test_position_limit_resize_rejects_forged_order_reason(
+    forged_reason: RiskReasonCode,
+) -> None:
+    spec_set = _spec_set()
+    policy = _policy(spec_set, order_limit="5")
+    risk = _risk_authority(spec_set, policy)
+    intent = _intent(spec_set, quantity="2", portfolio_snapshot_version=1)
+    result = risk.evaluate(intent, _snapshot(spec_set, position="9"))
+    forged = _result(
+        result.decision,
+        _replace_slots(result.evidence, reason_code=forged_reason),
+    )
+    authority = _order_authority(spec_set, policy, risk)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, forged)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert authority._state is original_state
+
+
+def test_unconfigured_instrument_cannot_carry_a_coherent_executable_result() -> None:
+    spec_set = _spec_set()
+    configured_policy = _policy(spec_set)
+    intent = _intent(spec_set)
+    configured_risk = _risk_authority(spec_set, configured_policy)
+    valid = configured_risk.evaluate(intent, _snapshot(spec_set))
+    empty_policy = create_phase1_risk_policy(
+        policy_id=RiskPolicyId("phase1.risk.v1"),
+        spec_set=spec_set,
+        execution_policy=EXECUTION_POLICY,
+        instrument_limits=(),
+    )
+    evidence = _replace_slots(
+        valid.evidence,
+        policy_sha256=phase1_risk_policy_digest(empty_policy),
+    )
+    forged = _result(valid.decision, evidence)
+    verifier = _VerifierStub(spec_set, empty_policy)
+    authority = _order_authority(spec_set, empty_policy, verifier)
+    original_state = authority._state
+
+    with pytest.raises(ExecutionAuthorityError) as error:
+        authority.create_order(intent, forged)
+
+    _assert_error(error, OutcomeCode.CONFLICTING_ID)
+    assert verifier.calls == 0
+    assert authority._state is original_state
 
 
 def test_non_executable_risk_result_never_consumes_an_order_id() -> None:
@@ -345,8 +847,9 @@ def test_non_executable_risk_result_never_consumes_an_order_id() -> None:
         instrument_limits=(),
     )
     intent = _intent(spec_set)
-    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    risk = _risk_authority(spec_set, policy)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, risk)
     original_state = authority._state
 
     with pytest.raises(ExecutionAuthorityError) as error:
@@ -359,12 +862,13 @@ def test_non_executable_risk_result_never_consumes_an_order_id() -> None:
 def test_occupied_identity_with_different_canonical_bytes_is_conflict() -> None:
     spec_set = _spec_set()
     policy = _policy(spec_set)
+    risk = _risk_authority(spec_set, policy)
     original_intent = _intent(spec_set, quantity="2")
-    original_result = _risk_authority(spec_set, policy).evaluate(
+    original_result = risk.evaluate(
         original_intent,
         _snapshot(spec_set),
     )
-    authority = _order_authority(spec_set, policy)
+    authority = _order_authority(spec_set, policy, risk)
     authority.create_order(original_intent, original_result)
     original_state = authority._state
 
@@ -386,7 +890,7 @@ def test_order_sequence_maximum_transitions_to_none_and_replay_still_wins() -> N
     risk = _risk_authority(spec_set, policy)
     first_intent = _intent(spec_set, sequence=1)
     first_result = risk.evaluate(first_intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    authority = _order_authority(spec_set, policy, risk)
     authority._state = replace(authority._state, order_next=MAX_UINT64)
 
     order = authority.create_order(first_intent, first_result)
@@ -434,10 +938,11 @@ def test_forged_evidence_is_rejected_without_publication(
     spec_set = _spec_set()
     policy = _policy(spec_set)
     intent = _intent(spec_set)
-    valid = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
+    risk = _risk_authority(spec_set, policy)
+    valid = risk.evaluate(intent, _snapshot(spec_set))
     evidence = _replace_slots(valid.evidence, **{field_name: replacement})
     forged = _result(valid.decision, evidence)
-    authority = _order_authority(spec_set, policy)
+    authority = _order_authority(spec_set, policy, risk)
     original_state = authority._state
 
     with pytest.raises(ExecutionAuthorityError) as error:
@@ -492,28 +997,16 @@ def test_risk_allocation_maximum_to_none_is_accepted() -> None:
     spec_set = _spec_set()
     policy = _policy(spec_set)
     intent = _intent(spec_set)
-    valid = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    decision = allow_order_intent(
-        decision_id=_id(EconomicOwnerKind.RISK_DECISION, MAX_UINT64),
-        approval_id=_id(EconomicOwnerKind.RISK_APPROVAL, MAX_UINT64),
-        intent=intent,
-        spec_set=spec_set,
-        risk_state_version=0,
+    risk = _risk_authority(spec_set, policy)
+    risk._state = replace(
+        risk._state,
+        decision_next=MAX_UINT64,
+        approval_next=MAX_UINT64,
     )
-    assert decision.approval is not None
-    evidence = _replace_slots(
-        valid.evidence,
-        decision_id=decision.decision_id,
-        decision_sha256=risk_decision_digest(decision),
-        approval_sha256=execution_approval_digest(decision.approval),
-        decision_next_before=MAX_UINT64,
-        decision_next_after=None,
-        approval_next_before=MAX_UINT64,
-        approval_next_after=None,
-    )
-    authority = _order_authority(spec_set, policy)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, risk)
 
-    order = authority.create_order(intent, _result(decision, evidence))
+    order = authority.create_order(intent, result)
 
     assert order.decision_id.owner_sequence == MAX_UINT64
     assert order.approval_id.owner_sequence == MAX_UINT64
@@ -782,7 +1275,7 @@ def test_every_inconsistent_triple_index_lookup_is_a_conflict(case: str) -> None
     first_result = risk.evaluate(first_intent, _snapshot(spec_set))
     second_intent = _intent(spec_set, sequence=2)
     second_result = risk.evaluate(second_intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    authority = _order_authority(spec_set, policy, risk)
     authority.create_order(first_intent, first_result)
     authority.create_order(second_intent, second_result)
     assert first_result.decision.approval is not None
@@ -843,8 +1336,9 @@ def test_every_candidate_publication_stage_is_atomic(
     spec_set = _spec_set()
     policy = _policy(spec_set)
     intent = _intent(spec_set)
-    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    risk = _risk_authority(spec_set, policy)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, risk)
     original_state = authority._state
 
     with monkeypatch.context() as patch:
@@ -877,8 +1371,9 @@ def test_each_real_order_evidence_construction_boundary_is_atomic(
     spec_set = _spec_set()
     policy = _policy(spec_set)
     intent = _intent(spec_set)
-    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    risk = _risk_authority(spec_set, policy)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, risk)
     original_state = authority._state
 
     with monkeypatch.context() as patch:
@@ -910,8 +1405,9 @@ def test_each_real_order_evidence_final_repreflight_boundary_is_atomic(
     spec_set = _spec_set()
     policy = _policy(spec_set)
     intent = _intent(spec_set)
-    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    risk = _risk_authority(spec_set, policy)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, risk)
     original_state = authority._state
     original = cast(Callable[..., Any], getattr(authority_module, target))
     calls = 0
@@ -990,8 +1486,9 @@ def test_actual_dict_copy_operations_are_fail_closed(
     spec_set = _spec_set()
     policy = _policy(spec_set)
     intent = _intent(spec_set)
-    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    risk = _risk_authority(spec_set, policy)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, risk)
     if state_field == "approval_index":
         authority._state = replace(authority._state, approval_index=failing)
     elif state_field == "intent_index":
@@ -1040,8 +1537,9 @@ def test_each_real_defensive_freeze_failure_is_atomic_inside_create_order(
     spec_set = _spec_set()
     policy = _policy(spec_set)
     intent = _intent(spec_set)
-    result = _risk_authority(spec_set, policy).evaluate(intent, _snapshot(spec_set))
-    authority = _order_authority(spec_set, policy)
+    risk = _risk_authority(spec_set, policy)
+    result = risk.evaluate(intent, _snapshot(spec_set))
+    authority = _order_authority(spec_set, policy, risk)
     original_state = authority._state
 
     def return_two_stage_mapping(_: object) -> Any:

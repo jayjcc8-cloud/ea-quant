@@ -6,9 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import NoReturn, final
+from typing import Any, NoReturn, Protocol, cast, final
 
-from ea.core.economics import EconomicValidationError
+from ea.core.economics import CanonicalDecimal, EconomicValidationError
 from ea.core.execution import InstrumentExecutionSpecSet, instrument_spec_set_digest
 from ea.core.execution_identity import (
     EconomicId,
@@ -44,6 +44,7 @@ from ea.core.execution_messages import (
 )
 from ea.core.outcomes import OutcomeCode
 from ea.core.risk import (
+    InstrumentRiskLimit,
     Phase1RiskPolicy,
     RiskContractError,
     RiskEvaluationEvidence,
@@ -92,6 +93,41 @@ class ExecutionAuthorityError(ValueError):
         super().__init__(message)
 
 
+class RiskResultIssuanceVerifier(Protocol):
+    """Consumer-owned read-only proof that Risk issued one canonical result."""
+
+    @property
+    def run_id(self) -> RunId: ...
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet: ...
+
+    @property
+    def execution_policy(self) -> ExecutionPolicyRef: ...
+
+    @property
+    def policy(self) -> Phase1RiskPolicy: ...
+
+    def has_issued_result(
+        self,
+        *,
+        intent_id: EconomicId,
+        canonical_intent_bytes: bytes,
+        canonical_decision_bytes: bytes,
+        canonical_evidence_bytes: bytes,
+    ) -> bool: ...
+
+
+class _IssuanceVerifierFailure(Exception):
+    """Preserve an unexpected verifier exception across public error translation."""
+
+    error: Exception
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        super().__init__(str(error))
+
+
 @dataclass(frozen=True, slots=True)
 class _SubmittedInput:
     intent: OrderIntent
@@ -137,12 +173,14 @@ class Phase1OrderAuthority:
     _execution_policy: ExecutionPolicyRef
     _risk_policy: Phase1RiskPolicy
     _risk_policy_sha256: Sha256Digest
+    _risk_result_verifier: RiskResultIssuanceVerifier
     _state: _OrderAuthorityState
 
     __slots__ = (
         "_execution_policy",
         "_risk_policy",
         "_risk_policy_sha256",
+        "_risk_result_verifier",
         "_run_id",
         "_spec_set",
         "_spec_set_sha256",
@@ -241,6 +279,17 @@ class Phase1OrderAuthority:
                 reconstructed_intent,
                 submitted.evidence,
             )
+            _require_static_policy_proof(
+                intent=reconstructed_intent,
+                decision=reconstructed_decision,
+                evidence=submitted.evidence,
+                approval=reconstructed_approval,
+                risk_policy=self._risk_policy,
+            )
+            _require_issued_result(
+                self._risk_result_verifier,
+                submitted=submitted,
+            )
 
             order_before = self._state.order_next
             if order_before is None:
@@ -302,6 +351,8 @@ class Phase1OrderAuthority:
             return order
         except ExecutionAuthorityError:
             raise
+        except _IssuanceVerifierFailure as failure:
+            raise failure.error from None
         except (
             EconomicValidationError,
             ExecutionIdentityError,
@@ -389,6 +440,7 @@ def create_phase1_order_authority(
     spec_set: InstrumentExecutionSpecSet,
     execution_policy: ExecutionPolicyRef,
     risk_policy: Phase1RiskPolicy,
+    risk_result_verifier: RiskResultIssuanceVerifier,
 ) -> Phase1OrderAuthority:
     """Create one run- and contract-bound Order authority at sequence one."""
     try:
@@ -417,6 +469,15 @@ def create_phase1_order_authority(
                 OutcomeCode.CONFLICTING_ID,
                 "Order-authority construction bindings conflict",
             )
+        verifier = _require_verifier_binding(
+            risk_result_verifier,
+            run_id=run_id,
+            spec_set=spec_set,
+            spec_set_sha256=spec_set_sha256,
+            execution_policy=execution_policy,
+            risk_policy=risk_policy,
+            risk_policy_sha256=risk_policy_sha256,
+        )
         authority = object.__new__(Phase1OrderAuthority)
         authority._run_id = run_id
         authority._spec_set = spec_set
@@ -424,6 +485,7 @@ def create_phase1_order_authority(
         authority._execution_policy = execution_policy
         authority._risk_policy = risk_policy
         authority._risk_policy_sha256 = risk_policy_sha256
+        authority._risk_result_verifier = verifier
         authority._state = _OrderAuthorityState(
             order_next=1,
             approval_index=_freeze_approval_index({}),
@@ -448,6 +510,137 @@ def create_phase1_order_authority(
             OutcomeCode.INVALID_TYPE,
             "Order-authority construction carrier is structurally incomplete",
         ) from error
+
+
+def _require_verifier_binding(
+    verifier: object,
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    spec_set_sha256: Sha256Digest,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+    risk_policy_sha256: Sha256Digest,
+) -> RiskResultIssuanceVerifier:
+    candidate = cast(Any, verifier)
+    try:
+        verifier_run_id = candidate.run_id
+        verifier_spec_set = candidate.spec_set
+        verifier_execution_policy = candidate.execution_policy
+        verifier_policy = candidate.policy
+        membership = candidate.has_issued_result
+    except (AttributeError, TypeError) as error:
+        raise ExecutionAuthorityError(
+            OutcomeCode.INVALID_TYPE,
+            "risk-result verifier has an incomplete construction contract",
+        ) from error
+    if (
+        type(verifier_run_id) is not RunId
+        or type(verifier_spec_set) is not InstrumentExecutionSpecSet
+        or type(verifier_execution_policy) is not ExecutionPolicyRef
+        or type(verifier_policy) is not Phase1RiskPolicy
+        or not callable(membership)
+    ):
+        raise ExecutionAuthorityError(
+            OutcomeCode.INVALID_TYPE,
+            "risk-result verifier bindings must have exact canonical runtime types",
+        )
+    if (
+        verifier_run_id != run_id
+        or verifier_spec_set.identifier != spec_set.identifier
+        or instrument_spec_set_digest(verifier_spec_set) != spec_set_sha256
+        or verifier_execution_policy != execution_policy
+        or verifier_policy.policy_id != risk_policy.policy_id
+        or phase1_risk_policy_digest(verifier_policy) != risk_policy_sha256
+    ):
+        raise ExecutionAuthorityError(
+            OutcomeCode.CONFLICTING_ID,
+            "risk-result verifier construction bindings conflict",
+        )
+    return cast(RiskResultIssuanceVerifier, verifier)
+
+
+def _require_static_policy_proof(
+    *,
+    intent: OrderIntent,
+    decision: RiskDecision,
+    evidence: RiskEvaluationEvidence,
+    approval: ExecutionApproval,
+    risk_policy: Phase1RiskPolicy,
+) -> None:
+    limit = _instrument_limit(risk_policy, intent)
+    if limit is None:
+        raise ExecutionAuthorityError(
+            OutcomeCode.CONFLICTING_ID,
+            "an unconfigured instrument cannot carry an executable risk result",
+        )
+    approved = approval.approved_quantity
+    requested = intent.quantity
+    maximum = limit.maximum_order_quantity
+    if type(approved) is not CanonicalDecimal:
+        raise ExecutionAuthorityError(
+            OutcomeCode.INVALID_TYPE,
+            "approved quantity must have exact canonical runtime type",
+        )
+    if decision.kind is RiskDecisionKind.ALLOW:
+        valid = (
+            evidence.reason_code is RiskReasonCode.WITHIN_LIMITS
+            and approved == requested
+            and requested <= maximum
+        )
+    elif decision.kind is RiskDecisionKind.RESIZE:
+        reduced = CanonicalDecimal("0") < approved < requested
+        if evidence.reason_code is RiskReasonCode.RESIZED_ORDER_LIMIT:
+            valid = reduced and requested > maximum and approved == maximum
+        elif evidence.reason_code is RiskReasonCode.RESIZED_POSITION_LIMIT:
+            valid = reduced and approved < maximum
+        elif evidence.reason_code is RiskReasonCode.RESIZED_ORDER_AND_POSITION_LIMITS:
+            valid = reduced and requested > maximum and approved == maximum
+        else:
+            valid = False
+    else:
+        valid = False
+    if not valid:
+        raise ExecutionAuthorityError(
+            OutcomeCode.CONFLICTING_ID,
+            "executable risk result conflicts with the frozen policy truth table",
+        )
+
+
+def _instrument_limit(
+    risk_policy: Phase1RiskPolicy,
+    intent: OrderIntent,
+) -> InstrumentRiskLimit | None:
+    for limit in risk_policy.instrument_limits:
+        if limit.instrument == intent.instrument:
+            return limit
+    return None
+
+
+def _require_issued_result(
+    verifier: RiskResultIssuanceVerifier,
+    *,
+    submitted: _SubmittedInput,
+) -> None:
+    try:
+        issued = verifier.has_issued_result(
+            intent_id=submitted.intent.intent_id,
+            canonical_intent_bytes=submitted.intent_bytes,
+            canonical_decision_bytes=submitted.decision_bytes,
+            canonical_evidence_bytes=submitted.evidence_bytes,
+        )
+    except Exception as error:
+        raise _IssuanceVerifierFailure(error) from error
+    if type(issued) is not bool:
+        raise ExecutionAuthorityError(
+            OutcomeCode.INVALID_TYPE,
+            "risk-result verifier must return an exact bool",
+        )
+    if not issued:
+        raise ExecutionAuthorityError(
+            OutcomeCode.CONFLICTING_ID,
+            "risk result was not issued by the bound risk authority",
+        )
 
 
 def _materialize_submitted_input(

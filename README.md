@@ -48,10 +48,13 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   allow/resize/reject/evaluation-failed、owner ID、证据摘要和 monotone halt，并保留 v1
   `OrderIntent` 的 exact non-negative dispatch domain。Risk 边界本身不创建 Order、不维护
   shadow ledger，也不替代 execution、runtime gate 或 reconciliation。
-- `ea.execution.authority` 实现 shared OMS 的 Order-creation authority：只接受完整且重新证明的
-  `OrderIntent + RiskEvaluationResult`，以 approval/intent/decision 三组 identity 保证一次性
-  消费、exact replay 与 conflict，确定性分配 `EXECUTION_ORDER`，并在单次 state publication
-  前预检 canonical Order、execution request、digest 与 client submission key。该切片不提交
+- `ea.execution.authority` 已按
+  [Accepted ADR 0013](docs/adr/0013-risk-result-issuance-provenance.md) 实现 shared OMS 的
+  Order-creation authority：只接受完整且重新证明的 `OrderIntent + RiskEvaluationResult`，
+  并要求 exact canonical tuple 已存在于绑定 Risk authority 的非淘汰签发注册表；静态
+  order-limit 真值表只是纵深防御。approval/intent/decision 三组 identity 保证一次性消费、
+  exact replay 与 conflict，`EXECUTION_ORDER` 确定性分配，并在单次 state publication 前
+  预检 canonical Order、execution request、digest 与 client submission key。该切片不提交
   venue、不处理 raw fact/Fill，也不替代紧邻 submission 的 audit/freshness/halt gate。
 - `ea.core.runtime` 与 `ea.runtime` 已按
   [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md) 建立 safety、execution
@@ -92,7 +95,9 @@ src/ea/
 和 reconciliation 契约见
 [Accepted ADR 0008](docs/adr/0008-deterministic-execution-and-reconciliation.md)；root safety
 suffix、sequence authority、factory-only plan 与错误映射的实现澄清见
-[Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md)。
+[Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md)；Risk result 的
+canonical issuance provenance 边界见
+[Accepted ADR 0013](docs/adr/0013-risk-result-issuance-provenance.md)。
 
 订单、数量、费用、现金、持仓、风险限制和账本金额不得使用 `float`。当前 economic value
 边界只接受 canonical decimal text，使用无界整数 coefficient/scale 完成精确乘法，并仅在
