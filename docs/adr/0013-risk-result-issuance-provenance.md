@@ -4,7 +4,7 @@ Date: 2026-07-28
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -235,6 +235,19 @@ Issue #47 must prove:
 - risk-state advancement or halt after issuance does not erase historical membership;
 - import-boundary tests retain the two independent stage-to-core directions; and
 - cross-process Order/request bytes and digests remain unchanged.
+
+## Design-finding traceability
+
+- `ARCH47-REVIEW-001` / `EXEC47-REVIEW-003`: closed by making exact issuance membership in the
+  bound Risk registry mandatory before a new Order allocation; static policy checks alone are
+  explicitly insufficient.
+- `ARCH47-REVIEW-002`: closed by this Accepted ADR's consumer-owned port, registry-ownership,
+  lifecycle, precedence, freshness, and dependency contract.
+- `ARCH47-ADR13-001`: closed by the exact construction-binding error matrix.
+- `ARCH47-ADR13-002` / `EXEC47-ADR13-001`: closed by the literal snapshot-independent
+  allow/resize truth table, failure outcome, precedence, and atomicity.
+- `EXEC47-ADR13-002`: closed by defining provenance as canonical membership in the bound registry,
+  independent of Python object origin.
 
 ## Consequences
 
