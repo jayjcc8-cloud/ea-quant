@@ -207,30 +207,42 @@ commit ambiguity.
 When no candidate, live lease, or acknowledged terminal is present, polling the historical
 producer does exactly:
 
-1. call `source.next_available_at()` once;
-2. if it returns a market timestamp, require exact canonical UTC at or after `clock.now()` and
+1. if a market scheduling promise is already retained and `clock.now()` is earlier, return that
+   exact same timestamp as `lower_bound` without a source call;
+2. if a retained promise is due, require `clock.now()` to equal it and proceed directly to
+   `admit_one`; do not call `next_available_at()` again and do not permit revision;
+3. only when no promise is retained, call `source.next_available_at()` once;
+4. if it returns a market timestamp, require exact canonical UTC at or after `clock.now()` and
    strictly before `replay_window.end_exclusive`;
-3. if that timestamp is later than the current clock, return it unchanged as `lower_bound` without
-   advancing the clock or calling `admit_one`;
-4. only when that timestamp equals the current clock, call
+5. if that timestamp is later than the current clock, retain it as the exact market scheduling
+   promise and return it unchanged as `lower_bound` without advancing the clock or calling
+   `admit_one`;
+6. when a newly returned timestamp equals the current clock, retain it as the promise for this
+   admission attempt;
+7. only when the retained promise equals the current clock, call
    `source.admit_one(clock=read_only_clock)` once;
-5. require one opaque candidate with one exact `MarketDataEnvelope` and exact UTC
+8. require one opaque candidate with one exact `MarketDataEnvelope` and exact UTC
    `scheduled_at`/`cursor_as_of`;
-6. require the invariant
-   `scheduled_timestamp == candidate.scheduled_at == candidate.event.available_at ==
+9. require the invariant
+   `retained_scheduled_timestamp == candidate.scheduled_at == candidate.event.available_at ==
    candidate.cursor_as_of == clock.now()`;
-7. require the event's complete runtime root key to be strictly greater than the last
+10. require the event's complete runtime root key to be strictly greater than the last
    acknowledged market-root key, when one exists;
-8. compute `canonical_market_data_record_bytes(candidate.event)`, require exact equality with
+11. compute `canonical_market_data_record_bytes(candidate.event)`, require exact equality with
    `candidate.canonical_event_bytes`, pass only that event through
    `prepare_bounded_runtime_roots`, and capture those exact bytes in the sealed offer; and
-9. retain the sealed one-root plan and opaque candidate privately without committing source
+12. retain the sealed one-root plan and opaque candidate privately without committing source
    progress or allocating a dispatch sequence.
 
 If `next_available_at()` returns `None`, the historical producer follows the terminal lower-bound
 contract below; it does not advance the clock itself. Thus every clock change is selected by the
 run-wide arbitration state machine, and a producer supplies a root offer only at the root's exact
 availability time.
+
+The retained market scheduling promise is cleared only by successful acknowledgement and commit
+of the exact candidate issued for that timestamp. Admission failure, candidate rejection, stale
+lease, failed acknowledgement, or callback failure retains it unchanged. A retry at the same clock
+calls `admit_one` again against the same promise; it never asks the source for a later timestamp.
 
 The bridge converts ADR 0015's empty or multi-event result, cursor/event mismatch, or cursor cutoff
 mismatch into a port-contract conflict before returning a candidate. Runtime rejects a delayed
@@ -240,7 +252,7 @@ created its opaque uncommitted candidate may retain only that same candidate; it
 commit a later event after runtime rejection.
 
 When the next source event shares the current availability timestamp, it immediately follows
-steps 4–9 and is drained through another one-event transaction. Consequently equal-time events
+steps 3–12 and is drained through another one-event transaction. Consequently equal-time events
 retain the full ADR 0004/0008 order without batching or cursor ambiguity.
 
 The market producer returns only its current root to the run-wide dispatcher. It exposes no public
@@ -279,7 +291,9 @@ machine is:
    response;
 5. repoll or reuse the retained responses from all other producers, but do not select an offer
    until every producer due at the new clock has returned `offer`, a new
-   `lower_bound > clock.now()`, or `exhausted`; and
+   `lower_bound > clock.now()`, or `exhausted` as permitted by that producer's accepted contract;
+   this ADR's historical market producer must instead honor its binding market promise by
+   attempting admission at the due time and cannot return a revised market lower bound; and
 6. repeat steps 2–5.
 
 A lower bound equal to or earlier than the current clock is
@@ -288,6 +302,12 @@ higher-precedence root. This state machine allows a current offer from producer 
 producer B proves its next root is later, while forcing every producer due at the selected time to
 materialize before full-key comparison. The historical producer therefore cannot advance past a
 current safety/fact/timer root or assign the global order itself.
+
+For a generic future producer, `lower_bound` proves only absence before that time and its later
+producer contract must define what happens when the bound becomes due. For this ADR's immutable
+historical source, `next_available_at` identifies the exact next market availability, so its
+market lower bound is a stronger binding promise: once emitted, reaching it must produce the
+admission attempt for that timestamp or fail closed. It cannot be revised to a later lower bound.
 
 Issue #53 implements the dispatcher seam and configures exactly one producer: historical market
 data plus its terminal root. Later lifecycle/fact/reconciliation/timer Issues must register their
@@ -319,7 +339,8 @@ Acknowledging the exact live market lease is one preflighted state transition:
    candidate, with no source mutation;
 5. compute and validate the complete next dispatcher and producer states without mutation;
 6. call `source.commit(prepared)`, whose port contract is atomic and already preflighted;
-7. install the precomputed producer state, clearing its candidate and increasing committed count;
+7. install the precomputed producer state, clearing its candidate and retained market scheduling
+   promise and increasing committed count;
 8. install the precomputed dispatcher state, clearing the live lease while preserving the next
    sequence allocated at `pop`; and
 9. retain the acknowledged root key, offer-captured canonical bytes, and canonical dispatch
@@ -521,15 +542,19 @@ The first matching row in each operation is normative.
 |---|---|---|
 | runtime completed, lease active, or dispatcher/producer state structurally invalid | `RuntimeOrderingError(validation.conflicting_id)` | none |
 | retained candidate exists | return that exact candidate | none |
+| retained market promise is later than clock | return that exact `lower_bound`; no source call | none |
+| clock is later than retained market promise | `RuntimeOrderingError(validation.out_of_range)` | none |
+| retained market promise equals clock | call `admit_one` directly; no `next_available_at` call | promise retained |
 | `next_available_at()` raises declared `HistoricalMarketDataError` or another exception | propagate unchanged | none |
 | returned value is neither `None` nor exact datetime | `RuntimeOrderingError(validation.invalid_type)` | none |
 | returned exact datetime is non-UTC | `RuntimeOrderingError(validation.out_of_range)` | none |
 | returned timestamp is earlier than clock or not before replay end | `RuntimeOrderingError(validation.out_of_range)` | none |
-| valid timestamp later than clock | return `lower_bound`; no admit call | none |
-| valid timestamp equal to clock, then `admit_one(clock=clock)` raises | propagate unchanged | none; clock was already selected by run-wide arbiter |
+| valid timestamp later than clock | retain promise and return `lower_bound`; no admit call | market promise only |
+| valid timestamp equal to clock | retain promise and call `admit_one(clock=clock)` | market promise only |
+| due `admit_one(clock=clock)` raises | propagate unchanged | market promise remains; clock was already selected by run-wide arbiter |
 | candidate carrier/property has wrong exact type or shape | `RuntimeOrderingError(validation.invalid_type)` | bridge may retain only the rejected uncommitted candidate |
 | candidate timestamp property is an exact non-UTC datetime | `RuntimeOrderingError(validation.out_of_range)` | bridge may retain only the rejected uncommitted candidate |
-| candidate/event/schedule/cursor-as-of/clock/canonical-byte equality fails, candidate repeats or does not increase the prior market key, or sealed-plan validation conflicts | `RuntimeOrderingError(validation.conflicting_id)` | bridge may retain only the rejected uncommitted candidate |
+| candidate/event/retained-promise/cursor-as-of/clock/canonical-byte equality fails, candidate repeats or does not increase the prior market key, or sealed-plan validation conflicts | `RuntimeOrderingError(validation.conflicting_id)` | market promise and rejected uncommitted bridge candidate remain |
 | all checks pass | retain exact candidate and sealed root offer | candidate publication |
 
 An exception raised by source/port code is never reclassified by message text. In particular an
@@ -660,6 +685,10 @@ Implementation requires:
   failure atomicity;
 - dispatcher contract tests with multiple fake root producers proving fixed registration,
   current-root minimum selection, next-time minimum selection, and one global sequence;
+- a malicious historical-port test that advertises market time `T`, attempts to revise it to
+  `U > T` after the arbiter reaches `T`, and has another producer offer between `T` and `U`;
+  runtime must call `admit_one` against retained `T` without a second scheduling query and must
+  never dispatch the intervening offer first;
 - sequence tests spanning multiple producers/frontiers, uint64 edge behavior, and proof that
   zero/restart is impossible;
 - exhaustion tests proving one terminal root at exact replay end and no later source call;
