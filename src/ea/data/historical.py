@@ -285,34 +285,49 @@ class Phase1HistoricalMarketDataSource:
             return None
         if type(cursor) is not Phase1HistoricalSourceCursor:
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
+        try:
+            replay_window = cursor._replay_window
+            data_sha256 = cursor._data_sha256
+            record_count = cursor._record_count
+            admission = cursor._admission_cursor
+        except (AttributeError, TypeError):
+            _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
         if (
-            cursor._replay_window != self._replay_window
-            or cursor._data_sha256 != self._fingerprint.sha256
-            or cursor._record_count != self._fingerprint.record_count
-            or type(cursor._admission_cursor) is not AdmissionCursor
+            type(replay_window) is not ReplayWindow
+            or type(data_sha256) is not Sha256Digest
+            or type(record_count) is not int
+            or record_count <= 0
+            or type(admission) is not AdmissionCursor
+            or replay_window != self._replay_window
+            or data_sha256 != self._fingerprint.sha256
+            or record_count != self._fingerprint.record_count
         ):
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
-        admission = cursor._admission_cursor
-        if type(admission.as_of) is not datetime or admission.as_of.tzinfo is not UTC:
+        try:
+            as_of = admission.as_of
+            last_event = admission.last_event
+        except (AttributeError, TypeError):
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
-        if admission.last_event is None:
-            if any(is_visible_as_of(event, admission.as_of) for event in self._events):
+        if type(as_of) is not datetime or as_of.tzinfo is not UTC:
+            _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
+        if last_event is None:
+            if any(is_visible_as_of(event, as_of) for event in self._events):
                 _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
-            return AdmissionCursor(as_of=admission.as_of, last_event=None)
-        if type(admission.last_event) is not MarketDataEnvelope:
+            return AdmissionCursor(as_of=as_of, last_event=None)
+        if type(last_event) is not MarketDataEnvelope:
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
         try:
-            key = admission_order_key(admission.last_event)
+            key = admission_order_key(last_event)
             indexed = self._index_by_key.get(key)
-            encoded = canonical_market_data_record_bytes(admission.last_event)
-        except (MarketDataValidationError, RunContractError):
+            encoded = canonical_market_data_record_bytes(last_event)
+        except Exception:
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
         if indexed is None or encoded != indexed[2]:
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
         source_event = indexed[1]
-        if not is_visible_as_of(source_event, admission.as_of):
+        if not is_visible_as_of(source_event, as_of):
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
-        return AdmissionCursor(as_of=admission.as_of, last_event=source_event)
+        return AdmissionCursor(as_of=as_of, last_event=source_event)
 
     def _issued_cursor(
         self,
@@ -608,6 +623,12 @@ def _preflight_csv(text: str) -> None:
         _raise(
             HistoricalMarketDataFailureCode.MALFORMED_CSV,
             record_number=record_number,
+        )
+    logical_records = record_number - 1 if text.endswith("\n") else record_number
+    if logical_records > PHASE1_OHLCV_MAX_RECORDS:
+        _raise(
+            HistoricalMarketDataFailureCode.INVALID_RECORD_SHAPE,
+            record_number=PHASE1_OHLCV_MAX_RECORDS + 1,
         )
 
 
