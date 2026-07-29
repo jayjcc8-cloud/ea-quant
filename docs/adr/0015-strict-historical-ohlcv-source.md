@@ -284,13 +284,16 @@ read_phase1_ohlcv_csv(
 ```
 
 `path` must be a standard `pathlib.Path` value for the current platform. A string, bytes, or
-arbitrary `PathLike` is invalid. Phase 1 file reading requires POSIX `os.O_NOFOLLOW`; when that
-capability is unavailable the helper fails closed as `source_unreadable`.
+arbitrary `PathLike` is invalid. Phase 1 file reading requires POSIX `os.O_NOFOLLOW` and
+`os.O_NONBLOCK`; when either capability is unavailable the helper fails closed as
+`source_unreadable`.
 
 The helper uses `lstat`, rejects a missing path, directory, symlink, socket, device, FIFO, or other
-non-regular path, then opens with `os.O_RDONLY | os.O_NOFOLLOW`. It verifies the descriptor with
-`fstat`, reads at most 67,108,865 bytes in binary mode, performs a second `fstat` and path `lstat`,
-and rejects the capture if:
+non-regular path, then opens with `os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK`. `O_NONBLOCK`
+prevents a regular-to-FIFO/device replacement between `lstat` and `open` from blocking before
+descriptor validation. The helper immediately verifies the descriptor with `fstat` and rejects a
+non-regular descriptor before any read. It then reads at most 67,108,865 bytes in binary mode,
+performs a second `fstat` and path `lstat`, and rejects the capture if:
 
 - the descriptor or path is no longer the same regular `(device, inode)`;
 - pre-read, post-read, or path size differs from the captured byte count;
@@ -515,16 +518,20 @@ orders admitted output or changes the semantic fingerprint.
 | Condition | Code | Evidence |
 |---|---|---|
 | wrong `path` or replay-window type | `invalid_type` | null/null |
-| `O_NOFOLLOW` unavailable; `lstat`/open/read fails; path missing; symlink; non-regular path or descriptor | `source_unreadable` | null/null |
+| `O_NOFOLLOW` or `O_NONBLOCK` unavailable; initial `lstat` fails; path missing; symlink; initial non-regular path | `source_unreadable` | null/null |
+| after an initial regular `lstat`, no-follow/nonblocking open fails or descriptor `fstat` is non-regular or identity-mismatched | `source_changed_during_read` | null/null |
+| verified regular-descriptor read fails | `source_unreadable` | null/null |
 | pre-read size exceeds the byte bound, or the bounded read obtains a 67,108,865th byte | `source_too_large` | null/null |
 | descriptor/path identity, regular kind, size, byte count, or nanosecond mtime changes across capture | `source_changed_during_read` | null/null |
 | stable capture succeeds | invoke the byte decoder matrix | unchanged |
 
-An `OSError` during pre-open inspection, open, or read is `source_unreadable`. An `OSError` or
-identity mismatch during post-read descriptor/path stability checks is
-`source_changed_during_read`. The helper closes its descriptor in `finally`; a close failure after
-successful capture propagates as an unexpected implementation/platform error rather than changing
-the captured-data classification.
+An `OSError` during initial inspection is `source_unreadable`. Once initial `lstat` has proved a
+regular path, an open failure is classified as `source_changed_during_read` because the path or
+its accessibility changed before descriptor capture. An `OSError` while reading an already
+verified regular descriptor is `source_unreadable`. An `OSError` or identity mismatch during
+post-read descriptor/path stability checks is `source_changed_during_read`. The helper closes its
+descriptor in `finally`; a close failure after successful capture propagates as an unexpected
+implementation/platform error rather than changing the captured-data classification.
 
 #### Dataset and source construction matrix
 
@@ -613,7 +620,8 @@ The implementation must provide:
 - golden tests binding every normative failure-matrix row to exact code/record/field evidence;
 - API tests proving no public future-event/history/path/iterator surface;
 - filesystem symlink, non-regular, oversize, short-read/change-during-read, and read-failure tests
-  on supported platforms;
+  on supported platforms, including regular-to-FIFO and regular-to-device swaps proving the
+  nonblocking descriptor check;
 - cross-process tests varying hash seed, locale, timezone, and environment while producing
   byte-identical canonical evidence; and
 - failure-injection tests proving no partial publication.
@@ -637,6 +645,9 @@ returned HOLD. This revision addresses:
 - `ARCH51-003` / `DATA51-003`: byte decoder, canonical conflict, filesystem, construction,
   scheduling, cursor, clock, limit, evidence, and unexpected-exception behavior are frozen in
   normative matrices.
+- `DATA51-004`: capture requires both `O_NOFOLLOW` and `O_NONBLOCK`; a raced FIFO/device cannot
+  block before `fstat`, and the exact raced non-regular classification and failure-injection
+  evidence are frozen.
 
 Closure requires new exact-SHA Architecture and Data/Backtest verdicts. This section does not
 accept the ADR or authorize implementation.
