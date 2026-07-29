@@ -266,7 +266,7 @@ storage 或 external attestation。
 | Fill / Account / Position | matcher facts -> shared OMS -> shared ledger -> updated immutable snapshot | simulator facts -> shared OMS -> shared ledger -> updated immutable snapshot | broker reports/snapshots -> shared OMS/reconciler -> shared ledger -> updated immutable snapshot |
 | audit / result | mandatory run-scoped audit 和 deterministic result；terminal failure fails run | mandatory durable audit/result；terminal failure fails run | mandatory durable audit/result；terminal failure fails run |
 | optional telemetry | best effort，不影响 decision | best effort，不影响 decision | best effort，不影响 decision |
-| 当前状态 | contract only，Phase 1 待实现 | contract only，Phase 3 待实现 | unavailable；不得由现有 flag 构建 |
+| 当前状态 | bounded historical source 已实现；coordinator/matcher/result 待实现 | contract only，Phase 3 待实现 | unavailable；不得由现有 flag 构建 |
 
 任何 mode 都不能移除 risk/execution/audit gate 或以 mode branch 替换 inner policy。配置值可以不同，inner code 不读取 mode。Historical matcher 和 paper simulator 不得主动访问 feed、market-data store、future iterator 或 clock；Runtime 提供的 as-of context schema 与 ordering 由 #12/#15 决定。
 
@@ -367,8 +367,10 @@ Phase 1 入口门禁的历史状态审查基线为
   Accepted ADR 0013 绑定 Risk-owned canonical issuance verifier，coherent low-level factory
   result 不再等同于 authority issuance。Accepted ADR 0014 的 source-issued fact ingress、
   single-active runtime dispatch、canonical Fill allocation 与 observation-derived Order
-  projection 已实现当前切片；historical runtime coordinator、venue submission、ledger/runtime
-  integration、reconciliation correction、portfolio planning、strategy 和 backtest 仍未实现。
+  projection 已实现当前切片；Accepted ADR 0015 的严格 OHLCV decoder、稳定 local-file
+  capture、semantic fingerprint 与 bounded no-look-ahead historical source 也已实现当前切片。
+  historical runtime coordinator、venue submission、ledger/runtime integration、
+  reconciliation correction、portfolio planning、strategy 和完整 backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -404,7 +406,9 @@ Phase 1 入口门禁的历史状态审查基线为
   coherent observed quantity、bounded immutable Order projection、closed processing outcome 与
   monotone halt（已实现；尚未接入 ledger/runtime coordinator，也不实现 venue adapter、
   reconciliation correction 或 matcher）。
-- 本地 OHLCV 数据导入与质量检查。
+- 严格本地 OHLCV 数据导入、稳定文件捕获、canonical selection/fingerprint、bounded
+  historical admission 与跨进程 golden/property evidence（已实现；runtime coordinator、
+  virtual clock、matcher 与 result adapter 尚未实现）。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。
 - 固定 fixture 的 deterministic golden tests。
@@ -459,3 +463,7 @@ Phase 1 入口门禁的历史状态审查基线为
   [Accepted ADR 0014](adr/0014-trusted-execution-fact-dispatch-and-order-projection.md)：冻结
   trusted fact ingress/dispatch、Order correlation、canonical Fill、projection、venue binding
   与 closed anomaly/action 语义。
+- [Issue #51](https://github.com/jayjcc8-cloud/ea-quant/issues/51) /
+  [Accepted ADR 0015](adr/0015-strict-historical-ohlcv-source.md)：冻结并实现严格本地 OHLCV
+  profile、稳定文件捕获、semantic fingerprint、bounded admission cursor 和未来 payload
+  隔离；runtime coordinator、virtual clock 与 matcher 不在该切片。
