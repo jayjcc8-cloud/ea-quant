@@ -28,8 +28,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   ingress/dispatch、canonical Fill allocation 与 observation-derived Order projection 已实现
   当前切片；Accepted ADR 0015 的严格本地 OHLCV 解码、稳定文件捕获、canonical selection /
   fingerprint 和 bounded no-look-ahead historical source 已实现当前切片。尚未实现 historical
-  runtime coordinator、venue submission、ledger/runtime integration、reconciliation
-  correction、portfolio planning、strategy 或完整 backtest。
+  runtime 的完整 lifecycle/stage coordinator、venue submission、ledger/runtime integration、
+  reconciliation correction、portfolio planning、strategy 或完整 backtest；Accepted ADR 0016
+  的 virtual clock、incremental historical frontier、run-wide arbitration/dispatch sequence、
+  exact acknowledgement/cursor commit 与 deterministic trace 已实现当前切片。
 - Phase 1 实现从 dependency-neutral economic values 开始：`ea.core.economics` 提供严格
   `ea-decimal-v1`、exact grid 与唯一 settlement rounding boundary；`ea.core.execution`
   提供 versioned instrument specification set、canonical bytes/digest 和 identity-bound
@@ -65,8 +67,12 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   fact、market、timer、end-of-run 的全局 root key、完整有界计划验证和不可插入的单消费者顺序
   queue；并按 [Accepted ADR 0014](docs/adr/0014-trusted-execution-fact-dispatch-and-order-projection.md)
   增加 source issuance、单 active fact dispatch lease、non-evicting dispatch history 与 exact
-  acknowledgement。reconciliation rank 仅保留词汇，不存在 opaque placeholder；该切片尚不是
-  lifecycle coordinator，也不包含 audit gate、stage callback、feed 或 matcher。
+  acknowledgement；并按
+  [Accepted ADR 0016](docs/adr/0016-deterministic-historical-runtime-frontier.md) 增加只读 virtual
+  clock、固定 producer set 的 run-wide time arbiter、continuous dispatch sequence、one-event
+  historical frontier、ack 后 source cursor commit，以及 versioned canonical trace/digest。
+  reconciliation rank 仅保留词汇，不存在 opaque placeholder；这些切片尚不是完整 lifecycle
+  coordinator，也不包含 audit gate、stage callback、strategy/portfolio orchestration 或 matcher。
 - `ea.core.execution_state` 与 `ea.execution.fact_authority` 已按 Accepted ADR 0014 实现 exact
   fact replay/conflict、authority-backed Order correlation、staged venue binding、deterministic
   Fill allocation、coherent observed quantity、bounded immutable Order projection、closed
@@ -77,7 +83,8 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   `ea-phase1-ohlcv-csv-v1`：严格 UTF-8/CSV/token/time/identity/revision 验证、稳定 regular-file
   capture、ADR 0004 canonical order、ADR 0006 semantic fingerprint，以及只公开
   `next_available_at` 和 clock-gated `admit` 的 immutable bounded source。它不提供未来 payload
-  iterator，也不推进 clock；runtime coordinator、virtual clock、matcher 与结果报告仍由后续
+  iterator，也不推进 clock；outer `ea.data` bridge 私有持有 concrete cursor，并按 ADR 0016
+  只在 exact runtime acknowledgement 后提交。完整 coordinator、matcher 与结果报告仍由后续
   切片实现。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
@@ -119,7 +126,9 @@ canonical issuance provenance 边界见
 dispatch 与 Order projection authority 见
 [Accepted ADR 0014](docs/adr/0014-trusted-execution-fact-dispatch-and-order-projection.md)。
 严格 historical OHLCV source boundary 见
-[Accepted ADR 0015](docs/adr/0015-strict-historical-ohlcv-source.md)。
+[Accepted ADR 0015](docs/adr/0015-strict-historical-ohlcv-source.md)；deterministic historical
+frontier、virtual clock、run-wide arbitration 与 trace contract 见
+[Accepted ADR 0016](docs/adr/0016-deterministic-historical-runtime-frontier.md)。
 
 订单、数量、费用、现金、持仓、风险限制和账本金额不得使用 `float`。当前 economic value
 边界只接受 canonical decimal text，使用无界整数 coefficient/scale 完成精确乘法，并仅在

@@ -2,58 +2,18 @@
 
 from __future__ import annotations
 
-import json
-import struct
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
 from hashlib import sha256
 
 from ea.core.market_data import MarketDataEnvelope, MarketDataValidationError, order_market_data
+from ea.core.market_data_codec import (
+    canonical_market_data_record_bytes as canonical_market_data_record_bytes,
+)
 from ea.core.run import DataFingerprint, ReplayWindow, RunContractError, Sha256Digest
 
 _DATA_HASH_DOMAIN = b"ea.market-data.v1\0"
 _MAX_UINT64 = (1 << 64) - 1
-
-
-def _utc_text(value: datetime) -> str:
-    # MarketDataEnvelope and ReplayWindow already guarantee exact canonical UTC datetimes.
-    return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
-def _float_bits(value: float) -> str:
-    return struct.pack(">d", value).hex()
-
-
-def canonical_market_data_record_bytes(event: MarketDataEnvelope) -> bytes:
-    """Serialize one ADR 0004 envelope using the closed ADR 0006 record schema."""
-    if type(event) is not MarketDataEnvelope:
-        raise RunContractError("event must be a MarketDataEnvelope")
-    payload = event.payload
-    record = {
-        "adjustment": payload.adjustment.value,
-        "available_at": _utc_text(event.available_at),
-        "close_bits": _float_bits(payload.close),
-        "high_bits": _float_bits(payload.high),
-        "interval_end": _utc_text(payload.interval_end),
-        "interval_start": _utc_text(payload.interval_start),
-        "kind": payload.kind.value,
-        "low_bits": _float_bits(payload.low),
-        "open_bits": _float_bits(payload.open),
-        "revision": event.revision,
-        "source": event.source.code,
-        "source_sequence": event.source_sequence,
-        "symbol": payload.instrument.symbol,
-        "venue": payload.instrument.venue.code,
-        "volume_bits": _float_bits(payload.volume),
-    }
-    return json.dumps(
-        record,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
 
 
 def _fingerprint_selected(events: tuple[MarketDataEnvelope, ...]) -> DataFingerprint:

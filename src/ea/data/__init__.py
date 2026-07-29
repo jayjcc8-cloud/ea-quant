@@ -18,6 +18,10 @@ from ea.data.historical import (
     decode_phase1_ohlcv_csv,
     read_phase1_ohlcv_csv,
 )
+from ea.data.historical_runtime import (
+    Phase1HistoricalMarketSourceBridge,
+    create_phase1_historical_market_source_bridge,
+)
 
 __all__ = [
     "MarketDataSelection",
@@ -29,8 +33,10 @@ __all__ = [
     "HistoricalMarketDataFailureCode",
     "Phase1HistoricalDataset",
     "Phase1HistoricalMarketDataSource",
+    "Phase1HistoricalMarketSourceBridge",
     "Phase1HistoricalSourceCursor",
     "create_phase1_historical_market_data_source",
+    "create_phase1_historical_market_source_bridge",
     "decode_phase1_ohlcv_csv",
     "read_phase1_ohlcv_csv",
     "select_and_fingerprint_market_data",
