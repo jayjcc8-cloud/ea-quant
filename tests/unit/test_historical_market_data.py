@@ -652,7 +652,9 @@ def test_source_rejects_wrong_cursor_type_shape_time_key_and_visibility() -> Non
         assert caught.value.code is HistoricalMarketDataFailureCode.INVALID_CURSOR
 
 
-def test_source_rejects_incomplete_and_non_exact_cursor_bindings_before_clock() -> None:
+def test_source_rejects_incomplete_and_non_exact_cursor_bindings_before_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     dataset = decode_phase1_ohlcv_csv(_content(_row()), replay_window=WINDOW)
     source = create_phase1_historical_market_data_source(dataset)
     early = datetime(2026, 1, 2, 9, 30, tzinfo=UTC)
@@ -664,6 +666,10 @@ def test_source_rejects_incomplete_and_non_exact_cursor_bindings_before_clock() 
     object.__setattr__(boolean_count, "_record_count", True)
     wrong_digest = _forged_cursor(dataset, valid_admission)
     object.__setattr__(wrong_digest, "_data_sha256", dataset.selection.fingerprint.sha256.value)
+    missing_window_slots = _forged_cursor(dataset, valid_admission)
+    object.__setattr__(missing_window_slots, "_replay_window", object.__new__(ReplayWindow))
+    missing_digest_slots = _forged_cursor(dataset, valid_admission)
+    object.__setattr__(missing_digest_slots, "_data_sha256", object.__new__(Sha256Digest))
     damaged_event = object.__new__(MarketDataEnvelope)
     damaged_envelope = _forged_cursor(
         dataset,
@@ -675,6 +681,8 @@ def test_source_rejects_incomplete_and_non_exact_cursor_bindings_before_clock() 
         missing_inner,
         boolean_count,
         wrong_digest,
+        missing_window_slots,
+        missing_digest_slots,
         damaged_envelope,
     )
     for candidate in candidates:
@@ -687,6 +695,22 @@ def test_source_rejects_incomplete_and_non_exact_cursor_bindings_before_clock() 
         source.admit(clock=cast(Any, clock), cursor=missing_outer)
     assert pre_clock.value.code is HistoricalMarketDataFailureCode.INVALID_CURSOR
     assert clock.calls == 0
+
+    valid_cursor, _events = source.admit(
+        clock=cast(Any, _Clock(WINDOW.end_exclusive)),
+        cursor=None,
+    )
+
+    def internal_failure(_event: MarketDataEnvelope) -> bytes:
+        raise RuntimeError("injected serializer defect")
+
+    monkeypatch.setattr(
+        historical_module,
+        "canonical_market_data_record_bytes",
+        internal_failure,
+    )
+    with pytest.raises(RuntimeError, match="injected serializer defect"):
+        source.next_available_at(valid_cursor)
 
 
 def test_source_validates_cursor_and_limit_before_reading_clock() -> None:

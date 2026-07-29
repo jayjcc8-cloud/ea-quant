@@ -14,6 +14,7 @@ from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
 from pathlib import Path
+from struct import error as StructError
 from types import MappingProxyType
 from typing import Any, Literal, NoReturn, cast, final
 
@@ -298,10 +299,17 @@ class Phase1HistoricalMarketDataSource:
             or type(record_count) is not int
             or record_count <= 0
             or type(admission) is not AdmissionCursor
-            or replay_window != self._replay_window
-            or data_sha256 != self._fingerprint.sha256
-            or record_count != self._fingerprint.record_count
         ):
+            _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
+        try:
+            binding_matches = (
+                replay_window == self._replay_window
+                and data_sha256 == self._fingerprint.sha256
+                and record_count == self._fingerprint.record_count
+            )
+        except (AttributeError, TypeError):
+            _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
+        if not binding_matches:
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
         try:
             as_of = admission.as_of
@@ -320,7 +328,15 @@ class Phase1HistoricalMarketDataSource:
             key = admission_order_key(last_event)
             indexed = self._index_by_key.get(key)
             encoded = canonical_market_data_record_bytes(last_event)
-        except Exception:
+        except (
+            AttributeError,
+            MarketDataValidationError,
+            OverflowError,
+            RunContractError,
+            StructError,
+            TypeError,
+            ValueError,
+        ):
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
         if indexed is None or encoded != indexed[2]:
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
