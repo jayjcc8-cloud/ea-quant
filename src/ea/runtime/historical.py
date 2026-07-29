@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
+from types import MappingProxyType
 from typing import Any, Protocol, cast, final
 
 from ea.core.execution import (
@@ -231,6 +232,11 @@ def _exhausted_response() -> _ProducerResponse:
     return _ProducerResponse(_ProducerResponseKind.EXHAUSTED, None, None)
 
 
+class _RuntimePreparedCommit(Protocol):
+    @property
+    def trace_record(self) -> bytes: ...
+
+
 class _RuntimeRootProducer(Protocol):
     @property
     def producer_id(self) -> RuntimeIdentifier: ...
@@ -242,9 +248,9 @@ class _RuntimeRootProducer(Protocol):
         offer: _RuntimeRootOffer,
         *,
         dispatch_sequence: int,
-    ) -> object: ...
+    ) -> _RuntimePreparedCommit: ...
 
-    def commit(self, prepared: object) -> bytes: ...
+    def commit(self, prepared: _RuntimePreparedCommit) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,16 +372,24 @@ def historical_runtime_trace_digest(records: tuple[bytes, ...]) -> Sha256Digest:
     return Sha256Digest(digest.hexdigest())
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoricalProducerState:
+    committed_count: int
+    current_offer: _RuntimeRootOffer | None
+    last_market_key: RuntimeRootOrderKey | None
+    market_promise: datetime | None
+    terminal_acknowledged: bool
+    terminal_promise: bool
+
+
 @final
 @dataclass(frozen=True, slots=True, init=False)
 class _PreparedHistoricalCommit:
     _seal: object
     offer: _RuntimeRootOffer
     source_prepared: HistoricalMarketPreparedCommit | None
-    next_committed_count: int
-    next_last_key: RuntimeRootOrderKey
+    next_state: _HistoricalProducerState
     trace_record: bytes
-    terminal: bool
 
     def __init__(self) -> None:
         raise TypeError("historical producer commits are created only by prepare_commit")
@@ -383,31 +397,14 @@ class _PreparedHistoricalCommit:
 
 @final
 class _HistoricalMarketProducer:
-    __slots__ = (
-        "_binding",
-        "_clock",
-        "_committed_count",
-        "_current_offer",
-        "_last_market_key",
-        "_market_promise",
-        "_producer_id",
-        "_run_id",
-        "_source",
-        "_terminal_acknowledged",
-        "_terminal_promise",
-    )
+    __slots__ = ("_binding", "_clock", "_producer_id", "_run_id", "_source", "_state")
 
     _binding: HistoricalMarketSourceBinding
     _clock: Phase1VirtualClock
-    _committed_count: int
-    _current_offer: _RuntimeRootOffer | None
-    _last_market_key: RuntimeRootOrderKey | None
-    _market_promise: datetime | None
     _producer_id: RuntimeIdentifier
     _run_id: RunId
     _source: HistoricalMarketSourcePort
-    _terminal_acknowledged: bool
-    _terminal_promise: bool
+    _state: _HistoricalProducerState
 
     def __init__(self) -> None:
         raise TypeError("historical producers are created only by the runtime factory")
@@ -418,37 +415,38 @@ class _HistoricalMarketProducer:
 
     @property
     def committed_event_count(self) -> int:
-        return self._committed_count
+        return self._state.committed_count
 
     @property
     def terminal_acknowledged(self) -> bool:
-        return self._terminal_acknowledged
+        return self._state.terminal_acknowledged
 
     def poll(self, *, clock: Clock) -> _ProducerResponse:
         if clock is not self._clock:
             raise _fail(OutcomeCode.CONFLICTING_ID, "historical producer clock binding conflicts")
-        if self._terminal_acknowledged:
+        state = self._state
+        if state.terminal_acknowledged:
             return _exhausted_response()
-        if self._current_offer is not None:
-            return _offer_response(self._current_offer)
+        if state.current_offer is not None:
+            return _offer_response(state.current_offer)
         now = self._clock.now()
-        if self._terminal_promise:
+        if state.terminal_promise:
             if now < self._binding.replay_window.end_exclusive:
                 return _lower_bound_response(self._binding.replay_window.end_exclusive)
             if now > self._binding.replay_window.end_exclusive:
                 raise _fail(OutcomeCode.OUT_OF_RANGE, "clock advanced beyond replay end")
             return _offer_response(self._create_terminal_offer())
 
-        scheduled = self._market_promise
+        scheduled = state.market_promise
         if scheduled is None:
             scheduled_value = self._source.next_available_at()
             if scheduled_value is None:
-                if self._committed_count == 0:
+                if state.committed_count == 0:
                     raise _fail(
                         OutcomeCode.CONFLICTING_ID,
                         "historical source exhausted before any committed event",
                     )
-                self._terminal_promise = True
+                self._state = replace(state, terminal_promise=True)
                 if now < self._binding.replay_window.end_exclusive:
                     return _lower_bound_response(self._binding.replay_window.end_exclusive)
                 if now > self._binding.replay_window.end_exclusive:
@@ -460,7 +458,8 @@ class _HistoricalMarketProducer:
                     OutcomeCode.OUT_OF_RANGE,
                     "historical source schedule is outside the active clock/window frontier",
                 )
-            self._market_promise = scheduled
+            self._state = replace(state, market_promise=scheduled)
+            state = self._state
 
         if now < scheduled:
             return _lower_bound_response(scheduled)
@@ -486,7 +485,7 @@ class _HistoricalMarketProducer:
             )
         plan = prepare_bounded_runtime_roots((view.event,))
         key = runtime_root_order_key(view.event)
-        if self._last_market_key is not None and key <= self._last_market_key:
+        if state.last_market_key is not None and key <= state.last_market_key:
             raise _fail(
                 OutcomeCode.CONFLICTING_ID,
                 "historical market root did not advance the canonical key",
@@ -499,10 +498,11 @@ class _HistoricalMarketProducer:
             candidate=view.candidate,
             terminal=False,
         )
-        self._current_offer = offer
+        self._state = replace(state, current_offer=offer)
         return _offer_response(offer)
 
     def _create_terminal_offer(self) -> _RuntimeRootOffer:
+        state = self._state
         end = self._binding.replay_window.end_exclusive
         root = EndOfRunRoot(
             available_at=end,
@@ -520,12 +520,12 @@ class _HistoricalMarketProducer:
             candidate=None,
             terminal=True,
         )
-        if self._last_market_key is None or offer.order_key <= self._last_market_key:
+        if state.last_market_key is None or offer.order_key <= state.last_market_key:
             raise _fail(
                 OutcomeCode.CONFLICTING_ID,
                 "terminal root does not follow the final market root",
             )
-        self._current_offer = offer
+        self._state = replace(state, current_offer=offer)
         return offer
 
     def prepare_commit(
@@ -533,32 +533,54 @@ class _HistoricalMarketProducer:
         offer: _RuntimeRootOffer,
         *,
         dispatch_sequence: int,
-    ) -> object:
+    ) -> _PreparedHistoricalCommit:
+        state = self._state
         if type(offer) is not _RuntimeRootOffer or offer._seal is not _OFFER_SEAL:
             raise _fail(OutcomeCode.INVALID_TYPE, "commit requires a factory-issued offer")
-        if offer is not self._current_offer:
+        if offer is not state.current_offer:
             raise _fail(OutcomeCode.CONFLICTING_ID, "commit offer is stale or foreign")
         if type(dispatch_sequence) is not int or not 1 <= dispatch_sequence <= _MAX_UINT64:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch sequence is outside uint64")
 
+        now = self._clock.now()
         source_prepared: HistoricalMarketPreparedCommit | None = None
-        next_count = self._committed_count
         cursor_as_of: datetime | None = None
         if offer.terminal:
             if (
-                type(offer.root) is not EndOfRunRoot
+                not state.terminal_promise
+                or now != self._binding.replay_window.end_exclusive
+                or type(offer.root) is not EndOfRunRoot
                 or _terminal_root_bytes(offer.root) != offer.canonical_root_bytes
             ):
-                raise _fail(OutcomeCode.CONFLICTING_ID, "terminal offer bytes conflict")
+                raise _fail(OutcomeCode.CONFLICTING_ID, "terminal offer evidence conflicts")
+            next_state = replace(
+                state,
+                current_offer=None,
+                terminal_acknowledged=True,
+            )
         else:
             if type(offer.root) is not MarketDataEnvelope or offer.candidate is None:
                 raise _fail(OutcomeCode.INVALID_TYPE, "market offer carriers are invalid")
             view = _candidate_view(offer.candidate)
+            promise = state.market_promise
+            if not (
+                promise is not None
+                and offer.root is view.event
+                and view.scheduled_at
+                == view.event.available_at
+                == view.cursor_as_of
+                == promise
+                == now
+                and offer.order_key.available_at == now
+            ):
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "live market time/identity evidence conflicts",
+                )
             live_bytes = canonical_market_data_record_bytes(offer.root)
             candidate_bytes = canonical_market_data_record_bytes(view.event)
             if not (
-                offer.root is view.event
-                and live_bytes
+                live_bytes
                 == candidate_bytes
                 == view.canonical_event_bytes
                 == offer.canonical_root_bytes
@@ -568,16 +590,22 @@ class _HistoricalMarketProducer:
                     "live market/candidate/offer canonical bytes conflict",
                 )
             source_prepared = self._source.prepare_commit(view.candidate)
-            next_count += 1
             cursor_as_of = view.cursor_as_of
+            next_state = replace(
+                state,
+                committed_count=state.committed_count + 1,
+                current_offer=None,
+                last_market_key=offer.order_key,
+                market_promise=None,
+            )
 
         trace = _trace_record_bytes(
             run_id=self._run_id,
             fingerprint=self._binding.data_fingerprint,
-            clock_now=self._clock.now(),
+            clock_now=now,
             dispatch_sequence=dispatch_sequence,
             offer=offer,
-            committed_event_count=next_count,
+            committed_event_count=next_state.committed_count,
             committed_cursor_as_of=cursor_as_of,
             terminal_acknowledged=offer.terminal,
         )
@@ -585,34 +613,24 @@ class _HistoricalMarketProducer:
         object.__setattr__(prepared, "_seal", _PREPARED_SEAL)
         object.__setattr__(prepared, "offer", offer)
         object.__setattr__(prepared, "source_prepared", source_prepared)
-        object.__setattr__(prepared, "next_committed_count", next_count)
-        object.__setattr__(prepared, "next_last_key", offer.order_key)
+        object.__setattr__(prepared, "next_state", next_state)
         object.__setattr__(prepared, "trace_record", trace)
-        object.__setattr__(prepared, "terminal", offer.terminal)
         return prepared
 
-    def commit(self, prepared_object: object) -> bytes:
+    def commit(self, prepared_object: _RuntimePreparedCommit) -> None:
         if (
             type(prepared_object) is not _PreparedHistoricalCommit
             or prepared_object._seal is not _PREPARED_SEAL
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "producer commit is not factory-prepared")
         prepared = prepared_object
-        if prepared.offer is not self._current_offer:
+        if prepared.offer is not self._state.current_offer:
             raise _fail(OutcomeCode.CONFLICTING_ID, "producer commit is stale or foreign")
-        if prepared.terminal:
-            if prepared.source_prepared is not None:
-                raise AssertionError("terminal commit unexpectedly contains source progress")
-            self._terminal_acknowledged = True
-        else:
-            if prepared.source_prepared is None:
-                raise AssertionError("market commit lost source prepared state")
+        if prepared.source_prepared is not None:
             self._source.commit(prepared.source_prepared)
-            self._market_promise = None
-            self._committed_count = prepared.next_committed_count
-            self._last_market_key = prepared.next_last_key
-        self._current_offer = None
-        return prepared.trace_record
+        elif not prepared.next_state.terminal_acknowledged:
+            raise AssertionError("market commit lost source prepared state")
+        self._state = prepared.next_state
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,59 +641,75 @@ class _ActiveDispatch:
     dispatch_sequence: int
 
 
+@dataclass(frozen=True, slots=True)
+class _DispatcherState:
+    active: _ActiveDispatch | None
+    exhausted: bool
+    next_sequence: int | None
+    responses: MappingProxyType[RuntimeIdentifier, _ProducerResponse]
+    trace_records: tuple[bytes, ...]
+
+
+def _frozen_responses(
+    responses: dict[RuntimeIdentifier, _ProducerResponse],
+) -> MappingProxyType[RuntimeIdentifier, _ProducerResponse]:
+    return MappingProxyType(responses)
+
+
 @final
 class _RunWideDispatcher:
     __slots__ = (
-        "_active",
         "_clock",
-        "_exhausted",
-        "_next_sequence",
         "_producers",
-        "_responses",
-        "_trace_records",
+        "_replay_end",
+        "_state",
+        "_terminal_producer_id",
     )
 
-    _active: _ActiveDispatch | None
     _clock: Phase1VirtualClock
-    _exhausted: bool
-    _next_sequence: int | None
     _producers: tuple[_RuntimeRootProducer, ...]
-    _responses: dict[RuntimeIdentifier, _ProducerResponse]
-    _trace_records: tuple[bytes, ...]
+    _replay_end: datetime
+    _state: _DispatcherState
+    _terminal_producer_id: RuntimeIdentifier
 
     def __init__(self) -> None:
         raise TypeError("run-wide dispatchers are created only by their factory")
 
     @property
     def next_dispatch_sequence(self) -> int | None:
-        return self._next_sequence
+        return self._state.next_sequence
 
     @property
     def active_lease(self) -> RuntimeDispatchLease | None:
-        return None if self._active is None else self._active.lease
+        active = self._state.active
+        return None if active is None else active.lease
 
     @property
     def trace_records(self) -> tuple[bytes, ...]:
-        return self._trace_records
+        return self._state.trace_records
 
     def peek(self) -> RuntimeRoot:
-        if self._active is not None:
+        if self._state.active is not None:
             raise _fail(OutcomeCode.CONFLICTING_ID, "one runtime dispatch remains active")
         return self._select_offer().root
 
     def pop(self) -> RuntimeDispatchLease:
-        if self._active is not None:
+        if self._state.active is not None:
             raise _fail(OutcomeCode.CONFLICTING_ID, "one runtime dispatch remains active")
-        sequence = self._next_sequence
+        offer = self._select_offer()
+        state = self._state
+        sequence = state.next_sequence
         if sequence is None:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "runtime dispatch sequence is exhausted")
-        offer = self._select_offer()
         producer = self._producer_for(offer.producer_id)
         lease = object.__new__(RuntimeDispatchLease)
         object.__setattr__(lease, "_root", offer.root)
         object.__setattr__(lease, "_dispatch_sequence", sequence)
-        self._next_sequence = None if sequence == _MAX_UINT64 else sequence + 1
-        self._active = _ActiveDispatch(producer, offer, lease, sequence)
+        self._state = replace(
+            state,
+            active=_ActiveDispatch(producer, offer, lease, sequence),
+            next_sequence=None if sequence == _MAX_UINT64 else sequence + 1,
+        )
         return lease
 
     def acknowledge(self, lease: RuntimeDispatchLease) -> None:
@@ -684,7 +718,8 @@ class _RunWideDispatcher:
                 OutcomeCode.INVALID_TYPE,
                 "acknowledgement requires an exact RuntimeDispatchLease",
             )
-        active = self._active
+        state = self._state
+        active = state.active
         if active is None or active.lease is not lease:
             raise _fail(
                 OutcomeCode.CONFLICTING_ID,
@@ -700,12 +735,19 @@ class _RunWideDispatcher:
             active.offer,
             dispatch_sequence=active.dispatch_sequence,
         )
-        trace = active.producer.commit(prepared)
+        trace = prepared.trace_record
         if type(trace) is not bytes:
-            raise AssertionError("producer commit must return exact canonical trace bytes")
-        self._responses.pop(active.offer.producer_id)
-        self._trace_records = (*self._trace_records, trace)
-        self._active = None
+            raise AssertionError("producer preparation must contain exact trace bytes")
+        responses = dict(state.responses)
+        responses.pop(active.offer.producer_id)
+        next_state = replace(
+            state,
+            active=None,
+            responses=_frozen_responses(responses),
+            trace_records=(*state.trace_records, trace),
+        )
+        active.producer.commit(prepared)
+        self._state = next_state
 
     def _producer_for(self, producer_id: RuntimeIdentifier) -> _RuntimeRootProducer:
         for producer in self._producers:
@@ -714,11 +756,12 @@ class _RunWideDispatcher:
         raise AssertionError("selected runtime producer is not registered")
 
     def _select_offer(self) -> _RuntimeRootOffer:
-        if self._exhausted:
+        if self._state.exhausted:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "run-wide dispatcher is exhausted")
         while True:
             self._poll_missing()
-            responses = tuple(self._responses[producer.producer_id] for producer in self._producers)
+            state = self._state
+            responses = tuple(state.responses[producer.producer_id] for producer in self._producers)
             offers = tuple(
                 response.offer
                 for response in responses
@@ -727,7 +770,7 @@ class _RunWideDispatcher:
             if offers:
                 return min(offers, key=lambda offer: offer.order_key)
             if all(response.kind is _ProducerResponseKind.EXHAUSTED for response in responses):
-                self._exhausted = True
+                self._state = replace(state, exhausted=True)
                 raise _fail(OutcomeCode.OUT_OF_RANGE, "run-wide dispatcher is exhausted")
             bounds = tuple(
                 response.lower_bound
@@ -739,28 +782,49 @@ class _RunWideDispatcher:
                 raise AssertionError("producer response set has no offer, bound, or exhaustion")
             selected = min(bounds)
             _advance_virtual_clock(self._clock, selected)
+            retained = dict(state.responses)
             due = tuple(
                 producer.producer_id
                 for producer in self._producers
                 if (
-                    self._responses[producer.producer_id].kind is _ProducerResponseKind.LOWER_BOUND
-                    and self._responses[producer.producer_id].lower_bound == selected
+                    state.responses[producer.producer_id].kind is _ProducerResponseKind.LOWER_BOUND
+                    and state.responses[producer.producer_id].lower_bound == selected
                 )
             )
             for producer_id in due:
-                self._responses.pop(producer_id)
+                retained.pop(producer_id)
+            self._state = replace(state, responses=_frozen_responses(retained))
 
     def _poll_missing(self) -> None:
+        state = self._state
         now = self._clock.now()
+        responses = dict(state.responses)
         for producer in self._producers:
-            if producer.producer_id in self._responses:
+            if producer.producer_id in responses:
                 continue
-            response = producer.poll(clock=self._clock)
-            self._responses[producer.producer_id] = _validate_response(
-                response,
+            response = _validate_response(
+                producer.poll(clock=self._clock),
                 producer_id=producer.producer_id,
                 clock_now=now,
             )
+            scheduled = (
+                response.offer.order_key.available_at
+                if response.offer is not None
+                else response.lower_bound
+            )
+            if scheduled is not None and (
+                scheduled > self._replay_end
+                or (
+                    scheduled == self._replay_end
+                    and producer.producer_id != self._terminal_producer_id
+                )
+            ):
+                raise _fail(
+                    OutcomeCode.OUT_OF_RANGE,
+                    "producer response exceeds the replay frontier or terminal authority",
+                )
+            responses[producer.producer_id] = response
+        self._state = replace(state, responses=_frozen_responses(responses))
 
 
 def _validate_response(
@@ -804,9 +868,14 @@ def _create_run_wide_dispatcher(
     *,
     clock: Phase1VirtualClock,
     producers: tuple[_RuntimeRootProducer, ...],
+    replay_end: datetime,
+    terminal_producer_id: RuntimeIdentifier,
 ) -> _RunWideDispatcher:
     if type(clock) is not Phase1VirtualClock or clock._seal is not _CLOCK_SEAL:
         raise _fail(OutcomeCode.INVALID_TYPE, "dispatcher clock is not factory-issued")
+    end = _utc(replay_end, field="replay_end")
+    if end <= clock.now():
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatcher replay end must follow its initial clock")
     if type(producers) is not tuple or not producers:
         raise _fail(OutcomeCode.INVALID_TYPE, "dispatcher producers must be a non-empty tuple")
     identifiers: list[RuntimeIdentifier] = []
@@ -835,14 +904,22 @@ def _create_run_wide_dispatcher(
             OutcomeCode.CONFLICTING_ID,
             "runtime producers must have unique canonical-order identifiers",
         )
+    if type(terminal_producer_id) is not RuntimeIdentifier:
+        raise _fail(OutcomeCode.INVALID_TYPE, "terminal producer ID must be exact")
+    if terminal_producer_id not in identifiers:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "terminal producer is not registered")
     dispatcher = object.__new__(_RunWideDispatcher)
-    dispatcher._active = None
     dispatcher._clock = clock
-    dispatcher._exhausted = False
-    dispatcher._next_sequence = 1
     dispatcher._producers = producers
-    dispatcher._responses = {}
-    dispatcher._trace_records = ()
+    dispatcher._replay_end = end
+    dispatcher._state = _DispatcherState(
+        active=None,
+        exhausted=False,
+        next_sequence=1,
+        responses=_frozen_responses({}),
+        trace_records=(),
+    )
+    dispatcher._terminal_producer_id = terminal_producer_id
     return dispatcher
 
 
@@ -932,6 +1009,30 @@ def _require_source_port(
     return cast(HistoricalMarketSourcePort, source), binding
 
 
+def _create_historical_market_producer(
+    *,
+    run_id: RunId,
+    source: HistoricalMarketSourcePort,
+    binding: HistoricalMarketSourceBinding,
+    clock: Phase1VirtualClock,
+) -> _HistoricalMarketProducer:
+    producer = object.__new__(_HistoricalMarketProducer)
+    producer._binding = binding
+    producer._clock = clock
+    producer._producer_id = RuntimeIdentifier(HISTORICAL_RUNTIME_PRODUCER_NAMESPACE)
+    producer._run_id = run_id
+    producer._source = source
+    producer._state = _HistoricalProducerState(
+        committed_count=0,
+        current_offer=None,
+        last_market_key=None,
+        market_promise=None,
+        terminal_acknowledged=False,
+        terminal_promise=False,
+    )
+    return producer
+
+
 def create_phase1_historical_market_runtime(
     *,
     run_id: RunId,
@@ -954,19 +1055,18 @@ def create_phase1_historical_market_runtime(
         )
     instrument_spec_set_digest(spec_set)
     clock = _create_virtual_clock(binding.replay_window.start_inclusive)
-    producer = object.__new__(_HistoricalMarketProducer)
-    producer._binding = binding
-    producer._clock = clock
-    producer._committed_count = 0
-    producer._current_offer = None
-    producer._last_market_key = None
-    producer._market_promise = None
-    producer._producer_id = RuntimeIdentifier(HISTORICAL_RUNTIME_PRODUCER_NAMESPACE)
-    producer._run_id = run_id
-    producer._source = port
-    producer._terminal_acknowledged = False
-    producer._terminal_promise = False
-    dispatcher = _create_run_wide_dispatcher(clock=clock, producers=(producer,))
+    producer = _create_historical_market_producer(
+        run_id=run_id,
+        source=port,
+        binding=binding,
+        clock=clock,
+    )
+    dispatcher = _create_run_wide_dispatcher(
+        clock=clock,
+        producers=(producer,),
+        replay_end=binding.replay_window.end_exclusive,
+        terminal_producer_id=producer.producer_id,
+    )
     runtime = object.__new__(Phase1HistoricalMarketRuntime)
     runtime._clock = clock
     runtime._dispatcher = dispatcher

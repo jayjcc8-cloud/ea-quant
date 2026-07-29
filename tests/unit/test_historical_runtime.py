@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -9,6 +9,7 @@ import pytest
 
 import ea.runtime.historical as historical_runtime
 from ea.core import (
+    AdmissionCursor,
     CanonicalDecimal,
     Clock,
     EndOfRunKind,
@@ -32,6 +33,7 @@ from ea.core import (
     TimerRoot,
     VenueId,
     build_instrument_spec_set,
+    canonical_market_data_record_bytes,
     prepare_bounded_runtime_roots,
 )
 from ea.data import (
@@ -39,12 +41,16 @@ from ea.data import (
     HistoricalMarketDataFailureCode,
     Phase1HistoricalMarketDataSource,
     Phase1HistoricalMarketSourceBridge,
+    Phase1HistoricalSourceCursor,
     create_phase1_historical_market_data_source,
     create_phase1_historical_market_source_bridge,
     decode_phase1_ohlcv_csv,
 )
 from ea.runtime import (
     HISTORICAL_RUNTIME_TRACE_SCHEMA,
+    HistoricalMarketCandidate,
+    HistoricalMarketPreparedCommit,
+    HistoricalMarketSourceBinding,
     Phase1HistoricalMarketRuntime,
     Phase1VirtualClock,
     RuntimeDispatchLease,
@@ -102,6 +108,28 @@ def _row(
             str(sequence),
             "0",
             available,
+        )
+    )
+
+
+def _revision_row(*, revision: int, sequence: int) -> str:
+    return ",".join(
+        (
+            "1",
+            "XNAS",
+            "AAPL",
+            "2026-01-02T09:30:00.000000Z",
+            "2026-01-02T09:31:00.000000Z",
+            "raw",
+            "100.0",
+            "101.0",
+            "99.0",
+            "100.5",
+            "10.0",
+            "fixture.revision",
+            str(sequence),
+            str(revision),
+            "2026-01-02T09:31:00.000000Z",
         )
     )
 
@@ -279,6 +307,19 @@ def test_direct_construction_and_wrong_bridge_source_fail_closed() -> None:
     assert caught.value.code is HistoricalMarketDataFailureCode.INVALID_TYPE
 
 
+@pytest.mark.parametrize("field", ("_replay_window", "_fingerprint"))
+def test_bridge_maps_malformed_exact_source_binding_to_invalid_dataset(
+    field: str,
+) -> None:
+    source = _source(_two_rows()[0])
+    object.__setattr__(source, field, object())
+
+    with pytest.raises(HistoricalMarketDataError) as caught:
+        create_phase1_historical_market_source_bridge(source)
+
+    assert caught.value.code is HistoricalMarketDataFailureCode.INVALID_DATASET
+
+
 def test_virtual_clock_is_publicly_read_only() -> None:
     runtime, _bridge = _runtime(_two_rows()[0])
 
@@ -407,6 +448,101 @@ def test_bridge_rejects_foreign_stale_and_repeated_commit_capabilities() -> None
     assert stale_candidate.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_bridge_prepare_commit_is_read_only_and_each_capability_is_single_use() -> None:
+    scheduled = datetime(2026, 1, 2, 9, 31, tzinfo=UTC)
+    bridge = create_phase1_historical_market_source_bridge(_source(_two_rows()[0]))
+    candidate = bridge.admit_one(clock=_ExactClock(scheduled))
+
+    first = bridge.prepare_commit(candidate)
+    second = bridge.prepare_commit(candidate)
+
+    assert first is not second
+    assert bridge.next_available_at() == scheduled
+    bridge.commit(first)
+    with pytest.raises(RuntimeOrderingError) as repeated:
+        bridge.commit(second)
+    assert repeated.value.code is OutcomeCode.CONFLICTING_ID
+
+
+class _BrokenAdmissionSource:
+    def __init__(
+        self,
+        source: Phase1HistoricalMarketDataSource,
+        mode: str,
+    ) -> None:
+        self.source = source
+        self.mode = mode
+
+    def next_available_at(
+        self,
+        cursor: Phase1HistoricalSourceCursor | None,
+    ) -> datetime | None:
+        return self.source.next_available_at(cursor)
+
+    def admit(
+        self,
+        *,
+        clock: Clock,
+        cursor: Phase1HistoricalSourceCursor | None,
+        limit: int | None = None,
+    ) -> tuple[Phase1HistoricalSourceCursor, tuple[MarketDataEnvelope, ...]]:
+        requested = 2 if self.mode == "cursor_mismatch" else limit
+        candidate, events = self.source.admit(
+            clock=clock,
+            cursor=cursor,
+            limit=requested,
+        )
+        if self.mode == "empty":
+            return candidate, ()
+        if self.mode == "multiple":
+            return candidate, (events[0], events[0])
+        if self.mode == "cursor_mismatch":
+            return candidate, (events[0],)
+        if self.mode == "cutoff_mismatch":
+            object.__setattr__(
+                candidate,
+                "_admission_cursor",
+                AdmissionCursor(
+                    as_of=candidate.as_of + timedelta(minutes=1),
+                    last_event=events[0],
+                ),
+            )
+            return candidate, events
+        raise AssertionError("unknown broken admission mode")
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("empty", "multiple", "cursor_mismatch", "cutoff_mismatch"),
+)
+def test_bridge_rejects_broken_concrete_admission_without_retaining_candidate(
+    mode: str,
+) -> None:
+    rows = (
+        _row(
+            start="2026-01-02T09:30:00.000000Z",
+            end="2026-01-02T09:31:00.000000Z",
+            available="2026-01-02T09:32:00.000000Z",
+            sequence=0,
+        ),
+        _row(
+            start="2026-01-02T09:31:00.000000Z",
+            end="2026-01-02T09:32:00.000000Z",
+            available="2026-01-02T09:32:00.000000Z",
+            sequence=1,
+        ),
+    )
+    bridge = create_phase1_historical_market_source_bridge(_source(*rows))
+    broken = _BrokenAdmissionSource(bridge._source, mode)
+    bridge._source = cast(Phase1HistoricalMarketDataSource, broken)
+
+    with pytest.raises(RuntimeOrderingError) as caught:
+        bridge.admit_one(clock=_ExactClock(datetime(2026, 1, 2, 9, 32, tzinfo=UTC)))
+
+    assert caught.value.code is OutcomeCode.CONFLICTING_ID
+    assert bridge._state.candidate is None
+
+
 def test_equal_availability_market_events_drain_in_complete_key_order() -> None:
     rows = (
         _row(
@@ -435,6 +571,256 @@ def test_equal_availability_market_events_drain_in_complete_key_order() -> None:
     assert first_event.event_time < second_event.event_time
     assert first.dispatch_sequence == 1
     assert second.dispatch_sequence == 2
+
+
+def test_equal_knowledge_time_revisions_drain_in_revision_order() -> None:
+    runtime, _bridge = _runtime(
+        _revision_row(revision=1, sequence=1),
+        _revision_row(revision=0, sequence=0),
+    )
+
+    leases = (runtime.pop(),)
+    runtime.acknowledge(leases[0])
+    second = runtime.pop()
+
+    assert [cast(MarketDataEnvelope, lease.root).revision for lease in (*leases, second)] == [0, 1]
+
+
+@dataclass(slots=True)
+class _PortCandidate:
+    event: MarketDataEnvelope
+    scheduled_at: datetime
+    cursor_as_of: datetime
+    canonical_event_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _PortPrepared:
+    candidate: _PortCandidate
+
+    def _historical_market_prepared_commit_marker(self) -> None:
+        return None
+
+
+class _ScriptedPort:
+    def __init__(
+        self,
+        *,
+        binding: HistoricalMarketSourceBinding,
+        candidates: tuple[_PortCandidate, ...],
+        prepare_failures: int = 0,
+        commit_failures: int = 0,
+        advertised_at: datetime | None = None,
+    ) -> None:
+        self._binding = binding
+        self.candidates = candidates
+        self.index = 0
+        self.next_calls = 0
+        self.prepare_calls = 0
+        self.commit_calls = 0
+        self.prepare_failures = prepare_failures
+        self.commit_failures = commit_failures
+        self.advertised_at = advertised_at
+
+    @property
+    def binding(self) -> HistoricalMarketSourceBinding:
+        return self._binding
+
+    def next_available_at(self) -> datetime | None:
+        self.next_calls += 1
+        if self.index == len(self.candidates):
+            return None
+        return self.advertised_at or self.candidates[self.index].scheduled_at
+
+    def admit_one(self, *, clock: Clock) -> HistoricalMarketCandidate:
+        return self.candidates[self.index]
+
+    def prepare_commit(
+        self,
+        candidate: HistoricalMarketCandidate,
+    ) -> HistoricalMarketPreparedCommit:
+        self.prepare_calls += 1
+        if self.prepare_failures:
+            self.prepare_failures -= 1
+            raise LookupError("scripted prepare failure")
+        current = self.candidates[self.index]
+        assert candidate is current
+        return _PortPrepared(current)
+
+    def commit(self, prepared: HistoricalMarketPreparedCommit) -> None:
+        self.commit_calls += 1
+        if self.commit_failures:
+            self.commit_failures -= 1
+            raise LookupError("scripted commit failure")
+        assert type(prepared) is _PortPrepared
+        assert prepared.candidate is self.candidates[self.index]
+        self.index += 1
+
+
+def _scripted_port(
+    events: tuple[MarketDataEnvelope, ...],
+    *,
+    prepare_failures: int = 0,
+    commit_failures: int = 0,
+) -> _ScriptedPort:
+    source = _source(*_two_rows())
+    binding = create_phase1_historical_market_source_bridge(source).binding
+    return _ScriptedPort(
+        binding=binding,
+        candidates=tuple(
+            _PortCandidate(
+                event=event,
+                scheduled_at=event.available_at,
+                cursor_as_of=event.available_at,
+                canonical_event_bytes=canonical_market_data_record_bytes(event),
+            )
+            for event in events
+        ),
+        prepare_failures=prepare_failures,
+        commit_failures=commit_failures,
+    )
+
+
+def _runtime_for_port(port: _ScriptedPort) -> Phase1HistoricalMarketRuntime:
+    return create_phase1_historical_market_runtime(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        source=port,
+    )
+
+
+@pytest.mark.parametrize("mutation", ("scheduled", "cursor", "both"))
+def test_acknowledgement_revalidates_mutable_candidate_time_evidence(
+    mutation: str,
+) -> None:
+    event = decode_phase1_ohlcv_csv(
+        ("\n".join((HEADER, _two_rows()[0])) + "\n").encode(),
+        replay_window=WINDOW,
+    ).selection.events[0]
+    port = _scripted_port((event,))
+    runtime = _runtime_for_port(port)
+    lease = runtime.pop()
+    candidate = port.candidates[0]
+    if mutation in {"scheduled", "both"}:
+        candidate.scheduled_at += timedelta(minutes=1)
+    if mutation in {"cursor", "both"}:
+        candidate.cursor_as_of += timedelta(minutes=1)
+
+    with pytest.raises(RuntimeOrderingError) as caught:
+        runtime.acknowledge(lease)
+
+    assert caught.value.code is OutcomeCode.CONFLICTING_ID
+    assert runtime.active_lease is lease
+    assert runtime.committed_event_count == 0
+    assert runtime.trace_records == ()
+    assert port.prepare_calls == 0
+    assert port.index == 0
+
+
+def test_runtime_rejects_future_candidate_at_binding_wake_time() -> None:
+    events = decode_phase1_ohlcv_csv(
+        ("\n".join((HEADER, *_two_rows())) + "\n").encode(),
+        replay_window=WINDOW,
+    ).selection.events
+    port = _scripted_port((events[1],))
+    port.candidates[0].scheduled_at = events[0].available_at
+    runtime = _runtime_for_port(port)
+
+    with pytest.raises(RuntimeOrderingError) as caught:
+        runtime.pop()
+
+    assert caught.value.code is OutcomeCode.CONFLICTING_ID
+    assert runtime.clock.now() == events[0].available_at
+    assert port.index == 0
+
+
+def test_runtime_rejects_candidate_delayed_beyond_binding_wake_time() -> None:
+    event = decode_phase1_ohlcv_csv(
+        ("\n".join((HEADER, _two_rows()[1])) + "\n").encode(),
+        replay_window=WINDOW,
+    ).selection.events[0]
+    port = _scripted_port((event,))
+    port.advertised_at = datetime(2026, 1, 2, 9, 31, tzinfo=UTC)
+    runtime = _runtime_for_port(port)
+
+    with pytest.raises(RuntimeOrderingError) as caught:
+        runtime.pop()
+
+    assert caught.value.code is OutcomeCode.CONFLICTING_ID
+    assert runtime.clock.now() == port.advertised_at
+    assert port.index == 0
+
+
+def test_runtime_rejects_non_monotone_root_from_malicious_port() -> None:
+    rows = (
+        _row(
+            start="2026-01-02T09:30:00.000000Z",
+            end="2026-01-02T09:31:00.000000Z",
+            available="2026-01-02T09:32:00.000000Z",
+            sequence=0,
+        ),
+        _row(
+            start="2026-01-02T09:31:00.000000Z",
+            end="2026-01-02T09:32:00.000000Z",
+            available="2026-01-02T09:32:00.000000Z",
+            sequence=1,
+        ),
+    )
+    events = decode_phase1_ohlcv_csv(
+        ("\n".join((HEADER, *rows)) + "\n").encode(),
+        replay_window=WINDOW,
+    ).selection.events
+    port = _scripted_port(tuple(reversed(events)))
+    runtime = _runtime_for_port(port)
+    first = runtime.pop()
+    runtime.acknowledge(first)
+
+    with pytest.raises(RuntimeOrderingError) as caught:
+        runtime.pop()
+
+    assert caught.value.code is OutcomeCode.CONFLICTING_ID
+    assert port.index == 1
+
+
+@pytest.mark.parametrize(
+    ("prepare_failures", "commit_failures", "message"),
+    ((1, 0, "scripted prepare failure"), (0, 1, "scripted commit failure")),
+)
+def test_source_prepare_and_commit_failures_leave_ack_state_retryable(
+    prepare_failures: int,
+    commit_failures: int,
+    message: str,
+) -> None:
+    event = decode_phase1_ohlcv_csv(
+        ("\n".join((HEADER, _two_rows()[0])) + "\n").encode(),
+        replay_window=WINDOW,
+    ).selection.events[0]
+    port = _scripted_port(
+        (event,),
+        prepare_failures=prepare_failures,
+        commit_failures=commit_failures,
+    )
+    runtime = _runtime_for_port(port)
+    lease = runtime.pop()
+
+    with pytest.raises(LookupError, match=message):
+        runtime.acknowledge(lease)
+    assert runtime.active_lease is lease
+    assert runtime.committed_event_count == 0
+    assert runtime.trace_records == ()
+    assert port.index == 0
+
+    runtime.acknowledge(lease)
+    assert runtime.active_lease is None
+    assert runtime.committed_event_count == 1
+    assert len(runtime.trace_records) == 1
+    assert port.index == 1
+
+
+@dataclass(frozen=True, slots=True)
+class _FakePrepared:
+    sequence: int
+    trace_record: bytes
 
 
 class _FakeRootProducer:
@@ -480,15 +866,17 @@ class _FakeRootProducer:
         offer: historical_runtime._RuntimeRootOffer,
         *,
         dispatch_sequence: int,
-    ) -> object:
+    ) -> _FakePrepared:
         assert offer is self.offer
-        return dispatch_sequence
+        return _FakePrepared(
+            dispatch_sequence,
+            f"{self.producer_id.value}:{dispatch_sequence}".encode(),
+        )
 
-    def commit(self, prepared: object) -> bytes:
-        assert type(prepared) is int
+    def commit(self, prepared: historical_runtime._RuntimePreparedCommit) -> None:
+        assert type(prepared) is _FakePrepared
         self.offer = None
         self.cursor += 1
-        return f"{self.producer_id.value}:{prepared}".encode()
 
 
 def test_run_wide_dispatcher_arbitrates_all_due_producers_by_complete_root_key() -> None:
@@ -515,6 +903,8 @@ def test_run_wide_dispatcher_arbitrates_all_due_producers_by_complete_root_key()
             tuple[historical_runtime._RuntimeRootProducer, ...],
             (alpha, beta),
         ),
+        replay_end=WINDOW.end_exclusive,
+        terminal_producer_id=beta.producer_id,
     )
 
     first = dispatcher.pop()
@@ -526,6 +916,126 @@ def test_run_wide_dispatcher_arbitrates_all_due_producers_by_complete_root_key()
     assert second.root is timer
     assert (first.dispatch_sequence, second.dispatch_sequence) == (1, 2)
     assert dispatcher.trace_records == (b"beta:1", b"alpha:2")
+
+
+def test_binding_market_promise_beats_intervening_later_domain_at_same_time() -> None:
+    bridge = create_phase1_historical_market_source_bridge(_source(_two_rows()[0]))
+    port = _CountingPort(bridge)
+    clock = historical_runtime._create_virtual_clock(WINDOW.start_inclusive)
+    market = historical_runtime._create_historical_market_producer(
+        run_id=RUN_ID,
+        source=port,
+        binding=port.binding,
+        clock=clock,
+    )
+    due = datetime(2026, 1, 2, 9, 31, tzinfo=UTC)
+    timer_root = TimerRoot(
+        available_at=due,
+        kind=TimerKind.STRATEGY_TIMER,
+        timer_namespace=SourceNamespace("timer.intervening"),
+        timer_id=RuntimeIdentifier("timer-at-market-time"),
+        producer_sequence=0,
+    )
+    timer = _FakeRootProducer("z-timer", (timer_root,))
+    dispatcher = historical_runtime._create_run_wide_dispatcher(
+        clock=clock,
+        producers=cast(
+            tuple[historical_runtime._RuntimeRootProducer, ...],
+            (market, timer),
+        ),
+        replay_end=WINDOW.end_exclusive,
+        terminal_producer_id=market.producer_id,
+    )
+
+    lease = dispatcher.pop()
+
+    assert type(lease.root) is MarketDataEnvelope
+    assert lease.root.available_at == due
+    assert port.next_calls == 1
+    assert port.admit_calls == 1
+
+
+def test_dispatcher_rejects_noncanonical_registration_and_replay_bounds() -> None:
+    due = datetime(2026, 1, 2, 9, 1, tzinfo=UTC)
+    root = TimerRoot(
+        available_at=due,
+        kind=TimerKind.STRATEGY_TIMER,
+        timer_namespace=SourceNamespace("timer.registration"),
+        timer_id=RuntimeIdentifier("timer-registration"),
+        producer_sequence=0,
+    )
+    alpha = _FakeRootProducer("alpha", (root,))
+    beta = _FakeRootProducer("beta", ())
+    clock = historical_runtime._create_virtual_clock(WINDOW.start_inclusive)
+
+    with pytest.raises(RuntimeOrderingError) as unsorted:
+        historical_runtime._create_run_wide_dispatcher(
+            clock=clock,
+            producers=cast(
+                tuple[historical_runtime._RuntimeRootProducer, ...],
+                (beta, alpha),
+            ),
+            replay_end=WINDOW.end_exclusive,
+            terminal_producer_id=beta.producer_id,
+        )
+    assert unsorted.value.code is OutcomeCode.CONFLICTING_ID
+    with pytest.raises(RuntimeOrderingError) as duplicate:
+        historical_runtime._create_run_wide_dispatcher(
+            clock=clock,
+            producers=cast(
+                tuple[historical_runtime._RuntimeRootProducer, ...],
+                (alpha, alpha),
+            ),
+            replay_end=WINDOW.end_exclusive,
+            terminal_producer_id=alpha.producer_id,
+        )
+    assert duplicate.value.code is OutcomeCode.CONFLICTING_ID
+
+    at_end = TimerRoot(
+        available_at=WINDOW.end_exclusive,
+        kind=TimerKind.STRATEGY_TIMER,
+        timer_namespace=SourceNamespace("timer.boundary"),
+        timer_id=RuntimeIdentifier("timer-at-end"),
+        producer_sequence=0,
+    )
+    boundary = _FakeRootProducer("alpha", (at_end,))
+    terminal = _FakeRootProducer("z-terminal", ())
+    bounded = historical_runtime._create_run_wide_dispatcher(
+        clock=clock,
+        producers=cast(
+            tuple[historical_runtime._RuntimeRootProducer, ...],
+            (boundary, terminal),
+        ),
+        replay_end=WINDOW.end_exclusive,
+        terminal_producer_id=terminal.producer_id,
+    )
+    with pytest.raises(RuntimeOrderingError) as outside:
+        bounded.pop()
+    assert outside.value.code is OutcomeCode.OUT_OF_RANGE
+    assert clock.now() == WINDOW.start_inclusive
+
+
+def test_terminal_offer_is_retained_once_and_source_is_never_polled_after_ack() -> None:
+    bridge = create_phase1_historical_market_source_bridge(_source(_two_rows()[0]))
+    port = _CountingPort(bridge)
+    runtime = create_phase1_historical_market_runtime(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        source=port,
+    )
+    market = runtime.pop()
+    runtime.acknowledge(market)
+
+    first_terminal = runtime.peek()
+    second_terminal = runtime.peek()
+    terminal_lease = runtime.pop()
+
+    assert first_terminal is second_terminal is terminal_lease.root
+    assert port.next_calls == 2
+    runtime.acknowledge(terminal_lease)
+    with pytest.raises(RuntimeOrderingError):
+        runtime.pop()
+    assert port.next_calls == 2
 
 
 def test_run_wide_dispatch_sequence_closes_at_uint64_boundary() -> None:
@@ -545,8 +1055,10 @@ def test_run_wide_dispatch_sequence_closes_at_uint64_boundary() -> None:
             tuple[historical_runtime._RuntimeRootProducer, ...],
             (producer,),
         ),
+        replay_end=WINDOW.end_exclusive,
+        terminal_producer_id=producer.producer_id,
     )
-    dispatcher._next_sequence = (1 << 64) - 1
+    dispatcher._state = replace(dispatcher._state, next_sequence=(1 << 64) - 1)
 
     lease = dispatcher.pop()
 

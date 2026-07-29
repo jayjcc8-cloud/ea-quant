@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, cast, final
 
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.outcomes import OutcomeCode
+from ea.core.run import DataFingerprint, ReplayWindow
 from ea.core.runtime import RuntimeOrderingError
 from ea.core.time import Clock, TimeValidationError, require_utc
 from ea.data.historical import (
@@ -70,11 +72,19 @@ class _Phase1HistoricalMarketCandidate:
 
 
 @final
+@dataclass(frozen=True, slots=True)
+class _BridgeState:
+    committed_cursor: Phase1HistoricalSourceCursor | None
+    candidate: _Phase1HistoricalMarketCandidate | None
+
+
+@final
 class _Phase1HistoricalPreparedCommit:
-    __slots__ = ("_candidate", "_cursor", "_seal")
+    __slots__ = ("_candidate", "_cursor", "_next_state", "_seal")
 
     _candidate: _Phase1HistoricalMarketCandidate
     _cursor: Phase1HistoricalSourceCursor
+    _next_state: _BridgeState
     _seal: object
 
     def __init__(self) -> None:
@@ -88,13 +98,11 @@ class _Phase1HistoricalPreparedCommit:
 class Phase1HistoricalMarketSourceBridge:
     """Factory-only bridge retaining concrete cursor state outside ``ea.runtime``."""
 
-    __slots__ = ("_binding", "_candidate", "_committed_cursor", "_prepared", "_source")
+    __slots__ = ("_binding", "_source", "_state")
 
     _binding: HistoricalMarketSourceBinding
-    _candidate: _Phase1HistoricalMarketCandidate | None
-    _committed_cursor: Phase1HistoricalSourceCursor | None
-    _prepared: _Phase1HistoricalPreparedCommit | None
     _source: Phase1HistoricalMarketDataSource
+    _state: _BridgeState
 
     def __init__(self) -> None:
         raise TypeError(
@@ -107,13 +115,15 @@ class Phase1HistoricalMarketSourceBridge:
         return self._binding
 
     def next_available_at(self) -> datetime | None:
-        candidate = self._candidate
+        state = self._state
+        candidate = state.candidate
         if candidate is not None:
             return candidate.scheduled_at
-        return self._source.next_available_at(self._committed_cursor)
+        return self._source.next_available_at(state.committed_cursor)
 
     def admit_one(self, *, clock: Clock) -> HistoricalMarketCandidate:
-        candidate = self._candidate
+        state = self._state
+        candidate = state.candidate
         if candidate is not None:
             observed = _read_clock(clock)
             if observed != candidate.scheduled_at:
@@ -121,7 +131,7 @@ class Phase1HistoricalMarketSourceBridge:
             return candidate
         cursor, events = self._source.admit(
             clock=clock,
-            cursor=self._committed_cursor,
+            cursor=state.committed_cursor,
             limit=1,
         )
         if type(cursor) is not Phase1HistoricalSourceCursor or len(events) != 1:
@@ -149,7 +159,7 @@ class Phase1HistoricalMarketSourceBridge:
         issued._event = event
         issued._scheduled_at = event.available_at
         issued._seal = _CANDIDATE_SEAL
-        self._candidate = issued
+        self._state = replace(state, candidate=issued)
         return issued
 
     def prepare_commit(
@@ -161,20 +171,19 @@ class Phase1HistoricalMarketSourceBridge:
                 OutcomeCode.INVALID_TYPE,
                 "source prepare_commit requires an exact bridge candidate",
             )
-        current = self._candidate
+        state = self._state
+        current = state.candidate
         if current is None or candidate is not current or candidate._seal is not _CANDIDATE_SEAL:
             raise _conflict("source prepare_commit candidate is stale or foreign")
         _validate_candidate_bytes(current)
-        prepared = self._prepared
-        if prepared is not None:
-            if prepared._candidate is not current:
-                raise _conflict("source retained a conflicting prepared commit")
-            return prepared
         prepared = object.__new__(_Phase1HistoricalPreparedCommit)
         prepared._candidate = current
         prepared._cursor = current._cursor
+        prepared._next_state = _BridgeState(
+            committed_cursor=current._cursor,
+            candidate=None,
+        )
         prepared._seal = _PREPARED_SEAL
-        self._prepared = prepared
         return prepared
 
     def commit(self, prepared: HistoricalMarketPreparedCommit) -> None:
@@ -183,19 +192,18 @@ class Phase1HistoricalMarketSourceBridge:
                 OutcomeCode.INVALID_TYPE,
                 "source commit requires an exact prepared bridge capability",
             )
-        current = self._candidate
+        current = self._state.candidate
         if (
-            prepared is not self._prepared
-            or prepared._seal is not _PREPARED_SEAL
+            prepared._seal is not _PREPARED_SEAL
             or current is None
             or prepared._candidate is not current
             or prepared._cursor is not current._cursor
+            or prepared._next_state.committed_cursor is not current._cursor
+            or prepared._next_state.candidate is not None
         ):
             raise _conflict("source prepared commit is stale or foreign")
         _validate_candidate_bytes(current)
-        self._committed_cursor = prepared._cursor
-        self._candidate = None
-        self._prepared = None
+        self._state = prepared._next_state
 
 
 def _read_clock(clock: Clock) -> datetime:
@@ -240,15 +248,17 @@ def create_phase1_historical_market_source_bridge(
     """Wrap one exact strict source behind the runtime-owned structural port."""
     if type(source) is not Phase1HistoricalMarketDataSource:
         raise HistoricalMarketDataError(HistoricalMarketDataFailureCode.INVALID_TYPE)
+    replay_window = source.replay_window
+    fingerprint = source.fingerprint
+    if type(replay_window) is not ReplayWindow or type(fingerprint) is not DataFingerprint:
+        raise HistoricalMarketDataError(HistoricalMarketDataFailureCode.INVALID_DATASET)
     binding = HistoricalMarketSourceBinding(
         profile=PHASE1_OHLCV_PROFILE,
-        replay_window=source.replay_window,
-        data_fingerprint=source.fingerprint,
+        replay_window=replay_window,
+        data_fingerprint=fingerprint,
     )
     bridge = object.__new__(Phase1HistoricalMarketSourceBridge)
     bridge._binding = binding
-    bridge._candidate = None
-    bridge._committed_cursor = None
-    bridge._prepared = None
     bridge._source = source
+    bridge._state = _BridgeState(committed_cursor=None, candidate=None)
     return bridge
