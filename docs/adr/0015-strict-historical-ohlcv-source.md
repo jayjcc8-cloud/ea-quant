@@ -519,19 +519,28 @@ orders admitted output or changes the semantic fingerprint.
 |---|---|---|
 | wrong `path` or replay-window type | `invalid_type` | null/null |
 | `O_NOFOLLOW` or `O_NONBLOCK` unavailable; initial `lstat` fails; path missing; symlink; initial non-regular path | `source_unreadable` | null/null |
-| after an initial regular `lstat`, no-follow/nonblocking open fails or descriptor `fstat` is non-regular or identity-mismatched | `source_changed_during_read` | null/null |
+| after an initial regular `lstat`, open fails and a bounded follow-up `lstat` positively proves disappearance, symlink/non-regular replacement, `(device, inode)` change, size change, or nanosecond-mtime change | `source_changed_during_read` | null/null |
+| after an initial regular `lstat`, open fails while follow-up `lstat` proves the same regular identity/metadata, or follow-up inspection cannot prove a frozen change condition | `source_unreadable` | null/null |
+| open succeeds but the immediate pre-read descriptor `fstat` raises | `source_unreadable` | null/null |
+| immediate descriptor `fstat` proves non-regular kind or `(device, inode)` mismatch | `source_changed_during_read` | null/null |
 | verified regular-descriptor read fails | `source_unreadable` | null/null |
 | pre-read size exceeds the byte bound, or the bounded read obtains a 67,108,865th byte | `source_too_large` | null/null |
 | descriptor/path identity, regular kind, size, byte count, or nanosecond mtime changes across capture | `source_changed_during_read` | null/null |
 | stable capture succeeds | invoke the byte decoder matrix | unchanged |
 
 An `OSError` during initial inspection is `source_unreadable`. Once initial `lstat` has proved a
-regular path, an open failure is classified as `source_changed_during_read` because the path or
-its accessibility changed before descriptor capture. An `OSError` while reading an already
-verified regular descriptor is `source_unreadable`. An `OSError` or identity mismatch during
-post-read descriptor/path stability checks is `source_changed_during_read`. The helper closes its
-descriptor in `finally`; a close failure after successful capture propagates as an unexpected
-implementation/platform error rather than changing the captured-data classification.
+regular path, an open failure triggers exactly one bounded follow-up `lstat`. `ENOENT` positively
+proves disappearance. A successful follow-up positively proves change only through the frozen
+kind, identity, size, or nanosecond-mtime comparisons above. Any other follow-up exception is
+indeterminate and therefore `source_unreadable`; change is never inferred from permission or ACL
+failure alone.
+
+An exception from the immediate pre-read descriptor `fstat`, or from reading an already verified
+regular descriptor, is `source_unreadable`. A proved descriptor kind/identity mismatch is
+`source_changed_during_read`. An `OSError` or identity mismatch during post-read descriptor/path
+stability checks is `source_changed_during_read`. The helper closes its descriptor in `finally`;
+a close failure after successful capture propagates as an unexpected implementation/platform
+error rather than changing the captured-data classification.
 
 #### Dataset and source construction matrix
 
@@ -621,7 +630,8 @@ The implementation must provide:
 - API tests proving no public future-event/history/path/iterator surface;
 - filesystem symlink, non-regular, oversize, short-read/change-during-read, and read-failure tests
   on supported platforms, including regular-to-FIFO and regular-to-device swaps proving the
-  nonblocking descriptor check;
+  nonblocking descriptor check, stable permission/ACL open failure, changed-path follow-up
+  `lstat`, indeterminate follow-up failure, and pre-read descriptor-`fstat` failure;
 - cross-process tests varying hash seed, locale, timezone, and environment while producing
   byte-identical canonical evidence; and
 - failure-injection tests proving no partial publication.
@@ -648,6 +658,10 @@ returned HOLD. This revision addresses:
 - `DATA51-004`: capture requires both `O_NOFOLLOW` and `O_NONBLOCK`; a raced FIFO/device cannot
   block before `fstat`, and the exact raced non-regular classification and failure-injection
   evidence are frozen.
+- `ARCH51-003` follow-up: an open failure is not itself evidence of change. One bounded follow-up
+  `lstat` distinguishes positively proved disappearance/kind/identity/metadata change from stable
+  or indeterminate unreadability, and pre-read descriptor `fstat` exceptions are frozen as
+  `source_unreadable`.
 
 Closure requires new exact-SHA Architecture and Data/Backtest verdicts. This section does not
 accept the ADR or authorize implementation.
