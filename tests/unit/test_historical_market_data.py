@@ -14,6 +14,7 @@ from ea.core import (
     MarketDataEnvelope,
     ReplayWindow,
     Sha256Digest,
+    is_visible_as_of,
 )
 from ea.data import (
     PHASE1_OHLCV_PROFILE,
@@ -577,6 +578,78 @@ def test_source_early_cursor_replay_and_monotone_limited_drain() -> None:
     )
     assert replay_batch == second_batch
     assert replay_cursor == second_cursor
+
+
+def test_source_admission_scans_only_unread_suffix_to_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = tuple(
+        _row(
+            sequence=str(index),
+            symbol=f"S{index:03d}",
+        )
+        for index in range(128)
+    )
+    dataset = decode_phase1_ohlcv_csv(_content(*rows), replay_window=WINDOW)
+    source = create_phase1_historical_market_data_source(dataset)
+    cutoff = datetime(2026, 1, 2, 9, 40, tzinfo=UTC)
+    cursor, initial_batch = source.admit(
+        clock=cast(Any, _Clock(cutoff)),
+        cursor=None,
+        limit=127,
+    )
+    assert len(initial_batch) == 127
+
+    visibility_checks = 0
+
+    def counted_is_visible(event: MarketDataEnvelope, as_of: datetime) -> bool:
+        nonlocal visibility_checks
+        visibility_checks += 1
+        return is_visible_as_of(event, as_of)
+
+    monkeypatch.setattr(historical_module, "is_visible_as_of", counted_is_visible)
+
+    candidate, batch = source.admit(
+        clock=cast(Any, _Clock(cutoff)),
+        cursor=cursor,
+        limit=1,
+    )
+
+    assert tuple(event.source_sequence for event in batch) == (127,)
+    assert candidate.last_event is dataset.selection.events[-1]
+    assert visibility_checks == 2
+
+
+def test_source_admission_stops_at_first_future_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = tuple(
+        _row(
+            sequence=str(index),
+            symbol=f"S{index:03d}",
+        )
+        for index in range(128)
+    )
+    dataset = decode_phase1_ohlcv_csv(_content(*rows), replay_window=WINDOW)
+    source = create_phase1_historical_market_data_source(dataset)
+    before_first_availability = datetime(2026, 1, 2, 9, 30, tzinfo=UTC)
+    visibility_checks = 0
+
+    def counted_is_visible(event: MarketDataEnvelope, as_of: datetime) -> bool:
+        nonlocal visibility_checks
+        visibility_checks += 1
+        return is_visible_as_of(event, as_of)
+
+    monkeypatch.setattr(historical_module, "is_visible_as_of", counted_is_visible)
+
+    candidate, batch = source.admit(
+        clock=cast(Any, _Clock(before_first_availability)),
+        cursor=None,
+    )
+
+    assert batch == ()
+    assert candidate.last_event is None
+    assert visibility_checks == 1
 
 
 def test_source_rejects_forged_binding_initial_skip_and_signed_zero_alias() -> None:

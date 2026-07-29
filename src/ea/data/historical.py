@@ -29,7 +29,6 @@ from ea.core.market_data import (
     MarketDataValidationError,
     SourceId,
     admission_order_key,
-    admit_market_data,
     is_visible_as_of,
     validate_market_data_batch,
 )
@@ -267,15 +266,26 @@ class Phase1HistoricalMarketDataSource:
             _raise(HistoricalMarketDataFailureCode.INVALID_TYPE)
         if admission is not None and cutoff < admission.as_of:
             _raise(HistoricalMarketDataFailureCode.CLOCK_REGRESSED)
-        try:
-            next_admission, events = admit_market_data(
-                self._events,
-                clock=_FixedClock(cutoff),
-                cursor=admission,
-                limit=limit,
-            )
-        except MarketDataValidationError as error:
-            raise AssertionError("validated source admission unexpectedly failed") from error
+        if admission is None or admission.last_event is None:
+            next_index = 0
+        else:
+            next_index = self._index_by_key[admission_order_key(admission.last_event)][0] + 1
+
+        admitted: list[MarketDataEnvelope] = []
+        while next_index < len(self._events):
+            event = self._events[next_index]
+            if not is_visible_as_of(event, cutoff):
+                break
+            admitted.append(event)
+            next_index += 1
+            if limit is not None and len(admitted) == limit:
+                break
+
+        events = tuple(admitted)
+        last_event = (
+            events[-1] if events else admission.last_event if admission is not None else None
+        )
+        next_admission = AdmissionCursor(as_of=cutoff, last_event=last_event)
         return self._issued_cursor(next_admission), events
 
     def _validated_admission_cursor(
@@ -319,7 +329,7 @@ class Phase1HistoricalMarketDataSource:
         if type(as_of) is not datetime or as_of.tzinfo is not UTC:
             _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
         if last_event is None:
-            if any(is_visible_as_of(event, as_of) for event in self._events):
+            if self._events and is_visible_as_of(self._events[0], as_of):
                 _raise(HistoricalMarketDataFailureCode.INVALID_CURSOR)
             return AdmissionCursor(as_of=as_of, last_event=None)
         if type(last_event) is not MarketDataEnvelope:
@@ -355,14 +365,6 @@ class Phase1HistoricalMarketDataSource:
         object.__setattr__(value, "_record_count", self._fingerprint.record_count)
         object.__setattr__(value, "_admission_cursor", admission)
         return value
-
-
-@dataclass(frozen=True, slots=True)
-class _FixedClock:
-    value: datetime
-
-    def now(self) -> datetime:
-        return self.value
 
 
 def decode_phase1_ohlcv_csv(
