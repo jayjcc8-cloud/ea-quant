@@ -26,8 +26,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   Issue #28 已将 manifest 的 model、wire、codec 和 evidence 职责分离，同时保持公开与 wire
   契约不变。当前开发已在该历史基线上继续推进；Accepted ADR 0014 的 trusted fact
   ingress/dispatch、canonical Fill allocation 与 observation-derived Order projection 已实现
-  当前切片。尚未实现 historical runtime coordinator、venue submission、ledger/runtime
-  integration、reconciliation correction、portfolio planning、strategy 或 backtest。
+  当前切片；Accepted ADR 0015 的严格本地 OHLCV 解码、稳定文件捕获、canonical selection /
+  fingerprint 和 bounded no-look-ahead historical source 已实现当前切片。尚未实现 historical
+  runtime coordinator、venue submission、ledger/runtime integration、reconciliation
+  correction、portfolio planning、strategy 或完整 backtest。
 - Phase 1 实现从 dependency-neutral economic values 开始：`ea.core.economics` 提供严格
   `ea-decimal-v1`、exact grid 与唯一 settlement rounding boundary；`ea.core.execution`
   提供 versioned instrument specification set、canonical bytes/digest 和 identity-bound
@@ -70,6 +72,13 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   Fill allocation、coherent observed quantity、bounded immutable Order projection、closed
   processing outcome 与 monotone halt。它尚未接入 ledger/runtime coordinator，也不实现 venue
   adapter、reconciliation correction 或 matcher。
+- `ea.data.historical` 已按
+  [Accepted ADR 0015](docs/adr/0015-strict-historical-ohlcv-source.md) 实现固定
+  `ea-phase1-ohlcv-csv-v1`：严格 UTF-8/CSV/token/time/identity/revision 验证、稳定 regular-file
+  capture、ADR 0004 canonical order、ADR 0006 semantic fingerprint，以及只公开
+  `next_available_at` 和 clock-gated `admit` 的 immutable bounded source。它不提供未来 payload
+  iterator，也不推进 clock；runtime coordinator、virtual clock、matcher 与结果报告仍由后续
+  切片实现。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -109,6 +118,8 @@ canonical issuance provenance 边界见
 [Accepted ADR 0013](docs/adr/0013-risk-result-issuance-provenance.md)；trusted execution-fact
 dispatch 与 Order projection authority 见
 [Accepted ADR 0014](docs/adr/0014-trusted-execution-fact-dispatch-and-order-projection.md)。
+严格 historical OHLCV source boundary 见
+[Accepted ADR 0015](docs/adr/0015-strict-historical-ohlcv-source.md)。
 
 订单、数量、费用、现金、持仓、风险限制和账本金额不得使用 `float`。当前 economic value
 边界只接受 canonical decimal text，使用无界整数 coefficient/scale 完成精确乘法，并仅在
