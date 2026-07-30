@@ -909,12 +909,17 @@ def test_run_wide_dispatcher_arbitrates_all_due_producers_by_complete_root_key()
 
     first = dispatcher.pop()
     dispatcher.acknowledge(first)
+    first_trace_tail = dispatcher._state.trace_tail
     second = dispatcher.pop()
     dispatcher.acknowledge(second)
+    second_trace_tail = dispatcher._state.trace_tail
 
     assert first.root is safety
     assert second.root is timer
     assert (first.dispatch_sequence, second.dispatch_sequence) == (1, 2)
+    assert first_trace_tail is not None
+    assert second_trace_tail is not None
+    assert second_trace_tail.previous is first_trace_tail
     assert dispatcher.trace_records == (b"beta:1", b"alpha:2")
 
 

@@ -647,7 +647,23 @@ class _DispatcherState:
     exhausted: bool
     next_sequence: int | None
     responses: MappingProxyType[RuntimeIdentifier, _ProducerResponse]
-    trace_records: tuple[bytes, ...]
+    trace_tail: _TraceNode | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TraceNode:
+    previous: _TraceNode | None
+    record: bytes
+
+
+def _materialize_trace_records(tail: _TraceNode | None) -> tuple[bytes, ...]:
+    records: list[bytes] = []
+    current = tail
+    while current is not None:
+        records.append(current.record)
+        current = current.previous
+    records.reverse()
+    return tuple(records)
 
 
 def _frozen_responses(
@@ -686,7 +702,7 @@ class _RunWideDispatcher:
 
     @property
     def trace_records(self) -> tuple[bytes, ...]:
-        return self._state.trace_records
+        return _materialize_trace_records(self._state.trace_tail)
 
     def peek(self) -> RuntimeRoot:
         if self._state.active is not None:
@@ -744,7 +760,7 @@ class _RunWideDispatcher:
             state,
             active=None,
             responses=_frozen_responses(responses),
-            trace_records=(*state.trace_records, trace),
+            trace_tail=_TraceNode(previous=state.trace_tail, record=trace),
         )
         active.producer.commit(prepared)
         self._state = next_state
@@ -917,7 +933,7 @@ def _create_run_wide_dispatcher(
         exhausted=False,
         next_sequence=1,
         responses=_frozen_responses({}),
-        trace_records=(),
+        trace_tail=None,
     )
     dispatcher._terminal_producer_id = terminal_producer_id
     return dispatcher
