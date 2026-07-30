@@ -1,6 +1,6 @@
 # ADR 0017: Deterministic Strategy Signal and Portfolio Planning
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-30
 - Decision owners: Architecture, Strategy/Portfolio, Runtime, Risk, Execution
 - Related: ADR 0003, ADR 0004, ADR 0006, ADR 0008, ADR 0010, ADR 0011, ADR 0012,
