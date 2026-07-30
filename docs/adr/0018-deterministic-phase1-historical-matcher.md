@@ -768,7 +768,7 @@ The literal receipt document is:
   "instrument_spec_set_id":"...",
   "instrument_spec_set_sha256":"<64 lowercase hex>",
   "message_type":"historical_submission_receipt",
-  "order_id":{"owner_kind":"execution_order","owner_sequence":1,"run_id":"..."},
+  "order_id":{"owner_kind":"execution.order","owner_sequence":1,"run_id":"..."},
   "order_sha256":"<64 lowercase hex>",
   "outcome_code":"submission.submitted",
   "quantity":"1",
@@ -801,7 +801,7 @@ The literal dispatch batch document is:
   "next_fact_sequence_after":2,
   "next_fact_sequence_before":1,
   "order_ids":[
-    {"owner_kind":"execution_order","owner_sequence":1,"run_id":"..."}
+    {"owner_kind":"execution.order","owner_sequence":1,"run_id":"..."}
   ],
   "run_id":"...",
   "schema_version":1,
