@@ -195,6 +195,7 @@ from ea.core.market_data import (
     order_market_data,
     validate_market_data_batch,
 )
+from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.numeric import (
     DETERMINISTIC_FLOAT64_POLICY,
     NumericPolicyError,
@@ -409,6 +410,7 @@ __all__ = [
     "MarketDataKind",
     "MarketDataValidationError",
     "MARKET_DATA_KIND_RANKS",
+    "canonical_market_data_record_bytes",
     "MESSAGE_SCHEMA_VERSION",
     "NumericPolicyError",
     "OUTCOME_FAMILY_BY_CODE",

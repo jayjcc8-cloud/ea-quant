@@ -100,10 +100,13 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.execution",
             "ea.core.execution_identity",
             "ea.core.execution_messages",
+            "ea.core.market_data",
+            "ea.core.market_data_codec",
             "ea.core.outcomes",
             "ea.core.run",
             "ea.core.runtime",
             "ea.core.time",
+            "ea.runtime.historical",
             "ea.runtime.ingress",
             "ea.runtime.queue",
         }

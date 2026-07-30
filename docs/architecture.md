@@ -93,6 +93,11 @@ flowchart LR
 - Historical matcher 和 paper simulator 只消费 Runtime 已准入的当前或过去 market context；它们
   不得拉取或推进 feed、读取 market-data store、查看未来 iterator，或推进 clock。
 - 所有 inner components 只能看到 injected clock 已经可见的数据，不可读取未来 iterator、wall clock 或 ambient randomness。
+- Accepted ADR 0016 的 historical runtime frontier 由 runtime-owned structural source port、
+  唯一 run-wide time arbiter/dispatcher 和只读 virtual clock 组成；concrete source/cursor 留在
+  outer `data` bridge。每个 market candidate 只包含一个 root，只有 exact dispatch
+  acknowledgement 才提交 matching cursor；这一实现 seam 不等于完整 lifecycle/stage
+  coordinator。
 
 ## 4. 领域对象与所有权
 
@@ -266,7 +271,7 @@ storage 或 external attestation。
 | Fill / Account / Position | matcher facts -> shared OMS -> shared ledger -> updated immutable snapshot | simulator facts -> shared OMS -> shared ledger -> updated immutable snapshot | broker reports/snapshots -> shared OMS/reconciler -> shared ledger -> updated immutable snapshot |
 | audit / result | mandatory run-scoped audit 和 deterministic result；terminal failure fails run | mandatory durable audit/result；terminal failure fails run | mandatory durable audit/result；terminal failure fails run |
 | optional telemetry | best effort，不影响 decision | best effort，不影响 decision | best effort，不影响 decision |
-| 当前状态 | bounded historical source 已实现；coordinator/matcher/result 待实现 | contract only，Phase 3 待实现 | unavailable；不得由现有 flag 构建 |
+| 当前状态 | bounded historical source、virtual clock、incremental frontier 和 run-wide dispatcher 已实现；完整 lifecycle/stage coordinator、matcher/result 待实现 | contract only，Phase 3 待实现 | unavailable；不得由现有 flag 构建 |
 
 任何 mode 都不能移除 risk/execution/audit gate 或以 mode branch 替换 inner policy。配置值可以不同，inner code 不读取 mode。Historical matcher 和 paper simulator 不得主动访问 feed、market-data store、future iterator 或 clock；Runtime 提供的 as-of context schema 与 ordering 由 #12/#15 决定。
 
@@ -369,8 +374,10 @@ Phase 1 入口门禁的历史状态审查基线为
   single-active runtime dispatch、canonical Fill allocation 与 observation-derived Order
   projection 已实现当前切片；Accepted ADR 0015 的严格 OHLCV decoder、稳定 local-file
   capture、semantic fingerprint 与 bounded no-look-ahead historical source 也已实现当前切片。
-  historical runtime coordinator、venue submission、ledger/runtime integration、
-  reconciliation correction、portfolio planning、strategy 和完整 backtest 仍未实现。
+  Accepted ADR 0016 的只读 virtual clock、one-event historical frontier、run-wide
+  arbitration/dispatch sequence、acknowledgement-bound cursor commit 与 canonical trace/digest
+  已实现当前切片。完整 lifecycle/stage coordinator、venue submission、ledger/runtime
+  integration、reconciliation correction、portfolio planning、strategy 和完整 backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -407,8 +414,11 @@ Phase 1 入口门禁的历史状态审查基线为
   monotone halt（已实现；尚未接入 ledger/runtime coordinator，也不实现 venue adapter、
   reconciliation correction 或 matcher）。
 - 严格本地 OHLCV 数据导入、稳定文件捕获、canonical selection/fingerprint、bounded
-  historical admission 与跨进程 golden/property evidence（已实现；runtime coordinator、
-  virtual clock、matcher 与 result adapter 尚未实现）。
+  historical admission 与跨进程 golden/property evidence（已实现）。
+- deterministic historical runtime frontier：Accepted ADR 0016 的只读 virtual clock、
+  runtime-owned structural source port、outer concrete-cursor bridge、one-event candidate、
+  run-wide time arbitration/continuous dispatch identity、exact ack/commit 与 versioned
+  trace/digest（已实现；完整 lifecycle/stage coordinator、matcher 与 result adapter 尚未实现）。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。
 - 固定 fixture 的 deterministic golden tests。
@@ -467,3 +477,8 @@ Phase 1 入口门禁的历史状态审查基线为
   [Accepted ADR 0015](adr/0015-strict-historical-ohlcv-source.md)：冻结并实现严格本地 OHLCV
   profile、稳定文件捕获、semantic fingerprint、bounded admission cursor 和未来 payload
   隔离；runtime coordinator、virtual clock 与 matcher 不在该切片。
+- [Issue #53](https://github.com/jayjcc8-cloud/ea-quant/issues/53) /
+  [Accepted ADR 0016](adr/0016-deterministic-historical-runtime-frontier.md)：冻结并实现
+  virtual clock、binding lower-bound promise、one-event frontier、run-wide arbitration、
+  continuous dispatch sequence、acknowledgement-bound cursor commit 和 deterministic trace；
+  完整 lifecycle/stage coordinator、matcher 与 result adapter 不在该切片。
