@@ -302,6 +302,12 @@ dispatch_sequence == order.dispatch_sequence
 Submission sequence starts at one and is an unsigned 64-bit owner-local sequence. Zero is never
 issued. The receipt carries `submission.submitted`; this is a definitive simulated-venue outcome.
 
+The next-submission pointer is `int | None`: initial value `1`; issuing a value below
+`2**64-1` advances by one; issuing `2**64-1` changes it to `None`; and `None` is the sole
+exhausted representation. A genuinely new submission at `None` fails
+`validation.arithmetic_overflow` before authorization, receipt precomputation, or state
+publication. Exact retained replay still succeeds after exhaustion and consumes nothing.
+
 The matcher reconstructs the Order through its canonical decoder and retains:
 
 - the owned Order;
@@ -544,7 +550,15 @@ Runtime constructs one `CausalDescendantFactDispatchVerifier` bound by identity 
 - the exact `Phase1HistoricalMarketRuntime` dispatcher/queue;
 - the exact matcher issuance capability and its run/spec/source bindings;
 - the exact matcher batch lookup capability; and
-- the exact `Phase1ExecutionFactAuthority` run/spec bindings.
+- immutable run/spec baselines and one closed source registry covering the direct root plan and
+  every descendant adapter.
+
+There is no fact-authority object identity dependency and no construction cycle. Runtime first
+constructs the queue, matcher, closed source registry, and adapter; it then passes that same
+adapter to the `Phase1ExecutionFactAuthority` factory, which validates the adapter's run/spec
+bindings. Construction fails atomically if the matcher namespace occurs in any direct-plan fact
+source or any other descendant binding. Thus one `(source_namespace, ingress_sequence)` can have
+only one issuance authority.
 
 It implements the existing complete `RuntimeFactDispatchVerifier` shape:
 
@@ -582,11 +596,10 @@ verifier. Therefore post-ack replay of an already processed descendant returns t
 acknowledgement receives no dispatch sequence and fails `validation.conflicting_id`; it cannot be
 retroactively processed.
 
-The adapter does not acknowledge the parent, mutate the matcher, register a new source, or insert
-a root. Construction rejects a matcher source namespace that conflicts with another descendant
-source binding. The independent root queue continues to require source registration for every
-fact ingress present in its sealed plan; the matcher source is instead registered exactly once on
-this descendant adapter. This is the only source-registration amendment.
+The adapter does not acknowledge the parent, mutate the matcher, or insert a root. The independent
+root queue continues to require source registration for every fact ingress present in its sealed
+plan; the matcher source is registered exactly once on the closed descendant registry and must be
+absent from that root-plan registry. This is the only source-registration amendment.
 
 ### Canonical dispatch batch
 
@@ -824,6 +837,7 @@ The literal public state document is:
   "next_fact_sequence":1,
   "next_submission_sequence":1,
   "pending_order_ids":[],
+  "provenance_id":"...",
   "receipt_sha256s":[],
   "run_id":"...",
   "schema_version":1,
@@ -937,18 +951,27 @@ decode_historical_matcher_conflict
 
 Each decoder requires an exact `HistoricalMatcherDecodeContext` bound to run, owned
 specification/policy, source/provenance, and read-only canonical Order/receipt/batch/ingress
-lookups as required by that value. It reconstructs through factories, rejects unknown fields and
-context substitution, recomputes every nested digest, and requires the re-encoded bytes to equal
-the submitted bytes exactly.
+lookups as required by that value. The state decoder requires `provenance_id` to equal its context
+binding. Each decoder reconstructs through factories, rejects unknown fields and context
+substitution, recomputes every nested digest, and requires the re-encoded bytes to equal the
+submitted bytes exactly.
 
 The normative cross-process fixture is
 [`../fixtures/adr0018-historical-matcher-v1.json`](../fixtures/adr0018-historical-matcher-v1.json).
-It records the complete canonical UTF-8 bytes and digest for one delayed-availability trade path
-and one bounded-end expiry path: receipt, trade observation, market batch, trade fact/ingress, end
-observation, end batch, and expiry fact/ingress. The existing fact digest is over the fact document
-with `fact_sha256` absent; the existing ingress digest is over its complete canonical document.
-All other artifact digests use the domains and length framing above. The fixture is normative and
-must be reproduced byte-for-byte by every supported process environment.
+It records real canonical spec-set, policy-source, target-lineage, OrderIntent, RiskDecision,
+ExecutionApproval, Order, execution-request, audit-acknowledgement, and root context bytes/digests,
+plus the complete canonical UTF-8 bytes and digest for one delayed-availability trade path and one
+bounded-end expiry path. Both paths use the matcher's single bound `provenance_id`. The expiry
+Order is submitted on dispatch 8 after that dispatch's matching stage, so it is not eligible for
+the already-observed Bar and remains pending until bounded end dispatch 9. The existing fact
+digest is over the fact document with `fact_sha256` absent; the existing ingress digest is over
+its complete canonical document. All other new artifact digests use the domains and length
+framing above.
+
+The fixture is normative. Its context artifacts must decode through current frozen factories and
+re-encode byte-for-byte; future receipt, observation, batch, fact, ingress, and matcher decoders
+must do the same as they are implemented. Every supported process environment must reproduce all
+literal bytes and digests.
 
 ### Bounded-end expiry
 
@@ -1006,9 +1029,11 @@ Rules:
 - an explicit generic code or any other exact code/kind combination fails
   `validation.out_of_range` before fact construction.
 
-The decoder parses the lifecycle payload code and passes it into the factory. Existing generic
-fact bytes and factory calls remain byte-identical. The new expiry code now round-trips
-canonically.
+The decoder validates the closed kind/code pair. For the existing generic code corresponding to
+its kind it calls the factory with `outcome_code=None`; only
+`order.expired.no_eligible_market_data` is passed as an explicit override. Every other pair fails
+`validation.out_of_range`. Existing generic fact bytes and factory calls therefore remain
+byte-identical, while the new expiry code round-trips canonically.
 
 The closed compatibility mapping is:
 
