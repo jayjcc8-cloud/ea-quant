@@ -29,7 +29,9 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   当前切片；Accepted ADR 0015 的严格本地 OHLCV 解码、稳定文件捕获、canonical selection /
   fingerprint 和 bounded no-look-ahead historical source 已实现当前切片。尚未实现 historical
   runtime 的完整 lifecycle/stage coordinator、venue submission、ledger/runtime integration、
-  reconciliation correction、portfolio planning、strategy 或完整 backtest；Accepted ADR 0016
+  reconciliation correction、historical matcher、concrete strategy 或完整 backtest；Accepted
+  ADR 0017 的 factory-only StrategySignal、PortfolioTarget、planning outcome、target-current
+  intent authority 与 retained-snapshot Risk handoff 已实现当前切片；Accepted ADR 0016
   的 virtual clock、incremental historical frontier、run-wide arbitration/dispatch sequence、
   exact acknowledgement/cursor commit 与 deterministic trace 已实现当前切片。
 - Phase 1 实现从 dependency-neutral economic values 开始：`ea.core.economics` 提供严格
@@ -46,6 +48,15 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   [Accepted ADR 0010](docs/adr/0010-canonical-fill-ledger-and-portfolio-snapshots.md) 实现单一
   Fill ledger、原子应用/重放/冲突结果，以及供 risk 消费的 immutable canonical
   `PortfolioSnapshot`。
+- `ea.core.strategy`、`ea.strategy.authority`、`ea.core.portfolio_planning` 与
+  `ea.portfolio.planning` 已按
+  [Accepted ADR 0017](docs/adr/0017-deterministic-strategy-signal-and-portfolio-planning.md)
+  实现 runtime-active root proof、factory-only `StrategySignal`、absolute signed
+  `PortfolioTarget`、显式 no-op/unresolved-Fill outcome、latest snapshot target-current
+  conversion、最多一个 canonical `OrderIntent`、exact replay/conflict 与 monotone halt。
+  `PortfolioPlanningResult` 保留并规范化完整 immutable planning snapshot，供未来 coordinator
+  在每次 Risk 调用前执行 object/bytes/digest substitution gate；本切片不包含 concrete
+  strategy、matcher、完整 coordinator、venue、result adapter 或 CLI。
 - `ea.core.risk` 与 `ea.risk.authority` 已按
   [Accepted ADR 0011](docs/adr/0011-deterministic-pre-trade-risk-authority.md) 和
   [Accepted ADR 0012](docs/adr/0012-risk-conflict-dispatch-sequence-compatibility.md) 实现
@@ -71,8 +82,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   [Accepted ADR 0016](docs/adr/0016-deterministic-historical-runtime-frontier.md) 增加只读 virtual
   clock、固定 producer set 的 run-wide time arbiter、continuous dispatch sequence、one-event
   historical frontier、ack 后 source cursor commit，以及 versioned canonical trace/digest。
-  reconciliation rank 仅保留词汇，不存在 opaque placeholder；这些切片尚不是完整 lifecycle
-  coordinator，也不包含 audit gate、stage callback、strategy/portfolio orchestration 或 matcher。
+  ADR 0017 另增加只读 active-market-dispatch verifier/proof，策略只能为 exact live market
+  lease 签发 Signal。reconciliation rank 仅保留词汇，不存在 opaque placeholder；这些切片尚
+  不是完整 lifecycle coordinator，也不包含 audit gate、stage callback、concrete strategy
+  orchestration 或 matcher。
 - `ea.core.execution_state` 与 `ea.execution.fact_authority` 已按 Accepted ADR 0014 实现 exact
   fact replay/conflict、authority-backed Order correlation、staged venue binding、deterministic
   Fill allocation、coherent observed quantity、bounded immutable Order projection、closed
@@ -128,7 +141,9 @@ dispatch 与 Order projection authority 见
 严格 historical OHLCV source boundary 见
 [Accepted ADR 0015](docs/adr/0015-strict-historical-ohlcv-source.md)；deterministic historical
 frontier、virtual clock、run-wide arbitration 与 trace contract 见
-[Accepted ADR 0016](docs/adr/0016-deterministic-historical-runtime-frontier.md)。
+[Accepted ADR 0016](docs/adr/0016-deterministic-historical-runtime-frontier.md)；Signal 与
+portfolio planning authority 见
+[Accepted ADR 0017](docs/adr/0017-deterministic-strategy-signal-and-portfolio-planning.md)。
 
 订单、数量、费用、现金、持仓、风险限制和账本金额不得使用 `float`。当前 economic value
 边界只接受 canonical decimal text，使用无界整数 coefficient/scale 完成精确乘法，并仅在

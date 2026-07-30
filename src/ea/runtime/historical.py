@@ -700,6 +700,44 @@ class _RunWideDispatcher:
         active = self._state.active
         return None if active is None else active.lease
 
+    def _require_active_market_dispatch_bytes(
+        self,
+        market_root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> bytes:
+        """Return the immutable admitted bytes for one exact live market dispatch."""
+        if type(market_root) is not MarketDataEnvelope:
+            raise _fail(OutcomeCode.INVALID_TYPE, "active market root must be exact")
+        if type(dispatch_sequence) is not int:
+            raise _fail(OutcomeCode.INVALID_TYPE, "active dispatch sequence must be exact int")
+        if not 1 <= dispatch_sequence <= _MAX_UINT64:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "active dispatch sequence is outside uint64")
+        state = self._state
+        active = state.active
+        if (
+            active is None
+            or active.lease.root is not market_root
+            or active.offer.root is not market_root
+            or active.dispatch_sequence != dispatch_sequence
+            or active.lease.dispatch_sequence != dispatch_sequence
+        ):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "market root is not the exact active runtime dispatch",
+            )
+        live_bytes = canonical_market_data_record_bytes(market_root)
+        if (
+            self._state is not state
+            or state.active is not active
+            or active.offer.canonical_root_bytes != live_bytes
+        ):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "active market dispatch canonical bytes changed",
+            )
+        return active.offer.canonical_root_bytes
+
     @property
     def trace_records(self) -> tuple[bytes, ...]:
         return _materialize_trace_records(self._state.trace_tail)
@@ -979,6 +1017,17 @@ class Phase1HistoricalMarketRuntime:
     @property
     def active_lease(self) -> RuntimeDispatchLease | None:
         return self._dispatcher.active_lease
+
+    def _require_active_market_dispatch_bytes(
+        self,
+        market_root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> bytes:
+        return self._dispatcher._require_active_market_dispatch_bytes(
+            market_root,
+            dispatch_sequence=dispatch_sequence,
+        )
 
     @property
     def terminal_acknowledged(self) -> bool:

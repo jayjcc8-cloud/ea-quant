@@ -24,6 +24,7 @@ from ea.runtime.queue import (
     RuntimeDispatchLease,
     create_deterministic_root_queue,
 )
+from ea.runtime.strategy import create_active_market_dispatch_verifier
 
 __all__ = [
     "DeterministicRootQueue",
@@ -41,6 +42,7 @@ __all__ = [
     "Phase1VirtualClock",
     "RuntimeDispatchLease",
     "create_deterministic_root_queue",
+    "create_active_market_dispatch_verifier",
     "create_phase1_execution_fact_ingress_authority",
     "create_phase1_historical_market_runtime",
     "historical_runtime_trace_digest",

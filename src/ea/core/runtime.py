@@ -24,7 +24,7 @@ from ea.core.market_data import (
     validate_market_data_batch,
 )
 from ea.core.outcomes import OutcomeCode
-from ea.core.run import RunId
+from ea.core.run import RunId, Sha256Digest
 from ea.core.time import TimeValidationError, require_utc
 
 _RUNTIME_ERROR_CODES = frozenset(
@@ -34,6 +34,8 @@ _RUNTIME_ERROR_CODES = frozenset(
         OutcomeCode.CONFLICTING_ID,
     }
 )
+
+_ACTIVE_MARKET_DISPATCH_PROOF_SEAL = object()
 
 
 class RuntimeOrderingError(ValueError):
@@ -64,6 +66,102 @@ def _require_non_negative_integer(value: object, *, field_name: str) -> int:
             f"{field_name} must be non-negative",
         )
     return value
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ActiveMarketDispatchProof:
+    """Opaque process-local proof of one exact live market dispatch."""
+
+    _run_id: RunId
+    _market_root: MarketDataEnvelope
+    _canonical_market_bytes: bytes
+    _causal_market_sha256: Sha256Digest
+    _dispatch_sequence: int
+    _issuer: object
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("ActiveMarketDispatchProof values are created only by the runtime verifier")
+
+    @property
+    def run_id(self) -> RunId:
+        return self._run_id
+
+    @property
+    def market_root(self) -> MarketDataEnvelope:
+        return self._market_root
+
+    @property
+    def canonical_market_bytes(self) -> bytes:
+        return self._canonical_market_bytes
+
+    @property
+    def causal_market_sha256(self) -> Sha256Digest:
+        return self._causal_market_sha256
+
+    @property
+    def dispatch_sequence(self) -> int:
+        return self._dispatch_sequence
+
+
+def _create_active_market_dispatch_proof(
+    *,
+    run_id: RunId,
+    market_root: MarketDataEnvelope,
+    canonical_market_bytes: bytes,
+    causal_market_sha256: Sha256Digest,
+    dispatch_sequence: int,
+    issuer: object,
+) -> ActiveMarketDispatchProof:
+    if (
+        type(run_id) is not RunId
+        or type(market_root) is not MarketDataEnvelope
+        or type(canonical_market_bytes) is not bytes
+        or type(causal_market_sha256) is not Sha256Digest
+        or type(dispatch_sequence) is not int
+        or dispatch_sequence < 1
+        or dispatch_sequence > (1 << 64) - 1
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "active market proof inputs are invalid")
+    value = object.__new__(ActiveMarketDispatchProof)
+    object.__setattr__(value, "_run_id", run_id)
+    object.__setattr__(value, "_market_root", market_root)
+    object.__setattr__(value, "_canonical_market_bytes", canonical_market_bytes)
+    object.__setattr__(value, "_causal_market_sha256", causal_market_sha256)
+    object.__setattr__(value, "_dispatch_sequence", dispatch_sequence)
+    object.__setattr__(value, "_issuer", issuer)
+    object.__setattr__(value, "_seal", _ACTIVE_MARKET_DISPATCH_PROOF_SEAL)
+    return value
+
+
+def _require_active_market_dispatch_proof(
+    proof: object,
+    *,
+    run_id: RunId,
+    market_root: MarketDataEnvelope,
+    canonical_market_bytes: bytes,
+    causal_market_sha256: Sha256Digest,
+    dispatch_sequence: int,
+    issuer: object,
+) -> ActiveMarketDispatchProof:
+    if type(proof) is not ActiveMarketDispatchProof:
+        raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier returned a non-exact proof")
+    try:
+        matches = (
+            proof._seal is _ACTIVE_MARKET_DISPATCH_PROOF_SEAL
+            and proof._issuer is issuer
+            and proof._run_id == run_id
+            and proof._market_root is market_root
+            and proof._canonical_market_bytes == canonical_market_bytes
+            and proof._causal_market_sha256 == causal_market_sha256
+            and proof._dispatch_sequence == dispatch_sequence
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "active market proof carriers are invalid") from error
+    if not matches:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "active market dispatch proof conflicts")
+    return proof
 
 
 def _require_utc_time(value: object, *, field_name: str) -> datetime:
