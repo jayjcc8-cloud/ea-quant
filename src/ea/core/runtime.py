@@ -147,15 +147,19 @@ def _require_active_market_dispatch_proof(
 ) -> ActiveMarketDispatchProof:
     if type(proof) is not ActiveMarketDispatchProof:
         raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier returned a non-exact proof")
-    if (
-        proof._seal is not _ACTIVE_MARKET_DISPATCH_PROOF_SEAL
-        or proof._issuer is not issuer
-        or proof._run_id != run_id
-        or proof._market_root is not market_root
-        or proof._canonical_market_bytes != canonical_market_bytes
-        or proof._causal_market_sha256 != causal_market_sha256
-        or proof._dispatch_sequence != dispatch_sequence
-    ):
+    try:
+        matches = (
+            proof._seal is _ACTIVE_MARKET_DISPATCH_PROOF_SEAL
+            and proof._issuer is issuer
+            and proof._run_id == run_id
+            and proof._market_root is market_root
+            and proof._canonical_market_bytes == canonical_market_bytes
+            and proof._causal_market_sha256 == causal_market_sha256
+            and proof._dispatch_sequence == dispatch_sequence
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "active market proof carriers are invalid") from error
+    if not matches:
         raise _fail(OutcomeCode.CONFLICTING_ID, "active market dispatch proof conflicts")
     return proof
 

@@ -7,12 +7,20 @@ import sys
 from pathlib import Path
 
 SCRIPT = r"""
+import decimal
 import json
 import os
 import sys
 from datetime import UTC, datetime
 
 sys.path.insert(0, os.environ["EA_STRATEGY_PLANNING_SOURCE_ROOT"])
+context = decimal.getcontext()
+if os.environ["EA_STRATEGY_PLANNING_TEST_NOISE"] == "first":
+    context.prec = 7
+    context.rounding = decimal.ROUND_DOWN
+else:
+    context.prec = 31
+    context.rounding = decimal.ROUND_CEILING
 
 from ea.core import (
     CanonicalDecimal,
@@ -75,20 +83,34 @@ dataset = decode_phase1_ohlcv_csv(
 source = create_phase1_historical_market_data_source(dataset)
 bridge = create_phase1_historical_market_source_bridge(source)
 instrument = Instrument(VenueId("XNAS"), "AAPL")
+other_instrument = Instrument(VenueId("XNAS"), "MSFT")
+specifications = [
+    InstrumentExecutionSpec(
+        instrument=instrument,
+        specification_id=InstrumentSpecId("xnas-aapl-cross.v1"),
+        price_quantum=CanonicalDecimal("0.01"),
+        quantity_quantum=CanonicalDecimal("1"),
+        settlement_currency=SettlementCurrency("USD"),
+        currency_quantum=CanonicalDecimal("0.01"),
+        contract_multiplier=CanonicalDecimal("1"),
+        price_domain=PriceDomain.POSITIVE,
+    ),
+    InstrumentExecutionSpec(
+        instrument=other_instrument,
+        specification_id=InstrumentSpecId("xnas-msft-cross.v1"),
+        price_quantum=CanonicalDecimal("0.01"),
+        quantity_quantum=CanonicalDecimal("1"),
+        settlement_currency=SettlementCurrency("USD"),
+        currency_quantum=CanonicalDecimal("0.01"),
+        contract_multiplier=CanonicalDecimal("1"),
+        price_domain=PriceDomain.POSITIVE,
+    ),
+]
+if os.environ["EA_STRATEGY_PLANNING_TEST_NOISE"] == "second":
+    specifications.reverse()
 spec_set = build_instrument_spec_set(
     InstrumentSpecSetId("strategy-planning-cross.v1"),
-    (
-        InstrumentExecutionSpec(
-            instrument=instrument,
-            specification_id=InstrumentSpecId("xnas-aapl-cross.v1"),
-            price_quantum=CanonicalDecimal("0.01"),
-            quantity_quantum=CanonicalDecimal("1"),
-            settlement_currency=SettlementCurrency("USD"),
-            currency_quantum=CanonicalDecimal("0.01"),
-            contract_multiplier=CanonicalDecimal("1"),
-            price_domain=PriceDomain.POSITIVE,
-        ),
-    ),
+    tuple(sorted(specifications, key=lambda item: item.instrument.key)),
 )
 run_id = RunId("12345678-1234-4234-8234-123456789abc")
 runtime = create_phase1_historical_market_runtime(
@@ -104,14 +126,21 @@ signal = signal_authority.issue(
     dispatch_sequence=lease.dispatch_sequence,
     direction=SignalDirection.LONG,
 )
+policy_entries = [
+    Phase1PortfolioPolicyEntry(
+        instrument=instrument,
+        target_quantity=CanonicalDecimal("10"),
+    ),
+    Phase1PortfolioPolicyEntry(
+        instrument=other_instrument,
+        target_quantity=CanonicalDecimal("20"),
+    ),
+]
+if os.environ["EA_STRATEGY_PLANNING_TEST_NOISE"] == "second":
+    policy_entries.reverse()
 policy = create_phase1_portfolio_policy(
     policy_id=PortfolioPolicyId("strategy-planning-cross.v1"),
-    entries=(
-        Phase1PortfolioPolicyEntry(
-            instrument=instrument,
-            target_quantity=CanonicalDecimal("10"),
-        ),
-    ),
+    entries=tuple(sorted(policy_entries, key=lambda item: item.instrument.key)),
     spec_set=spec_set,
 )
 ledger = create_portfolio_ledger(run_id=run_id, spec_set=spec_set)
@@ -199,10 +228,10 @@ def test_strategy_planning_evidence_is_cross_process_deterministic(tmp_path: Pat
         "047472e5c2c38366e2065d183abdfbe3f35ccf3d7c89de4eb4713a1b9b937477"
     )
     assert document["policy_sha256"] == (
-        "4fda9b58f7fdcd97e8ae83a9aced8ca404fcb302f97822fc110dea79a1e1babc"
+        "51795ed8be83e31d054619815accd1c3567dc101faa74f87c83a26eb8803c1a4"
     )
     assert document["result_sha256"] == (
-        "2eb4e42eb8c519b37526ecadb35718f6d15a5c05f8d6a64448ddc613076ad734"
+        "9795735b1f17ee347b3ba2e945b1809a4224e07f63f39cdc8fdeaf92898919ea"
     )
     assert document["signal_state_sha256"] == (
         "8e46407287f1ace3ebd56c6309f5acb188bc602da5debff78873c161d73d403b"

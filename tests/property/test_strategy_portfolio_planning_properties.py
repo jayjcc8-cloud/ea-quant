@@ -61,7 +61,7 @@ SPEC_SET = build_instrument_spec_set(
             instrument=INSTRUMENT,
             specification_id=InstrumentSpecId("xnas.aapl.property.v1"),
             price_quantum=CanonicalDecimal("0.01"),
-            quantity_quantum=CanonicalDecimal("1"),
+            quantity_quantum=CanonicalDecimal("0.1"),
             settlement_currency=SettlementCurrency("USD"),
             currency_quantum=CanonicalDecimal("0.01"),
             contract_multiplier=CanonicalDecimal("1"),
@@ -117,8 +117,15 @@ def _signal(direction: SignalDirection) -> StrategySignal:
     )
 
 
-def _position_fill(position: int) -> Fill:
-    side = OrderSide.BUY if position > 0 else OrderSide.SELL
+def _tenth_text(ticks: int) -> str:
+    sign = "-" if ticks < 0 else ""
+    absolute = abs(ticks)
+    whole, fractional = divmod(absolute, 10)
+    return f"{sign}{whole}" if fractional == 0 else f"{sign}{whole}.{fractional}"
+
+
+def _position_fill(position_ticks: int) -> Fill:
+    side = OrderSide.BUY if position_ticks > 0 else OrderSide.SELL
     order_id = _id(EconomicOwnerKind.EXECUTION_ORDER, 1)
     fact = create_trade_execution_fact(
         source_namespace=SourceNamespace("sim.property"),
@@ -131,7 +138,7 @@ def _position_fill(position: int) -> Fill:
         spec_set=SPEC_SET,
         instrument=INSTRUMENT,
         side=side,
-        quantity=CanonicalDecimal(str(abs(position))),
+        quantity=CanonicalDecimal(_tenth_text(abs(position_ticks))),
         price=CanonicalDecimal("100"),
         client_submission_key=Sha256Digest("4" * 64),
         venue_order_id=VenueOrderId("property-order"),
@@ -148,25 +155,25 @@ def _position_fill(position: int) -> Fill:
 
 @given(
     direction=st.sampled_from(tuple(SignalDirection)),
-    current=st.integers(min_value=-20, max_value=20),
-    target_quantity=st.integers(min_value=1, max_value=20),
+    current_ticks=st.integers(min_value=-200, max_value=200),
+    target_quantity_ticks=st.integers(min_value=1, max_value=200),
 )
 @settings(max_examples=90)
 def test_target_current_delta_has_exact_side_quantity_and_noop(
     direction: SignalDirection,
-    current: int,
-    target_quantity: int,
+    current_ticks: int,
+    target_quantity_ticks: int,
 ) -> None:
     signal = _signal(direction)
     ledger = create_portfolio_ledger(run_id=RUN_ID, spec_set=SPEC_SET)
-    if current != 0:
-        ledger.apply_fill(_position_fill(current))
+    if current_ticks != 0:
+        ledger.apply_fill(_position_fill(current_ticks))
     policy = create_phase1_portfolio_policy(
         policy_id=PortfolioPolicyId("phase1.strategy-planning-property.v1"),
         entries=(
             Phase1PortfolioPolicyEntry(
                 instrument=INSTRUMENT,
-                target_quantity=CanonicalDecimal(str(target_quantity)),
+                target_quantity=CanonicalDecimal(_tenth_text(target_quantity_ticks)),
             ),
         ),
         spec_set=SPEC_SET,
@@ -179,23 +186,23 @@ def test_target_current_delta_has_exact_side_quantity_and_noop(
         execution_policy=EXECUTION_POLICY,
     )
     result = authority.plan(signal)
-    expected_target = {
-        SignalDirection.LONG: target_quantity,
+    expected_target_ticks = {
+        SignalDirection.LONG: target_quantity_ticks,
         SignalDirection.FLAT: 0,
-        SignalDirection.SHORT: -target_quantity,
+        SignalDirection.SHORT: -target_quantity_ticks,
     }[direction]
-    expected_delta = expected_target - current
+    expected_delta_ticks = expected_target_ticks - current_ticks
 
-    assert result.target.target_position.coefficient == expected_target
-    assert result.outcome.delta.coefficient == expected_delta
-    if expected_delta == 0:
+    assert result.target.target_position.text == _tenth_text(expected_target_ticks)
+    assert result.outcome.delta.text == _tenth_text(expected_delta_ticks)
+    if expected_delta_ticks == 0:
         assert result.outcome.kind is PlanningOutcomeKind.ALREADY_AT_TARGET
         assert result.intent is None
     else:
         assert result.outcome.kind is PlanningOutcomeKind.INTENT_EMITTED
         assert result.intent is not None
-        assert result.intent.quantity.coefficient == abs(expected_delta)
-        assert result.intent.side is (OrderSide.BUY if expected_delta > 0 else OrderSide.SELL)
+        assert result.intent.quantity.text == _tenth_text(abs(expected_delta_ticks))
+        assert result.intent.side is (OrderSide.BUY if expected_delta_ticks > 0 else OrderSide.SELL)
     first_state = authority.state
     assert authority.plan(signal) is result
     assert authority.state is first_state

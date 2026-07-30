@@ -5,13 +5,16 @@ from __future__ import annotations
 from typing import final
 
 from ea.core.market_data import MarketDataEnvelope
-from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.outcomes import OutcomeCode
 from ea.core.runtime import (
     ActiveMarketDispatchProof,
+    RuntimeOrderingError,
     _create_active_market_dispatch_proof,
 )
-from ea.core.strategy import StrategyContractError, causal_market_digest
+from ea.core.strategy import (
+    StrategyContractError,
+    _causal_market_digest_from_canonical_bytes,
+)
 from ea.runtime.historical import Phase1HistoricalMarketRuntime
 
 
@@ -42,19 +45,28 @@ class _ActiveMarketDispatchVerifier:
             raise _fail(OutcomeCode.INVALID_TYPE, "dispatch sequence must be exact int")
         if dispatch_sequence < 1 or dispatch_sequence > (1 << 64) - 1:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch sequence must be positive uint64")
-        active = self._runtime.active_lease
-        if (
-            active is None
-            or active.root is not market_root
-            or active.dispatch_sequence != dispatch_sequence
-        ):
-            raise _fail(
-                OutcomeCode.CONFLICTING_ID,
-                "market root is not the exact active runtime dispatch",
-            )
         try:
-            market_bytes = canonical_market_data_record_bytes(market_root)
-            market_sha256 = causal_market_digest(market_root)
+            market_bytes = self._runtime._require_active_market_dispatch_bytes(
+                market_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+            market_sha256 = _causal_market_digest_from_canonical_bytes(market_bytes)
+            confirmed_bytes = self._runtime._require_active_market_dispatch_bytes(
+                market_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+        except RuntimeOrderingError as error:
+            code = (
+                error.code
+                if error.code
+                in {
+                    OutcomeCode.INVALID_TYPE,
+                    OutcomeCode.OUT_OF_RANGE,
+                    OutcomeCode.CONFLICTING_ID,
+                }
+                else OutcomeCode.INVALID_TYPE
+            )
+            raise _fail(code, "active market dispatch verification failed") from error
         except StrategyContractError:
             raise
         except (AttributeError, TypeError, ValueError) as error:
@@ -62,11 +74,7 @@ class _ActiveMarketDispatchVerifier:
                 OutcomeCode.INVALID_TYPE,
                 "active market root cannot be canonically encoded",
             ) from error
-        if (
-            self._runtime.active_lease is not active
-            or active.root is not market_root
-            or active.dispatch_sequence != dispatch_sequence
-        ):
+        if confirmed_bytes != market_bytes:
             raise _fail(OutcomeCode.CONFLICTING_ID, "active market dispatch changed")
         return _create_active_market_dispatch_proof(
             run_id=self._runtime.run_id,

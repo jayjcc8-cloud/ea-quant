@@ -54,14 +54,19 @@ from ea.core import (
     VenueId,
     VenueOrderId,
     build_instrument_spec_set,
+    canonical_order_intent_bytes,
     canonical_phase1_portfolio_policy_bytes,
+    canonical_planning_outcome_bytes,
     canonical_portfolio_planning_result_bytes,
+    canonical_portfolio_target_bytes,
     canonical_strategy_signal_authority_state_bytes,
     canonical_strategy_signal_bytes,
     create_fill,
     create_phase1_portfolio_policy,
     create_phase1_risk_policy,
     create_trade_execution_fact,
+    order_intent_digest,
+    phase1_portfolio_policy_digest,
     portfolio_planning_result_digest,
     strategy_signal_digest,
     validate_portfolio_planning_risk_handoff,
@@ -242,6 +247,13 @@ def _forge_signal(signal: StrategySignal, **changes: object) -> StrategySignal:
     return value
 
 
+def _forge_id(identity: EconomicId, **changes: object) -> EconomicId:
+    value = object.__new__(EconomicId)
+    for name in EconomicId.__slots__:
+        object.__setattr__(value, name, changes.get(name, getattr(identity, name)))
+    return value
+
+
 def test_signal_requires_exact_active_dispatch_and_replays_after_acknowledgement() -> None:
     spec_set = _spec_set()
     runtime = _runtime(spec_set)
@@ -387,6 +399,27 @@ def test_active_dispatch_verifier_rejects_unadmitted_foreign_run_and_stale_root(
     assert foreign_authority.state.issuance_count == 0
 
 
+def test_active_dispatch_rejects_post_pop_payload_mutation_without_publication() -> None:
+    spec_set = _spec_set()
+    runtime = _runtime(spec_set)
+    lease = runtime.pop()
+    root = cast(MarketDataEnvelope, lease.root)
+    authority = create_strategy_signal_authority(
+        run_id=RUN_ID,
+        verifier=create_active_market_dispatch_verifier(runtime),
+    )
+    before = authority.state
+    object.__setattr__(root.payload, "close", 100.75)
+    with pytest.raises(StrategyContractError) as changed:
+        authority.issue(
+            root,
+            dispatch_sequence=lease.dispatch_sequence,
+            direction=SignalDirection.LONG,
+        )
+    assert changed.value.code is OutcomeCode.CONFLICTING_ID
+    assert authority.state is before
+
+
 def test_signal_rejects_foreign_proof_and_malformed_carrier_without_mutation() -> None:
     spec_set = _spec_set()
     runtime = _runtime(spec_set)
@@ -427,6 +460,69 @@ def test_signal_rejects_foreign_proof_and_malformed_carrier_without_mutation() -
     assert authority.state is before
 
 
+def test_structural_verifier_cannot_mint_an_unsealed_exact_proof() -> None:
+    spec_set = _spec_set()
+    runtime = _runtime(spec_set)
+    lease = runtime.pop()
+    root = cast(MarketDataEnvelope, lease.root)
+
+    class MintingVerifier:
+        def verify_active_market_dispatch(
+            self,
+            market_root: MarketDataEnvelope,
+            *,
+            dispatch_sequence: int,
+        ) -> ActiveMarketDispatchProof:
+            return object.__new__(ActiveMarketDispatchProof)
+
+    authority = create_strategy_signal_authority(
+        run_id=RUN_ID,
+        verifier=MintingVerifier(),
+    )
+    before = authority.state
+    with pytest.raises(StrategyContractError) as unsealed:
+        authority.issue(
+            root,
+            dispatch_sequence=lease.dispatch_sequence,
+            direction=SignalDirection.LONG,
+        )
+    assert unsealed.value.code is OutcomeCode.INVALID_TYPE
+    assert authority.state is before
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected_code"),
+    [
+        ({"owner_sequence": 0}, OutcomeCode.OUT_OF_RANGE),
+        ({"owner_sequence": (1 << 64)}, OutcomeCode.OUT_OF_RANGE),
+        ({"owner_sequence": True}, OutcomeCode.INVALID_TYPE),
+        ({"owner_kind": EconomicOwnerKind.PORTFOLIO_TARGET}, OutcomeCode.CONFLICTING_ID),
+        ({"run_id": OTHER_RUN_ID}, OutcomeCode.CONFLICTING_ID),
+    ],
+)
+def test_signal_canonical_boundary_revalidates_nested_identity(
+    changes: dict[str, object],
+    expected_code: OutcomeCode,
+) -> None:
+    _, _, _, signal = _signal()
+    changed = _forge_signal(signal, signal_id=_forge_id(signal.signal_id, **changes))
+    with pytest.raises(StrategyContractError) as invalid:
+        canonical_strategy_signal_bytes(changed)
+    assert invalid.value.code is expected_code
+
+
+def test_signal_nested_identity_accepts_exact_uint64_max() -> None:
+    _, _, _, signal = _signal()
+    changed = _forge_signal(
+        signal,
+        signal_id=_forge_id(signal.signal_id, owner_sequence=(1 << 64) - 1),
+    )
+    assert (
+        json.loads(canonical_strategy_signal_bytes(changed))["signal_id"]["owner_sequence"]
+        == (1 << 64) - 1
+    )
+
+
 def test_signal_and_policy_have_closed_canonical_documents_and_factory_seals() -> None:
     spec_set = _spec_set()
     _, _, _, signal = _signal(spec_set=spec_set)
@@ -463,6 +559,12 @@ def test_signal_and_policy_have_closed_canonical_documents_and_factory_seals() -
             factory_only()
     with pytest.raises(FrozenInstanceError):
         cast(Any, policy).entries = ()
+    with pytest.raises(PortfolioPlanningError) as forged_target:
+        canonical_portfolio_target_bytes(object.__new__(PortfolioTarget))
+    assert forged_target.value.code is OutcomeCode.INVALID_TYPE
+    with pytest.raises(PortfolioPlanningError) as forged_result:
+        canonical_portfolio_planning_result_bytes(object.__new__(PortfolioPlanningResult))
+    assert forged_result.value.code is OutcomeCode.INVALID_TYPE
     object.__setattr__(
         policy.entries[0],
         "target_quantity",
@@ -574,6 +676,100 @@ def test_planning_conflict_halts_and_malformed_signal_does_not() -> None:
     first_conflict = planner.state.conflict
     assert planner.plan(signal) is result
     assert planner.state.conflict is first_conflict
+
+
+def test_planner_owns_policy_projection_after_binding() -> None:
+    spec_set = _spec_set()
+    _, _, _, signal = _signal(spec_set=spec_set)
+    policy = _policy(spec_set, target="10")
+    ledger = create_portfolio_ledger(run_id=RUN_ID, spec_set=spec_set)
+    planner = create_portfolio_planning_authority(
+        run_id=RUN_ID,
+        ledger=ledger,
+        spec_set=spec_set,
+        policy=policy,
+        execution_policy=EXECUTION_POLICY,
+    )
+    retained_policy_sha256 = phase1_portfolio_policy_digest(policy)
+    object.__setattr__(
+        policy.entries[0],
+        "target_quantity",
+        CanonicalDecimal("20"),
+    )
+    result = planner.plan(signal)
+    assert phase1_portfolio_policy_digest(policy) != retained_policy_sha256
+    assert result.target.portfolio_policy_sha256 == retained_policy_sha256
+    assert result.target.target_position.text == "10"
+    assert result.intent is not None
+    assert result.intent.quantity.text == "10"
+
+
+def test_target_outcome_result_and_handoff_revalidate_nested_identity() -> None:
+    spec_set = _spec_set()
+    _, _, _, signal = _signal(spec_set=spec_set)
+    _, planner = _ledger_and_planner(spec_set)
+    result = planner.plan(signal)
+    assert result.intent is not None
+    invalid_target_id = _forge_id(
+        result.target.target_id,
+        owner_sequence=(1 << 64),
+    )
+    object.__setattr__(result.target, "target_id", invalid_target_id)
+    with pytest.raises(PortfolioPlanningError) as target_invalid:
+        canonical_portfolio_target_bytes(result.target)
+    assert target_invalid.value.code is OutcomeCode.OUT_OF_RANGE
+
+    object.__setattr__(result.outcome, "target_id", invalid_target_id)
+    with pytest.raises(PortfolioPlanningError) as outcome_invalid:
+        canonical_planning_outcome_bytes(result.outcome)
+    assert outcome_invalid.value.code is OutcomeCode.OUT_OF_RANGE
+    with pytest.raises(PortfolioPlanningError) as result_invalid:
+        canonical_portfolio_planning_result_bytes(result)
+    assert result_invalid.value.code is OutcomeCode.OUT_OF_RANGE
+    with pytest.raises(PortfolioPlanningError) as handoff_invalid:
+        validate_portfolio_planning_risk_handoff(
+            result,
+            intent=result.intent,
+            portfolio_snapshot=result.portfolio_snapshot,
+        )
+    assert handoff_invalid.value.code is OutcomeCode.OUT_OF_RANGE
+
+
+@pytest.mark.parametrize("mutation", ["side", "quantity"])
+def test_risk_handoff_rejects_coordinated_intent_outcome_payload_mutation(
+    mutation: str,
+) -> None:
+    spec_set = _spec_set()
+    _, _, _, signal = _signal(spec_set=spec_set)
+    _, planner = _ledger_and_planner(spec_set)
+    result = planner.plan(signal)
+    intent = result.intent
+    assert intent is not None
+    if mutation == "side":
+        object.__setattr__(intent, "side", OrderSide.SELL)
+    else:
+        object.__setattr__(intent, "quantity", CanonicalDecimal("9"))
+    object.__setattr__(result.outcome, "intent_sha256", order_intent_digest(intent))
+    with pytest.raises(PortfolioPlanningError) as canonical_failure:
+        canonical_portfolio_planning_result_bytes(result)
+    assert canonical_failure.value.code is OutcomeCode.CONFLICTING_ID
+    object.__setattr__(result, "_intent_bytes", canonical_order_intent_bytes(intent))
+    object.__setattr__(
+        result,
+        "_outcome_bytes",
+        canonical_planning_outcome_bytes(result.outcome),
+    )
+    with pytest.raises(PortfolioPlanningError) as economic_coupling_failure:
+        canonical_portfolio_planning_result_bytes(result)
+    assert economic_coupling_failure.value.code is OutcomeCode.CONFLICTING_ID
+    assert str(economic_coupling_failure.value) == "planning result intent coupling conflicts"
+    with pytest.raises(PortfolioPlanningError) as handoff_failure:
+        validate_portfolio_planning_risk_handoff(
+            result,
+            intent=intent,
+            portfolio_snapshot=result.portfolio_snapshot,
+        )
+    assert handoff_failure.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_planning_non_monotone_new_signal_halts_and_retains_exact_replays() -> None:

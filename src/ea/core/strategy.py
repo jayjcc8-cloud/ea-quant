@@ -176,9 +176,29 @@ def _digest(domain: bytes, payload: bytes) -> Sha256Digest:
     return Sha256Digest(sha256(domain + payload).hexdigest())
 
 
-def _economic_id_document(identity: EconomicId) -> dict[str, object]:
+def _validate_economic_id(
+    identity: EconomicId,
+    *,
+    field_name: str,
+    expected_owner: EconomicOwnerKind | None = None,
+    expected_run: RunId | None = None,
+) -> None:
     if type(identity) is not EconomicId:
-        raise _fail(OutcomeCode.INVALID_TYPE, "economic ID must be exact")
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} must be an exact EconomicId")
+    if type(identity.run_id) is not RunId or type(identity.owner_kind) is not EconomicOwnerKind:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            f"{field_name} nested identity carriers must be exact",
+        )
+    _require_positive_uint64(identity.owner_sequence, field_name=f"{field_name}.owner_sequence")
+    if expected_owner is not None and identity.owner_kind is not expected_owner:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field_name} owner kind conflicts")
+    if expected_run is not None and identity.run_id != expected_run:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field_name} run conflicts")
+
+
+def _economic_id_document(identity: EconomicId) -> dict[str, object]:
+    _validate_economic_id(identity, field_name="economic ID")
     return {
         "owner_kind": identity.owner_kind.value,
         "owner_sequence": identity.owner_sequence,
@@ -218,6 +238,12 @@ def causal_market_digest(market_root: MarketDataEnvelope) -> Sha256Digest:
             OutcomeCode.INVALID_TYPE,
             "market root cannot be canonically encoded",
         ) from error
+    return _causal_market_digest_from_canonical_bytes(payload)
+
+
+def _causal_market_digest_from_canonical_bytes(payload: bytes) -> Sha256Digest:
+    if type(payload) is not bytes:
+        raise _fail(OutcomeCode.INVALID_TYPE, "canonical market bytes must be exact")
     return _digest(
         STRATEGY_CAUSAL_MARKET_DIGEST_DOMAIN,
         len(payload).to_bytes(8, "big") + payload,
@@ -261,14 +287,12 @@ def _validate_signal(signal: StrategySignal) -> None:
         raise _fail(OutcomeCode.INVALID_TYPE, "signal run_id must be exact")
     if signal._seal is not _STRATEGY_SIGNAL_SEAL:
         raise _fail(OutcomeCode.INVALID_TYPE, "signal is not factory-issued")
-    if type(signal.signal_id) is not EconomicId:
-        raise _fail(OutcomeCode.INVALID_TYPE, "signal ID must be exact")
-    if (
-        signal.signal_id.owner_kind is not EconomicOwnerKind.STRATEGY_SIGNAL
-        or signal.signal_id.run_id != signal.run_id
-        or signal.signal_id.owner_sequence < 1
-    ):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "signal identity lineage conflicts")
+    _validate_economic_id(
+        signal.signal_id,
+        field_name="signal ID",
+        expected_owner=EconomicOwnerKind.STRATEGY_SIGNAL,
+        expected_run=signal.run_id,
+    )
     if type(signal.instrument) is not Instrument:
         raise _fail(OutcomeCode.INVALID_TYPE, "signal instrument must be exact")
     if type(signal.direction) is not SignalDirection:
@@ -377,11 +401,13 @@ def _validate_conflict(value: AuthorityConflictEvidence) -> None:
         value.last_new_dispatch_sequence,
         field_name="last_new_dispatch_sequence",
     )
-    if value.occupied_owner_id is not None and (
-        type(value.occupied_owner_id) is not EconomicId
-        or value.occupied_owner_id.run_id != value.run_id
-    ):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "occupied owner identity conflicts")
+    if value.occupied_owner_id is not None:
+        _validate_economic_id(
+            value.occupied_owner_id,
+            field_name="occupied owner ID",
+            expected_owner=EconomicOwnerKind.STRATEGY_SIGNAL,
+            expected_run=value.run_id,
+        )
     if value.existing_sha256 is not None and type(value.existing_sha256) is not Sha256Digest:
         raise _fail(OutcomeCode.INVALID_TYPE, "existing digest must be exact or None")
     occupied = value.occupied_owner_id is not None

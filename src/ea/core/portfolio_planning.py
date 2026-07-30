@@ -25,6 +25,7 @@ from ea.core.execution import (
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind
 from ea.core.execution_messages import (
     OrderIntent,
+    OrderSide,
     canonical_order_intent_bytes,
     order_intent_digest,
 )
@@ -204,6 +205,12 @@ class PortfolioPlanningResult:
     portfolio_snapshot: PortfolioSnapshot
     outcome: PlanningOutcome
     intent: OrderIntent | None
+    _signal_bytes: bytes = field(repr=False, compare=False)
+    _target_bytes: bytes = field(repr=False, compare=False)
+    _portfolio_snapshot_bytes: bytes = field(repr=False, compare=False)
+    _outcome_bytes: bytes = field(repr=False, compare=False)
+    _intent_bytes: bytes | None = field(repr=False, compare=False)
+    _canonical_bytes: bytes = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
     def __init__(self) -> None:
@@ -262,6 +269,27 @@ def _require_non_negative_uint64(value: object, *, field_name: str) -> int:
     return value
 
 
+def _validate_planning_id(
+    identity: EconomicId,
+    *,
+    field_name: str,
+    expected_owner: EconomicOwnerKind | None = None,
+    expected_run: RunId | None = None,
+) -> None:
+    if type(identity) is not EconomicId:
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} must be an exact EconomicId")
+    if type(identity.run_id) is not RunId or type(identity.owner_kind) is not EconomicOwnerKind:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            f"{field_name} nested identity carriers must be exact",
+        )
+    _require_positive_uint64(identity.owner_sequence, field_name=f"{field_name}.owner_sequence")
+    if expected_owner is not None and identity.owner_kind is not expected_owner:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field_name} owner kind conflicts")
+    if expected_run is not None and identity.run_id != expected_run:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field_name} run conflicts")
+
+
 def _encode_json(value: object) -> bytes:
     try:
         return json.dumps(
@@ -292,8 +320,7 @@ def _digest(domain: bytes, payload: bytes) -> Sha256Digest:
 
 
 def _economic_id_document(identity: EconomicId) -> dict[str, object]:
-    if type(identity) is not EconomicId:
-        raise _fail(OutcomeCode.INVALID_TYPE, "economic ID must be exact")
+    _validate_planning_id(identity, field_name="economic ID")
     return {
         "owner_kind": identity.owner_kind.value,
         "owner_sequence": identity.owner_sequence,
@@ -457,23 +484,29 @@ def _create_portfolio_target(
 def _validate_target(target: PortfolioTarget) -> None:
     if type(target) is not PortfolioTarget:
         raise _fail(OutcomeCode.INVALID_TYPE, "portfolio target must be exact")
-    if type(target.run_id) is not RunId or type(target.target_id) is not EconomicId:
+    if type(target.run_id) is not RunId:
         raise _fail(OutcomeCode.INVALID_TYPE, "target identity carriers must be exact")
     if target._seal is not _PORTFOLIO_TARGET_SEAL:
         raise _fail(OutcomeCode.INVALID_TYPE, "portfolio target is not factory-issued")
-    if (
-        target.target_id.owner_kind is not EconomicOwnerKind.PORTFOLIO_TARGET
-        or target.target_id.run_id != target.run_id
-        or target.target_id.owner_sequence < 1
-    ):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "target identity lineage conflicts")
-    if (
-        type(target.correlation_id) is not EconomicId
-        or type(target.causation_id) is not EconomicId
-        or target.correlation_id != target.causation_id
-        or target.correlation_id.owner_kind is not EconomicOwnerKind.STRATEGY_SIGNAL
-        or target.correlation_id.run_id != target.run_id
-    ):
+    _validate_planning_id(
+        target.target_id,
+        field_name="target ID",
+        expected_owner=EconomicOwnerKind.PORTFOLIO_TARGET,
+        expected_run=target.run_id,
+    )
+    _validate_planning_id(
+        target.correlation_id,
+        field_name="target correlation ID",
+        expected_owner=EconomicOwnerKind.STRATEGY_SIGNAL,
+        expected_run=target.run_id,
+    )
+    _validate_planning_id(
+        target.causation_id,
+        field_name="target causation ID",
+        expected_owner=EconomicOwnerKind.STRATEGY_SIGNAL,
+        expected_run=target.run_id,
+    )
+    if target.correlation_id != target.causation_id:
         raise _fail(OutcomeCode.CONFLICTING_ID, "target signal lineage conflicts")
     if any(
         type(value) is not Sha256Digest
@@ -591,8 +624,6 @@ def _validate_outcome(outcome: PlanningOutcome) -> None:
         raise _fail(OutcomeCode.INVALID_TYPE, "planning outcome must be exact")
     if (
         type(outcome.run_id) is not RunId
-        or type(outcome.target_id) is not EconomicId
-        or type(outcome.signal_id) is not EconomicId
         or type(outcome.portfolio_policy_id) is not PortfolioPolicyId
         or type(outcome.kind) is not PlanningOutcomeKind
         or type(outcome.delta) is not CanonicalDecimal
@@ -600,13 +631,18 @@ def _validate_outcome(outcome: PlanningOutcome) -> None:
         raise _fail(OutcomeCode.INVALID_TYPE, "planning outcome carriers must be exact")
     if outcome._seal is not _PLANNING_OUTCOME_SEAL:
         raise _fail(OutcomeCode.INVALID_TYPE, "planning outcome is not factory-issued")
-    if (
-        outcome.target_id.owner_kind is not EconomicOwnerKind.PORTFOLIO_TARGET
-        or outcome.signal_id.owner_kind is not EconomicOwnerKind.STRATEGY_SIGNAL
-        or outcome.target_id.run_id != outcome.run_id
-        or outcome.signal_id.run_id != outcome.run_id
-    ):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "planning outcome identity lineage conflicts")
+    _validate_planning_id(
+        outcome.target_id,
+        field_name="outcome target ID",
+        expected_owner=EconomicOwnerKind.PORTFOLIO_TARGET,
+        expected_run=outcome.run_id,
+    )
+    _validate_planning_id(
+        outcome.signal_id,
+        field_name="outcome signal ID",
+        expected_owner=EconomicOwnerKind.STRATEGY_SIGNAL,
+        expected_run=outcome.run_id,
+    )
     if any(
         type(value) is not Sha256Digest
         for value in (
@@ -626,15 +662,17 @@ def _validate_outcome(outcome: PlanningOutcome) -> None:
     _require_optional_positive_uint64(outcome.intent_next_before, field_name="intent_next_before")
     _require_optional_positive_uint64(outcome.intent_next_after, field_name="intent_next_after")
     has_intent = outcome.intent_id is not None or outcome.intent_sha256 is not None
-    if has_intent and (
-        type(outcome.intent_id) is not EconomicId
-        or outcome.intent_id.owner_kind is not EconomicOwnerKind.PORTFOLIO_INTENT
-        or outcome.intent_id.run_id != outcome.run_id
-        or type(outcome.intent_sha256) is not Sha256Digest
-    ):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "planning intent evidence conflicts")
     if (outcome.intent_id is None) is not (outcome.intent_sha256 is None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "planning intent fields must coexist")
+    if has_intent:
+        if outcome.intent_id is None or type(outcome.intent_sha256) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "planning intent evidence carriers are invalid")
+        _validate_planning_id(
+            outcome.intent_id,
+            field_name="outcome intent ID",
+            expected_owner=EconomicOwnerKind.PORTFOLIO_INTENT,
+            expected_run=outcome.run_id,
+        )
     if outcome.kind is PlanningOutcomeKind.INTENT_EMITTED:
         if not has_intent or outcome.delta.coefficient == 0:
             raise _fail(OutcomeCode.CONFLICTING_ID, "emitted outcome coupling conflicts")
@@ -707,14 +745,26 @@ def _create_portfolio_planning_result(
     outcome: PlanningOutcome,
     intent: OrderIntent | None,
 ) -> PortfolioPlanningResult:
+    signal_bytes = canonical_strategy_signal_bytes(signal)
+    target_bytes = canonical_portfolio_target_bytes(target)
+    snapshot_bytes = canonical_portfolio_snapshot_bytes(portfolio_snapshot)
+    outcome_bytes = canonical_planning_outcome_bytes(outcome)
+    intent_bytes = None if intent is None else canonical_order_intent_bytes(intent)
     value = object.__new__(PortfolioPlanningResult)
     object.__setattr__(value, "signal", signal)
     object.__setattr__(value, "target", target)
     object.__setattr__(value, "portfolio_snapshot", portfolio_snapshot)
     object.__setattr__(value, "outcome", outcome)
     object.__setattr__(value, "intent", intent)
+    object.__setattr__(value, "_signal_bytes", signal_bytes)
+    object.__setattr__(value, "_target_bytes", target_bytes)
+    object.__setattr__(value, "_portfolio_snapshot_bytes", snapshot_bytes)
+    object.__setattr__(value, "_outcome_bytes", outcome_bytes)
+    object.__setattr__(value, "_intent_bytes", intent_bytes)
+    object.__setattr__(value, "_canonical_bytes", b"")
     object.__setattr__(value, "_seal", _PLANNING_RESULT_SEAL)
-    canonical_portfolio_planning_result_bytes(value)
+    canonical_bytes = _encode_json(_result_document(value))
+    object.__setattr__(value, "_canonical_bytes", canonical_bytes)
     return value
 
 
@@ -731,10 +781,52 @@ def _result_document(result: PortfolioPlanningResult) -> dict[str, object]:
         raise _fail(OutcomeCode.INVALID_TYPE, "planning result carriers must be exact")
     if result._seal is not _PLANNING_RESULT_SEAL:
         raise _fail(OutcomeCode.INVALID_TYPE, "planning result is not factory-issued")
+    if result.intent is not None:
+        _validate_planning_id(
+            result.intent.intent_id,
+            field_name="result intent ID",
+            expected_owner=EconomicOwnerKind.PORTFOLIO_INTENT,
+            expected_run=result.signal.run_id,
+        )
+        _validate_planning_id(
+            result.intent.correlation_id,
+            field_name="result intent correlation ID",
+            expected_owner=EconomicOwnerKind.STRATEGY_SIGNAL,
+            expected_run=result.signal.run_id,
+        )
+        _validate_planning_id(
+            result.intent.causation_id,
+            field_name="result intent causation ID",
+            expected_owner=EconomicOwnerKind.PORTFOLIO_TARGET,
+            expected_run=result.signal.run_id,
+        )
+        _validate_planning_id(
+            result.intent.target_lineage.target_id,
+            field_name="result intent target-lineage ID",
+            expected_owner=EconomicOwnerKind.PORTFOLIO_TARGET,
+            expected_run=result.signal.run_id,
+        )
     signal_bytes = canonical_strategy_signal_bytes(result.signal)
     target_bytes = canonical_portfolio_target_bytes(result.target)
     snapshot_bytes = canonical_portfolio_snapshot_bytes(result.portfolio_snapshot)
     outcome_bytes = canonical_planning_outcome_bytes(result.outcome)
+    intent_bytes = None if result.intent is None else canonical_order_intent_bytes(result.intent)
+    if (
+        type(result._signal_bytes) is not bytes
+        or type(result._target_bytes) is not bytes
+        or type(result._portfolio_snapshot_bytes) is not bytes
+        or type(result._outcome_bytes) is not bytes
+        or (result._intent_bytes is not None and type(result._intent_bytes) is not bytes)
+        or signal_bytes != result._signal_bytes
+        or target_bytes != result._target_bytes
+        or snapshot_bytes != result._portfolio_snapshot_bytes
+        or outcome_bytes != result._outcome_bytes
+        or intent_bytes != result._intent_bytes
+    ):
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "planning result retained canonical evidence conflicts",
+        )
     current_position = CanonicalDecimal("0")
     for balance in result.portfolio_snapshot.position_balances:
         if balance.instrument == result.signal.instrument:
@@ -792,10 +884,14 @@ def _result_document(result: PortfolioPlanningResult) -> dict[str, object]:
             raise _fail(OutcomeCode.CONFLICTING_ID, "emitted result requires intent")
         intent_document = None
     else:
+        expected_side = OrderSide.BUY if result.outcome.delta.coefficient > 0 else OrderSide.SELL
         if (
             result.outcome.kind is not PlanningOutcomeKind.INTENT_EMITTED
             or result.outcome.intent_id != result.intent.intent_id
             or result.outcome.intent_sha256 != order_intent_digest(result.intent)
+            or result.intent.side is not expected_side
+            or result.intent.quantity.coefficient != abs(result.outcome.delta.coefficient)
+            or result.intent.quantity.scale != result.outcome.delta.scale
             or result.intent.run_id != result.signal.run_id
             or result.intent.correlation_id != result.signal.signal_id
             or result.intent.causation_id != result.target.target_id
@@ -829,7 +925,13 @@ def _result_document(result: PortfolioPlanningResult) -> dict[str, object]:
 
 def canonical_portfolio_planning_result_bytes(result: PortfolioPlanningResult) -> bytes:
     try:
-        return _encode_json(_result_document(result))
+        current = _encode_json(_result_document(result))
+        if type(result._canonical_bytes) is not bytes or current != result._canonical_bytes:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "planning result canonical baseline conflicts",
+            )
+        return current
     except PortfolioPlanningError:
         raise
     except (AttributeError, TypeError, ValueError) as error:

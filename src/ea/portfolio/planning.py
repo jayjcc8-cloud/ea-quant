@@ -42,15 +42,18 @@ from ea.core.portfolio_planning import (
     PortfolioPlanningAuthorityState,
     PortfolioPlanningError,
     PortfolioPlanningResult,
+    PortfolioPolicyId,
     _create_planning_outcome,
     _create_portfolio_planning_authority_state,
     _create_portfolio_planning_result,
     _create_portfolio_target,
+    _validate_planning_id,
     canonical_phase1_portfolio_policy_bytes,
     canonical_planning_outcome_bytes,
     canonical_portfolio_planning_authority_state_bytes,
     canonical_portfolio_planning_result_bytes,
     canonical_portfolio_target_bytes,
+    create_phase1_portfolio_policy,
     phase1_portfolio_policy_digest,
     planning_outcome_digest,
     portfolio_planning_authority_state_digest,
@@ -170,6 +173,7 @@ class PortfolioPlanningAuthority:
         "_execution_policy",
         "_ledger",
         "_policy",
+        "_policy_bytes",
         "_policy_sha256",
         "_run_id",
         "_spec_by_instrument",
@@ -183,6 +187,7 @@ class PortfolioPlanningAuthority:
     _spec_set: InstrumentExecutionSpecSet
     _spec_set_sha256: Sha256Digest
     _policy: Phase1PortfolioPolicy
+    _policy_bytes: bytes
     _policy_sha256: Sha256Digest
     _execution_policy: ExecutionPolicyRef
     _entry_by_instrument: MappingProxyType[Instrument, Phase1PortfolioPolicyEntry]
@@ -200,8 +205,12 @@ class PortfolioPlanningAuthority:
         return self._state.public
 
     def lookup_by_signal_id(self, signal_id: EconomicId) -> PortfolioPlanningResult | None:
-        if type(signal_id) is not EconomicId:
-            raise _fail(OutcomeCode.INVALID_TYPE, "signal ID must be exact")
+        _validate_planning_id(
+            signal_id,
+            field_name="lookup signal ID",
+            expected_owner=EconomicOwnerKind.STRATEGY_SIGNAL,
+            expected_run=self._run_id,
+        )
         record = self._state.replay_by_signal_id.get(signal_id)
         return None if record is None else record.result
 
@@ -244,6 +253,21 @@ class PortfolioPlanningAuthority:
         specification = self._spec_by_instrument.get(signal.instrument)
         if entry is None or specification is None:
             raise _fail(OutcomeCode.CONFLICTING_ID, "signal instrument is not in policy/spec set")
+        try:
+            current_policy_bytes = canonical_phase1_portfolio_policy_bytes(self._policy)
+            current_policy_sha256 = phase1_portfolio_policy_digest(self._policy)
+        except PortfolioPlanningError:
+            raise
+        except Exception as error:
+            raise _fail(
+                OutcomeCode.INVALID_TYPE,
+                "bound portfolio policy validation failed",
+            ) from error
+        if (
+            current_policy_bytes != self._policy_bytes
+            or current_policy_sha256 != self._policy_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "bound portfolio policy changed")
         target_next = state.public.target_next
         if target_next is None:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "portfolio target sequence is exhausted")
@@ -526,8 +550,32 @@ def create_portfolio_planning_authority(
         or policy.instrument_spec_set_sha256 != spec_sha256
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "policy and specification set conflict")
-    canonical_phase1_portfolio_policy_bytes(policy)
-    policy_sha256 = phase1_portfolio_policy_digest(policy)
+    original_policy_bytes = canonical_phase1_portfolio_policy_bytes(policy)
+    original_policy_sha256 = phase1_portfolio_policy_digest(policy)
+    try:
+        copied_entries = tuple(
+            Phase1PortfolioPolicyEntry(
+                instrument=spec_set.require(entry.instrument).instrument,
+                target_quantity=CanonicalDecimal(entry.target_quantity.text),
+            )
+            for entry in policy.entries
+        )
+        retained_policy = create_phase1_portfolio_policy(
+            policy_id=PortfolioPolicyId(policy.policy_id.value),
+            entries=copied_entries,
+            spec_set=spec_set,
+        )
+        policy_bytes = canonical_phase1_portfolio_policy_bytes(retained_policy)
+        policy_sha256 = phase1_portfolio_policy_digest(retained_policy)
+    except (PortfolioPlanningError, EconomicValidationError) as error:
+        _raise_structural(error)
+    except Exception as error:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "retained portfolio policy construction failed",
+        ) from error
+    if policy_bytes != original_policy_bytes or policy_sha256 != original_policy_sha256:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "retained portfolio policy copy conflicts")
     try:
         snapshot = ledger.snapshot
         canonical_portfolio_snapshot_bytes(snapshot)
@@ -544,7 +592,7 @@ def create_portfolio_planning_authority(
         or type(snapshot_sha256) is not Sha256Digest
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "ledger binding conflicts")
-    entry_by_instrument = {entry.instrument: entry for entry in policy.entries}
+    entry_by_instrument = {entry.instrument: entry for entry in retained_policy.entries}
     spec_by_instrument: dict[Instrument, InstrumentExecutionSpec] = {
         specification.instrument: specification for specification in spec_set.specifications
     }
@@ -562,7 +610,8 @@ def create_portfolio_planning_authority(
     value._ledger = ledger
     value._spec_set = spec_set
     value._spec_set_sha256 = spec_sha256
-    value._policy = policy
+    value._policy = retained_policy
+    value._policy_bytes = policy_bytes
     value._policy_sha256 = policy_sha256
     value._execution_policy = execution_policy
     value._entry_by_instrument = MappingProxyType(entry_by_instrument)
