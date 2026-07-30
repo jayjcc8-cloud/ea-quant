@@ -14,11 +14,17 @@ from ea.core.economics import (
 from ea.core.execution import (
     InstrumentExecutionSpec,
     InstrumentExecutionSpecSet,
+    InstrumentSpecId,
+    InstrumentSpecSetId,
+    SettlementCurrency,
+    build_instrument_spec_set,
+    canonical_instrument_spec_set_bytes,
     instrument_spec_set_digest,
 )
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind
 from ea.core.execution_messages import (
     ExecutionMessageError,
+    ExecutionPolicyId,
     ExecutionPolicyRef,
     OrderIntent,
     OrderSide,
@@ -27,7 +33,7 @@ from ea.core.execution_messages import (
     create_order_intent,
     order_intent_digest,
 )
-from ea.core.identity import Instrument
+from ea.core.identity import Instrument, VenueId
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import (
     PortfolioLedgerError,
@@ -171,6 +177,8 @@ class PortfolioPlanningAuthority:
     __slots__ = (
         "_entry_by_instrument",
         "_execution_policy",
+        "_execution_policy_identifier_value",
+        "_execution_policy_sha256_value",
         "_ledger",
         "_policy",
         "_policy_bytes",
@@ -178,6 +186,7 @@ class PortfolioPlanningAuthority:
         "_run_id",
         "_spec_by_instrument",
         "_spec_set",
+        "_spec_set_bytes",
         "_spec_set_sha256",
         "_state",
     )
@@ -185,11 +194,14 @@ class PortfolioPlanningAuthority:
     _run_id: RunId
     _ledger: PortfolioLedger
     _spec_set: InstrumentExecutionSpecSet
+    _spec_set_bytes: bytes
     _spec_set_sha256: Sha256Digest
     _policy: Phase1PortfolioPolicy
     _policy_bytes: bytes
     _policy_sha256: Sha256Digest
     _execution_policy: ExecutionPolicyRef
+    _execution_policy_identifier_value: str
+    _execution_policy_sha256_value: str
     _entry_by_instrument: MappingProxyType[Instrument, Phase1PortfolioPolicyEntry]
     _spec_by_instrument: MappingProxyType[Instrument, InstrumentExecutionSpec]
     _state: _AuthorityState
@@ -268,6 +280,32 @@ class PortfolioPlanningAuthority:
             or current_policy_sha256 != self._policy_sha256
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "bound portfolio policy changed")
+        try:
+            current_spec_set_bytes = canonical_instrument_spec_set_bytes(self._spec_set)
+            current_spec_set_sha256 = instrument_spec_set_digest(self._spec_set)
+            execution_policy = self._execution_policy
+            current_execution_policy = ExecutionPolicyRef(
+                ExecutionPolicyId(execution_policy.identifier.value),
+                Sha256Digest(execution_policy.sha256.value),
+            )
+        except (EconomicValidationError, ExecutionMessageError) as error:
+            _raise_structural(error)
+        except Exception as error:
+            raise _fail(
+                OutcomeCode.INVALID_TYPE,
+                "bound specification or execution policy validation failed",
+            ) from error
+        if (
+            current_spec_set_bytes != self._spec_set_bytes
+            or current_spec_set_sha256 != self._spec_set_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "bound specification set changed")
+        if (
+            current_execution_policy != execution_policy
+            or execution_policy.identifier.value != self._execution_policy_identifier_value
+            or execution_policy.sha256.value != self._execution_policy_sha256_value
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "bound execution policy changed")
         target_next = state.public.target_next
         if target_next is None:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "portfolio target sequence is exhausted")
@@ -544,6 +582,7 @@ def create_portfolio_planning_authority(
         raise _fail(OutcomeCode.INVALID_TYPE, "policy must be exact")
     if type(execution_policy) is not ExecutionPolicyRef:
         raise _fail(OutcomeCode.INVALID_TYPE, "execution_policy must be exact")
+    original_spec_set_bytes = canonical_instrument_spec_set_bytes(spec_set)
     spec_sha256 = instrument_spec_set_digest(spec_set)
     if (
         policy.instrument_spec_set_id != spec_set.identifier
@@ -553,9 +592,34 @@ def create_portfolio_planning_authority(
     original_policy_bytes = canonical_phase1_portfolio_policy_bytes(policy)
     original_policy_sha256 = phase1_portfolio_policy_digest(policy)
     try:
+        retained_spec_set = build_instrument_spec_set(
+            InstrumentSpecSetId(spec_set.identifier.value),
+            (
+                InstrumentExecutionSpec(
+                    instrument=Instrument(
+                        VenueId(specification.instrument.venue.code),
+                        specification.instrument.symbol,
+                    ),
+                    specification_id=InstrumentSpecId(specification.specification_id.value),
+                    price_quantum=CanonicalDecimal(specification.price_quantum.text),
+                    quantity_quantum=CanonicalDecimal(specification.quantity_quantum.text),
+                    settlement_currency=SettlementCurrency(specification.settlement_currency.code),
+                    currency_quantum=CanonicalDecimal(specification.currency_quantum.text),
+                    contract_multiplier=CanonicalDecimal(specification.contract_multiplier.text),
+                    price_domain=specification.price_domain,
+                )
+                for specification in spec_set.specifications
+            ),
+        )
+        retained_spec_set_bytes = canonical_instrument_spec_set_bytes(retained_spec_set)
+        retained_spec_sha256 = instrument_spec_set_digest(retained_spec_set)
+        retained_execution_policy = ExecutionPolicyRef(
+            ExecutionPolicyId(execution_policy.identifier.value),
+            Sha256Digest(execution_policy.sha256.value),
+        )
         copied_entries = tuple(
             Phase1PortfolioPolicyEntry(
-                instrument=spec_set.require(entry.instrument).instrument,
+                instrument=retained_spec_set.require(entry.instrument).instrument,
                 target_quantity=CanonicalDecimal(entry.target_quantity.text),
             )
             for entry in policy.entries
@@ -563,7 +627,7 @@ def create_portfolio_planning_authority(
         retained_policy = create_phase1_portfolio_policy(
             policy_id=PortfolioPolicyId(policy.policy_id.value),
             entries=copied_entries,
-            spec_set=spec_set,
+            spec_set=retained_spec_set,
         )
         policy_bytes = canonical_phase1_portfolio_policy_bytes(retained_policy)
         policy_sha256 = phase1_portfolio_policy_digest(retained_policy)
@@ -574,6 +638,15 @@ def create_portfolio_planning_authority(
             OutcomeCode.INVALID_TYPE,
             "retained portfolio policy construction failed",
         ) from error
+    if (
+        retained_spec_set_bytes != original_spec_set_bytes
+        or retained_spec_sha256 != spec_sha256
+        or retained_execution_policy != execution_policy
+    ):
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "retained specification or execution policy copy conflicts",
+        )
     if policy_bytes != original_policy_bytes or policy_sha256 != original_policy_sha256:
         raise _fail(OutcomeCode.CONFLICTING_ID, "retained portfolio policy copy conflicts")
     try:
@@ -594,7 +667,8 @@ def create_portfolio_planning_authority(
         raise _fail(OutcomeCode.CONFLICTING_ID, "ledger binding conflicts")
     entry_by_instrument = {entry.instrument: entry for entry in retained_policy.entries}
     spec_by_instrument: dict[Instrument, InstrumentExecutionSpec] = {
-        specification.instrument: specification for specification in spec_set.specifications
+        specification.instrument: specification
+        for specification in retained_spec_set.specifications
     }
     public = _create_portfolio_planning_authority_state(
         run_id=run_id,
@@ -608,12 +682,15 @@ def create_portfolio_planning_authority(
     value = object.__new__(PortfolioPlanningAuthority)
     value._run_id = run_id
     value._ledger = ledger
-    value._spec_set = spec_set
-    value._spec_set_sha256 = spec_sha256
+    value._spec_set = retained_spec_set
+    value._spec_set_bytes = retained_spec_set_bytes
+    value._spec_set_sha256 = retained_spec_sha256
     value._policy = retained_policy
     value._policy_bytes = policy_bytes
     value._policy_sha256 = policy_sha256
-    value._execution_policy = execution_policy
+    value._execution_policy = retained_execution_policy
+    value._execution_policy_identifier_value = retained_execution_policy.identifier.value
+    value._execution_policy_sha256_value = retained_execution_policy.sha256.value
     value._entry_by_instrument = MappingProxyType(entry_by_instrument)
     value._spec_by_instrument = MappingProxyType(spec_by_instrument)
     value._state = _AuthorityState(

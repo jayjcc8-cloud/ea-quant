@@ -71,7 +71,7 @@ from ea.core import (
     strategy_signal_digest,
     validate_portfolio_planning_risk_handoff,
 )
-from ea.core.execution import InstrumentExecutionSpecSet
+from ea.core.execution import InstrumentExecutionSpecSet, instrument_spec_set_digest
 from ea.core.execution_messages import Fill
 from ea.core.portfolio_planning import _create_portfolio_planning_authority_state
 from ea.core.strategy import _create_strategy_signal_authority_state
@@ -702,6 +702,121 @@ def test_planner_owns_policy_projection_after_binding() -> None:
     assert result.target.target_position.text == "10"
     assert result.intent is not None
     assert result.intent.quantity.text == "10"
+
+
+@pytest.mark.parametrize(
+    ("direction", "unresolved", "expected_kind"),
+    [
+        (SignalDirection.LONG, False, PlanningOutcomeKind.INTENT_EMITTED),
+        (SignalDirection.FLAT, False, PlanningOutcomeKind.ALREADY_AT_TARGET),
+        (SignalDirection.LONG, True, PlanningOutcomeKind.BLOCKED_UNRESOLVED_FILLS),
+    ],
+)
+def test_planner_owns_specification_projection_after_binding(
+    direction: SignalDirection,
+    unresolved: bool,
+    expected_kind: PlanningOutcomeKind,
+) -> None:
+    spec_set = _spec_set()
+    original_spec_sha256 = instrument_spec_set_digest(spec_set)
+    _, _, _, signal = _signal(direction, spec_set=spec_set)
+    ledger = create_portfolio_ledger(run_id=RUN_ID, spec_set=spec_set)
+    if unresolved:
+        ledger.apply_fill(_fill(spec_set, fill_sequence=1, quantity="2", resolved=False))
+    planner = create_portfolio_planning_authority(
+        run_id=RUN_ID,
+        ledger=ledger,
+        spec_set=spec_set,
+        policy=_policy(spec_set),
+        execution_policy=EXECUTION_POLICY,
+    )
+    object.__setattr__(
+        spec_set,
+        "identifier",
+        InstrumentSpecSetId("phase1.mutated.v1"),
+    )
+    object.__setattr__(
+        spec_set.specifications[0],
+        "specification_id",
+        InstrumentSpecId("xnas.aapl.mutated"),
+    )
+    object.__setattr__(
+        spec_set.specifications[0],
+        "quantity_quantum",
+        CanonicalDecimal("100"),
+    )
+
+    result = planner.plan(signal)
+
+    assert result.outcome.kind is expected_kind
+    assert result.target.instrument_spec_set_id == InstrumentSpecSetId(
+        "phase1.strategy-planning.v1"
+    )
+    assert result.target.instrument_spec_set_sha256 == original_spec_sha256
+    assert result.target.instrument_specification_id == InstrumentSpecId("xnas.aapl.v1")
+    if expected_kind is PlanningOutcomeKind.INTENT_EMITTED:
+        assert result.intent is not None
+        assert result.intent.quantity.text == "10"
+    else:
+        assert result.intent is None
+
+
+def test_planner_owns_execution_policy_projection_after_binding() -> None:
+    spec_set = _spec_set()
+    _, _, _, signal = _signal(spec_set=spec_set)
+    execution_policy = ExecutionPolicyRef(
+        ExecutionPolicyId("phase1.bound.v1"),
+        Sha256Digest("2" * 64),
+    )
+    planner = create_portfolio_planning_authority(
+        run_id=RUN_ID,
+        ledger=create_portfolio_ledger(run_id=RUN_ID, spec_set=spec_set),
+        spec_set=spec_set,
+        policy=_policy(spec_set),
+        execution_policy=execution_policy,
+    )
+    object.__setattr__(
+        execution_policy,
+        "identifier",
+        ExecutionPolicyId("phase1.mutated.v1"),
+    )
+    object.__setattr__(execution_policy, "sha256", Sha256Digest("3" * 64))
+
+    result = planner.plan(signal)
+
+    assert result.intent is not None
+    assert result.intent.execution_policy == ExecutionPolicyRef(
+        ExecutionPolicyId("phase1.bound.v1"),
+        Sha256Digest("2" * 64),
+    )
+
+
+def test_planner_revalidates_owned_specification_and_execution_policy() -> None:
+    spec_set = _spec_set()
+    _, _, _, signal = _signal(spec_set=spec_set)
+    _, planner = _ledger_and_planner(spec_set)
+    object.__setattr__(
+        cast(Any, planner)._spec_set.specifications[0],
+        "quantity_quantum",
+        CanonicalDecimal("100"),
+    )
+    before = planner.state
+    with pytest.raises(PortfolioPlanningError) as changed_spec:
+        planner.plan(signal)
+    assert changed_spec.value.code is OutcomeCode.CONFLICTING_ID
+    assert planner.state is before
+
+    _, second_planner = _ledger_and_planner(spec_set)
+    object.__setattr__(
+        cast(Any, second_planner)._execution_policy,
+        "identifier",
+        ExecutionPolicyId("phase1.mutated.v1"),
+    )
+    second_before = second_planner.state
+    with pytest.raises(PortfolioPlanningError) as changed_policy:
+        second_planner.plan(signal)
+    assert changed_policy.value.code is OutcomeCode.CONFLICTING_ID
+    assert second_planner.state is second_before
 
 
 def test_target_outcome_result_and_handoff_revalidate_nested_identity() -> None:
