@@ -141,9 +141,11 @@ economics and lineage use only those owned projections.
 The source namespace is the fact and ingress source. The provenance ID identifies this exact
 matcher policy. Both are immutable construction bindings.
 
-The factory validates the three verifier operation surfaces and their available static bindings.
+The factory validates the three verifier operation surfaces and their complete static bindings.
 It retains each verifier by identity so an opaque proof can be checked against the verifier that
-issued it.
+issued it. Before every genuinely new submission or dispatch, it re-reads and validates the owned
+specification/policy bytes and every verifier binding against the construction-time scalar,
+canonical-byte, and digest baselines. Exact retained replay precedes this live validation.
 
 Construction performs no submission, sequence allocation, fact issuance, or external effect.
 
@@ -165,7 +167,10 @@ an exact `Order` whose complete canonical bytes equal the submitted Order.
 
 ```python
 verifier.run_id -> RunId
-verifier.has_authorized_historical_submission(
+verifier.instrument_spec_set_id -> InstrumentSpecSetId
+verifier.instrument_spec_set_sha256 -> Sha256Digest
+verifier.execution_policy -> ExecutionPolicyRef
+verifier.verify_authorized_historical_submission(
     *,
     order_id: EconomicId,
     canonical_order_bytes: bytes,
@@ -174,12 +179,44 @@ verifier.has_authorized_historical_submission(
     causal_market_sha256: Sha256Digest,
     causal_root_key: RuntimeRootOrderKey,
     dispatch_sequence: int,
-) -> bool
+) -> HistoricalSubmissionAuthorizationProof
 ```
 
-The later coordinator will implement this port from its persisted audit-acknowledgement state.
-The matcher requires exact `bool`. `False`, a wrong type, an exception, missing operation, or
-binding mismatch produces no receipt, sequence use, or pending Order.
+The later coordinator will implement this port from its persisted audit-acknowledgement,
+portfolio/risk freshness, halt, and instrument-gate state. The verifier performs one atomic
+read-only pre-effect decision immediately before the simulated venue effect.
+
+An authorized result is one sealed, process-local `HistoricalSubmissionAuthorizationProof`
+containing:
+
+- issuing verifier identity and a private core factory seal;
+- exact run, specification-set, execution-policy, Order ID, Order digest, execution-request
+  digest, causal market digest/root key, and dispatch sequence;
+- the persisted audit acknowledgement ID and digest for the exact execution request;
+- current portfolio snapshot version equal to `order.portfolio_snapshot_version`;
+- current risk-state version equal to `order.risk_state_version`;
+- exact global- and Risk-halt epochs with both states proved not halted;
+- the Phase 1 instrument-gate identity/version and `held_for_order_id == order.order_id`; and
+- one verifier-state version so a proof cannot be replayed as authority for a different new
+  effect.
+
+The matcher calls the core proof validator with every submitted value and the retained verifier
+identity. A wrong type, fabricated proof, cross-verifier proof, changed field, or binding mismatch
+publishes no receipt, sequence, or pending Order.
+
+The verifier raises only `HistoricalPreEffectAuthorizationError` for a normal denied gate:
+
+| Gate result | Exact code |
+|---|---|
+| global halt or Risk halt is currently active | `submission.blocked_by_halt` |
+| portfolio or risk version is no longer current | `risk.stale_approval` |
+| persisted audit acknowledgement is absent | `durability.audit_append_failed` |
+| acknowledgement exists but does not bind the exact request | `durability.audit_ack_mismatch` |
+| instrument gate is absent, released, or held for another Order | `validation.conflicting_id` |
+| proof/binding carrier has a wrong exact type | `validation.invalid_type` |
+
+Those errors propagate with their exact code before any venue state mutation. Any other verifier
+exception propagates unchanged through the existing private-sentinel pattern.
 
 The verifier does not pass an audit object into execution and does not let execution append,
 amend, or interpret audit storage. It proves membership only.
@@ -244,8 +281,9 @@ The operation validates, in order:
 6. the current active causal market proof;
 7. `order.run_id`, `order.dispatch_sequence`, `order.eligible_after_available_at`, instrument,
    specification-set, and execution-policy equality with the bound authority and active root;
-8. audit authorization membership for the exact Order, execution request, active market bytes,
-   root key, digest, and dispatch sequence;
+8. one sealed immediate pre-effect authorization proof for the exact Order, request, persisted
+   audit acknowledgement, current portfolio/risk versions, clear halt states, held instrument
+   gate, active market bytes/root key/digest, and dispatch sequence;
 9. sequence availability; and
 10. complete receipt/pending-state precomputation before one atomic publication.
 
@@ -301,6 +339,13 @@ causal_market_sha256
 causal_root_key
 dispatch_sequence
 eligible_after_available_at
+audit_acknowledgement_id
+audit_acknowledgement_sha256
+global_halt_epoch
+risk_halt_epoch
+instrument_gate_id
+instrument_gate_version
+authorization_state_version
 instrument_spec_set_id
 instrument_spec_set_sha256
 execution_policy_id
@@ -334,11 +379,16 @@ matcher.match_active_market_root(
 ) -> HistoricalMatcherDispatchBatch
 ```
 
-It first validates the exact active market proof. For a new dispatch, dispatch sequence must be
-strictly greater than the last new matcher dispatch sequence. Exact retry of an already retained
-dispatch with identical canonical root bytes returns the retained batch before halt/end checks.
-Same sequence with different root bytes, a non-monotone new sequence, or root identity conflict
-publishes the first matcher conflict and halts.
+It first performs only the minimal exact type/range/canonical encoding needed to derive the
+dispatch sequence and submitted root digest. It then resolves an exact retained replay or an
+occupied dispatch identity with conflicting bytes. Exact replay returns the retained batch even
+after the parent dispatch was acknowledged, the matcher later halted, or bounded end completed;
+it does not call the active verifier or any other live port.
+
+Only a genuinely new dispatch validates the exact active market proof. Its dispatch sequence must
+be strictly greater than the last new matcher dispatch sequence. Same sequence with different root
+bytes, a non-monotone new sequence, or root identity conflict publishes the first matcher conflict
+and halts.
 
 The matcher retains only the submitted current root bytes, digest, key, and result. It cannot ask
 for another root.
@@ -471,6 +521,73 @@ has_issued_ingress(
 
 It returns exact `False` for absent or byte-mismatched evidence and performs no mutation.
 
+The matcher therefore satisfies the complete existing issuance shape:
+
+```python
+matcher.run_id -> RunId
+matcher.spec_set -> InstrumentExecutionSpecSet
+matcher.source_namespace -> SourceNamespace
+matcher.has_issued_ingress(...) -> bool
+```
+
+The returned specification set is the authority-owned projection. Every membership call
+revalidates retained ingress/fact bytes and construction bindings.
+
+### Causal-descendant fact dispatch
+
+This decision narrowly amends ADR 0014's trusted dispatch boundary. Matcher facts remain causal
+descendants and are not inserted into the root plan, but they still require a non-forgeable
+runtime dispatch proof before `Phase1ExecutionFactAuthority.process_ingress`.
+
+Runtime constructs one `CausalDescendantFactDispatchVerifier` bound by identity to:
+
+- the exact `Phase1HistoricalMarketRuntime` dispatcher/queue;
+- the exact matcher issuance capability and its run/spec/source bindings;
+- the exact matcher batch lookup capability; and
+- the exact `Phase1ExecutionFactAuthority` run/spec bindings.
+
+It implements the existing complete `RuntimeFactDispatchVerifier` shape:
+
+```python
+verifier.run_id -> RunId
+verifier.spec_set -> InstrumentExecutionSpecSet
+verifier.resolve_active_issued_fact_dispatch(
+    *,
+    ingress_identity: IngressIdentity,
+    canonical_ingress_bytes: bytes,
+    canonical_fact_bytes: bytes,
+) -> int | None
+```
+
+For each lookup it:
+
+1. first delegates to the existing queue verifier so an independently queued active fact root
+   retains byte-identical behavior;
+2. if no direct fact root matches, asks the matcher for one immutable descendant binding by exact
+   ingress identity and bytes;
+3. proves matcher issuance membership, exact batch membership/index, batch digest, parent
+   root kind/digest/key, and parent dispatch sequence;
+4. proves that exact parent market/end root is still the runtime's active dispatch with retained
+   canonical bytes unchanged; and
+5. returns the parent dispatch sequence.
+
+`HistoricalMatcherDescendantBinding` is factory-only and retained in matcher state. It contains
+the ingress identity/digests, batch digest, zero-based batch index, parent kind/digest/key, and
+parent dispatch sequence. A matcher lookup returns exact `False`/`None` for an absent or
+byte-mismatched ingress and performs no mutation.
+
+The fact authority already resolves exact processed-ingress replay before calling its dispatch
+verifier. Therefore post-ack replay of an already processed descendant returns the retained
+`ExecutionFactProcessingOutcome`. A previously unseen or byte-conflicting ingress after the parent
+acknowledgement receives no dispatch sequence and fails `validation.conflicting_id`; it cannot be
+retroactively processed.
+
+The adapter does not acknowledge the parent, mutate the matcher, register a new source, or insert
+a root. Construction rejects a matcher source namespace that conflicts with another descendant
+source binding. The independent root queue continues to require source registration for every
+fact ingress present in its sealed plan; the matcher source is instead registered exactly once on
+this descendant adapter. This is the only source-registration amendment.
+
 ### Canonical dispatch batch
 
 `HistoricalMatcherDispatchBatch` is a factory-only immutable version-one result for either a
@@ -483,8 +600,8 @@ dispatch_kind = market | end_of_run
 dispatch_sequence
 trigger_root_sha256
 trigger_root_key
-fact_sequence_before
-fact_sequence_after
+next_fact_sequence_before
+next_fact_sequence_after
 submission_sequences
 order_ids
 ingress_identities
@@ -504,6 +621,335 @@ The batch digest domain is:
 b"ea.phase1-historical-matcher-dispatch-batch.v1\0"
 ```
 
+`next_fact_sequence_before/after` is `int | None`, with the same meaning as existing authority
+sequence pointers:
+
+- initial next value is `1`;
+- an integer is the next fact/ingress sequence available in `1..2**64-1`;
+- issuing a value below the maximum advances it by one;
+- issuing the maximum changes the pointer to `None`; and
+- `None` is the only exhausted representation.
+
+An empty batch has equal before/after pointers. A one-fact batch at initial state has `1/2`. A
+two-fact batch has `n/n+2`. A final one-fact batch has `2**64-1/None`. A request for two facts when
+the pointer is `2**64-1`, or any facts when it is `None`, fails atomically before provenance or
+fact publication.
+
+### Literal canonical encodings
+
+All new public canonical values use the existing closed JSON encoder:
+
+```python
+json.dumps(
+    document,
+    ensure_ascii=True,
+    allow_nan=False,
+    sort_keys=True,
+    separators=(",", ":"),
+).encode("utf-8")
+```
+
+Unknown, missing, extra, duplicate, non-exact, or non-canonical fields fail. UTC text uses
+`YYYY-MM-DDTHH:MM:SS.ffffffZ`. Decimal text uses `ea-decimal-v1`. Economic IDs use the existing
+literal object:
+
+```json
+{"owner_kind":"...","owner_sequence":1,"run_id":"..."}
+```
+
+Instruments use `{"symbol":"...","venue":"..."}`. An optional value is JSON `null`; an empty
+tuple is `[]`. No absent-field convention exists.
+
+Every new digest is:
+
+```python
+sha256(domain + len(payload).to_bytes(8, "big") + payload).hexdigest()
+```
+
+where `payload` is the exact canonical byte string and length is an unsigned big-endian uint64.
+The receipt and batch domains named above use this formula. The remaining domains are:
+
+```text
+b"ea.phase1-historical-matcher-state.v1\0"
+b"ea.phase1-historical-matcher-conflict.v1\0"
+b"ea.phase1-historical-matcher-market-root.v1\0"
+b"ea.phase1-historical-matcher-end-root.v1\0"
+b"ea.phase1-historical-matcher-observation.v1\0"
+```
+
+The exact root digest inputs are:
+
+- market: existing `canonical_market_data_record_bytes(root)` unchanged; and
+- end: canonical bytes of:
+
+  ```json
+  {
+    "available_at":"...",
+    "kind":"bounded_source_exhausted",
+    "producer_namespace":"...",
+    "producer_sequence":1,
+    "run_id":"...",
+    "type":"end_of_run"
+  }
+  ```
+
+The market matcher digest deliberately does not reuse the strategy-specific causal-market digest
+domain. The active proof contains both its existing strategy causal digest and the exact market
+bytes; the matcher derives and validates its own root digest from those bytes.
+
+`trigger_root_key` and `causal_root_key` are one of exactly two tagged documents:
+
+```json
+{
+  "adjustment":"raw",
+  "available_at":"...",
+  "domain_rank":30,
+  "event_time":"...",
+  "instrument":{"symbol":"...","venue":"..."},
+  "interval_end":"...",
+  "interval_start":"...",
+  "kind_rank":0,
+  "revision":0,
+  "root_domain":"market_data",
+  "source":"...",
+  "source_sequence":1
+}
+```
+
+```json
+{
+  "available_at":"...",
+  "domain_rank":50,
+  "kind":"bounded_source_exhausted",
+  "kind_rank":0,
+  "producer_namespace":"...",
+  "producer_sequence":1,
+  "root_domain":"end_of_run",
+  "run_id":"..."
+}
+```
+
+The numeric ranks must equal the current accepted runtime rank registries. Decoder reconstruction
+must produce a `RuntimeRootOrderKey` whose `as_tuple()` equals the supplied root's key exactly.
+
+The literal receipt document is:
+
+```json
+{
+  "audit_acknowledgement_id":"...",
+  "audit_acknowledgement_sha256":"<64 lowercase hex>",
+  "authorization_state_version":1,
+  "canonicalization":"ea-phase1-historical-submission-receipt-v1",
+  "causal_market_sha256":"<64 lowercase hex>",
+  "causal_root_key":{},
+  "client_submission_key":"<64 lowercase hex>",
+  "dispatch_sequence":1,
+  "eligible_after_available_at":"...",
+  "execution_policy_id":"...",
+  "execution_policy_sha256":"<64 lowercase hex>",
+  "execution_request_sha256":"<64 lowercase hex>",
+  "global_halt_epoch":0,
+  "instrument":{"symbol":"...","venue":"..."},
+  "instrument_gate_id":"...",
+  "instrument_gate_version":1,
+  "instrument_spec_set_id":"...",
+  "instrument_spec_set_sha256":"<64 lowercase hex>",
+  "message_type":"historical_submission_receipt",
+  "order_id":{"owner_kind":"execution_order","owner_sequence":1,"run_id":"..."},
+  "order_sha256":"<64 lowercase hex>",
+  "outcome_code":"submission.submitted",
+  "quantity":"1",
+  "risk_halt_epoch":0,
+  "run_id":"...",
+  "schema_version":1,
+  "side":"buy",
+  "source_namespace":"...",
+  "submission_sequence":1
+}
+```
+
+`causal_root_key` contains the complete market-key document, not `{}`. Halt epochs and versions are
+exact non-negative uint64; submission/dispatch/gate versions are positive uint64.
+
+The literal dispatch batch document is:
+
+```json
+{
+  "canonicalization":"ea-phase1-historical-matcher-dispatch-batch-v1",
+  "dispatch_kind":"market",
+  "dispatch_sequence":2,
+  "ingresses":[
+    {
+      "ingress_identity":{"ingress_sequence":1,"source_namespace":"..."},
+      "ingress_sha256":"<64 lowercase hex>"
+    }
+  ],
+  "message_type":"historical_matcher_dispatch_batch",
+  "next_fact_sequence_after":2,
+  "next_fact_sequence_before":1,
+  "order_ids":[
+    {"owner_kind":"execution_order","owner_sequence":1,"run_id":"..."}
+  ],
+  "run_id":"...",
+  "schema_version":1,
+  "source_namespace":"...",
+  "submission_sequences":[1],
+  "trigger_root_key":{},
+  "trigger_root_sha256":"<64 lowercase hex>"
+}
+```
+
+`dispatch_kind` is exactly `market` or `end_of_run`; its root-key tag must agree. The five ordered
+arrays (`ingresses`, `order_ids`, `submission_sequences`, retained public ingress tuple, and
+descendant bindings) have equal length and aligned indexes. For an empty batch all are empty and
+the before/after pointers are equal.
+
+The literal public state document is:
+
+```json
+{
+  "canonicalization":"ea-phase1-historical-matcher-state-v1",
+  "conflict_sha256":null,
+  "dispatch_batch_sha256s":[],
+  "end_batch_sha256":null,
+  "ended":false,
+  "execution_policy_id":"...",
+  "execution_policy_sha256":"<64 lowercase hex>",
+  "halted":false,
+  "instrument_spec_set_id":"...",
+  "instrument_spec_set_sha256":"<64 lowercase hex>",
+  "issued_ingresses":[],
+  "last_new_dispatch_sequence":null,
+  "message_type":"historical_matcher_state",
+  "next_fact_sequence":1,
+  "next_submission_sequence":1,
+  "pending_order_ids":[],
+  "receipt_sha256s":[],
+  "run_id":"...",
+  "schema_version":1,
+  "source_namespace":"..."
+}
+```
+
+Each `issued_ingresses` item has the exact two-field identity/digest shape used by a batch.
+Receipt and batch digest arrays are append order. `None` sequence exhaustion and nullable
+last/end/conflict fields are encoded as JSON `null`.
+
+The literal conflict document is:
+
+```json
+{
+  "canonicalization":"ea-phase1-historical-matcher-conflict-v1",
+  "conflict_kind":"...",
+  "existing_sha256":null,
+  "last_successful_dispatch_sequence":null,
+  "message_type":"historical_matcher_conflict",
+  "next_fact_sequence":1,
+  "next_submission_sequence":1,
+  "occupied_identity":null,
+  "pending_count":0,
+  "run_id":"...",
+  "schema_version":1,
+  "submitted_dispatch_sequence":null,
+  "submitted_sha256":null,
+  "trigger_root_sha256":null
+}
+```
+
+`conflict_kind` is a closed enum:
+
+```text
+submission_identity
+client_submission_key
+dispatch_identity
+non_monotone_dispatch
+retained_binding_drift
+```
+
+`occupied_identity` is either `null` or one tagged object:
+
+```json
+{"kind":"order_id","order_id":{}}
+{"kind":"client_submission_key","sha256":"<64 lowercase hex>"}
+{"dispatch_sequence":1,"kind":"dispatch_sequence"}
+```
+
+The object payload must agree with the conflict kind. Optional digests/sequences are present as
+`null` when they cannot be safely derived.
+
+The exact matcher-observation preimage is:
+
+```json
+{
+  "available_at":"...",
+  "canonicalization":"ea-phase1-historical-matcher-observation-v1",
+  "execution_policy_id":"...",
+  "execution_policy_sha256":"<64 lowercase hex>",
+  "expiry_outcome_code":null,
+  "fact_kind":"trade",
+  "fact_sequence":1,
+  "instrument":{"symbol":"...","venue":"..."},
+  "instrument_spec_set_id":"...",
+  "instrument_spec_set_sha256":"<64 lowercase hex>",
+  "occurred_at":"...",
+  "order_sha256":"<64 lowercase hex>",
+  "price":"10.5",
+  "provenance_id":"...",
+  "quantity":"1",
+  "schema_version":1,
+  "side":"buy",
+  "source_namespace":"...",
+  "submission_receipt_sha256":"<64 lowercase hex>",
+  "trigger_dispatch_sequence":2,
+  "trigger_root_key":{},
+  "trigger_root_kind":"market",
+  "trigger_root_sha256":"<64 lowercase hex>"
+}
+```
+
+For trade, `price` is canonical text and `expiry_outcome_code` is `null`. For expiry, `price` is
+`null`, `expiry_outcome_code` is `order.expired.no_eligible_market_data`,
+`trigger_root_kind` is `end_of_run`, and occurred/available times are equal. No other combination
+is valid.
+
+The matcher never preserves a negative-zero distinction. Python binary64 `+0.0` and `-0.0` both
+produce the exact rational `(0, 1)` from `as_integer_ratio()`, both select tick index zero on BUY
+and SELL, and both canonicalize to price text `"0"`. `PriceDomain.POSITIVE` rejects that price;
+`PriceDomain.NON_NEGATIVE` and `PriceDomain.SIGNED` accept the same byte-identical `"0"`. A minus
+sign is never emitted for zero.
+
+Public APIs are exact and named:
+
+```python
+canonical_historical_submission_receipt_bytes
+historical_submission_receipt_digest
+decode_historical_submission_receipt
+canonical_historical_matcher_dispatch_batch_bytes
+historical_matcher_dispatch_batch_digest
+decode_historical_matcher_dispatch_batch
+canonical_historical_matcher_state_bytes
+historical_matcher_state_digest
+decode_historical_matcher_state
+canonical_historical_matcher_conflict_bytes
+historical_matcher_conflict_digest
+decode_historical_matcher_conflict
+```
+
+Each decoder requires an exact `HistoricalMatcherDecodeContext` bound to run, owned
+specification/policy, source/provenance, and read-only canonical Order/receipt/batch/ingress
+lookups as required by that value. It reconstructs through factories, rejects unknown fields and
+context substitution, recomputes every nested digest, and requires the re-encoded bytes to equal
+the submitted bytes exactly.
+
+The normative cross-process fixture is
+[`../fixtures/adr0018-historical-matcher-v1.json`](../fixtures/adr0018-historical-matcher-v1.json).
+It records the complete canonical UTF-8 bytes and digest for one delayed-availability trade path
+and one bounded-end expiry path: receipt, trade observation, market batch, trade fact/ingress, end
+observation, end batch, and expiry fact/ingress. The existing fact digest is over the fact document
+with `fact_sha256` absent; the existing ingress digest is over its complete canonical document.
+All other artifact digests use the domains and length framing above. The fixture is normative and
+must be reproduced byte-for-byte by every supported process environment.
+
 ### Bounded-end expiry
 
 The public operation is:
@@ -519,9 +965,11 @@ matcher.expire_at_active_end(
 Only `EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED` is accepted by this Phase 1 operation. Requested or
 failure cutovers are coordinator policy, not fabricated no-data evidence.
 
-The matcher validates the sealed active end proof, run ID, monotone dispatch, root bytes/key, end
-state, and complete sequence capacity before publication. It emits one expiry fact for every
-still-pending Order in submission order:
+The matcher minimally materializes the end root/sequence and resolves exact retained replay or
+occupied-identity conflict before checking halt, end state, or a live port. Only a genuinely new
+end dispatch validates the sealed active end proof, run ID, monotone dispatch, root bytes/key, and
+complete sequence capacity before publication. It emits one expiry fact for every still-pending
+Order in submission order:
 
 - fact kind `expiry`;
 - outcome `order.expired.no_eligible_market_data`;
@@ -535,7 +983,8 @@ No Fill exists. All pending Orders are removed atomically and the matcher become
 that, new submission, market matching, or a distinct end root fails closed. Exact replay of any
 retained submission or dispatch remains available.
 
-An exact end retry returns the same retained batch with no sequence use.
+An exact end retry returns the same retained batch with no sequence use and no active-end proof,
+including after the parent dispatch was acknowledged.
 
 ### Lifecycle-fact compatibility extension
 
@@ -552,13 +1001,23 @@ create_lifecycle_execution_fact(..., outcome_code: OutcomeCode | None = None)
 Rules:
 
 - absent uses the existing kind-to-generic-code mapping;
-- acknowledgement, rejection, and cancellation accept only their existing generic code;
-- expiry accepts `order.expired` or `order.expired.no_eligible_market_data`; and
-- any other exact code/kind combination fails before fact construction.
+- acknowledgement, rejection, and cancellation reject every explicit override;
+- expiry accepts only the explicit override `order.expired.no_eligible_market_data`; and
+- an explicit generic code or any other exact code/kind combination fails
+  `validation.out_of_range` before fact construction.
 
 The decoder parses the lifecycle payload code and passes it into the factory. Existing generic
 fact bytes and factory calls remain byte-identical. The new expiry code now round-trips
 canonically.
+
+The closed compatibility mapping is:
+
+| Kind | `outcome_code is None` | Allowed explicit override |
+|---|---|---|
+| acknowledgement | `order.acknowledged` | none |
+| rejection | `order.rejected` | none |
+| cancellation | `order.cancelled` | none |
+| expiry | `order.expired` | `order.expired.no_eligible_market_data` only |
 
 Order projection continues to map fact kind `expiry` to projection state `expired`. The more
 specific outcome remains in the immutable fact payload and provenance.
@@ -620,11 +1079,20 @@ validation.price_domain
 validation.arithmetic_overflow
 validation.conflicting_id
 submission.blocked_by_halt
+risk.stale_approval
+durability.audit_append_failed
+durability.audit_ack_mismatch
 ```
 
 `submission.blocked_by_halt` is used only when an otherwise well-formed new submission reaches an
 already halted matcher. Existing exact replay still succeeds. New match/end operations on halt
 use `validation.conflicting_id`, because they do not represent a venue submission outcome.
+
+The three authorization-proof codes are exposed only by a genuinely new, otherwise well-formed
+submission after exact replay and structural validation: stale portfolio/risk state uses
+`risk.stale_approval`; an absent persisted pre-effect audit acknowledgement uses
+`durability.audit_append_failed`; and an acknowledgement that does not bind the exact request
+uses `durability.audit_ack_mismatch`. They consume no submission sequence and publish no receipt.
 
 Errors never use exception text for control flow.
 
@@ -633,19 +1101,34 @@ Errors never use exception text for control flow.
 For one active market root the future coordinator calls, in this order:
 
 1. `match_active_market_root`;
-2. for every returned ingress in batch order, verify matcher issuance, process the fact, apply any
-   Fill to the ledger, and publish updated portfolio/risk state;
-3. run strategy, portfolio, and risk;
-4. create an Order from an authority-issued executable risk result;
-5. persist and verify the exact pre-effect audit acknowledgement;
-6. call `submit` while the same causal market dispatch remains active; and
-7. acknowledge the runtime dispatch only after required stage outcomes are durable.
+2. for every returned ingress in batch order, use the causal-descendant adapter to verify matcher
+   issuance and exact active-parent membership, then process the fact;
+3. persist and verify inbound audit acknowledgement of the exact immutable
+   `ExecutionFactProcessingOutcome` before dispatching its Fill or projection to another owner;
+4. only after that acknowledgement, apply any Fill to the ledger and publish the newer immutable
+   portfolio/risk view;
+5. run strategy, portfolio, and risk;
+6. create an Order from an authority-issued executable risk result;
+7. persist and verify the exact pre-effect audit acknowledgement;
+8. perform the immediate freshness/halt/instrument-gate authorization read and call `submit` while
+   the same causal market dispatch remains active; and
+9. acknowledge the runtime dispatch only after required stage outcomes are durable.
+
+Inbound audit append/acknowledgement failure blocks ledger/portfolio/risk dispatch for that
+outcome, records the failing-safety transition when durability is available, and blocks every new
+submission. The already accepted fact, Fill, projection, and processing outcome remain retained
+by the fact authority; they are not discarded or fabricated. Runtime continues the mandatory
+inbound drain for later real facts under the failing state and retries/recovers the missing
+audit-before-ledger stage only from authoritative retained evidence. The complete retry and
+durability choreography remains coordinator scope, but no path may mutate ledger state before the
+exact inbound outcome acknowledgement.
 
 Matcher facts are causal descendants. They are not reinserted as independently competing roots
 ahead of their causal market root.
 
 At bounded source exhaustion the coordinator calls `expire_at_active_end`, processes every expiry
-fact in batch order, and then completes result durability.
+fact through the same descendant-verifier and inbound-audit-before-projection order, and then
+completes result durability.
 
 This Issue tests the port contract with sealed/malicious verifier doubles. It does not claim the
 coordinator exists.
@@ -668,7 +1151,7 @@ Implementation evidence must include:
 - malicious verifier return types, exceptions, fabricated proof, cross-verifier proof, caller
   mutation, retained-state mutation, and failure-atomic publication;
 - end-of-source expiry with no Fill;
-- property tests for permutation invariance and no-look-ahead;
+- property tests for the bounded permutation and prefix properties below;
 - cross-process golden bytes under changed hash seed, timezone, locale, current directory, and
   ambient decimal context;
 - AST import boundaries;
@@ -686,6 +1169,19 @@ Implementation evidence must include:
 - Empty match observations and bounded expiry become replay-stable evidence.
 - The future coordinator can compose existing OMS, matcher, fact, ledger, strategy, portfolio, and
   risk authorities without changing their ownership.
+
+The order of public `submit`, `match_active_market_root`, and `expire_at_active_end` calls is
+normative and is not permutation invariant. The bounded permutation property applies only when
+the receipt sequence and dispatched root sequence are held fixed: reordering instrument-spec
+construction input, immutable lookup-map insertion, or presentation order of an internal pending
+container cannot change canonical state, batches, facts, or ingresses. Pending economic emission
+always follows retained submission sequence.
+
+The no-look-ahead property is a prefix property. For any cutoff dispatch sequence `n`, appending
+any valid market or end roots strictly after `n` cannot change any receipt, observation, batch,
+fact, ingress, state digest, error, or sequence pointer produced through `n`. The matcher API
+contains no source, iterator, cursor, callback, or `next` capability; its only market/end input is
+the one exact active root supplied to the current call.
 
 ## Alternatives rejected
 
