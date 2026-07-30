@@ -281,10 +281,10 @@ The operation validates, in order:
 6. the current active causal market proof;
 7. `order.run_id`, `order.dispatch_sequence`, `order.eligible_after_available_at`, instrument,
    specification-set, and execution-policy equality with the bound authority and active root;
-8. one sealed immediate pre-effect authorization proof for the exact Order, request, persisted
+8. submission-sequence availability;
+9. one sealed immediate pre-effect authorization proof for the exact Order, request, persisted
    audit acknowledgement, current portfolio/risk versions, clear halt states, held instrument
    gate, active market bytes/root key/digest, and dispatch sequence;
-9. sequence availability; and
 10. complete receipt/pending-state precomputation before one atomic publication.
 
 The accepted profile is exactly:
@@ -306,7 +306,8 @@ The next-submission pointer is `int | None`: initial value `1`; issuing a value 
 `2**64-1` advances by one; issuing `2**64-1` changes it to `None`; and `None` is the sole
 exhausted representation. A genuinely new submission at `None` fails
 `validation.arithmetic_overflow` before authorization, receipt precomputation, or state
-publication. Exact retained replay still succeeds after exhaustion and consumes nothing.
+publication, and the authorization verifier is not called. Exact retained replay still succeeds
+after exhaustion and consumes nothing and calls no live port.
 
 The matcher reconstructs the Order through its canonical decoder and retains:
 
@@ -1084,10 +1085,11 @@ Validation and mutation precedence is:
 2. exact retained replay or occupied-identity conflict;
 3. halt/end check;
 4. remaining new-input profile and binding validation;
-5. active proof and issuance/authorization verifier calls;
+5. active proof and issuance-verifier calls;
 6. sequence capacity;
-7. full batch/state precomputation and internal canonical preflight; and
-8. one state assignment.
+7. submission authorization-verifier call, when applicable;
+8. full batch/state precomputation and internal canonical preflight; and
+9. one state assignment.
 
 Unexpected verifier exceptions propagate unchanged only when wrapped in a private sentinel, as in
 the existing Order authority. Other structural port failures become `validation.invalid_type`.
@@ -1173,6 +1175,8 @@ Implementation evidence must include:
 - multi-Order and multi-instrument deterministic emission ordering;
 - exact submission/root/end replay and conflict halt;
 - uint64 submission/fact/dispatch boundaries and atomic multi-fact exhaustion failure;
+- exhausted new submission does not call the authorization verifier, while exact replay after
+  exhaustion calls no live port and returns retained evidence;
 - malicious verifier return types, exceptions, fabricated proof, cross-verifier proof, caller
   mutation, retained-state mutation, and failure-atomic publication;
 - end-of-source expiry with no Fill;
