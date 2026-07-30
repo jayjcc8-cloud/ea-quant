@@ -1,6 +1,6 @@
 # ADR 0018: Deterministic Phase 1 Historical Matcher
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-30
 - Decision owners: Architecture, Execution, Backtest, Runtime, Data
 - Related: ADR 0003, ADR 0004, ADR 0006, ADR 0008, ADR 0010, ADR 0011,
