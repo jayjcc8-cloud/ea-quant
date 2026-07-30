@@ -843,6 +843,7 @@ ea.core.portfolio_planning
   PlanningOutcome
   PortfolioPlanningResult
   canonical/digest helpers
+  validate_portfolio_planning_risk_handoff
 
 ea.strategy
   StrategySignalAuthority

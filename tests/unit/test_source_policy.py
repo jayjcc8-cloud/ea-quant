@@ -79,6 +79,32 @@ def test_execution_value_modules_keep_the_frozen_import_boundary() -> None:
                 "ea.core.time",
             }
         ),
+        "strategy.py": frozenset(
+            {
+                "ea.core.execution_identity",
+                "ea.core.identity",
+                "ea.core.market_data",
+                "ea.core.market_data_codec",
+                "ea.core.outcomes",
+                "ea.core.run",
+                "ea.core.runtime",
+                "ea.core.time",
+            }
+        ),
+        "portfolio_planning.py": frozenset(
+            {
+                "ea.core.economics",
+                "ea.core.execution",
+                "ea.core.execution_identity",
+                "ea.core.execution_messages",
+                "ea.core.identity",
+                "ea.core.outcomes",
+                "ea.core.portfolio",
+                "ea.core.run",
+                "ea.core.strategy",
+                "ea.core.time",
+            }
+        ),
     }
 
     for filename, allowed in expected.items():
@@ -105,14 +131,43 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.outcomes",
             "ea.core.run",
             "ea.core.runtime",
+            "ea.core.strategy",
             "ea.core.time",
             "ea.runtime.historical",
             "ea.runtime.ingress",
             "ea.runtime.queue",
+            "ea.runtime.strategy",
         }
     )
     imported_ea_modules: set[str] = set()
     for source in sorted((SOURCE_ROOT / "runtime").rglob("*.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        imported_ea_modules.update(
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("ea.")
+        )
+
+    assert imported_ea_modules == allowed
+
+
+def test_inner_strategy_package_depends_only_on_core_and_itself() -> None:
+    allowed = frozenset(
+        {
+            "ea.core.execution_identity",
+            "ea.core.market_data",
+            "ea.core.market_data_codec",
+            "ea.core.outcomes",
+            "ea.core.run",
+            "ea.core.runtime",
+            "ea.core.strategy",
+            "ea.strategy.authority",
+        }
+    )
+    imported_ea_modules: set[str] = set()
+    for source in sorted((SOURCE_ROOT / "strategy").rglob("*.py")):
         tree = ast.parse(source.read_text(encoding="utf-8"))
         imported_ea_modules.update(
             node.module

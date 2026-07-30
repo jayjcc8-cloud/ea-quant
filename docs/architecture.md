@@ -113,7 +113,7 @@ flowchart LR
 | `Instrument` | `core` 共享 identity 语义 | data adapter 解析为 canonical identity | data/features/strategy | `(venue, symbol)` 与 namespace 规则由 [ADR 0004](adr/0004-canonical-market-data-time-and-visibility.md) 定义；vendor identity 不得穿透 adapter |
 | `Bar` / `Tick` / market event | data domain 的 canonical semantics | feed adapter 按 clock/as-of 顺序产生 | runtime 投递给 features/strategy | `Bar`、envelope、revision、UTC、visibility 与 market admission ordering 由 [ADR 0004](adr/0004-canonical-market-data-time-and-visibility.md) 定义；feed 不得暴露未来事件；其他 event kind 仍待后续契约 |
 | `Signal` | strategy | strategy 只根据已投递数据与自身状态产生 | runtime 交给 portfolio | immutable；不能包含 SDK 调用、Order 或 Fill |
-| `PortfolioTarget` / planning outcome | portfolio policy | portfolio 根据 signal、ledger snapshot 和约束产生 | portfolio planner / runtime | target 表示 desired state；每个 target 记录 planning outcome，可产生零个或多个 intent |
+| `PortfolioTarget` / planning outcome | portfolio policy | portfolio 根据 signal、ledger snapshot 和约束产生 | portfolio planner / runtime | target 表示 desired state；每个 target 记录 planning outcome，Phase 1 产生零个或一个 intent |
 | `OrderIntent` | portfolio planning | target 与 canonical current state 的差额 | runtime 连同 canonical snapshot 仅交给 risk | 不能绕过 risk；每个 emitted intent 都需显式 risk outcome |
 | risk decision | risk | risk 对成功评估的 intent 给出 allow/resize/reject | runtime；批准结果才交 execution | 必须关联原 intent；reject 是正常结果；不预设 Python schema |
 | `Order` / canonical execution request | shared execution/OMS | execution 依据 approved decision 唯一创建 | runtime pre-effect gate，ack 后由 execution 提交 venue | request 必须可审计且已 redacted；vendor wire/auth material 不得离开 adapter |
@@ -376,8 +376,11 @@ Phase 1 入口门禁的历史状态审查基线为
   capture、semantic fingerprint 与 bounded no-look-ahead historical source 也已实现当前切片。
   Accepted ADR 0016 的只读 virtual clock、one-event historical frontier、run-wide
   arbitration/dispatch sequence、acknowledgement-bound cursor commit 与 canonical trace/digest
-  已实现当前切片。完整 lifecycle/stage coordinator、venue submission、ledger/runtime
-  integration、reconciliation correction、portfolio planning、strategy 和完整 backtest 仍未实现。
+  已实现当前切片；Accepted ADR 0017 的 active-dispatch proof、factory-only StrategySignal、
+  signed PortfolioTarget、显式 planning outcome、latest-snapshot target-current conversion、
+  optional OrderIntent 与 replay/conflict authority 已实现当前切片。完整 lifecycle/stage
+  coordinator、venue submission、ledger/runtime integration、reconciliation correction、
+  concrete strategy、historical matcher、result adapter 和完整 backtest 仍未实现。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -419,6 +422,12 @@ Phase 1 入口门禁的历史状态审查基线为
   runtime-owned structural source port、outer concrete-cursor bridge、one-event candidate、
   run-wide time arbitration/continuous dispatch identity、exact ack/commit 与 versioned
   trace/digest（已实现；完整 lifecycle/stage coordinator、matcher 与 result adapter 尚未实现）。
+- deterministic strategy / portfolio planning：Accepted ADR 0017 的 runtime-active market
+  proof、factory-only Signal/Target、absolute signed target policy、latest immutable snapshot、
+  exact target-current delta、buy/sell/no-op/unresolved-Fill outcome、optional canonical
+  OrderIntent、retained-snapshot Risk handoff、exact replay/conflict/halt 与跨进程
+  golden/property evidence（已实现；concrete strategy、coordinator、matcher 与 result adapter
+  尚未实现）。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。
 - 固定 fixture 的 deterministic golden tests。
