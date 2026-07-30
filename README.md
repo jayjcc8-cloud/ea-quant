@@ -29,7 +29,7 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   当前切片；Accepted ADR 0015 的严格本地 OHLCV 解码、稳定文件捕获、canonical selection /
   fingerprint 和 bounded no-look-ahead historical source 已实现当前切片。尚未实现 historical
   runtime 的完整 lifecycle/stage coordinator、venue submission、ledger/runtime integration、
-  reconciliation correction、historical matcher、concrete strategy 或完整 backtest；Accepted
+  reconciliation correction、concrete strategy 或完整 backtest；Accepted
   ADR 0017 的 factory-only StrategySignal、PortfolioTarget、planning outcome、target-current
   intent authority 与 retained-snapshot Risk handoff 已实现当前切片；Accepted ADR 0016
   的 virtual clock、incremental historical frontier、run-wide arbitration/dispatch sequence、
@@ -73,6 +73,15 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   预检 canonical Order、execution request、digest 与 client submission key，并提供
   authority-backed Order ID / client submission key resolution ports。该切片不提交 venue，
   也不替代紧邻 submission 的 audit/freshness/halt gate。
+- `ea.core.historical_matching`、`ea.execution.matcher` 与 `ea.runtime.matcher` 已按
+  [Accepted ADR 0018](docs/adr/0018-deterministic-phase1-historical-matcher.md) 实现 Phase 1
+  deterministic simulated venue：只接受 authority-issued Order 和 exact active runtime
+  market/end root，在 consumer-owned persisted-audit/freshness/halt/gate proof 后原子发布
+  submission receipt；按首个 later eligible raw initial Bar 的 exact binary64 close 做
+  adverse half-tick 量化并发布 full trade，bounded end 则发布精确 no-data expiry。matcher
+  不持有 source/cursor/clock/store；factory-only batch/state/conflict codec、replay/monotone halt、
+  causal-descendant fact dispatch 和 ADR 0018 规范夹具均由测试覆盖。完整 lifecycle coordinator、
+  audit store 实现、ledger 串接、result adapter 与 backtest CLI 仍属后续切片。
 - `ea.core.runtime` 与 `ea.runtime` 已按
   [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md) 建立 safety、execution
   fact、market、timer、end-of-run 的全局 root key、完整有界计划验证和不可插入的单消费者顺序
@@ -83,9 +92,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   clock、固定 producer set 的 run-wide time arbiter、continuous dispatch sequence、one-event
   historical frontier、ack 后 source cursor commit，以及 versioned canonical trace/digest。
   ADR 0017 另增加只读 active-market-dispatch verifier/proof，策略只能为 exact live market
-  lease 签发 Signal。reconciliation rank 仅保留词汇，不存在 opaque placeholder；这些切片尚
-  不是完整 lifecycle coordinator，也不包含 audit gate、stage callback、concrete strategy
-  orchestration 或 matcher。
+  lease 签发 Signal；ADR 0018 另增加 active end proof、historical matcher dispatch verifier
+  与 causal-descendant fact adapter。reconciliation rank 仅保留词汇，不存在 opaque
+  placeholder；这些切片尚不是完整 lifecycle coordinator，也不包含 concrete audit store、
+  stage callback 或 concrete strategy orchestration。
 - `ea.core.execution_state` 与 `ea.execution.fact_authority` 已按 Accepted ADR 0014 实现 exact
   fact replay/conflict、authority-backed Order correlation、staged venue binding、deterministic
   Fill allocation、coherent observed quantity、bounded immutable Order projection、closed

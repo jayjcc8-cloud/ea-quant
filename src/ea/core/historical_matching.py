@@ -1,0 +1,1809 @@
+"""Immutable deterministic historical-matcher contracts from ADR 0018."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
+from hashlib import sha256
+from types import MappingProxyType
+from typing import Any, cast, final
+
+from ea.core.execution import (
+    InstrumentExecutionSpecSet,
+    InstrumentSpecSetId,
+    instrument_spec_set_digest,
+)
+from ea.core.execution_identity import (
+    EconomicId,
+    EconomicOwnerKind,
+    IngressIdentity,
+    SourceNamespace,
+)
+from ea.core.execution_messages import (
+    ExecutionFactIngress,
+    ExecutionPolicyId,
+    ExecutionPolicyRef,
+    FactProvenanceId,
+    Order,
+    OrderSide,
+    canonical_execution_request_bytes,
+    execution_request_digest,
+    order_client_submission_key,
+    order_digest,
+)
+from ea.core.identity import Instrument, VenueId
+from ea.core.market_data import MarketDataEnvelope
+from ea.core.market_data_codec import canonical_market_data_record_bytes
+from ea.core.outcomes import OutcomeCode
+from ea.core.run import RunId, Sha256Digest
+from ea.core.runtime import (
+    END_OF_RUN_KIND_RANKS,
+    MARKET_DATA_KIND_RANKS,
+    RUNTIME_ROOT_DOMAIN_RANKS,
+    EndOfRunKind,
+    EndOfRunRoot,
+    RuntimeRootDomain,
+    RuntimeRootOrderKey,
+    _EndOfRunSuffix,
+    _MarketDataSuffix,
+)
+
+HISTORICAL_SUBMISSION_RECEIPT_CANONICALIZATION = "ea-phase1-historical-submission-receipt-v1"
+HISTORICAL_SUBMISSION_RECEIPT_DIGEST_DOMAIN = b"ea.phase1-historical-submission-receipt.v1\0"
+HISTORICAL_MATCHER_DISPATCH_BATCH_CANONICALIZATION = (
+    "ea-phase1-historical-matcher-dispatch-batch-v1"
+)
+HISTORICAL_MATCHER_DISPATCH_BATCH_DIGEST_DOMAIN = (
+    b"ea.phase1-historical-matcher-dispatch-batch.v1\0"
+)
+HISTORICAL_MATCHER_STATE_CANONICALIZATION = "ea-phase1-historical-matcher-state-v1"
+HISTORICAL_MATCHER_STATE_DIGEST_DOMAIN = b"ea.phase1-historical-matcher-state.v1\0"
+HISTORICAL_MATCHER_CONFLICT_CANONICALIZATION = "ea-phase1-historical-matcher-conflict-v1"
+HISTORICAL_MATCHER_CONFLICT_DIGEST_DOMAIN = b"ea.phase1-historical-matcher-conflict.v1\0"
+HISTORICAL_MATCHER_MARKET_ROOT_DIGEST_DOMAIN = b"ea.phase1-historical-matcher-market-root.v1\0"
+HISTORICAL_MATCHER_END_ROOT_DIGEST_DOMAIN = b"ea.phase1-historical-matcher-end-root.v1\0"
+HISTORICAL_MATCHER_OBSERVATION_CANONICALIZATION = "ea-phase1-historical-matcher-observation-v1"
+HISTORICAL_MATCHER_OBSERVATION_DIGEST_DOMAIN = b"ea.phase1-historical-matcher-observation.v1\0"
+HISTORICAL_MATCHER_SCHEMA_VERSION = 1
+_MAX_UINT64 = (1 << 64) - 1
+_AUTHORIZATION_PROOF_SEAL = object()
+
+_MATCHER_ERROR_CODES = frozenset(
+    {
+        OutcomeCode.INVALID_TYPE,
+        OutcomeCode.OUT_OF_RANGE,
+        OutcomeCode.NOT_QUANTIZED,
+        OutcomeCode.PRICE_DOMAIN,
+        OutcomeCode.ARITHMETIC_OVERFLOW,
+        OutcomeCode.CONFLICTING_ID,
+        OutcomeCode.SUBMISSION_BLOCKED_BY_HALT,
+        OutcomeCode.RISK_STALE_APPROVAL,
+        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+        OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+    }
+)
+_AUTHORIZATION_ERROR_CODES = frozenset(
+    {
+        OutcomeCode.INVALID_TYPE,
+        OutcomeCode.CONFLICTING_ID,
+        OutcomeCode.SUBMISSION_BLOCKED_BY_HALT,
+        OutcomeCode.RISK_STALE_APPROVAL,
+        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+        OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+    }
+)
+
+
+class HistoricalMatcherError(ValueError):
+    """Closed structured failure for the Phase 1 historical matcher."""
+
+    code: OutcomeCode
+
+    def __init__(self, code: OutcomeCode, message: str) -> None:
+        if type(code) is not OutcomeCode or code not in _MATCHER_ERROR_CODES:
+            raise TypeError("historical matcher errors require an exact permitted OutcomeCode")
+        self.code = code
+        super().__init__(message)
+
+
+class HistoricalPreEffectAuthorizationError(ValueError):
+    """Normal fail-closed denial returned by the coordinator-owned authorization port."""
+
+    code: OutcomeCode
+
+    def __init__(self, code: OutcomeCode, message: str) -> None:
+        if type(code) is not OutcomeCode or code not in _AUTHORIZATION_ERROR_CODES:
+            raise TypeError("historical authorization errors require an exact permitted code")
+        self.code = code
+        super().__init__(message)
+
+
+def _fail(code: OutcomeCode, message: str) -> HistoricalMatcherError:
+    return HistoricalMatcherError(code, message)
+
+
+def _utc_text(value: object) -> str:
+    from datetime import datetime
+
+    if type(value) is not datetime:
+        raise _fail(OutcomeCode.INVALID_TYPE, "canonical time must be exact datetime")
+    offset = value.utcoffset()
+    if value.tzinfo is None or offset is None:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "canonical time must be UTC")
+    if offset.total_seconds() != 0:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "canonical time must be UTC")
+    return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _canonical_json(document: object) -> bytes:
+    try:
+        return json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "value cannot be canonically encoded") from error
+
+
+def _framed_digest(domain: bytes, payload: bytes) -> Sha256Digest:
+    if type(domain) is not bytes or type(payload) is not bytes:
+        raise _fail(OutcomeCode.INVALID_TYPE, "digest inputs must be exact bytes")
+    return Sha256Digest(sha256(domain + len(payload).to_bytes(8, "big") + payload).hexdigest())
+
+
+def _economic_id_document(value: EconomicId) -> dict[str, object]:
+    if type(value) is not EconomicId:
+        raise _fail(OutcomeCode.INVALID_TYPE, "economic ID must be exact")
+    return {
+        "owner_kind": value.owner_kind.value,
+        "owner_sequence": value.owner_sequence,
+        "run_id": value.run_id.value,
+    }
+
+
+def _instrument_document(value: Instrument) -> dict[str, str]:
+    if type(value) is not Instrument:
+        raise _fail(OutcomeCode.INVALID_TYPE, "instrument must be exact")
+    return {"symbol": value.symbol, "venue": value.venue.code}
+
+
+def _ingress_identity_document(value: IngressIdentity) -> dict[str, object]:
+    if type(value) is not IngressIdentity:
+        raise _fail(OutcomeCode.INVALID_TYPE, "ingress identity must be exact")
+    return {
+        "ingress_sequence": value.ingress_sequence,
+        "source_namespace": value.source_namespace.value,
+    }
+
+
+def canonical_end_of_run_root_bytes(root: EndOfRunRoot) -> bytes:
+    """Encode the ADR 0018 terminal-root preimage."""
+    if type(root) is not EndOfRunRoot:
+        raise _fail(OutcomeCode.INVALID_TYPE, "end root must be exact")
+    return _canonical_json(
+        {
+            "available_at": _utc_text(root.available_at),
+            "kind": root.kind.value,
+            "producer_namespace": root.producer_namespace.value,
+            "producer_sequence": root.producer_sequence,
+            "run_id": root.run_id.value,
+            "type": "end_of_run",
+        }
+    )
+
+
+def historical_market_root_digest(root: MarketDataEnvelope) -> Sha256Digest:
+    if type(root) is not MarketDataEnvelope:
+        raise _fail(OutcomeCode.INVALID_TYPE, "market root must be exact")
+    try:
+        payload = canonical_market_data_record_bytes(root)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "market root cannot be encoded") from error
+    return _framed_digest(HISTORICAL_MATCHER_MARKET_ROOT_DIGEST_DOMAIN, payload)
+
+
+def historical_end_root_digest(root: EndOfRunRoot) -> Sha256Digest:
+    return _framed_digest(
+        HISTORICAL_MATCHER_END_ROOT_DIGEST_DOMAIN,
+        canonical_end_of_run_root_bytes(root),
+    )
+
+
+def runtime_root_key_document(
+    root: MarketDataEnvelope | EndOfRunRoot,
+) -> dict[str, object]:
+    """Return the closed tagged matcher root-key projection."""
+    if type(root) is MarketDataEnvelope:
+        payload = root.payload
+        return {
+            "adjustment": payload.adjustment.value,
+            "available_at": _utc_text(root.available_at),
+            "domain_rank": RUNTIME_ROOT_DOMAIN_RANKS[RuntimeRootDomain.MARKET_DATA],
+            "event_time": _utc_text(root.event_time),
+            "instrument": _instrument_document(payload.instrument),
+            "interval_end": _utc_text(payload.interval_end),
+            "interval_start": _utc_text(payload.interval_start),
+            "kind_rank": MARKET_DATA_KIND_RANKS[root.kind],
+            "revision": root.revision,
+            "root_domain": RuntimeRootDomain.MARKET_DATA.value,
+            "source": root.source.code,
+            "source_sequence": root.source_sequence,
+        }
+    if type(root) is EndOfRunRoot:
+        return {
+            "available_at": _utc_text(root.available_at),
+            "domain_rank": RUNTIME_ROOT_DOMAIN_RANKS[RuntimeRootDomain.END_OF_RUN],
+            "kind": root.kind.value,
+            "kind_rank": END_OF_RUN_KIND_RANKS[root.kind],
+            "producer_namespace": root.producer_namespace.value,
+            "producer_sequence": root.producer_sequence,
+            "root_domain": RuntimeRootDomain.END_OF_RUN.value,
+            "run_id": root.run_id.value,
+        }
+    raise _fail(OutcomeCode.INVALID_TYPE, "matcher root key requires market or end root")
+
+
+def runtime_root_key_from_document(document: object) -> RuntimeRootOrderKey:
+    """Strictly reconstruct one tagged matcher root key."""
+    from datetime import UTC, datetime
+
+    if type(document) is not dict:
+        raise _fail(OutcomeCode.INVALID_TYPE, "root key must be an object")
+
+    def time(field: str) -> datetime:
+        raw = document.get(field)
+        if type(raw) is not str:
+            raise _fail(OutcomeCode.INVALID_TYPE, f"{field} must be exact str")
+        try:
+            value = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        except ValueError as error:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field} is invalid") from error
+        if _utc_text(value) != raw:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field} is not canonical")
+        return value
+
+    domain = document.get("root_domain")
+    if domain == RuntimeRootDomain.MARKET_DATA.value:
+        expected = {
+            "adjustment",
+            "available_at",
+            "domain_rank",
+            "event_time",
+            "instrument",
+            "interval_end",
+            "interval_start",
+            "kind_rank",
+            "revision",
+            "root_domain",
+            "source",
+            "source_sequence",
+        }
+        if set(document) != expected:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "market root key fields conflict")
+        instrument = document["instrument"]
+        if type(instrument) is not dict or set(instrument) != {"symbol", "venue"}:
+            raise _fail(OutcomeCode.INVALID_TYPE, "market root instrument is invalid")
+        values = (
+            document["domain_rank"],
+            document["kind_rank"],
+            document["source_sequence"],
+            document["revision"],
+        )
+        if any(type(value) is not int for value in values):
+            raise _fail(OutcomeCode.INVALID_TYPE, "market root ranks must be exact int")
+        if (
+            document["domain_rank"] != RUNTIME_ROOT_DOMAIN_RANKS[RuntimeRootDomain.MARKET_DATA]
+            or document["kind_rank"] != MARKET_DATA_KIND_RANKS[next(iter(MARKET_DATA_KIND_RANKS))]
+            or document["source_sequence"] < 0
+            or document["revision"] < 0
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "market root ranks conflict")
+        for field in ("adjustment", "source"):
+            if type(document[field]) is not str:
+                raise _fail(OutcomeCode.INVALID_TYPE, f"{field} must be exact str")
+        if any(type(instrument[field]) is not str for field in ("symbol", "venue")):
+            raise _fail(OutcomeCode.INVALID_TYPE, "instrument fields must be exact str")
+        return RuntimeRootOrderKey(
+            available_at=time("available_at"),
+            domain_rank=document["domain_rank"],
+            _suffix=_MarketDataSuffix(
+                event_time=time("event_time"),
+                kind_rank=document["kind_rank"],
+                source_code=document["source"],
+                source_sequence=document["source_sequence"],
+                instrument_venue=instrument["venue"],
+                instrument_symbol=instrument["symbol"],
+                interval_start=time("interval_start"),
+                interval_end=time("interval_end"),
+                adjustment=document["adjustment"],
+                revision=document["revision"],
+            ),
+        )
+    if domain == RuntimeRootDomain.END_OF_RUN.value:
+        expected = {
+            "available_at",
+            "domain_rank",
+            "kind",
+            "kind_rank",
+            "producer_namespace",
+            "producer_sequence",
+            "root_domain",
+            "run_id",
+        }
+        if set(document) != expected:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "end root key fields conflict")
+        for field in ("kind", "producer_namespace", "run_id"):
+            if type(document[field]) is not str:
+                raise _fail(OutcomeCode.INVALID_TYPE, f"{field} must be exact str")
+        if type(document["producer_sequence"]) is not int:
+            raise _fail(OutcomeCode.INVALID_TYPE, "producer_sequence must be exact int")
+        try:
+            kind = EndOfRunKind(document["kind"])
+        except ValueError as error:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "end kind is invalid") from error
+        if (
+            document["domain_rank"] != RUNTIME_ROOT_DOMAIN_RANKS[RuntimeRootDomain.END_OF_RUN]
+            or document["kind_rank"] != END_OF_RUN_KIND_RANKS[kind]
+            or document["producer_sequence"] < 0
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "end root ranks conflict")
+        try:
+            SourceNamespace(document["producer_namespace"])
+            RunId(document["run_id"])
+        except (TypeError, ValueError) as error:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "end root identity is invalid") from error
+        return RuntimeRootOrderKey(
+            available_at=time("available_at"),
+            domain_rank=document["domain_rank"],
+            _suffix=_EndOfRunSuffix(
+                kind_rank=document["kind_rank"],
+                producer_namespace=document["producer_namespace"],
+                producer_sequence=document["producer_sequence"],
+                run_id=document["run_id"],
+            ),
+        )
+    raise _fail(OutcomeCode.OUT_OF_RANGE, "root key domain is invalid")
+
+
+class HistoricalDispatchKind(StrEnum):
+    MARKET = "market"
+    END_OF_RUN = "end_of_run"
+
+
+class HistoricalMatcherConflictKind(StrEnum):
+    SUBMISSION_IDENTITY = "submission_identity"
+    CLIENT_SUBMISSION_KEY = "client_submission_key"
+    DISPATCH_IDENTITY = "dispatch_identity"
+    NON_MONOTONE_DISPATCH = "non_monotone_dispatch"
+    RETAINED_BINDING_DRIFT = "retained_binding_drift"
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class HistoricalSubmissionAuthorizationProof:
+    _run_id: RunId
+    _instrument_spec_set_id: InstrumentSpecSetId
+    _instrument_spec_set_sha256: Sha256Digest
+    _execution_policy: ExecutionPolicyRef
+    _order_id: EconomicId
+    _order_sha256: Sha256Digest
+    _execution_request_sha256: Sha256Digest
+    _causal_market_sha256: Sha256Digest
+    _causal_root_key: RuntimeRootOrderKey
+    _dispatch_sequence: int
+    _audit_acknowledgement_id: str
+    _audit_acknowledgement_sha256: Sha256Digest
+    _portfolio_snapshot_version: int
+    _risk_state_version: int
+    _global_halt_epoch: int
+    _risk_halt_epoch: int
+    _instrument_gate_id: str
+    _instrument_gate_version: int
+    _held_for_order_id: EconomicId
+    _authorization_state_version: int
+    _issuer: object
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("authorization proofs are created only by the sealed factory")
+
+    @property
+    def audit_acknowledgement_id(self) -> str:
+        return self._audit_acknowledgement_id
+
+    @property
+    def audit_acknowledgement_sha256(self) -> Sha256Digest:
+        return self._audit_acknowledgement_sha256
+
+    @property
+    def global_halt_epoch(self) -> int:
+        return self._global_halt_epoch
+
+    @property
+    def risk_halt_epoch(self) -> int:
+        return self._risk_halt_epoch
+
+    @property
+    def instrument_gate_id(self) -> str:
+        return self._instrument_gate_id
+
+    @property
+    def instrument_gate_version(self) -> int:
+        return self._instrument_gate_version
+
+    @property
+    def authorization_state_version(self) -> int:
+        return self._authorization_state_version
+
+
+def _create_historical_submission_authorization_proof(
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    order: Order,
+    order_sha256: Sha256Digest,
+    execution_request_sha256: Sha256Digest,
+    causal_market_sha256: Sha256Digest,
+    causal_root_key: RuntimeRootOrderKey,
+    dispatch_sequence: int,
+    audit_acknowledgement_id: str,
+    audit_acknowledgement_sha256: Sha256Digest,
+    global_halt_epoch: int,
+    risk_halt_epoch: int,
+    instrument_gate_id: str,
+    instrument_gate_version: int,
+    held_for_order_id: EconomicId,
+    authorization_state_version: int,
+    issuer: object,
+) -> HistoricalSubmissionAuthorizationProof:
+    if (
+        type(run_id) is not RunId
+        or type(spec_set) is not InstrumentExecutionSpecSet
+        or type(execution_policy) is not ExecutionPolicyRef
+        or type(order) is not Order
+        or type(order_sha256) is not Sha256Digest
+        or type(execution_request_sha256) is not Sha256Digest
+        or type(causal_market_sha256) is not Sha256Digest
+        or type(causal_root_key) is not RuntimeRootOrderKey
+        or type(audit_acknowledgement_id) is not str
+        or not audit_acknowledgement_id
+        or type(audit_acknowledgement_sha256) is not Sha256Digest
+        or type(instrument_gate_id) is not str
+        or not instrument_gate_id
+        or type(held_for_order_id) is not EconomicId
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "authorization proof inputs are invalid")
+    for value in (
+        dispatch_sequence,
+        order.portfolio_snapshot_version,
+        order.risk_state_version,
+        global_halt_epoch,
+        risk_halt_epoch,
+        instrument_gate_version,
+        authorization_state_version,
+    ):
+        if type(value) is not int:
+            raise _fail(OutcomeCode.INVALID_TYPE, "authorization versions must be exact int")
+    if (
+        not 1 <= dispatch_sequence <= _MAX_UINT64
+        or min(
+            global_halt_epoch,
+            risk_halt_epoch,
+            instrument_gate_version,
+            authorization_state_version,
+        )
+        < 0
+    ):
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "authorization versions are outside range")
+    proof = object.__new__(HistoricalSubmissionAuthorizationProof)
+    values: dict[str, object] = {
+        "_run_id": run_id,
+        "_instrument_spec_set_id": spec_set.identifier,
+        "_instrument_spec_set_sha256": instrument_spec_set_digest(spec_set),
+        "_execution_policy": execution_policy,
+        "_order_id": order.order_id,
+        "_order_sha256": order_sha256,
+        "_execution_request_sha256": execution_request_sha256,
+        "_causal_market_sha256": causal_market_sha256,
+        "_causal_root_key": causal_root_key,
+        "_dispatch_sequence": dispatch_sequence,
+        "_audit_acknowledgement_id": audit_acknowledgement_id,
+        "_audit_acknowledgement_sha256": audit_acknowledgement_sha256,
+        "_portfolio_snapshot_version": order.portfolio_snapshot_version,
+        "_risk_state_version": order.risk_state_version,
+        "_global_halt_epoch": global_halt_epoch,
+        "_risk_halt_epoch": risk_halt_epoch,
+        "_instrument_gate_id": instrument_gate_id,
+        "_instrument_gate_version": instrument_gate_version,
+        "_held_for_order_id": held_for_order_id,
+        "_authorization_state_version": authorization_state_version,
+        "_issuer": issuer,
+        "_seal": _AUTHORIZATION_PROOF_SEAL,
+    }
+    for name, proof_value in values.items():
+        object.__setattr__(proof, name, proof_value)
+    return proof
+
+
+def _require_historical_submission_authorization_proof(
+    proof: object,
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    order: Order,
+    order_sha256: Sha256Digest,
+    execution_request_sha256: Sha256Digest,
+    causal_market_sha256: Sha256Digest,
+    causal_root_key: RuntimeRootOrderKey,
+    dispatch_sequence: int,
+    issuer: object,
+) -> HistoricalSubmissionAuthorizationProof:
+    if type(proof) is not HistoricalSubmissionAuthorizationProof:
+        raise _fail(OutcomeCode.INVALID_TYPE, "authorization verifier returned non-exact proof")
+    try:
+        matches = (
+            proof._seal is _AUTHORIZATION_PROOF_SEAL
+            and proof._issuer is issuer
+            and proof._run_id == run_id
+            and proof._instrument_spec_set_id == spec_set.identifier
+            and proof._instrument_spec_set_sha256 == instrument_spec_set_digest(spec_set)
+            and proof._execution_policy == execution_policy
+            and proof._order_id == order.order_id
+            and proof._order_sha256 == order_sha256
+            and proof._execution_request_sha256 == execution_request_sha256
+            and proof._causal_market_sha256 == causal_market_sha256
+            and proof._causal_root_key == causal_root_key
+            and proof._dispatch_sequence == dispatch_sequence
+            and proof._portfolio_snapshot_version == order.portfolio_snapshot_version
+            and proof._risk_state_version == order.risk_state_version
+            and proof._held_for_order_id == order.order_id
+            and type(proof._audit_acknowledgement_id) is str
+            and bool(proof._audit_acknowledgement_id)
+            and type(proof._audit_acknowledgement_sha256) is Sha256Digest
+            and type(proof._global_halt_epoch) is int
+            and proof._global_halt_epoch >= 0
+            and type(proof._risk_halt_epoch) is int
+            and proof._risk_halt_epoch >= 0
+            and type(proof._instrument_gate_id) is str
+            and bool(proof._instrument_gate_id)
+            and type(proof._instrument_gate_version) is int
+            and proof._instrument_gate_version >= 0
+            and type(proof._authorization_state_version) is int
+            and proof._authorization_state_version >= 0
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "authorization proof carriers are invalid") from error
+    if not matches:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization proof conflicts")
+    return proof
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class HistoricalSubmissionReceipt:
+    run_id: RunId
+    source_namespace: SourceNamespace
+    submission_sequence: int
+    order_id: EconomicId
+    order_sha256: Sha256Digest
+    execution_request_sha256: Sha256Digest
+    client_submission_key: Sha256Digest
+    instrument: Instrument
+    side: OrderSide
+    quantity_text: str
+    causal_market_sha256: Sha256Digest
+    causal_root_key: RuntimeRootOrderKey
+    dispatch_sequence: int
+    eligible_after_available_at: datetime
+    audit_acknowledgement_id: str
+    audit_acknowledgement_sha256: Sha256Digest
+    global_halt_epoch: int
+    risk_halt_epoch: int
+    instrument_gate_id: str
+    instrument_gate_version: int
+    authorization_state_version: int
+    instrument_spec_set_id: InstrumentSpecSetId
+    instrument_spec_set_sha256: Sha256Digest
+    execution_policy: ExecutionPolicyRef
+
+    def __init__(self) -> None:
+        raise TypeError("submission receipts are created only by the matcher or decoder")
+
+    @property
+    def outcome_code(self) -> OutcomeCode:
+        return OutcomeCode.SUBMISSION_SUBMITTED
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class HistoricalMatcherDispatchBatch:
+    run_id: RunId
+    source_namespace: SourceNamespace
+    dispatch_kind: HistoricalDispatchKind
+    dispatch_sequence: int
+    trigger_root_sha256: Sha256Digest
+    trigger_root_key: RuntimeRootOrderKey
+    next_fact_sequence_before: int | None
+    next_fact_sequence_after: int | None
+    submission_sequences: tuple[int, ...]
+    order_ids: tuple[EconomicId, ...]
+    ingresses: tuple[ExecutionFactIngress, ...]
+    ingress_sha256s: tuple[Sha256Digest, ...]
+
+    def __init__(self) -> None:
+        raise TypeError("dispatch batches are created only by the matcher or decoder")
+
+    @property
+    def ingress_identities(self) -> tuple[IngressIdentity, ...]:
+        return tuple(ingress.identity for ingress in self.ingresses)
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class HistoricalMatcherDescendantBinding:
+    ingress_identity: IngressIdentity
+    ingress_sha256: Sha256Digest
+    fact_sha256: Sha256Digest
+    batch_sha256: Sha256Digest
+    batch_index: int
+    parent_kind: HistoricalDispatchKind
+    parent_root_sha256: Sha256Digest
+    parent_root_key: RuntimeRootOrderKey
+    parent_dispatch_sequence: int
+
+    def __init__(self) -> None:
+        raise TypeError("descendant bindings are created only by the matcher")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class HistoricalMatcherConflictEvidence:
+    run_id: RunId
+    conflict_kind: HistoricalMatcherConflictKind
+    occupied_identity: Mapping[str, object] | None
+    existing_sha256: Sha256Digest | None
+    submitted_sha256: Sha256Digest | None
+    submitted_dispatch_sequence: int | None
+    last_successful_dispatch_sequence: int | None
+    pending_count: int
+    next_submission_sequence: int | None
+    next_fact_sequence: int | None
+    trigger_root_sha256: Sha256Digest | None
+
+    def __init__(self) -> None:
+        raise TypeError("matcher conflicts are created only by the matcher or decoder")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class HistoricalMatcherState:
+    run_id: RunId
+    source_namespace: SourceNamespace
+    provenance_id: FactProvenanceId
+    instrument_spec_set_id: InstrumentSpecSetId
+    instrument_spec_set_sha256: Sha256Digest
+    execution_policy: ExecutionPolicyRef
+    next_submission_sequence: int | None
+    next_fact_sequence: int | None
+    receipt_sha256s: tuple[Sha256Digest, ...]
+    pending_order_ids: tuple[EconomicId, ...]
+    issued_ingresses: tuple[ExecutionFactIngress, ...]
+    dispatch_batch_sha256s: tuple[Sha256Digest, ...]
+    last_new_dispatch_sequence: int | None
+    ended: bool
+    end_batch_sha256: Sha256Digest | None
+    halted: bool
+    conflict: HistoricalMatcherConflictEvidence | None
+
+    def __init__(self) -> None:
+        raise TypeError("matcher states are created only by the matcher or decoder")
+
+
+def _new_immutable(value_type: type[object], values: Mapping[str, object]) -> object:
+    fields = getattr(value_type, "__dataclass_fields__", None)
+    if type(fields) is not dict:
+        raise _fail(OutcomeCode.INVALID_TYPE, "immutable matcher value type is invalid")
+    expected = set(fields)
+    if set(values) != expected:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "immutable matcher value fields conflict")
+    value = object.__new__(value_type)
+    for name, item in values.items():
+        object.__setattr__(value, name, item)
+    return value
+
+
+def _create_historical_submission_receipt(
+    **values: object,
+) -> HistoricalSubmissionReceipt:
+    return cast(
+        HistoricalSubmissionReceipt,
+        _new_immutable(HistoricalSubmissionReceipt, values),
+    )
+
+
+def _create_historical_matcher_dispatch_batch(
+    **values: object,
+) -> HistoricalMatcherDispatchBatch:
+    return cast(
+        HistoricalMatcherDispatchBatch,
+        _new_immutable(HistoricalMatcherDispatchBatch, values),
+    )
+
+
+def _create_historical_matcher_descendant_binding(
+    **values: object,
+) -> HistoricalMatcherDescendantBinding:
+    return cast(
+        HistoricalMatcherDescendantBinding,
+        _new_immutable(HistoricalMatcherDescendantBinding, values),
+    )
+
+
+def _create_historical_matcher_conflict(
+    **values: object,
+) -> HistoricalMatcherConflictEvidence:
+    return cast(
+        HistoricalMatcherConflictEvidence,
+        _new_immutable(HistoricalMatcherConflictEvidence, values),
+    )
+
+
+def _create_historical_matcher_state(**values: object) -> HistoricalMatcherState:
+    return cast(
+        HistoricalMatcherState,
+        _new_immutable(HistoricalMatcherState, values),
+    )
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class HistoricalMatcherDecodeContext:
+    """Closed run/binding context and canonical nested-value registries."""
+
+    run_id: RunId
+    spec_set: InstrumentExecutionSpecSet
+    execution_policy: ExecutionPolicyRef
+    source_namespace: SourceNamespace
+    provenance_id: FactProvenanceId
+    orders_by_sha256: Mapping[Sha256Digest, Order] = field(default_factory=dict)
+    receipts_by_sha256: Mapping[Sha256Digest, HistoricalSubmissionReceipt] = field(
+        default_factory=dict
+    )
+    batches_by_sha256: Mapping[Sha256Digest, HistoricalMatcherDispatchBatch] = field(
+        default_factory=dict
+    )
+    ingresses_by_sha256: Mapping[Sha256Digest, ExecutionFactIngress] = field(default_factory=dict)
+    conflicts_by_sha256: Mapping[Sha256Digest, HistoricalMatcherConflictEvidence] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.run_id) is not RunId
+            or type(self.spec_set) is not InstrumentExecutionSpecSet
+            or type(self.execution_policy) is not ExecutionPolicyRef
+            or type(self.source_namespace) is not SourceNamespace
+            or type(self.provenance_id) is not FactProvenanceId
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "matcher decode bindings must be exact")
+        registries = (
+            ("orders_by_sha256", self.orders_by_sha256, Order),
+            (
+                "receipts_by_sha256",
+                self.receipts_by_sha256,
+                HistoricalSubmissionReceipt,
+            ),
+            (
+                "batches_by_sha256",
+                self.batches_by_sha256,
+                HistoricalMatcherDispatchBatch,
+            ),
+            ("ingresses_by_sha256", self.ingresses_by_sha256, ExecutionFactIngress),
+            (
+                "conflicts_by_sha256",
+                self.conflicts_by_sha256,
+                HistoricalMatcherConflictEvidence,
+            ),
+        )
+        for name, registry, value_type in registries:
+            if not isinstance(registry, Mapping):
+                raise _fail(
+                    OutcomeCode.INVALID_TYPE,
+                    "matcher decode registries must be read-only mappings",
+                )
+            if any(
+                type(key) is not Sha256Digest or type(value) is not value_type
+                for key, value in registry.items()
+            ):
+                raise _fail(
+                    OutcomeCode.INVALID_TYPE,
+                    "matcher decode registry entries must have exact types",
+                )
+            object.__setattr__(self, name, MappingProxyType(dict(registry)))
+
+
+def _receipt_document(receipt: HistoricalSubmissionReceipt) -> dict[str, object]:
+    if type(receipt) is not HistoricalSubmissionReceipt:
+        raise _fail(OutcomeCode.INVALID_TYPE, "receipt must be exact")
+    return {
+        "audit_acknowledgement_id": receipt.audit_acknowledgement_id,
+        "audit_acknowledgement_sha256": receipt.audit_acknowledgement_sha256.value,
+        "authorization_state_version": receipt.authorization_state_version,
+        "canonicalization": HISTORICAL_SUBMISSION_RECEIPT_CANONICALIZATION,
+        "causal_market_sha256": receipt.causal_market_sha256.value,
+        "causal_root_key": _runtime_key_document_from_key(receipt.causal_root_key),
+        "client_submission_key": receipt.client_submission_key.value,
+        "dispatch_sequence": receipt.dispatch_sequence,
+        "eligible_after_available_at": _utc_text(receipt.eligible_after_available_at),
+        "execution_policy_id": receipt.execution_policy.identifier.value,
+        "execution_policy_sha256": receipt.execution_policy.sha256.value,
+        "execution_request_sha256": receipt.execution_request_sha256.value,
+        "global_halt_epoch": receipt.global_halt_epoch,
+        "instrument": _instrument_document(receipt.instrument),
+        "instrument_gate_id": receipt.instrument_gate_id,
+        "instrument_gate_version": receipt.instrument_gate_version,
+        "instrument_spec_set_id": receipt.instrument_spec_set_id.value,
+        "instrument_spec_set_sha256": receipt.instrument_spec_set_sha256.value,
+        "message_type": "historical_submission_receipt",
+        "order_id": _economic_id_document(receipt.order_id),
+        "order_sha256": receipt.order_sha256.value,
+        "outcome_code": receipt.outcome_code.value,
+        "quantity": receipt.quantity_text,
+        "risk_halt_epoch": receipt.risk_halt_epoch,
+        "run_id": receipt.run_id.value,
+        "schema_version": HISTORICAL_MATCHER_SCHEMA_VERSION,
+        "side": receipt.side.value,
+        "source_namespace": receipt.source_namespace.value,
+        "submission_sequence": receipt.submission_sequence,
+    }
+
+
+def _runtime_key_document_from_key(key: RuntimeRootOrderKey) -> dict[str, object]:
+    if type(key) is not RuntimeRootOrderKey:
+        raise _fail(OutcomeCode.INVALID_TYPE, "runtime key must be exact")
+    suffix = key._suffix
+    if type(suffix) is _MarketDataSuffix:
+        return {
+            "adjustment": suffix.adjustment,
+            "available_at": _utc_text(key.available_at),
+            "domain_rank": key.domain_rank,
+            "event_time": _utc_text(suffix.event_time),
+            "instrument": {
+                "symbol": suffix.instrument_symbol,
+                "venue": suffix.instrument_venue,
+            },
+            "interval_end": _utc_text(suffix.interval_end),
+            "interval_start": _utc_text(suffix.interval_start),
+            "kind_rank": suffix.kind_rank,
+            "revision": suffix.revision,
+            "root_domain": RuntimeRootDomain.MARKET_DATA.value,
+            "source": suffix.source_code,
+            "source_sequence": suffix.source_sequence,
+        }
+    if type(suffix) is _EndOfRunSuffix:
+        return {
+            "available_at": _utc_text(key.available_at),
+            "domain_rank": key.domain_rank,
+            "kind": next(
+                kind.value
+                for kind, rank in END_OF_RUN_KIND_RANKS.items()
+                if rank == suffix.kind_rank
+            ),
+            "kind_rank": suffix.kind_rank,
+            "producer_namespace": suffix.producer_namespace,
+            "producer_sequence": suffix.producer_sequence,
+            "root_domain": RuntimeRootDomain.END_OF_RUN.value,
+            "run_id": suffix.run_id,
+        }
+    raise _fail(OutcomeCode.CONFLICTING_ID, "matcher key has unsupported suffix")
+
+
+def canonical_historical_submission_receipt_bytes(
+    receipt: HistoricalSubmissionReceipt,
+) -> bytes:
+    return _canonical_json(_receipt_document(receipt))
+
+
+def historical_submission_receipt_digest(
+    receipt: HistoricalSubmissionReceipt,
+) -> Sha256Digest:
+    return _framed_digest(
+        HISTORICAL_SUBMISSION_RECEIPT_DIGEST_DOMAIN,
+        canonical_historical_submission_receipt_bytes(receipt),
+    )
+
+
+def _batch_document(batch: HistoricalMatcherDispatchBatch) -> dict[str, object]:
+    if type(batch) is not HistoricalMatcherDispatchBatch:
+        raise _fail(OutcomeCode.INVALID_TYPE, "batch must be exact")
+    if not (
+        len(batch.ingresses)
+        == len(batch.ingress_sha256s)
+        == len(batch.order_ids)
+        == len(batch.submission_sequences)
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "batch arrays are not aligned")
+    return {
+        "canonicalization": HISTORICAL_MATCHER_DISPATCH_BATCH_CANONICALIZATION,
+        "dispatch_kind": batch.dispatch_kind.value,
+        "dispatch_sequence": batch.dispatch_sequence,
+        "ingresses": [
+            {
+                "ingress_identity": _ingress_identity_document(ingress.identity),
+                "ingress_sha256": digest.value,
+            }
+            for ingress, digest in zip(
+                batch.ingresses,
+                batch.ingress_sha256s,
+                strict=True,
+            )
+        ],
+        "message_type": "historical_matcher_dispatch_batch",
+        "next_fact_sequence_after": batch.next_fact_sequence_after,
+        "next_fact_sequence_before": batch.next_fact_sequence_before,
+        "order_ids": [_economic_id_document(value) for value in batch.order_ids],
+        "run_id": batch.run_id.value,
+        "schema_version": HISTORICAL_MATCHER_SCHEMA_VERSION,
+        "source_namespace": batch.source_namespace.value,
+        "submission_sequences": list(batch.submission_sequences),
+        "trigger_root_key": _runtime_key_document_from_key(batch.trigger_root_key),
+        "trigger_root_sha256": batch.trigger_root_sha256.value,
+    }
+
+
+def canonical_historical_matcher_dispatch_batch_bytes(
+    batch: HistoricalMatcherDispatchBatch,
+) -> bytes:
+    return _canonical_json(_batch_document(batch))
+
+
+def historical_matcher_dispatch_batch_digest(
+    batch: HistoricalMatcherDispatchBatch,
+) -> Sha256Digest:
+    return _framed_digest(
+        HISTORICAL_MATCHER_DISPATCH_BATCH_DIGEST_DOMAIN,
+        canonical_historical_matcher_dispatch_batch_bytes(batch),
+    )
+
+
+def canonical_historical_matcher_state_bytes(state: HistoricalMatcherState) -> bytes:
+    if type(state) is not HistoricalMatcherState:
+        raise _fail(OutcomeCode.INVALID_TYPE, "state must be exact")
+    document = {
+        "canonicalization": HISTORICAL_MATCHER_STATE_CANONICALIZATION,
+        "conflict_sha256": (
+            None
+            if state.conflict is None
+            else historical_matcher_conflict_digest(state.conflict).value
+        ),
+        "dispatch_batch_sha256s": [digest.value for digest in state.dispatch_batch_sha256s],
+        "end_batch_sha256": (
+            None if state.end_batch_sha256 is None else state.end_batch_sha256.value
+        ),
+        "ended": state.ended,
+        "execution_policy_id": state.execution_policy.identifier.value,
+        "execution_policy_sha256": state.execution_policy.sha256.value,
+        "halted": state.halted,
+        "instrument_spec_set_id": state.instrument_spec_set_id.value,
+        "instrument_spec_set_sha256": state.instrument_spec_set_sha256.value,
+        "issued_ingresses": [
+            {
+                "ingress_identity": _ingress_identity_document(ingress.identity),
+                "ingress_sha256": _execution_fact_ingress_digest(ingress).value,
+            }
+            for ingress in state.issued_ingresses
+        ],
+        "last_new_dispatch_sequence": state.last_new_dispatch_sequence,
+        "message_type": "historical_matcher_state",
+        "next_fact_sequence": state.next_fact_sequence,
+        "next_submission_sequence": state.next_submission_sequence,
+        "pending_order_ids": [_economic_id_document(value) for value in state.pending_order_ids],
+        "provenance_id": state.provenance_id.value,
+        "receipt_sha256s": [digest.value for digest in state.receipt_sha256s],
+        "run_id": state.run_id.value,
+        "schema_version": HISTORICAL_MATCHER_SCHEMA_VERSION,
+        "source_namespace": state.source_namespace.value,
+    }
+    return _canonical_json(document)
+
+
+def historical_matcher_state_digest(state: HistoricalMatcherState) -> Sha256Digest:
+    return _framed_digest(
+        HISTORICAL_MATCHER_STATE_DIGEST_DOMAIN,
+        canonical_historical_matcher_state_bytes(state),
+    )
+
+
+def _execution_fact_ingress_digest(ingress: ExecutionFactIngress) -> Sha256Digest:
+    from ea.core.execution_messages import execution_fact_ingress_digest
+
+    return execution_fact_ingress_digest(ingress)
+
+
+def canonical_historical_matcher_conflict_bytes(
+    conflict: HistoricalMatcherConflictEvidence,
+) -> bytes:
+    if type(conflict) is not HistoricalMatcherConflictEvidence:
+        raise _fail(OutcomeCode.INVALID_TYPE, "conflict must be exact")
+    document = {
+        "canonicalization": HISTORICAL_MATCHER_CONFLICT_CANONICALIZATION,
+        "conflict_kind": conflict.conflict_kind.value,
+        "existing_sha256": (
+            None if conflict.existing_sha256 is None else conflict.existing_sha256.value
+        ),
+        "last_successful_dispatch_sequence": conflict.last_successful_dispatch_sequence,
+        "message_type": "historical_matcher_conflict",
+        "next_fact_sequence": conflict.next_fact_sequence,
+        "next_submission_sequence": conflict.next_submission_sequence,
+        "occupied_identity": (
+            None if conflict.occupied_identity is None else dict(conflict.occupied_identity)
+        ),
+        "pending_count": conflict.pending_count,
+        "run_id": conflict.run_id.value,
+        "schema_version": HISTORICAL_MATCHER_SCHEMA_VERSION,
+        "submitted_dispatch_sequence": conflict.submitted_dispatch_sequence,
+        "submitted_sha256": (
+            None if conflict.submitted_sha256 is None else conflict.submitted_sha256.value
+        ),
+        "trigger_root_sha256": (
+            None if conflict.trigger_root_sha256 is None else conflict.trigger_root_sha256.value
+        ),
+    }
+    return _canonical_json(document)
+
+
+def historical_matcher_conflict_digest(
+    conflict: HistoricalMatcherConflictEvidence,
+) -> Sha256Digest:
+    return _framed_digest(
+        HISTORICAL_MATCHER_CONFLICT_DIGEST_DOMAIN,
+        canonical_historical_matcher_conflict_bytes(conflict),
+    )
+
+
+def canonical_historical_matcher_observation_bytes(
+    *,
+    fact_sequence: int,
+    fact_kind: str,
+    source_namespace: SourceNamespace,
+    provenance_id: FactProvenanceId,
+    submission_receipt_sha256: Sha256Digest,
+    order_sha256: Sha256Digest,
+    trigger_root_kind: HistoricalDispatchKind,
+    trigger_root_sha256: Sha256Digest,
+    trigger_root_key: RuntimeRootOrderKey,
+    trigger_dispatch_sequence: int,
+    occurred_at: object,
+    available_at: object,
+    instrument: Instrument,
+    side: OrderSide,
+    quantity_text: str,
+    price_text: str | None,
+    expiry_outcome_code: OutcomeCode | None,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+) -> bytes:
+    if (
+        type(fact_sequence) is not int
+        or not 1 <= fact_sequence <= _MAX_UINT64
+        or type(fact_kind) is not str
+        or type(source_namespace) is not SourceNamespace
+        or type(provenance_id) is not FactProvenanceId
+        or type(submission_receipt_sha256) is not Sha256Digest
+        or type(order_sha256) is not Sha256Digest
+        or type(trigger_root_kind) is not HistoricalDispatchKind
+        or type(trigger_root_sha256) is not Sha256Digest
+        or type(trigger_root_key) is not RuntimeRootOrderKey
+        or type(trigger_dispatch_sequence) is not int
+        or not 1 <= trigger_dispatch_sequence <= _MAX_UINT64
+        or type(instrument) is not Instrument
+        or type(side) is not OrderSide
+        or type(quantity_text) is not str
+        or type(spec_set) is not InstrumentExecutionSpecSet
+        or type(execution_policy) is not ExecutionPolicyRef
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "matcher observation inputs are invalid")
+    document = {
+        "available_at": _utc_text(available_at),
+        "canonicalization": HISTORICAL_MATCHER_OBSERVATION_CANONICALIZATION,
+        "execution_policy_id": execution_policy.identifier.value,
+        "execution_policy_sha256": execution_policy.sha256.value,
+        "expiry_outcome_code": (None if expiry_outcome_code is None else expiry_outcome_code.value),
+        "fact_kind": fact_kind,
+        "fact_sequence": fact_sequence,
+        "instrument": _instrument_document(instrument),
+        "instrument_spec_set_id": spec_set.identifier.value,
+        "instrument_spec_set_sha256": instrument_spec_set_digest(spec_set).value,
+        "occurred_at": _utc_text(occurred_at),
+        "order_sha256": order_sha256.value,
+        "price": price_text,
+        "provenance_id": provenance_id.value,
+        "quantity": quantity_text,
+        "schema_version": HISTORICAL_MATCHER_SCHEMA_VERSION,
+        "side": side.value,
+        "source_namespace": source_namespace.value,
+        "submission_receipt_sha256": submission_receipt_sha256.value,
+        "trigger_dispatch_sequence": trigger_dispatch_sequence,
+        "trigger_root_key": _runtime_key_document_from_key(trigger_root_key),
+        "trigger_root_kind": trigger_root_kind.value,
+        "trigger_root_sha256": trigger_root_sha256.value,
+    }
+    if fact_kind == "trade":
+        if price_text is None or expiry_outcome_code is not None:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "trade observation fields conflict")
+    elif fact_kind == "expiry":
+        if (
+            price_text is not None
+            or expiry_outcome_code is not OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "expiry observation fields conflict")
+    else:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "observation fact kind is invalid")
+    return _canonical_json(document)
+
+
+def historical_matcher_observation_digest(**kwargs: object) -> Sha256Digest:
+    encoder = cast(
+        Callable[..., bytes],
+        cast(Any, canonical_historical_matcher_observation_bytes),
+    )
+    return _framed_digest(
+        HISTORICAL_MATCHER_OBSERVATION_DIGEST_DOMAIN,
+        encoder(**kwargs),
+    )
+
+
+def immutable_occupied_identity(
+    value: Mapping[str, object] | None,
+) -> Mapping[str, object] | None:
+    if value is None:
+        return None
+    if any(type(key) is not str or type(item) not in (str, int) for key, item in value.items()):
+        raise _fail(OutcomeCode.INVALID_TYPE, "occupied identity must contain scalar fields")
+    return MappingProxyType(dict(value))
+
+
+def _decode_document(payload: bytes) -> dict[str, object]:
+    if type(payload) is not bytes:
+        raise _fail(OutcomeCode.INVALID_TYPE, "canonical payload must be exact bytes")
+
+    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if type(key) is not str or key in result:
+                raise _fail(
+                    OutcomeCode.OUT_OF_RANGE,
+                    "canonical payload has duplicate or invalid object keys",
+                )
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=object_pairs)
+    except HistoricalMatcherError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "canonical payload is invalid JSON") from error
+    if type(value) is not dict:
+        raise _fail(OutcomeCode.INVALID_TYPE, "canonical payload must be an object")
+    if _canonical_json(value) != payload:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "canonical payload bytes are not canonical")
+    return value
+
+
+def _require_decode_context(value: object) -> HistoricalMatcherDecodeContext:
+    if type(value) is not HistoricalMatcherDecodeContext:
+        raise _fail(OutcomeCode.INVALID_TYPE, "decode context must be exact")
+    instrument_spec_set_digest(value.spec_set)
+    return value
+
+
+def _parse_digest(value: object, *, field_name: str) -> Sha256Digest:
+    if type(value) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} must be exact str")
+    try:
+        return Sha256Digest(value)
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} is invalid") from error
+
+
+def _parse_optional_digest(
+    value: object,
+    *,
+    field_name: str,
+) -> Sha256Digest | None:
+    return None if value is None else _parse_digest(value, field_name=field_name)
+
+
+def _parse_uint64_or_none(value: object, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int:
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} must be exact int or null")
+    if not 1 <= value <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} is outside positive uint64")
+    return value
+
+
+def _parse_non_negative(value: object, *, field_name: str) -> int:
+    if type(value) is not int:
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} must be exact int")
+    if value < 0:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} must be non-negative")
+    return value
+
+
+def _parse_time(value: object, *, field_name: str) -> datetime:
+    if type(value) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} must be exact str")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} is invalid") from error
+    if _utc_text(parsed) != value:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} is not canonical")
+    return parsed
+
+
+def _parse_economic_id(value: object, *, field_name: str) -> EconomicId:
+    if type(value) is not dict or set(value) != {
+        "owner_kind",
+        "owner_sequence",
+        "run_id",
+    }:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} has invalid fields")
+    if type(value["owner_kind"]) is not str or type(value["run_id"]) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} strings are invalid")
+    sequence = _parse_non_negative(
+        value["owner_sequence"],
+        field_name=f"{field_name}.owner_sequence",
+    )
+    try:
+        return EconomicId(
+            RunId(value["run_id"]),
+            EconomicOwnerKind(value["owner_kind"]),
+            sequence,
+        )
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} is invalid") from error
+
+
+def _parse_instrument(value: object) -> Instrument:
+    if type(value) is not dict or set(value) != {"symbol", "venue"}:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "instrument fields are invalid")
+    if type(value["symbol"]) is not str or type(value["venue"]) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, "instrument strings must be exact")
+    try:
+        return Instrument(VenueId(value["venue"]), value["symbol"])
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "instrument is invalid") from error
+
+
+def _parse_policy(
+    document: Mapping[str, object],
+    *,
+    context: HistoricalMatcherDecodeContext,
+) -> ExecutionPolicyRef:
+    identifier = document.get("execution_policy_id")
+    digest = document.get("execution_policy_sha256")
+    if type(identifier) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, "execution policy ID must be exact str")
+    try:
+        policy = ExecutionPolicyRef(
+            ExecutionPolicyId(identifier),
+            _parse_digest(digest, field_name="execution_policy_sha256"),
+        )
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "execution policy is invalid") from error
+    if policy != context.execution_policy:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "execution policy context conflicts")
+    return policy
+
+
+def _require_common_binding_document(
+    document: Mapping[str, object],
+    *,
+    context: HistoricalMatcherDecodeContext,
+    require_provenance: bool = False,
+) -> None:
+    if document.get("run_id") != context.run_id.value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "run context conflicts")
+    if document.get("source_namespace") != context.source_namespace.value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "source context conflicts")
+    if require_provenance and document.get("provenance_id") != context.provenance_id.value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "provenance context conflicts")
+
+
+def decode_historical_submission_receipt(
+    payload: bytes,
+    *,
+    context: HistoricalMatcherDecodeContext,
+) -> HistoricalSubmissionReceipt:
+    context = _require_decode_context(context)
+    document = _decode_document(payload)
+    expected_fields = {
+        "audit_acknowledgement_id",
+        "audit_acknowledgement_sha256",
+        "authorization_state_version",
+        "canonicalization",
+        "causal_market_sha256",
+        "causal_root_key",
+        "client_submission_key",
+        "dispatch_sequence",
+        "eligible_after_available_at",
+        "execution_policy_id",
+        "execution_policy_sha256",
+        "execution_request_sha256",
+        "global_halt_epoch",
+        "instrument",
+        "instrument_gate_id",
+        "instrument_gate_version",
+        "instrument_spec_set_id",
+        "instrument_spec_set_sha256",
+        "message_type",
+        "order_id",
+        "order_sha256",
+        "outcome_code",
+        "quantity",
+        "risk_halt_epoch",
+        "run_id",
+        "schema_version",
+        "side",
+        "source_namespace",
+        "submission_sequence",
+    }
+    if set(document) != expected_fields:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "receipt fields conflict")
+    if (
+        document["schema_version"] != HISTORICAL_MATCHER_SCHEMA_VERSION
+        or document["canonicalization"] != HISTORICAL_SUBMISSION_RECEIPT_CANONICALIZATION
+        or document["message_type"] != "historical_submission_receipt"
+        or document["outcome_code"] != OutcomeCode.SUBMISSION_SUBMITTED.value
+    ):
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "receipt schema markers conflict")
+    _require_common_binding_document(document, context=context)
+    order_sha256 = _parse_digest(document["order_sha256"], field_name="order_sha256")
+    order = context.orders_by_sha256.get(order_sha256)
+    if type(order) is not Order or order_digest(order) != order_sha256:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt Order lookup failed")
+    request_sha256 = _parse_digest(
+        document["execution_request_sha256"],
+        field_name="execution_request_sha256",
+    )
+    if (
+        execution_request_digest(order) != request_sha256
+        or type(canonical_execution_request_bytes(order)) is not bytes
+        or order_client_submission_key(order)
+        != _parse_digest(
+            document["client_submission_key"],
+            field_name="client_submission_key",
+        )
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt Order evidence conflicts")
+    policy = _parse_policy(document, context=context)
+    spec_id = document["instrument_spec_set_id"]
+    if spec_id != context.spec_set.identifier.value or _parse_digest(
+        document["instrument_spec_set_sha256"],
+        field_name="instrument_spec_set_sha256",
+    ) != instrument_spec_set_digest(context.spec_set):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt spec context conflicts")
+    try:
+        side = OrderSide(_require_string(document["side"], field_name="side"))
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "receipt side is invalid") from error
+    receipt = _create_historical_submission_receipt(
+        run_id=context.run_id,
+        source_namespace=context.source_namespace,
+        submission_sequence=_parse_uint64_or_none(
+            document["submission_sequence"],
+            field_name="submission_sequence",
+        )
+        or 0,
+        order_id=_parse_economic_id(document["order_id"], field_name="order_id"),
+        order_sha256=order_sha256,
+        execution_request_sha256=request_sha256,
+        client_submission_key=order_client_submission_key(order),
+        instrument=_parse_instrument(document["instrument"]),
+        side=side,
+        quantity_text=_require_string(document["quantity"], field_name="quantity"),
+        causal_market_sha256=_parse_digest(
+            document["causal_market_sha256"],
+            field_name="causal_market_sha256",
+        ),
+        causal_root_key=runtime_root_key_from_document(document["causal_root_key"]),
+        dispatch_sequence=_parse_uint64_or_none(
+            document["dispatch_sequence"],
+            field_name="dispatch_sequence",
+        )
+        or 0,
+        eligible_after_available_at=_parse_time(
+            document["eligible_after_available_at"],
+            field_name="eligible_after_available_at",
+        ),
+        audit_acknowledgement_id=_require_string(
+            document["audit_acknowledgement_id"],
+            field_name="audit_acknowledgement_id",
+        ),
+        audit_acknowledgement_sha256=_parse_digest(
+            document["audit_acknowledgement_sha256"],
+            field_name="audit_acknowledgement_sha256",
+        ),
+        global_halt_epoch=_parse_non_negative(
+            document["global_halt_epoch"],
+            field_name="global_halt_epoch",
+        ),
+        risk_halt_epoch=_parse_non_negative(
+            document["risk_halt_epoch"],
+            field_name="risk_halt_epoch",
+        ),
+        instrument_gate_id=_require_string(
+            document["instrument_gate_id"],
+            field_name="instrument_gate_id",
+        ),
+        instrument_gate_version=_parse_non_negative(
+            document["instrument_gate_version"],
+            field_name="instrument_gate_version",
+        ),
+        authorization_state_version=_parse_non_negative(
+            document["authorization_state_version"],
+            field_name="authorization_state_version",
+        ),
+        instrument_spec_set_id=context.spec_set.identifier,
+        instrument_spec_set_sha256=instrument_spec_set_digest(context.spec_set),
+        execution_policy=policy,
+    )
+    if (
+        receipt.order_id != order.order_id
+        or receipt.instrument != order.instrument
+        or receipt.side is not order.side
+        or receipt.quantity_text != order.quantity.text
+        or receipt.eligible_after_available_at != order.eligible_after_available_at
+        or canonical_historical_submission_receipt_bytes(receipt) != payload
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt reconstruction conflicts")
+    return receipt
+
+
+def _require_string(value: object, *, field_name: str) -> str:
+    if type(value) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} must be exact str")
+    return value
+
+
+def decode_historical_matcher_dispatch_batch(
+    payload: bytes,
+    *,
+    context: HistoricalMatcherDecodeContext,
+) -> HistoricalMatcherDispatchBatch:
+    context = _require_decode_context(context)
+    document = _decode_document(payload)
+    if set(document) != {
+        "canonicalization",
+        "dispatch_kind",
+        "dispatch_sequence",
+        "ingresses",
+        "message_type",
+        "next_fact_sequence_after",
+        "next_fact_sequence_before",
+        "order_ids",
+        "run_id",
+        "schema_version",
+        "source_namespace",
+        "submission_sequences",
+        "trigger_root_key",
+        "trigger_root_sha256",
+    }:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch batch fields conflict")
+    if (
+        document["schema_version"] != HISTORICAL_MATCHER_SCHEMA_VERSION
+        or document["canonicalization"] != HISTORICAL_MATCHER_DISPATCH_BATCH_CANONICALIZATION
+        or document["message_type"] != "historical_matcher_dispatch_batch"
+    ):
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch batch schema markers conflict")
+    _require_common_binding_document(document, context=context)
+    try:
+        kind = HistoricalDispatchKind(
+            _require_string(document["dispatch_kind"], field_name="dispatch_kind")
+        )
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch kind is invalid") from error
+    raw_ingresses = document["ingresses"]
+    raw_orders = document["order_ids"]
+    raw_submissions = document["submission_sequences"]
+    if (
+        type(raw_ingresses) is not list
+        or type(raw_orders) is not list
+        or type(raw_submissions) is not list
+        or not len(raw_ingresses) == len(raw_orders) == len(raw_submissions)
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "dispatch batch arrays are invalid")
+    ingresses: list[ExecutionFactIngress] = []
+    ingress_sha256s: list[Sha256Digest] = []
+    for index, raw in enumerate(raw_ingresses):
+        if type(raw) is not dict or set(raw) != {
+            "ingress_identity",
+            "ingress_sha256",
+        }:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "batch ingress entry fields conflict")
+        digest = _parse_digest(
+            raw["ingress_sha256"],
+            field_name=f"ingresses[{index}].ingress_sha256",
+        )
+        ingress = context.ingresses_by_sha256.get(digest)
+        if (
+            type(ingress) is not ExecutionFactIngress
+            or _execution_fact_ingress_digest(ingress) != digest
+            or raw["ingress_identity"] != _ingress_identity_document(ingress.identity)
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "batch ingress lookup conflicts")
+        ingresses.append(ingress)
+        ingress_sha256s.append(digest)
+    batch = _create_historical_matcher_dispatch_batch(
+        run_id=context.run_id,
+        source_namespace=context.source_namespace,
+        dispatch_kind=kind,
+        dispatch_sequence=_parse_uint64_or_none(
+            document["dispatch_sequence"],
+            field_name="dispatch_sequence",
+        )
+        or 0,
+        trigger_root_sha256=_parse_digest(
+            document["trigger_root_sha256"],
+            field_name="trigger_root_sha256",
+        ),
+        trigger_root_key=runtime_root_key_from_document(document["trigger_root_key"]),
+        next_fact_sequence_before=_parse_uint64_or_none(
+            document["next_fact_sequence_before"],
+            field_name="next_fact_sequence_before",
+        ),
+        next_fact_sequence_after=_parse_uint64_or_none(
+            document["next_fact_sequence_after"],
+            field_name="next_fact_sequence_after",
+        ),
+        submission_sequences=tuple(
+            _parse_uint64_or_none(value, field_name="submission_sequence") or 0
+            for value in raw_submissions
+        ),
+        order_ids=tuple(_parse_economic_id(value, field_name="order_id") for value in raw_orders),
+        ingresses=tuple(ingresses),
+        ingress_sha256s=tuple(ingress_sha256s),
+    )
+    if canonical_historical_matcher_dispatch_batch_bytes(batch) != payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch reconstruction conflicts")
+    return batch
+
+
+def decode_historical_matcher_conflict(
+    payload: bytes,
+    *,
+    context: HistoricalMatcherDecodeContext,
+) -> HistoricalMatcherConflictEvidence:
+    context = _require_decode_context(context)
+    document = _decode_document(payload)
+    if set(document) != {
+        "canonicalization",
+        "conflict_kind",
+        "existing_sha256",
+        "last_successful_dispatch_sequence",
+        "message_type",
+        "next_fact_sequence",
+        "next_submission_sequence",
+        "occupied_identity",
+        "pending_count",
+        "run_id",
+        "schema_version",
+        "submitted_dispatch_sequence",
+        "submitted_sha256",
+        "trigger_root_sha256",
+    }:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "conflict fields conflict")
+    if (
+        document["schema_version"] != HISTORICAL_MATCHER_SCHEMA_VERSION
+        or document["canonicalization"] != HISTORICAL_MATCHER_CONFLICT_CANONICALIZATION
+        or document["message_type"] != "historical_matcher_conflict"
+        or document["run_id"] != context.run_id.value
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "conflict schema or run binding conflicts")
+    try:
+        kind = HistoricalMatcherConflictKind(
+            _require_string(document["conflict_kind"], field_name="conflict_kind")
+        )
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "conflict kind is invalid") from error
+    occupied = document["occupied_identity"]
+    if occupied is not None and type(occupied) is not dict:
+        raise _fail(OutcomeCode.INVALID_TYPE, "occupied identity must be object or null")
+    conflict = _create_historical_matcher_conflict(
+        run_id=context.run_id,
+        conflict_kind=kind,
+        occupied_identity=immutable_occupied_identity(occupied),
+        existing_sha256=_parse_optional_digest(
+            document["existing_sha256"],
+            field_name="existing_sha256",
+        ),
+        submitted_sha256=_parse_optional_digest(
+            document["submitted_sha256"],
+            field_name="submitted_sha256",
+        ),
+        submitted_dispatch_sequence=_parse_uint64_or_none(
+            document["submitted_dispatch_sequence"],
+            field_name="submitted_dispatch_sequence",
+        ),
+        last_successful_dispatch_sequence=_parse_uint64_or_none(
+            document["last_successful_dispatch_sequence"],
+            field_name="last_successful_dispatch_sequence",
+        ),
+        pending_count=_parse_non_negative(
+            document["pending_count"],
+            field_name="pending_count",
+        ),
+        next_submission_sequence=_parse_uint64_or_none(
+            document["next_submission_sequence"],
+            field_name="next_submission_sequence",
+        ),
+        next_fact_sequence=_parse_uint64_or_none(
+            document["next_fact_sequence"],
+            field_name="next_fact_sequence",
+        ),
+        trigger_root_sha256=_parse_optional_digest(
+            document["trigger_root_sha256"],
+            field_name="trigger_root_sha256",
+        ),
+    )
+    if canonical_historical_matcher_conflict_bytes(conflict) != payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "conflict reconstruction conflicts")
+    return conflict
+
+
+def decode_historical_matcher_state(
+    payload: bytes,
+    *,
+    context: HistoricalMatcherDecodeContext,
+) -> HistoricalMatcherState:
+    context = _require_decode_context(context)
+    document = _decode_document(payload)
+    if set(document) != {
+        "canonicalization",
+        "conflict_sha256",
+        "dispatch_batch_sha256s",
+        "end_batch_sha256",
+        "ended",
+        "execution_policy_id",
+        "execution_policy_sha256",
+        "halted",
+        "instrument_spec_set_id",
+        "instrument_spec_set_sha256",
+        "issued_ingresses",
+        "last_new_dispatch_sequence",
+        "message_type",
+        "next_fact_sequence",
+        "next_submission_sequence",
+        "pending_order_ids",
+        "provenance_id",
+        "receipt_sha256s",
+        "run_id",
+        "schema_version",
+        "source_namespace",
+    }:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "matcher state fields conflict")
+    if (
+        document["schema_version"] != HISTORICAL_MATCHER_SCHEMA_VERSION
+        or document["canonicalization"] != HISTORICAL_MATCHER_STATE_CANONICALIZATION
+        or document["message_type"] != "historical_matcher_state"
+        or type(document["ended"]) is not bool
+        or type(document["halted"]) is not bool
+    ):
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "matcher state schema markers conflict")
+    _require_common_binding_document(
+        document,
+        context=context,
+        require_provenance=True,
+    )
+    _parse_policy(document, context=context)
+    if document["instrument_spec_set_id"] != context.spec_set.identifier.value or _parse_digest(
+        document["instrument_spec_set_sha256"],
+        field_name="instrument_spec_set_sha256",
+    ) != instrument_spec_set_digest(context.spec_set):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "matcher state spec context conflicts")
+    raw_receipts = document["receipt_sha256s"]
+    raw_batches = document["dispatch_batch_sha256s"]
+    raw_ingresses = document["issued_ingresses"]
+    raw_pending = document["pending_order_ids"]
+    if any(
+        type(value) is not list for value in (raw_receipts, raw_batches, raw_ingresses, raw_pending)
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "matcher state arrays are invalid")
+    raw_receipts = cast(list[object], raw_receipts)
+    raw_batches = cast(list[object], raw_batches)
+    raw_ingresses = cast(list[object], raw_ingresses)
+    raw_pending = cast(list[object], raw_pending)
+    receipt_digests: list[Sha256Digest] = []
+    for value in raw_receipts:
+        digest = _parse_digest(value, field_name="receipt_sha256")
+        receipt = context.receipts_by_sha256.get(digest)
+        if (
+            type(receipt) is not HistoricalSubmissionReceipt
+            or historical_submission_receipt_digest(receipt) != digest
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt lookup conflicts")
+        receipt_digests.append(digest)
+    batch_digests: list[Sha256Digest] = []
+    for value in raw_batches:
+        digest = _parse_digest(value, field_name="batch_sha256")
+        batch = context.batches_by_sha256.get(digest)
+        if (
+            type(batch) is not HistoricalMatcherDispatchBatch
+            or historical_matcher_dispatch_batch_digest(batch) != digest
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state batch lookup conflicts")
+        batch_digests.append(digest)
+    issued: list[ExecutionFactIngress] = []
+    for raw in raw_ingresses:
+        if type(raw) is not dict or set(raw) != {
+            "ingress_identity",
+            "ingress_sha256",
+        }:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "state ingress fields conflict")
+        digest = _parse_digest(raw["ingress_sha256"], field_name="ingress_sha256")
+        ingress = context.ingresses_by_sha256.get(digest)
+        if (
+            type(ingress) is not ExecutionFactIngress
+            or _execution_fact_ingress_digest(ingress) != digest
+            or raw["ingress_identity"] != _ingress_identity_document(ingress.identity)
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state ingress lookup conflicts")
+        issued.append(ingress)
+    conflict_digest = _parse_optional_digest(
+        document["conflict_sha256"],
+        field_name="conflict_sha256",
+    )
+    conflict = None if conflict_digest is None else context.conflicts_by_sha256.get(conflict_digest)
+    if conflict_digest is not None and (
+        type(conflict) is not HistoricalMatcherConflictEvidence
+        or historical_matcher_conflict_digest(conflict) != conflict_digest
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state conflict lookup conflicts")
+    state = _create_historical_matcher_state(
+        run_id=context.run_id,
+        source_namespace=context.source_namespace,
+        provenance_id=context.provenance_id,
+        instrument_spec_set_id=context.spec_set.identifier,
+        instrument_spec_set_sha256=instrument_spec_set_digest(context.spec_set),
+        execution_policy=context.execution_policy,
+        next_submission_sequence=_parse_uint64_or_none(
+            document["next_submission_sequence"],
+            field_name="next_submission_sequence",
+        ),
+        next_fact_sequence=_parse_uint64_or_none(
+            document["next_fact_sequence"],
+            field_name="next_fact_sequence",
+        ),
+        receipt_sha256s=tuple(receipt_digests),
+        pending_order_ids=tuple(
+            _parse_economic_id(value, field_name="pending_order_id") for value in raw_pending
+        ),
+        issued_ingresses=tuple(issued),
+        dispatch_batch_sha256s=tuple(batch_digests),
+        last_new_dispatch_sequence=_parse_uint64_or_none(
+            document["last_new_dispatch_sequence"],
+            field_name="last_new_dispatch_sequence",
+        ),
+        ended=document["ended"],
+        end_batch_sha256=_parse_optional_digest(
+            document["end_batch_sha256"],
+            field_name="end_batch_sha256",
+        ),
+        halted=document["halted"],
+        conflict=conflict,
+    )
+    if canonical_historical_matcher_state_bytes(state) != payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "matcher state reconstruction conflicts")
+    return state

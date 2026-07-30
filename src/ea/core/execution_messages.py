@@ -77,6 +77,7 @@ _LIFECYCLE_CODES = frozenset(
         OutcomeCode.ORDER_ACKNOWLEDGED,
         OutcomeCode.ORDER_REJECTED,
         OutcomeCode.ORDER_EXPIRED,
+        OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
         OutcomeCode.ORDER_CANCELLED,
     }
 )
@@ -1530,6 +1531,7 @@ def create_lifecycle_execution_fact(
     order_id: EconomicId | None = None,
     correlation_id: EconomicId | None = None,
     causation_id: EconomicId | None = None,
+    outcome_code: OutcomeCode | None = None,
 ) -> ExecutionFact:
     if type(kind) is not ExecutionFactKind:
         raise _fail(OutcomeCode.INVALID_TYPE, "kind must be an exact ExecutionFactKind")
@@ -1537,6 +1539,23 @@ def create_lifecycle_execution_fact(
         raise _fail(
             OutcomeCode.OUT_OF_RANGE,
             "lifecycle fact kind must be acknowledgement/rejection/expiry/cancellation",
+        )
+    if outcome_code is not None and type(outcome_code) is not OutcomeCode:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "outcome_code must be an exact OutcomeCode or None",
+        )
+    if outcome_code is None:
+        selected_outcome = _LIFECYCLE_CODE_BY_KIND[kind]
+    elif (
+        kind is ExecutionFactKind.EXPIRY
+        and outcome_code is OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA
+    ):
+        selected_outcome = outcome_code
+    else:
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE,
+            "explicit lifecycle outcome is not allowed for this fact kind",
         )
     (
         source,
@@ -1573,7 +1592,7 @@ def create_lifecycle_execution_fact(
         order_id=known_order,
         correlation_id=correlation,
         causation_id=cause,
-        payload=LifecycleFactPayload(_LIFECYCLE_CODE_BY_KIND[kind]),
+        payload=LifecycleFactPayload(selected_outcome),
         provenance=source_provenance,
     )
 
@@ -3377,7 +3396,7 @@ def _parse_lifecycle_payload(
     value: object,
     *,
     kind: ExecutionFactKind,
-) -> LifecycleFactPayload:
+) -> OutcomeCode:
     if type(value) is not dict or set(value) != {"outcome_code", "payload_type"}:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "lifecycle payload has invalid keys")
     if value["payload_type"] != "lifecycle":
@@ -3388,12 +3407,19 @@ def _parse_lifecycle_payload(
         field_name="outcome_code",
     )
     expected = _LIFECYCLE_CODE_BY_KIND[kind]
+    if code is expected:
+        return code
+    if (
+        kind is ExecutionFactKind.EXPIRY
+        and code is OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA
+    ):
+        return code
     if code is not expected:
         raise _fail(
-            OutcomeCode.CONFLICTING_ID,
+            OutcomeCode.OUT_OF_RANGE,
             "lifecycle outcome conflicts with fact kind",
         )
-    return LifecycleFactPayload(code)
+    raise AssertionError("unreachable lifecycle code")
 
 
 def _parse_trade_payload(
@@ -3570,7 +3596,7 @@ def decode_execution_fact(
     else:
         if kind not in _LIFECYCLE_CODE_BY_KIND:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "fact kind has no declared payload")
-        _parse_lifecycle_payload(document["payload"], kind=kind)
+        lifecycle_code = _parse_lifecycle_payload(document["payload"], kind=kind)
         fact = create_lifecycle_execution_fact(
             kind=kind,
             source_namespace=source,
@@ -3583,6 +3609,9 @@ def decode_execution_fact(
             order_id=order_id,
             correlation_id=correlation_id,
             causation_id=causation_id,
+            outcome_code=(
+                None if lifecycle_code is _LIFECYCLE_CODE_BY_KIND[kind] else lifecycle_code
+            ),
         )
     if wire_fact_digest != fact.fact_sha256:
         raise _fail(OutcomeCode.FACT_INVALID, "fact_sha256 does not match fact preimage")

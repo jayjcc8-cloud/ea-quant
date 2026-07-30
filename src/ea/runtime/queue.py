@@ -141,6 +141,11 @@ class DeterministicRootQueue:
     def acknowledged_fact_dispatch_count(self) -> int:
         return len(self._state.acknowledged_fact_dispatches)
 
+    @property
+    def registered_fact_source_namespaces(self) -> tuple[SourceNamespace, ...]:
+        """Expose the queue's closed canonical fact-source registry."""
+        return tuple(self._fact_issuance_verifiers)
+
     def _current(self) -> RuntimeRoot:
         if self._state.cursor >= len(self._plan):
             raise RuntimeOrderingError(
