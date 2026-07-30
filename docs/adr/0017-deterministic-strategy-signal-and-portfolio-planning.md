@@ -618,21 +618,24 @@ next/last/halt field.
 
 Both owner sequences start at one. Rules:
 
-1. exact signal runtime type, canonical bytes/digest, run, instrument, policy membership, spec
-   binding, positive dispatch sequence, and signal owner are validated;
+1. the minimal safe replay input is validated: exact signal carrier and required-field types,
+   positive uint64 dispatch/owner sequences, exact owner kind, and complete canonical
+   encodability/digest derivation;
 2. an existing signal ID with identical canonical bytes returns the exact prior result without
    reading the ledger or consuming any sequence;
 3. an existing signal ID with different bytes, or a new signal whose dispatch sequence is not
    strictly greater than the last newly planned signal, records deterministic conflict evidence
    and monotonically halts the authority;
 4. a halted authority rejects later new signals but continues exact replay;
-5. target sequence exhaustion fails before snapshot read or mutation;
-6. the exact latest snapshot is read once and validated;
-7. target, target digest/ref, delta, outcome, optional intent, all canonical bytes/digests, replay
+5. for a new signal, run, instrument, policy membership, and spec binding are validated without
+   mutation;
+6. target sequence exhaustion fails before snapshot read or mutation;
+7. the exact latest snapshot is read once and validated;
+8. target, target digest/ref, delta, outcome, optional intent, all canonical bytes/digests, replay
    record, conflict-free indexes, and complete immutable next state are precomputed;
-8. intent sequence is consumed only for `intent_emitted`; target sequence is consumed for every
+9. intent sequence is consumed only for `intent_emitted`; target sequence is consumed for every
    successful new planning result; and
-9. one state-reference assignment publishes the result. Any exception before publication leaves
+10. one state-reference assignment publishes the result. Any exception before publication leaves
    ledger and authority state unchanged.
 
 The planner never mutates the ledger. No audit, runtime acknowledgement, risk call, Order creation,
@@ -792,14 +795,24 @@ verifier behavior is translated to `StrategyContractError(INVALID_TYPE, ...)`. A
 `PortfolioLedgerError` or core validation error uses the mapping above; malformed/unexpected
 snapshot access or encoding is translated to `PortfolioPlanningError(INVALID_TYPE, ...)`.
 
-Signal issuance precedence is: exact retained replay/conflict classification; retained halt;
-public input validation; signal-sequence exhaustion; verifier call and exact proof validation;
-precompute; single publication. Portfolio planning precedence is: exact retained replay/conflict
-classification; retained halt; public input validation; target-sequence exhaustion; one snapshot
-read and structural/canonical validation; target/delta/outcome computation; required
-intent-sequence exhaustion; precompute; single publication. A lower-precedence failure never
-replaces retained conflict evidence and no external verifier/snapshot access occurs after an
-earlier failure.
+Signal issuance precedence is: validate the minimal safe replay input (exact market-root and
+direction carriers, exact positive uint64 sequence, required fields, and canonical market bytes
+needed for the replay key/submitted digest); retained replay/conflict classification; retained
+halt; remaining new-input validation; signal-sequence exhaustion; verifier call and exact proof
+validation; precompute; single publication.
+
+Portfolio planning precedence is: validate the minimal safe replay input (exact `StrategySignal`
+carrier and required-field carriers, positive uint64 sequences, signal owner, and complete
+canonical bytes/digest needed for the replay key); retained replay/conflict classification;
+retained halt; remaining new-input run/instrument/policy/spec validation; target-sequence
+exhaustion; one snapshot read and structural/canonical validation; target/delta/outcome
+computation; required intent-sequence exhaustion; precompute; single publication.
+
+Minimal replay-input failure always returns its mapped error without reading mutable authority
+state beyond the immutable current state reference and without publishing conflict/halt evidence.
+Only a fully valid, canonically encodable submitted input may be compared with a retained replay
+key or publish first-conflict evidence. A lower-precedence failure never replaces retained conflict
+evidence and no external verifier/snapshot access occurs after an earlier failure.
 
 Already-at-target and unresolved-Fill blocking are successful explicit planning outcomes, not
 exceptions. A later runtime decides how to audit and continue after them.
