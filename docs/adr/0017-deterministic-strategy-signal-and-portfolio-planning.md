@@ -452,13 +452,18 @@ blocked_unresolved_fills
 
 Every authority-issued target produces exactly one immutable `PlanningOutcome`:
 
-- `intent_emitted`: exactly one canonical `OrderIntent` is present;
-- `already_at_target`: delta is exact zero and no intent is present; or
 - `blocked_unresolved_fills`: the retained snapshot contains one or more unresolved Fill
-  references and no intent is present.
+  references and no intent is present;
+- `already_at_target`: the snapshot has no unresolved Fill references, delta is exact zero, and no
+  intent is present; or
+- `intent_emitted`: the snapshot has no unresolved Fill references, delta is nonzero, and exactly
+  one canonical `OrderIntent` is present.
 
 Unresolved Fills make current economic ownership incomplete. Phase 1 records the target but blocks
 new intent issuance until later reconciliation resolves them; it does not guess exposure.
+Classification is exclusive and ordered: first `blocked_unresolved_fills` when any unresolved Fill
+reference exists, otherwise `already_at_target` when delta is zero, otherwise `intent_emitted`.
+This order applies even when a snapshot has unresolved Fill references and delta is exact zero.
 
 The outcome records run, target ID/digest, signal ID/digest, policy ID/digest, snapshot
 version/digest, before/after target and intent sequence positions, kind, optional intent
@@ -486,7 +491,7 @@ The exact closed outcome JSON object is:
 ```json
 {
   "canonicalization": "ea-canonical-json-v1",
-  "delta": "100",
+  "delta": "0",
   "intent_id": null,
   "intent_next_after": 1,
   "intent_next_before": 1,
@@ -524,9 +529,9 @@ are present exact values. `intent_next_before`/`intent_next_after` are exact pos
 positions unchanged. `delta` is signed target-minus-current; outcome coupling is:
 
 ```text
-intent_emitted          -> delta != 0, intent fields present, intent sequence consumed
-already_at_target       -> delta == 0, intent fields null, intent sequence unchanged
-blocked_unresolved_fills -> any delta, intent fields null, intent sequence unchanged
+intent_emitted           -> no unresolved Fills, delta != 0, intent fields present, intent sequence consumed
+already_at_target        -> no unresolved Fills, delta == 0, intent fields null, intent sequence unchanged
+blocked_unresolved_fills -> unresolved Fills present, any delta, intent fields null, intent sequence unchanged
 ```
 
 The exact closed result document is constructed as follows; `parse` means strict JSON decoding of
@@ -757,18 +762,44 @@ coordinator; private mappings and capability seals are not serialized.
 
 ### Failure taxonomy
 
-Public contract/factory errors map to existing closed `OutcomeCode` values:
+Direct construction of factory-only carriers retains the project convention of raising
+`TypeError`. All public strategy factories, verifier operations, and signal-authority operations
+otherwise raise exact `StrategyContractError(ValueError)` with a `.code` restricted to
+`INVALID_TYPE`, `OUT_OF_RANGE`, or `CONFLICTING_ID`. All public portfolio-policy/planning factories
+and planning-authority operations raise exact `PortfolioPlanningError(ValueError)` with a `.code`
+restricted to `INVALID_TYPE`, `OUT_OF_RANGE`, `NOT_QUANTIZED`, or `CONFLICTING_ID`.
+
+Public failures map exhaustively:
 
 | Condition | Code | Mutation |
 |---|---|---|
 | wrong exact carrier/runtime type | `invalid_type` | none |
-| empty/invalid identifier, non-UTC time, non-positive/out-of-range sequence, invalid decimal/grid | `out_of_range` | none |
+| empty/invalid identifier, non-UTC time, non-positive/out-of-range sequence, or invalid decimal domain | `out_of_range` | none |
+| exact quantity is not on the bound quantity grid | `not_quantized` | none |
 | foreign run/spec/instrument/policy/ledger identity or derived-field mismatch | `conflicting_id` | none |
 | stale/copied/foreign/acknowledged/unadmitted dispatch or verifier/proof mismatch | `conflicting_id` | none |
-| verifier unexpected exception or incomplete proof contract | deterministic runtime/strategy boundary failure | none |
+| verifier has no callable operation, returns a non-exact proof, or raises an unexpected exception | `invalid_type` | none |
 | conflicting signal replay or non-monotone new signal dispatch | `conflicting_id` | publish monotone halt/conflict evidence only |
 | target or required intent owner sequence exhausted | `out_of_range` | none |
-| unexpected ledger snapshot/canonicalization failure | matching structural code or deterministic wrapper | none |
+| subordinate exact structural `INVALID_TYPE`, `NOT_QUANTIZED`, or `CONFLICTING_ID` failure | preserve that exact code | none |
+| subordinate exact `OUT_OF_RANGE`, `NON_FINITE`, `PRICE_DOMAIN`, `ARITHMETIC_OVERFLOW`, or `ROUNDING_UNREPRESENTABLE` failure | `out_of_range` | none |
+| ledger snapshot access or canonical encoder raises any other exception | `invalid_type` | none |
+
+The boundary raises a constant public message for every unexpected subordinate exception and chains
+the original exception as its cause; raw subordinate messages and exception types never become the
+public classification. An exact verifier rejection uses its permitted code; malformed/unexpected
+verifier behavior is translated to `StrategyContractError(INVALID_TYPE, ...)`. An exact
+`PortfolioLedgerError` or core validation error uses the mapping above; malformed/unexpected
+snapshot access or encoding is translated to `PortfolioPlanningError(INVALID_TYPE, ...)`.
+
+Signal issuance precedence is: exact retained replay/conflict classification; retained halt;
+public input validation; signal-sequence exhaustion; verifier call and exact proof validation;
+precompute; single publication. Portfolio planning precedence is: exact retained replay/conflict
+classification; retained halt; public input validation; target-sequence exhaustion; one snapshot
+read and structural/canonical validation; target/delta/outcome computation; required
+intent-sequence exhaustion; precompute; single publication. A lower-precedence failure never
+replaces retained conflict evidence and no external verifier/snapshot access occurs after an
+earlier failure.
 
 Already-at-target and unresolved-Fill blocking are successful explicit planning outcomes, not
 exceptions. A later runtime decides how to audit and continue after them.
@@ -781,6 +812,7 @@ New public modules:
 ea.core.strategy
   SignalDirection
   StrategySignal
+  StrategyContractError
   ActiveMarketDispatchVerifierPort
   canonical_strategy_signal_bytes
   strategy_signal_digest
@@ -789,6 +821,7 @@ ea.core.runtime
   ActiveMarketDispatchProof
 
 ea.core.portfolio_planning
+  PortfolioPlanningError
   PortfolioPolicyId
   Phase1PortfolioPolicyEntry
   Phase1PortfolioPolicy
@@ -856,8 +889,13 @@ Implementation requires:
   cannot disappear, each emitted intent carries exact target/snapshot/policy/spec/root lineage, and
   each positive/negative delta maps to exactly one correct side/absolute quantity;
 - boundary tests proving planning replay after ledger progress returns the exact retained snapshot
-  and result, runtime-to-risk handoff uses that object without rereading ledger, and current risk
-  accepts/replays only the matching intent/snapshot pair;
+  and result, and coordinator-to-risk handoff rejects object/byte/digest substitution before every
+  call and uses that retained object without rereading the ledger;
+- risk-compatibility tests proving first evaluation binds the retained intent/snapshot evidence,
+  while direct exact-intent replay retains Accepted ADR 0011 semantics and returns the original
+  result after exact snapshot type validation even if another exact snapshot object is supplied;
+- classification tests proving unresolved Fill references take precedence over zero/nonzero delta,
+  including the zero-delta overlap case, and the three outcomes are exclusive and exhaustive;
 - canonical authority state/conflict tests covering first-conflict retention, repeat precedence,
   lookup membership, counts, and every uint64-max -> `null` transition;
 - cross-process byte-golden tests across hash seed, timezone, locale, current directory, input
