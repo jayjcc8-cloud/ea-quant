@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
+from enum import Enum
 from types import MappingProxyType
-from typing import Protocol, final
+from typing import Protocol, cast, final
 
 from ea.core.economics import CanonicalDecimal, EconomicValidationError, require_positive
 from ea.core.execution import (
@@ -254,6 +256,42 @@ def _next_submission_after(records: tuple[_SubmissionRecord, ...]) -> int | None
             raise ValueError("submission history must be contiguous from one")
         expected = _advance(expected)
     return expected
+
+
+def _freeze_callback_value(value: object) -> object:
+    value_type = type(value)
+    if value is None or value_type in {bool, bytes, int, str}:
+        return value
+    if value_type is float:
+        return (float, cast(float, value).hex())
+    if value_type is datetime:
+        instant = cast(datetime, value)
+        return (datetime, instant.isoformat(timespec="microseconds"), instant.fold)
+    if isinstance(value, Enum):
+        return (value_type, value.name)
+    if value_type is tuple:
+        return (
+            tuple,
+            tuple(_freeze_callback_value(item) for item in cast(tuple[object, ...], value)),
+        )
+    if value_type in {dict, MappingProxyType}:
+        mapping = cast(Mapping[object, object], value)
+        return (
+            value_type,
+            tuple(
+                (_freeze_callback_value(key), _freeze_callback_value(item))
+                for key, item in mapping.items()
+            ),
+        )
+    if is_dataclass(value) and not isinstance(value, type):
+        return (
+            value_type,
+            tuple(
+                (field.name, _freeze_callback_value(getattr(value, field.name)))
+                for field in fields(value)
+            ),
+        )
+    raise TypeError(f"unsupported callback state value: {value_type.__qualname__}")
 
 
 def _require_dispatch_sequence(value: object) -> int:
@@ -744,12 +782,47 @@ class Phase1HistoricalMatcher:
         submission_sequence: int,
         dispatch_sequence: int,
     ) -> None:
+        self._require_callback_state(
+            callback_state=allocation_state,
+            callback_state_bytes=allocation_state_bytes,
+            dispatch_sequence=dispatch_sequence,
+        )
+        if self._state.next_submission != submission_sequence:
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+
+    def _require_callback_state(
+        self,
+        *,
+        callback_state: _MatcherState,
+        callback_state_bytes: bytes,
+        dispatch_sequence: int,
+    ) -> None:
         current_state_bytes = canonical_historical_matcher_state_bytes(self.state)
-        if (
-            self._state is not allocation_state
-            or current_state_bytes != allocation_state_bytes
-            or self._state.next_submission != submission_sequence
-        ):
+        if self._state is not callback_state or current_state_bytes != callback_state_bytes:
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+
+    def _dispatch_callback_snapshot(self) -> object:
+        return (
+            _freeze_callback_value(self._state),
+            self._conflict_bytes,
+            _freeze_callback_value(self._conflict_sha256),
+        )
+
+    def _require_dispatch_callback_state(
+        self,
+        *,
+        callback_state: _MatcherState,
+        callback_snapshot: object,
+        dispatch_sequence: int,
+    ) -> None:
+        try:
+            valid = (
+                self._state is callback_state
+                and self._dispatch_callback_snapshot() == callback_snapshot
+            )
+        except Exception:
+            valid = False
+        if not valid:
             self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
 
     def _require_retained_state(self) -> None:
@@ -1340,6 +1413,9 @@ class Phase1HistoricalMatcher:
                 trigger_root_sha256=root_sha256,
             )
         self._require_live_bindings()
+        callback_state = self._state
+        callback_snapshot = self._dispatch_callback_snapshot()
+        proof_valid = False
         try:
             try:
                 proof = self._active_dispatch_verifier.verify_active_market_dispatch(
@@ -1366,6 +1442,7 @@ class Phase1HistoricalMatcher:
             ):
                 raise _fail(OutcomeCode.CONFLICTING_ID, "market root changed during proof")
             owned_market_root = _clone_market_root(market_root)
+            proof_valid = True
         except _VerifierFailure as failure:
             raise failure.error from None
         except HistoricalMatcherError:
@@ -1374,6 +1451,18 @@ class Phase1HistoricalMatcher:
             raise _fail(error.code, "active market proof is invalid") from error
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier failed") from error
+        finally:
+            if not proof_valid:
+                self._require_dispatch_callback_state(
+                    callback_state=callback_state,
+                    callback_snapshot=callback_snapshot,
+                    dispatch_sequence=sequence,
+                )
+        self._require_dispatch_callback_state(
+            callback_state=callback_state,
+            callback_snapshot=callback_snapshot,
+            dispatch_sequence=sequence,
+        )
         self._require_dispatch_eligibility_state()
         eligible = tuple(
             sorted(
@@ -1461,6 +1550,9 @@ class Phase1HistoricalMatcher:
                 trigger_root_sha256=root_sha256,
             )
         self._require_live_bindings()
+        callback_state = self._state
+        callback_snapshot = self._dispatch_callback_snapshot()
+        proof_valid = False
         try:
             try:
                 proof = self._active_dispatch_verifier.verify_active_end_of_run_dispatch(
@@ -1487,6 +1579,7 @@ class Phase1HistoricalMatcher:
             ):
                 raise _fail(OutcomeCode.CONFLICTING_ID, "end root changed during proof")
             owned_end_root = _clone_end_root(end_root)
+            proof_valid = True
         except _VerifierFailure as failure:
             raise failure.error from None
         except HistoricalMatcherError:
@@ -1495,6 +1588,18 @@ class Phase1HistoricalMatcher:
             raise _fail(error.code, "active end proof is invalid") from error
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "active end verifier failed") from error
+        finally:
+            if not proof_valid:
+                self._require_dispatch_callback_state(
+                    callback_state=callback_state,
+                    callback_snapshot=callback_snapshot,
+                    dispatch_sequence=sequence,
+                )
+        self._require_dispatch_callback_state(
+            callback_state=callback_state,
+            callback_snapshot=callback_snapshot,
+            dispatch_sequence=sequence,
+        )
         self._require_dispatch_eligibility_state()
         return self._publish_batch(
             kind=HistoricalDispatchKind.END_OF_RUN,

@@ -2908,6 +2908,152 @@ def test_dispatch_revalidates_verifier_binding_before_market_and_end_publication
     assert matcher._state is initial
 
 
+def test_dispatch_rebinds_complete_state_on_every_verifier_exit() -> None:
+    def market_callback(
+        matcher: Phase1HistoricalMatcher,
+        original: Any,
+        exit_kind: str,
+    ) -> Any:
+        def callback(
+            root: MarketDataEnvelope,
+            *,
+            dispatch_sequence: int,
+        ) -> Any:
+            proof = original(root, dispatch_sequence=dispatch_sequence)
+            object.__setattr__(matcher._state.issued[0], "ingress_bytes", b"drift")
+            if exit_kind == "exception":
+                raise RuntimeError("market verifier failed after state mutation")
+            if exit_kind == "invalid-proof":
+                return object()
+            return proof
+
+        return callback
+
+    def end_callback(
+        matcher: Phase1HistoricalMatcher,
+        original: Any,
+        exit_kind: str,
+    ) -> Any:
+        def callback(
+            root: EndOfRunRoot,
+            *,
+            dispatch_sequence: int,
+        ) -> Any:
+            proof = original(root, dispatch_sequence=dispatch_sequence)
+            object.__setattr__(matcher._state.issued[0], "ingress_bytes", b"drift")
+            if exit_kind == "exception":
+                raise RuntimeError("end verifier failed after state mutation")
+            if exit_kind == "invalid-proof":
+                return object()
+            return proof
+
+        return callback
+
+    def market_operation(
+        matcher: Phase1HistoricalMatcher,
+        root: MarketDataEnvelope,
+    ) -> Any:
+        def operation() -> Any:
+            return matcher.match_active_market_root(root, dispatch_sequence=9)
+
+        return operation
+
+    def end_operation(
+        matcher: Phase1HistoricalMatcher,
+        root: EndOfRunRoot,
+    ) -> Any:
+        def operation() -> Any:
+            return matcher.expire_at_active_end(root, dispatch_sequence=9)
+
+        return operation
+
+    def failing_market_callback(error: RuntimeError) -> Any:
+        def callback(
+            _root: MarketDataEnvelope,
+            *,
+            dispatch_sequence: int,
+        ) -> Any:
+            del dispatch_sequence
+            raise error
+
+        return callback
+
+    def failing_end_callback(error: RuntimeError) -> Any:
+        def callback(
+            _root: EndOfRunRoot,
+            *,
+            dispatch_sequence: int,
+        ) -> Any:
+            del dispatch_sequence
+            raise error
+
+        return callback
+
+    for dispatch_kind in ("market", "end"):
+        for exit_kind in ("valid-proof", "exception", "invalid-proof"):
+            _, matcher, orders, causal, delayed, end = _system()
+            matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+            matcher.match_active_market_root(delayed, dispatch_sequence=8)
+            before = matcher._state
+            verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+            original: Any
+            if dispatch_kind == "market":
+                original = verifier.verify_active_market_dispatch
+                cast(Any, verifier).verify_active_market_dispatch = market_callback(
+                    matcher,
+                    original,
+                    exit_kind,
+                )
+                operation = market_operation(
+                    matcher,
+                    replace(delayed, source_sequence=delayed.source_sequence + 1),
+                )
+            else:
+                original = verifier.verify_active_end_of_run_dispatch
+                cast(Any, verifier).verify_active_end_of_run_dispatch = end_callback(
+                    matcher,
+                    original,
+                    exit_kind,
+                )
+                operation = end_operation(matcher, end)
+
+            with pytest.raises(HistoricalMatcherError) as rejected:
+                operation()
+            assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+            assert matcher._state.last_dispatch == before.last_dispatch == 8
+            assert matcher._state.next_fact == before.next_fact
+            assert matcher._state.ended is False
+            assert 9 not in matcher._state.dispatch_by_sequence
+            assert len(matcher._state.issued) == 1
+            assert matcher._state.issued[0].ingress_bytes == b"drift"
+            assert matcher._state.conflict is not None
+            assert (
+                matcher._state.conflict.conflict_kind
+                is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+            )
+
+    for dispatch_kind in ("market", "end"):
+        _, matcher, orders, causal, delayed, end = _system()
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+        verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+        sentinel = RuntimeError(f"unchanged {dispatch_kind} verifier failure")
+        if dispatch_kind == "market":
+            cast(Any, verifier).verify_active_market_dispatch = failing_market_callback(sentinel)
+            operation = market_operation(
+                matcher,
+                replace(delayed, source_sequence=delayed.source_sequence + 1),
+            )
+        else:
+            cast(Any, verifier).verify_active_end_of_run_dispatch = failing_end_callback(sentinel)
+            operation = end_operation(matcher, end)
+        initial = matcher._state
+        with pytest.raises(RuntimeError) as unchanged:
+            operation()
+        assert unchanged.value is sentinel
+        assert matcher._state is initial
+
+
 def test_cross_issuer_and_mutated_authorization_and_end_proofs_are_rejected() -> None:
     fixture, matcher, orders, causal, _, _ = _system()
     original = cast(_AuthorizationVerifier, matcher._submission_authorization_verifier)
