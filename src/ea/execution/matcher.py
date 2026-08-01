@@ -1502,6 +1502,7 @@ class Phase1HistoricalMatcher:
                 conflict=None,
             )
         )
+        self._require_live_bindings()
         self._state = next_state
         return batch
 

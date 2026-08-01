@@ -1861,6 +1861,52 @@ def test_submission_revalidates_every_verifier_binding_after_callbacks() -> None
     assert matcher._state is initial
 
 
+def test_dispatch_revalidates_verifier_binding_before_market_and_end_publication() -> None:
+    changed_run_id = RunId("87654321-4321-4234-8234-cba987654321")
+
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    dispatch_verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    original_market = dispatch_verifier.verify_active_market_dispatch
+
+    def mutate_market_binding(
+        root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> Any:
+        proof = original_market(root, dispatch_sequence=dispatch_sequence)
+        dispatch_verifier.run_id = changed_run_id
+        return proof
+
+    cast(Any, dispatch_verifier).verify_active_market_dispatch = mutate_market_binding
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError) as changed_market_binding:
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert changed_market_binding.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state is initial
+
+    _, matcher, orders, causal, _, end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    dispatch_verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    original_end = dispatch_verifier.verify_active_end_of_run_dispatch
+
+    def mutate_end_binding(
+        root: EndOfRunRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> Any:
+        proof = original_end(root, dispatch_sequence=dispatch_sequence)
+        dispatch_verifier.run_id = changed_run_id
+        return proof
+
+    cast(Any, dispatch_verifier).verify_active_end_of_run_dispatch = mutate_end_binding
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError) as changed_end_binding:
+        matcher.expire_at_active_end(end, dispatch_sequence=9)
+    assert changed_end_binding.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state is initial
+
+
 def test_cross_issuer_and_mutated_authorization_and_end_proofs_are_rejected() -> None:
     fixture, matcher, orders, causal, _, _ = _system()
     original = cast(_AuthorizationVerifier, matcher._submission_authorization_verifier)
