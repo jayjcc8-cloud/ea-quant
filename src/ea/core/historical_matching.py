@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
+from math import isfinite
 from types import MappingProxyType
 from typing import Any, cast, final
 
@@ -18,6 +19,7 @@ from ea.core.economics import (
     require_quantized,
 )
 from ea.core.execution import (
+    InstrumentExecutionSpec,
     InstrumentExecutionSpecSet,
     InstrumentSpecSetId,
     PriceDomain,
@@ -35,12 +37,16 @@ from ea.core.execution_messages import (
     ExecutionFactKind,
     ExecutionPolicyId,
     ExecutionPolicyRef,
+    FactProvenance,
     FactProvenanceId,
     Order,
     OrderSide,
     canonical_execution_fact_bytes,
     canonical_execution_fact_ingress_bytes,
     canonical_execution_request_bytes,
+    create_execution_fact_ingress,
+    create_lifecycle_execution_fact,
+    create_trade_execution_fact,
     execution_fact_ingress_digest,
     execution_request_digest,
     order_client_submission_key,
@@ -61,6 +67,7 @@ from ea.core.runtime import (
     RuntimeRootOrderKey,
     _EndOfRunSuffix,
     _MarketDataSuffix,
+    runtime_root_order_key,
 )
 
 HISTORICAL_SUBMISSION_RECEIPT_CANONICALIZATION = "ea-phase1-historical-submission-receipt-v1"
@@ -904,6 +911,69 @@ def _validate_execution_policy(value: object) -> ExecutionPolicyRef:
     return value
 
 
+def _canonical_decimal_from_coefficient(coefficient: int, scale: int) -> CanonicalDecimal:
+    negative = coefficient < 0
+    digits = str(abs(coefficient))
+    if coefficient == 0:
+        return CanonicalDecimal("0")
+    if scale:
+        digits = digits.rjust(scale + 1, "0")
+        text = f"{digits[:-scale]}.{digits[-scale:]}"
+        while text.endswith("0"):
+            text = text[:-1]
+        if text.endswith("."):
+            text = text[:-1]
+    else:
+        text = digits
+    return CanonicalDecimal(("-" if negative else "") + text)
+
+
+def _quantized_historical_close(
+    close: object,
+    *,
+    side: OrderSide,
+    specification: InstrumentExecutionSpec,
+) -> CanonicalDecimal:
+    if type(close) is not float:
+        raise _fail(OutcomeCode.INVALID_TYPE, "Bar close must be exact float")
+    if not isfinite(close):
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "Bar close must be finite")
+    c = specification.price_quantum.coefficient
+    s = specification.price_quantum.scale
+    if c <= 0:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "price quantum is invalid")
+    p, q = close.as_integer_ratio()
+    numerator = p * (10**s)
+    denominator = q * c
+    ticks, remainder = divmod(numerator, denominator)
+    doubled = remainder * 2
+    if doubled > denominator or (doubled == denominator and side is OrderSide.BUY):
+        ticks += 1
+    try:
+        price = _canonical_decimal_from_coefficient(ticks * c, s)
+        if specification.price_domain is PriceDomain.POSITIVE and price.coefficient <= 0:
+            raise _fail(OutcomeCode.PRICE_DOMAIN, "quantized price must be positive")
+        if specification.price_domain is PriceDomain.NON_NEGATIVE and price.coefficient < 0:
+            raise _fail(OutcomeCode.PRICE_DOMAIN, "quantized price must be non-negative")
+    except HistoricalMatcherError:
+        raise
+    except EconomicValidationError as error:
+        code = (
+            OutcomeCode.ARITHMETIC_OVERFLOW
+            if error.code is OutcomeCode.OUT_OF_RANGE
+            else error.code
+        )
+        if code not in {
+            OutcomeCode.INVALID_TYPE,
+            OutcomeCode.NOT_QUANTIZED,
+            OutcomeCode.PRICE_DOMAIN,
+            OutcomeCode.ARITHMETIC_OVERFLOW,
+        }:
+            code = OutcomeCode.CONFLICTING_ID
+        raise _fail(code, "quantized close is invalid") from error
+    return price
+
+
 def _validate_runtime_root_key(
     value: object,
     *,
@@ -1348,6 +1418,8 @@ class HistoricalMatcherDecodeContext:
     source_namespace: SourceNamespace
     provenance_id: FactProvenanceId
     orders_by_sha256: Mapping[Sha256Digest, Order] = field(default_factory=dict)
+    market_roots_by_sha256: Mapping[Sha256Digest, MarketDataEnvelope] = field(default_factory=dict)
+    end_roots_by_sha256: Mapping[Sha256Digest, EndOfRunRoot] = field(default_factory=dict)
     receipts_by_sha256: Mapping[Sha256Digest, HistoricalSubmissionReceipt] = field(
         default_factory=dict
     )
@@ -1370,6 +1442,12 @@ class HistoricalMatcherDecodeContext:
             raise _fail(OutcomeCode.INVALID_TYPE, "matcher decode bindings must be exact")
         registries = (
             ("orders_by_sha256", self.orders_by_sha256, Order),
+            (
+                "market_roots_by_sha256",
+                self.market_roots_by_sha256,
+                MarketDataEnvelope,
+            ),
+            ("end_roots_by_sha256", self.end_roots_by_sha256, EndOfRunRoot),
             (
                 "receipts_by_sha256",
                 self.receipts_by_sha256,
@@ -1407,6 +1485,14 @@ class HistoricalMatcherDecodeContext:
             ...,
         ] = (
             (self.orders_by_sha256, cast(Callable[[Any], Sha256Digest], order_digest)),
+            (
+                self.market_roots_by_sha256,
+                cast(Callable[[Any], Sha256Digest], historical_market_root_digest),
+            ),
+            (
+                self.end_roots_by_sha256,
+                cast(Callable[[Any], Sha256Digest], historical_end_root_digest),
+            ),
             (
                 self.receipts_by_sha256,
                 cast(Callable[[Any], Sha256Digest], historical_submission_receipt_digest),
@@ -2217,6 +2303,133 @@ def _require_string(value: object, *, field_name: str) -> str:
     return value
 
 
+def _expected_decoded_batch_ingress(
+    *,
+    context: HistoricalMatcherDecodeContext,
+    batch: HistoricalMatcherDispatchBatch,
+    receipt_sha256: Sha256Digest,
+    receipt: HistoricalSubmissionReceipt,
+    order: Order,
+    fact_sequence: int,
+    trigger_root: MarketDataEnvelope | EndOfRunRoot,
+) -> ExecutionFactIngress:
+    if (
+        historical_submission_receipt_digest(receipt) != receipt_sha256
+        or receipt.run_id != context.run_id
+        or receipt.source_namespace != context.source_namespace
+        or receipt.instrument_spec_set_id != context.spec_set.identifier
+        or receipt.instrument_spec_set_sha256 != instrument_spec_set_digest(context.spec_set)
+        or receipt.execution_policy != context.execution_policy
+        or order_digest(order) != receipt.order_sha256
+        or order.order_id != receipt.order_id
+        or order.instrument != receipt.instrument
+        or order.side is not receipt.side
+        or order.quantity.text != receipt.quantity_text
+        or order_client_submission_key(order) != receipt.client_submission_key
+        or batch.dispatch_sequence <= receipt.dispatch_sequence
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "batch receipt bindings conflict")
+
+    fact_kind: str
+    price: CanonicalDecimal | None
+    expiry_code: OutcomeCode | None
+    occurred_at: datetime
+    available_at: datetime
+    if batch.dispatch_kind is HistoricalDispatchKind.MARKET:
+        if type(trigger_root) is not MarketDataEnvelope:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "batch market root conflicts")
+        root_key = runtime_root_order_key(trigger_root)
+        if (
+            trigger_root.payload.instrument != receipt.instrument
+            or trigger_root.payload.adjustment is not Adjustment.RAW
+            or trigger_root.revision != 0
+            or root_key <= receipt.causal_root_key
+            or trigger_root.event_time <= receipt.eligible_after_available_at
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "batch market eligibility conflicts")
+        fact_kind = "trade"
+        price = _quantized_historical_close(
+            trigger_root.payload.close,
+            side=receipt.side,
+            specification=context.spec_set.require(receipt.instrument),
+        )
+        expiry_code = None
+        occurred_at = trigger_root.event_time
+        available_at = trigger_root.available_at
+    else:
+        if (
+            type(trigger_root) is not EndOfRunRoot
+            or trigger_root.kind is not EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED
+            or trigger_root.run_id != context.run_id
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "batch end root conflicts")
+        fact_kind = "expiry"
+        price = None
+        expiry_code = OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA
+        occurred_at = trigger_root.available_at
+        available_at = trigger_root.available_at
+
+    observation_sha256 = historical_matcher_observation_digest(
+        fact_sequence=fact_sequence,
+        fact_kind=fact_kind,
+        source_namespace=context.source_namespace,
+        provenance_id=context.provenance_id,
+        submission_receipt_sha256=receipt_sha256,
+        order_sha256=receipt.order_sha256,
+        trigger_root_kind=batch.dispatch_kind,
+        trigger_root_sha256=batch.trigger_root_sha256,
+        trigger_root_key=batch.trigger_root_key,
+        trigger_dispatch_sequence=batch.dispatch_sequence,
+        occurred_at=occurred_at,
+        available_at=available_at,
+        instrument=receipt.instrument,
+        side=receipt.side,
+        quantity_text=receipt.quantity_text,
+        price_text=None if price is None else price.text,
+        expiry_outcome_code=expiry_code,
+        spec_set=context.spec_set,
+        execution_policy=context.execution_policy,
+    )
+    provenance = FactProvenance(context.provenance_id, observation_sha256)
+    if batch.dispatch_kind is HistoricalDispatchKind.MARKET:
+        assert price is not None
+        fact = create_trade_execution_fact(
+            spec_set=context.spec_set,
+            side=receipt.side,
+            quantity=CanonicalDecimal(receipt.quantity_text),
+            price=price,
+            source_namespace=context.source_namespace,
+            dedup_identity=SourceNativeSequence(fact_sequence),
+            occurred_at=occurred_at,
+            provenance=provenance,
+            instrument=receipt.instrument,
+            client_submission_key=receipt.client_submission_key,
+            order_id=receipt.order_id,
+            correlation_id=order.correlation_id,
+            causation_id=receipt.order_id,
+        )
+    else:
+        fact = create_lifecycle_execution_fact(
+            kind=ExecutionFactKind.EXPIRY,
+            outcome_code=expiry_code,
+            source_namespace=context.source_namespace,
+            dedup_identity=SourceNativeSequence(fact_sequence),
+            occurred_at=occurred_at,
+            provenance=provenance,
+            instrument=receipt.instrument,
+            client_submission_key=receipt.client_submission_key,
+            order_id=receipt.order_id,
+            correlation_id=order.correlation_id,
+            causation_id=receipt.order_id,
+        )
+    return create_execution_fact_ingress(
+        available_at=available_at,
+        source_namespace=context.source_namespace,
+        ingress_sequence=fact_sequence,
+        fact=fact,
+    )
+
+
 def decode_historical_matcher_dispatch_batch(
     payload: bytes,
     *,
@@ -2314,15 +2527,37 @@ def decode_historical_matcher_dispatch_batch(
         ingresses=tuple(ingresses),
         ingress_sha256s=tuple(ingress_sha256s),
     )
-    receipts = tuple(context.receipts_by_sha256.values())
-    for submission_sequence, order_id in zip(
-        batch.submission_sequences,
-        batch.order_ids,
-        strict=True,
+    if batch.dispatch_kind is HistoricalDispatchKind.MARKET:
+        trigger_root: MarketDataEnvelope | EndOfRunRoot | None = context.market_roots_by_sha256.get(
+            batch.trigger_root_sha256
+        )
+    else:
+        trigger_root = context.end_roots_by_sha256.get(batch.trigger_root_sha256)
+    if trigger_root is None:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch root evidence conflicts")
+    root_digest_matches = (
+        type(trigger_root) is MarketDataEnvelope
+        and historical_market_root_digest(trigger_root) == batch.trigger_root_sha256
+    ) or (
+        type(trigger_root) is EndOfRunRoot
+        and historical_end_root_digest(trigger_root) == batch.trigger_root_sha256
+    )
+    if not root_digest_matches or runtime_root_order_key(trigger_root) != batch.trigger_root_key:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch root evidence conflicts")
+
+    receipts = tuple(context.receipts_by_sha256.items())
+    for index, (submission_sequence, order_id, ingress, ingress_sha256) in enumerate(
+        zip(
+            batch.submission_sequences,
+            batch.order_ids,
+            batch.ingresses,
+            batch.ingress_sha256s,
+            strict=True,
+        )
     ):
         matching_receipts = tuple(
-            receipt
-            for receipt in receipts
+            (digest, receipt)
+            for digest, receipt in receipts
             if receipt.submission_sequence == submission_sequence and receipt.order_id == order_id
         )
         if len(matching_receipts) != 1:
@@ -2330,6 +2565,25 @@ def decode_historical_matcher_dispatch_batch(
                 OutcomeCode.CONFLICTING_ID,
                 "dispatch batch submission evidence conflicts",
             )
+        receipt_sha256, receipt = matching_receipts[0]
+        order = context.orders_by_sha256.get(receipt.order_sha256)
+        if type(order) is not Order:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch Order evidence conflicts")
+        expected = _expected_decoded_batch_ingress(
+            context=context,
+            batch=batch,
+            receipt_sha256=receipt_sha256,
+            receipt=receipt,
+            order=order,
+            fact_sequence=cast(int, batch.next_fact_sequence_before) + index,
+            trigger_root=trigger_root,
+        )
+        if canonical_execution_fact_ingress_bytes(
+            ingress
+        ) != canonical_execution_fact_ingress_bytes(
+            expected
+        ) or ingress_sha256 != execution_fact_ingress_digest(expected):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch fact evidence conflicts")
     if canonical_historical_matcher_dispatch_batch_bytes(batch) != payload:
         raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch reconstruction conflicts")
     return batch

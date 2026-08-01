@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from math import isfinite
 from types import MappingProxyType
 from typing import Protocol, final
 
@@ -70,6 +69,7 @@ from ea.core.historical_matching import (
     _create_historical_matcher_dispatch_batch,
     _create_historical_matcher_state,
     _create_historical_submission_receipt,
+    _quantized_historical_close,
     _require_historical_submission_authorization_proof,
     _validate_descendant_binding,
     canonical_end_of_run_root_bytes,
@@ -376,67 +376,13 @@ def _clone_order(value: Order) -> Order:
     return owned
 
 
-def _canonical_decimal_from_coefficient(coefficient: int, scale: int) -> CanonicalDecimal:
-    negative = coefficient < 0
-    digits = str(abs(coefficient))
-    if coefficient == 0:
-        return CanonicalDecimal("0")
-    if scale:
-        digits = digits.rjust(scale + 1, "0")
-        text = f"{digits[:-scale]}.{digits[-scale:]}"
-        while text.endswith("0"):
-            text = text[:-1]
-        if text.endswith("."):
-            text = text[:-1]
-    else:
-        text = digits
-    return CanonicalDecimal(("-" if negative else "") + text)
-
-
 def _quantized_close(
     close: object,
     *,
     side: OrderSide,
     specification: InstrumentExecutionSpec,
 ) -> CanonicalDecimal:
-    if type(close) is not float:
-        raise _fail(OutcomeCode.INVALID_TYPE, "Bar close must be exact float")
-    if not isfinite(close):
-        raise _fail(OutcomeCode.OUT_OF_RANGE, "Bar close must be finite")
-    c = specification.price_quantum.coefficient
-    s = specification.price_quantum.scale
-    if c <= 0:
-        raise _fail(OutcomeCode.CONFLICTING_ID, "price quantum is invalid")
-    p, q = close.as_integer_ratio()
-    numerator = p * (10**s)
-    denominator = q * c
-    ticks, remainder = divmod(numerator, denominator)
-    doubled = remainder * 2
-    if doubled > denominator or (doubled == denominator and side is OrderSide.BUY):
-        ticks += 1
-    try:
-        price = _canonical_decimal_from_coefficient(ticks * c, s)
-        if specification.price_domain is PriceDomain.POSITIVE and price.coefficient <= 0:
-            raise _fail(OutcomeCode.PRICE_DOMAIN, "quantized price must be positive")
-        if specification.price_domain is PriceDomain.NON_NEGATIVE and price.coefficient < 0:
-            raise _fail(OutcomeCode.PRICE_DOMAIN, "quantized price must be non-negative")
-    except HistoricalMatcherError:
-        raise
-    except EconomicValidationError as error:
-        code = (
-            OutcomeCode.ARITHMETIC_OVERFLOW
-            if error.code is OutcomeCode.OUT_OF_RANGE
-            else error.code
-        )
-        if code not in {
-            OutcomeCode.INVALID_TYPE,
-            OutcomeCode.NOT_QUANTIZED,
-            OutcomeCode.PRICE_DOMAIN,
-            OutcomeCode.ARITHMETIC_OVERFLOW,
-        }:
-            code = OutcomeCode.CONFLICTING_ID
-        raise _fail(code, "quantized close is invalid") from error
-    return price
+    return _quantized_historical_close(close, side=side, specification=specification)
 
 
 @final
@@ -446,6 +392,7 @@ class Phase1HistoricalMatcher:
         "_execution_policy",
         "_conflict_bytes",
         "_conflict_sha256",
+        "_mutation_active",
         "_order_issuance_verifier",
         "_provenance_id",
         "_provenance_id_value",
@@ -463,6 +410,7 @@ class Phase1HistoricalMatcher:
     _execution_policy: ExecutionPolicyRef
     _conflict_bytes: bytes | None
     _conflict_sha256: Sha256Digest | None
+    _mutation_active: bool
     _order_issuance_verifier: HistoricalOrderIssuanceVerifier
     _provenance_id: FactProvenanceId
     _provenance_id_value: str
@@ -644,6 +592,16 @@ class Phase1HistoricalMatcher:
             trigger_root_sha256=None,
         )
 
+    def _enter_mutation(self) -> None:
+        if type(self._mutation_active) is not bool:
+            raise _fail(OutcomeCode.INVALID_TYPE, "matcher mutation guard must be exact")
+        if self._mutation_active:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reentrant matcher mutation is forbidden")
+        self._mutation_active = True
+
+    def _leave_mutation(self) -> None:
+        self._mutation_active = False
+
     def _submission_record_is_valid(self, record: _SubmissionRecord) -> bool:
         try:
             receipt = record.receipt
@@ -793,6 +751,23 @@ class Phase1HistoricalMatcher:
         raise _fail(OutcomeCode.CONFLICTING_ID, "matcher identity conflict")
 
     def submit(
+        self,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+    ) -> HistoricalSubmissionReceipt:
+        self._enter_mutation()
+        try:
+            return self._submit(
+                order,
+                causal_market_root=causal_market_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+        finally:
+            self._leave_mutation()
+
+    def _submit(
         self,
         order: Order,
         *,
@@ -1106,6 +1081,21 @@ class Phase1HistoricalMatcher:
         *,
         dispatch_sequence: int,
     ) -> HistoricalMatcherDispatchBatch:
+        self._enter_mutation()
+        try:
+            return self._match_active_market_root(
+                market_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+        finally:
+            self._leave_mutation()
+
+    def _match_active_market_root(
+        self,
+        market_root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> HistoricalMatcherDispatchBatch:
         if type(market_root) is not MarketDataEnvelope:
             raise _fail(OutcomeCode.INVALID_TYPE, "market_root must be exact")
         sequence = _require_dispatch_sequence(dispatch_sequence)
@@ -1201,6 +1191,21 @@ class Phase1HistoricalMatcher:
         )
 
     def expire_at_active_end(
+        self,
+        end_root: EndOfRunRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> HistoricalMatcherDispatchBatch:
+        self._enter_mutation()
+        try:
+            return self._expire_at_active_end(
+                end_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+        finally:
+            self._leave_mutation()
+
+    def _expire_at_active_end(
         self,
         end_root: EndOfRunRoot,
         *,
@@ -1604,6 +1609,7 @@ def create_phase1_historical_matcher(
     value._execution_policy = owned_policy
     value._conflict_bytes = None
     value._conflict_sha256 = None
+    value._mutation_active = False
     value._source_namespace = owned_source_namespace
     value._source_namespace_value = owned_source_namespace.value
     value._provenance_id = owned_provenance_id
