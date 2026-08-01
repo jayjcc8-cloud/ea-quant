@@ -29,6 +29,7 @@ from ea.core.execution_identity import (
     SourceNativeSequence,
 )
 from ea.core.execution_messages import (
+    ExecutionFactKind,
     ExecutionPolicyId,
     ExecutionPolicyRef,
     FactProvenance,
@@ -39,6 +40,7 @@ from ea.core.execution_messages import (
     canonical_execution_fact_bytes,
     canonical_execution_fact_ingress_bytes,
     create_execution_fact_ingress,
+    create_lifecycle_execution_fact,
     create_trade_execution_fact,
     decode_order,
     decode_order_intent,
@@ -184,6 +186,58 @@ def _clone_receipt(
             name: changes.get(name, getattr(receipt, name))
             for name in type(receipt).__dataclass_fields__
         }
+    )
+
+
+def _expiry_ingress(
+    *,
+    matcher: Phase1HistoricalMatcher,
+    receipt: HistoricalSubmissionReceipt,
+    order: Order,
+    end_batch: Any,
+    end: EndOfRunRoot,
+    fact_sequence: int,
+) -> Any:
+    receipt_sha256 = historical_submission_receipt_digest(receipt)
+    observation_sha256 = historical_matcher_observation_digest(
+        fact_sequence=fact_sequence,
+        fact_kind="expiry",
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        submission_receipt_sha256=receipt_sha256,
+        order_sha256=receipt.order_sha256,
+        trigger_root_kind=HistoricalDispatchKind.END_OF_RUN,
+        trigger_root_sha256=end_batch.trigger_root_sha256,
+        trigger_root_key=end_batch.trigger_root_key,
+        trigger_dispatch_sequence=end_batch.dispatch_sequence,
+        occurred_at=end.available_at,
+        available_at=end.available_at,
+        instrument=order.instrument,
+        side=order.side,
+        quantity_text=order.quantity.text,
+        price_text=None,
+        expiry_outcome_code=OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+    )
+    fact = create_lifecycle_execution_fact(
+        kind=ExecutionFactKind.EXPIRY,
+        outcome_code=OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
+        source_namespace=matcher.source_namespace,
+        dedup_identity=SourceNativeSequence(fact_sequence),
+        occurred_at=end.available_at,
+        provenance=FactProvenance(matcher.provenance_id, observation_sha256),
+        instrument=order.instrument,
+        client_submission_key=receipt.client_submission_key,
+        order_id=order.order_id,
+        correlation_id=order.correlation_id,
+        causation_id=order.order_id,
+    )
+    return create_execution_fact_ingress(
+        available_at=end.available_at,
+        source_namespace=matcher.source_namespace,
+        ingress_sequence=fact_sequence,
+        fact=fact,
     )
 
 
@@ -776,6 +830,120 @@ def test_state_decoder_rebuilds_registered_batch_before_accepting_state() -> Non
     assert rejected.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_state_decoder_binds_batch_history_to_unique_state_receipts() -> None:
+    _, matcher, orders, causal, delayed, end = _system()
+    receipts = [matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)]
+    batches = [matcher.match_active_market_root(delayed, dispatch_sequence=8)]
+    receipts.append(matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8))
+    batches.append(matcher.expire_at_active_end(end, dispatch_sequence=9))
+    state_document = json.loads(canonical_historical_matcher_state_bytes(matcher.state))
+    full_context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={order_digest(order): order for order in orders},
+        receipts_by_sha256={
+            historical_submission_receipt_digest(receipt): receipt for receipt in receipts
+        },
+        batches_by_sha256={
+            historical_matcher_dispatch_batch_digest(batch): batch for batch in batches
+        },
+        ingresses_by_sha256={
+            execution_fact_ingress_digest(ingress): ingress
+            for batch in batches
+            for ingress in batch.ingresses
+        },
+        market_roots_by_sha256={
+            receipts[0].causal_market_sha256: causal,
+            receipts[1].causal_market_sha256: delayed,
+        },
+        end_roots_by_sha256={batches[1].trigger_root_sha256: end},
+    )
+    external_receipt_state = {
+        **state_document,
+        "next_submission_sequence": 2,
+        "receipt_sha256s": [historical_submission_receipt_digest(receipts[0]).value],
+    }
+    with pytest.raises(HistoricalMatcherError) as external_receipt:
+        decode_historical_matcher_state(
+            _canonical_document(external_receipt_state),
+            context=full_context,
+        )
+    assert external_receipt.value.code is OutcomeCode.CONFLICTING_ID
+
+    duplicate_expiry_ingress = _expiry_ingress(
+        matcher=matcher,
+        receipt=receipts[0],
+        order=orders[0],
+        end_batch=batches[1],
+        end=end,
+        fact_sequence=2,
+    )
+    duplicate_expiry_sha256 = execution_fact_ingress_digest(duplicate_expiry_ingress)
+    duplicate_end_batch = _create_historical_matcher_dispatch_batch(
+        run_id=batches[1].run_id,
+        source_namespace=batches[1].source_namespace,
+        dispatch_kind=batches[1].dispatch_kind,
+        dispatch_sequence=batches[1].dispatch_sequence,
+        trigger_root_sha256=batches[1].trigger_root_sha256,
+        trigger_root_key=batches[1].trigger_root_key,
+        next_fact_sequence_before=batches[1].next_fact_sequence_before,
+        next_fact_sequence_after=batches[1].next_fact_sequence_after,
+        submission_sequences=(receipts[0].submission_sequence,),
+        order_ids=(receipts[0].order_id,),
+        ingresses=(duplicate_expiry_ingress,),
+        ingress_sha256s=(duplicate_expiry_sha256,),
+    )
+    duplicate_end_sha256 = historical_matcher_dispatch_batch_digest(duplicate_end_batch)
+    duplicate_end_document = json.loads(
+        canonical_historical_matcher_dispatch_batch_bytes(duplicate_end_batch)
+    )
+    duplicate_state = {
+        **state_document,
+        "dispatch_batch_sha256s": [
+            historical_matcher_dispatch_batch_digest(batches[0]).value,
+            duplicate_end_sha256.value,
+        ],
+        "end_batch_sha256": duplicate_end_sha256.value,
+        "issued_ingresses": [
+            json.loads(canonical_historical_matcher_dispatch_batch_bytes(batches[0]))["ingresses"][
+                0
+            ],
+            duplicate_end_document["ingresses"][0],
+        ],
+        "pending_order_ids": [
+            json.loads(canonical_historical_submission_receipt_bytes(receipts[1]))["order_id"]
+        ],
+    }
+    duplicate_context = HistoricalMatcherDecodeContext(
+        run_id=full_context.run_id,
+        spec_set=full_context.spec_set,
+        execution_policy=full_context.execution_policy,
+        source_namespace=full_context.source_namespace,
+        provenance_id=full_context.provenance_id,
+        orders_by_sha256=full_context.orders_by_sha256,
+        receipts_by_sha256=full_context.receipts_by_sha256,
+        batches_by_sha256={
+            historical_matcher_dispatch_batch_digest(batches[0]): batches[0],
+            duplicate_end_sha256: duplicate_end_batch,
+        },
+        ingresses_by_sha256={
+            execution_fact_ingress_digest(batches[0].ingresses[0]): batches[0].ingresses[0],
+            duplicate_expiry_sha256: duplicate_expiry_ingress,
+        },
+        market_roots_by_sha256=full_context.market_roots_by_sha256,
+        end_roots_by_sha256=full_context.end_roots_by_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as duplicate_emission:
+        decode_historical_matcher_state(
+            _canonical_document(duplicate_state),
+            context=duplicate_context,
+        )
+    assert duplicate_emission.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_runtime_adapter_mints_market_and_terminal_proofs_only_while_active() -> None:
     _, matcher, _, _, _, _ = _system()
     header = (
@@ -1207,6 +1375,30 @@ def test_receipt_decoder_binds_order_request_dispatch_eligibility_and_causal_roo
             context=end_context,
         )
     assert rejected_end.value.code is OutcomeCode.CONFLICTING_ID
+
+    off_grid_order = _clone_order(orders[1], quantity=CanonicalDecimal("5.5"))
+    off_grid_receipt = _clone_receipt(
+        expiry_receipt,
+        order_sha256=order_digest(off_grid_order),
+        execution_request_sha256=execution_request_digest(off_grid_order),
+        client_submission_key=order_client_submission_key(off_grid_order),
+        quantity_text=off_grid_order.quantity.text,
+    )
+    off_grid_context = HistoricalMatcherDecodeContext(
+        run_id=context.run_id,
+        spec_set=context.spec_set,
+        execution_policy=context.execution_policy,
+        source_namespace=context.source_namespace,
+        provenance_id=context.provenance_id,
+        orders_by_sha256={order_digest(off_grid_order): off_grid_order},
+        market_roots_by_sha256=context.market_roots_by_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as off_grid:
+        decode_historical_submission_receipt(
+            canonical_historical_submission_receipt_bytes(off_grid_receipt),
+            context=off_grid_context,
+        )
+    assert off_grid.value.code is OutcomeCode.NOT_QUANTIZED
 
 
 def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:

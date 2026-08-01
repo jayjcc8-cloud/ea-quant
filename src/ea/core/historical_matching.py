@@ -2160,6 +2160,14 @@ def _require_receipt_order_and_causal_root_bindings(
 ) -> MarketDataEnvelope:
     try:
         specification = context.spec_set.require(order.instrument)
+        require_positive(order.quantity, field_name="Order quantity")
+        require_quantized(
+            order.quantity,
+            specification.quantity_quantum,
+            field_name="Order quantity",
+        )
+    except EconomicValidationError as error:
+        raise _fail(error.code, "receipt Order quantity conflicts") from error
     except (KeyError, TypeError, ValueError) as error:
         raise _fail(OutcomeCode.CONFLICTING_ID, "receipt Order specification conflicts") from error
     if (
@@ -2877,6 +2885,13 @@ def decode_historical_matcher_state(
         range(1, len(receipts) + 1)
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt append order conflicts")
+    submitted_entries = tuple(
+        (receipt.submission_sequence, receipt.order_id) for receipt in receipts
+    )
+    if len(set(submitted_entries)) != len(submitted_entries) or len(
+        {receipt.order_id for receipt in receipts}
+    ) != len(receipts):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt identity history conflicts")
     if any(
         receipt.run_id != context.run_id or receipt.source_namespace != context.source_namespace
         for receipt in receipts
@@ -2903,6 +2918,16 @@ def decode_historical_matcher_state(
     expected_last = None if not batches else batches[-1].dispatch_sequence
     if state.last_new_dispatch_sequence != expected_last:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state last dispatch conflicts")
+    emitted_entries = tuple(
+        zip(batch.submission_sequences, batch.order_ids, strict=True) for batch in batches
+    )
+    flattened_emitted_entries = tuple(entry for entries in emitted_entries for entry in entries)
+    submitted_entry_set = set(submitted_entries)
+    if any(entry not in submitted_entry_set for entry in flattened_emitted_entries):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state batch references external receipt")
+    emitted_order_ids_in_order = tuple(order_id for _, order_id in flattened_emitted_entries)
+    if len(set(emitted_order_ids_in_order)) != len(emitted_order_ids_in_order):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state Order is emitted more than once")
     if state.ended and (
         not batches
         or batches[-1].dispatch_kind is not HistoricalDispatchKind.END_OF_RUN
@@ -2917,7 +2942,7 @@ def decode_historical_matcher_state(
     if flattened_ingresses != tuple(issued):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state issued ingress append order conflicts")
     submitted_order_ids = tuple(receipt.order_id for receipt in receipts)
-    emitted_order_ids = {order_id for batch in batches for order_id in batch.order_ids}
+    emitted_order_ids = set(emitted_order_ids_in_order)
     expected_pending = tuple(
         order_id for order_id in submitted_order_ids if order_id not in emitted_order_ids
     )
