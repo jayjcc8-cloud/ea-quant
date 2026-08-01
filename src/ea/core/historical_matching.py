@@ -1340,6 +1340,8 @@ def _validate_state(state: HistoricalMatcherState) -> None:
             raise _fail(OutcomeCode.CONFLICTING_ID, "state conflict run binding conflicts")
     if state.ended != (state.end_batch_sha256 is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state end relationship conflicts")
+    if state.ended and state.pending_order_ids:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "ended state retains pending Orders")
     if state.end_batch_sha256 is not None and (
         type(state.end_batch_sha256) is not Sha256Digest
         or not state.dispatch_batch_sha256s

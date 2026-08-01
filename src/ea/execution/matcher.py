@@ -712,6 +712,22 @@ class Phase1HistoricalMatcher:
             sequence = getattr(record.binding, "parent_dispatch_sequence", None)
             self._retained_binding_drift(dispatch_sequence=sequence)
 
+    def _require_submission_pointer(self, *, dispatch_sequence: int | None) -> None:
+        state = self._state
+        try:
+            expected = (
+                1
+                if not state.submissions
+                else _advance(state.submissions[-1].receipt.submission_sequence)
+            )
+            valid = (
+                state.next_submission is None or type(state.next_submission) is int
+            ) and state.next_submission == expected
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+
     def _require_retained_state(self) -> None:
         state = self._state
         for submission_record in state.submissions:
@@ -733,13 +749,9 @@ class Phase1HistoricalMatcher:
                 and len(submission_ids) == len(state.submissions)
                 and submission_sequences == tuple(sorted(submission_sequences))
                 and len(set(submission_sequences)) == len(submission_sequences)
-                and (
-                    state.next_submission is None
-                    or (
-                        type(state.next_submission) is int
-                        and 1 <= state.next_submission <= _MAX_UINT64
-                    )
-                )
+                and (state.next_submission is None or type(state.next_submission) is int)
+                and state.next_submission
+                == (1 if not submission_sequences else _advance(submission_sequences[-1]))
                 and len(state.submission_by_order) == len(state.submissions)
                 and len(state.submission_by_client) == len(state.submissions)
                 and all(
@@ -822,12 +834,12 @@ class Phase1HistoricalMatcher:
             )
             valid = (
                 type(state) is _MatcherState
-                and (
-                    state.next_submission is None
-                    or (
-                        type(state.next_submission) is int
-                        and 1 <= state.next_submission <= _MAX_UINT64
-                    )
+                and (state.next_submission is None or type(state.next_submission) is int)
+                and state.next_submission
+                == (
+                    1
+                    if not state.submissions
+                    else _advance(state.submissions[-1].receipt.submission_sequence)
                 )
                 and (
                     state.next_fact is None
@@ -1083,6 +1095,7 @@ class Phase1HistoricalMatcher:
                 else OutcomeCode.CONFLICTING_ID
             )
             raise _fail(code, "Order quantity is invalid") from error
+        self._require_submission_pointer(dispatch_sequence=sequence)
         submission_sequence = self._state.next_submission
         if submission_sequence is None:
             raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "submission sequence exhausted")

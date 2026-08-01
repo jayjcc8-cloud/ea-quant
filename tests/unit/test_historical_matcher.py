@@ -564,6 +564,18 @@ def test_matcher_canonical_values_decode_with_closed_context() -> None:
     )
 
 
+def test_state_encoder_rejects_terminal_state_with_pending_orders() -> None:
+    _, matcher, orders, causal, _, end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    matcher.expire_at_active_end(end, dispatch_sequence=8)
+    state = matcher.state
+    object.__setattr__(state, "pending_order_ids", (orders[0].order_id,))
+
+    with pytest.raises(HistoricalMatcherError) as contradictory:
+        canonical_historical_matcher_state_bytes(state)
+    assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_batch_state_decoders_reject_uint64_and_cross_field_substitutions() -> None:
     _, matcher, orders, causal, delayed, end = _system()
     receipts = [matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)]
@@ -1266,7 +1278,7 @@ def test_non_monotone_dispatch_publishes_first_conflict_and_halts_submission() -
     assert halted.value.code is OutcomeCode.SUBMISSION_BLOCKED_BY_HALT
 
 
-def test_submission_exhaustion_skips_authorization_but_retained_replay_survives() -> None:
+def test_submission_pointer_drift_skips_authorization_but_retained_replay_survives() -> None:
     _, matcher, orders, causal, delayed, _ = _system()
     authorization = cast(
         _AuthorizationVerifier,
@@ -1275,17 +1287,23 @@ def test_submission_exhaustion_skips_authorization_but_retained_replay_survives(
     receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     assert authorization.calls == 1
 
-    matcher._state = replace(matcher._state, next_submission=None)
-    exhausted_state = matcher._state
+    matcher._state = replace(matcher._state, next_submission=1)
+    drifted_state = matcher._state
     assert matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7) is receipt
     assert authorization.calls == 1
-    assert matcher._state is exhausted_state
+    assert matcher._state is drifted_state
 
-    with pytest.raises(HistoricalMatcherError) as exhausted:
+    with pytest.raises(HistoricalMatcherError) as drift:
         matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8)
-    assert exhausted.value.code is OutcomeCode.ARITHMETIC_OVERFLOW
+    assert drift.value.code is OutcomeCode.CONFLICTING_ID
     assert authorization.calls == 1
-    assert matcher._state is exhausted_state
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+    assert matcher._state.submissions == drifted_state.submissions
+    assert matcher._state.pending == drifted_state.pending
 
 
 def test_receipt_decoder_rejects_noncanonical_unknown_and_substituted_context() -> None:
@@ -2235,9 +2253,11 @@ def test_uint64_sequence_edges_and_atomic_multi_fact_exhaustion() -> None:
     maximum = (1 << 64) - 1
     _, matcher, orders, causal, _, _ = _system()
     matcher._state = replace(matcher._state, next_submission=maximum)
-    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
-    assert receipt.submission_sequence == maximum
-    assert matcher._state.next_submission is None
+    with pytest.raises(HistoricalMatcherError) as drifted_submission_pointer:
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert drifted_submission_pointer.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.conflict is not None
+    assert matcher._state.submissions == ()
 
     assert _advance(maximum) is None
 
