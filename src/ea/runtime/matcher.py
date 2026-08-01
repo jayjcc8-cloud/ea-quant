@@ -194,6 +194,7 @@ class CausalDescendantFactDispatchVerifier:
     __slots__ = (
         "_direct",
         "_matcher",
+        "_matcher_source_namespace",
         "_run_id",
         "_runtime",
         "_spec_set",
@@ -201,6 +202,7 @@ class CausalDescendantFactDispatchVerifier:
     )
     _direct: DeterministicRootQueue
     _matcher: HistoricalMatcherIssuanceCapability
+    _matcher_source_namespace: SourceNamespace
     _run_id: RunId
     _runtime: Phase1HistoricalMarketRuntime
     _spec_set: InstrumentExecutionSpecSet
@@ -286,9 +288,17 @@ class CausalDescendantFactDispatchVerifier:
 
     def _require_bindings(self) -> None:
         if (
-            self._runtime.run_id != self._run_id
+            type(self._runtime.run_id) is not RunId
+            or type(self._matcher.run_id) is not RunId
+            or type(self._direct.run_id) is not RunId
+            or type(self._runtime.spec_set) is not InstrumentExecutionSpecSet
+            or type(self._matcher.spec_set) is not InstrumentExecutionSpecSet
+            or type(self._direct.spec_set) is not InstrumentExecutionSpecSet
+            or type(self._matcher.source_namespace) is not SourceNamespace
+            or self._runtime.run_id != self._run_id
             or self._matcher.run_id != self._run_id
             or self._direct.run_id != self._run_id
+            or self._matcher.source_namespace != self._matcher_source_namespace
             or instrument_spec_set_digest(self._runtime.spec_set) != self._spec_sha256
             or instrument_spec_set_digest(self._matcher.spec_set) != self._spec_sha256
             or instrument_spec_set_digest(self._direct.spec_set) != self._spec_sha256
@@ -311,6 +321,16 @@ def create_causal_descendant_fact_dispatch_verifier(
         or any(type(source) is not SourceNamespace for source in other_descendant_source_namespaces)
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "descendant verifier bindings are invalid")
+    if (
+        type(runtime.run_id) is not RunId
+        or type(runtime.spec_set) is not InstrumentExecutionSpecSet
+        or type(direct_dispatch_verifier.run_id) is not RunId
+        or type(direct_dispatch_verifier.spec_set) is not InstrumentExecutionSpecSet
+        or type(matcher.run_id) is not RunId
+        or type(matcher.spec_set) is not InstrumentExecutionSpecSet
+        or type(matcher.source_namespace) is not SourceNamespace
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "descendant verifier binding types are invalid")
     if (
         not callable(
             getattr(
@@ -342,6 +362,7 @@ def create_causal_descendant_fact_dispatch_verifier(
     value._runtime = runtime
     value._direct = direct_dispatch_verifier
     value._matcher = matcher
+    value._matcher_source_namespace = matcher.source_namespace
     value._run_id = runtime.run_id
     value._spec_set = runtime.spec_set
     value._spec_sha256 = expected_digest

@@ -228,6 +228,7 @@ def test_inner_execution_package_depends_only_on_core_and_itself() -> None:
             "ea.core.risk",
             "ea.core.run",
             "ea.core.runtime",
+            "ea.core.strategy",
             "ea.core.time",
             "ea.execution.authority",
             "ea.execution.fact_authority",

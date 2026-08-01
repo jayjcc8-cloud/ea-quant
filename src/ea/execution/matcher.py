@@ -79,7 +79,6 @@ from ea.core.historical_matching import (
     historical_matcher_observation_digest,
     historical_matcher_state_digest,
     historical_submission_receipt_digest,
-    immutable_occupied_identity,
 )
 from ea.core.identity import Instrument, VenueId
 from ea.core.market_data import Adjustment, MarketDataEnvelope
@@ -97,8 +96,19 @@ from ea.core.runtime import (
     _require_active_market_dispatch_proof,
     runtime_root_order_key,
 )
+from ea.core.strategy import causal_market_digest
 
 _MAX_UINT64 = (1 << 64) - 1
+
+
+class _VerifierFailure(Exception):
+    """Preserve an unexpected verifier exception across matcher translation."""
+
+    error: Exception
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        super().__init__(str(error))
 
 
 class HistoricalOrderIssuanceVerifier(Protocol):
@@ -407,6 +417,12 @@ class Phase1HistoricalMatcher:
     @property
     def state(self) -> HistoricalMatcherState:
         state = self._state
+        for submission_record in state.submissions:
+            self._require_submission_record(submission_record)
+        for _, dispatch_record in sorted(state.dispatch_by_sequence.items()):
+            self._require_dispatch_record(dispatch_record)
+        for issued_record in state.issued:
+            self._require_issued_record(issued_record)
         public = _create_historical_matcher_state(
             run_id=self._run_id,
             source_namespace=self._source_namespace,
@@ -417,7 +433,13 @@ class Phase1HistoricalMatcher:
             next_submission_sequence=state.next_submission,
             next_fact_sequence=state.next_fact,
             receipt_sha256s=tuple(record.receipt_sha256 for record in state.submissions),
-            pending_order_ids=tuple(record.order.order_id for record in state.pending),
+            pending_order_ids=tuple(
+                record.order.order_id
+                for record in sorted(
+                    state.pending,
+                    key=lambda item: item.receipt.submission_sequence,
+                )
+            ),
             issued_ingresses=tuple(record.ingress for record in state.issued),
             dispatch_batch_sha256s=tuple(
                 record.batch_sha256 for _, record in sorted(state.dispatch_by_sequence.items())
@@ -447,6 +469,8 @@ class Phase1HistoricalMatcher:
                 policy = verifier.execution_policy
             except (AttributeError, TypeError) as error:
                 raise _fail(OutcomeCode.INVALID_TYPE, "verifier binding failed") from error
+            if type(run_id) is not RunId or type(policy) is not ExecutionPolicyRef:
+                raise _fail(OutcomeCode.INVALID_TYPE, "verifier bindings must be exact")
             if run_id != self._run_id or policy != self._execution_policy:
                 raise _fail(OutcomeCode.CONFLICTING_ID, "verifier binding changed")
         try:
@@ -461,14 +485,122 @@ class Phase1HistoricalMatcher:
             type(order_specs) is not InstrumentExecutionSpecSet
             or canonical_instrument_spec_set_bytes(order_specs) != self._spec_bytes
             or instrument_spec_set_digest(order_specs) != self._spec_sha256
+            or type(auth_spec_id) is not InstrumentSpecSetId
+            or type(auth_spec_digest) is not Sha256Digest
             or auth_spec_id != self._spec_set.identifier
             or auth_spec_digest != self._spec_sha256
+            or type(dispatch_run_id) is not RunId
             or dispatch_run_id != self._run_id
             or type(dispatch_specs) is not InstrumentExecutionSpecSet
             or canonical_instrument_spec_set_bytes(dispatch_specs) != self._spec_bytes
             or instrument_spec_set_digest(dispatch_specs) != self._spec_sha256
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "verifier spec binding changed")
+
+    def _retained_binding_drift(self, *, dispatch_sequence: object = None) -> None:
+        sequence = (
+            dispatch_sequence
+            if type(dispatch_sequence) is int and 1 <= dispatch_sequence <= _MAX_UINT64
+            else None
+        )
+        self._publish_conflict(
+            kind=HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT,
+            occupied_identity=None,
+            existing_sha256=None,
+            submitted_sha256=None,
+            submitted_dispatch_sequence=sequence,
+            trigger_root_sha256=None,
+        )
+
+    def _require_submission_record(self, record: _SubmissionRecord) -> None:
+        try:
+            receipt = record.receipt
+            valid = (
+                type(record) is _SubmissionRecord
+                and type(record.order) is Order
+                and canonical_order_bytes(record.order) == record.order_bytes
+                and order_digest(record.order) == record.order_sha256
+                and canonical_execution_request_bytes(record.order) == record.request_bytes
+                and execution_request_digest(record.order) == record.request_sha256
+                and order_client_submission_key(record.order) == record.client_key
+                and type(receipt) is HistoricalSubmissionReceipt
+                and canonical_historical_submission_receipt_bytes(receipt) == record.receipt_bytes
+                and historical_submission_receipt_digest(receipt) == record.receipt_sha256
+                and receipt.run_id == self._run_id
+                and receipt.source_namespace == self._source_namespace
+                and receipt.order_id == record.order.order_id
+                and receipt.order_sha256 == record.order_sha256
+                and receipt.execution_request_sha256 == record.request_sha256
+                and receipt.client_submission_key == record.client_key
+                and receipt.instrument == record.order.instrument
+                and receipt.side is record.order.side
+                and receipt.quantity_text == record.order.quantity.text
+                and receipt.causal_market_sha256 == record.causal_market_sha256
+                and receipt.causal_root_key == record.causal_root_key
+                and receipt.dispatch_sequence == record.dispatch_sequence
+                and receipt.eligible_after_available_at == record.order.eligible_after_available_at
+                and receipt.instrument_spec_set_id == self._spec_set.identifier
+                and receipt.instrument_spec_set_sha256 == self._spec_sha256
+                and receipt.execution_policy == self._execution_policy
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=record.dispatch_sequence)
+
+    def _require_dispatch_record(self, record: _DispatchRecord) -> None:
+        try:
+            batch = record.batch
+            valid = (
+                type(record) is _DispatchRecord
+                and type(batch) is HistoricalMatcherDispatchBatch
+                and canonical_historical_matcher_dispatch_batch_bytes(batch) == record.batch_bytes
+                and historical_matcher_dispatch_batch_digest(batch) == record.batch_sha256
+                and batch.run_id == self._run_id
+                and batch.source_namespace == self._source_namespace
+                and batch.dispatch_sequence in self._state.dispatch_by_sequence
+                and self._state.dispatch_by_sequence[batch.dispatch_sequence] is record
+                and batch.trigger_root_sha256 == record.root_sha256
+                and batch.trigger_root_key == record.root_key
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            sequence = getattr(record.batch, "dispatch_sequence", None)
+            self._retained_binding_drift(dispatch_sequence=sequence)
+
+    def _require_issued_record(self, record: _IssuedRecord) -> None:
+        try:
+            ingress = record.ingress
+            binding = record.binding
+            dispatch = self._state.dispatch_by_sequence.get(binding.parent_dispatch_sequence)
+            valid = (
+                type(record) is _IssuedRecord
+                and type(ingress) is ExecutionFactIngress
+                and type(binding) is HistoricalMatcherDescendantBinding
+                and canonical_execution_fact_ingress_bytes(ingress) == record.ingress_bytes
+                and execution_fact_ingress_digest(ingress) == record.ingress_sha256
+                and canonical_execution_fact_bytes(ingress.fact) == record.fact_bytes
+                and binding.ingress_identity == ingress.identity
+                and binding.ingress_sha256 == record.ingress_sha256
+                and binding.fact_sha256 == execution_fact_digest(ingress.fact)
+                and dispatch is not None
+                and binding.batch_sha256 == dispatch.batch_sha256
+                and binding.parent_kind is dispatch.batch.dispatch_kind
+                and binding.parent_root_sha256 == dispatch.root_sha256
+                and binding.parent_root_key == dispatch.root_key
+                and binding.parent_dispatch_sequence == dispatch.batch.dispatch_sequence
+                and type(binding.batch_index) is int
+                and 0 <= binding.batch_index < len(dispatch.batch.ingresses)
+                and dispatch.batch.ingresses[binding.batch_index] is ingress
+                and dispatch.batch.ingress_sha256s[binding.batch_index] == record.ingress_sha256
+                and self._state.issued_by_identity.get(ingress.identity) is record
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            sequence = getattr(record.binding, "parent_dispatch_sequence", None)
+            self._retained_binding_drift(dispatch_sequence=sequence)
 
     def _publish_conflict(
         self,
@@ -484,7 +616,7 @@ class Phase1HistoricalMatcher:
             conflict = _create_historical_matcher_conflict(
                 run_id=self._run_id,
                 conflict_kind=kind,
-                occupied_identity=immutable_occupied_identity(occupied_identity),
+                occupied_identity=occupied_identity,
                 existing_sha256=existing_sha256,
                 submitted_sha256=submitted_sha256,
                 submitted_dispatch_sequence=submitted_dispatch_sequence,
@@ -532,6 +664,7 @@ class Phase1HistoricalMatcher:
 
         existing = self._state.submission_by_order.get(order.order_id)
         if existing is not None:
+            self._require_submission_record(existing)
             if (
                 existing.order_bytes == submitted_order_bytes
                 and existing.causal_market_bytes == causal_bytes
@@ -540,7 +673,14 @@ class Phase1HistoricalMatcher:
                 return existing.receipt
             self._publish_conflict(
                 kind=HistoricalMatcherConflictKind.SUBMISSION_IDENTITY,
-                occupied_identity={"order_id": order.order_id.owner_sequence},
+                occupied_identity={
+                    "kind": "order_id",
+                    "order_id": {
+                        "owner_kind": order.order_id.owner_kind.value,
+                        "owner_sequence": order.order_id.owner_sequence,
+                        "run_id": order.order_id.run_id.value,
+                    },
+                },
                 existing_sha256=existing.order_sha256,
                 submitted_sha256=submitted_order_sha256,
                 submitted_dispatch_sequence=sequence,
@@ -548,9 +688,13 @@ class Phase1HistoricalMatcher:
             )
         existing = self._state.submission_by_client.get(client_key)
         if existing is not None:
+            self._require_submission_record(existing)
             self._publish_conflict(
                 kind=HistoricalMatcherConflictKind.CLIENT_SUBMISSION_KEY,
-                occupied_identity={"client_submission_key": client_key.value},
+                occupied_identity={
+                    "kind": "client_submission_key",
+                    "sha256": client_key.value,
+                },
                 existing_sha256=existing.order_sha256,
                 submitted_sha256=submitted_order_sha256,
                 submitted_dispatch_sequence=sequence,
@@ -568,31 +712,41 @@ class Phase1HistoricalMatcher:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "Order is outside Phase 1 profile")
         self._require_live_bindings()
         try:
-            issued = self._order_issuance_verifier.resolve_issued_order_by_id(order.order_id)
-        except Exception as error:
-            raise _fail(OutcomeCode.INVALID_TYPE, "Order issuance verifier failed") from error
+            try:
+                issued = self._order_issuance_verifier.resolve_issued_order_by_id(order.order_id)
+            except Exception as error:
+                raise _VerifierFailure(error) from error
+        except _VerifierFailure as failure:
+            raise failure.error from None
         if type(issued) is not Order or canonical_order_bytes(issued) != submitted_order_bytes:
             raise _fail(OutcomeCode.CONFLICTING_ID, "Order was not issued by authority")
         try:
-            proof = self._active_dispatch_verifier.verify_active_market_dispatch(
-                causal_market_root,
-                dispatch_sequence=sequence,
-            )
+            try:
+                proof = self._active_dispatch_verifier.verify_active_market_dispatch(
+                    causal_market_root,
+                    dispatch_sequence=sequence,
+                )
+            except RuntimeOrderingError:
+                raise
+            except Exception as error:
+                raise _VerifierFailure(error) from error
             _require_active_market_dispatch_proof(
                 proof,
                 run_id=self._run_id,
                 market_root=causal_market_root,
                 canonical_market_bytes=causal_bytes,
-                causal_market_sha256=proof.causal_market_sha256,
+                causal_market_sha256=causal_market_digest(causal_market_root),
                 dispatch_sequence=sequence,
                 issuer=self._active_dispatch_verifier,
             )
+        except _VerifierFailure as failure:
+            raise failure.error from None
         except HistoricalMatcherError:
             raise
         except RuntimeOrderingError as error:
             raise _fail(error.code, "active market proof is invalid") from error
-        except Exception as error:
-            raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier failed") from error
+        except (AttributeError, TypeError) as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "active market proof is invalid") from error
         if (
             order.run_id != self._run_id
             or order.dispatch_sequence != sequence
@@ -629,17 +783,22 @@ class Phase1HistoricalMatcher:
         if submission_sequence is None:
             raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "submission sequence exhausted")
         try:
-            auth_proof = (
-                self._submission_authorization_verifier.verify_authorized_historical_submission(
-                    order_id=order.order_id,
-                    canonical_order_bytes=submitted_order_bytes,
-                    canonical_execution_request_bytes=request_bytes,
-                    canonical_causal_market_bytes=causal_bytes,
-                    causal_market_sha256=causal_sha256,
-                    causal_root_key=causal_key,
-                    dispatch_sequence=sequence,
+            try:
+                auth_proof = (
+                    self._submission_authorization_verifier.verify_authorized_historical_submission(
+                        order_id=order.order_id,
+                        canonical_order_bytes=submitted_order_bytes,
+                        canonical_execution_request_bytes=request_bytes,
+                        canonical_causal_market_bytes=causal_bytes,
+                        causal_market_sha256=causal_sha256,
+                        causal_root_key=causal_key,
+                        dispatch_sequence=sequence,
+                    )
                 )
-            )
+            except HistoricalPreEffectAuthorizationError:
+                raise
+            except Exception as error:
+                raise _VerifierFailure(error) from error
             auth = _require_historical_submission_authorization_proof(
                 auth_proof,
                 run_id=self._run_id,
@@ -653,12 +812,14 @@ class Phase1HistoricalMatcher:
                 dispatch_sequence=sequence,
                 issuer=self._submission_authorization_verifier,
             )
+        except _VerifierFailure as failure:
+            raise failure.error from None
         except HistoricalPreEffectAuthorizationError:
             raise
         except HistoricalMatcherError:
             raise
-        except Exception as error:
-            raise _fail(OutcomeCode.INVALID_TYPE, "authorization verifier failed") from error
+        except (AttributeError, TypeError) as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "authorization proof is invalid") from error
         owned_order = _clone_order(order)
         receipt = _create_historical_submission_receipt(
             run_id=self._run_id,
@@ -734,11 +895,15 @@ class Phase1HistoricalMatcher:
     ) -> HistoricalMatcherDispatchBatch | None:
         existing = self._state.dispatch_by_sequence.get(sequence)
         if existing is not None:
+            self._require_dispatch_record(existing)
             if existing.root_bytes == root_bytes and existing.root_sha256 == root_sha256:
                 return existing.batch
             self._publish_conflict(
                 kind=HistoricalMatcherConflictKind.DISPATCH_IDENTITY,
-                occupied_identity={"dispatch_sequence": sequence},
+                occupied_identity={
+                    "dispatch_sequence": sequence,
+                    "kind": "dispatch_sequence",
+                },
                 existing_sha256=existing.root_sha256,
                 submitted_sha256=root_sha256,
                 submitted_dispatch_sequence=sequence,
@@ -746,9 +911,10 @@ class Phase1HistoricalMatcher:
             )
         existing = self._state.dispatch_by_digest.get(root_sha256)
         if existing is not None:
+            self._require_dispatch_record(existing)
             self._publish_conflict(
                 kind=HistoricalMatcherConflictKind.DISPATCH_IDENTITY,
-                occupied_identity={"trigger_root_sha256": root_sha256.value},
+                occupied_identity=None,
                 existing_sha256=existing.root_sha256,
                 submitted_sha256=root_sha256,
                 submitted_dispatch_sequence=sequence,
@@ -783,7 +949,10 @@ class Phase1HistoricalMatcher:
         if self._state.last_dispatch is not None and sequence <= self._state.last_dispatch:
             self._publish_conflict(
                 kind=HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH,
-                occupied_identity={"dispatch_sequence": sequence},
+                occupied_identity={
+                    "dispatch_sequence": sequence,
+                    "kind": "dispatch_sequence",
+                },
                 existing_sha256=None,
                 submitted_sha256=root_sha256,
                 submitted_dispatch_sequence=sequence,
@@ -791,32 +960,44 @@ class Phase1HistoricalMatcher:
             )
         self._require_live_bindings()
         try:
-            proof = self._active_dispatch_verifier.verify_active_market_dispatch(
-                market_root,
-                dispatch_sequence=sequence,
-            )
+            try:
+                proof = self._active_dispatch_verifier.verify_active_market_dispatch(
+                    market_root,
+                    dispatch_sequence=sequence,
+                )
+            except RuntimeOrderingError:
+                raise
+            except Exception as error:
+                raise _VerifierFailure(error) from error
             _require_active_market_dispatch_proof(
                 proof,
                 run_id=self._run_id,
                 market_root=market_root,
                 canonical_market_bytes=root_bytes,
-                causal_market_sha256=proof.causal_market_sha256,
+                causal_market_sha256=causal_market_digest(market_root),
                 dispatch_sequence=sequence,
                 issuer=self._active_dispatch_verifier,
             )
+        except _VerifierFailure as failure:
+            raise failure.error from None
         except RuntimeOrderingError as error:
             raise _fail(error.code, "active market proof is invalid") from error
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier failed") from error
         eligible = tuple(
-            record
-            for record in self._state.pending
-            if (
-                record.order.instrument == market_root.payload.instrument
-                and market_root.payload.adjustment is Adjustment.RAW
-                and market_root.revision == 0
-                and root_key > record.causal_root_key
-                and market_root.event_time > record.order.eligible_after_available_at
+            sorted(
+                (
+                    record
+                    for record in self._state.pending
+                    if (
+                        record.order.instrument == market_root.payload.instrument
+                        and market_root.payload.adjustment is Adjustment.RAW
+                        and market_root.revision == 0
+                        and root_key > record.causal_root_key
+                        and market_root.event_time > record.order.eligible_after_available_at
+                    )
+                ),
+                key=lambda record: record.receipt.submission_sequence,
             )
         )
         return self._publish_batch(
@@ -863,7 +1044,10 @@ class Phase1HistoricalMatcher:
         if self._state.last_dispatch is not None and sequence <= self._state.last_dispatch:
             self._publish_conflict(
                 kind=HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH,
-                occupied_identity={"dispatch_sequence": sequence},
+                occupied_identity={
+                    "dispatch_sequence": sequence,
+                    "kind": "dispatch_sequence",
+                },
                 existing_sha256=None,
                 submitted_sha256=root_sha256,
                 submitted_dispatch_sequence=sequence,
@@ -871,10 +1055,15 @@ class Phase1HistoricalMatcher:
             )
         self._require_live_bindings()
         try:
-            proof = self._active_dispatch_verifier.verify_active_end_of_run_dispatch(
-                end_root,
-                dispatch_sequence=sequence,
-            )
+            try:
+                proof = self._active_dispatch_verifier.verify_active_end_of_run_dispatch(
+                    end_root,
+                    dispatch_sequence=sequence,
+                )
+            except RuntimeOrderingError:
+                raise
+            except Exception as error:
+                raise _VerifierFailure(error) from error
             _require_active_end_of_run_dispatch_proof(
                 proof,
                 run_id=self._run_id,
@@ -884,6 +1073,8 @@ class Phase1HistoricalMatcher:
                 dispatch_sequence=sequence,
                 issuer=self._active_dispatch_verifier,
             )
+        except _VerifierFailure as failure:
+            raise failure.error from None
         except RuntimeOrderingError as error:
             raise _fail(error.code, "active end proof is invalid") from error
         except Exception as error:
@@ -894,7 +1085,12 @@ class Phase1HistoricalMatcher:
             root_key=root_key,
             root_bytes=root_bytes,
             root_sha256=root_sha256,
-            records=self._state.pending,
+            records=tuple(
+                sorted(
+                    self._state.pending,
+                    key=lambda record: record.receipt.submission_sequence,
+                )
+            ),
             occurred_at=end_root.available_at,
             available_at=end_root.available_at,
             close=None,
@@ -915,6 +1111,8 @@ class Phase1HistoricalMatcher:
         close: float | None,
         end: bool,
     ) -> HistoricalMatcherDispatchBatch:
+        for record in records:
+            self._require_submission_record(record)
         fact_before = self._state.next_fact
         if records and fact_before is None:
             raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "fact sequence exhausted")
@@ -1060,7 +1258,14 @@ class Phase1HistoricalMatcher:
             issued_by_identity[issued.ingress.identity] = issued
         matched_ids = {record.order.order_id for record in records}
         pending = tuple(
-            record for record in self._state.pending if record.order.order_id not in matched_ids
+            sorted(
+                (
+                    record
+                    for record in self._state.pending
+                    if record.order.order_id not in matched_ids
+                ),
+                key=lambda record: record.receipt.submission_sequence,
+            )
         )
         next_state = _MatcherState(
             next_submission=self._state.next_submission,
@@ -1119,12 +1324,12 @@ class Phase1HistoricalMatcher:
             raise _fail(OutcomeCode.INVALID_TYPE, "issuance lookup inputs must be exact")
         self._require_live_bindings()
         record = self._state.issued_by_identity.get(ingress_identity)
+        if record is None:
+            return False
+        self._require_issued_record(record)
         return bool(
-            record is not None
-            and record.ingress_bytes == canonical_ingress_bytes
+            record.ingress_bytes == canonical_ingress_bytes
             and record.fact_bytes == canonical_fact_bytes
-            and canonical_execution_fact_ingress_bytes(record.ingress) == record.ingress_bytes
-            and canonical_execution_fact_bytes(record.ingress.fact) == record.fact_bytes
         )
 
     def resolve_descendant_binding(
@@ -1140,6 +1345,7 @@ class Phase1HistoricalMatcher:
             or type(canonical_fact_bytes) is not bytes
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant lookup inputs must be exact")
+        self._require_live_bindings()
         record = self._state.issued_by_identity.get(ingress_identity)
         if (
             record is None
@@ -1147,20 +1353,7 @@ class Phase1HistoricalMatcher:
             or record.fact_bytes != canonical_fact_bytes
         ):
             return None
-        dispatch = self._state.dispatch_by_sequence.get(record.binding.parent_dispatch_sequence)
-        if (
-            dispatch is None
-            or dispatch.batch_sha256 != record.binding.batch_sha256
-            or dispatch.batch.ingresses[record.binding.batch_index] is not record.ingress
-        ):
-            self._publish_conflict(
-                kind=HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT,
-                occupied_identity={"ingress_sequence": ingress_identity.ingress_sequence},
-                existing_sha256=record.binding.batch_sha256,
-                submitted_sha256=None,
-                submitted_dispatch_sequence=record.binding.parent_dispatch_sequence,
-                trigger_root_sha256=record.binding.parent_root_sha256,
-            )
+        self._require_issued_record(record)
         return record.binding
 
 
