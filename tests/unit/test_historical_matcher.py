@@ -1354,8 +1354,11 @@ def test_no_fill_filters_and_first_later_fill_are_closed_and_replay_stable() -> 
     ):
         _, matcher, orders, causal, _, _ = _system()
         matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
-        batch = matcher.match_active_market_root(root(causal), dispatch_sequence=8)
+        candidate = root(causal)
+        batch = matcher.match_active_market_root(candidate, dispatch_sequence=8)
         assert batch.ingresses == ()
+        assert matcher.state.pending_order_ids == (orders[0].order_id,)
+        assert matcher.match_active_market_root(candidate, dispatch_sequence=8) is batch
         assert matcher.state.pending_order_ids == (orders[0].order_id,)
 
     _, matcher, orders, causal, delayed, end = _system()
@@ -1625,8 +1628,9 @@ def test_invalid_non_raw_carrier_never_fills_or_publishes() -> None:
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     object.__setattr__(delayed.payload, "adjustment", "split_adjusted")
     initial = matcher._state
-    with pytest.raises(HistoricalMatcherError):
+    with pytest.raises(HistoricalMatcherError) as invalid_adjustment:
         matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert invalid_adjustment.value.code is OutcomeCode.INVALID_TYPE
     assert matcher._state is initial
 
 

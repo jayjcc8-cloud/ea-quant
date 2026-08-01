@@ -222,6 +222,11 @@ def test_bar_allows_finite_negative_prices_equal_prices_and_zero_volume() -> Non
     assert equal.open == equal.high == equal.low == equal.close == equal.volume == 0.0
 
 
+def test_adjustment_vocabulary_is_exhaustively_phase1_raw_only() -> None:
+    assert tuple(Adjustment) == (Adjustment.RAW,)
+    assert Adjustment.RAW.value == "raw"
+
+
 def test_bar_requires_explicit_supported_adjustment() -> None:
     with pytest.raises(MarketDataValidationError, match="Adjustment"):
         _bar(adjustment=cast(Adjustment, "adjusted"))
