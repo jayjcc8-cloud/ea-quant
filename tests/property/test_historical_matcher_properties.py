@@ -142,6 +142,11 @@ def test_lookup_registry_insertion_order_cannot_change_state_decode(
         orders_by_sha256={
             order_digest(orders[index]): orders[index] for index in order_permutation
         },
+        market_roots_by_sha256={
+            receipts[0].causal_market_sha256: causal,
+            batches[0].trigger_root_sha256: delayed,
+        },
+        end_roots_by_sha256={batches[1].trigger_root_sha256: end},
         receipts_by_sha256={
             historical_submission_receipt_digest(receipts[index]): receipts[index]
             for index in receipt_permutation

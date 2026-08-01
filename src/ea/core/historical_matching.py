@@ -40,7 +40,9 @@ from ea.core.execution_messages import (
     FactProvenance,
     FactProvenanceId,
     Order,
+    OrderKind,
     OrderSide,
+    TimeInForce,
     canonical_execution_fact_bytes,
     canonical_execution_fact_ingress_bytes,
     canonical_execution_request_bytes,
@@ -1418,8 +1420,6 @@ class HistoricalMatcherDecodeContext:
     source_namespace: SourceNamespace
     provenance_id: FactProvenanceId
     orders_by_sha256: Mapping[Sha256Digest, Order] = field(default_factory=dict)
-    market_roots_by_sha256: Mapping[Sha256Digest, MarketDataEnvelope] = field(default_factory=dict)
-    end_roots_by_sha256: Mapping[Sha256Digest, EndOfRunRoot] = field(default_factory=dict)
     receipts_by_sha256: Mapping[Sha256Digest, HistoricalSubmissionReceipt] = field(
         default_factory=dict
     )
@@ -1430,6 +1430,8 @@ class HistoricalMatcherDecodeContext:
     conflicts_by_sha256: Mapping[Sha256Digest, HistoricalMatcherConflictEvidence] = field(
         default_factory=dict
     )
+    market_roots_by_sha256: Mapping[Sha256Digest, MarketDataEnvelope] = field(default_factory=dict)
+    end_roots_by_sha256: Mapping[Sha256Digest, EndOfRunRoot] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if (
@@ -1442,12 +1444,6 @@ class HistoricalMatcherDecodeContext:
             raise _fail(OutcomeCode.INVALID_TYPE, "matcher decode bindings must be exact")
         registries = (
             ("orders_by_sha256", self.orders_by_sha256, Order),
-            (
-                "market_roots_by_sha256",
-                self.market_roots_by_sha256,
-                MarketDataEnvelope,
-            ),
-            ("end_roots_by_sha256", self.end_roots_by_sha256, EndOfRunRoot),
             (
                 "receipts_by_sha256",
                 self.receipts_by_sha256,
@@ -1464,6 +1460,12 @@ class HistoricalMatcherDecodeContext:
                 self.conflicts_by_sha256,
                 HistoricalMatcherConflictEvidence,
             ),
+            (
+                "market_roots_by_sha256",
+                self.market_roots_by_sha256,
+                MarketDataEnvelope,
+            ),
+            ("end_roots_by_sha256", self.end_roots_by_sha256, EndOfRunRoot),
         )
         for name, registry, value_type in registries:
             if not isinstance(registry, Mapping):
@@ -1486,14 +1488,6 @@ class HistoricalMatcherDecodeContext:
         ] = (
             (self.orders_by_sha256, cast(Callable[[Any], Sha256Digest], order_digest)),
             (
-                self.market_roots_by_sha256,
-                cast(Callable[[Any], Sha256Digest], historical_market_root_digest),
-            ),
-            (
-                self.end_roots_by_sha256,
-                cast(Callable[[Any], Sha256Digest], historical_end_root_digest),
-            ),
-            (
                 self.receipts_by_sha256,
                 cast(Callable[[Any], Sha256Digest], historical_submission_receipt_digest),
             ),
@@ -1508,6 +1502,14 @@ class HistoricalMatcherDecodeContext:
             (
                 self.conflicts_by_sha256,
                 cast(Callable[[Any], Sha256Digest], historical_matcher_conflict_digest),
+            ),
+            (
+                self.market_roots_by_sha256,
+                cast(Callable[[Any], Sha256Digest], historical_market_root_digest),
+            ),
+            (
+                self.end_roots_by_sha256,
+                cast(Callable[[Any], Sha256Digest], historical_end_root_digest),
             ),
         )
         for registry, digest_function in digest_functions:
@@ -2149,6 +2151,55 @@ def _require_common_binding_document(
         raise _fail(OutcomeCode.CONFLICTING_ID, "provenance context conflicts")
 
 
+def _require_receipt_order_and_causal_root_bindings(
+    *,
+    context: HistoricalMatcherDecodeContext,
+    receipt: HistoricalSubmissionReceipt,
+    receipt_sha256: Sha256Digest,
+    order: Order,
+) -> MarketDataEnvelope:
+    try:
+        specification = context.spec_set.require(order.instrument)
+    except (KeyError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt Order specification conflicts") from error
+    if (
+        historical_submission_receipt_digest(receipt) != receipt_sha256
+        or order_digest(order) != receipt.order_sha256
+        or execution_request_digest(order) != receipt.execution_request_sha256
+        or order_client_submission_key(order) != receipt.client_submission_key
+        or order.run_id != context.run_id
+        or receipt.run_id != context.run_id
+        or receipt.source_namespace != context.source_namespace
+        or order.order_id != receipt.order_id
+        or order.instrument != receipt.instrument
+        or order.side is not receipt.side
+        or order.quantity.text != receipt.quantity_text
+        or order.dispatch_sequence != receipt.dispatch_sequence
+        or order.eligible_after_available_at != receipt.eligible_after_available_at
+        or order.order_kind is not OrderKind.MARKET
+        or order.time_in_force is not TimeInForce.GOOD_FOR_NEXT_ELIGIBLE_MARKET_EVENT
+        or order.price_constraint is not None
+        or order.instrument_specification_id != specification.specification_id
+        or order.instrument_spec_set_id != context.spec_set.identifier
+        or order.instrument_spec_set_id != receipt.instrument_spec_set_id
+        or order.instrument_spec_set_sha256 != instrument_spec_set_digest(context.spec_set)
+        or order.instrument_spec_set_sha256 != receipt.instrument_spec_set_sha256
+        or order.execution_policy != context.execution_policy
+        or order.execution_policy != receipt.execution_policy
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt Order bindings conflict")
+    causal_root = context.market_roots_by_sha256.get(receipt.causal_market_sha256)
+    if (
+        type(causal_root) is not MarketDataEnvelope
+        or historical_market_root_digest(causal_root) != receipt.causal_market_sha256
+        or runtime_root_order_key(causal_root) != receipt.causal_root_key
+        or causal_root.payload.instrument != order.instrument
+        or causal_root.available_at != order.eligible_after_available_at
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt causal market evidence conflicts")
+    return causal_root
+
+
 def decode_historical_submission_receipt(
     payload: bytes,
     *,
@@ -2294,6 +2345,12 @@ def decode_historical_submission_receipt(
         or canonical_historical_submission_receipt_bytes(receipt) != payload
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "receipt reconstruction conflicts")
+    _require_receipt_order_and_causal_root_bindings(
+        context=context,
+        receipt=receipt,
+        receipt_sha256=historical_submission_receipt_digest(receipt),
+        order=order,
+    )
     return receipt
 
 
@@ -2313,21 +2370,13 @@ def _expected_decoded_batch_ingress(
     fact_sequence: int,
     trigger_root: MarketDataEnvelope | EndOfRunRoot,
 ) -> ExecutionFactIngress:
-    if (
-        historical_submission_receipt_digest(receipt) != receipt_sha256
-        or receipt.run_id != context.run_id
-        or receipt.source_namespace != context.source_namespace
-        or receipt.instrument_spec_set_id != context.spec_set.identifier
-        or receipt.instrument_spec_set_sha256 != instrument_spec_set_digest(context.spec_set)
-        or receipt.execution_policy != context.execution_policy
-        or order_digest(order) != receipt.order_sha256
-        or order.order_id != receipt.order_id
-        or order.instrument != receipt.instrument
-        or order.side is not receipt.side
-        or order.quantity.text != receipt.quantity_text
-        or order_client_submission_key(order) != receipt.client_submission_key
-        or batch.dispatch_sequence <= receipt.dispatch_sequence
-    ):
+    causal_root = _require_receipt_order_and_causal_root_bindings(
+        context=context,
+        receipt=receipt,
+        receipt_sha256=receipt_sha256,
+        order=order,
+    )
+    if batch.dispatch_sequence <= order.dispatch_sequence:
         raise _fail(OutcomeCode.CONFLICTING_ID, "batch receipt bindings conflict")
 
     fact_kind: str
@@ -2340,18 +2389,18 @@ def _expected_decoded_batch_ingress(
             raise _fail(OutcomeCode.CONFLICTING_ID, "batch market root conflicts")
         root_key = runtime_root_order_key(trigger_root)
         if (
-            trigger_root.payload.instrument != receipt.instrument
+            trigger_root.payload.instrument != order.instrument
             or trigger_root.payload.adjustment is not Adjustment.RAW
             or trigger_root.revision != 0
-            or root_key <= receipt.causal_root_key
-            or trigger_root.event_time <= receipt.eligible_after_available_at
+            or root_key <= runtime_root_order_key(causal_root)
+            or trigger_root.event_time <= order.eligible_after_available_at
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "batch market eligibility conflicts")
         fact_kind = "trade"
         price = _quantized_historical_close(
             trigger_root.payload.close,
-            side=receipt.side,
-            specification=context.spec_set.require(receipt.instrument),
+            side=order.side,
+            specification=context.spec_set.require(order.instrument),
         )
         expiry_code = None
         occurred_at = trigger_root.event_time
@@ -2383,8 +2432,8 @@ def _expected_decoded_batch_ingress(
         occurred_at=occurred_at,
         available_at=available_at,
         instrument=receipt.instrument,
-        side=receipt.side,
-        quantity_text=receipt.quantity_text,
+        side=order.side,
+        quantity_text=order.quantity.text,
         price_text=None if price is None else price.text,
         expiry_outcome_code=expiry_code,
         spec_set=context.spec_set,
@@ -2395,18 +2444,18 @@ def _expected_decoded_batch_ingress(
         assert price is not None
         fact = create_trade_execution_fact(
             spec_set=context.spec_set,
-            side=receipt.side,
-            quantity=CanonicalDecimal(receipt.quantity_text),
+            side=order.side,
+            quantity=CanonicalDecimal(order.quantity.text),
             price=price,
             source_namespace=context.source_namespace,
             dedup_identity=SourceNativeSequence(fact_sequence),
             occurred_at=occurred_at,
             provenance=provenance,
-            instrument=receipt.instrument,
-            client_submission_key=receipt.client_submission_key,
-            order_id=receipt.order_id,
+            instrument=order.instrument,
+            client_submission_key=order_client_submission_key(order),
+            order_id=order.order_id,
             correlation_id=order.correlation_id,
-            causation_id=receipt.order_id,
+            causation_id=order.order_id,
         )
     else:
         fact = create_lifecycle_execution_fact(
@@ -2416,11 +2465,11 @@ def _expected_decoded_batch_ingress(
             dedup_identity=SourceNativeSequence(fact_sequence),
             occurred_at=occurred_at,
             provenance=provenance,
-            instrument=receipt.instrument,
-            client_submission_key=receipt.client_submission_key,
-            order_id=receipt.order_id,
+            instrument=order.instrument,
+            client_submission_key=order_client_submission_key(order),
+            order_id=order.order_id,
             correlation_id=order.correlation_id,
-            causation_id=receipt.order_id,
+            causation_id=order.order_id,
         )
     return create_execution_fact_ingress(
         available_at=available_at,
@@ -2743,6 +2792,10 @@ def decode_historical_matcher_state(
             or historical_submission_receipt_digest(receipt) != digest
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt lookup conflicts")
+        receipt = decode_historical_submission_receipt(
+            canonical_historical_submission_receipt_bytes(receipt),
+            context=context,
+        )
         receipt_digests.append(digest)
         receipts.append(receipt)
     batch_digests: list[Sha256Digest] = []
@@ -2755,6 +2808,10 @@ def decode_historical_matcher_state(
             or historical_matcher_dispatch_batch_digest(batch) != digest
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "state batch lookup conflicts")
+        batch = decode_historical_matcher_dispatch_batch(
+            canonical_historical_matcher_dispatch_batch_bytes(batch),
+            context=context,
+        )
         batch_digests.append(digest)
         batches.append(batch)
     issued: list[ExecutionFactIngress] = []

@@ -56,10 +56,12 @@ from ea.core.historical_matching import (
     HistoricalMatcherError,
     HistoricalPreEffectAuthorizationError,
     HistoricalSubmissionAuthorizationProof,
+    HistoricalSubmissionReceipt,
     _create_historical_matcher_conflict,
     _create_historical_matcher_descendant_binding,
     _create_historical_matcher_dispatch_batch,
     _create_historical_submission_authorization_proof,
+    _create_historical_submission_receipt,
     _validate_descendant_binding,
     canonical_end_of_run_root_bytes,
     canonical_historical_matcher_dispatch_batch_bytes,
@@ -171,6 +173,18 @@ def _clone_order(order: Order, **changes: object) -> Order:
     for name in Order.__dataclass_fields__:
         object.__setattr__(value, name, changes.get(name, getattr(order, name)))
     return value
+
+
+def _clone_receipt(
+    receipt: HistoricalSubmissionReceipt,
+    **changes: object,
+) -> HistoricalSubmissionReceipt:
+    return _create_historical_submission_receipt(
+        **{
+            name: changes.get(name, getattr(receipt, name))
+            for name in type(receipt).__dataclass_fields__
+        }
+    )
 
 
 class _OrderVerifier:
@@ -463,7 +477,10 @@ def test_matcher_canonical_values_decode_with_closed_context() -> None:
         source_namespace=matcher.source_namespace,
         provenance_id=matcher.provenance_id,
         orders_by_sha256={order_digest(order): order for order in orders},
-        market_roots_by_sha256={historical_market_root_digest(delayed): delayed},
+        market_roots_by_sha256={
+            receipts[0].causal_market_sha256: causal,
+            historical_market_root_digest(delayed): delayed,
+        },
         end_roots_by_sha256={historical_end_root_digest(end): end},
         receipts_by_sha256={
             historical_submission_receipt_digest(receipt): receipt for receipt in receipts
@@ -507,7 +524,10 @@ def test_batch_state_decoders_reject_uint64_and_cross_field_substitutions() -> N
         source_namespace=matcher.source_namespace,
         provenance_id=matcher.provenance_id,
         orders_by_sha256={order_digest(order): order for order in orders},
-        market_roots_by_sha256={historical_market_root_digest(delayed): delayed},
+        market_roots_by_sha256={
+            receipts[0].causal_market_sha256: causal,
+            historical_market_root_digest(delayed): delayed,
+        },
         end_roots_by_sha256={historical_end_root_digest(end): end},
         receipts_by_sha256={
             historical_submission_receipt_digest(receipt): receipt for receipt in receipts
@@ -572,6 +592,26 @@ def test_batch_state_decoders_reject_uint64_and_cross_field_substitutions() -> N
         )
     assert bad_registry.value.code is OutcomeCode.CONFLICTING_ID
 
+    positional = HistoricalMatcherDecodeContext(
+        matcher.run_id,
+        matcher.spec_set,
+        matcher.execution_policy,
+        matcher.source_namespace,
+        matcher.provenance_id,
+        {order_digest(order): order for order in orders},
+        {historical_submission_receipt_digest(receipt): receipt for receipt in receipts},
+        {historical_matcher_dispatch_batch_digest(batch): batch for batch in batches},
+        {
+            execution_fact_ingress_digest(ingress): ingress
+            for batch in batches
+            for ingress in batch.ingresses
+        },
+        {},
+    )
+    assert positional.receipts_by_sha256
+    assert positional.market_roots_by_sha256 == {}
+    assert positional.end_roots_by_sha256 == {}
+
 
 def test_batch_decoder_rebuilds_fact_economics_lineage_and_provenance_from_roots() -> None:
     _, matcher, orders, causal, delayed, _ = _system()
@@ -587,6 +627,7 @@ def test_batch_decoder_rebuilds_fact_economics_lineage_and_provenance_from_roots
         source_namespace=matcher.source_namespace,
         provenance_id=matcher.provenance_id,
         orders_by_sha256={order_digest(orders[0]): orders[0]},
+        market_roots_by_sha256={receipt.causal_market_sha256: causal},
         receipts_by_sha256={receipt_sha256: receipt},
         ingresses_by_sha256={execution_fact_ingress_digest(valid_ingress): valid_ingress},
     )
@@ -654,7 +695,10 @@ def test_batch_decoder_rebuilds_fact_economics_lineage_and_provenance_from_roots
             source_namespace=matcher.source_namespace,
             provenance_id=matcher.provenance_id,
             orders_by_sha256={order_digest(orders[0]): orders[0]},
-            market_roots_by_sha256={historical_market_root_digest(delayed): delayed},
+            market_roots_by_sha256={
+                receipt.causal_market_sha256: causal,
+                historical_market_root_digest(delayed): delayed,
+            },
             receipts_by_sha256={receipt_sha256: receipt},
             ingresses_by_sha256={fake_ingress_sha256: fake_ingress},
         )
@@ -664,6 +708,72 @@ def test_batch_decoder_rebuilds_fact_economics_lineage_and_provenance_from_roots
                 context=context,
             )
         assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_state_decoder_rebuilds_registered_batch_before_accepting_state() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    valid_batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    valid_ingress = valid_batch.ingresses[0]
+    fake_fact = create_trade_execution_fact(
+        source_namespace=matcher.source_namespace,
+        dedup_identity=SourceNativeSequence(1),
+        occurred_at=delayed.event_time,
+        provenance=valid_ingress.fact.provenance,
+        spec_set=matcher.spec_set,
+        instrument=orders[0].instrument,
+        side=orders[0].side,
+        quantity=orders[0].quantity,
+        price=CanonicalDecimal("102"),
+        client_submission_key=receipt.client_submission_key,
+        order_id=receipt.order_id,
+        correlation_id=orders[0].correlation_id,
+        causation_id=receipt.order_id,
+    )
+    fake_ingress = create_execution_fact_ingress(
+        available_at=delayed.available_at,
+        source_namespace=matcher.source_namespace,
+        ingress_sequence=1,
+        fact=fake_fact,
+    )
+    fake_ingress_sha256 = execution_fact_ingress_digest(fake_ingress)
+    fake_batch = _create_historical_matcher_dispatch_batch(
+        run_id=valid_batch.run_id,
+        source_namespace=valid_batch.source_namespace,
+        dispatch_kind=valid_batch.dispatch_kind,
+        dispatch_sequence=valid_batch.dispatch_sequence,
+        trigger_root_sha256=valid_batch.trigger_root_sha256,
+        trigger_root_key=valid_batch.trigger_root_key,
+        next_fact_sequence_before=valid_batch.next_fact_sequence_before,
+        next_fact_sequence_after=valid_batch.next_fact_sequence_after,
+        submission_sequences=valid_batch.submission_sequences,
+        order_ids=valid_batch.order_ids,
+        ingresses=(fake_ingress,),
+        ingress_sha256s=(fake_ingress_sha256,),
+    )
+    fake_batch_sha256 = historical_matcher_dispatch_batch_digest(fake_batch)
+    state_document = json.loads(canonical_historical_matcher_state_bytes(matcher.state))
+    fake_batch_document = json.loads(canonical_historical_matcher_dispatch_batch_bytes(fake_batch))
+    state_document["dispatch_batch_sha256s"] = [fake_batch_sha256.value]
+    state_document["issued_ingresses"] = fake_batch_document["ingresses"]
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={order_digest(orders[0]): orders[0]},
+        receipts_by_sha256={historical_submission_receipt_digest(receipt): receipt},
+        batches_by_sha256={fake_batch_sha256: fake_batch},
+        ingresses_by_sha256={fake_ingress_sha256: fake_ingress},
+        market_roots_by_sha256={
+            receipt.causal_market_sha256: causal,
+            valid_batch.trigger_root_sha256: delayed,
+        },
+    )
+    with pytest.raises(HistoricalMatcherError) as rejected:
+        decode_historical_matcher_state(_canonical_document(state_document), context=context)
+    assert rejected.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_runtime_adapter_mints_market_and_terminal_proofs_only_while_active() -> None:
@@ -972,6 +1082,7 @@ def test_receipt_decoder_rejects_noncanonical_unknown_and_substituted_context() 
         source_namespace=matcher.source_namespace,
         provenance_id=matcher.provenance_id,
         orders_by_sha256={order_digest(orders[0]): orders[0]},
+        market_roots_by_sha256={receipt.causal_market_sha256: causal},
     )
     with pytest.raises(HistoricalMatcherError) as invalid_json:
         decode_historical_submission_receipt(b"{", context=context)
@@ -991,6 +1102,7 @@ def test_receipt_decoder_rejects_noncanonical_unknown_and_substituted_context() 
         source_namespace=context.source_namespace,
         provenance_id=context.provenance_id,
         orders_by_sha256=context.orders_by_sha256,
+        market_roots_by_sha256=context.market_roots_by_sha256,
     )
     with pytest.raises(HistoricalMatcherError) as substitution:
         decode_historical_submission_receipt(
@@ -1014,6 +1126,87 @@ def test_receipt_decoder_rejects_noncanonical_unknown_and_substituted_context() 
                 _canonical_document(malformed),
                 context=context,
             )
+
+
+def test_receipt_decoder_binds_order_request_dispatch_eligibility_and_causal_root() -> None:
+    _, matcher, orders, causal, delayed, end = _system()
+    trade_receipt = matcher.submit(
+        orders[0],
+        causal_market_root=causal,
+        dispatch_sequence=7,
+    )
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    expiry_receipt = matcher.submit(
+        orders[1],
+        causal_market_root=delayed,
+        dispatch_sequence=8,
+    )
+    end_batch = matcher.expire_at_active_end(end, dispatch_sequence=9)
+    earlier_causal = replace(causal, available_at=causal.event_time)
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={order_digest(order): order for order in orders},
+        market_roots_by_sha256={
+            historical_market_root_digest(causal): causal,
+            historical_market_root_digest(earlier_causal): earlier_causal,
+            historical_market_root_digest(delayed): delayed,
+        },
+        end_roots_by_sha256={historical_end_root_digest(end): end},
+        ingresses_by_sha256={
+            execution_fact_ingress_digest(ingress): ingress for ingress in end_batch.ingresses
+        },
+    )
+    forged_trade_receipts = (
+        _clone_receipt(
+            trade_receipt,
+            execution_request_sha256=Sha256Digest("f" * 64),
+        ),
+        _clone_receipt(
+            trade_receipt,
+            dispatch_sequence=trade_receipt.dispatch_sequence + 1,
+        ),
+        _clone_receipt(
+            trade_receipt,
+            causal_market_sha256=historical_market_root_digest(earlier_causal),
+            causal_root_key=runtime_root_order_key(earlier_causal),
+            eligible_after_available_at=earlier_causal.available_at,
+        ),
+    )
+    for forged_receipt in forged_trade_receipts:
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            decode_historical_submission_receipt(
+                canonical_historical_submission_receipt_bytes(forged_receipt),
+                context=context,
+            )
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+    forged_expiry_receipt = _clone_receipt(
+        expiry_receipt,
+        dispatch_sequence=expiry_receipt.dispatch_sequence - 1,
+    )
+    forged_expiry_sha256 = historical_submission_receipt_digest(forged_expiry_receipt)
+    end_context = HistoricalMatcherDecodeContext(
+        run_id=context.run_id,
+        spec_set=context.spec_set,
+        execution_policy=context.execution_policy,
+        source_namespace=context.source_namespace,
+        provenance_id=context.provenance_id,
+        orders_by_sha256=context.orders_by_sha256,
+        receipts_by_sha256={forged_expiry_sha256: forged_expiry_receipt},
+        ingresses_by_sha256=context.ingresses_by_sha256,
+        market_roots_by_sha256=context.market_roots_by_sha256,
+        end_roots_by_sha256=context.end_roots_by_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as rejected_end:
+        decode_historical_matcher_dispatch_batch(
+            canonical_historical_matcher_dispatch_batch_bytes(end_batch),
+            context=end_context,
+        )
+    assert rejected_end.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:
