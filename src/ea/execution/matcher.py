@@ -244,6 +244,18 @@ def _advance(value: int) -> int | None:
     return None if value == _MAX_UINT64 else value + 1
 
 
+def _next_submission_after(records: tuple[_SubmissionRecord, ...]) -> int | None:
+    if type(records) is not tuple:
+        raise ValueError("submission history must be a tuple")
+    expected: int | None = 1
+    for record in records:
+        sequence = record.receipt.submission_sequence
+        if expected is None or type(sequence) is not int or sequence != expected:
+            raise ValueError("submission history must be contiguous from one")
+        expected = _advance(expected)
+    return expected
+
+
 def _require_dispatch_sequence(value: object) -> int:
     if type(value) is not int:
         raise _fail(OutcomeCode.INVALID_TYPE, "dispatch_sequence must be exact int")
@@ -715,11 +727,7 @@ class Phase1HistoricalMatcher:
     def _require_submission_pointer(self, *, dispatch_sequence: int | None) -> None:
         state = self._state
         try:
-            expected = (
-                1
-                if not state.submissions
-                else _advance(state.submissions[-1].receipt.submission_sequence)
-            )
+            expected = _next_submission_after(state.submissions)
             valid = (
                 state.next_submission is None or type(state.next_submission) is int
             ) and state.next_submission == expected
@@ -742,6 +750,7 @@ class Phase1HistoricalMatcher:
             submission_sequences = tuple(
                 record.receipt.submission_sequence for record in state.submissions
             )
+            expected_next_submission = _next_submission_after(state.submissions)
             issued_sequences = tuple(record.ingress.ingress_sequence for record in state.issued)
             dispatch_sequences = tuple(sorted(state.dispatch_by_sequence))
             valid = (
@@ -750,8 +759,7 @@ class Phase1HistoricalMatcher:
                 and submission_sequences == tuple(sorted(submission_sequences))
                 and len(set(submission_sequences)) == len(submission_sequences)
                 and (state.next_submission is None or type(state.next_submission) is int)
-                and state.next_submission
-                == (1 if not submission_sequences else _advance(submission_sequences[-1]))
+                and state.next_submission == expected_next_submission
                 and len(state.submission_by_order) == len(state.submissions)
                 and len(state.submission_by_client) == len(state.submissions)
                 and all(
@@ -832,15 +840,11 @@ class Phase1HistoricalMatcher:
                 if state.last_dispatch is None
                 else state.dispatch_by_sequence.get(state.last_dispatch)
             )
+            expected_next_submission = _next_submission_after(state.submissions)
             valid = (
                 type(state) is _MatcherState
                 and (state.next_submission is None or type(state.next_submission) is int)
-                and state.next_submission
-                == (
-                    1
-                    if not state.submissions
-                    else _advance(state.submissions[-1].receipt.submission_sequence)
-                )
+                and state.next_submission == expected_next_submission
                 and (
                     state.next_fact is None
                     or (type(state.next_fact) is int and 1 <= state.next_fact <= _MAX_UINT64)

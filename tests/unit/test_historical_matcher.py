@@ -1306,6 +1306,72 @@ def test_submission_pointer_drift_skips_authorization_but_retained_replay_surviv
     assert matcher._state.pending == drifted_state.pending
 
 
+def test_submission_pointer_binds_complete_contiguous_history() -> None:
+    def with_sequence(record: Any, sequence: int) -> Any:
+        receipt = _clone_receipt(record.receipt, submission_sequence=sequence)
+        return replace(
+            record,
+            receipt=receipt,
+            receipt_bytes=canonical_historical_submission_receipt_bytes(receipt),
+            receipt_sha256=historical_submission_receipt_digest(receipt),
+        )
+
+    for sequences in ((3,), (2, 1, 3)):
+        _, matcher, orders, causal, delayed, _ = _system()
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+        original = matcher._state.submissions[0]
+        records = tuple(with_sequence(original, sequence) for sequence in sequences)
+        matcher._state = replace(
+            matcher._state,
+            submissions=records,
+            next_submission=4,
+        )
+        drifted_state = matcher._state
+        authorization = cast(
+            _AuthorizationVerifier,
+            matcher._submission_authorization_verifier,
+        )
+        authorization_calls = authorization.calls
+
+        with pytest.raises(HistoricalMatcherError) as drift:
+            matcher.submit(
+                orders[1],
+                causal_market_root=delayed,
+                dispatch_sequence=8,
+            )
+        assert drift.value.code is OutcomeCode.CONFLICTING_ID
+        assert authorization.calls == authorization_calls
+        assert matcher._state.conflict is not None
+        assert (
+            matcher._state.conflict.conflict_kind
+            is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+        )
+        assert matcher._state.submissions == drifted_state.submissions
+        assert matcher._state.pending == drifted_state.pending
+
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    conflicting_root = replace(delayed, source_sequence=delayed.source_sequence + 1)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(conflicting_root, dispatch_sequence=8)
+    first_conflict = matcher._state.conflict
+    first_conflict_bytes = matcher._conflict_bytes
+    assert first_conflict is not None
+    original = matcher._state.submissions[0]
+    matcher._state = replace(
+        matcher._state,
+        submissions=(with_sequence(original, 3),),
+        next_submission=4,
+    )
+
+    with pytest.raises(HistoricalMatcherError) as later_drift:
+        _ = matcher.state
+    assert later_drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.conflict is first_conflict
+    assert matcher._conflict_bytes == first_conflict_bytes
+
+
 def test_receipt_decoder_rejects_noncanonical_unknown_and_substituted_context() -> None:
     _, matcher, orders, causal, _, _ = _system()
     receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
