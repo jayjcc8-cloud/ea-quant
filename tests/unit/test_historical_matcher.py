@@ -2001,6 +2001,62 @@ def test_retained_state_is_validated_before_filtering_and_after_halt() -> None:
         assert matcher._state.conflict is first_conflict
         assert matcher._conflict_bytes == first_conflict_bytes
 
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    original_verify = verifier.verify_active_market_dispatch
+
+    def mutate_pending_during_proof(
+        market_root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> Any:
+        proof = original_verify(market_root, dispatch_sequence=dispatch_sequence)
+        object.__setattr__(matcher._state.pending[0], "order_id", orders[1].order_id)
+        return proof
+
+    cast(Any, verifier).verify_active_market_dispatch = mutate_pending_during_proof
+    with pytest.raises(HistoricalMatcherError) as callback_drift:
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert callback_drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.dispatch_by_sequence == {}
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+
+def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, matcher, _, _, delayed, _ = _system()
+    validations = 0
+    original = Phase1HistoricalMatcher._require_dispatch_record
+
+    def tracked(
+        self: Phase1HistoricalMatcher,
+        record: Any,
+    ) -> None:
+        nonlocal validations
+        validations += 1
+        original(self, record)
+
+    monkeypatch.setattr(Phase1HistoricalMatcher, "_require_dispatch_record", tracked)
+    roots = tuple(
+        replace(delayed, source_sequence=delayed.source_sequence + offset)
+        for offset in range(1, 33)
+    )
+    batches = tuple(
+        matcher.match_active_market_root(root, dispatch_sequence=sequence)
+        for sequence, root in enumerate(roots, start=1)
+    )
+
+    assert all(batch.ingresses == () for batch in batches)
+    assert validations == 0
+    assert matcher.match_active_market_root(roots[0], dispatch_sequence=1) is batches[0]
+    assert validations == 1
+
 
 def test_no_fill_filters_and_first_later_fill_are_closed_and_replay_stable() -> None:
     def raw_variant(

@@ -805,6 +805,73 @@ class Phase1HistoricalMatcher:
         if not valid:
             self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
 
+    def _require_dispatch_eligibility_state(self) -> None:
+        """Validate the mutable frontier without rescanning immutable history."""
+        state = self._state
+        for submission_record in state.pending:
+            self._require_submission_record(submission_record)
+        try:
+            pending_ids = tuple(id(record) for record in state.pending)
+            submission_ids = (
+                {id(record) for record in state.submissions} if state.pending else set()
+            )
+            last_record = (
+                None
+                if state.last_dispatch is None
+                else state.dispatch_by_sequence.get(state.last_dispatch)
+            )
+            valid = (
+                type(state) is _MatcherState
+                and (
+                    state.next_submission is None
+                    or (
+                        type(state.next_submission) is int
+                        and 1 <= state.next_submission <= _MAX_UINT64
+                    )
+                )
+                and (
+                    state.next_fact is None
+                    or (type(state.next_fact) is int and 1 <= state.next_fact <= _MAX_UINT64)
+                )
+                and len(set(pending_ids)) == len(pending_ids)
+                and all(record_id in submission_ids for record_id in pending_ids)
+                and all(
+                    state.submission_by_order.get(record.order_id) is record
+                    and state.submission_by_client.get(record.client_key) is record
+                    for record in state.pending
+                )
+                and len(state.dispatch_by_sequence) == len(state.dispatch_by_digest)
+                and (
+                    (state.last_dispatch is None and not state.dispatch_by_sequence)
+                    or (
+                        type(state.last_dispatch) is int
+                        and last_record is not None
+                        and last_record.batch.dispatch_sequence == state.last_dispatch
+                        and state.dispatch_by_digest.get(last_record.root_sha256) is last_record
+                    )
+                )
+                and type(state.ended) is bool
+                and (
+                    (
+                        state.ended
+                        and not state.pending
+                        and last_record is not None
+                        and state.end_batch_sha256 is not None
+                        and last_record.batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN
+                        and last_record.batch_sha256 == state.end_batch_sha256
+                    )
+                    or (not state.ended and state.end_batch_sha256 is None)
+                )
+                and (
+                    (state.conflict is None and self._conflict_bytes is None)
+                    or (state.conflict is not None and self._conflict_bytes is not None)
+                )
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
+
     def _publish_conflict(
         self,
         *,
@@ -1198,7 +1265,6 @@ class Phase1HistoricalMatcher:
             root_key = runtime_root_order_key(market_root)
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "market root cannot be encoded") from error
-        self._require_retained_state()
         replay = self._dispatch_replay(
             sequence=sequence,
             root_bytes=root_bytes,
@@ -1206,6 +1272,7 @@ class Phase1HistoricalMatcher:
         )
         if replay is not None:
             return replay
+        self._require_dispatch_eligibility_state()
         if self._state.conflict is not None or self._state.ended:
             raise _fail(OutcomeCode.CONFLICTING_ID, "matcher is halted or ended")
         if self._state.last_dispatch is not None and sequence <= self._state.last_dispatch:
@@ -1255,6 +1322,7 @@ class Phase1HistoricalMatcher:
             raise _fail(error.code, "active market proof is invalid") from error
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier failed") from error
+        self._require_dispatch_eligibility_state()
         eligible = tuple(
             sorted(
                 (
@@ -1314,7 +1382,6 @@ class Phase1HistoricalMatcher:
             root_key = runtime_root_order_key(end_root)
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "end root cannot be encoded") from error
-        self._require_retained_state()
         replay = self._dispatch_replay(
             sequence=sequence,
             root_bytes=root_bytes,
@@ -1322,6 +1389,7 @@ class Phase1HistoricalMatcher:
         )
         if replay is not None:
             return replay
+        self._require_dispatch_eligibility_state()
         if self._state.conflict is not None or self._state.ended:
             raise _fail(OutcomeCode.CONFLICTING_ID, "matcher is halted or ended")
         if end_root.kind is not EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED:
@@ -1375,6 +1443,7 @@ class Phase1HistoricalMatcher:
             raise _fail(error.code, "active end proof is invalid") from error
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "active end verifier failed") from error
+        self._require_dispatch_eligibility_state()
         return self._publish_batch(
             kind=HistoricalDispatchKind.END_OF_RUN,
             sequence=sequence,
@@ -1620,7 +1689,6 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "issuance lookup inputs must be exact")
         self._require_live_bindings()
-        self._require_retained_state()
         record = self._state.issued_by_identity.get(ingress_identity)
         if record is None:
             return False
@@ -1644,7 +1712,6 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant lookup inputs must be exact")
         self._require_live_bindings()
-        self._require_retained_state()
         record = self._state.issued_by_identity.get(ingress_identity)
         if (
             record is None
@@ -1652,6 +1719,7 @@ class Phase1HistoricalMatcher:
             or record.fact_bytes != canonical_fact_bytes
         ):
             return None
+        self._require_issued_record(record)
         return record.binding
 
 
