@@ -826,7 +826,7 @@ class Phase1HistoricalMatcher:
             self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
 
     def _require_dispatch_eligibility_state(self) -> None:
-        """Validate the mutable frontier without rescanning immutable history."""
+        """Validate the mutable frontier and its lightweight submission-sequence spine."""
         state = self._state
         for submission_record in state.pending:
             self._require_submission_record(submission_record)
@@ -1100,7 +1100,9 @@ class Phase1HistoricalMatcher:
             )
             raise _fail(code, "Order quantity is invalid") from error
         self._require_submission_pointer(dispatch_sequence=sequence)
-        submission_sequence = self._state.next_submission
+        allocation_state = self._state
+        allocation_state_bytes = canonical_historical_matcher_state_bytes(self.state)
+        submission_sequence = allocation_state.next_submission
         if submission_sequence is None:
             raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "submission sequence exhausted")
         try:
@@ -1194,22 +1196,30 @@ class Phase1HistoricalMatcher:
         if not self._submission_record_is_valid(record):
             raise _fail(OutcomeCode.CONFLICTING_ID, "submission record preflight failed")
         self._require_live_bindings()
-        by_order = dict(self._state.submission_by_order)
-        by_client = dict(self._state.submission_by_client)
+        current_state_bytes = canonical_historical_matcher_state_bytes(self.state)
+        if (
+            self._state is not allocation_state
+            or current_state_bytes != allocation_state_bytes
+            or self._state.next_submission != submission_sequence
+        ):
+            self._retained_binding_drift(dispatch_sequence=sequence)
+        publication_state = self._state
+        by_order = dict(publication_state.submission_by_order)
+        by_client = dict(publication_state.submission_by_client)
         by_order[record.order_id] = record
         by_client[client_key] = record
         self._state = _MatcherState(
             next_submission=_advance(submission_sequence),
-            next_fact=self._state.next_fact,
-            submissions=(*self._state.submissions, record),
-            pending=(*self._state.pending, record),
+            next_fact=publication_state.next_fact,
+            submissions=(*publication_state.submissions, record),
+            pending=(*publication_state.pending, record),
             submission_by_order=MappingProxyType(by_order),
             submission_by_client=MappingProxyType(by_client),
-            dispatch_by_sequence=self._state.dispatch_by_sequence,
-            dispatch_by_digest=self._state.dispatch_by_digest,
-            issued=self._state.issued,
-            issued_by_identity=self._state.issued_by_identity,
-            last_dispatch=self._state.last_dispatch,
+            dispatch_by_sequence=publication_state.dispatch_by_sequence,
+            dispatch_by_digest=publication_state.dispatch_by_digest,
+            issued=publication_state.issued,
+            issued_by_identity=publication_state.issued_by_identity,
+            last_dispatch=publication_state.last_dispatch,
             ended=False,
             end_batch_sha256=None,
             conflict=None,

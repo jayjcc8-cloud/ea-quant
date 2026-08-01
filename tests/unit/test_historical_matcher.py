@@ -1372,6 +1372,79 @@ def test_submission_pointer_binds_complete_contiguous_history() -> None:
     assert matcher._conflict_bytes == first_conflict_bytes
 
 
+def test_submission_rebinds_state_and_history_after_authorization_callback() -> None:
+    _, matcher, orders, causal, _, _ = _system()
+    authorization = cast(
+        _AuthorizationVerifier,
+        matcher._submission_authorization_verifier,
+    )
+    original_authorization = authorization.verify_authorized_historical_submission
+
+    def replace_state(**kwargs: object) -> HistoricalSubmissionAuthorizationProof:
+        proof = original_authorization(**cast(Any, kwargs))
+        matcher._state = replace(matcher._state)
+        return proof
+
+    cast(Any, authorization).verify_authorized_historical_submission = replace_state
+    with pytest.raises(HistoricalMatcherError) as replacement:
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert replacement.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.submissions == ()
+    assert matcher._state.pending == ()
+    assert matcher._state.submission_by_order == {}
+    assert matcher._state.submission_by_client == {}
+    assert matcher._state.next_submission == 1
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    initial = matcher._state
+    authorization = cast(
+        _AuthorizationVerifier,
+        matcher._submission_authorization_verifier,
+    )
+    original_authorization = authorization.verify_authorized_historical_submission
+    forged_records: list[Any] = []
+
+    def replace_history(**kwargs: object) -> HistoricalSubmissionAuthorizationProof:
+        proof = original_authorization(**cast(Any, kwargs))
+        original = matcher._state.submissions[0]
+        receipt = _clone_receipt(original.receipt, submission_sequence=3)
+        forged = replace(
+            original,
+            receipt=receipt,
+            receipt_bytes=canonical_historical_submission_receipt_bytes(receipt),
+            receipt_sha256=historical_submission_receipt_digest(receipt),
+        )
+        forged_records.append(forged)
+        matcher._state = replace(
+            matcher._state,
+            submissions=(forged,),
+            next_submission=4,
+        )
+        return proof
+
+    cast(Any, authorization).verify_authorized_historical_submission = replace_history
+    with pytest.raises(HistoricalMatcherError) as history:
+        matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8)
+    assert history.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.submissions == tuple(forged_records)
+    assert matcher._state.pending == initial.pending
+    assert matcher._state.submission_by_order == initial.submission_by_order
+    assert matcher._state.submission_by_client == initial.submission_by_client
+    assert matcher._state.next_submission == 4
+    assert all(record.receipt.submission_sequence != 2 for record in matcher._state.submissions)
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+
 def test_receipt_decoder_rejects_noncanonical_unknown_and_substituted_context() -> None:
     _, matcher, orders, causal, _, _ = _system()
     receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
