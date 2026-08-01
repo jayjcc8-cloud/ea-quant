@@ -1963,6 +1963,54 @@ def test_retained_public_artifact_mutation_halts_before_replay_or_membership() -
     )
 
 
+def test_descendant_lookup_validates_addressed_record_before_caller_evidence() -> None:
+    for field in ("ingress_bytes", "fact_bytes"):
+        _, matcher, orders, causal, delayed, _ = _system()
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+        record = matcher._state.issued[0]
+        original_ingress = record.ingress_bytes
+        original_fact = record.fact_bytes
+        object.__setattr__(record, field, b"retained drift")
+
+        with pytest.raises(HistoricalMatcherError) as drift:
+            matcher.resolve_descendant_binding(
+                ingress_identity=record.ingress_identity,
+                canonical_ingress_bytes=original_ingress,
+                canonical_fact_bytes=original_fact,
+            )
+        assert drift.value.code is OutcomeCode.CONFLICTING_ID
+        assert matcher._state.conflict is not None
+        assert (
+            matcher._state.conflict.conflict_kind
+            is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+        )
+
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    conflicting_root = replace(delayed, source_sequence=delayed.source_sequence + 1)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(conflicting_root, dispatch_sequence=8)
+    first_conflict = matcher._state.conflict
+    first_conflict_bytes = matcher._conflict_bytes
+    assert first_conflict is not None
+    record = matcher._state.issued[0]
+    original_ingress = record.ingress_bytes
+    original_fact = record.fact_bytes
+    object.__setattr__(record, "fact_bytes", b"later retained drift")
+
+    with pytest.raises(HistoricalMatcherError) as later_drift:
+        matcher.resolve_descendant_binding(
+            ingress_identity=record.ingress_identity,
+            canonical_ingress_bytes=original_ingress,
+            canonical_fact_bytes=original_fact,
+        )
+    assert later_drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.conflict is first_conflict
+    assert matcher._conflict_bytes == first_conflict_bytes
+
+
 def test_retained_state_is_validated_before_filtering_and_after_halt() -> None:
     _, matcher, orders, causal, delayed, _ = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)

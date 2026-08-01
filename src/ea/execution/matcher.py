@@ -1713,13 +1713,14 @@ class Phase1HistoricalMatcher:
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant lookup inputs must be exact")
         self._require_live_bindings()
         record = self._state.issued_by_identity.get(ingress_identity)
+        if record is None:
+            return None
+        self._require_issued_record(record)
         if (
-            record is None
-            or record.ingress_bytes != canonical_ingress_bytes
+            record.ingress_bytes != canonical_ingress_bytes
             or record.fact_bytes != canonical_fact_bytes
         ):
             return None
-        self._require_issued_record(record)
         return record.binding
 
 
