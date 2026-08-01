@@ -450,14 +450,8 @@ class Phase1HistoricalMatcher:
 
     @property
     def state(self) -> HistoricalMatcherState:
+        self._require_retained_state()
         state = self._state
-        if state.conflict is None:
-            for submission_record in state.submissions:
-                self._require_submission_record(submission_record)
-            for _, dispatch_record in sorted(state.dispatch_by_sequence.items()):
-                self._require_dispatch_record(dispatch_record)
-            for issued_record in state.issued:
-                self._require_issued_record(issued_record)
         public_ingresses = tuple(
             decode_execution_fact_ingress(
                 record.ingress_bytes,
@@ -717,6 +711,99 @@ class Phase1HistoricalMatcher:
         if not valid:
             sequence = getattr(record.binding, "parent_dispatch_sequence", None)
             self._retained_binding_drift(dispatch_sequence=sequence)
+
+    def _require_retained_state(self) -> None:
+        state = self._state
+        for submission_record in state.submissions:
+            self._require_submission_record(submission_record)
+        for _, dispatch_record in sorted(state.dispatch_by_sequence.items()):
+            self._require_dispatch_record(dispatch_record)
+        for issued_record in state.issued:
+            self._require_issued_record(issued_record)
+        try:
+            submission_ids = {id(record) for record in state.submissions}
+            pending_ids = tuple(id(record) for record in state.pending)
+            submission_sequences = tuple(
+                record.receipt.submission_sequence for record in state.submissions
+            )
+            issued_sequences = tuple(record.ingress.ingress_sequence for record in state.issued)
+            dispatch_sequences = tuple(sorted(state.dispatch_by_sequence))
+            valid = (
+                type(state) is _MatcherState
+                and len(submission_ids) == len(state.submissions)
+                and submission_sequences == tuple(sorted(submission_sequences))
+                and len(set(submission_sequences)) == len(submission_sequences)
+                and (
+                    state.next_submission is None
+                    or (
+                        type(state.next_submission) is int
+                        and 1 <= state.next_submission <= _MAX_UINT64
+                    )
+                )
+                and len(state.submission_by_order) == len(state.submissions)
+                and len(state.submission_by_client) == len(state.submissions)
+                and all(
+                    state.submission_by_order.get(record.order_id) is record
+                    and state.submission_by_client.get(record.client_key) is record
+                    for record in state.submissions
+                )
+                and len(set(pending_ids)) == len(pending_ids)
+                and all(record_id in submission_ids for record_id in pending_ids)
+                and len(state.dispatch_by_sequence) == len(state.dispatch_by_digest)
+                and all(
+                    type(sequence) is int
+                    and record.batch.dispatch_sequence == sequence
+                    and state.dispatch_by_digest.get(record.root_sha256) is record
+                    for sequence, record in state.dispatch_by_sequence.items()
+                )
+                and state.last_dispatch
+                == (None if not dispatch_sequences else dispatch_sequences[-1])
+                and issued_sequences == tuple(sorted(issued_sequences))
+                and len(set(issued_sequences)) == len(issued_sequences)
+                and (
+                    state.next_fact is None
+                    or (type(state.next_fact) is int and 1 <= state.next_fact <= _MAX_UINT64)
+                )
+                and len(state.issued_by_identity) == len(state.issued)
+                and all(
+                    state.issued_by_identity.get(record.ingress_identity) is record
+                    for record in state.issued
+                )
+                and type(state.ended) is bool
+                and (
+                    (
+                        state.ended
+                        and not state.pending
+                        and state.last_dispatch is not None
+                        and state.end_batch_sha256 is not None
+                        and state.dispatch_by_sequence[state.last_dispatch].batch.dispatch_kind
+                        is HistoricalDispatchKind.END_OF_RUN
+                        and state.dispatch_by_sequence[state.last_dispatch].batch_sha256
+                        == state.end_batch_sha256
+                    )
+                    or (not state.ended and state.end_batch_sha256 is None)
+                )
+                and (
+                    (
+                        state.conflict is None
+                        and self._conflict_bytes is None
+                        and self._conflict_sha256 is None
+                    )
+                    or (
+                        state.conflict is not None
+                        and self._conflict_bytes is not None
+                        and self._conflict_sha256 is not None
+                        and canonical_historical_matcher_conflict_bytes(state.conflict)
+                        == self._conflict_bytes
+                        and historical_matcher_conflict_digest(state.conflict)
+                        == self._conflict_sha256
+                    )
+                )
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
 
     def _publish_conflict(
         self,
@@ -1111,6 +1198,7 @@ class Phase1HistoricalMatcher:
             root_key = runtime_root_order_key(market_root)
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "market root cannot be encoded") from error
+        self._require_retained_state()
         replay = self._dispatch_replay(
             sequence=sequence,
             root_bytes=root_bytes,
@@ -1226,6 +1314,7 @@ class Phase1HistoricalMatcher:
             root_key = runtime_root_order_key(end_root)
         except Exception as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "end root cannot be encoded") from error
+        self._require_retained_state()
         replay = self._dispatch_replay(
             sequence=sequence,
             root_bytes=root_bytes,
@@ -1531,8 +1620,7 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "issuance lookup inputs must be exact")
         self._require_live_bindings()
-        for retained in self._state.issued:
-            self._require_issued_record(retained)
+        self._require_retained_state()
         record = self._state.issued_by_identity.get(ingress_identity)
         if record is None:
             return False
@@ -1556,8 +1644,7 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant lookup inputs must be exact")
         self._require_live_bindings()
-        for retained in self._state.issued:
-            self._require_issued_record(retained)
+        self._require_retained_state()
         record = self._state.issued_by_identity.get(ingress_identity)
         if (
             record is None

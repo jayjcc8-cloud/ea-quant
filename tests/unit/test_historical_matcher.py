@@ -1892,7 +1892,6 @@ def test_retained_public_artifact_mutation_halts_before_replay_or_membership() -
         matcher._state.conflict.conflict_kind
         is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
     )
-
     _, matcher, orders, causal, delayed, _ = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     matcher.match_active_market_root(delayed, dispatch_sequence=8)
@@ -1962,6 +1961,45 @@ def test_retained_public_artifact_mutation_halts_before_replay_or_membership() -
         matcher._state.conflict.conflict_kind
         is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
     )
+
+
+def test_retained_state_is_validated_before_filtering_and_after_halt() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    retained = matcher._state.pending[0]
+    object.__setattr__(retained, "order_id", orders[1].order_id)
+    with pytest.raises(HistoricalMatcherError) as before_filter:
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert before_filter.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+    assert matcher._state.dispatch_by_sequence == {}
+    assert matcher._state.pending == (retained,)
+
+    for retained_kind in ("submission", "dispatch", "issued"):
+        _, matcher, orders, causal, delayed, _ = _system()
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+        conflicting_root = replace(delayed, source_sequence=delayed.source_sequence + 1)
+        with pytest.raises(HistoricalMatcherError):
+            matcher.match_active_market_root(conflicting_root, dispatch_sequence=8)
+        first_conflict = matcher._state.conflict
+        first_conflict_bytes = matcher._conflict_bytes
+        assert first_conflict is not None
+        if retained_kind == "submission":
+            object.__setattr__(matcher._state.submissions[0], "order_id", orders[1].order_id)
+        elif retained_kind == "dispatch":
+            object.__setattr__(matcher._state.dispatch_by_sequence[8], "root_bytes", b"drift")
+        else:
+            object.__setattr__(matcher._state.issued[0], "ingress_bytes", b"drift")
+        with pytest.raises(HistoricalMatcherError) as after_halt:
+            _ = matcher.state
+        assert after_halt.value.code is OutcomeCode.CONFLICTING_ID
+        assert matcher._state.conflict is first_conflict
+        assert matcher._conflict_bytes == first_conflict_bytes
 
 
 def test_no_fill_filters_and_first_later_fill_are_closed_and_replay_stable() -> None:
@@ -2624,10 +2662,13 @@ def test_deep_caller_and_descendant_mutation_cannot_corrupt_lookup_or_conflict_s
             canonical_ingress_bytes=matcher._state.issued[0].ingress_bytes,
             canonical_fact_bytes=matcher._state.issued[0].fact_bytes,
         )
-    state = matcher.state
-    assert state.halted is True
-    assert state.conflict is not None
-    assert state.conflict.conflict_kind is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    first_conflict = matcher._state.conflict
+    assert first_conflict is not None
+    assert first_conflict.conflict_kind is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    with pytest.raises(HistoricalMatcherError) as inconsistent_state:
+        _ = matcher.state
+    assert inconsistent_state.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.conflict is first_conflict
 
 
 def test_multi_instrument_terminal_emission_uses_global_submission_order() -> None:
