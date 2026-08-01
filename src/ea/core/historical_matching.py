@@ -1786,10 +1786,18 @@ def canonical_historical_matcher_observation_bytes(
         "trigger_root_sha256": trigger_root_sha256.value,
     }
     if fact_kind == "trade":
+        suffix = trigger_root_key._suffix
         if (
             price_text is None
             or expiry_outcome_code is not None
             or trigger_root_kind is not HistoricalDispatchKind.MARKET
+            or type(suffix) is not _MarketDataSuffix
+            or occurred_text != _utc_text(suffix.event_time)
+            or available_text != _utc_text(trigger_root_key.available_at)
+            or instrument.venue.code != suffix.instrument_venue
+            or instrument.symbol != suffix.instrument_symbol
+            or suffix.adjustment != Adjustment.RAW.value
+            or suffix.revision != 0
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "trade observation fields conflict")
     elif fact_kind == "expiry":
@@ -1798,6 +1806,7 @@ def canonical_historical_matcher_observation_bytes(
             or expiry_outcome_code is not OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA
             or trigger_root_kind is not HistoricalDispatchKind.END_OF_RUN
             or occurred_text != available_text
+            or available_text != _utc_text(trigger_root_key.available_at)
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "expiry observation fields conflict")
     else:

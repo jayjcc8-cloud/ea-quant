@@ -1041,6 +1041,7 @@ class Phase1HistoricalMatcher:
         )
         if not self._submission_record_is_valid(record):
             raise _fail(OutcomeCode.CONFLICTING_ID, "submission record preflight failed")
+        self._require_live_bindings()
         by_order = dict(self._state.submission_by_order)
         by_client = dict(self._state.submission_by_client)
         by_order[record.order_id] = record
