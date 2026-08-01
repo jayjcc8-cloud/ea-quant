@@ -1288,6 +1288,31 @@ def test_retained_public_artifact_mutation_halts_before_replay_or_membership() -
         is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
     )
 
+    _, matcher, orders, causal, _, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    record = matcher._state.submissions[0]
+    replacement_causal = replace(causal, source_sequence=causal.source_sequence + 1)
+    object.__setattr__(
+        record,
+        "causal_market_bytes",
+        canonical_market_data_record_bytes(replacement_causal),
+    )
+    authorization = cast(_AuthorizationVerifier, matcher._submission_authorization_verifier)
+    authorization_calls = authorization.calls
+    with pytest.raises(HistoricalMatcherError) as causal_drift:
+        matcher.submit(
+            orders[0],
+            causal_market_root=replacement_causal,
+            dispatch_sequence=7,
+        )
+    assert causal_drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert authorization.calls == authorization_calls
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
     _, matcher, orders, causal, delayed, _ = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)

@@ -187,6 +187,7 @@ class _SubmissionRecord:
     request_bytes: bytes
     request_sha256: Sha256Digest
     client_key: Sha256Digest
+    causal_market_root: MarketDataEnvelope
     causal_market_bytes: bytes
     causal_market_sha256: Sha256Digest
     causal_root_key: RuntimeRootOrderKey
@@ -656,6 +657,18 @@ class Phase1HistoricalMatcher:
                 and canonical_execution_request_bytes(record.order) == record.request_bytes
                 and execution_request_digest(record.order) == record.request_sha256
                 and order_client_submission_key(record.order) == record.client_key
+                and type(record.causal_market_root) is MarketDataEnvelope
+                and type(record.causal_market_bytes) is bytes
+                and type(record.causal_market_sha256) is Sha256Digest
+                and type(record.causal_root_key) is RuntimeRootOrderKey
+                and canonical_market_data_record_bytes(record.causal_market_root)
+                == record.causal_market_bytes
+                and historical_market_root_digest(record.causal_market_root)
+                == record.causal_market_sha256
+                and runtime_root_order_key(record.causal_market_root) == record.causal_root_key
+                and record.causal_market_root.payload.instrument == record.order.instrument
+                and record.causal_market_root.available_at
+                == record.order.eligible_after_available_at
                 and type(receipt) is HistoricalSubmissionReceipt
                 and canonical_historical_submission_receipt_bytes(receipt) == record.receipt_bytes
                 and historical_submission_receipt_digest(receipt) == record.receipt_sha256
@@ -1017,6 +1030,7 @@ class Phase1HistoricalMatcher:
             request_bytes=request_bytes,
             request_sha256=request_sha256,
             client_key=client_key,
+            causal_market_root=owned_causal_root,
             causal_market_bytes=causal_bytes,
             causal_market_sha256=causal_sha256,
             causal_root_key=causal_key,
