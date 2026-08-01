@@ -1445,6 +1445,84 @@ def test_submission_rebinds_state_and_history_after_authorization_callback() -> 
     )
 
 
+def test_submission_rebinds_state_on_every_authorization_exit() -> None:
+    for exit_kind in ("denied", "exception", "invalid-proof"):
+        _, matcher, orders, causal, delayed, _ = _system()
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+        initial = matcher._state
+        authorization = cast(
+            _AuthorizationVerifier,
+            matcher._submission_authorization_verifier,
+        )
+        forged_records: list[Any] = []
+
+        def fail_after_history_change(
+            *,
+            _matcher: Phase1HistoricalMatcher = matcher,
+            _forged_records: list[Any] = forged_records,
+            _exit_kind: str = exit_kind,
+            **_kwargs: object,
+        ) -> Any:
+            original = _matcher._state.submissions[0]
+            receipt = _clone_receipt(original.receipt, submission_sequence=3)
+            forged = replace(
+                original,
+                receipt=receipt,
+                receipt_bytes=canonical_historical_submission_receipt_bytes(receipt),
+                receipt_sha256=historical_submission_receipt_digest(receipt),
+            )
+            _forged_records.append(forged)
+            _matcher._state = replace(
+                _matcher._state,
+                submissions=(forged,),
+                next_submission=4,
+            )
+            if _exit_kind == "denied":
+                raise HistoricalPreEffectAuthorizationError(
+                    OutcomeCode.RISK_STALE_APPROVAL,
+                    "denied after state mutation",
+                )
+            if _exit_kind == "exception":
+                raise RuntimeError("authorization verifier failed after state mutation")
+            return object()
+
+        cast(
+            Any,
+            authorization,
+        ).verify_authorized_historical_submission = fail_after_history_change
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8)
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+        assert matcher._state.submissions == tuple(forged_records)
+        assert matcher._state.pending == initial.pending
+        assert matcher._state.submission_by_order == initial.submission_by_order
+        assert matcher._state.submission_by_client == initial.submission_by_client
+        assert matcher._state.next_submission == 4
+        assert all(record.receipt.submission_sequence != 2 for record in matcher._state.submissions)
+        assert matcher._state.conflict is not None
+        assert (
+            matcher._state.conflict.conflict_kind
+            is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+        )
+
+    _, matcher, orders, causal, _, _ = _system()
+    authorization = cast(
+        _AuthorizationVerifier,
+        matcher._submission_authorization_verifier,
+    )
+    sentinel = RuntimeError("unchanged authorization verifier failure")
+
+    def fail_without_state_change(**_kwargs: object) -> Any:
+        raise sentinel
+
+    cast(Any, authorization).verify_authorized_historical_submission = fail_without_state_change
+    initial = matcher._state
+    with pytest.raises(RuntimeError) as unchanged:
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert unchanged.value is sentinel
+    assert matcher._state is initial
+
+
 def test_receipt_decoder_rejects_noncanonical_unknown_and_substituted_context() -> None:
     _, matcher, orders, causal, _, _ = _system()
     receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)

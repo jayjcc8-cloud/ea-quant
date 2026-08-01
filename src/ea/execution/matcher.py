@@ -736,6 +736,22 @@ class Phase1HistoricalMatcher:
         if not valid:
             self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
 
+    def _require_submission_allocation_state(
+        self,
+        *,
+        allocation_state: _MatcherState,
+        allocation_state_bytes: bytes,
+        submission_sequence: int,
+        dispatch_sequence: int,
+    ) -> None:
+        current_state_bytes = canonical_historical_matcher_state_bytes(self.state)
+        if (
+            self._state is not allocation_state
+            or current_state_bytes != allocation_state_bytes
+            or self._state.next_submission != submission_sequence
+        ):
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+
     def _require_retained_state(self) -> None:
         state = self._state
         for submission_record in state.submissions:
@@ -1105,6 +1121,7 @@ class Phase1HistoricalMatcher:
         submission_sequence = allocation_state.next_submission
         if submission_sequence is None:
             raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "submission sequence exhausted")
+        authorization_valid = False
         try:
             try:
                 auth_proof = (
@@ -1135,6 +1152,7 @@ class Phase1HistoricalMatcher:
                 dispatch_sequence=sequence,
                 issuer=self._submission_authorization_verifier,
             )
+            authorization_valid = True
         except _VerifierFailure as failure:
             raise failure.error from None
         except HistoricalPreEffectAuthorizationError:
@@ -1143,6 +1161,14 @@ class Phase1HistoricalMatcher:
             raise
         except (AttributeError, TypeError) as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "authorization proof is invalid") from error
+        finally:
+            if not authorization_valid:
+                self._require_submission_allocation_state(
+                    allocation_state=allocation_state,
+                    allocation_state_bytes=allocation_state_bytes,
+                    submission_sequence=submission_sequence,
+                    dispatch_sequence=sequence,
+                )
         if (
             canonical_order_bytes(order) != submitted_order_bytes
             or canonical_market_data_record_bytes(causal_market_root) != causal_bytes
@@ -1196,14 +1222,13 @@ class Phase1HistoricalMatcher:
         if not self._submission_record_is_valid(record):
             raise _fail(OutcomeCode.CONFLICTING_ID, "submission record preflight failed")
         self._require_live_bindings()
-        current_state_bytes = canonical_historical_matcher_state_bytes(self.state)
-        if (
-            self._state is not allocation_state
-            or current_state_bytes != allocation_state_bytes
-            or self._state.next_submission != submission_sequence
-        ):
-            self._retained_binding_drift(dispatch_sequence=sequence)
-        publication_state = self._state
+        self._require_submission_allocation_state(
+            allocation_state=allocation_state,
+            allocation_state_bytes=allocation_state_bytes,
+            submission_sequence=submission_sequence,
+            dispatch_sequence=sequence,
+        )
+        publication_state = allocation_state
         by_order = dict(publication_state.submission_by_order)
         by_client = dict(publication_state.submission_by_client)
         by_order[record.order_id] = record
