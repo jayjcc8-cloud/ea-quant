@@ -69,6 +69,7 @@ from ea.core.historical_matching import (
     _create_historical_matcher_dispatch_batch,
     _create_historical_matcher_state,
     _create_historical_submission_receipt,
+    _historical_root_digest_from_bytes,
     _quantized_historical_close,
     _require_historical_submission_authorization_proof,
     _validate_descendant_binding,
@@ -669,6 +670,11 @@ class Phase1HistoricalMatcher:
                 and self._state.dispatch_by_sequence[batch.dispatch_sequence] is record
                 and batch.trigger_root_sha256 == record.root_sha256
                 and batch.trigger_root_key == record.root_key
+                and _historical_root_digest_from_bytes(
+                    kind=batch.dispatch_kind,
+                    canonical_root_bytes=record.root_bytes,
+                )
+                == record.root_sha256
             )
         except Exception:
             valid = False

@@ -1513,6 +1513,7 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
         ),
     )
     revised_market = replace(causal, revision=1)
+    requested_end = replace(end, kind=EndOfRunKind.REQUESTED_END)
     common = {
         "fact_sequence": 1,
         "source_namespace": matcher.source_namespace,
@@ -1646,6 +1647,17 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
             "trigger_root_key": runtime_root_order_key(end),
             "occurred_at": causal.available_at,
             "available_at": end.available_at,
+            "price_text": None,
+            "expiry_outcome_code": OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
+        },
+        {
+            **common,
+            "fact_kind": "expiry",
+            "trigger_root_kind": HistoricalDispatchKind.END_OF_RUN,
+            "trigger_root_sha256": historical_end_root_digest(requested_end),
+            "trigger_root_key": runtime_root_order_key(requested_end),
+            "occurred_at": requested_end.available_at,
+            "available_at": requested_end.available_at,
             "price_text": None,
             "expiry_outcome_code": OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
         },
@@ -1875,6 +1887,20 @@ def test_retained_public_artifact_mutation_halts_before_replay_or_membership() -
     with pytest.raises(HistoricalMatcherError) as receipt_drift:
         matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     assert receipt_drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    dispatch = matcher._state.dispatch_by_sequence[8]
+    object.__setattr__(dispatch, "root_bytes", b"tampered retained root")
+    with pytest.raises(HistoricalMatcherError) as root_drift:
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert root_drift.value.code is OutcomeCode.CONFLICTING_ID
     assert matcher._state.conflict is not None
     assert (
         matcher._state.conflict.conflict_kind

@@ -236,6 +236,21 @@ def historical_end_root_digest(root: EndOfRunRoot) -> Sha256Digest:
     )
 
 
+def _historical_root_digest_from_bytes(
+    *,
+    kind: HistoricalDispatchKind,
+    canonical_root_bytes: bytes,
+) -> Sha256Digest:
+    if type(kind) is not HistoricalDispatchKind or type(canonical_root_bytes) is not bytes:
+        raise _fail(OutcomeCode.INVALID_TYPE, "historical root digest inputs are invalid")
+    domain = (
+        HISTORICAL_MATCHER_MARKET_ROOT_DIGEST_DOMAIN
+        if kind is HistoricalDispatchKind.MARKET
+        else HISTORICAL_MATCHER_END_ROOT_DIGEST_DOMAIN
+    )
+    return _framed_digest(domain, canonical_root_bytes)
+
+
 def runtime_root_key_document(
     root: MarketDataEnvelope | EndOfRunRoot,
 ) -> dict[str, object]:
@@ -1889,10 +1904,13 @@ def canonical_historical_matcher_observation_bytes(
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "trade observation fields conflict")
     elif fact_kind == "expiry":
+        suffix = trigger_root_key._suffix
         if (
             price_text is not None
             or expiry_outcome_code is not OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA
             or trigger_root_kind is not HistoricalDispatchKind.END_OF_RUN
+            or type(suffix) is not _EndOfRunSuffix
+            or suffix.kind_rank != END_OF_RUN_KIND_RANKS[EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED]
             or occurred_text != available_text
             or available_text != _utc_text(trigger_root_key.available_at)
         ):
