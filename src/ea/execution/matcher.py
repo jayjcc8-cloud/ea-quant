@@ -22,6 +22,7 @@ from ea.core.execution import (
 )
 from ea.core.execution_identity import (
     EconomicId,
+    EconomicOwnerKind,
     IngressIdentity,
     SourceNamespace,
     SourceNativeSequence,
@@ -33,6 +34,7 @@ from ea.core.execution_messages import (
     ExecutionPolicyRef,
     FactProvenance,
     FactProvenanceId,
+    IndependentFactDecodeContext,
     Order,
     OrderKind,
     OrderSide,
@@ -44,6 +46,7 @@ from ea.core.execution_messages import (
     create_execution_fact_ingress,
     create_lifecycle_execution_fact,
     create_trade_execution_fact,
+    decode_execution_fact_ingress,
     execution_fact_digest,
     execution_fact_ingress_digest,
     execution_request_digest,
@@ -67,6 +70,7 @@ from ea.core.historical_matching import (
     _create_historical_matcher_state,
     _create_historical_submission_receipt,
     _require_historical_submission_authorization_proof,
+    _validate_descendant_binding,
     canonical_end_of_run_root_bytes,
     canonical_historical_matcher_conflict_bytes,
     canonical_historical_matcher_dispatch_batch_bytes,
@@ -81,7 +85,7 @@ from ea.core.historical_matching import (
     historical_submission_receipt_digest,
 )
 from ea.core.identity import Instrument, VenueId
-from ea.core.market_data import Adjustment, MarketDataEnvelope
+from ea.core.market_data import Adjustment, Bar, MarketDataEnvelope, SourceId
 from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunId, Sha256Digest
@@ -175,6 +179,7 @@ class HistoricalMatcherDispatchVerifier(Protocol):
 @dataclass(frozen=True, slots=True)
 class _SubmissionRecord:
     order: Order
+    order_id: EconomicId
     order_bytes: bytes
     order_sha256: Sha256Digest
     request_bytes: bytes
@@ -202,6 +207,7 @@ class _DispatchRecord:
 @dataclass(frozen=True, slots=True)
 class _IssuedRecord:
     ingress: ExecutionFactIngress
+    ingress_identity: IngressIdentity
     ingress_bytes: bytes
     ingress_sha256: Sha256Digest
     fact_bytes: bytes
@@ -244,6 +250,62 @@ def _require_dispatch_sequence(value: object) -> int:
 
 def _clone_instrument(value: Instrument) -> Instrument:
     return Instrument(VenueId(value.venue.code), value.symbol)
+
+
+def _clone_run_id(value: RunId) -> RunId:
+    return RunId(value.value)
+
+
+def _clone_economic_id(value: EconomicId) -> EconomicId:
+    return EconomicId(
+        _clone_run_id(value.run_id),
+        EconomicOwnerKind(value.owner_kind.value),
+        value.owner_sequence,
+    )
+
+
+def _clone_ingress_identity(value: IngressIdentity) -> IngressIdentity:
+    return IngressIdentity(
+        SourceNamespace(value.source_namespace.value),
+        value.ingress_sequence,
+    )
+
+
+def _clone_market_root(value: MarketDataEnvelope) -> MarketDataEnvelope:
+    payload = value.payload
+    owned = MarketDataEnvelope(
+        payload=Bar(
+            instrument=_clone_instrument(payload.instrument),
+            interval_start=payload.interval_start,
+            interval_end=payload.interval_end,
+            adjustment=Adjustment(payload.adjustment.value),
+            open=payload.open,
+            high=payload.high,
+            low=payload.low,
+            close=payload.close,
+            volume=payload.volume,
+        ),
+        source=SourceId(value.source.code),
+        available_at=value.available_at,
+        source_sequence=value.source_sequence,
+        revision=value.revision,
+    )
+    if canonical_market_data_record_bytes(owned) != canonical_market_data_record_bytes(value):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "owned market root reconstruction conflicts")
+    return owned
+
+
+def _clone_end_root(value: EndOfRunRoot) -> EndOfRunRoot:
+    owned = EndOfRunRoot(
+        available_at=value.available_at,
+        kind=EndOfRunKind(value.kind.value),
+        producer_namespace=SourceNamespace(value.producer_namespace.value),
+        producer_sequence=value.producer_sequence,
+        run_id=_clone_run_id(value.run_id),
+    )
+    if canonical_end_of_run_root_bytes(owned) != canonical_end_of_run_root_bytes(value):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "owned end root reconstruction conflicts")
+    return owned
 
 
 def _clone_spec_set(value: InstrumentExecutionSpecSet) -> InstrumentExecutionSpecSet:
@@ -291,6 +353,16 @@ def _clone_order(value: Order) -> Order:
         submitted = getattr(value, name)
         if type(submitted) is Instrument:
             submitted = _clone_instrument(submitted)
+        elif type(submitted) is RunId:
+            submitted = _clone_run_id(submitted)
+        elif type(submitted) is EconomicId:
+            submitted = _clone_economic_id(submitted)
+        elif type(submitted) is Sha256Digest:
+            submitted = Sha256Digest(submitted.value)
+        elif type(submitted) is InstrumentSpecId:
+            submitted = InstrumentSpecId(submitted.value)
+        elif type(submitted) is InstrumentSpecSetId:
+            submitted = InstrumentSpecSetId(submitted.value)
         elif type(submitted) is CanonicalDecimal:
             submitted = CanonicalDecimal(submitted.text)
         elif type(submitted) is ExecutionPolicyRef:
@@ -371,8 +443,11 @@ class Phase1HistoricalMatcher:
         "_execution_policy",
         "_order_issuance_verifier",
         "_provenance_id",
+        "_provenance_id_value",
         "_run_id",
+        "_run_id_value",
         "_source_namespace",
+        "_source_namespace_value",
         "_spec_bytes",
         "_spec_set",
         "_spec_sha256",
@@ -383,8 +458,11 @@ class Phase1HistoricalMatcher:
     _execution_policy: ExecutionPolicyRef
     _order_issuance_verifier: HistoricalOrderIssuanceVerifier
     _provenance_id: FactProvenanceId
+    _provenance_id_value: str
     _run_id: RunId
+    _run_id_value: str
     _source_namespace: SourceNamespace
+    _source_namespace_value: str
     _spec_bytes: bytes
     _spec_set: InstrumentExecutionSpecSet
     _spec_sha256: Sha256Digest
@@ -396,7 +474,7 @@ class Phase1HistoricalMatcher:
 
     @property
     def run_id(self) -> RunId:
-        return self._run_id
+        return _clone_run_id(self._run_id)
 
     @property
     def spec_set(self) -> InstrumentExecutionSpecSet:
@@ -404,25 +482,33 @@ class Phase1HistoricalMatcher:
 
     @property
     def source_namespace(self) -> SourceNamespace:
-        return self._source_namespace
+        return SourceNamespace(self._source_namespace.value)
 
     @property
     def execution_policy(self) -> ExecutionPolicyRef:
-        return self._execution_policy
+        return _clone_policy(self._execution_policy)
 
     @property
     def provenance_id(self) -> FactProvenanceId:
-        return self._provenance_id
+        return FactProvenanceId(self._provenance_id.value)
 
     @property
     def state(self) -> HistoricalMatcherState:
         state = self._state
-        for submission_record in state.submissions:
-            self._require_submission_record(submission_record)
-        for _, dispatch_record in sorted(state.dispatch_by_sequence.items()):
-            self._require_dispatch_record(dispatch_record)
-        for issued_record in state.issued:
-            self._require_issued_record(issued_record)
+        if state.conflict is None:
+            for submission_record in state.submissions:
+                self._require_submission_record(submission_record)
+            for _, dispatch_record in sorted(state.dispatch_by_sequence.items()):
+                self._require_dispatch_record(dispatch_record)
+            for issued_record in state.issued:
+                self._require_issued_record(issued_record)
+        public_ingresses = tuple(
+            decode_execution_fact_ingress(
+                record.ingress_bytes,
+                context=IndependentFactDecodeContext(self._spec_set),
+            )
+            for record in state.issued
+        )
         public = _create_historical_matcher_state(
             run_id=self._run_id,
             source_namespace=self._source_namespace,
@@ -434,13 +520,13 @@ class Phase1HistoricalMatcher:
             next_fact_sequence=state.next_fact,
             receipt_sha256s=tuple(record.receipt_sha256 for record in state.submissions),
             pending_order_ids=tuple(
-                record.order.order_id
+                record.order_id
                 for record in sorted(
                     state.pending,
                     key=lambda item: item.receipt.submission_sequence,
                 )
             ),
-            issued_ingresses=tuple(record.ingress for record in state.issued),
+            issued_ingresses=public_ingresses,
             dispatch_batch_sha256s=tuple(
                 record.batch_sha256 for _, record in sorted(state.dispatch_by_sequence.items())
             ),
@@ -456,7 +542,16 @@ class Phase1HistoricalMatcher:
 
     def _require_live_bindings(self) -> None:
         if (
-            canonical_instrument_spec_set_bytes(self._spec_set) != self._spec_bytes
+            type(self._run_id) is not RunId
+            or type(self._source_namespace) is not SourceNamespace
+            or type(self._provenance_id) is not FactProvenanceId
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "owned bindings must be exact")
+        if (
+            self._run_id.value != self._run_id_value
+            or self._source_namespace.value != self._source_namespace_value
+            or self._provenance_id.value != self._provenance_id_value
+            or canonical_instrument_spec_set_bytes(self._spec_set) != self._spec_bytes
             or instrument_spec_set_digest(self._spec_set) != self._spec_sha256
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "owned spec binding changed")
@@ -483,15 +578,18 @@ class Phase1HistoricalMatcher:
             raise _fail(OutcomeCode.INVALID_TYPE, "verifier spec binding failed") from error
         if (
             type(order_specs) is not InstrumentExecutionSpecSet
-            or canonical_instrument_spec_set_bytes(order_specs) != self._spec_bytes
-            or instrument_spec_set_digest(order_specs) != self._spec_sha256
             or type(auth_spec_id) is not InstrumentSpecSetId
             or type(auth_spec_digest) is not Sha256Digest
+            or type(dispatch_run_id) is not RunId
+            or type(dispatch_specs) is not InstrumentExecutionSpecSet
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "verifier spec bindings must be exact")
+        if (
+            canonical_instrument_spec_set_bytes(order_specs) != self._spec_bytes
+            or instrument_spec_set_digest(order_specs) != self._spec_sha256
             or auth_spec_id != self._spec_set.identifier
             or auth_spec_digest != self._spec_sha256
-            or type(dispatch_run_id) is not RunId
             or dispatch_run_id != self._run_id
-            or type(dispatch_specs) is not InstrumentExecutionSpecSet
             or canonical_instrument_spec_set_bytes(dispatch_specs) != self._spec_bytes
             or instrument_spec_set_digest(dispatch_specs) != self._spec_sha256
         ):
@@ -512,12 +610,14 @@ class Phase1HistoricalMatcher:
             trigger_root_sha256=None,
         )
 
-    def _require_submission_record(self, record: _SubmissionRecord) -> None:
+    def _submission_record_is_valid(self, record: _SubmissionRecord) -> bool:
         try:
             receipt = record.receipt
             valid = (
                 type(record) is _SubmissionRecord
                 and type(record.order) is Order
+                and type(record.order_id) is EconomicId
+                and record.order.order_id == record.order_id
                 and canonical_order_bytes(record.order) == record.order_bytes
                 and order_digest(record.order) == record.order_sha256
                 and canonical_execution_request_bytes(record.order) == record.request_bytes
@@ -545,7 +645,10 @@ class Phase1HistoricalMatcher:
             )
         except Exception:
             valid = False
-        if not valid:
+        return valid
+
+    def _require_submission_record(self, record: _SubmissionRecord) -> None:
+        if not self._submission_record_is_valid(record):
             self._retained_binding_drift(dispatch_sequence=record.dispatch_sequence)
 
     def _require_dispatch_record(self, record: _DispatchRecord) -> None:
@@ -573,15 +676,18 @@ class Phase1HistoricalMatcher:
         try:
             ingress = record.ingress
             binding = record.binding
+            _validate_descendant_binding(binding)
             dispatch = self._state.dispatch_by_sequence.get(binding.parent_dispatch_sequence)
             valid = (
                 type(record) is _IssuedRecord
                 and type(ingress) is ExecutionFactIngress
+                and type(record.ingress_identity) is IngressIdentity
                 and type(binding) is HistoricalMatcherDescendantBinding
                 and canonical_execution_fact_ingress_bytes(ingress) == record.ingress_bytes
                 and execution_fact_ingress_digest(ingress) == record.ingress_sha256
                 and canonical_execution_fact_bytes(ingress.fact) == record.fact_bytes
                 and binding.ingress_identity == ingress.identity
+                and record.ingress_identity == ingress.identity
                 and binding.ingress_sha256 == record.ingress_sha256
                 and binding.fact_sha256 == execution_fact_digest(ingress.fact)
                 and dispatch is not None
@@ -594,7 +700,7 @@ class Phase1HistoricalMatcher:
                 and 0 <= binding.batch_index < len(dispatch.batch.ingresses)
                 and dispatch.batch.ingresses[binding.batch_index] is ingress
                 and dispatch.batch.ingress_sha256s[binding.batch_index] == record.ingress_sha256
-                and self._state.issued_by_identity.get(ingress.identity) is record
+                and self._state.issued_by_identity.get(record.ingress_identity) is record
             )
         except Exception:
             valid = False
@@ -720,6 +826,14 @@ class Phase1HistoricalMatcher:
             raise failure.error from None
         if type(issued) is not Order or canonical_order_bytes(issued) != submitted_order_bytes:
             raise _fail(OutcomeCode.CONFLICTING_ID, "Order was not issued by authority")
+        if (
+            canonical_order_bytes(order) != submitted_order_bytes
+            or order_digest(order) != submitted_order_sha256
+            or canonical_execution_request_bytes(order) != request_bytes
+            or execution_request_digest(order) != request_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submitted Order changed during issuance")
+        owned_order = _clone_order(order)
         try:
             try:
                 proof = self._active_dispatch_verifier.verify_active_market_dispatch(
@@ -739,6 +853,13 @@ class Phase1HistoricalMatcher:
                 dispatch_sequence=sequence,
                 issuer=self._active_dispatch_verifier,
             )
+            if (
+                canonical_market_data_record_bytes(causal_market_root) != causal_bytes
+                or historical_market_root_digest(causal_market_root) != causal_sha256
+                or runtime_root_order_key(causal_market_root) != causal_key
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "causal market root changed")
+            owned_causal_root = _clone_market_root(causal_market_root)
         except _VerifierFailure as failure:
             raise failure.error from None
         except HistoricalMatcherError:
@@ -748,22 +869,22 @@ class Phase1HistoricalMatcher:
         except (AttributeError, TypeError) as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "active market proof is invalid") from error
         if (
-            order.run_id != self._run_id
-            or order.dispatch_sequence != sequence
-            or order.eligible_after_available_at != causal_market_root.available_at
-            or order.instrument != causal_market_root.payload.instrument
-            or order.instrument_spec_set_id != self._spec_set.identifier
-            or order.instrument_spec_set_sha256 != self._spec_sha256
-            or order.execution_policy != self._execution_policy
+            owned_order.run_id != self._run_id
+            or owned_order.dispatch_sequence != sequence
+            or owned_order.eligible_after_available_at != owned_causal_root.available_at
+            or owned_order.instrument != owned_causal_root.payload.instrument
+            or owned_order.instrument_spec_set_id != self._spec_set.identifier
+            or owned_order.instrument_spec_set_sha256 != self._spec_sha256
+            or owned_order.execution_policy != self._execution_policy
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "submission bindings conflict")
         try:
-            specification = self._spec_set.require(order.instrument)
-            require_positive(order.quantity, field_name="quantity")
+            specification = self._spec_set.require(owned_order.instrument)
+            require_positive(owned_order.quantity, field_name="quantity")
             from ea.core.economics import require_quantized
 
             require_quantized(
-                order.quantity,
+                owned_order.quantity,
                 specification.quantity_quantum,
                 field_name="quantity",
             )
@@ -786,7 +907,7 @@ class Phase1HistoricalMatcher:
             try:
                 auth_proof = (
                     self._submission_authorization_verifier.verify_authorized_historical_submission(
-                        order_id=order.order_id,
+                        order_id=owned_order.order_id,
                         canonical_order_bytes=submitted_order_bytes,
                         canonical_execution_request_bytes=request_bytes,
                         canonical_causal_market_bytes=causal_bytes,
@@ -804,7 +925,7 @@ class Phase1HistoricalMatcher:
                 run_id=self._run_id,
                 spec_set=self._spec_set,
                 execution_policy=self._execution_policy,
-                order=order,
+                order=owned_order,
                 order_sha256=submitted_order_sha256,
                 execution_request_sha256=request_sha256,
                 causal_market_sha256=causal_sha256,
@@ -820,37 +941,42 @@ class Phase1HistoricalMatcher:
             raise
         except (AttributeError, TypeError) as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "authorization proof is invalid") from error
-        owned_order = _clone_order(order)
+        if (
+            canonical_order_bytes(order) != submitted_order_bytes
+            or canonical_market_data_record_bytes(causal_market_root) != causal_bytes
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submission input changed during authorization")
         receipt = _create_historical_submission_receipt(
-            run_id=self._run_id,
-            source_namespace=self._source_namespace,
+            run_id=_clone_run_id(self._run_id),
+            source_namespace=SourceNamespace(self._source_namespace.value),
             submission_sequence=submission_sequence,
-            order_id=owned_order.order_id,
-            order_sha256=submitted_order_sha256,
-            execution_request_sha256=request_sha256,
-            client_submission_key=client_key,
-            instrument=owned_order.instrument,
+            order_id=_clone_economic_id(owned_order.order_id),
+            order_sha256=Sha256Digest(submitted_order_sha256.value),
+            execution_request_sha256=Sha256Digest(request_sha256.value),
+            client_submission_key=Sha256Digest(client_key.value),
+            instrument=_clone_instrument(owned_order.instrument),
             side=owned_order.side,
             quantity_text=owned_order.quantity.text,
-            causal_market_sha256=causal_sha256,
-            causal_root_key=causal_key,
+            causal_market_sha256=Sha256Digest(causal_sha256.value),
+            causal_root_key=runtime_root_order_key(owned_causal_root),
             dispatch_sequence=sequence,
             eligible_after_available_at=owned_order.eligible_after_available_at,
             audit_acknowledgement_id=auth.audit_acknowledgement_id,
-            audit_acknowledgement_sha256=auth.audit_acknowledgement_sha256,
+            audit_acknowledgement_sha256=Sha256Digest(auth.audit_acknowledgement_sha256.value),
             global_halt_epoch=auth.global_halt_epoch,
             risk_halt_epoch=auth.risk_halt_epoch,
             instrument_gate_id=auth.instrument_gate_id,
             instrument_gate_version=auth.instrument_gate_version,
             authorization_state_version=auth.authorization_state_version,
-            instrument_spec_set_id=self._spec_set.identifier,
-            instrument_spec_set_sha256=self._spec_sha256,
-            execution_policy=self._execution_policy,
+            instrument_spec_set_id=InstrumentSpecSetId(self._spec_set.identifier.value),
+            instrument_spec_set_sha256=Sha256Digest(self._spec_sha256.value),
+            execution_policy=_clone_policy(self._execution_policy),
         )
         receipt_bytes = canonical_historical_submission_receipt_bytes(receipt)
         receipt_sha256 = historical_submission_receipt_digest(receipt)
         record = _SubmissionRecord(
             order=owned_order,
+            order_id=_clone_economic_id(owned_order.order_id),
             order_bytes=submitted_order_bytes,
             order_sha256=submitted_order_sha256,
             request_bytes=request_bytes,
@@ -864,9 +990,11 @@ class Phase1HistoricalMatcher:
             receipt_bytes=receipt_bytes,
             receipt_sha256=receipt_sha256,
         )
+        if not self._submission_record_is_valid(record):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submission record preflight failed")
         by_order = dict(self._state.submission_by_order)
         by_client = dict(self._state.submission_by_client)
-        by_order[owned_order.order_id] = record
+        by_order[record.order_id] = record
         by_client[client_key] = record
         self._state = _MatcherState(
             next_submission=_advance(submission_sequence),
@@ -978,8 +1106,17 @@ class Phase1HistoricalMatcher:
                 dispatch_sequence=sequence,
                 issuer=self._active_dispatch_verifier,
             )
+            if (
+                canonical_market_data_record_bytes(market_root) != root_bytes
+                or historical_market_root_digest(market_root) != root_sha256
+                or runtime_root_order_key(market_root) != root_key
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "market root changed during proof")
+            owned_market_root = _clone_market_root(market_root)
         except _VerifierFailure as failure:
             raise failure.error from None
+        except HistoricalMatcherError:
+            raise
         except RuntimeOrderingError as error:
             raise _fail(error.code, "active market proof is invalid") from error
         except Exception as error:
@@ -990,11 +1127,11 @@ class Phase1HistoricalMatcher:
                     record
                     for record in self._state.pending
                     if (
-                        record.order.instrument == market_root.payload.instrument
-                        and market_root.payload.adjustment is Adjustment.RAW
-                        and market_root.revision == 0
+                        record.order.instrument == owned_market_root.payload.instrument
+                        and owned_market_root.payload.adjustment is Adjustment.RAW
+                        and owned_market_root.revision == 0
                         and root_key > record.causal_root_key
-                        and market_root.event_time > record.order.eligible_after_available_at
+                        and owned_market_root.event_time > record.order.eligible_after_available_at
                     )
                 ),
                 key=lambda record: record.receipt.submission_sequence,
@@ -1007,9 +1144,9 @@ class Phase1HistoricalMatcher:
             root_bytes=root_bytes,
             root_sha256=root_sha256,
             records=eligible,
-            occurred_at=market_root.event_time,
-            available_at=market_root.available_at,
-            close=market_root.payload.close,
+            occurred_at=owned_market_root.event_time,
+            available_at=owned_market_root.available_at,
+            close=owned_market_root.payload.close,
             end=False,
         )
 
@@ -1073,8 +1210,17 @@ class Phase1HistoricalMatcher:
                 dispatch_sequence=sequence,
                 issuer=self._active_dispatch_verifier,
             )
+            if (
+                canonical_end_of_run_root_bytes(end_root) != root_bytes
+                or historical_end_root_digest(end_root) != root_sha256
+                or runtime_root_order_key(end_root) != root_key
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "end root changed during proof")
+            owned_end_root = _clone_end_root(end_root)
         except _VerifierFailure as failure:
             raise failure.error from None
+        except HistoricalMatcherError:
+            raise
         except RuntimeOrderingError as error:
             raise _fail(error.code, "active end proof is invalid") from error
         except Exception as error:
@@ -1091,8 +1237,8 @@ class Phase1HistoricalMatcher:
                     key=lambda record: record.receipt.submission_sequence,
                 )
             ),
-            occurred_at=end_root.available_at,
-            available_at=end_root.available_at,
+            occurred_at=owned_end_root.available_at,
+            available_at=owned_end_root.available_at,
             close=None,
             end=True,
         )
@@ -1157,41 +1303,44 @@ class Phase1HistoricalMatcher:
                 spec_set=self._spec_set,
                 execution_policy=self._execution_policy,
             )
-            provenance = FactProvenance(self._provenance_id, observation_sha256)
+            provenance = FactProvenance(
+                FactProvenanceId(self._provenance_id.value),
+                Sha256Digest(observation_sha256.value),
+            )
             if end:
                 fact = create_lifecycle_execution_fact(
                     kind=ExecutionFactKind.EXPIRY,
                     outcome_code=expiry_code,
-                    source_namespace=self._source_namespace,
+                    source_namespace=SourceNamespace(self._source_namespace.value),
                     dedup_identity=SourceNativeSequence(fact_sequence),
                     occurred_at=occurred_at,
                     provenance=provenance,
-                    instrument=record.order.instrument,
-                    client_submission_key=record.client_key,
-                    order_id=record.order.order_id,
-                    correlation_id=record.order.correlation_id,
-                    causation_id=record.order.order_id,
+                    instrument=_clone_instrument(record.order.instrument),
+                    client_submission_key=Sha256Digest(record.client_key.value),
+                    order_id=_clone_economic_id(record.order_id),
+                    correlation_id=_clone_economic_id(record.order.correlation_id),
+                    causation_id=_clone_economic_id(record.order_id),
                 )
             else:
                 assert price is not None
                 fact = create_trade_execution_fact(
                     spec_set=self._spec_set,
                     side=record.order.side,
-                    quantity=record.order.quantity,
-                    price=price,
-                    source_namespace=self._source_namespace,
+                    quantity=CanonicalDecimal(record.order.quantity.text),
+                    price=CanonicalDecimal(price.text),
+                    source_namespace=SourceNamespace(self._source_namespace.value),
                     dedup_identity=SourceNativeSequence(fact_sequence),
                     occurred_at=occurred_at,
                     provenance=provenance,
-                    instrument=record.order.instrument,
-                    client_submission_key=record.client_key,
-                    order_id=record.order.order_id,
-                    correlation_id=record.order.correlation_id,
-                    causation_id=record.order.order_id,
+                    instrument=_clone_instrument(record.order.instrument),
+                    client_submission_key=Sha256Digest(record.client_key.value),
+                    order_id=_clone_economic_id(record.order_id),
+                    correlation_id=_clone_economic_id(record.order.correlation_id),
+                    causation_id=_clone_economic_id(record.order_id),
                 )
             ingress = create_execution_fact_ingress(
                 available_at=available_at,
-                source_namespace=self._source_namespace,
+                source_namespace=SourceNamespace(self._source_namespace.value),
                 ingress_sequence=fact_sequence,
                 fact=fact,
             )
@@ -1199,16 +1348,16 @@ class Phase1HistoricalMatcher:
             ingress_digests.append(execution_fact_ingress_digest(ingress))
             fact_sequence = _advance(fact_sequence)
         batch = _create_historical_matcher_dispatch_batch(
-            run_id=self._run_id,
-            source_namespace=self._source_namespace,
+            run_id=_clone_run_id(self._run_id),
+            source_namespace=SourceNamespace(self._source_namespace.value),
             dispatch_kind=kind,
             dispatch_sequence=sequence,
-            trigger_root_sha256=root_sha256,
+            trigger_root_sha256=Sha256Digest(root_sha256.value),
             trigger_root_key=root_key,
             next_fact_sequence_before=fact_before,
             next_fact_sequence_after=fact_sequence,
             submission_sequences=tuple(record.receipt.submission_sequence for record in records),
-            order_ids=tuple(record.order.order_id for record in records),
+            order_ids=tuple(_clone_economic_id(record.order_id) for record in records),
             ingresses=tuple(ingresses),
             ingress_sha256s=tuple(ingress_digests),
         )
@@ -1220,19 +1369,20 @@ class Phase1HistoricalMatcher:
             fact_bytes = canonical_execution_fact_bytes(ingress.fact)
             ingress_bytes = canonical_execution_fact_ingress_bytes(ingress)
             binding = _create_historical_matcher_descendant_binding(
-                ingress_identity=ingress.identity,
-                ingress_sha256=ingress_sha256,
-                fact_sha256=execution_fact_digest(ingress.fact),
-                batch_sha256=batch_sha256,
+                ingress_identity=_clone_ingress_identity(ingress.identity),
+                ingress_sha256=Sha256Digest(ingress_sha256.value),
+                fact_sha256=Sha256Digest(execution_fact_digest(ingress.fact).value),
+                batch_sha256=Sha256Digest(batch_sha256.value),
                 batch_index=index,
                 parent_kind=kind,
-                parent_root_sha256=root_sha256,
+                parent_root_sha256=Sha256Digest(root_sha256.value),
                 parent_root_key=root_key,
                 parent_dispatch_sequence=sequence,
             )
             issued_records.append(
                 _IssuedRecord(
                     ingress=ingress,
+                    ingress_identity=_clone_ingress_identity(ingress.identity),
                     ingress_bytes=ingress_bytes,
                     ingress_sha256=ingress_sha256,
                     fact_bytes=fact_bytes,
@@ -1253,17 +1403,13 @@ class Phase1HistoricalMatcher:
         by_digest[root_sha256] = dispatch_record
         issued_by_identity = dict(self._state.issued_by_identity)
         for issued in issued_records:
-            if issued.ingress.identity in issued_by_identity:
+            if issued.ingress_identity in issued_by_identity:
                 raise _fail(OutcomeCode.CONFLICTING_ID, "issued ingress identity collided")
-            issued_by_identity[issued.ingress.identity] = issued
-        matched_ids = {record.order.order_id for record in records}
+            issued_by_identity[issued.ingress_identity] = issued
+        matched_ids = {record.order_id for record in records}
         pending = tuple(
             sorted(
-                (
-                    record
-                    for record in self._state.pending
-                    if record.order.order_id not in matched_ids
-                ),
+                (record for record in self._state.pending if record.order_id not in matched_ids),
                 key=lambda record: record.receipt.submission_sequence,
             )
         )
@@ -1294,7 +1440,7 @@ class Phase1HistoricalMatcher:
                 next_submission_sequence=next_state.next_submission,
                 next_fact_sequence=next_state.next_fact,
                 receipt_sha256s=tuple(item.receipt_sha256 for item in next_state.submissions),
-                pending_order_ids=tuple(item.order.order_id for item in next_state.pending),
+                pending_order_ids=tuple(item.order_id for item in next_state.pending),
                 issued_ingresses=tuple(item.ingress for item in next_state.issued),
                 dispatch_batch_sha256s=tuple(
                     item.batch_sha256 for _, item in sorted(next_state.dispatch_by_sequence.items())
@@ -1323,6 +1469,8 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "issuance lookup inputs must be exact")
         self._require_live_bindings()
+        for retained in self._state.issued:
+            self._require_issued_record(retained)
         record = self._state.issued_by_identity.get(ingress_identity)
         if record is None:
             return False
@@ -1346,6 +1494,8 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant lookup inputs must be exact")
         self._require_live_bindings()
+        for retained in self._state.issued:
+            self._require_issued_record(retained)
         record = self._state.issued_by_identity.get(ingress_identity)
         if (
             record is None
@@ -1353,7 +1503,6 @@ class Phase1HistoricalMatcher:
             or record.fact_bytes != canonical_fact_bytes
         ):
             return None
-        self._require_issued_record(record)
         return record.binding
 
 
@@ -1376,6 +1525,9 @@ def create_phase1_historical_matcher(
         raise _fail(OutcomeCode.INVALID_TYPE, "matcher bindings must be exact")
     owned_specs = _clone_spec_set(spec_set)
     owned_policy = _clone_policy(execution_policy)
+    owned_run_id = _clone_run_id(run_id)
+    owned_source_namespace = SourceNamespace(source_namespace.value)
+    owned_provenance_id = FactProvenanceId(provenance_id.value)
     for verifier, operations in (
         (order_issuance_verifier, ("resolve_issued_order_by_id",)),
         (
@@ -1393,13 +1545,16 @@ def create_phase1_historical_matcher(
         if any(not callable(getattr(verifier, operation, None)) for operation in operations):
             raise _fail(OutcomeCode.INVALID_TYPE, "matcher verifier surface is incomplete")
     value = object.__new__(Phase1HistoricalMatcher)
-    value._run_id = run_id
+    value._run_id = owned_run_id
+    value._run_id_value = owned_run_id.value
     value._spec_set = owned_specs
     value._spec_bytes = canonical_instrument_spec_set_bytes(owned_specs)
     value._spec_sha256 = instrument_spec_set_digest(owned_specs)
     value._execution_policy = owned_policy
-    value._source_namespace = source_namespace
-    value._provenance_id = provenance_id
+    value._source_namespace = owned_source_namespace
+    value._source_namespace_value = owned_source_namespace.value
+    value._provenance_id = owned_provenance_id
+    value._provenance_id_value = owned_provenance_id.value
     value._order_issuance_verifier = order_issuance_verifier
     value._submission_authorization_verifier = submission_authorization_verifier
     value._active_dispatch_verifier = active_dispatch_verifier

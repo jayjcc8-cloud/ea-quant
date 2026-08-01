@@ -11,10 +11,15 @@ from typing import Any, cast
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from ea.core.execution_messages import execution_fact_ingress_digest, order_digest
 from ea.core.historical_matching import (
+    HistoricalMatcherDecodeContext,
     canonical_historical_matcher_dispatch_batch_bytes,
     canonical_historical_matcher_state_bytes,
     canonical_historical_submission_receipt_bytes,
+    decode_historical_matcher_state,
+    historical_matcher_dispatch_batch_digest,
+    historical_submission_receipt_digest,
 )
 
 _HELPER_PATH = Path(__file__).parents[1] / "unit" / "test_historical_matcher.py"
@@ -100,3 +105,45 @@ def test_future_roots_cannot_change_a_frozen_prefix(
     assert canonical_historical_submission_receipt_bytes(receipt) == receipt_bytes
     assert canonical_historical_matcher_dispatch_batch_bytes(batch) == batch_bytes
     assert canonical_historical_matcher_state_bytes(prefix_state) == state_bytes
+
+
+@given(
+    order_permutation=st.permutations((0, 1)),
+    receipt_permutation=st.permutations((0, 1)),
+    batch_permutation=st.permutations((0, 1)),
+)
+def test_lookup_registry_insertion_order_cannot_change_state_decode(
+    order_permutation: list[int],
+    receipt_permutation: list[int],
+    batch_permutation: list[int],
+) -> None:
+    _, matcher, orders, causal, delayed, end = _system()
+    receipts = [matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)]
+    batches = [matcher.match_active_market_root(delayed, dispatch_sequence=8)]
+    receipts.append(matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8))
+    batches.append(matcher.expire_at_active_end(end, dispatch_sequence=9))
+    encoded = canonical_historical_matcher_state_bytes(matcher.state)
+    ingresses = [ingress for batch in batches for ingress in batch.ingresses]
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={
+            order_digest(orders[index]): orders[index] for index in order_permutation
+        },
+        receipts_by_sha256={
+            historical_submission_receipt_digest(receipts[index]): receipts[index]
+            for index in receipt_permutation
+        },
+        batches_by_sha256={
+            historical_matcher_dispatch_batch_digest(batches[index]): batches[index]
+            for index in batch_permutation
+        },
+        ingresses_by_sha256={
+            execution_fact_ingress_digest(ingress): ingress for ingress in reversed(ingresses)
+        },
+    )
+    decoded = decode_historical_matcher_state(encoded, context=context)
+    assert canonical_historical_matcher_state_bytes(decoded) == encoded

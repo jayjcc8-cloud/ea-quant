@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, cast
 
 import pytest
@@ -40,9 +41,11 @@ from ea.core.execution_messages import (
     decode_risk_decision,
     execution_fact_ingress_digest,
     execution_request_digest,
+    order_client_submission_key,
     order_digest,
 )
 from ea.core.historical_matching import (
+    HistoricalDispatchKind,
     HistoricalMatcherConflictKind,
     HistoricalMatcherDecodeContext,
     HistoricalMatcherError,
@@ -52,6 +55,7 @@ from ea.core.historical_matching import (
     _create_historical_submission_authorization_proof,
     canonical_end_of_run_root_bytes,
     canonical_historical_matcher_dispatch_batch_bytes,
+    canonical_historical_matcher_observation_bytes,
     canonical_historical_matcher_state_bytes,
     canonical_historical_submission_receipt_bytes,
     decode_historical_matcher_dispatch_batch,
@@ -76,6 +80,7 @@ from ea.core.runtime import (
     _create_active_end_of_run_dispatch_proof,
     _create_active_market_dispatch_proof,
     prepare_bounded_runtime_roots,
+    runtime_root_order_key,
 )
 from ea.core.strategy import _causal_market_digest_from_canonical_bytes
 from ea.data import (
@@ -945,6 +950,8 @@ def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:
         ({**terminal, "unknown": None}, OutcomeCode.OUT_OF_RANGE),
         ({**terminal, "producer_namespace": 1}, OutcomeCode.INVALID_TYPE),
         ({**terminal, "producer_sequence": "1"}, OutcomeCode.INVALID_TYPE),
+        ({**terminal, "domain_rank": True}, OutcomeCode.INVALID_TYPE),
+        ({**terminal, "kind_rank": True}, OutcomeCode.INVALID_TYPE),
         ({**terminal, "kind": "future"}, OutcomeCode.OUT_OF_RANGE),
         ({**terminal, "producer_sequence": -1}, OutcomeCode.CONFLICTING_ID),
         ({**terminal, "producer_sequence": 1 << 64}, OutcomeCode.CONFLICTING_ID),
@@ -954,6 +961,73 @@ def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:
         with pytest.raises(HistoricalMatcherError) as rejected:
             runtime_root_key_from_document(document)
         assert rejected.value.code is code
+
+
+def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() -> None:
+    _, matcher, orders, causal, _, end = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    common = {
+        "fact_sequence": 1,
+        "source_namespace": matcher.source_namespace,
+        "provenance_id": matcher.provenance_id,
+        "submission_receipt_sha256": historical_submission_receipt_digest(receipt),
+        "order_sha256": order_digest(orders[0]),
+        "trigger_dispatch_sequence": 8,
+        "instrument": orders[0].instrument,
+        "side": orders[0].side,
+        "quantity_text": orders[0].quantity.text,
+        "spec_set": matcher.spec_set,
+        "execution_policy": matcher.execution_policy,
+    }
+    invalid = (
+        {
+            **common,
+            "fact_kind": "trade",
+            "trigger_root_kind": HistoricalDispatchKind.END_OF_RUN,
+            "trigger_root_sha256": historical_end_root_digest(end),
+            "trigger_root_key": runtime_root_order_key(end),
+            "occurred_at": end.available_at,
+            "available_at": end.available_at,
+            "price_text": "1",
+            "expiry_outcome_code": None,
+        },
+        {
+            **common,
+            "fact_kind": "expiry",
+            "trigger_root_kind": HistoricalDispatchKind.MARKET,
+            "trigger_root_sha256": historical_market_root_digest(causal),
+            "trigger_root_key": runtime_root_order_key(causal),
+            "occurred_at": causal.event_time,
+            "available_at": causal.available_at,
+            "price_text": None,
+            "expiry_outcome_code": OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
+        },
+        {
+            **common,
+            "fact_kind": "trade",
+            "trigger_root_kind": HistoricalDispatchKind.MARKET,
+            "trigger_root_sha256": historical_end_root_digest(end),
+            "trigger_root_key": runtime_root_order_key(end),
+            "occurred_at": end.available_at,
+            "available_at": end.available_at,
+            "price_text": "1",
+            "expiry_outcome_code": None,
+        },
+        {
+            **common,
+            "fact_kind": "expiry",
+            "trigger_root_kind": HistoricalDispatchKind.END_OF_RUN,
+            "trigger_root_sha256": historical_end_root_digest(end),
+            "trigger_root_key": runtime_root_order_key(end),
+            "occurred_at": causal.available_at,
+            "available_at": end.available_at,
+            "price_text": None,
+            "expiry_outcome_code": OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
+        },
+    )
+    for values in invalid:
+        with pytest.raises(HistoricalMatcherError):
+            canonical_historical_matcher_observation_bytes(**cast(Any, values))
 
 
 def test_conflict_evidence_uses_one_exact_tagged_identity_union() -> None:
@@ -1352,6 +1426,263 @@ def test_binary64_tick_vectors(value: float, side: OrderSide, expected: str) -> 
     baseline = matcher.spec_set.specifications[0]
     specification = replace(baseline, price_quantum=CanonicalDecimal("0.5"))
     assert _quantized_close(value, side=side, specification=specification).text == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "side", "expected"),
+    (
+        (-1.0, OrderSide.BUY, "-1"),
+        (-1.24, OrderSide.BUY, "-1"),
+        (-1.26, OrderSide.BUY, "-1.5"),
+        (-1.25, OrderSide.BUY, "-1"),
+        (-1.25, OrderSide.SELL, "-1.5"),
+    ),
+)
+def test_signed_binary64_tick_vectors(value: float, side: OrderSide, expected: str) -> None:
+    _, matcher, _, _, _, _ = _system()
+    specification = replace(
+        matcher.spec_set.specifications[0],
+        price_quantum=CanonicalDecimal("0.5"),
+        price_domain=PriceDomain.SIGNED,
+    )
+    assert _quantized_close(value, side=side, specification=specification).text == expected
+
+
+def test_invalid_non_raw_carrier_never_fills_or_publishes() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    object.__setattr__(delayed.payload, "adjustment", "split_adjusted")
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert matcher._state is initial
+
+
+def test_submission_client_dispatch_and_terminal_identity_conflicts_halt() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    conflicting_order = _clone_order(orders[0], quantity=CanonicalDecimal("2"))
+    with pytest.raises(HistoricalMatcherError):
+        matcher.submit(conflicting_order, causal_market_root=causal, dispatch_sequence=7)
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind is HistoricalMatcherConflictKind.SUBMISSION_IDENTITY
+    )
+
+    _, matcher, orders, causal, _, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    second_key = order_client_submission_key(orders[1])
+    matcher._state = replace(
+        matcher._state,
+        submission_by_client=MappingProxyType(
+            {**matcher._state.submission_by_client, second_key: matcher._state.submissions[0]}
+        ),
+    )
+    with pytest.raises(HistoricalMatcherError):
+        matcher.submit(orders[1], causal_market_root=causal, dispatch_sequence=7)
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind is HistoricalMatcherConflictKind.CLIENT_SUBMISSION_KEY
+    )
+
+    _, matcher, _, _, delayed, _ = _system()
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    different = replace(delayed, source_sequence=delayed.source_sequence + 1)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(different, dispatch_sequence=8)
+    assert matcher._state.conflict is not None
+    assert matcher._state.conflict.conflict_kind is HistoricalMatcherConflictKind.DISPATCH_IDENTITY
+
+    _, matcher, _, _, _, end = _system()
+    matcher.expire_at_active_end(end, dispatch_sequence=9)
+    different_end = replace(end, producer_sequence=end.producer_sequence + 1)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.expire_at_active_end(different_end, dispatch_sequence=9)
+    assert matcher._state.conflict is not None
+    assert matcher._state.conflict.conflict_kind is HistoricalMatcherConflictKind.DISPATCH_IDENTITY
+
+
+def test_verifier_mutation_and_non_exact_proof_fields_are_rejected_atomically() -> None:
+    _, matcher, orders, causal, _, _ = _system()
+    verifier = cast(_AuthorizationVerifier, matcher._submission_authorization_verifier)
+    original_auth = verifier.verify_authorized_historical_submission
+
+    def mutate_order(**kwargs: object) -> HistoricalSubmissionAuthorizationProof:
+        proof = original_auth(**cast(Any, kwargs))
+        object.__setattr__(
+            orders[0].order_id.run_id, "value", "87654321-4321-4234-8234-cba987654321"
+        )
+        return proof
+
+    cast(Any, verifier).verify_authorized_historical_submission = mutate_order
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError) as changed:
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert changed.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state is initial
+
+
+def test_cross_issuer_and_mutated_authorization_and_end_proofs_are_rejected() -> None:
+    fixture, matcher, orders, causal, _, _ = _system()
+    original = cast(_AuthorizationVerifier, matcher._submission_authorization_verifier)
+    receipts = [
+        json.loads(fixture["artifacts"][name]["canonical_utf8"])
+        for name in ("trade_receipt", "expiry_receipt")
+    ]
+    foreign = _AuthorizationVerifier(
+        matcher.run_id,
+        matcher.spec_set,
+        matcher.execution_policy,
+        receipts,
+        orders,
+    )
+    cast(
+        Any, original
+    ).verify_authorized_historical_submission = foreign.verify_authorized_historical_submission
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError) as cross:
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert cross.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state is initial
+
+    _, matcher, orders, causal, _, _ = _system()
+    authorization = cast(_AuthorizationVerifier, matcher._submission_authorization_verifier)
+    original_auth = authorization.verify_authorized_historical_submission
+
+    def mutated_auth(**kwargs: object) -> HistoricalSubmissionAuthorizationProof:
+        proof = original_auth(**cast(Any, kwargs))
+        object.__setattr__(proof, "_dispatch_sequence", True)
+        return proof
+
+    cast(Any, authorization).verify_authorized_historical_submission = mutated_auth
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError) as malformed:
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert malformed.value.code is OutcomeCode.INVALID_TYPE
+    assert matcher._state is initial
+
+    _, matcher, _, _, _, end = _system()
+    dispatch = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    original_end = dispatch.verify_active_end_of_run_dispatch
+
+    def mutate_end(root: EndOfRunRoot, *, dispatch_sequence: int) -> Any:
+        proof = original_end(root, dispatch_sequence=dispatch_sequence)
+        object.__setattr__(root, "producer_sequence", root.producer_sequence + 1)
+        return proof
+
+    cast(Any, dispatch).verify_active_end_of_run_dispatch = mutate_end
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError) as changed:
+        matcher.expire_at_active_end(end, dispatch_sequence=9)
+    assert changed.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state is initial
+
+    _, matcher, _, _, delayed, _ = _system()
+    dispatch = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    original_market = dispatch.verify_active_market_dispatch
+
+    def non_exact(root: MarketDataEnvelope, *, dispatch_sequence: int) -> Any:
+        proof = original_market(root, dispatch_sequence=dispatch_sequence)
+        object.__setattr__(proof, "_dispatch_sequence", True)
+        return proof
+
+    cast(Any, dispatch).verify_active_market_dispatch = non_exact
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError) as invalid:
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert invalid.value.code is OutcomeCode.INVALID_TYPE
+    assert matcher._state is initial
+
+
+def test_deep_caller_and_descendant_mutation_cannot_corrupt_lookup_or_conflict_snapshot() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    submitted = _clone_order(
+        orders[0],
+        order_id=EconomicId(
+            RunId(orders[0].order_id.run_id.value),
+            orders[0].order_id.owner_kind,
+            orders[0].order_id.owner_sequence,
+        ),
+    )
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    object.__setattr__(orders[0].order_id.run_id, "value", "87654321-4321-4234-8234-cba987654321")
+    assert matcher.submit(submitted, causal_market_root=causal, dispatch_sequence=7)
+
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    binding = matcher._state.issued[0].binding
+    object.__setattr__(binding.ingress_identity, "ingress_sequence", True)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.resolve_descendant_binding(
+            ingress_identity=batch.ingresses[0].identity,
+            canonical_ingress_bytes=matcher._state.issued[0].ingress_bytes,
+            canonical_fact_bytes=matcher._state.issued[0].fact_bytes,
+        )
+    state = matcher.state
+    assert state.halted is True
+    assert state.conflict is not None
+    assert state.conflict.conflict_kind is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+
+
+def test_multi_instrument_terminal_emission_uses_global_submission_order() -> None:
+    fixture, baseline, orders, causal, delayed, end = _system()
+    aapl_spec = baseline.spec_set.specifications[0]
+    msft = Instrument(VenueId("XNYS"), "MSFT")
+    msft_spec = replace(
+        aapl_spec,
+        instrument=msft,
+        specification_id=InstrumentSpecId("xnys.msft.v1"),
+    )
+    spec_set = build_instrument_spec_set(
+        InstrumentSpecSetId("phase1.multi.v1"),
+        (msft_spec, aapl_spec),
+    )
+    spec_digest = instrument_spec_set_digest(spec_set)
+    bound_orders = [
+        _clone_order(
+            orders[0],
+            instrument_spec_set_id=spec_set.identifier,
+            instrument_spec_set_sha256=spec_digest,
+        ),
+        _clone_order(
+            orders[1],
+            instrument=msft,
+            instrument_specification_id=msft_spec.specification_id,
+            instrument_spec_set_id=spec_set.identifier,
+            instrument_spec_set_sha256=spec_digest,
+        ),
+    ]
+    msft_causal = replace(delayed, payload=replace(delayed.payload, instrument=msft))
+    receipts = [
+        json.loads(fixture["artifacts"][name]["canonical_utf8"])
+        for name in ("trade_receipt", "expiry_receipt")
+    ]
+    matcher = create_phase1_historical_matcher(
+        run_id=baseline.run_id,
+        spec_set=spec_set,
+        execution_policy=baseline.execution_policy,
+        source_namespace=baseline.source_namespace,
+        provenance_id=baseline.provenance_id,
+        order_issuance_verifier=_OrderVerifier(
+            baseline.run_id, spec_set, baseline.execution_policy, bound_orders
+        ),
+        submission_authorization_verifier=_AuthorizationVerifier(
+            baseline.run_id,
+            spec_set,
+            baseline.execution_policy,
+            receipts,
+            bound_orders,
+        ),
+        active_dispatch_verifier=_DispatchVerifier(baseline.run_id, spec_set),
+    )
+    first = matcher.submit(bound_orders[0], causal_market_root=causal, dispatch_sequence=7)
+    second = matcher.submit(bound_orders[1], causal_market_root=msft_causal, dispatch_sequence=8)
+    matcher._state = replace(matcher._state, pending=tuple(reversed(matcher._state.pending)))
+    batch = matcher.expire_at_active_end(end, dispatch_sequence=9)
+    assert batch.submission_sequences == (
+        first.submission_sequence,
+        second.submission_sequence,
+    )
+    assert batch.order_ids == (bound_orders[0].order_id, bound_orders[1].order_id)
 
 
 def test_binary64_digit_boundary_is_structured_overflow() -> None:

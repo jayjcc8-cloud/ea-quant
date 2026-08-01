@@ -149,6 +149,14 @@ def _require_active_market_dispatch_proof(
     if type(proof) is not ActiveMarketDispatchProof:
         raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier returned a non-exact proof")
     try:
+        if (
+            type(proof._run_id) is not RunId
+            or type(proof._market_root) is not MarketDataEnvelope
+            or type(proof._canonical_market_bytes) is not bytes
+            or type(proof._causal_market_sha256) is not Sha256Digest
+            or type(proof._dispatch_sequence) is not int
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "active market proof carriers must be exact")
         matches = (
             proof._seal is _ACTIVE_MARKET_DISPATCH_PROOF_SEAL
             and proof._issuer is issuer
@@ -156,6 +164,7 @@ def _require_active_market_dispatch_proof(
             and proof._market_root is market_root
             and proof._canonical_market_bytes == canonical_market_bytes
             and proof._causal_market_sha256 == causal_market_sha256
+            and 1 <= proof._dispatch_sequence <= (1 << 64) - 1
             and proof._dispatch_sequence == dispatch_sequence
         )
     except (AttributeError, TypeError, ValueError) as error:
@@ -247,6 +256,14 @@ def _require_active_end_of_run_dispatch_proof(
     if type(proof) is not ActiveEndOfRunDispatchProof:
         raise _fail(OutcomeCode.INVALID_TYPE, "active end verifier returned a non-exact proof")
     try:
+        if (
+            type(proof._run_id) is not RunId
+            or type(proof._end_root) is not EndOfRunRoot
+            or type(proof._canonical_end_bytes) is not bytes
+            or type(proof._end_root_sha256) is not Sha256Digest
+            or type(proof._dispatch_sequence) is not int
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "active end proof carriers must be exact")
         matches = (
             proof._seal is _ACTIVE_END_OF_RUN_DISPATCH_PROOF_SEAL
             and proof._issuer is issuer
@@ -254,6 +271,7 @@ def _require_active_end_of_run_dispatch_proof(
             and proof._end_root is end_root
             and proof._canonical_end_bytes == canonical_end_bytes
             and proof._end_root_sha256 == end_root_sha256
+            and 1 <= proof._dispatch_sequence <= (1 << 64) - 1
             and proof._dispatch_sequence == dispatch_sequence
         )
     except (AttributeError, TypeError, ValueError) as error:

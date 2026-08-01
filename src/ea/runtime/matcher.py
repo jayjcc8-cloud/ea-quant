@@ -295,7 +295,10 @@ class CausalDescendantFactDispatchVerifier:
             or type(self._matcher.spec_set) is not InstrumentExecutionSpecSet
             or type(self._direct.spec_set) is not InstrumentExecutionSpecSet
             or type(self._matcher.source_namespace) is not SourceNamespace
-            or self._runtime.run_id != self._run_id
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "descendant verifier binding types changed")
+        if (
+            self._runtime.run_id != self._run_id
             or self._matcher.run_id != self._run_id
             or self._direct.run_id != self._run_id
             or self._matcher.source_namespace != self._matcher_source_namespace
@@ -362,7 +365,7 @@ def create_causal_descendant_fact_dispatch_verifier(
     value._runtime = runtime
     value._direct = direct_dispatch_verifier
     value._matcher = matcher
-    value._matcher_source_namespace = matcher.source_namespace
+    value._matcher_source_namespace = SourceNamespace(matcher.source_namespace.value)
     value._run_id = runtime.run_id
     value._spec_set = runtime.spec_set
     value._spec_sha256 = expected_digest
