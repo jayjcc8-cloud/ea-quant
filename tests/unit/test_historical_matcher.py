@@ -944,6 +944,54 @@ def test_state_decoder_binds_batch_history_to_unique_state_receipts() -> None:
     assert duplicate_emission.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_state_decoder_rejects_ended_state_with_pending_orders() -> None:
+    _, matcher, orders, causal, _, end = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    actual_end_batch = matcher.expire_at_active_end(end, dispatch_sequence=9)
+    empty_end_batch = _create_historical_matcher_dispatch_batch(
+        run_id=actual_end_batch.run_id,
+        source_namespace=actual_end_batch.source_namespace,
+        dispatch_kind=actual_end_batch.dispatch_kind,
+        dispatch_sequence=actual_end_batch.dispatch_sequence,
+        trigger_root_sha256=actual_end_batch.trigger_root_sha256,
+        trigger_root_key=actual_end_batch.trigger_root_key,
+        next_fact_sequence_before=1,
+        next_fact_sequence_after=1,
+        submission_sequences=(),
+        order_ids=(),
+        ingresses=(),
+        ingress_sha256s=(),
+    )
+    empty_end_sha256 = historical_matcher_dispatch_batch_digest(empty_end_batch)
+    state_document = json.loads(canonical_historical_matcher_state_bytes(matcher.state))
+    state_document.update(
+        {
+            "dispatch_batch_sha256s": [empty_end_sha256.value],
+            "end_batch_sha256": empty_end_sha256.value,
+            "issued_ingresses": [],
+            "next_fact_sequence": 1,
+            "pending_order_ids": [
+                json.loads(canonical_historical_submission_receipt_bytes(receipt))["order_id"]
+            ],
+        }
+    )
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={order_digest(orders[0]): orders[0]},
+        receipts_by_sha256={historical_submission_receipt_digest(receipt): receipt},
+        batches_by_sha256={empty_end_sha256: empty_end_batch},
+        market_roots_by_sha256={receipt.causal_market_sha256: causal},
+        end_roots_by_sha256={empty_end_batch.trigger_root_sha256: end},
+    )
+    with pytest.raises(HistoricalMatcherError) as pending_after_end:
+        decode_historical_matcher_state(_canonical_document(state_document), context=context)
+    assert pending_after_end.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_runtime_adapter_mints_market_and_terminal_proofs_only_while_active() -> None:
     _, matcher, _, _, _, _ = _system()
     header = (

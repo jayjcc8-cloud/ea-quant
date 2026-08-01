@@ -2948,6 +2948,8 @@ def decode_historical_matcher_state(
     )
     if state.pending_order_ids != expected_pending:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state pending membership conflicts")
+    if state.ended and state.pending_order_ids:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "ended state retains pending Orders")
     if conflict is not None and (
         conflict.pending_count != len(state.pending_order_ids)
         or conflict.next_submission_sequence != state.next_submission_sequence
