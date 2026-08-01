@@ -1,6 +1,6 @@
 # ADR 0019: Phase 1 Raw-Only Adjustment Capability Gate
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-01
 - Decision owners: Architecture, Data, Execution, Backtest, Runtime
 - Related: ADR 0004, ADR 0008, ADR 0015, ADR 0016, ADR 0018, Issue #59
