@@ -57,6 +57,7 @@ from ea.core.historical_matching import (
     HistoricalDispatchKind,
     HistoricalMatcherConflictEvidence,
     HistoricalMatcherConflictKind,
+    HistoricalMatcherDecodeContext,
     HistoricalMatcherDescendantBinding,
     HistoricalMatcherDispatchBatch,
     HistoricalMatcherError,
@@ -76,6 +77,7 @@ from ea.core.historical_matching import (
     canonical_historical_matcher_dispatch_batch_bytes,
     canonical_historical_matcher_state_bytes,
     canonical_historical_submission_receipt_bytes,
+    decode_historical_matcher_conflict,
     historical_end_root_digest,
     historical_market_root_digest,
     historical_matcher_conflict_digest,
@@ -441,6 +443,8 @@ class Phase1HistoricalMatcher:
     __slots__ = (
         "_active_dispatch_verifier",
         "_execution_policy",
+        "_conflict_bytes",
+        "_conflict_sha256",
         "_order_issuance_verifier",
         "_provenance_id",
         "_provenance_id_value",
@@ -456,6 +460,8 @@ class Phase1HistoricalMatcher:
     )
     _active_dispatch_verifier: HistoricalMatcherDispatchVerifier
     _execution_policy: ExecutionPolicyRef
+    _conflict_bytes: bytes | None
+    _conflict_sha256: Sha256Digest | None
     _order_issuance_verifier: HistoricalOrderIssuanceVerifier
     _provenance_id: FactProvenanceId
     _provenance_id_value: str
@@ -509,18 +515,40 @@ class Phase1HistoricalMatcher:
             )
             for record in state.issued
         )
+        public_conflict = None
+        if state.conflict is not None:
+            if (
+                self._conflict_bytes is None
+                or self._conflict_sha256 is None
+                or canonical_historical_matcher_conflict_bytes(state.conflict)
+                != self._conflict_bytes
+                or historical_matcher_conflict_digest(state.conflict) != self._conflict_sha256
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "retained conflict evidence changed")
+            public_conflict = decode_historical_matcher_conflict(
+                self._conflict_bytes,
+                context=HistoricalMatcherDecodeContext(
+                    run_id=_clone_run_id(self._run_id),
+                    spec_set=self._spec_set,
+                    execution_policy=_clone_policy(self._execution_policy),
+                    source_namespace=SourceNamespace(self._source_namespace.value),
+                    provenance_id=FactProvenanceId(self._provenance_id.value),
+                ),
+            )
         public = _create_historical_matcher_state(
-            run_id=self._run_id,
-            source_namespace=self._source_namespace,
-            provenance_id=self._provenance_id,
-            instrument_spec_set_id=self._spec_set.identifier,
-            instrument_spec_set_sha256=self._spec_sha256,
-            execution_policy=self._execution_policy,
+            run_id=_clone_run_id(self._run_id),
+            source_namespace=SourceNamespace(self._source_namespace.value),
+            provenance_id=FactProvenanceId(self._provenance_id.value),
+            instrument_spec_set_id=InstrumentSpecSetId(self._spec_set.identifier.value),
+            instrument_spec_set_sha256=Sha256Digest(self._spec_sha256.value),
+            execution_policy=_clone_policy(self._execution_policy),
             next_submission_sequence=state.next_submission,
             next_fact_sequence=state.next_fact,
-            receipt_sha256s=tuple(record.receipt_sha256 for record in state.submissions),
+            receipt_sha256s=tuple(
+                Sha256Digest(record.receipt_sha256.value) for record in state.submissions
+            ),
             pending_order_ids=tuple(
-                record.order_id
+                _clone_economic_id(record.order_id)
                 for record in sorted(
                     state.pending,
                     key=lambda item: item.receipt.submission_sequence,
@@ -528,13 +556,18 @@ class Phase1HistoricalMatcher:
             ),
             issued_ingresses=public_ingresses,
             dispatch_batch_sha256s=tuple(
-                record.batch_sha256 for _, record in sorted(state.dispatch_by_sequence.items())
+                Sha256Digest(record.batch_sha256.value)
+                for _, record in sorted(state.dispatch_by_sequence.items())
             ),
             last_new_dispatch_sequence=state.last_dispatch,
             ended=state.ended,
-            end_batch_sha256=state.end_batch_sha256,
+            end_batch_sha256=(
+                None
+                if state.end_batch_sha256 is None
+                else Sha256Digest(state.end_batch_sha256.value)
+            ),
             halted=state.conflict is not None,
-            conflict=state.conflict,
+            conflict=public_conflict,
         )
         canonical_historical_matcher_state_bytes(public)
         historical_matcher_state_digest(public)
@@ -732,8 +765,10 @@ class Phase1HistoricalMatcher:
                 next_fact_sequence=self._state.next_fact,
                 trigger_root_sha256=trigger_root_sha256,
             )
-            canonical_historical_matcher_conflict_bytes(conflict)
-            historical_matcher_conflict_digest(conflict)
+            conflict_bytes = canonical_historical_matcher_conflict_bytes(conflict)
+            conflict_sha256 = historical_matcher_conflict_digest(conflict)
+            self._conflict_bytes = conflict_bytes
+            self._conflict_sha256 = conflict_sha256
             self._state = _MatcherState(
                 **{
                     name: getattr(self._state, name)
@@ -1551,6 +1586,8 @@ def create_phase1_historical_matcher(
     value._spec_bytes = canonical_instrument_spec_set_bytes(owned_specs)
     value._spec_sha256 = instrument_spec_set_digest(owned_specs)
     value._execution_policy = owned_policy
+    value._conflict_bytes = None
+    value._conflict_sha256 = None
     value._source_namespace = owned_source_namespace
     value._source_namespace_value = owned_source_namespace.value
     value._provenance_id = owned_provenance_id

@@ -26,19 +26,24 @@ from ea.core.execution_identity import (
     EconomicId,
     EconomicOwnerKind,
     SourceNamespace,
+    SourceNativeSequence,
 )
 from ea.core.execution_messages import (
     ExecutionPolicyId,
     ExecutionPolicyRef,
+    FactProvenance,
     FactProvenanceId,
     Order,
     OrderSide,
     TargetLineageRef,
     canonical_execution_fact_bytes,
     canonical_execution_fact_ingress_bytes,
+    create_execution_fact_ingress,
+    create_trade_execution_fact,
     decode_order,
     decode_order_intent,
     decode_risk_decision,
+    execution_fact_digest,
     execution_fact_ingress_digest,
     execution_request_digest,
     order_client_submission_key,
@@ -52,7 +57,10 @@ from ea.core.historical_matching import (
     HistoricalPreEffectAuthorizationError,
     HistoricalSubmissionAuthorizationProof,
     _create_historical_matcher_conflict,
+    _create_historical_matcher_descendant_binding,
+    _create_historical_matcher_dispatch_batch,
     _create_historical_submission_authorization_proof,
+    _validate_descendant_binding,
     canonical_end_of_run_root_bytes,
     canonical_historical_matcher_dispatch_batch_bytes,
     canonical_historical_matcher_observation_bytes,
@@ -64,6 +72,7 @@ from ea.core.historical_matching import (
     historical_end_root_digest,
     historical_market_root_digest,
     historical_matcher_dispatch_batch_digest,
+    historical_matcher_observation_digest,
     historical_submission_receipt_digest,
     runtime_root_key_document,
     runtime_root_key_from_document,
@@ -1004,6 +1013,29 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
         },
         {
             **common,
+            "quantity_text": "1.5",
+            "fact_kind": "trade",
+            "trigger_root_kind": HistoricalDispatchKind.MARKET,
+            "trigger_root_sha256": historical_market_root_digest(causal),
+            "trigger_root_key": runtime_root_order_key(causal),
+            "occurred_at": causal.event_time,
+            "available_at": causal.available_at,
+            "price_text": "101.25",
+            "expiry_outcome_code": None,
+        },
+        {
+            **common,
+            "fact_kind": "trade",
+            "trigger_root_kind": HistoricalDispatchKind.MARKET,
+            "trigger_root_sha256": historical_market_root_digest(causal),
+            "trigger_root_key": runtime_root_order_key(causal),
+            "occurred_at": causal.event_time,
+            "available_at": causal.available_at,
+            "price_text": "101.251",
+            "expiry_outcome_code": None,
+        },
+        {
+            **common,
             "fact_kind": "trade",
             "trigger_root_kind": HistoricalDispatchKind.MARKET,
             "trigger_root_sha256": historical_end_root_digest(end),
@@ -1028,6 +1060,26 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
     for values in invalid:
         with pytest.raises(HistoricalMatcherError):
             canonical_historical_matcher_observation_bytes(**cast(Any, values))
+
+
+def test_public_encoders_deep_validate_nested_root_and_instrument_values() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    object.__setattr__(receipt.instrument.venue, "code", "not valid")
+    with pytest.raises(HistoricalMatcherError):
+        canonical_historical_submission_receipt_bytes(receipt)
+
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    object.__setattr__(batch.trigger_root_key._suffix, "source_sequence", True)
+    with pytest.raises(HistoricalMatcherError):
+        canonical_historical_matcher_dispatch_batch_bytes(batch)
+
+    binding = matcher._state.issued[0].binding
+    object.__setattr__(binding.parent_root_key._suffix, "kind_rank", True)
+    with pytest.raises(HistoricalMatcherError):
+        _validate_descendant_binding(binding)
 
 
 def test_conflict_evidence_uses_one_exact_tagged_identity_union() -> None:
@@ -1333,6 +1385,7 @@ def test_submission_membership_authorization_and_caller_ownership_fail_closed() 
     assert matcher._state is initial
 
     for code in (
+        OutcomeCode.SUBMISSION_BLOCKED_BY_HALT,
         OutcomeCode.RISK_STALE_APPROVAL,
         OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
         OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
@@ -1364,6 +1417,30 @@ def test_submission_membership_authorization_and_caller_ownership_fail_closed() 
     assert matcher.submit(retained_input, causal_market_root=causal, dispatch_sequence=7) is receipt
     assert canonical_historical_submission_receipt_bytes(receipt) == receipt_bytes
 
+    _, matcher, orders, causal, _, _ = _system()
+    foreign_run = RunId("87654321-4321-4234-8234-cba987654321")
+    foreign_values: dict[str, object] = {"run_id": foreign_run}
+    for field_name in (
+        "order_id",
+        "intent_id",
+        "correlation_id",
+        "causation_id",
+        "decision_id",
+        "approval_id",
+    ):
+        identity = cast(EconomicId, getattr(orders[0], field_name))
+        foreign_values[field_name] = EconomicId(
+            foreign_run,
+            identity.owner_kind,
+            identity.owner_sequence,
+        )
+    foreign_order = _clone_order(orders[0], **foreign_values)
+    initial = matcher._state
+    with pytest.raises(HistoricalMatcherError) as foreign:
+        matcher.submit(foreign_order, causal_market_root=causal, dispatch_sequence=7)
+    assert foreign.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state is initial
+
 
 def test_uint64_sequence_edges_and_atomic_multi_fact_exhaustion() -> None:
     maximum = (1 << 64) - 1
@@ -1394,6 +1471,101 @@ def test_uint64_sequence_edges_and_atomic_multi_fact_exhaustion() -> None:
     with pytest.raises(HistoricalMatcherError) as overflow:
         matcher.match_active_market_root(delayed, dispatch_sequence=maximum + 1)
     assert overflow.value.code is OutcomeCode.OUT_OF_RANGE
+
+
+def test_final_uint64_fact_boundary_constructs_and_replays_canonical_evidence() -> None:
+    maximum = (1 << 64) - 1
+    _, matcher, orders, causal, delayed, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    order = orders[0]
+    root_sha256 = historical_market_root_digest(delayed)
+    root_key = runtime_root_order_key(delayed)
+    price = _quantized_close(
+        delayed.payload.close,
+        side=order.side,
+        specification=matcher.spec_set.require(order.instrument),
+    )
+    observation = historical_matcher_observation_digest(
+        fact_sequence=maximum,
+        fact_kind="trade",
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        submission_receipt_sha256=historical_submission_receipt_digest(receipt),
+        order_sha256=order_digest(order),
+        trigger_root_kind=HistoricalDispatchKind.MARKET,
+        trigger_root_sha256=root_sha256,
+        trigger_root_key=root_key,
+        trigger_dispatch_sequence=8,
+        occurred_at=delayed.event_time,
+        available_at=delayed.available_at,
+        instrument=order.instrument,
+        side=order.side,
+        quantity_text=order.quantity.text,
+        price_text=price.text,
+        expiry_outcome_code=None,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+    )
+    fact = create_trade_execution_fact(
+        spec_set=matcher.spec_set,
+        side=order.side,
+        quantity=order.quantity,
+        price=price,
+        source_namespace=matcher.source_namespace,
+        dedup_identity=SourceNativeSequence(maximum),
+        occurred_at=delayed.event_time,
+        provenance=FactProvenance(matcher.provenance_id, observation),
+        instrument=order.instrument,
+        client_submission_key=order_client_submission_key(order),
+        order_id=order.order_id,
+        correlation_id=order.correlation_id,
+        causation_id=order.order_id,
+    )
+    ingress = create_execution_fact_ingress(
+        available_at=delayed.available_at,
+        source_namespace=matcher.source_namespace,
+        ingress_sequence=maximum,
+        fact=fact,
+    )
+    ingress_sha256 = execution_fact_ingress_digest(ingress)
+    values = {
+        "run_id": matcher.run_id,
+        "source_namespace": matcher.source_namespace,
+        "dispatch_kind": HistoricalDispatchKind.MARKET,
+        "dispatch_sequence": 8,
+        "trigger_root_sha256": root_sha256,
+        "trigger_root_key": root_key,
+        "next_fact_sequence_before": maximum,
+        "next_fact_sequence_after": None,
+        "submission_sequences": (receipt.submission_sequence,),
+        "order_ids": (order.order_id,),
+        "ingresses": (ingress,),
+        "ingress_sha256s": (ingress_sha256,),
+    }
+    batch = _create_historical_matcher_dispatch_batch(**values)
+    binding = _create_historical_matcher_descendant_binding(
+        ingress_identity=ingress.identity,
+        ingress_sha256=ingress_sha256,
+        fact_sha256=execution_fact_digest(fact),
+        batch_sha256=historical_matcher_dispatch_batch_digest(batch),
+        batch_index=0,
+        parent_kind=HistoricalDispatchKind.MARKET,
+        parent_root_sha256=root_sha256,
+        parent_root_key=root_key,
+        parent_dispatch_sequence=8,
+    )
+    _validate_descendant_binding(binding)
+    assert fact.dedup_identity == SourceNativeSequence(maximum)
+    assert ingress.ingress_sequence == maximum
+    assert batch.next_fact_sequence_before == maximum
+    assert batch.next_fact_sequence_after is None
+    fact_bytes = canonical_execution_fact_bytes(fact)
+    ingress_bytes = canonical_execution_fact_ingress_bytes(ingress)
+    batch_bytes = canonical_historical_matcher_dispatch_batch_bytes(batch)
+    replay = _create_historical_matcher_dispatch_batch(**values)
+    assert canonical_execution_fact_bytes(replay.ingresses[0].fact) == fact_bytes
+    assert canonical_execution_fact_ingress_bytes(replay.ingresses[0]) == ingress_bytes
+    assert canonical_historical_matcher_dispatch_batch_bytes(replay) == batch_bytes
 
 
 def test_multi_order_emission_is_submission_order_even_if_pending_view_is_reordered() -> None:
@@ -1492,6 +1664,25 @@ def test_submission_client_dispatch_and_terminal_identity_conflicts_halt() -> No
         matcher.match_active_market_root(different, dispatch_sequence=8)
     assert matcher._state.conflict is not None
     assert matcher._state.conflict.conflict_kind is HistoricalMatcherConflictKind.DISPATCH_IDENTITY
+
+
+def test_public_conflict_snapshot_is_independent_from_first_retained_evidence() -> None:
+    _, matcher, orders, causal, _, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.submit(
+            _clone_order(orders[0], quantity=CanonicalDecimal("2")),
+            causal_market_root=causal,
+            dispatch_sequence=7,
+        )
+    first = matcher.state
+    assert first.conflict is not None
+    retained_pending_count = first.conflict.pending_count
+    object.__setattr__(first.conflict, "pending_count", retained_pending_count + 10)
+    second = matcher.state
+    assert second.conflict is not None
+    assert second.conflict is not first.conflict
+    assert second.conflict.pending_count == retained_pending_count
 
     _, matcher, _, _, _, end = _system()
     matcher.expire_at_active_end(end, dispatch_sequence=9)

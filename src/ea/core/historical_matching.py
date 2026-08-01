@@ -11,10 +11,16 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, cast, final
 
-from ea.core.economics import CanonicalDecimal
+from ea.core.economics import (
+    CanonicalDecimal,
+    EconomicValidationError,
+    require_positive,
+    require_quantized,
+)
 from ea.core.execution import (
     InstrumentExecutionSpecSet,
     InstrumentSpecSetId,
+    PriceDomain,
     instrument_spec_set_digest,
 )
 from ea.core.execution_identity import (
@@ -824,6 +830,101 @@ def _validate_economic_id(
     return value
 
 
+def _validate_run_id(value: object) -> RunId:
+    if type(value) is not RunId or type(value.value) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, "run ID carriers must be exact")
+    try:
+        owned = RunId(value.value)
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "run ID is invalid") from error
+    if owned != value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "run ID reconstruction conflicts")
+    return value
+
+
+def _validate_source_namespace(value: object) -> SourceNamespace:
+    if type(value) is not SourceNamespace or type(value.value) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, "source namespace carriers must be exact")
+    try:
+        owned = SourceNamespace(value.value)
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "source namespace is invalid") from error
+    if owned != value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "source namespace reconstruction conflicts")
+    return value
+
+
+def _validate_digest(value: object, *, field_name: str) -> Sha256Digest:
+    if type(value) is not Sha256Digest or type(value.value) is not str:
+        raise _fail(OutcomeCode.INVALID_TYPE, f"{field_name} carriers must be exact")
+    try:
+        owned = Sha256Digest(value.value)
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, f"{field_name} is invalid") from error
+    if owned != value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field_name} reconstruction conflicts")
+    return value
+
+
+def _validate_instrument(value: object) -> Instrument:
+    if (
+        type(value) is not Instrument
+        or type(value.venue) is not VenueId
+        or type(value.venue.code) is not str
+        or type(value.symbol) is not str
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "instrument carriers must be exact")
+    try:
+        owned = Instrument(VenueId(value.venue.code), value.symbol)
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "instrument is invalid") from error
+    if owned != value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "instrument reconstruction conflicts")
+    return value
+
+
+def _validate_execution_policy(value: object) -> ExecutionPolicyRef:
+    if (
+        type(value) is not ExecutionPolicyRef
+        or type(value.identifier) is not ExecutionPolicyId
+        or type(value.identifier.value) is not str
+        or type(value.sha256) is not Sha256Digest
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "execution policy carriers must be exact")
+    _validate_digest(value.sha256, field_name="execution policy digest")
+    try:
+        owned = ExecutionPolicyRef(
+            ExecutionPolicyId(value.identifier.value),
+            Sha256Digest(value.sha256.value),
+        )
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "execution policy is invalid") from error
+    if owned != value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "execution policy reconstruction conflicts")
+    return value
+
+
+def _validate_runtime_root_key(
+    value: object,
+    *,
+    expected_kind: HistoricalDispatchKind | None = None,
+) -> RuntimeRootOrderKey:
+    if type(value) is not RuntimeRootOrderKey:
+        raise _fail(OutcomeCode.INVALID_TYPE, "runtime root key must be exact")
+    try:
+        document = _runtime_key_document_from_key(value)
+        owned = runtime_root_key_from_document(document)
+    except HistoricalMatcherError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "runtime root key carriers are invalid") from error
+    if owned != value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "runtime root key reconstruction conflicts")
+    if expected_kind is not None and _root_key_dispatch_kind(owned) is not expected_kind:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "runtime root key kind conflicts")
+    return value
+
+
 def _next_sequence_after(before: int | None, count: int) -> int | None:
     _require_non_negative_uint64(count, field_name="sequence count")
     if count == 0:
@@ -856,6 +957,25 @@ def _validate_receipt(receipt: HistoricalSubmissionReceipt) -> None:
         or type(receipt.execution_policy) is not ExecutionPolicyRef
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "submission receipt carriers must be exact")
+    _validate_run_id(receipt.run_id)
+    _validate_source_namespace(receipt.source_namespace)
+    for field_name, digest in (
+        ("order digest", receipt.order_sha256),
+        ("execution request digest", receipt.execution_request_sha256),
+        ("client submission key", receipt.client_submission_key),
+        ("causal market digest", receipt.causal_market_sha256),
+        ("audit acknowledgement digest", receipt.audit_acknowledgement_sha256),
+        ("instrument spec-set digest", receipt.instrument_spec_set_sha256),
+    ):
+        _validate_digest(digest, field_name=field_name)
+    _validate_instrument(receipt.instrument)
+    _validate_execution_policy(receipt.execution_policy)
+    try:
+        owned_spec_set_id = InstrumentSpecSetId(receipt.instrument_spec_set_id.value)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "instrument spec-set ID is invalid") from error
+    if owned_spec_set_id != receipt.instrument_spec_set_id:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "instrument spec-set ID conflicts")
     _require_positive_uint64(receipt.submission_sequence, field_name="submission_sequence")
     _require_positive_uint64(receipt.dispatch_sequence, field_name="dispatch_sequence")
     _require_non_negative_uint64(receipt.global_halt_epoch, field_name="global_halt_epoch")
@@ -885,6 +1005,10 @@ def _validate_receipt(receipt: HistoricalSubmissionReceipt) -> None:
         run_id=receipt.run_id,
         owner_kind=EconomicOwnerKind.EXECUTION_ORDER,
     )
+    _validate_runtime_root_key(
+        receipt.causal_root_key,
+        expected_kind=HistoricalDispatchKind.MARKET,
+    )
     suffix = receipt.causal_root_key._suffix
     if (
         type(suffix) is not _MarketDataSuffix
@@ -908,6 +1032,10 @@ def _validate_batch(batch: HistoricalMatcherDispatchBatch) -> None:
         or type(batch.ingress_sha256s) is not tuple
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "dispatch batch carriers must be exact")
+    _validate_run_id(batch.run_id)
+    _validate_source_namespace(batch.source_namespace)
+    _validate_digest(batch.trigger_root_sha256, field_name="trigger root digest")
+    _validate_runtime_root_key(batch.trigger_root_key, expected_kind=batch.dispatch_kind)
     _require_positive_uint64(batch.dispatch_sequence, field_name="dispatch_sequence")
     before = (
         None
@@ -932,8 +1060,6 @@ def _validate_batch(batch: HistoricalMatcherDispatchBatch) -> None:
         == len(batch.submission_sequences)
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch arrays are not aligned")
-    if _root_key_dispatch_kind(batch.trigger_root_key) is not batch.dispatch_kind:
-        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch kind and root key conflict")
     if _next_sequence_after(before, len(batch.ingresses)) != after:
         raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch fact sequence pointers conflict")
     if len(set(batch.order_ids)) != len(batch.order_ids):
@@ -964,6 +1090,7 @@ def _validate_batch(batch: HistoricalMatcherDispatchBatch) -> None:
         )
         if type(ingress) is not ExecutionFactIngress or type(digest) is not Sha256Digest:
             raise _fail(OutcomeCode.INVALID_TYPE, "batch entry carriers must be exact")
+        _validate_digest(digest, field_name="ingress digest")
         expected_sequence = cast(int, before) + index
         fact = ingress.fact
         if (
@@ -992,8 +1119,14 @@ def _validate_descendant_binding(binding: HistoricalMatcherDescendantBinding) ->
         or type(binding.parent_root_key) is not RuntimeRootOrderKey
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "descendant binding carriers must be exact")
-    if type(binding.ingress_identity.source_namespace) is not SourceNamespace:
-        raise _fail(OutcomeCode.INVALID_TYPE, "descendant ingress namespace must be exact")
+    _validate_source_namespace(binding.ingress_identity.source_namespace)
+    for field_name, digest in (
+        ("ingress digest", binding.ingress_sha256),
+        ("fact digest", binding.fact_sha256),
+        ("batch digest", binding.batch_sha256),
+        ("parent root digest", binding.parent_root_sha256),
+    ):
+        _validate_digest(digest, field_name=field_name)
     _require_non_negative_uint64(
         binding.ingress_identity.ingress_sequence,
         field_name="ingress_sequence",
@@ -1003,8 +1136,7 @@ def _validate_descendant_binding(binding: HistoricalMatcherDescendantBinding) ->
         binding.parent_dispatch_sequence,
         field_name="parent_dispatch_sequence",
     )
-    if _root_key_dispatch_kind(binding.parent_root_key) is not binding.parent_kind:
-        raise _fail(OutcomeCode.CONFLICTING_ID, "descendant parent kind and key conflict")
+    _validate_runtime_root_key(binding.parent_root_key, expected_kind=binding.parent_kind)
 
 
 def _validate_conflict(conflict: HistoricalMatcherConflictEvidence) -> None:
@@ -1025,6 +1157,14 @@ def _validate_conflict(conflict: HistoricalMatcherConflictEvidence) -> None:
         )
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "conflict carriers must be exact")
+    _validate_run_id(conflict.run_id)
+    for field_name, digest in (
+        ("existing digest", conflict.existing_sha256),
+        ("submitted digest", conflict.submitted_sha256),
+        ("trigger root digest", conflict.trigger_root_sha256),
+    ):
+        if digest is not None:
+            _validate_digest(digest, field_name=field_name)
     for field_name, value in (
         ("submitted_dispatch_sequence", conflict.submitted_dispatch_sequence),
         ("last_successful_dispatch_sequence", conflict.last_successful_dispatch_sequence),
@@ -1056,6 +1196,15 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         or type(state.halted) is not bool
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "matcher state carriers must be exact")
+    _validate_run_id(state.run_id)
+    _validate_source_namespace(state.source_namespace)
+    _validate_execution_policy(state.execution_policy)
+    _validate_digest(state.instrument_spec_set_sha256, field_name="instrument spec-set digest")
+    try:
+        FactProvenanceId(state.provenance_id.value)
+        InstrumentSpecSetId(state.instrument_spec_set_id.value)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "state lineage binding is invalid") from error
     for field_name, value in (
         ("next_submission_sequence", state.next_submission_sequence),
         ("next_fact_sequence", state.next_fact_sequence),
@@ -1067,6 +1216,8 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.INVALID_TYPE, "state receipt digests must be exact")
     if any(type(value) is not Sha256Digest for value in state.dispatch_batch_sha256s):
         raise _fail(OutcomeCode.INVALID_TYPE, "state batch digests must be exact")
+    for digest in (*state.receipt_sha256s, *state.dispatch_batch_sha256s):
+        _validate_digest(digest, field_name="state digest")
     for order_id in state.pending_order_ids:
         _validate_economic_id(
             order_id,
@@ -1567,10 +1718,48 @@ def canonical_historical_matcher_observation_bytes(
         or type(execution_policy) is not ExecutionPolicyRef
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "matcher observation inputs are invalid")
+    _validate_source_namespace(source_namespace)
+    try:
+        if FactProvenanceId(provenance_id.value) != provenance_id:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "observation provenance conflicts")
+    except HistoricalMatcherError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "observation provenance is invalid") from error
+    _validate_digest(submission_receipt_sha256, field_name="submission receipt digest")
+    _validate_digest(order_sha256, field_name="order digest")
+    _validate_digest(trigger_root_sha256, field_name="trigger root digest")
+    _validate_instrument(instrument)
+    _validate_execution_policy(execution_policy)
+    _validate_runtime_root_key(trigger_root_key, expected_kind=trigger_root_kind)
+    try:
+        specification = spec_set.require(instrument)
+        quantity = CanonicalDecimal(quantity_text)
+        require_positive(quantity, field_name="quantity")
+        require_quantized(
+            quantity,
+            specification.quantity_quantum,
+            field_name="quantity",
+        )
+        price = None if price_text is None else CanonicalDecimal(price_text)
+        if price is not None:
+            require_quantized(
+                price,
+                specification.price_quantum,
+                field_name="price",
+            )
+            if specification.price_domain is PriceDomain.POSITIVE and price.coefficient <= 0:
+                raise _fail(OutcomeCode.PRICE_DOMAIN, "observation price must be positive")
+            if specification.price_domain is PriceDomain.NON_NEGATIVE and price.coefficient < 0:
+                raise _fail(OutcomeCode.PRICE_DOMAIN, "observation price must be non-negative")
+    except HistoricalMatcherError:
+        raise
+    except EconomicValidationError as error:
+        raise _fail(error.code, "observation economics are invalid") from error
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "observation economics are invalid") from error
     occurred_text = _utc_text(occurred_at)
     available_text = _utc_text(available_at)
-    if _root_key_dispatch_kind(trigger_root_key) is not trigger_root_kind:
-        raise _fail(OutcomeCode.CONFLICTING_ID, "observation root kind conflicts")
     document = {
         "available_at": available_text,
         "canonicalization": HISTORICAL_MATCHER_OBSERVATION_CANONICALIZATION,

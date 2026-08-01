@@ -11,6 +11,14 @@ from typing import Any, cast
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from ea.core.economics import CanonicalDecimal
+from ea.core.execution import (
+    InstrumentSpecId,
+    InstrumentSpecSetId,
+    build_instrument_spec_set,
+    canonical_instrument_spec_set_bytes,
+    instrument_spec_set_digest,
+)
 from ea.core.execution_messages import execution_fact_ingress_digest, order_digest
 from ea.core.historical_matching import (
     HistoricalMatcherDecodeContext,
@@ -21,6 +29,7 @@ from ea.core.historical_matching import (
     historical_matcher_dispatch_batch_digest,
     historical_submission_receipt_digest,
 )
+from ea.core.identity import Instrument, VenueId
 
 _HELPER_PATH = Path(__file__).parents[1] / "unit" / "test_historical_matcher.py"
 _SPEC = importlib.util.spec_from_file_location("historical_matcher_property_helper", _HELPER_PATH)
@@ -147,3 +156,46 @@ def test_lookup_registry_insertion_order_cannot_change_state_decode(
     )
     decoded = decode_historical_matcher_state(encoded, context=context)
     assert canonical_historical_matcher_state_bytes(decoded) == encoded
+
+
+@given(permutation=st.permutations((0, 1)))
+def test_instrument_spec_construction_permutation_is_canonical(
+    permutation: list[int],
+) -> None:
+    _, matcher, _, _, _, _ = _system()
+    first = matcher.spec_set.specifications[0]
+    second = replace(
+        first,
+        instrument=Instrument(VenueId("XNYS"), "MSFT"),
+        specification_id=InstrumentSpecId("xnys.msft.v1"),
+        price_quantum=CanonicalDecimal("0.05"),
+    )
+    specifications = (first, second)
+    baseline = build_instrument_spec_set(
+        InstrumentSpecSetId("phase1.permutation.v1"),
+        specifications,
+    )
+    candidate = build_instrument_spec_set(
+        InstrumentSpecSetId("phase1.permutation.v1"),
+        tuple(specifications[index] for index in permutation),
+    )
+    assert canonical_instrument_spec_set_bytes(candidate) == (
+        canonical_instrument_spec_set_bytes(baseline)
+    )
+    assert instrument_spec_set_digest(candidate) == instrument_spec_set_digest(baseline)
+
+
+def test_future_bounded_end_cannot_change_frozen_market_prefix() -> None:
+    _, matcher, orders, causal, delayed, end = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    receipt_bytes = canonical_historical_submission_receipt_bytes(receipt)
+    batch_bytes = canonical_historical_matcher_dispatch_batch_bytes(batch)
+    state = matcher.state
+    state_bytes = canonical_historical_matcher_state_bytes(state)
+
+    matcher.expire_at_active_end(end, dispatch_sequence=9)
+
+    assert canonical_historical_submission_receipt_bytes(receipt) == receipt_bytes
+    assert canonical_historical_matcher_dispatch_batch_bytes(batch) == batch_bytes
+    assert canonical_historical_matcher_state_bytes(state) == state_bytes
