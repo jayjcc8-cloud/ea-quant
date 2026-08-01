@@ -104,6 +104,7 @@ from ea.data import (
 from ea.execution.matcher import (
     Phase1HistoricalMatcher,
     _advance,
+    _DispatchCallbackStateFence,
     _quantized_close,
     create_phase1_historical_matcher,
 )
@@ -2315,7 +2316,10 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
 ) -> None:
     _, matcher, _, _, delayed, _ = _system()
     validations = 0
+    callback_state_types: list[type[object]] = []
     original = Phase1HistoricalMatcher._require_dispatch_record
+    verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    original_verify = verifier.verify_active_market_dispatch
 
     def tracked(
         self: Phase1HistoricalMatcher,
@@ -2326,6 +2330,16 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
         original(self, record)
 
     monkeypatch.setattr(Phase1HistoricalMatcher, "_require_dispatch_record", tracked)
+
+    def observe_callback_fence(
+        root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> Any:
+        callback_state_types.append(type(matcher._state))
+        return original_verify(root, dispatch_sequence=dispatch_sequence)
+
+    cast(Any, verifier).verify_active_market_dispatch = observe_callback_fence
     roots = tuple(
         replace(delayed, source_sequence=delayed.source_sequence + offset)
         for offset in range(1, 33)
@@ -2337,8 +2351,11 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
 
     assert all(batch.ingresses == () for batch in batches)
     assert validations == 0
+    assert callback_state_types == [_DispatchCallbackStateFence] * len(roots)
+    assert _DispatchCallbackStateFence.__slots__ == ("_accessed",)
     assert matcher.match_active_market_root(roots[0], dispatch_sequence=1) is batches[0]
     assert validations == 1
+    assert callback_state_types == [_DispatchCallbackStateFence] * len(roots)
 
 
 def test_no_fill_filters_and_first_later_fill_are_closed_and_replay_stable() -> None:
@@ -3025,7 +3042,8 @@ def test_dispatch_rebinds_complete_state_on_every_verifier_exit() -> None:
             assert matcher._state.ended is False
             assert 9 not in matcher._state.dispatch_by_sequence
             assert len(matcher._state.issued) == 1
-            assert matcher._state.issued[0].ingress_bytes == b"drift"
+            assert matcher._state.issued[0] is before.issued[0]
+            assert matcher._state.issued[0].ingress_bytes != b"drift"
             assert matcher._state.conflict is not None
             assert (
                 matcher._state.conflict.conflict_kind
@@ -3052,6 +3070,151 @@ def test_dispatch_rebinds_complete_state_on_every_verifier_exit() -> None:
             operation()
         assert unchanged.value is sentinel
         assert matcher._state is initial
+
+
+def test_dispatch_callback_drift_publishes_from_trusted_baseline() -> None:
+    changed_run_id = RunId("87654321-4321-4234-8234-cba987654321")
+    forged_conflict_sha256 = Sha256Digest("f" * 64)
+
+    def forge_callback_state(
+        matcher: Phase1HistoricalMatcher,
+        trusted_state: Any,
+    ) -> None:
+        matcher._state = replace(
+            trusted_state,
+            last_dispatch=None,
+            conflict=cast(Any, object()),
+        )
+        matcher._conflict_bytes = b"forged"
+        matcher._conflict_sha256 = forged_conflict_sha256
+        matcher._run_id = changed_run_id
+        matcher._run_id_value = changed_run_id.value
+        matcher._mutation_active = False
+
+    def delete_callback_state(matcher: Phase1HistoricalMatcher) -> None:
+        for name in (
+            "_state",
+            "_conflict_bytes",
+            "_conflict_sha256",
+            "_run_id",
+            "_run_id_value",
+            "_mutation_active",
+        ):
+            object.__delattr__(matcher, name)
+
+    def market_callback(
+        matcher: Phase1HistoricalMatcher,
+        trusted_state: Any,
+        original: Any,
+        exit_kind: str,
+    ) -> Any:
+        def callback(
+            root: MarketDataEnvelope,
+            *,
+            dispatch_sequence: int,
+        ) -> Any:
+            proof = original(root, dispatch_sequence=dispatch_sequence)
+            if exit_kind == "deleted-state":
+                delete_callback_state(matcher)
+            else:
+                forge_callback_state(matcher, trusted_state)
+            if exit_kind == "exception":
+                raise RuntimeError("market callback forged conflict state")
+            if exit_kind == "invalid-proof":
+                return object()
+            return proof
+
+        return callback
+
+    def end_callback(
+        matcher: Phase1HistoricalMatcher,
+        trusted_state: Any,
+        original: Any,
+        exit_kind: str,
+    ) -> Any:
+        def callback(
+            root: EndOfRunRoot,
+            *,
+            dispatch_sequence: int,
+        ) -> Any:
+            proof = original(root, dispatch_sequence=dispatch_sequence)
+            if exit_kind == "deleted-state":
+                delete_callback_state(matcher)
+            else:
+                forge_callback_state(matcher, trusted_state)
+            if exit_kind == "exception":
+                raise RuntimeError("end callback forged conflict state")
+            if exit_kind == "invalid-proof":
+                return object()
+            return proof
+
+        return callback
+
+    def market_operation(
+        matcher: Phase1HistoricalMatcher,
+        root: MarketDataEnvelope,
+    ) -> Any:
+        def operation() -> Any:
+            return matcher.match_active_market_root(root, dispatch_sequence=9)
+
+        return operation
+
+    def end_operation(
+        matcher: Phase1HistoricalMatcher,
+        root: EndOfRunRoot,
+    ) -> Any:
+        def operation() -> Any:
+            return matcher.expire_at_active_end(root, dispatch_sequence=9)
+
+        return operation
+
+    for dispatch_kind in ("market", "end"):
+        for exit_kind in ("valid-proof", "exception", "invalid-proof", "deleted-state"):
+            _, matcher, orders, causal, delayed, end = _system()
+            matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+            matcher.match_active_market_root(delayed, dispatch_sequence=8)
+            trusted_state = matcher._state
+            trusted_run_id = matcher.run_id
+            verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+
+            if dispatch_kind == "market":
+                original_market = verifier.verify_active_market_dispatch
+                cast(Any, verifier).verify_active_market_dispatch = market_callback(
+                    matcher,
+                    trusted_state,
+                    original_market,
+                    exit_kind,
+                )
+                operation = market_operation(
+                    matcher,
+                    replace(delayed, source_sequence=delayed.source_sequence + 1),
+                )
+            else:
+                original_end = verifier.verify_active_end_of_run_dispatch
+                cast(Any, verifier).verify_active_end_of_run_dispatch = end_callback(
+                    matcher,
+                    trusted_state,
+                    original_end,
+                    exit_kind,
+                )
+                operation = end_operation(matcher, end)
+
+            with pytest.raises(HistoricalMatcherError) as rejected:
+                operation()
+            assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+            assert matcher.run_id == trusted_run_id
+            assert matcher._state.last_dispatch == 8
+            assert matcher._state.issued == trusted_state.issued
+            assert 9 not in matcher._state.dispatch_by_sequence
+            assert matcher._state.conflict is not None
+            assert (
+                matcher._state.conflict.conflict_kind
+                is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+            )
+            assert matcher._state.conflict.last_successful_dispatch_sequence == 8
+            assert matcher._state.conflict.submitted_dispatch_sequence == 9
+            assert matcher._conflict_bytes != b"forged"
+            assert matcher._conflict_sha256 != forged_conflict_sha256
 
 
 def test_cross_issuer_and_mutated_authorization_and_end_proofs_are_rejected() -> None:
