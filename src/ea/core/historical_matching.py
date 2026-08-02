@@ -2922,17 +2922,63 @@ def decode_historical_matcher_state(
         for batch in batches
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state batch bindings conflict")
+    if tuple(receipt.dispatch_sequence for receipt in receipts) != tuple(
+        sorted(receipt.dispatch_sequence for receipt in receipts)
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt dispatch order conflicts")
     if tuple(batch.dispatch_sequence for batch in batches) != tuple(
         sorted(batch.dispatch_sequence for batch in batches)
     ) or len({batch.dispatch_sequence for batch in batches}) != len(batches):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state dispatch append order conflicts")
+    receipt_records: list[tuple[HistoricalSubmissionReceipt, Order]] = []
+    for receipt in receipts:
+        order = context.orders_by_sha256.get(receipt.order_sha256)
+        if type(order) is not Order:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt Order lookup conflicts")
+        receipt_records.append((receipt, order))
+    pending_records: list[tuple[HistoricalSubmissionReceipt, Order]] = []
+    next_receipt_index = 0
     expected_fact_pointer: int | None = 1
     for index, batch in enumerate(batches):
+        while (
+            next_receipt_index < len(receipt_records)
+            and receipt_records[next_receipt_index][0].dispatch_sequence < batch.dispatch_sequence
+        ):
+            pending_records.append(receipt_records[next_receipt_index])
+            next_receipt_index += 1
+        if batch.dispatch_kind is HistoricalDispatchKind.MARKET:
+            trigger_root = context.market_roots_by_sha256.get(batch.trigger_root_sha256)
+            if type(trigger_root) is not MarketDataEnvelope:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "state market root lookup conflicts")
+            expected_records = tuple(
+                (receipt, order)
+                for receipt, order in pending_records
+                if (
+                    trigger_root.payload.instrument == order.instrument
+                    and trigger_root.payload.adjustment is Adjustment.RAW
+                    and trigger_root.revision == 0
+                    and batch.trigger_root_key > receipt.causal_root_key
+                    and trigger_root.event_time > order.eligible_after_available_at
+                )
+            )
+        else:
+            expected_records = tuple(pending_records)
+        expected_entries = tuple(
+            (receipt.submission_sequence, receipt.order_id) for receipt, _ in expected_records
+        )
+        actual_entries = tuple(zip(batch.submission_sequences, batch.order_ids, strict=True))
+        if actual_entries != expected_entries:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state batch eligibility history conflicts")
+        emitted_order_ids = {receipt.order_id for receipt, _ in expected_records}
+        pending_records = [
+            record for record in pending_records if record[0].order_id not in emitted_order_ids
+        ]
         if batch.next_fact_sequence_before != expected_fact_pointer:
             raise _fail(OutcomeCode.CONFLICTING_ID, "state batch fact chain conflicts")
         expected_fact_pointer = batch.next_fact_sequence_after
         if batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN and index != len(batches) - 1:
             raise _fail(OutcomeCode.CONFLICTING_ID, "state has dispatch after terminal batch")
+    pending_records.extend(receipt_records[next_receipt_index:])
     if state.next_fact_sequence != expected_fact_pointer:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state final fact pointer conflicts")
     expected_last = None if not batches else batches[-1].dispatch_sequence
@@ -2961,11 +3007,7 @@ def decode_historical_matcher_state(
     flattened_ingresses = tuple(ingress for batch in batches for ingress in batch.ingresses)
     if flattened_ingresses != tuple(issued):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state issued ingress append order conflicts")
-    submitted_order_ids = tuple(receipt.order_id for receipt in receipts)
-    emitted_order_ids = set(emitted_order_ids_in_order)
-    expected_pending = tuple(
-        order_id for order_id in submitted_order_ids if order_id not in emitted_order_ids
-    )
+    expected_pending = tuple(receipt.order_id for receipt, _ in pending_records)
     if state.pending_order_ids != expected_pending:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state pending membership conflicts")
     if state.ended and state.pending_order_ids:

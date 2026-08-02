@@ -843,6 +843,156 @@ def test_state_decoder_rebuilds_registered_batch_before_accepting_state() -> Non
     assert rejected.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_state_decoder_rejects_fill_delayed_past_first_eligible_batch() -> None:
+    _, matcher, orders, causal, first_eligible, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    second_eligible = replace(
+        first_eligible,
+        payload=replace(
+            first_eligible.payload,
+            interval_start=first_eligible.payload.interval_end,
+            interval_end=first_eligible.payload.interval_end + timedelta(minutes=1),
+            open=102.0,
+            high=103.0,
+            low=101.0,
+            close=102.0,
+        ),
+        available_at=first_eligible.available_at + timedelta(minutes=1),
+        source_sequence=first_eligible.source_sequence + 1,
+    )
+    delayed_fill_batch = matcher.match_active_market_root(
+        second_eligible,
+        dispatch_sequence=9,
+    )
+    omitted_first_batch = _create_historical_matcher_dispatch_batch(
+        run_id=matcher.run_id,
+        source_namespace=matcher.source_namespace,
+        dispatch_kind=HistoricalDispatchKind.MARKET,
+        dispatch_sequence=8,
+        trigger_root_sha256=historical_market_root_digest(first_eligible),
+        trigger_root_key=runtime_root_order_key(first_eligible),
+        next_fact_sequence_before=1,
+        next_fact_sequence_after=1,
+        submission_sequences=(),
+        order_ids=(),
+        ingresses=(),
+        ingress_sha256s=(),
+    )
+    omitted_first_sha256 = historical_matcher_dispatch_batch_digest(omitted_first_batch)
+    delayed_fill_sha256 = historical_matcher_dispatch_batch_digest(delayed_fill_batch)
+    state_document = json.loads(canonical_historical_matcher_state_bytes(matcher.state))
+    state_document["dispatch_batch_sha256s"] = [
+        omitted_first_sha256.value,
+        delayed_fill_sha256.value,
+    ]
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={order_digest(orders[0]): orders[0]},
+        receipts_by_sha256={historical_submission_receipt_digest(receipt): receipt},
+        batches_by_sha256={
+            omitted_first_sha256: omitted_first_batch,
+            delayed_fill_sha256: delayed_fill_batch,
+        },
+        ingresses_by_sha256={
+            execution_fact_ingress_digest(delayed_fill_batch.ingresses[0]): (
+                delayed_fill_batch.ingresses[0]
+            )
+        },
+        market_roots_by_sha256={
+            receipt.causal_market_sha256: causal,
+            omitted_first_batch.trigger_root_sha256: first_eligible,
+            delayed_fill_batch.trigger_root_sha256: second_eligible,
+        },
+    )
+
+    assert (
+        decode_historical_matcher_dispatch_batch(
+            canonical_historical_matcher_dispatch_batch_bytes(omitted_first_batch),
+            context=context,
+        )
+        == omitted_first_batch
+    )
+    assert (
+        decode_historical_matcher_dispatch_batch(
+            canonical_historical_matcher_dispatch_batch_bytes(delayed_fill_batch),
+            context=context,
+        )
+        == delayed_fill_batch
+    )
+    with pytest.raises(HistoricalMatcherError) as delayed_fill:
+        decode_historical_matcher_state(
+            _canonical_document(state_document),
+            context=context,
+        )
+    assert delayed_fill.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_state_decoder_replays_non_eligible_empty_batch_before_fill() -> None:
+    _, matcher, orders, causal, first_eligible, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    other_instrument_root = replace(
+        first_eligible,
+        payload=replace(
+            first_eligible.payload,
+            instrument=Instrument(VenueId("XNAS"), "MSFT"),
+        ),
+    )
+    empty_batch = matcher.match_active_market_root(
+        other_instrument_root,
+        dispatch_sequence=8,
+    )
+    second_eligible = replace(
+        first_eligible,
+        payload=replace(
+            first_eligible.payload,
+            interval_start=first_eligible.payload.interval_end,
+            interval_end=first_eligible.payload.interval_end + timedelta(minutes=1),
+            open=102.0,
+            high=103.0,
+            low=101.0,
+            close=102.0,
+        ),
+        available_at=first_eligible.available_at + timedelta(minutes=1),
+        source_sequence=first_eligible.source_sequence + 1,
+    )
+    fill_batch = matcher.match_active_market_root(second_eligible, dispatch_sequence=9)
+    state = matcher.state
+    batches = (empty_batch, fill_batch)
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={order_digest(orders[0]): orders[0]},
+        receipts_by_sha256={historical_submission_receipt_digest(receipt): receipt},
+        batches_by_sha256={
+            historical_matcher_dispatch_batch_digest(batch): batch for batch in batches
+        },
+        ingresses_by_sha256={
+            execution_fact_ingress_digest(fill_batch.ingresses[0]): fill_batch.ingresses[0]
+        },
+        market_roots_by_sha256={
+            receipt.causal_market_sha256: causal,
+            empty_batch.trigger_root_sha256: other_instrument_root,
+            fill_batch.trigger_root_sha256: second_eligible,
+        },
+    )
+
+    assert empty_batch.ingresses == ()
+    assert (
+        decode_historical_matcher_state(
+            canonical_historical_matcher_state_bytes(state),
+            context=context,
+        )
+        == state
+    )
+
+
 def test_state_decoder_binds_batch_history_to_unique_state_receipts() -> None:
     _, matcher, orders, causal, delayed, end = _system()
     receipts = [matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)]
