@@ -158,6 +158,8 @@ class HistoricalSubmissionAuthorizationVerifier(Protocol):
 
 
 class HistoricalMatcherDispatchVerifier(Protocol):
+    """Root-proof capability only; matcher-private state is not part of this port."""
+
     @property
     def run_id(self) -> RunId: ...
 
@@ -796,7 +798,11 @@ class Phase1HistoricalMatcher:
             self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
 
     def _begin_dispatch_callback(self) -> _DispatchCallbackLease:
-        """Isolate trusted retained state from an untrusted verifier callback."""
+        """Fence state reachable through the matcher during a verifier callback.
+
+        The verifier port receives only the root and dispatch sequence. Pre-capturing matcher-
+        private objects through same-process reflection is outside that capability boundary.
+        """
         fence = _DispatchCallbackStateFence()
         lease = _DispatchCallbackLease(
             state=self._state,
@@ -830,6 +836,10 @@ class Phase1HistoricalMatcher:
         current_run_id_value = current("_run_id_value")
         current_mutation_active = current("_mutation_active")
         try:
+            current_fence_accessed = object.__getattribute__(lease.fence, "_accessed")
+        except (AttributeError, TypeError):
+            current_fence_accessed = missing
+        try:
             run_id_unchanged = (
                 type(current_run_id) is RunId
                 and current_run_id is lease.run_id
@@ -839,7 +849,7 @@ class Phase1HistoricalMatcher:
         except Exception:
             run_id_unchanged = False
         drifted = (
-            bool(object.__getattribute__(lease.fence, "_accessed"))
+            current_fence_accessed is not False
             or current_state is not lease.fence
             or current_conflict_bytes is not lease.conflict_bytes
             or current_conflict_sha256 is not lease.conflict_sha256

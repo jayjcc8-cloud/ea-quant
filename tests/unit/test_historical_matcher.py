@@ -3102,6 +3102,13 @@ def test_dispatch_callback_drift_publishes_from_trusted_baseline() -> None:
         ):
             object.__delattr__(matcher, name)
 
+    def tamper_callback_fence(matcher: Phase1HistoricalMatcher, *, delete: bool) -> None:
+        fence = object.__getattribute__(matcher, "_state")
+        if delete:
+            object.__delattr__(fence, "_accessed")
+        else:
+            object.__setattr__(fence, "_accessed", object())
+
     def market_callback(
         matcher: Phase1HistoricalMatcher,
         trusted_state: Any,
@@ -3116,11 +3123,16 @@ def test_dispatch_callback_drift_publishes_from_trusted_baseline() -> None:
             proof = original(root, dispatch_sequence=dispatch_sequence)
             if exit_kind == "deleted-state":
                 delete_callback_state(matcher)
+            elif exit_kind.startswith("fence-"):
+                tamper_callback_fence(
+                    matcher,
+                    delete=exit_kind != "fence-invalid-proof",
+                )
             else:
                 forge_callback_state(matcher, trusted_state)
-            if exit_kind == "exception":
+            if exit_kind in {"exception", "fence-exception"}:
                 raise RuntimeError("market callback forged conflict state")
-            if exit_kind == "invalid-proof":
+            if exit_kind in {"invalid-proof", "fence-invalid-proof"}:
                 return object()
             return proof
 
@@ -3140,11 +3152,16 @@ def test_dispatch_callback_drift_publishes_from_trusted_baseline() -> None:
             proof = original(root, dispatch_sequence=dispatch_sequence)
             if exit_kind == "deleted-state":
                 delete_callback_state(matcher)
+            elif exit_kind.startswith("fence-"):
+                tamper_callback_fence(
+                    matcher,
+                    delete=exit_kind != "fence-invalid-proof",
+                )
             else:
                 forge_callback_state(matcher, trusted_state)
-            if exit_kind == "exception":
+            if exit_kind in {"exception", "fence-exception"}:
                 raise RuntimeError("end callback forged conflict state")
-            if exit_kind == "invalid-proof":
+            if exit_kind in {"invalid-proof", "fence-invalid-proof"}:
                 return object()
             return proof
 
@@ -3169,7 +3186,15 @@ def test_dispatch_callback_drift_publishes_from_trusted_baseline() -> None:
         return operation
 
     for dispatch_kind in ("market", "end"):
-        for exit_kind in ("valid-proof", "exception", "invalid-proof", "deleted-state"):
+        for exit_kind in (
+            "valid-proof",
+            "exception",
+            "invalid-proof",
+            "deleted-state",
+            "fence-valid-proof",
+            "fence-exception",
+            "fence-invalid-proof",
+        ):
             _, matcher, orders, causal, delayed, end = _system()
             matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
             matcher.match_active_market_root(delayed, dispatch_sequence=8)
