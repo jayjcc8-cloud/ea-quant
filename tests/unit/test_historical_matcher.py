@@ -1991,6 +1991,18 @@ def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:
     )
     canonical_historical_matcher_dispatch_batch_bytes(batch)
 
+    unbounded_end = replace(end, producer_sequence=unbounded + 2)
+    assert runtime_root_key_from_document(runtime_root_key_document(unbounded_end)) == (
+        runtime_root_order_key(unbounded_end)
+    )
+    matcher.submit(
+        orders[1],
+        causal_market_root=delayed,
+        dispatch_sequence=8,
+    )
+    end_batch = matcher.expire_at_active_end(unbounded_end, dispatch_sequence=9)
+    canonical_historical_matcher_dispatch_batch_bytes(end_batch)
+
     malformed_market_documents = (
         ({**market, "unknown": None}, OutcomeCode.OUT_OF_RANGE),
         ({**market, "instrument": "XNAS/AAPL"}, OutcomeCode.INVALID_TYPE),
@@ -2026,7 +2038,6 @@ def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:
         ({**terminal, "kind_rank": True}, OutcomeCode.INVALID_TYPE),
         ({**terminal, "kind": "future"}, OutcomeCode.OUT_OF_RANGE),
         ({**terminal, "producer_sequence": -1}, OutcomeCode.CONFLICTING_ID),
-        ({**terminal, "producer_sequence": 1 << 64}, OutcomeCode.CONFLICTING_ID),
         ({**terminal, "run_id": "not-a-run-id"}, OutcomeCode.OUT_OF_RANGE),
     )
     for document, code in malformed_terminal_documents:

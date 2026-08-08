@@ -406,7 +406,6 @@ def runtime_root_key_from_document(document: object) -> RuntimeRootOrderKey:
             document["domain_rank"] != RUNTIME_ROOT_DOMAIN_RANKS[RuntimeRootDomain.END_OF_RUN]
             or document["kind_rank"] != END_OF_RUN_KIND_RANKS[kind]
             or document["producer_sequence"] < 0
-            or document["producer_sequence"] > _MAX_UINT64
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "end root ranks conflict")
         try:
