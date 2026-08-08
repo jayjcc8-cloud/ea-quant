@@ -1323,6 +1323,7 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state submission sequence conflicts")
     if _next_sequence_after(1, len(state.issued_ingresses)) != state.next_fact_sequence:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state fact sequence conflicts")
+    issued_order_ids: list[EconomicId] = []
     for sequence, ingress in enumerate(state.issued_ingresses, start=1):
         if (
             ingress.identity != IngressIdentity(state.source_namespace, sequence)
@@ -1330,8 +1331,23 @@ def _validate_state(state: HistoricalMatcherState) -> None:
             or ingress.fact.dedup_identity.value != sequence
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "state ingress sequence conflicts")
+        issued_order_id = ingress.fact.order_id
+        if type(issued_order_id) is not EconomicId:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state ingress Order identity conflicts")
+        _validate_economic_id(
+            issued_order_id,
+            run_id=state.run_id,
+            owner_kind=EconomicOwnerKind.EXECUTION_ORDER,
+        )
+        issued_order_ids.append(issued_order_id)
         canonical_execution_fact_ingress_bytes(ingress)
         canonical_execution_fact_bytes(ingress.fact)
+    if len(state.receipt_sha256s) != len(state.pending_order_ids) + len(issued_order_ids):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt partition conflicts")
+    if len(set(issued_order_ids)) != len(issued_order_ids):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state issued Order IDs duplicate")
+    if set(state.pending_order_ids).intersection(issued_order_ids):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state Order is both pending and issued")
     if state.halted != (state.conflict is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state halt/conflict relationship conflicts")
     if state.conflict is not None:

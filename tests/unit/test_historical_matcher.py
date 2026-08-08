@@ -578,6 +578,52 @@ def test_state_encoder_rejects_terminal_state_with_pending_orders() -> None:
     assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_state_encoder_requires_each_receipt_pending_or_issued() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    receipts = [matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)]
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    receipts.append(matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8))
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={order_digest(order): order for order in orders},
+        market_roots_by_sha256={
+            receipts[0].causal_market_sha256: causal,
+            historical_market_root_digest(delayed): delayed,
+        },
+        receipts_by_sha256={
+            historical_submission_receipt_digest(receipt): receipt for receipt in receipts
+        },
+        batches_by_sha256={historical_matcher_dispatch_batch_digest(batch): batch},
+        ingresses_by_sha256={
+            execution_fact_ingress_digest(ingress): ingress for ingress in batch.ingresses
+        },
+    )
+    state = matcher.state
+    assert (
+        decode_historical_matcher_state(
+            canonical_historical_matcher_state_bytes(state),
+            context=context,
+        )
+        == state
+    )
+
+    missing_pending = matcher.state
+    object.__setattr__(missing_pending, "pending_order_ids", ())
+    with pytest.raises(HistoricalMatcherError) as dropped:
+        canonical_historical_matcher_state_bytes(missing_pending)
+    assert dropped.value.code is OutcomeCode.CONFLICTING_ID
+
+    double_assigned = matcher.state
+    object.__setattr__(double_assigned, "pending_order_ids", (orders[0].order_id,))
+    with pytest.raises(HistoricalMatcherError) as overlap:
+        canonical_historical_matcher_state_bytes(double_assigned)
+    assert overlap.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
     _, matcher, _, _, delayed, _ = _system()
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
