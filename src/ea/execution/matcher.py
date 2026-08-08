@@ -2264,6 +2264,7 @@ class Phase1HistoricalMatcher:
                 provenance_id=self._provenance_id,
                 submission_receipt_sha256=record.receipt_sha256,
                 submission_receipt=record.receipt,
+                causal_market_root=record.causal_market_root,
                 order_sha256=record.order_sha256,
                 order=record.order,
                 trigger_root_kind=kind,

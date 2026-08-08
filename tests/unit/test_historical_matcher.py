@@ -202,6 +202,7 @@ def _expiry_ingress(
     matcher: Phase1HistoricalMatcher,
     receipt: HistoricalSubmissionReceipt,
     order: Order,
+    causal_market_root: MarketDataEnvelope,
     end_batch: Any,
     end: EndOfRunRoot,
     fact_sequence: int,
@@ -214,6 +215,7 @@ def _expiry_ingress(
         provenance_id=matcher.provenance_id,
         submission_receipt_sha256=receipt_sha256,
         submission_receipt=receipt,
+        causal_market_root=causal_market_root,
         order_sha256=receipt.order_sha256,
         order=order,
         trigger_root_kind=HistoricalDispatchKind.END_OF_RUN,
@@ -1591,6 +1593,7 @@ def test_state_decoder_binds_batch_history_to_unique_state_receipts() -> None:
         matcher=matcher,
         receipt=receipts[0],
         order=orders[0],
+        causal_market_root=causal,
         end_batch=batches[1],
         end=end,
         fact_sequence=2,
@@ -2663,6 +2666,7 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
         "provenance_id": matcher.provenance_id,
         "submission_receipt_sha256": historical_submission_receipt_digest(receipt),
         "submission_receipt": receipt,
+        "causal_market_root": causal,
         "order_sha256": order_digest(orders[0]),
         "order": orders[0],
         "trigger_dispatch_sequence": 8,
@@ -2841,6 +2845,7 @@ def test_observation_encoder_binds_trade_price_to_trigger_root() -> None:
         "provenance_id": matcher.provenance_id,
         "submission_receipt_sha256": historical_submission_receipt_digest(receipt),
         "submission_receipt": receipt,
+        "causal_market_root": causal,
         "order_sha256": order_digest(order),
         "order": order,
         "trigger_root_kind": HistoricalDispatchKind.MARKET,
@@ -2859,6 +2864,35 @@ def test_observation_encoder_binds_trade_price_to_trigger_root() -> None:
         "execution_policy": matcher.execution_policy,
     }
     canonical_historical_matcher_observation_bytes(**cast(Any, values))
+
+    different_causal_key = runtime_root_order_key(
+        replace(causal, source_sequence=causal.source_sequence + 1)
+    )
+    forged_receipts = (
+        _clone_receipt(receipt, causal_market_sha256=Sha256Digest("f" * 64)),
+        _clone_receipt(receipt, causal_root_key=different_causal_key),
+    )
+    for forged_receipt in forged_receipts:
+        with pytest.raises(HistoricalMatcherError) as causal_rejected:
+            canonical_historical_matcher_observation_bytes(
+                **cast(
+                    Any,
+                    {
+                        **values,
+                        "submission_receipt": forged_receipt,
+                        "submission_receipt_sha256": historical_submission_receipt_digest(
+                            forged_receipt
+                        ),
+                    },
+                )
+            )
+        assert causal_rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+    with pytest.raises(HistoricalMatcherError) as wrong_causal_root:
+        canonical_historical_matcher_observation_bytes(
+            **cast(Any, {**values, "causal_market_root": delayed})
+        )
+    assert wrong_causal_root.value.code is OutcomeCode.CONFLICTING_ID
 
     wrong_price = matcher.spec_set.require(order.instrument).price_quantum
     assert wrong_price != expected
@@ -3944,6 +3978,7 @@ def test_final_uint64_fact_boundary_constructs_and_replays_canonical_evidence() 
         provenance_id=matcher.provenance_id,
         submission_receipt_sha256=historical_submission_receipt_digest(receipt),
         submission_receipt=receipt,
+        causal_market_root=causal,
         order_sha256=order_digest(order),
         order=order,
         trigger_root_kind=HistoricalDispatchKind.MARKET,

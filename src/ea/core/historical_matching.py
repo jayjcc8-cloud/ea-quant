@@ -2172,6 +2172,7 @@ def canonical_historical_matcher_observation_bytes(
     provenance_id: FactProvenanceId,
     submission_receipt_sha256: Sha256Digest,
     submission_receipt: HistoricalSubmissionReceipt,
+    causal_market_root: MarketDataEnvelope,
     order_sha256: Sha256Digest,
     order: Order,
     trigger_root_kind: HistoricalDispatchKind,
@@ -2197,6 +2198,7 @@ def canonical_historical_matcher_observation_bytes(
         or type(provenance_id) is not FactProvenanceId
         or type(submission_receipt_sha256) is not Sha256Digest
         or type(submission_receipt) is not HistoricalSubmissionReceipt
+        or type(causal_market_root) is not MarketDataEnvelope
         or type(order_sha256) is not Sha256Digest
         or type(order) is not Order
         or type(trigger_root_kind) is not HistoricalDispatchKind
@@ -2273,6 +2275,13 @@ def canonical_historical_matcher_observation_bytes(
         client_key_matches = (
             order_client_submission_key(order) == submission_receipt.client_submission_key
         )
+        causal_market_sha256_matches = (
+            historical_market_root_digest(causal_market_root)
+            == submission_receipt.causal_market_sha256
+        )
+        causal_root_key_matches = (
+            runtime_root_order_key(causal_market_root) == submission_receipt.causal_root_key
+        )
     except (AttributeError, TypeError, ValueError) as error:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "observation Order evidence is invalid") from error
     if (
@@ -2281,6 +2290,10 @@ def canonical_historical_matcher_observation_bytes(
         or submission_receipt.order_sha256 != order_sha256
         or not request_sha256_matches
         or not client_key_matches
+        or not causal_market_sha256_matches
+        or not causal_root_key_matches
+        or causal_market_root.payload.instrument != order.instrument
+        or causal_market_root.available_at != order.eligible_after_available_at
         or order.run_id != submission_receipt.run_id
         or submission_receipt.source_namespace != source_namespace
         or order.order_id != submission_receipt.order_id
@@ -2974,6 +2987,7 @@ def _expected_decoded_batch_ingress(
         provenance_id=context.provenance_id,
         submission_receipt_sha256=receipt_sha256,
         submission_receipt=receipt,
+        causal_market_root=causal_root,
         order_sha256=receipt.order_sha256,
         order=order,
         trigger_root_kind=batch.dispatch_kind,
