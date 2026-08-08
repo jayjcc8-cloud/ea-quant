@@ -356,9 +356,7 @@ def runtime_root_key_from_document(document: object) -> RuntimeRootOrderKey:
         except (TypeError, ValueError) as error:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "market root identity is invalid") from error
         if (
-            document["source_sequence"] > _MAX_UINT64
-            or document["revision"] > _MAX_UINT64
-            or interval_start >= interval_end
+            interval_start >= interval_end
             or event_time != interval_end
             or available_at < event_time
         ):

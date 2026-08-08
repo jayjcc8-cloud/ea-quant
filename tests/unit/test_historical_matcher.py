@@ -1964,19 +1964,38 @@ def test_receipt_decoder_binds_order_request_dispatch_eligibility_and_causal_roo
 
 
 def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:
-    _, _, _, causal, _, end = _system()
+    _, matcher, orders, causal, delayed, end = _system()
     with pytest.raises(HistoricalMatcherError) as wrong_carrier:
         runtime_root_key_from_document(())
     assert wrong_carrier.value.code is OutcomeCode.INVALID_TYPE
 
     market = runtime_root_key_document(causal)
+    unbounded = 1 << 80
+    unbounded_root = replace(
+        causal,
+        source_sequence=unbounded,
+        revision=unbounded + 1,
+    )
+    assert runtime_root_key_from_document(runtime_root_key_document(unbounded_root)) == (
+        runtime_root_order_key(unbounded_root)
+    )
+    receipt = matcher.submit(
+        orders[0],
+        causal_market_root=replace(causal, source_sequence=unbounded),
+        dispatch_sequence=7,
+    )
+    canonical_historical_submission_receipt_bytes(receipt)
+    batch = matcher.match_active_market_root(
+        replace(delayed, source_sequence=unbounded + 1),
+        dispatch_sequence=8,
+    )
+    canonical_historical_matcher_dispatch_batch_bytes(batch)
+
     malformed_market_documents = (
         ({**market, "unknown": None}, OutcomeCode.OUT_OF_RANGE),
         ({**market, "instrument": "XNAS/AAPL"}, OutcomeCode.INVALID_TYPE),
         ({**market, "source_sequence": "1"}, OutcomeCode.INVALID_TYPE),
         ({**market, "revision": -1}, OutcomeCode.CONFLICTING_ID),
-        ({**market, "revision": 1 << 64}, OutcomeCode.CONFLICTING_ID),
-        ({**market, "source_sequence": 1 << 64}, OutcomeCode.CONFLICTING_ID),
         ({**market, "event_time": market["interval_start"]}, OutcomeCode.CONFLICTING_ID),
         ({**market, "available_at": market["interval_start"]}, OutcomeCode.CONFLICTING_ID),
         ({**market, "adjustment": 1}, OutcomeCode.INVALID_TYPE),
