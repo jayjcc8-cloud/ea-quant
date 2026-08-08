@@ -376,6 +376,71 @@ class _AuthorizationVerifier:
         )
 
 
+class _DescendantBindingMutatingMatcher:
+    def __init__(
+        self,
+        matcher: Phase1HistoricalMatcher,
+        replacement_runtime: Any,
+        *,
+        mutation_point: str,
+    ) -> None:
+        self._matcher = matcher
+        self._replacement_runtime = replacement_runtime
+        self._mutation_point = mutation_point
+        self._descendant: Any | None = None
+
+    @property
+    def run_id(self) -> RunId:
+        return self._matcher.run_id
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self._matcher.spec_set
+
+    @property
+    def source_namespace(self) -> SourceNamespace:
+        return self._matcher.source_namespace
+
+    def bind_descendant(self, descendant: Any) -> None:
+        self._descendant = descendant
+
+    def _mutate_descendant(self) -> None:
+        assert self._descendant is not None
+        object.__setattr__(self._descendant, "_runtime", self._replacement_runtime)
+
+    def resolve_descendant_binding(
+        self,
+        *,
+        ingress_identity: IngressIdentity,
+        canonical_ingress_bytes: bytes,
+        canonical_fact_bytes: bytes,
+    ) -> Any:
+        result = self._matcher.resolve_descendant_binding(
+            ingress_identity=ingress_identity,
+            canonical_ingress_bytes=canonical_ingress_bytes,
+            canonical_fact_bytes=canonical_fact_bytes,
+        )
+        if self._mutation_point == "resolve":
+            self._mutate_descendant()
+        return result
+
+    def has_issued_ingress(
+        self,
+        *,
+        ingress_identity: IngressIdentity,
+        canonical_ingress_bytes: bytes,
+        canonical_fact_bytes: bytes,
+    ) -> bool:
+        result = self._matcher.has_issued_ingress(
+            ingress_identity=ingress_identity,
+            canonical_ingress_bytes=canonical_ingress_bytes,
+            canonical_fact_bytes=canonical_fact_bytes,
+        )
+        if self._mutation_point == "issued":
+            self._mutate_descendant()
+        return result
+
+
 def _system() -> tuple[
     dict[str, Any],
     Phase1HistoricalMatcher,
@@ -1977,6 +2042,42 @@ def test_descendant_fact_is_dispatchable_only_while_parent_root_is_active() -> N
         )
         == match_lease.dispatch_sequence
     )
+
+    replacement_callback_runtime = create_phase1_historical_market_runtime(
+        run_id=baseline.run_id,
+        spec_set=baseline.spec_set,
+        source=create_phase1_historical_market_source_bridge(
+            create_phase1_historical_market_data_source(dataset)
+        ),
+    )
+    for _ in range(match_lease.dispatch_sequence - 1):
+        replacement_completed = replacement_callback_runtime.pop()
+        replacement_callback_runtime.acknowledge(replacement_completed)
+    replacement_active = replacement_callback_runtime.pop()
+    assert replacement_active.dispatch_sequence == match_lease.dispatch_sequence
+    assert runtime_root_order_key(replacement_active.root) == runtime_root_order_key(
+        match_lease.root
+    )
+    for mutation_point in ("resolve", "issued"):
+        mutating_matcher = _DescendantBindingMutatingMatcher(
+            matcher,
+            replacement_callback_runtime,
+            mutation_point=mutation_point,
+        )
+        callback_descendant = create_causal_descendant_fact_dispatch_verifier(
+            runtime=runtime,
+            direct_dispatch_verifier=direct_queue,
+            matcher=mutating_matcher,
+        )
+        mutating_matcher.bind_descendant(callback_descendant)
+        with pytest.raises(RuntimeOrderingError) as callback_mutation:
+            callback_descendant.resolve_active_issued_fact_dispatch(
+                ingress_identity=ingress.identity,
+                canonical_ingress_bytes=ingress_bytes,
+                canonical_fact_bytes=fact_bytes,
+            )
+        assert callback_mutation.value.code is OutcomeCode.CONFLICTING_ID
+
     runtime.acknowledge(match_lease)
     assert (
         descendant.resolve_active_issued_fact_dispatch(

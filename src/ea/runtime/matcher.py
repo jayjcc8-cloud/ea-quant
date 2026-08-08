@@ -292,31 +292,34 @@ class CausalDescendantFactDispatchVerifier:
             or type(canonical_fact_bytes) is not bytes
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "fact dispatch lookup inputs must be exact")
-        self._require_bindings()
-        direct = self._direct.resolve_active_issued_fact_dispatch(
+        construction = self._require_bindings()
+        direct = construction.direct.resolve_active_issued_fact_dispatch(
             ingress_identity=ingress_identity,
             canonical_ingress_bytes=canonical_ingress_bytes,
             canonical_fact_bytes=canonical_fact_bytes,
         )
+        self._require_bindings()
         if direct is not None:
             if type(direct) is not int or not 1 <= direct <= _MAX_UINT64:
                 raise _fail(OutcomeCode.INVALID_TYPE, "direct verifier result is invalid")
             return direct
-        binding = self._matcher.resolve_descendant_binding(
+        binding = construction.matcher.resolve_descendant_binding(
             ingress_identity=ingress_identity,
             canonical_ingress_bytes=canonical_ingress_bytes,
             canonical_fact_bytes=canonical_fact_bytes,
         )
+        self._require_bindings()
         if binding is None:
             return None
-        issued = self._matcher.has_issued_ingress(
+        issued = construction.matcher.has_issued_ingress(
             ingress_identity=ingress_identity,
             canonical_ingress_bytes=canonical_ingress_bytes,
             canonical_fact_bytes=canonical_fact_bytes,
         )
+        self._require_bindings()
         if type(issued) is not bool or not issued:
             raise _fail(OutcomeCode.CONFLICTING_ID, "matcher issuance proof conflicts")
-        active = self._runtime.active_lease
+        active = construction.runtime.active_lease
         if active is None or active.dispatch_sequence != binding.parent_dispatch_sequence:
             return None
         root = active.root
@@ -327,7 +330,7 @@ class CausalDescendantFactDispatchVerifier:
                 or runtime_root_order_key(root) != binding.parent_root_key
             ):
                 return None
-            self._runtime._require_active_market_dispatch_bytes(
+            construction.runtime._require_active_market_dispatch_bytes(
                 root,
                 dispatch_sequence=binding.parent_dispatch_sequence,
             )
@@ -338,15 +341,16 @@ class CausalDescendantFactDispatchVerifier:
                 or runtime_root_order_key(root) != binding.parent_root_key
             ):
                 return None
-            self._runtime._require_active_end_of_run_dispatch_bytes(
+            construction.runtime._require_active_end_of_run_dispatch_bytes(
                 root,
                 dispatch_sequence=binding.parent_dispatch_sequence,
             )
         else:
             raise _fail(OutcomeCode.CONFLICTING_ID, "descendant parent kind conflicts")
+        self._require_bindings()
         return binding.parent_dispatch_sequence
 
-    def _require_bindings(self) -> None:
+    def _require_bindings(self) -> _CausalDescendantBindings:
         try:
             construction = _CAUSAL_DESCENDANT_BINDINGS.get(self)
         except (AttributeError, TypeError) as error:
@@ -458,6 +462,7 @@ class CausalDescendantFactDispatchVerifier:
             or instrument_spec_set_digest(direct_specs).value != construction.spec_sha256_value
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "descendant verifier binding changed")
+        return construction
 
 
 _CAUSAL_DESCENDANT_BINDINGS: WeakKeyDictionary[
