@@ -211,6 +211,7 @@ def _expiry_ingress(
         trigger_root_kind=HistoricalDispatchKind.END_OF_RUN,
         trigger_root_sha256=end_batch.trigger_root_sha256,
         trigger_root_key=end_batch.trigger_root_key,
+        trigger_root=end,
         trigger_dispatch_sequence=end_batch.dispatch_sequence,
         occurred_at=end.available_at,
         available_at=end.available_at,
@@ -661,6 +662,23 @@ def test_state_encoder_requires_each_receipt_pending_or_issued() -> None:
     with pytest.raises(HistoricalMatcherError) as reordered:
         canonical_historical_matcher_state_bytes(reordered_pending)
     assert reordered.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_state_encoder_binds_last_dispatch_to_final_batch() -> None:
+    _, matcher, _, _, delayed, _ = _system()
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    state = matcher.state
+    object.__setattr__(state, "last_new_dispatch_sequence", 9)
+
+    with pytest.raises(HistoricalMatcherError) as contradictory:
+        canonical_historical_matcher_state_bytes(state)
+    assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
+
+    witness_mutation = matcher.state
+    object.__setattr__(witness_mutation._dispatch_batches[-1], "dispatch_sequence", 9)
+    with pytest.raises(HistoricalMatcherError):
+        canonical_historical_matcher_state_bytes(witness_mutation)
+    assert matcher.state.last_new_dispatch_sequence == 8
 
 
 def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
@@ -2065,6 +2083,7 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
         "submission_receipt_sha256": historical_submission_receipt_digest(receipt),
         "order_sha256": order_digest(orders[0]),
         "trigger_dispatch_sequence": 8,
+        "trigger_root": causal,
         "instrument": orders[0].instrument,
         "side": orders[0].side,
         "quantity_text": orders[0].quantity.text,
@@ -2209,6 +2228,48 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
     for values in invalid:
         with pytest.raises(HistoricalMatcherError):
             canonical_historical_matcher_observation_bytes(**cast(Any, values))
+
+
+def test_observation_encoder_binds_trade_price_to_trigger_root() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    order = orders[0]
+    receipt = matcher.submit(order, causal_market_root=causal, dispatch_sequence=7)
+    expected = _quantized_close(
+        delayed.payload.close,
+        side=order.side,
+        specification=matcher.spec_set.require(order.instrument),
+    )
+    values = {
+        "fact_sequence": 1,
+        "fact_kind": "trade",
+        "source_namespace": matcher.source_namespace,
+        "provenance_id": matcher.provenance_id,
+        "submission_receipt_sha256": historical_submission_receipt_digest(receipt),
+        "order_sha256": order_digest(order),
+        "trigger_root_kind": HistoricalDispatchKind.MARKET,
+        "trigger_root_sha256": historical_market_root_digest(delayed),
+        "trigger_root_key": runtime_root_order_key(delayed),
+        "trigger_root": delayed,
+        "trigger_dispatch_sequence": 8,
+        "occurred_at": delayed.event_time,
+        "available_at": delayed.available_at,
+        "instrument": order.instrument,
+        "side": order.side,
+        "quantity_text": order.quantity.text,
+        "price_text": expected.text,
+        "expiry_outcome_code": None,
+        "spec_set": matcher.spec_set,
+        "execution_policy": matcher.execution_policy,
+    }
+    canonical_historical_matcher_observation_bytes(**cast(Any, values))
+
+    wrong_price = matcher.spec_set.require(order.instrument).price_quantum
+    assert wrong_price != expected
+    with pytest.raises(HistoricalMatcherError) as rejected:
+        canonical_historical_matcher_observation_bytes(
+            **cast(Any, {**values, "price_text": wrong_price.text})
+        )
+    assert rejected.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_public_encoders_deep_validate_nested_root_and_instrument_values() -> None:
@@ -2555,6 +2616,35 @@ def test_descendant_lookup_validates_addressed_record_before_caller_evidence() -
     assert matcher._conflict_bytes == first_conflict_bytes
 
 
+@pytest.mark.parametrize("lookup", ["has", "resolve"])
+def test_descendant_lookup_validates_issuance_registry_before_absence(lookup: str) -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    record = matcher._state.issued[0]
+    object.__setattr__(matcher._state, "issued_by_identity", MappingProxyType({}))
+
+    with pytest.raises(HistoricalMatcherError) as drift:
+        if lookup == "has":
+            matcher.has_issued_ingress(
+                ingress_identity=record.ingress_identity,
+                canonical_ingress_bytes=record.ingress_bytes,
+                canonical_fact_bytes=record.fact_bytes,
+            )
+        else:
+            matcher.resolve_descendant_binding(
+                ingress_identity=record.ingress_identity,
+                canonical_ingress_bytes=record.ingress_bytes,
+                canonical_fact_bytes=record.fact_bytes,
+            )
+    assert drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+
 def test_retained_state_is_validated_before_filtering_and_after_halt() -> None:
     _, matcher, orders, causal, delayed, _ = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -2846,6 +2936,7 @@ def test_final_uint64_fact_boundary_constructs_and_replays_canonical_evidence() 
         trigger_root_kind=HistoricalDispatchKind.MARKET,
         trigger_root_sha256=root_sha256,
         trigger_root_key=root_key,
+        trigger_root=delayed,
         trigger_dispatch_sequence=8,
         occurred_at=delayed.event_time,
         available_at=delayed.available_at,

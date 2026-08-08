@@ -72,6 +72,7 @@ from ea.core.historical_matching import (
     _historical_root_digest_from_bytes,
     _quantized_historical_close,
     _require_historical_submission_authorization_proof,
+    _runtime_key_document_from_key,
     _validate_descendant_binding,
     canonical_end_of_run_root_bytes,
     canonical_historical_matcher_conflict_bytes,
@@ -87,6 +88,7 @@ from ea.core.historical_matching import (
     historical_matcher_observation_digest,
     historical_matcher_state_digest,
     historical_submission_receipt_digest,
+    runtime_root_key_from_document,
 )
 from ea.core.identity import Instrument, VenueId
 from ea.core.market_data import Adjustment, Bar, MarketDataEnvelope, SourceId
@@ -525,6 +527,33 @@ class Phase1HistoricalMatcher:
             )
             for record in state.issued
         )
+        public_ingresses_by_sha256 = {
+            execution_fact_ingress_digest(ingress): ingress for ingress in public_ingresses
+        }
+        public_batches = tuple(
+            _create_historical_matcher_dispatch_batch(
+                run_id=_clone_run_id(record.batch.run_id),
+                source_namespace=SourceNamespace(record.batch.source_namespace.value),
+                dispatch_kind=record.batch.dispatch_kind,
+                dispatch_sequence=record.batch.dispatch_sequence,
+                trigger_root_sha256=Sha256Digest(record.batch.trigger_root_sha256.value),
+                trigger_root_key=runtime_root_key_from_document(
+                    _runtime_key_document_from_key(record.batch.trigger_root_key)
+                ),
+                next_fact_sequence_before=record.batch.next_fact_sequence_before,
+                next_fact_sequence_after=record.batch.next_fact_sequence_after,
+                submission_sequences=tuple(record.batch.submission_sequences),
+                order_ids=tuple(_clone_economic_id(value) for value in record.batch.order_ids),
+                ingresses=tuple(
+                    public_ingresses_by_sha256[ingress_sha256]
+                    for ingress_sha256 in record.batch.ingress_sha256s
+                ),
+                ingress_sha256s=tuple(
+                    Sha256Digest(value.value) for value in record.batch.ingress_sha256s
+                ),
+            )
+            for _, record in sorted(state.dispatch_by_sequence.items())
+        )
         public_conflict = None
         if state.conflict is not None:
             if (
@@ -566,6 +595,7 @@ class Phase1HistoricalMatcher:
                 )
             ),
             issued_ingresses=public_ingresses,
+            _dispatch_batches=public_batches,
             dispatch_batch_sha256s=tuple(
                 Sha256Digest(record.batch_sha256.value)
                 for _, record in sorted(state.dispatch_by_sequence.items())
@@ -778,6 +808,20 @@ class Phase1HistoricalMatcher:
         if not valid:
             sequence = getattr(record.binding, "parent_dispatch_sequence", None)
             self._retained_binding_drift(dispatch_sequence=sequence)
+
+    def _require_issuance_registry(self) -> None:
+        state = self._state
+        for record in state.issued:
+            self._require_issued_record(record)
+        try:
+            valid = len(state.issued_by_identity) == len(state.issued) and all(
+                state.issued_by_identity.get(record.ingress_identity) is record
+                for record in state.issued
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
 
     def _require_submission_pointer(self, *, dispatch_sequence: int | None) -> None:
         state = self._state
@@ -1542,6 +1586,7 @@ class Phase1HistoricalMatcher:
             root_key=root_key,
             root_bytes=root_bytes,
             root_sha256=root_sha256,
+            trigger_root=owned_market_root,
             records=eligible,
             occurred_at=owned_market_root.event_time,
             available_at=owned_market_root.available_at,
@@ -1653,6 +1698,7 @@ class Phase1HistoricalMatcher:
             root_key=root_key,
             root_bytes=root_bytes,
             root_sha256=root_sha256,
+            trigger_root=owned_end_root,
             records=tuple(
                 sorted(
                     self._state.pending,
@@ -1673,6 +1719,7 @@ class Phase1HistoricalMatcher:
         root_key: RuntimeRootOrderKey,
         root_bytes: bytes,
         root_sha256: Sha256Digest,
+        trigger_root: MarketDataEnvelope | EndOfRunRoot,
         records: tuple[_SubmissionRecord, ...],
         occurred_at: datetime,
         available_at: datetime,
@@ -1714,6 +1761,7 @@ class Phase1HistoricalMatcher:
                 trigger_root_kind=kind,
                 trigger_root_sha256=root_sha256,
                 trigger_root_key=root_key,
+                trigger_root=trigger_root,
                 trigger_dispatch_sequence=sequence,
                 occurred_at=occurred_at,
                 available_at=available_at,
@@ -1865,6 +1913,9 @@ class Phase1HistoricalMatcher:
                 receipt_sha256s=tuple(item.receipt_sha256 for item in next_state.submissions),
                 pending_order_ids=tuple(item.order_id for item in next_state.pending),
                 issued_ingresses=tuple(item.ingress for item in next_state.issued),
+                _dispatch_batches=tuple(
+                    item.batch for _, item in sorted(next_state.dispatch_by_sequence.items())
+                ),
                 dispatch_batch_sha256s=tuple(
                     item.batch_sha256 for _, item in sorted(next_state.dispatch_by_sequence.items())
                 ),
@@ -1893,6 +1944,7 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "issuance lookup inputs must be exact")
         self._require_live_bindings()
+        self._require_issuance_registry()
         record = self._state.issued_by_identity.get(ingress_identity)
         if record is None:
             return False
@@ -1916,6 +1968,7 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant lookup inputs must be exact")
         self._require_live_bindings()
+        self._require_issuance_registry()
         record = self._state.issued_by_identity.get(ingress_identity)
         if record is None:
             return None

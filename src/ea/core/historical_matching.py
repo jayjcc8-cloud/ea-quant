@@ -785,6 +785,7 @@ class HistoricalMatcherState:
     receipt_sha256s: tuple[Sha256Digest, ...]
     pending_order_ids: tuple[EconomicId, ...]
     issued_ingresses: tuple[ExecutionFactIngress, ...]
+    _dispatch_batches: tuple[HistoricalMatcherDispatchBatch, ...] = field(repr=False)
     dispatch_batch_sha256s: tuple[Sha256Digest, ...]
     last_new_dispatch_sequence: int | None
     ended: bool
@@ -1277,6 +1278,7 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         or type(state.receipt_sha256s) is not tuple
         or type(state.pending_order_ids) is not tuple
         or type(state.issued_ingresses) is not tuple
+        or type(state._dispatch_batches) is not tuple
         or type(state.dispatch_batch_sha256s) is not tuple
         or type(state.ended) is not bool
         or type(state.halted) is not bool
@@ -1306,6 +1308,8 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         _validate_digest(digest, field_name="state digest")
     if len(state._submission_receipts) != len(state.receipt_sha256s):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt evidence is not aligned")
+    if len(state._dispatch_batches) != len(state.dispatch_batch_sha256s):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state batch evidence is not aligned")
     receipt_order_ids: list[EconomicId] = []
     for sequence, (receipt, digest) in enumerate(
         zip(state._submission_receipts, state.receipt_sha256s, strict=True),
@@ -1336,6 +1340,25 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt digests duplicate")
     if len(set(state.dispatch_batch_sha256s)) != len(state.dispatch_batch_sha256s):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state batch digests duplicate")
+    for batch, digest in zip(
+        state._dispatch_batches,
+        state.dispatch_batch_sha256s,
+        strict=True,
+    ):
+        if type(batch) is not HistoricalMatcherDispatchBatch:
+            raise _fail(OutcomeCode.INVALID_TYPE, "state batch evidence must be exact")
+        _validate_batch(batch)
+        if (
+            batch.run_id != state.run_id
+            or batch.source_namespace != state.source_namespace
+            or historical_matcher_dispatch_batch_digest(batch) != digest
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state batch evidence conflicts")
+    batch_sequences = tuple(batch.dispatch_sequence for batch in state._dispatch_batches)
+    if batch_sequences != tuple(sorted(batch_sequences)) or len(set(batch_sequences)) != len(
+        batch_sequences
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state batch sequence history conflicts")
     if len(set(state.pending_order_ids)) != len(state.pending_order_ids):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state pending Order IDs duplicate")
     if _next_sequence_after(1, len(state.receipt_sha256s)) != state.next_submission_sequence:
@@ -1401,6 +1424,9 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state end batch conflicts")
     if bool(state.dispatch_batch_sha256s) != (state.last_new_dispatch_sequence is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state last dispatch relationship conflicts")
+    expected_last_dispatch = None if not batch_sequences else batch_sequences[-1]
+    if state.last_new_dispatch_sequence != expected_last_dispatch:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state last dispatch conflicts")
 
 
 def _new_immutable(value_type: type[object], values: Mapping[str, object]) -> object:
@@ -1843,6 +1869,7 @@ def canonical_historical_matcher_observation_bytes(
     trigger_root_kind: HistoricalDispatchKind,
     trigger_root_sha256: Sha256Digest,
     trigger_root_key: RuntimeRootOrderKey,
+    trigger_root: MarketDataEnvelope | EndOfRunRoot,
     trigger_dispatch_sequence: int,
     occurred_at: object,
     available_at: object,
@@ -1888,6 +1915,19 @@ def canonical_historical_matcher_observation_bytes(
     _validate_instrument(instrument)
     _validate_execution_policy(execution_policy)
     _validate_runtime_root_key(trigger_root_key, expected_kind=trigger_root_kind)
+    if trigger_root_kind is HistoricalDispatchKind.MARKET:
+        if (
+            type(trigger_root) is not MarketDataEnvelope
+            or historical_market_root_digest(trigger_root) != trigger_root_sha256
+            or runtime_root_order_key(trigger_root) != trigger_root_key
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "trade trigger root conflicts")
+    elif (
+        type(trigger_root) is not EndOfRunRoot
+        or historical_end_root_digest(trigger_root) != trigger_root_sha256
+        or runtime_root_order_key(trigger_root) != trigger_root_key
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "expiry trigger root conflicts")
     try:
         specification = spec_set.require(instrument)
         quantity = CanonicalDecimal(quantity_text)
@@ -1943,8 +1983,18 @@ def canonical_historical_matcher_observation_bytes(
     }
     if fact_kind == "trade":
         suffix = trigger_root_key._suffix
+        expected_price = (
+            None
+            if type(trigger_root) is not MarketDataEnvelope
+            else _quantized_historical_close(
+                trigger_root.payload.close,
+                side=side,
+                specification=specification,
+            )
+        )
         if (
             price_text is None
+            or price != expected_price
             or expiry_outcome_code is not None
             or trigger_root_kind is not HistoricalDispatchKind.MARKET
             or type(suffix) is not _MarketDataSuffix
@@ -2507,6 +2557,7 @@ def _expected_decoded_batch_ingress(
         trigger_root_kind=batch.dispatch_kind,
         trigger_root_sha256=batch.trigger_root_sha256,
         trigger_root_key=batch.trigger_root_key,
+        trigger_root=trigger_root,
         trigger_dispatch_sequence=batch.dispatch_sequence,
         occurred_at=occurred_at,
         available_at=available_at,
@@ -2940,6 +2991,7 @@ def decode_historical_matcher_state(
             _parse_economic_id(value, field_name="pending_order_id") for value in raw_pending
         ),
         issued_ingresses=tuple(issued),
+        _dispatch_batches=tuple(batches),
         dispatch_batch_sha256s=tuple(batch_digests),
         last_new_dispatch_sequence=_parse_uint64_or_none(
             document["last_new_dispatch_sequence"],
