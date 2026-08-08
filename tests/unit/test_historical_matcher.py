@@ -3525,6 +3525,103 @@ def test_dispatch_revalidates_verifier_binding_before_market_and_end_publication
     assert matcher._state is initial
 
 
+def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() -> None:
+    replacement = ExecutionPolicyRef(
+        ExecutionPolicyId("replacement-policy"),
+        Sha256Digest("f" * 64),
+    )
+
+    def replace_policy_binding(
+        matcher: Phase1HistoricalMatcher,
+        order_verifier: _OrderVerifier,
+        authorization_verifier: _AuthorizationVerifier,
+    ) -> None:
+        matcher._execution_policy = replacement
+        matcher._execution_policy_identity = replacement
+        matcher._execution_policy_id_value = replacement.identifier.value
+        matcher._execution_policy_sha256_value = replacement.sha256.value
+        order_verifier.execution_policy = replacement
+        authorization_verifier.execution_policy = replacement
+
+    def market_callback(
+        matcher: Phase1HistoricalMatcher,
+        order_verifier: _OrderVerifier,
+        authorization_verifier: _AuthorizationVerifier,
+        original: Any,
+    ) -> Any:
+        def callback(
+            root: MarketDataEnvelope,
+            *,
+            dispatch_sequence: int,
+        ) -> Any:
+            proof = original(root, dispatch_sequence=dispatch_sequence)
+            replace_policy_binding(matcher, order_verifier, authorization_verifier)
+            return proof
+
+        return callback
+
+    def end_callback(
+        matcher: Phase1HistoricalMatcher,
+        order_verifier: _OrderVerifier,
+        authorization_verifier: _AuthorizationVerifier,
+        original: Any,
+    ) -> Any:
+        def callback(
+            root: EndOfRunRoot,
+            *,
+            dispatch_sequence: int,
+        ) -> Any:
+            proof = original(root, dispatch_sequence=dispatch_sequence)
+            replace_policy_binding(matcher, order_verifier, authorization_verifier)
+            return proof
+
+        return callback
+
+    for dispatch_kind in ("market", "end"):
+        _, matcher, _, _, delayed, end = _system()
+        baseline = matcher.execution_policy
+        initial = matcher._state
+        dispatch_verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+        order_verifier = cast(_OrderVerifier, matcher._order_issuance_verifier)
+        authorization_verifier = cast(
+            _AuthorizationVerifier,
+            matcher._submission_authorization_verifier,
+        )
+
+        if dispatch_kind == "market":
+            original_market = dispatch_verifier.verify_active_market_dispatch
+            cast(Any, dispatch_verifier).verify_active_market_dispatch = market_callback(
+                matcher,
+                order_verifier,
+                authorization_verifier,
+                original_market,
+            )
+        else:
+            original_end = dispatch_verifier.verify_active_end_of_run_dispatch
+            cast(Any, dispatch_verifier).verify_active_end_of_run_dispatch = end_callback(
+                matcher,
+                order_verifier,
+                authorization_verifier,
+                original_end,
+            )
+
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            if dispatch_kind == "market":
+                matcher.match_active_market_root(delayed, dispatch_sequence=8)
+            else:
+                matcher.expire_at_active_end(end, dispatch_sequence=8)
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+        assert matcher.execution_policy == baseline
+        assert matcher._execution_policy is matcher._execution_policy_identity
+        assert matcher._state.last_dispatch == initial.last_dispatch is None
+        assert matcher._state.ended is False
+        assert matcher._state.conflict is not None
+        assert (
+            matcher._state.conflict.conflict_kind
+            is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+        )
+
+
 def test_dispatch_rebinds_complete_state_on_every_verifier_exit() -> None:
     def market_callback(
         matcher: Phase1HistoricalMatcher,

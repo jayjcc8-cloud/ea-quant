@@ -272,6 +272,9 @@ class _DispatchCallbackLease:
     issued_registry_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
     conflict_bytes: bytes | None
     conflict_sha256: Sha256Digest | None
+    execution_policy: ExecutionPolicyRef
+    execution_policy_id_value: str
+    execution_policy_sha256_value: str
     run_id: RunId
     run_id_value: str
     fence: _DispatchCallbackStateFence
@@ -444,6 +447,9 @@ class Phase1HistoricalMatcher:
     __slots__ = (
         "_active_dispatch_verifier",
         "_execution_policy",
+        "_execution_policy_id_value",
+        "_execution_policy_identity",
+        "_execution_policy_sha256_value",
         "_conflict_bytes",
         "_conflict_sha256",
         "_issued_history_identity",
@@ -464,6 +470,9 @@ class Phase1HistoricalMatcher:
     )
     _active_dispatch_verifier: HistoricalMatcherDispatchVerifier
     _execution_policy: ExecutionPolicyRef
+    _execution_policy_id_value: str
+    _execution_policy_identity: ExecutionPolicyRef
+    _execution_policy_sha256_value: str
     _conflict_bytes: bytes | None
     _conflict_sha256: Sha256Digest | None
     _issued_history_identity: tuple[_IssuedRecord, ...]
@@ -646,12 +655,24 @@ class Phase1HistoricalMatcher:
             type(self._run_id) is not RunId
             or type(self._source_namespace) is not SourceNamespace
             or type(self._provenance_id) is not FactProvenanceId
+            or type(self._execution_policy) is not ExecutionPolicyRef
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "owned bindings must be exact")
+        try:
+            policy_unchanged = (
+                self._execution_policy is self._execution_policy_identity
+                and type(self._execution_policy.identifier) is ExecutionPolicyId
+                and type(self._execution_policy.sha256) is Sha256Digest
+                and self._execution_policy.identifier.value == self._execution_policy_id_value
+                and self._execution_policy.sha256.value == self._execution_policy_sha256_value
+            )
+        except (AttributeError, TypeError):
+            policy_unchanged = False
         if (
             self._run_id.value != self._run_id_value
             or self._source_namespace.value != self._source_namespace_value
             or self._provenance_id.value != self._provenance_id_value
+            or not policy_unchanged
             or canonical_instrument_spec_set_bytes(self._spec_set) != self._spec_bytes
             or instrument_spec_set_digest(self._spec_set) != self._spec_sha256
         ):
@@ -901,6 +922,9 @@ class Phase1HistoricalMatcher:
             issued_registry_identity=self._issued_registry_identity,
             conflict_bytes=self._conflict_bytes,
             conflict_sha256=self._conflict_sha256,
+            execution_policy=self._execution_policy,
+            execution_policy_id_value=self._execution_policy_id_value,
+            execution_policy_sha256_value=self._execution_policy_sha256_value,
             run_id=self._run_id,
             run_id_value=self._run_id_value,
             fence=fence,
@@ -927,6 +951,10 @@ class Phase1HistoricalMatcher:
         current_issued_registry_identity = current("_issued_registry_identity")
         current_conflict_bytes = current("_conflict_bytes")
         current_conflict_sha256 = current("_conflict_sha256")
+        current_execution_policy = current("_execution_policy")
+        current_execution_policy_identity = current("_execution_policy_identity")
+        current_execution_policy_id_value = current("_execution_policy_id_value")
+        current_execution_policy_sha256_value = current("_execution_policy_sha256_value")
         current_run_id = current("_run_id")
         current_run_id_value = current("_run_id_value")
         current_mutation_active = current("_mutation_active")
@@ -943,6 +971,20 @@ class Phase1HistoricalMatcher:
             )
         except Exception:
             run_id_unchanged = False
+        try:
+            execution_policy_unchanged = (
+                type(current_execution_policy) is ExecutionPolicyRef
+                and current_execution_policy is lease.execution_policy
+                and current_execution_policy_identity is lease.execution_policy
+                and type(current_execution_policy.identifier) is ExecutionPolicyId
+                and type(current_execution_policy.sha256) is Sha256Digest
+                and current_execution_policy.identifier.value == lease.execution_policy_id_value
+                and current_execution_policy.sha256.value == lease.execution_policy_sha256_value
+                and current_execution_policy_id_value == lease.execution_policy_id_value
+                and current_execution_policy_sha256_value == lease.execution_policy_sha256_value
+            )
+        except Exception:
+            execution_policy_unchanged = False
         drifted = (
             current_fence_accessed is not False
             or current_state is not lease.fence
@@ -950,6 +992,7 @@ class Phase1HistoricalMatcher:
             or current_issued_registry_identity is not lease.issued_registry_identity
             or current_conflict_bytes is not lease.conflict_bytes
             or current_conflict_sha256 is not lease.conflict_sha256
+            or not execution_policy_unchanged
             or not run_id_unchanged
             or current_mutation_active is not True
         )
@@ -959,6 +1002,26 @@ class Phase1HistoricalMatcher:
         object.__setattr__(self, "_issued_registry_identity", lease.issued_registry_identity)
         object.__setattr__(self, "_conflict_bytes", lease.conflict_bytes)
         object.__setattr__(self, "_conflict_sha256", lease.conflict_sha256)
+        restored_policy = (
+            lease.execution_policy
+            if execution_policy_unchanged
+            else ExecutionPolicyRef(
+                ExecutionPolicyId(lease.execution_policy_id_value),
+                Sha256Digest(lease.execution_policy_sha256_value),
+            )
+        )
+        object.__setattr__(self, "_execution_policy", restored_policy)
+        object.__setattr__(self, "_execution_policy_identity", restored_policy)
+        object.__setattr__(
+            self,
+            "_execution_policy_id_value",
+            lease.execution_policy_id_value,
+        )
+        object.__setattr__(
+            self,
+            "_execution_policy_sha256_value",
+            lease.execution_policy_sha256_value,
+        )
         object.__setattr__(
             self,
             "_run_id",
@@ -2079,6 +2142,9 @@ def create_phase1_historical_matcher(
     value._spec_bytes = canonical_instrument_spec_set_bytes(owned_specs)
     value._spec_sha256 = instrument_spec_set_digest(owned_specs)
     value._execution_policy = owned_policy
+    value._execution_policy_identity = owned_policy
+    value._execution_policy_id_value = owned_policy.identifier.value
+    value._execution_policy_sha256_value = owned_policy.sha256.value
     value._conflict_bytes = None
     value._conflict_sha256 = None
     value._mutation_active = False
