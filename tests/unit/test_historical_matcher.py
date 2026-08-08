@@ -5,6 +5,7 @@ import struct
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import product
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
@@ -3531,23 +3532,37 @@ def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() ->
         Sha256Digest("f" * 64),
     )
 
-    def replace_policy_binding(
+    class EqualitySpoof:
+        def __eq__(self, other: object) -> bool:
+            del other
+            return True
+
+    def mutate_policy_binding(
         matcher: Phase1HistoricalMatcher,
         order_verifier: _OrderVerifier,
         authorization_verifier: _AuthorizationVerifier,
+        mutation_kind: str,
     ) -> None:
-        matcher._execution_policy = replacement
-        matcher._execution_policy_identity = replacement
-        matcher._execution_policy_id_value = replacement.identifier.value
-        matcher._execution_policy_sha256_value = replacement.sha256.value
-        order_verifier.execution_policy = replacement
-        authorization_verifier.execution_policy = replacement
+        if mutation_kind == "replacement":
+            matcher._execution_policy = replacement
+            matcher._execution_policy_identity = replacement
+            matcher._execution_policy_id_value = replacement.identifier.value
+            matcher._execution_policy_sha256_value = replacement.sha256.value
+            order_verifier.execution_policy = replacement
+            authorization_verifier.execution_policy = replacement
+            return
+        spoof = EqualitySpoof()
+        object.__setattr__(matcher._execution_policy.identifier, "value", spoof)
+        object.__setattr__(matcher._execution_policy.sha256, "value", spoof)
+        object.__setattr__(matcher, "_execution_policy_id_value", spoof)
+        object.__setattr__(matcher, "_execution_policy_sha256_value", spoof)
 
     def market_callback(
         matcher: Phase1HistoricalMatcher,
         order_verifier: _OrderVerifier,
         authorization_verifier: _AuthorizationVerifier,
         original: Any,
+        mutation_kind: str,
     ) -> Any:
         def callback(
             root: MarketDataEnvelope,
@@ -3555,7 +3570,12 @@ def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() ->
             dispatch_sequence: int,
         ) -> Any:
             proof = original(root, dispatch_sequence=dispatch_sequence)
-            replace_policy_binding(matcher, order_verifier, authorization_verifier)
+            mutate_policy_binding(
+                matcher,
+                order_verifier,
+                authorization_verifier,
+                mutation_kind,
+            )
             return proof
 
         return callback
@@ -3565,6 +3585,7 @@ def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() ->
         order_verifier: _OrderVerifier,
         authorization_verifier: _AuthorizationVerifier,
         original: Any,
+        mutation_kind: str,
     ) -> Any:
         def callback(
             root: EndOfRunRoot,
@@ -3572,12 +3593,20 @@ def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() ->
             dispatch_sequence: int,
         ) -> Any:
             proof = original(root, dispatch_sequence=dispatch_sequence)
-            replace_policy_binding(matcher, order_verifier, authorization_verifier)
+            mutate_policy_binding(
+                matcher,
+                order_verifier,
+                authorization_verifier,
+                mutation_kind,
+            )
             return proof
 
         return callback
 
-    for dispatch_kind in ("market", "end"):
+    for dispatch_kind, mutation_kind in product(
+        ("market", "end"),
+        ("replacement", "equality-spoof"),
+    ):
         _, matcher, _, _, delayed, end = _system()
         baseline = matcher.execution_policy
         initial = matcher._state
@@ -3595,6 +3624,7 @@ def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() ->
                 order_verifier,
                 authorization_verifier,
                 original_market,
+                mutation_kind,
             )
         else:
             original_end = dispatch_verifier.verify_active_end_of_run_dispatch
@@ -3603,6 +3633,7 @@ def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() ->
                 order_verifier,
                 authorization_verifier,
                 original_end,
+                mutation_kind,
             )
 
         with pytest.raises(HistoricalMatcherError) as rejected:

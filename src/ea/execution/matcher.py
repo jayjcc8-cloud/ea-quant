@@ -663,6 +663,10 @@ class Phase1HistoricalMatcher:
                 self._execution_policy is self._execution_policy_identity
                 and type(self._execution_policy.identifier) is ExecutionPolicyId
                 and type(self._execution_policy.sha256) is Sha256Digest
+                and type(self._execution_policy.identifier.value) is str
+                and type(self._execution_policy.sha256.value) is str
+                and type(self._execution_policy_id_value) is str
+                and type(self._execution_policy_sha256_value) is str
                 and self._execution_policy.identifier.value == self._execution_policy_id_value
                 and self._execution_policy.sha256.value == self._execution_policy_sha256_value
             )
@@ -978,6 +982,12 @@ class Phase1HistoricalMatcher:
                 and current_execution_policy_identity is lease.execution_policy
                 and type(current_execution_policy.identifier) is ExecutionPolicyId
                 and type(current_execution_policy.sha256) is Sha256Digest
+                and type(current_execution_policy.identifier.value) is str
+                and type(current_execution_policy.sha256.value) is str
+                and type(current_execution_policy_id_value) is str
+                and type(current_execution_policy_sha256_value) is str
+                and type(lease.execution_policy_id_value) is str
+                and type(lease.execution_policy_sha256_value) is str
                 and current_execution_policy.identifier.value == lease.execution_policy_id_value
                 and current_execution_policy.sha256.value == lease.execution_policy_sha256_value
                 and current_execution_policy_id_value == lease.execution_policy_id_value
