@@ -684,6 +684,24 @@ def test_state_encoder_binds_last_dispatch_to_final_batch() -> None:
     assert matcher.state.last_new_dispatch_sequence == 8
 
 
+def test_state_encoder_binds_every_dispatch_digest_to_history_evidence() -> None:
+    _, matcher, _, _, delayed, _ = _system()
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    later = replace(delayed, source_sequence=delayed.source_sequence + 1)
+    matcher.match_active_market_root(later, dispatch_sequence=9)
+    state = matcher.state
+    assert len(state.dispatch_batch_sha256s) == 2
+    object.__setattr__(
+        state,
+        "dispatch_batch_sha256s",
+        (Sha256Digest("f" * 64), state.dispatch_batch_sha256s[-1]),
+    )
+
+    with pytest.raises(HistoricalMatcherError) as contradictory:
+        canonical_historical_matcher_state_bytes(state)
+    assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
     _, matcher, _, _, delayed, _ = _system()
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
@@ -3290,6 +3308,72 @@ def test_submission_revalidates_every_verifier_binding_after_callbacks() -> None
         matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     assert changed_authorization_binding.value.code is OutcomeCode.CONFLICTING_ID
     assert matcher._state is initial
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_submission_rebinds_state_after_issuance_callback(raises: bool) -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    initial = matcher._state
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    trusted = matcher._state
+    verifier = cast(_OrderVerifier, matcher._order_issuance_verifier)
+    original = verifier.resolve_issued_order_by_id
+    callback_error = RuntimeError("issuance callback failed")
+
+    def replace_state(order_id: EconomicId) -> Order | None:
+        matcher._state = initial
+        if raises:
+            raise callback_error
+        return original(order_id)
+
+    cast(Any, verifier).resolve_issued_order_by_id = replace_state
+    with pytest.raises(HistoricalMatcherError) as drift:
+        matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8)
+    assert drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state is not initial
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+    assert matcher._state.submissions == trusted.submissions
+    assert matcher._state.pending == trusted.pending
+    assert matcher._state.next_submission == trusted.next_submission
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_submission_rebinds_state_after_causal_dispatch_callback(raises: bool) -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    initial = matcher._state
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    trusted = matcher._state
+    verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    original = verifier.verify_active_market_dispatch
+    callback_error = RuntimeError("causal dispatch callback failed")
+
+    def replace_state(
+        root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> Any:
+        matcher._state = initial
+        if raises:
+            raise callback_error
+        return original(root, dispatch_sequence=dispatch_sequence)
+
+    cast(Any, verifier).verify_active_market_dispatch = replace_state
+    with pytest.raises(HistoricalMatcherError) as drift:
+        matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8)
+    assert drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state is not initial
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+    assert matcher._state.submissions == trusted.submissions
+    assert matcher._state.pending == trusted.pending
+    assert matcher._state.next_submission == trusted.next_submission
 
 
 def test_matcher_rejects_reentrant_mutations_from_all_verifier_callbacks() -> None:

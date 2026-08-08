@@ -69,6 +69,7 @@ from ea.core.historical_matching import (
     _create_historical_matcher_dispatch_batch,
     _create_historical_matcher_state,
     _create_historical_submission_receipt,
+    _dispatch_batch_history_digest,
     _historical_root_digest_from_bytes,
     _quantized_historical_close,
     _require_historical_submission_authorization_proof,
@@ -573,6 +574,10 @@ class Phase1HistoricalMatcher:
                 )
             )
         )
+        public_batch_sha256s = tuple(
+            Sha256Digest(record.batch_sha256.value)
+            for _, record in sorted(state.dispatch_by_sequence.items())
+        )
         public_conflict = None
         if state.conflict is not None:
             if (
@@ -614,11 +619,9 @@ class Phase1HistoricalMatcher:
                 )
             ),
             issued_ingresses=public_ingresses,
+            _dispatch_batch_history_sha256=_dispatch_batch_history_digest(public_batch_sha256s),
             _last_dispatch_batch=public_last_batch,
-            dispatch_batch_sha256s=tuple(
-                Sha256Digest(record.batch_sha256.value)
-                for _, record in sorted(state.dispatch_by_sequence.items())
-            ),
+            dispatch_batch_sha256s=public_batch_sha256s,
             last_new_dispatch_sequence=state.last_dispatch,
             ended=state.ended,
             end_batch_sha256=(
@@ -1242,11 +1245,17 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.OUT_OF_RANGE, "Order is outside Phase 1 profile")
         self._require_live_bindings()
+        issuance_lease = self._begin_dispatch_callback()
         try:
             try:
                 issued = self._order_issuance_verifier.resolve_issued_order_by_id(order.order_id)
             except Exception as error:
                 raise _VerifierFailure(error) from error
+            finally:
+                self._end_dispatch_callback(
+                    lease=issuance_lease,
+                    dispatch_sequence=sequence,
+                )
         except _VerifierFailure as failure:
             raise failure.error from None
         if type(issued) is not Order or canonical_order_bytes(issued) != submitted_order_bytes:
@@ -1259,6 +1268,7 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "submitted Order changed during issuance")
         owned_order = _clone_order(order)
+        causal_dispatch_lease = self._begin_dispatch_callback()
         try:
             try:
                 proof = self._active_dispatch_verifier.verify_active_market_dispatch(
@@ -1269,6 +1279,11 @@ class Phase1HistoricalMatcher:
                 raise
             except Exception as error:
                 raise _VerifierFailure(error) from error
+            finally:
+                self._end_dispatch_callback(
+                    lease=causal_dispatch_lease,
+                    dispatch_sequence=sequence,
+                )
             _require_active_market_dispatch_proof(
                 proof,
                 run_id=self._run_id,
@@ -1926,6 +1941,9 @@ class Phase1HistoricalMatcher:
             end_batch_sha256=batch_sha256 if end else None,
             conflict=None,
         )
+        next_batch_sha256s = tuple(
+            item.batch_sha256 for _, item in sorted(next_state.dispatch_by_sequence.items())
+        )
         canonical_historical_matcher_state_bytes(
             _create_historical_matcher_state(
                 run_id=self._run_id,
@@ -1940,10 +1958,9 @@ class Phase1HistoricalMatcher:
                 receipt_sha256s=tuple(item.receipt_sha256 for item in next_state.submissions),
                 pending_order_ids=tuple(item.order_id for item in next_state.pending),
                 issued_ingresses=tuple(item.ingress for item in next_state.issued),
+                _dispatch_batch_history_sha256=_dispatch_batch_history_digest(next_batch_sha256s),
                 _last_dispatch_batch=next_state.dispatch_by_sequence[sequence].batch,
-                dispatch_batch_sha256s=tuple(
-                    item.batch_sha256 for _, item in sorted(next_state.dispatch_by_sequence.items())
-                ),
+                dispatch_batch_sha256s=next_batch_sha256s,
                 last_new_dispatch_sequence=sequence,
                 ended=end,
                 end_batch_sha256=batch_sha256 if end else None,

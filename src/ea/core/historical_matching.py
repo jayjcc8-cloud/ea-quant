@@ -80,6 +80,9 @@ HISTORICAL_MATCHER_DISPATCH_BATCH_CANONICALIZATION = (
 HISTORICAL_MATCHER_DISPATCH_BATCH_DIGEST_DOMAIN = (
     b"ea.phase1-historical-matcher-dispatch-batch.v1\0"
 )
+_HISTORICAL_MATCHER_DISPATCH_HISTORY_DIGEST_DOMAIN = (
+    b"ea.phase1-historical-matcher-dispatch-history.v1\0"
+)
 HISTORICAL_MATCHER_STATE_CANONICALIZATION = "ea-phase1-historical-matcher-state-v1"
 HISTORICAL_MATCHER_STATE_DIGEST_DOMAIN = b"ea.phase1-historical-matcher-state.v1\0"
 HISTORICAL_MATCHER_CONFLICT_CANONICALIZATION = "ea-phase1-historical-matcher-conflict-v1"
@@ -785,6 +788,7 @@ class HistoricalMatcherState:
     receipt_sha256s: tuple[Sha256Digest, ...]
     pending_order_ids: tuple[EconomicId, ...]
     issued_ingresses: tuple[ExecutionFactIngress, ...]
+    _dispatch_batch_history_sha256: Sha256Digest = field(repr=False)
     _last_dispatch_batch: HistoricalMatcherDispatchBatch | None = field(repr=False)
     dispatch_batch_sha256s: tuple[Sha256Digest, ...]
     last_new_dispatch_sequence: int | None
@@ -1278,6 +1282,7 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         or type(state.receipt_sha256s) is not tuple
         or type(state.pending_order_ids) is not tuple
         or type(state.issued_ingresses) is not tuple
+        or type(state._dispatch_batch_history_sha256) is not Sha256Digest
         or type(state.dispatch_batch_sha256s) is not tuple
         or type(state.ended) is not bool
         or type(state.halted) is not bool
@@ -1305,6 +1310,10 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.INVALID_TYPE, "state batch digests must be exact")
     for digest in (*state.receipt_sha256s, *state.dispatch_batch_sha256s):
         _validate_digest(digest, field_name="state digest")
+    _validate_digest(
+        state._dispatch_batch_history_sha256,
+        field_name="state batch-history digest",
+    )
     if len(state._submission_receipts) != len(state.receipt_sha256s):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt evidence is not aligned")
     receipt_order_ids: list[EconomicId] = []
@@ -1337,6 +1346,11 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt digests duplicate")
     if len(set(state.dispatch_batch_sha256s)) != len(state.dispatch_batch_sha256s):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state batch digests duplicate")
+    if (
+        _dispatch_batch_history_digest(state.dispatch_batch_sha256s)
+        != state._dispatch_batch_history_sha256
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state batch digest history conflicts")
     if state._last_dispatch_batch is not None:
         if type(state._last_dispatch_batch) is not HistoricalMatcherDispatchBatch:
             raise _fail(OutcomeCode.INVALID_TYPE, "state final batch evidence must be exact")
@@ -1749,6 +1763,19 @@ def historical_matcher_dispatch_batch_digest(
     return _framed_digest(
         HISTORICAL_MATCHER_DISPATCH_BATCH_DIGEST_DOMAIN,
         canonical_historical_matcher_dispatch_batch_bytes(batch),
+    )
+
+
+def _dispatch_batch_history_digest(
+    digests: tuple[Sha256Digest, ...],
+) -> Sha256Digest:
+    if type(digests) is not tuple or any(type(value) is not Sha256Digest for value in digests):
+        raise _fail(OutcomeCode.INVALID_TYPE, "batch-history digests must be exact")
+    for digest in digests:
+        _validate_digest(digest, field_name="batch-history digest")
+    return _framed_digest(
+        _HISTORICAL_MATCHER_DISPATCH_HISTORY_DIGEST_DOMAIN,
+        _canonical_json([digest.value for digest in digests]),
     )
 
 
@@ -2983,6 +3010,7 @@ def decode_historical_matcher_state(
             _parse_economic_id(value, field_name="pending_order_id") for value in raw_pending
         ),
         issued_ingresses=tuple(issued),
+        _dispatch_batch_history_sha256=_dispatch_batch_history_digest(tuple(batch_digests)),
         _last_dispatch_batch=None if not batches else batches[-1],
         dispatch_batch_sha256s=tuple(batch_digests),
         last_new_dispatch_sequence=_parse_uint64_or_none(
