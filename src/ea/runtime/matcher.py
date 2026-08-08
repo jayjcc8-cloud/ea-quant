@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Protocol, final
+from weakref import WeakKeyDictionary
 
 from ea.core.execution import InstrumentExecutionSpecSet, instrument_spec_set_digest
 from ea.core.execution_identity import IngressIdentity, SourceNamespace
@@ -31,6 +32,22 @@ from ea.runtime.historical import Phase1HistoricalMarketRuntime
 from ea.runtime.queue import DeterministicRootQueue
 
 _MAX_UINT64 = (1 << 64) - 1
+
+
+@final
+class _DispatchRuntimeIdentity:
+    """Capability-free identity witness backed only by this module's private registry."""
+
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("dispatch runtime identities are created only by their factory")
+
+
+_DISPATCH_RUNTIME_IDENTITIES: WeakKeyDictionary[
+    _DispatchRuntimeIdentity,
+    Phase1HistoricalMarketRuntime,
+] = WeakKeyDictionary()
 
 
 class HistoricalMatcherIssuanceCapability(Protocol):
@@ -92,7 +109,7 @@ def _require_dispatch_sequence(value: object) -> int:
 class HistoricalMatcherDispatchVerifierAdapter:
     __slots__ = ("_runtime", "_runtime_identity")
     _runtime: Phase1HistoricalMarketRuntime
-    _runtime_identity: Phase1HistoricalMarketRuntime
+    _runtime_identity: _DispatchRuntimeIdentity
 
     def __init__(self) -> None:
         raise TypeError("matcher dispatch verifiers are created only by their factory")
@@ -101,20 +118,22 @@ class HistoricalMatcherDispatchVerifierAdapter:
         try:
             runtime = self._runtime
             identity = self._runtime_identity
+            bound_runtime = _DISPATCH_RUNTIME_IDENTITIES.get(identity)
         except (AttributeError, TypeError) as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "dispatch runtime binding is invalid") from error
         if (
             type(runtime) is not Phase1HistoricalMarketRuntime
-            or type(identity) is not Phase1HistoricalMarketRuntime
-            or runtime is not identity
+            or type(identity) is not _DispatchRuntimeIdentity
+            or bound_runtime is not runtime
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch runtime binding changed")
-        return identity
+        return runtime
 
     @property
     def runtime_identity(self) -> object:
-        """Return the exact construction runtime for independent identity leasing."""
-        return self._require_bound_runtime()
+        """Return an opaque witness without exposing runtime capabilities."""
+        self._require_bound_runtime()
+        return self._runtime_identity
 
     @property
     def run_id(self) -> RunId:
@@ -207,8 +226,10 @@ def create_historical_matcher_dispatch_verifier(
     if type(runtime) is not Phase1HistoricalMarketRuntime:
         raise _fail(OutcomeCode.INVALID_TYPE, "runtime must be exact")
     value = object.__new__(HistoricalMatcherDispatchVerifierAdapter)
+    identity = object.__new__(_DispatchRuntimeIdentity)
+    _DISPATCH_RUNTIME_IDENTITIES[identity] = runtime
     value._runtime = runtime
-    value._runtime_identity = runtime
+    value._runtime_identity = identity
     return value
 
 

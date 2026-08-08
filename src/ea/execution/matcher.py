@@ -172,7 +172,9 @@ class HistoricalMatcherDispatchVerifier(Protocol):
     def spec_set(self) -> InstrumentExecutionSpecSet: ...
 
     @property
-    def runtime_identity(self) -> object: ...
+    def runtime_identity(self) -> object:
+        """Return a capability-free opaque construction-runtime witness."""
+        ...
 
     def verify_active_market_dispatch(
         self,

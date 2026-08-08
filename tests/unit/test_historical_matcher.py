@@ -1434,6 +1434,17 @@ def test_runtime_adapter_mints_market_and_terminal_proofs_only_while_active() ->
         ),
     )
     verifier = create_historical_matcher_dispatch_verifier(runtime)
+    runtime_identity = verifier.runtime_identity
+    for forbidden_capability in (
+        "_runtime",
+        "clock",
+        "peek",
+        "pop",
+        "acknowledge",
+        "active_lease",
+        "trace_records",
+    ):
+        assert not hasattr(runtime_identity, forbidden_capability)
     market_lease = runtime.pop()
     market = cast(MarketDataEnvelope, market_lease.root)
     market_proof = verifier.verify_active_market_dispatch(
