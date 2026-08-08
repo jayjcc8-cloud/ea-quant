@@ -67,6 +67,7 @@ from ea.core.historical_matching import (
     HistoricalPreEffectAuthorizationError,
     HistoricalSubmissionAuthorizationProof,
     HistoricalSubmissionReceipt,
+    _append_historical_matcher_dispatch_history,
     _create_historical_matcher_conflict,
     _create_historical_matcher_descendant_binding,
     _create_historical_matcher_dispatch_batch,
@@ -74,7 +75,9 @@ from ea.core.historical_matching import (
     _create_historical_submission_receipt,
     _dispatch_batch_history_digest,
     _dispatch_ingress_history_digest,
+    _empty_historical_matcher_dispatch_history,
     _historical_root_digest_from_bytes,
+    _HistoricalMatcherDispatchHistory,
     _quantized_historical_close,
     _require_historical_submission_authorization_proof,
     _runtime_key_document_from_key,
@@ -288,6 +291,7 @@ class _MatcherState:
     dispatch_by_sequence: MappingProxyType[int, _DispatchRecordToken]
     dispatch_by_digest: MappingProxyType[str, _DispatchRecordToken]
     dispatch_chain_head: str
+    dispatch_history: _HistoricalMatcherDispatchHistory
     issued: tuple[_IssuedRecord, ...]
     issued_by_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
     last_dispatch: int | None
@@ -746,6 +750,7 @@ class Phase1HistoricalMatcher:
                 public_batch_sha256s,
                 public_ingresses,
             ),
+            _dispatch_history=state.dispatch_history,
             _last_dispatch_batch=public_last_batch,
             dispatch_batch_sha256s=public_batch_sha256s,
             last_new_dispatch_sequence=state.last_dispatch,
@@ -1921,6 +1926,7 @@ class Phase1HistoricalMatcher:
             dispatch_by_sequence=publication_state.dispatch_by_sequence,
             dispatch_by_digest=publication_state.dispatch_by_digest,
             dispatch_chain_head=publication_state.dispatch_chain_head,
+            dispatch_history=publication_state.dispatch_history,
             issued=publication_state.issued,
             issued_by_identity=publication_state.issued_by_identity,
             last_dispatch=publication_state.last_dispatch,
@@ -2449,6 +2455,10 @@ class Phase1HistoricalMatcher:
                 key=lambda record: record.receipt.submission_sequence,
             )
         )
+        next_dispatch_history = _append_historical_matcher_dispatch_history(
+            self._state.dispatch_history,
+            trusted_batch,
+        )
         next_state = _MatcherState(
             next_submission=self._state.next_submission,
             next_fact=fact_sequence,
@@ -2459,6 +2469,7 @@ class Phase1HistoricalMatcher:
             dispatch_by_sequence=next_by_sequence,
             dispatch_by_digest=next_by_digest,
             dispatch_chain_head=next_chain_head,
+            dispatch_history=next_dispatch_history,
             issued=(*self._state.issued, *issued_records),
             issued_by_identity=MappingProxyType(issued_by_identity),
             last_dispatch=sequence,
@@ -2489,6 +2500,7 @@ class Phase1HistoricalMatcher:
                     next_batch_sha256s,
                     tuple(item.ingress for item in next_state.issued),
                 ),
+                _dispatch_history=next_dispatch_history,
                 _last_dispatch_batch=trusted_batch,
                 dispatch_batch_sha256s=next_batch_sha256s,
                 last_new_dispatch_sequence=sequence,
@@ -2646,6 +2658,7 @@ def create_phase1_historical_matcher(
         dispatch_by_sequence=empty_dispatch_by_sequence,
         dispatch_by_digest=empty_dispatch_by_digest,
         dispatch_chain_head=_EMPTY_DISPATCH_CHAIN_HEAD,
+        dispatch_history=_empty_historical_matcher_dispatch_history(),
         issued=(),
         issued_by_identity=MappingProxyType({}),
         last_dispatch=None,

@@ -10,7 +10,8 @@ from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
 from types import MappingProxyType
-from typing import Any, cast, final
+from typing import Any, NamedTuple, cast, final
+from weakref import WeakKeyDictionary
 
 from ea.core.economics import (
     CanonicalDecimal,
@@ -741,6 +742,32 @@ class HistoricalMatcherDispatchBatch:
 
 
 @final
+class _HistoricalMatcherDispatchHistory:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("dispatch-history witnesses are created only by the sealed factory")
+
+
+class _SealedHistoricalMatcherDispatchHistory(NamedTuple):
+    batch_sha256_values: tuple[str, ...]
+    root_sha256_by_sequence: MappingProxyType[int, str]
+    sequence_by_root_sha256: MappingProxyType[str, int]
+    run_id_value: str | None
+    source_namespace_value: str | None
+    last_dispatch_sequence: int | None
+    last_root_key: RuntimeRootOrderKey | None
+    last_dispatch_kind: HistoricalDispatchKind | None
+    terminal_index: int | None
+
+
+_SEALED_HISTORICAL_MATCHER_DISPATCH_HISTORIES: WeakKeyDictionary[
+    _HistoricalMatcherDispatchHistory,
+    _SealedHistoricalMatcherDispatchHistory,
+] = WeakKeyDictionary()
+
+
+@final
 @dataclass(frozen=True, slots=True, init=False)
 class HistoricalMatcherDescendantBinding:
     ingress_identity: IngressIdentity
@@ -793,6 +820,10 @@ class HistoricalMatcherState:
     issued_ingresses: tuple[ExecutionFactIngress, ...]
     _dispatch_batch_history_sha256: Sha256Digest = field(repr=False)
     _dispatch_ingress_history_sha256: Sha256Digest = field(repr=False)
+    _dispatch_history: _HistoricalMatcherDispatchHistory = field(
+        repr=False,
+        compare=False,
+    )
     _last_dispatch_batch: HistoricalMatcherDispatchBatch | None = field(repr=False)
     dispatch_batch_sha256s: tuple[Sha256Digest, ...]
     last_new_dispatch_sequence: int | None
@@ -1202,6 +1233,97 @@ def _validate_batch(batch: HistoricalMatcherDispatchBatch) -> None:
         canonical_execution_fact_bytes(fact)
 
 
+def _require_historical_matcher_dispatch_history(
+    history: object,
+) -> _SealedHistoricalMatcherDispatchHistory:
+    if type(history) is not _HistoricalMatcherDispatchHistory:
+        raise _fail(OutcomeCode.INVALID_TYPE, "dispatch-history witness must be exact")
+    sealed = _SEALED_HISTORICAL_MATCHER_DISPATCH_HISTORIES.get(history)
+    if sealed is None:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch-history witness is not sealed")
+    return sealed
+
+
+def _empty_historical_matcher_dispatch_history() -> _HistoricalMatcherDispatchHistory:
+    history = object.__new__(_HistoricalMatcherDispatchHistory)
+    _SEALED_HISTORICAL_MATCHER_DISPATCH_HISTORIES[history] = (
+        _SealedHistoricalMatcherDispatchHistory(
+            batch_sha256_values=(),
+            root_sha256_by_sequence=MappingProxyType({}),
+            sequence_by_root_sha256=MappingProxyType({}),
+            run_id_value=None,
+            source_namespace_value=None,
+            last_dispatch_sequence=None,
+            last_root_key=None,
+            last_dispatch_kind=None,
+            terminal_index=None,
+        )
+    )
+    return history
+
+
+def _append_historical_matcher_dispatch_history(
+    history: _HistoricalMatcherDispatchHistory,
+    batch: HistoricalMatcherDispatchBatch,
+) -> _HistoricalMatcherDispatchHistory:
+    sealed = _require_historical_matcher_dispatch_history(history)
+    if type(batch) is not HistoricalMatcherDispatchBatch:
+        raise _fail(OutcomeCode.INVALID_TYPE, "dispatch-history batch must be exact")
+    batch_sha256 = historical_matcher_dispatch_batch_digest(batch)
+    root_sha256_value = batch.trigger_root_sha256.value
+    if sealed.terminal_index is not None:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch history continues after terminal batch")
+    if batch.dispatch_sequence in sealed.root_sha256_by_sequence:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch history sequence duplicates")
+    if root_sha256_value in sealed.sequence_by_root_sha256:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch history root duplicates")
+    if sealed.last_dispatch_sequence is not None and (
+        batch.run_id.value != sealed.run_id_value
+        or batch.source_namespace.value != sealed.source_namespace_value
+        or batch.dispatch_sequence <= sealed.last_dispatch_sequence
+        or sealed.last_root_key is None
+        or batch.trigger_root_key <= sealed.last_root_key
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch history append order conflicts")
+    by_sequence = dict(sealed.root_sha256_by_sequence)
+    by_root = dict(sealed.sequence_by_root_sha256)
+    by_sequence[batch.dispatch_sequence] = root_sha256_value
+    by_root[root_sha256_value] = batch.dispatch_sequence
+    terminal_index = (
+        len(sealed.batch_sha256_values)
+        if batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN
+        else None
+    )
+    appended = object.__new__(_HistoricalMatcherDispatchHistory)
+    _SEALED_HISTORICAL_MATCHER_DISPATCH_HISTORIES[appended] = (
+        _SealedHistoricalMatcherDispatchHistory(
+            batch_sha256_values=(*sealed.batch_sha256_values, batch_sha256.value),
+            root_sha256_by_sequence=MappingProxyType(by_sequence),
+            sequence_by_root_sha256=MappingProxyType(by_root),
+            run_id_value=batch.run_id.value,
+            source_namespace_value=batch.source_namespace.value,
+            last_dispatch_sequence=batch.dispatch_sequence,
+            last_root_key=runtime_root_key_from_document(
+                _runtime_key_document_from_key(batch.trigger_root_key)
+            ),
+            last_dispatch_kind=batch.dispatch_kind,
+            terminal_index=terminal_index,
+        )
+    )
+    return appended
+
+
+def _historical_matcher_dispatch_history_from_batches(
+    batches: tuple[HistoricalMatcherDispatchBatch, ...],
+) -> _HistoricalMatcherDispatchHistory:
+    if type(batches) is not tuple:
+        raise _fail(OutcomeCode.INVALID_TYPE, "dispatch-history batches must be exact tuple")
+    history = _empty_historical_matcher_dispatch_history()
+    for batch in batches:
+        history = _append_historical_matcher_dispatch_history(history, batch)
+    return history
+
+
 def _validate_descendant_binding(binding: HistoricalMatcherDescendantBinding) -> None:
     if (
         type(binding.ingress_identity) is not IngressIdentity
@@ -1346,6 +1468,7 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         or type(state.issued_ingresses) is not tuple
         or type(state._dispatch_batch_history_sha256) is not Sha256Digest
         or type(state._dispatch_ingress_history_sha256) is not Sha256Digest
+        or type(state._dispatch_history) is not _HistoricalMatcherDispatchHistory
         or type(state.dispatch_batch_sha256s) is not tuple
         or type(state.ended) is not bool
         or type(state.halted) is not bool
@@ -1426,6 +1549,37 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         != state._dispatch_ingress_history_sha256
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state batch/ingress history conflicts")
+    sealed_history = _require_historical_matcher_dispatch_history(state._dispatch_history)
+    if sealed_history.batch_sha256_values != tuple(
+        digest.value for digest in state.dispatch_batch_sha256s
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state dispatch-history witness conflicts")
+    if state.dispatch_batch_sha256s:
+        if (
+            sealed_history.run_id_value != state.run_id.value
+            or sealed_history.source_namespace_value != state.source_namespace.value
+            or sealed_history.last_dispatch_sequence is None
+            or sealed_history.last_dispatch_kind is None
+            or sealed_history.last_root_key is None
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state dispatch-history binding conflicts")
+    elif any(
+        value is not None
+        for value in (
+            sealed_history.run_id_value,
+            sealed_history.source_namespace_value,
+            sealed_history.last_dispatch_sequence,
+            sealed_history.last_dispatch_kind,
+            sealed_history.last_root_key,
+            sealed_history.terminal_index,
+        )
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "empty state has dispatch-history evidence")
+    if sealed_history.terminal_index is not None and (
+        sealed_history.terminal_index != len(state.dispatch_batch_sha256s) - 1
+        or sealed_history.last_dispatch_kind is not HistoricalDispatchKind.END_OF_RUN
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state terminal history position conflicts")
     if state._last_dispatch_batch is not None:
         if type(state._last_dispatch_batch) is not HistoricalMatcherDispatchBatch:
             raise _fail(OutcomeCode.INVALID_TYPE, "state final batch evidence must be exact")
@@ -1436,6 +1590,12 @@ def _validate_state(state: HistoricalMatcherState) -> None:
             or state._last_dispatch_batch.source_namespace != state.source_namespace
             or historical_matcher_dispatch_batch_digest(state._last_dispatch_batch)
             != state.dispatch_batch_sha256s[-1]
+            or state._last_dispatch_batch.dispatch_sequence != sealed_history.last_dispatch_sequence
+            or state._last_dispatch_batch.trigger_root_sha256.value
+            != sealed_history.root_sha256_by_sequence.get(
+                state._last_dispatch_batch.dispatch_sequence
+            )
+            or state._last_dispatch_batch.dispatch_kind is not sealed_history.last_dispatch_kind
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "state final batch evidence conflicts")
     if len(set(state.pending_order_ids)) != len(state.pending_order_ids):
@@ -1494,6 +1654,7 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         _validate_conflict_state_bindings(
             state.conflict,
             receipts=state._submission_receipts,
+            dispatch_history=state._dispatch_history,
         )
     if state.ended != (state.end_batch_sha256 is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state end relationship conflicts")
@@ -1505,6 +1666,8 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         or state.end_batch_sha256 != state.dispatch_batch_sha256s[-1]
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state end batch conflicts")
+    if state.ended != (sealed_history.last_dispatch_kind is HistoricalDispatchKind.END_OF_RUN):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state terminal dispatch kind conflicts")
     if bool(state.dispatch_batch_sha256s) != (state.last_new_dispatch_sequence is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state last dispatch relationship conflicts")
     expected_last_dispatch = (
@@ -2304,8 +2467,9 @@ def _validate_conflict_state_bindings(
     conflict: HistoricalMatcherConflictEvidence,
     *,
     receipts: tuple[HistoricalSubmissionReceipt, ...],
-    batches: tuple[HistoricalMatcherDispatchBatch, ...] | None = None,
+    dispatch_history: _HistoricalMatcherDispatchHistory,
 ) -> None:
+    sealed_history = _require_historical_matcher_dispatch_history(dispatch_history)
     occupied = conflict.occupied_identity
     kind = conflict.conflict_kind
     if kind is HistoricalMatcherConflictKind.SUBMISSION_IDENTITY:
@@ -2337,31 +2501,24 @@ def _validate_conflict_state_bindings(
         if retained is None or conflict.existing_sha256 != retained.order_sha256:
             raise _fail(OutcomeCode.CONFLICTING_ID, "client conflict state binding conflicts")
         return
-    if batches is None:
-        return
     if kind is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT:
         return
     submitted_sequence = cast(int, conflict.submitted_dispatch_sequence)
     submitted_digest = cast(Sha256Digest, conflict.submitted_sha256)
-    retained_sequence = next(
-        (batch for batch in batches if batch.dispatch_sequence == submitted_sequence),
-        None,
-    )
-    retained_digest = next(
-        (batch for batch in batches if batch.trigger_root_sha256 == submitted_digest),
-        None,
-    )
+    retained_sequence_digest = sealed_history.root_sha256_by_sequence.get(submitted_sequence)
+    retained_digest_sequence = sealed_history.sequence_by_root_sha256.get(submitted_digest.value)
     if kind is HistoricalMatcherConflictKind.DISPATCH_IDENTITY:
         if occupied is not None:
-            if retained_sequence is None or (
-                retained_sequence.trigger_root_sha256 != conflict.existing_sha256
+            if (
+                conflict.existing_sha256 is None
+                or retained_sequence_digest != conflict.existing_sha256.value
             ):
                 raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch conflict state binding conflicts")
-        elif retained_digest is None or retained_sequence is not None:
+        elif retained_digest_sequence is None or retained_sequence_digest is not None:
             raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch digest state binding conflicts")
         return
     if kind is HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH and (
-        retained_sequence is not None or retained_digest is not None
+        retained_sequence_digest is not None or retained_digest_sequence is not None
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "non-monotone state precedence conflicts")
 
@@ -3222,6 +3379,7 @@ def decode_historical_matcher_state(
         or historical_matcher_conflict_digest(conflict) != conflict_digest
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state conflict lookup conflicts")
+    dispatch_history = _historical_matcher_dispatch_history_from_batches(tuple(batches))
     state = _create_historical_matcher_state(
         run_id=context.run_id,
         source_namespace=context.source_namespace,
@@ -3248,6 +3406,7 @@ def decode_historical_matcher_state(
             tuple(batch_digests),
             tuple(issued),
         ),
+        _dispatch_history=dispatch_history,
         _last_dispatch_batch=None if not batches else batches[-1],
         dispatch_batch_sha256s=tuple(batch_digests),
         last_new_dispatch_sequence=_parse_uint64_or_none(
@@ -3389,7 +3548,7 @@ def decode_historical_matcher_state(
         _validate_conflict_state_bindings(
             conflict,
             receipts=tuple(receipt for receipt, _ in receipt_records),
-            batches=tuple(batches),
+            dispatch_history=dispatch_history,
         )
     if canonical_historical_matcher_state_bytes(state) != payload:
         raise _fail(OutcomeCode.CONFLICTING_ID, "matcher state reconstruction conflicts")

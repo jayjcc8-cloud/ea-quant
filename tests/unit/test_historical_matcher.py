@@ -792,6 +792,95 @@ def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
         assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_state_encoder_binds_dispatch_conflicts_to_sealed_history() -> None:
+    fake_existing = Sha256Digest("e" * 64)
+    fake_submitted = Sha256Digest("f" * 64)
+
+    _, matcher, _, _, delayed, _ = _system()
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(
+            replace(delayed, source_sequence=delayed.source_sequence + 1),
+            dispatch_sequence=8,
+        )
+    sequence_conflict = matcher.state
+    assert sequence_conflict.conflict is not None
+    assert sequence_conflict.conflict.occupied_identity is not None
+    object.__setattr__(sequence_conflict.conflict, "existing_sha256", fake_existing)
+    object.__setattr__(sequence_conflict.conflict, "submitted_sha256", fake_submitted)
+    object.__setattr__(sequence_conflict.conflict, "trigger_root_sha256", fake_submitted)
+    with pytest.raises(HistoricalMatcherError) as sequence_rejected:
+        canonical_historical_matcher_state_bytes(sequence_conflict)
+    assert sequence_rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+    _, matcher, _, _, delayed, _ = _system()
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(delayed, dispatch_sequence=9)
+    digest_conflict = matcher.state
+    assert digest_conflict.conflict is not None
+    assert digest_conflict.conflict.occupied_identity is None
+    for field_name in ("existing_sha256", "submitted_sha256", "trigger_root_sha256"):
+        object.__setattr__(digest_conflict.conflict, field_name, fake_submitted)
+    with pytest.raises(HistoricalMatcherError) as digest_rejected:
+        canonical_historical_matcher_state_bytes(digest_conflict)
+    assert digest_rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+    _, matcher, _, _, delayed, _ = _system()
+    retained = matcher.match_active_market_root(delayed, dispatch_sequence=9)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(
+            replace(delayed, source_sequence=delayed.source_sequence + 1),
+            dispatch_sequence=8,
+        )
+    non_monotone = matcher.state
+    assert non_monotone.conflict is not None
+    object.__setattr__(
+        non_monotone.conflict,
+        "submitted_sha256",
+        retained.trigger_root_sha256,
+    )
+    object.__setattr__(
+        non_monotone.conflict,
+        "trigger_root_sha256",
+        retained.trigger_root_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as precedence_rejected:
+        canonical_historical_matcher_state_bytes(non_monotone)
+    assert precedence_rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_state_encoder_binds_terminal_flag_to_sealed_final_batch_kind() -> None:
+    _, market_matcher, _, _, delayed, _ = _system()
+    market_batch = market_matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    false_terminal = market_matcher.state
+    object.__setattr__(false_terminal, "ended", True)
+    object.__setattr__(
+        false_terminal,
+        "end_batch_sha256",
+        historical_matcher_dispatch_batch_digest(market_batch),
+    )
+    with pytest.raises(HistoricalMatcherError) as market_rejected:
+        canonical_historical_matcher_state_bytes(false_terminal)
+    assert market_rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+    _, end_matcher, _, _, _, end = _system()
+    end_matcher.expire_at_active_end(end, dispatch_sequence=9)
+    hidden_terminal = end_matcher.state
+    object.__setattr__(hidden_terminal, "ended", False)
+    object.__setattr__(hidden_terminal, "end_batch_sha256", None)
+    with pytest.raises(HistoricalMatcherError) as end_rejected:
+        canonical_historical_matcher_state_bytes(hidden_terminal)
+    assert end_rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+    cross_bound = market_matcher.state
+    donor = end_matcher.state
+    object.__setattr__(cross_bound, "_dispatch_history", donor._dispatch_history)
+    with pytest.raises(HistoricalMatcherError) as witness_rejected:
+        canonical_historical_matcher_state_bytes(cross_bound)
+    assert witness_rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_state_decoder_enforces_non_monotone_conflict_precedence() -> None:
     _, matcher, _, _, delayed, _ = _system()
     first = matcher.match_active_market_root(delayed, dispatch_sequence=7)
