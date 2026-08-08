@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 
+import ea.core.historical_matching as historical_matching_module
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import (
     InstrumentExecutionSpec,
@@ -25,6 +26,7 @@ from ea.core.execution import (
 from ea.core.execution_identity import (
     EconomicId,
     EconomicOwnerKind,
+    IngressIdentity,
     SourceNamespace,
     SourceNativeSequence,
 )
@@ -675,7 +677,8 @@ def test_state_encoder_binds_last_dispatch_to_final_batch() -> None:
     assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
 
     witness_mutation = matcher.state
-    object.__setattr__(witness_mutation._dispatch_batches[-1], "dispatch_sequence", 9)
+    assert witness_mutation._last_dispatch_batch is not None
+    object.__setattr__(witness_mutation._last_dispatch_batch, "dispatch_sequence", 9)
     with pytest.raises(HistoricalMatcherError):
         canonical_historical_matcher_state_bytes(witness_mutation)
     assert matcher.state.last_new_dispatch_sequence == 8
@@ -2645,6 +2648,58 @@ def test_descendant_lookup_validates_issuance_registry_before_absence(lookup: st
     )
 
 
+def test_descendant_lookup_validation_is_addressed_record_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture, matcher, orders, causal, delayed, _ = _system()
+    template = orders[0]
+    order_verifier = cast(_OrderVerifier, matcher._order_issuance_verifier)
+    authorization = cast(_AuthorizationVerifier, matcher._submission_authorization_verifier)
+    receipt_template = fixture["artifacts"]["trade_receipt"]["canonical_utf8"]
+    receipt_document = json.loads(receipt_template)
+    submitted: list[Order] = []
+    for offset in range(32):
+        order = _clone_order(
+            template,
+            order_id=EconomicId(
+                matcher.run_id,
+                EconomicOwnerKind.EXECUTION_ORDER,
+                100 + offset,
+            ),
+        )
+        order_verifier._orders[order.order_id] = order
+        authorization._orders[order.order_id] = order
+        authorization._receipts[order.order_id] = receipt_document
+        matcher.submit(order, causal_market_root=causal, dispatch_sequence=7)
+        submitted.append(order)
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert len(batch.ingresses) == len(submitted)
+
+    validations = 0
+    original = Phase1HistoricalMatcher._require_issued_record
+
+    def tracked(self: Phase1HistoricalMatcher, record: Any) -> None:
+        nonlocal validations
+        validations += 1
+        original(self, record)
+
+    monkeypatch.setattr(Phase1HistoricalMatcher, "_require_issued_record", tracked)
+    for record in matcher._state.issued:
+        assert matcher.has_issued_ingress(
+            ingress_identity=record.ingress_identity,
+            canonical_ingress_bytes=record.ingress_bytes,
+            canonical_fact_bytes=record.fact_bytes,
+        )
+    assert validations == len(submitted)
+
+    assert not matcher.has_issued_ingress(
+        ingress_identity=IngressIdentity(matcher.source_namespace, len(submitted) + 1),
+        canonical_ingress_bytes=b"absent ingress",
+        canonical_fact_bytes=b"absent fact",
+    )
+    assert validations == len(submitted)
+
+
 def test_retained_state_is_validated_before_filtering_and_after_halt() -> None:
     _, matcher, orders, causal, delayed, _ = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -2714,8 +2769,12 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
 ) -> None:
     _, matcher, _, _, delayed, _ = _system()
     validations = 0
+    core_validations = 0
+    core_digests = 0
     callback_state_types: list[type[object]] = []
     original = Phase1HistoricalMatcher._require_dispatch_record
+    original_core_validation = historical_matching_module._validate_batch
+    original_core_digest = historical_matching_module.historical_matcher_dispatch_batch_digest
     verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
     original_verify = verifier.verify_active_market_dispatch
 
@@ -2728,6 +2787,23 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
         original(self, record)
 
     monkeypatch.setattr(Phase1HistoricalMatcher, "_require_dispatch_record", tracked)
+
+    def tracked_core_validation(batch: Any) -> None:
+        nonlocal core_validations
+        core_validations += 1
+        original_core_validation(batch)
+
+    def tracked_core_digest(batch: Any) -> Sha256Digest:
+        nonlocal core_digests
+        core_digests += 1
+        return original_core_digest(batch)
+
+    monkeypatch.setattr(historical_matching_module, "_validate_batch", tracked_core_validation)
+    monkeypatch.setattr(
+        historical_matching_module,
+        "historical_matcher_dispatch_batch_digest",
+        tracked_core_digest,
+    )
 
     def observe_callback_fence(
         root: MarketDataEnvelope,
@@ -2742,13 +2818,17 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
         replace(delayed, source_sequence=delayed.source_sequence + offset)
         for offset in range(1, 33)
     )
-    batches = tuple(
-        matcher.match_active_market_root(root, dispatch_sequence=sequence)
-        for sequence, root in enumerate(roots, start=1)
-    )
+    batches_list = []
+    core_work_by_dispatch = []
+    for sequence, root in enumerate(roots, start=1):
+        before = core_validations + core_digests
+        batches_list.append(matcher.match_active_market_root(root, dispatch_sequence=sequence))
+        core_work_by_dispatch.append(core_validations + core_digests - before)
+    batches = tuple(batches_list)
 
     assert all(batch.ingresses == () for batch in batches)
     assert validations == 0
+    assert max(core_work_by_dispatch) == min(core_work_by_dispatch)
     assert callback_state_types == [_DispatchCallbackStateFence] * len(roots)
     assert _DispatchCallbackStateFence.__slots__ == ("_accessed",)
     assert matcher.match_active_market_root(roots[0], dispatch_sequence=1) is batches[0]

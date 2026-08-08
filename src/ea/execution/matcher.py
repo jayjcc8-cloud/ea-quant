@@ -266,6 +266,8 @@ class _DispatchCallbackStateFence:
 @dataclass(frozen=True, slots=True)
 class _DispatchCallbackLease:
     state: _MatcherState
+    issued_history_identity: tuple[_IssuedRecord, ...]
+    issued_registry_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
     conflict_bytes: bytes | None
     conflict_sha256: Sha256Digest | None
     run_id: RunId
@@ -442,6 +444,8 @@ class Phase1HistoricalMatcher:
         "_execution_policy",
         "_conflict_bytes",
         "_conflict_sha256",
+        "_issued_history_identity",
+        "_issued_registry_identity",
         "_mutation_active",
         "_order_issuance_verifier",
         "_provenance_id",
@@ -460,6 +464,8 @@ class Phase1HistoricalMatcher:
     _execution_policy: ExecutionPolicyRef
     _conflict_bytes: bytes | None
     _conflict_sha256: Sha256Digest | None
+    _issued_history_identity: tuple[_IssuedRecord, ...]
+    _issued_registry_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
     _mutation_active: bool
     _order_issuance_verifier: HistoricalOrderIssuanceVerifier
     _provenance_id: FactProvenanceId
@@ -530,29 +536,42 @@ class Phase1HistoricalMatcher:
         public_ingresses_by_sha256 = {
             execution_fact_ingress_digest(ingress): ingress for ingress in public_ingresses
         }
-        public_batches = tuple(
-            _create_historical_matcher_dispatch_batch(
-                run_id=_clone_run_id(record.batch.run_id),
-                source_namespace=SourceNamespace(record.batch.source_namespace.value),
-                dispatch_kind=record.batch.dispatch_kind,
-                dispatch_sequence=record.batch.dispatch_sequence,
-                trigger_root_sha256=Sha256Digest(record.batch.trigger_root_sha256.value),
-                trigger_root_key=runtime_root_key_from_document(
-                    _runtime_key_document_from_key(record.batch.trigger_root_key)
-                ),
-                next_fact_sequence_before=record.batch.next_fact_sequence_before,
-                next_fact_sequence_after=record.batch.next_fact_sequence_after,
-                submission_sequences=tuple(record.batch.submission_sequences),
-                order_ids=tuple(_clone_economic_id(value) for value in record.batch.order_ids),
-                ingresses=tuple(
-                    public_ingresses_by_sha256[ingress_sha256]
-                    for ingress_sha256 in record.batch.ingress_sha256s
-                ),
-                ingress_sha256s=tuple(
-                    Sha256Digest(value.value) for value in record.batch.ingress_sha256s
-                ),
+        last_dispatch_record = (
+            None if state.last_dispatch is None else state.dispatch_by_sequence[state.last_dispatch]
+        )
+        public_last_batch = (
+            None
+            if last_dispatch_record is None
+            else (
+                _create_historical_matcher_dispatch_batch(
+                    run_id=_clone_run_id(last_dispatch_record.batch.run_id),
+                    source_namespace=SourceNamespace(
+                        last_dispatch_record.batch.source_namespace.value
+                    ),
+                    dispatch_kind=last_dispatch_record.batch.dispatch_kind,
+                    dispatch_sequence=last_dispatch_record.batch.dispatch_sequence,
+                    trigger_root_sha256=Sha256Digest(
+                        last_dispatch_record.batch.trigger_root_sha256.value
+                    ),
+                    trigger_root_key=runtime_root_key_from_document(
+                        _runtime_key_document_from_key(last_dispatch_record.batch.trigger_root_key)
+                    ),
+                    next_fact_sequence_before=last_dispatch_record.batch.next_fact_sequence_before,
+                    next_fact_sequence_after=last_dispatch_record.batch.next_fact_sequence_after,
+                    submission_sequences=tuple(last_dispatch_record.batch.submission_sequences),
+                    order_ids=tuple(
+                        _clone_economic_id(value) for value in last_dispatch_record.batch.order_ids
+                    ),
+                    ingresses=tuple(
+                        public_ingresses_by_sha256[ingress_sha256]
+                        for ingress_sha256 in last_dispatch_record.batch.ingress_sha256s
+                    ),
+                    ingress_sha256s=tuple(
+                        Sha256Digest(value.value)
+                        for value in last_dispatch_record.batch.ingress_sha256s
+                    ),
+                )
             )
-            for _, record in sorted(state.dispatch_by_sequence.items())
         )
         public_conflict = None
         if state.conflict is not None:
@@ -595,7 +614,7 @@ class Phase1HistoricalMatcher:
                 )
             ),
             issued_ingresses=public_ingresses,
-            _dispatch_batches=public_batches,
+            _last_dispatch_batch=public_last_batch,
             dispatch_batch_sha256s=tuple(
                 Sha256Digest(record.batch_sha256.value)
                 for _, record in sorted(state.dispatch_by_sequence.items())
@@ -811,12 +830,11 @@ class Phase1HistoricalMatcher:
 
     def _require_issuance_registry(self) -> None:
         state = self._state
-        for record in state.issued:
-            self._require_issued_record(record)
         try:
-            valid = len(state.issued_by_identity) == len(state.issued) and all(
-                state.issued_by_identity.get(record.ingress_identity) is record
-                for record in state.issued
+            valid = (
+                state.issued is self._issued_history_identity
+                and state.issued_by_identity is self._issued_registry_identity
+                and len(state.issued_by_identity) == len(state.issued)
             )
         except Exception:
             valid = False
@@ -871,6 +889,8 @@ class Phase1HistoricalMatcher:
         fence = _DispatchCallbackStateFence()
         lease = _DispatchCallbackLease(
             state=self._state,
+            issued_history_identity=self._issued_history_identity,
+            issued_registry_identity=self._issued_registry_identity,
             conflict_bytes=self._conflict_bytes,
             conflict_sha256=self._conflict_sha256,
             run_id=self._run_id,
@@ -895,6 +915,8 @@ class Phase1HistoricalMatcher:
                 return missing
 
         current_state = current("_state")
+        current_issued_history_identity = current("_issued_history_identity")
+        current_issued_registry_identity = current("_issued_registry_identity")
         current_conflict_bytes = current("_conflict_bytes")
         current_conflict_sha256 = current("_conflict_sha256")
         current_run_id = current("_run_id")
@@ -916,6 +938,8 @@ class Phase1HistoricalMatcher:
         drifted = (
             current_fence_accessed is not False
             or current_state is not lease.fence
+            or current_issued_history_identity is not lease.issued_history_identity
+            or current_issued_registry_identity is not lease.issued_registry_identity
             or current_conflict_bytes is not lease.conflict_bytes
             or current_conflict_sha256 is not lease.conflict_sha256
             or not run_id_unchanged
@@ -923,6 +947,8 @@ class Phase1HistoricalMatcher:
         )
 
         object.__setattr__(self, "_state", lease.state)
+        object.__setattr__(self, "_issued_history_identity", lease.issued_history_identity)
+        object.__setattr__(self, "_issued_registry_identity", lease.issued_registry_identity)
         object.__setattr__(self, "_conflict_bytes", lease.conflict_bytes)
         object.__setattr__(self, "_conflict_sha256", lease.conflict_sha256)
         object.__setattr__(
@@ -936,6 +962,7 @@ class Phase1HistoricalMatcher:
             self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
 
     def _require_retained_state(self) -> None:
+        self._require_issuance_registry()
         state = self._state
         for submission_record in state.submissions:
             self._require_submission_record(submission_record)
@@ -1913,9 +1940,7 @@ class Phase1HistoricalMatcher:
                 receipt_sha256s=tuple(item.receipt_sha256 for item in next_state.submissions),
                 pending_order_ids=tuple(item.order_id for item in next_state.pending),
                 issued_ingresses=tuple(item.ingress for item in next_state.issued),
-                _dispatch_batches=tuple(
-                    item.batch for _, item in sorted(next_state.dispatch_by_sequence.items())
-                ),
+                _last_dispatch_batch=next_state.dispatch_by_sequence[sequence].batch,
                 dispatch_batch_sha256s=tuple(
                     item.batch_sha256 for _, item in sorted(next_state.dispatch_by_sequence.items())
                 ),
@@ -1928,6 +1953,8 @@ class Phase1HistoricalMatcher:
         )
         self._require_live_bindings()
         self._state = next_state
+        self._issued_history_identity = next_state.issued
+        self._issued_registry_identity = next_state.issued_by_identity
         return batch
 
     def has_issued_ingress(
@@ -2052,5 +2079,7 @@ def create_phase1_historical_matcher(
         end_batch_sha256=None,
         conflict=None,
     )
+    value._issued_history_identity = value._state.issued
+    value._issued_registry_identity = value._state.issued_by_identity
     value._require_live_bindings()
     return value

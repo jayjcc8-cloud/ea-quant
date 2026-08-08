@@ -785,7 +785,7 @@ class HistoricalMatcherState:
     receipt_sha256s: tuple[Sha256Digest, ...]
     pending_order_ids: tuple[EconomicId, ...]
     issued_ingresses: tuple[ExecutionFactIngress, ...]
-    _dispatch_batches: tuple[HistoricalMatcherDispatchBatch, ...] = field(repr=False)
+    _last_dispatch_batch: HistoricalMatcherDispatchBatch | None = field(repr=False)
     dispatch_batch_sha256s: tuple[Sha256Digest, ...]
     last_new_dispatch_sequence: int | None
     ended: bool
@@ -1278,7 +1278,6 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         or type(state.receipt_sha256s) is not tuple
         or type(state.pending_order_ids) is not tuple
         or type(state.issued_ingresses) is not tuple
-        or type(state._dispatch_batches) is not tuple
         or type(state.dispatch_batch_sha256s) is not tuple
         or type(state.ended) is not bool
         or type(state.halted) is not bool
@@ -1308,8 +1307,6 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         _validate_digest(digest, field_name="state digest")
     if len(state._submission_receipts) != len(state.receipt_sha256s):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt evidence is not aligned")
-    if len(state._dispatch_batches) != len(state.dispatch_batch_sha256s):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "state batch evidence is not aligned")
     receipt_order_ids: list[EconomicId] = []
     for sequence, (receipt, digest) in enumerate(
         zip(state._submission_receipts, state.receipt_sha256s, strict=True),
@@ -1340,25 +1337,18 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt digests duplicate")
     if len(set(state.dispatch_batch_sha256s)) != len(state.dispatch_batch_sha256s):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state batch digests duplicate")
-    for batch, digest in zip(
-        state._dispatch_batches,
-        state.dispatch_batch_sha256s,
-        strict=True,
-    ):
-        if type(batch) is not HistoricalMatcherDispatchBatch:
-            raise _fail(OutcomeCode.INVALID_TYPE, "state batch evidence must be exact")
-        _validate_batch(batch)
+    if state._last_dispatch_batch is not None:
+        if type(state._last_dispatch_batch) is not HistoricalMatcherDispatchBatch:
+            raise _fail(OutcomeCode.INVALID_TYPE, "state final batch evidence must be exact")
+        _validate_batch(state._last_dispatch_batch)
         if (
-            batch.run_id != state.run_id
-            or batch.source_namespace != state.source_namespace
-            or historical_matcher_dispatch_batch_digest(batch) != digest
+            not state.dispatch_batch_sha256s
+            or state._last_dispatch_batch.run_id != state.run_id
+            or state._last_dispatch_batch.source_namespace != state.source_namespace
+            or historical_matcher_dispatch_batch_digest(state._last_dispatch_batch)
+            != state.dispatch_batch_sha256s[-1]
         ):
-            raise _fail(OutcomeCode.CONFLICTING_ID, "state batch evidence conflicts")
-    batch_sequences = tuple(batch.dispatch_sequence for batch in state._dispatch_batches)
-    if batch_sequences != tuple(sorted(batch_sequences)) or len(set(batch_sequences)) != len(
-        batch_sequences
-    ):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "state batch sequence history conflicts")
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state final batch evidence conflicts")
     if len(set(state.pending_order_ids)) != len(state.pending_order_ids):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state pending Order IDs duplicate")
     if _next_sequence_after(1, len(state.receipt_sha256s)) != state.next_submission_sequence:
@@ -1424,7 +1414,9 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state end batch conflicts")
     if bool(state.dispatch_batch_sha256s) != (state.last_new_dispatch_sequence is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state last dispatch relationship conflicts")
-    expected_last_dispatch = None if not batch_sequences else batch_sequences[-1]
+    expected_last_dispatch = (
+        None if state._last_dispatch_batch is None else state._last_dispatch_batch.dispatch_sequence
+    )
     if state.last_new_dispatch_sequence != expected_last_dispatch:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state last dispatch conflicts")
 
@@ -2991,7 +2983,7 @@ def decode_historical_matcher_state(
             _parse_economic_id(value, field_name="pending_order_id") for value in raw_pending
         ),
         issued_ingresses=tuple(issued),
-        _dispatch_batches=tuple(batches),
+        _last_dispatch_batch=None if not batches else batches[-1],
         dispatch_batch_sha256s=tuple(batch_digests),
         last_new_dispatch_sequence=_parse_uint64_or_none(
             document["last_new_dispatch_sequence"],
