@@ -784,6 +784,7 @@ class HistoricalMatcherState:
     execution_policy: ExecutionPolicyRef
     next_submission_sequence: int | None
     next_fact_sequence: int | None
+    _submission_receipts: tuple[HistoricalSubmissionReceipt, ...] = field(repr=False)
     receipt_sha256s: tuple[Sha256Digest, ...]
     pending_order_ids: tuple[EconomicId, ...]
     issued_ingresses: tuple[ExecutionFactIngress, ...]
@@ -1275,6 +1276,7 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         or type(state.instrument_spec_set_id) is not InstrumentSpecSetId
         or type(state.instrument_spec_set_sha256) is not Sha256Digest
         or type(state.execution_policy) is not ExecutionPolicyRef
+        or type(state._submission_receipts) is not tuple
         or type(state.receipt_sha256s) is not tuple
         or type(state.pending_order_ids) is not tuple
         or type(state.issued_ingresses) is not tuple
@@ -1305,6 +1307,26 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.INVALID_TYPE, "state batch digests must be exact")
     for digest in (*state.receipt_sha256s, *state.dispatch_batch_sha256s):
         _validate_digest(digest, field_name="state digest")
+    if len(state._submission_receipts) != len(state.receipt_sha256s):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt evidence is not aligned")
+    receipt_order_ids: list[EconomicId] = []
+    for sequence, (receipt, digest) in enumerate(
+        zip(state._submission_receipts, state.receipt_sha256s, strict=True),
+        start=1,
+    ):
+        if type(receipt) is not HistoricalSubmissionReceipt:
+            raise _fail(OutcomeCode.INVALID_TYPE, "state receipt evidence must be exact")
+        _validate_receipt(receipt)
+        if (
+            receipt.run_id != state.run_id
+            or receipt.source_namespace != state.source_namespace
+            or receipt.submission_sequence != sequence
+            or historical_submission_receipt_digest(receipt) != digest
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt evidence conflicts")
+        receipt_order_ids.append(receipt.order_id)
+    if len(set(receipt_order_ids)) != len(receipt_order_ids):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt Order IDs duplicate")
     for order_id in state.pending_order_ids:
         _validate_economic_id(
             order_id,
@@ -1348,6 +1370,15 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         raise _fail(OutcomeCode.CONFLICTING_ID, "state issued Order IDs duplicate")
     if set(state.pending_order_ids).intersection(issued_order_ids):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state Order is both pending and issued")
+    receipt_order_id_set = set(receipt_order_ids)
+    if set(state.pending_order_ids).union(issued_order_ids) != receipt_order_id_set:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt membership conflicts")
+    issued_order_id_set = set(issued_order_ids)
+    expected_pending_order_ids = tuple(
+        order_id for order_id in receipt_order_ids if order_id not in issued_order_id_set
+    )
+    if state.pending_order_ids != expected_pending_order_ids:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state pending Order order conflicts")
     if state.halted != (state.conflict is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state halt/conflict relationship conflicts")
     if state.conflict is not None:
@@ -2906,6 +2937,7 @@ def decode_historical_matcher_state(
             document["next_fact_sequence"],
             field_name="next_fact_sequence",
         ),
+        _submission_receipts=tuple(receipts),
         receipt_sha256s=tuple(receipt_digests),
         pending_order_ids=tuple(
             _parse_economic_id(value, field_name="pending_order_id") for value in raw_pending

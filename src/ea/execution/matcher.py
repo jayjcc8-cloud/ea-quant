@@ -79,6 +79,7 @@ from ea.core.historical_matching import (
     canonical_historical_matcher_state_bytes,
     canonical_historical_submission_receipt_bytes,
     decode_historical_matcher_conflict,
+    decode_historical_submission_receipt,
     historical_end_root_digest,
     historical_market_root_digest,
     historical_matcher_conflict_digest,
@@ -498,6 +499,25 @@ class Phase1HistoricalMatcher:
     def state(self) -> HistoricalMatcherState:
         self._require_retained_state()
         state = self._state
+        receipt_context = HistoricalMatcherDecodeContext(
+            run_id=_clone_run_id(self._run_id),
+            spec_set=self._spec_set,
+            execution_policy=_clone_policy(self._execution_policy),
+            source_namespace=SourceNamespace(self._source_namespace.value),
+            provenance_id=FactProvenanceId(self._provenance_id.value),
+            orders_by_sha256={record.order_sha256: record.order for record in state.submissions},
+            market_roots_by_sha256={
+                record.causal_market_sha256: record.causal_market_root
+                for record in state.submissions
+            },
+        )
+        public_receipts = tuple(
+            decode_historical_submission_receipt(
+                record.receipt_bytes,
+                context=receipt_context,
+            )
+            for record in state.submissions
+        )
         public_ingresses = tuple(
             decode_execution_fact_ingress(
                 record.ingress_bytes,
@@ -534,6 +554,7 @@ class Phase1HistoricalMatcher:
             execution_policy=_clone_policy(self._execution_policy),
             next_submission_sequence=state.next_submission,
             next_fact_sequence=state.next_fact,
+            _submission_receipts=public_receipts,
             receipt_sha256s=tuple(
                 Sha256Digest(record.receipt_sha256.value) for record in state.submissions
             ),
@@ -1840,6 +1861,7 @@ class Phase1HistoricalMatcher:
                 execution_policy=self._execution_policy,
                 next_submission_sequence=next_state.next_submission,
                 next_fact_sequence=next_state.next_fact,
+                _submission_receipts=tuple(item.receipt for item in next_state.submissions),
                 receipt_sha256s=tuple(item.receipt_sha256 for item in next_state.submissions),
                 pending_order_ids=tuple(item.order_id for item in next_state.pending),
                 issued_ingresses=tuple(item.ingress for item in next_state.issued),

@@ -623,6 +623,45 @@ def test_state_encoder_requires_each_receipt_pending_or_issued() -> None:
         canonical_historical_matcher_state_bytes(double_assigned)
     assert overlap.value.code is OutcomeCode.CONFLICTING_ID
 
+    foreign_order_id = EconomicId(
+        matcher.run_id,
+        EconomicOwnerKind.EXECUTION_ORDER,
+        999,
+    )
+    foreign_pending = matcher.state
+    object.__setattr__(foreign_pending, "pending_order_ids", (foreign_order_id,))
+    with pytest.raises(HistoricalMatcherError) as substituted_pending:
+        canonical_historical_matcher_state_bytes(foreign_pending)
+    assert substituted_pending.value.code is OutcomeCode.CONFLICTING_ID
+
+    foreign_issued = matcher.state
+    object.__setattr__(foreign_issued.issued_ingresses[0].fact, "order_id", foreign_order_id)
+    with pytest.raises(HistoricalMatcherError) as substituted_issued:
+        canonical_historical_matcher_state_bytes(foreign_issued)
+    assert substituted_issued.value.code is OutcomeCode.CONFLICTING_ID
+
+    _, pending_matcher, pending_orders, pending_causal, pending_delayed, _ = _system()
+    pending_matcher.submit(
+        pending_orders[0],
+        causal_market_root=pending_causal,
+        dispatch_sequence=7,
+    )
+    pending_matcher.submit(
+        pending_orders[1],
+        causal_market_root=pending_delayed,
+        dispatch_sequence=8,
+    )
+    reordered_pending = pending_matcher.state
+    canonical_historical_matcher_state_bytes(reordered_pending)
+    object.__setattr__(
+        reordered_pending,
+        "pending_order_ids",
+        tuple(reversed(reordered_pending.pending_order_ids)),
+    )
+    with pytest.raises(HistoricalMatcherError) as reordered:
+        canonical_historical_matcher_state_bytes(reordered_pending)
+    assert reordered.value.code is OutcomeCode.CONFLICTING_ID
+
 
 def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
     _, matcher, _, _, delayed, _ = _system()
