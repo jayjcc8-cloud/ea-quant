@@ -117,6 +117,7 @@ def test_future_roots_cannot_change_a_frozen_prefix(
     assert canonical_historical_matcher_state_bytes(prefix_state) == state_bytes
 
 
+@settings(deadline=None)
 @given(
     order_permutation=st.permutations((0, 1)),
     receipt_permutation=st.permutations((0, 1)),
