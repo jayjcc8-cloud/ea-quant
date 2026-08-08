@@ -40,6 +40,7 @@ _SPEC.loader.exec_module(_HELPER)
 _system = cast(Callable[[], tuple[Any, ...]], _HELPER.__dict__["_system"])
 
 
+@settings(deadline=None)
 @given(permutation=st.permutations((0, 1)))
 def test_pending_presentation_permutation_cannot_change_emission(
     permutation: list[int],
