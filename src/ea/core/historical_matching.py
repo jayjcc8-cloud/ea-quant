@@ -1927,7 +1927,9 @@ def canonical_historical_matcher_observation_bytes(
     source_namespace: SourceNamespace,
     provenance_id: FactProvenanceId,
     submission_receipt_sha256: Sha256Digest,
+    submission_receipt: HistoricalSubmissionReceipt,
     order_sha256: Sha256Digest,
+    order: Order,
     trigger_root_kind: HistoricalDispatchKind,
     trigger_root_sha256: Sha256Digest,
     trigger_root_key: RuntimeRootOrderKey,
@@ -1950,7 +1952,9 @@ def canonical_historical_matcher_observation_bytes(
         or type(source_namespace) is not SourceNamespace
         or type(provenance_id) is not FactProvenanceId
         or type(submission_receipt_sha256) is not Sha256Digest
+        or type(submission_receipt) is not HistoricalSubmissionReceipt
         or type(order_sha256) is not Sha256Digest
+        or type(order) is not Order
         or type(trigger_root_kind) is not HistoricalDispatchKind
         or type(trigger_root_sha256) is not Sha256Digest
         or type(trigger_root_key) is not RuntimeRootOrderKey
@@ -1976,6 +1980,7 @@ def canonical_historical_matcher_observation_bytes(
     _validate_digest(trigger_root_sha256, field_name="trigger root digest")
     _validate_instrument(instrument)
     _validate_execution_policy(execution_policy)
+    _validate_receipt(submission_receipt)
     _validate_runtime_root_key(trigger_root_key, expected_kind=trigger_root_kind)
     if trigger_root_kind is HistoricalDispatchKind.MARKET:
         if (
@@ -2016,6 +2021,46 @@ def canonical_historical_matcher_observation_bytes(
         raise _fail(error.code, "observation economics are invalid") from error
     except (AttributeError, TypeError, ValueError) as error:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "observation economics are invalid") from error
+    try:
+        order_sha256_matches = order_digest(order) == order_sha256
+        request_sha256_matches = (
+            execution_request_digest(order) == submission_receipt.execution_request_sha256
+        )
+        client_key_matches = (
+            order_client_submission_key(order) == submission_receipt.client_submission_key
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "observation Order evidence is invalid") from error
+    if (
+        historical_submission_receipt_digest(submission_receipt) != submission_receipt_sha256
+        or not order_sha256_matches
+        or submission_receipt.order_sha256 != order_sha256
+        or not request_sha256_matches
+        or not client_key_matches
+        or order.run_id != submission_receipt.run_id
+        or submission_receipt.source_namespace != source_namespace
+        or order.order_id != submission_receipt.order_id
+        or order.instrument != submission_receipt.instrument
+        or order.instrument != instrument
+        or order.side is not submission_receipt.side
+        or order.side is not side
+        or order.quantity.text != submission_receipt.quantity_text
+        or order.quantity.text != quantity_text
+        or order.dispatch_sequence != submission_receipt.dispatch_sequence
+        or order.eligible_after_available_at != submission_receipt.eligible_after_available_at
+        or order.order_kind is not OrderKind.MARKET
+        or order.time_in_force is not TimeInForce.GOOD_FOR_NEXT_ELIGIBLE_MARKET_EVENT
+        or order.price_constraint is not None
+        or order.instrument_specification_id != specification.specification_id
+        or order.instrument_spec_set_id != spec_set.identifier
+        or order.instrument_spec_set_id != submission_receipt.instrument_spec_set_id
+        or order.instrument_spec_set_sha256 != instrument_spec_set_digest(spec_set)
+        or order.instrument_spec_set_sha256 != submission_receipt.instrument_spec_set_sha256
+        or order.execution_policy != execution_policy
+        or order.execution_policy != submission_receipt.execution_policy
+        or trigger_dispatch_sequence <= order.dispatch_sequence
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "observation receipt Order bindings conflict")
     occurred_text = _utc_text(occurred_at)
     available_text = _utc_text(available_at)
     document = {
@@ -2066,6 +2111,9 @@ def canonical_historical_matcher_observation_bytes(
             or instrument.symbol != suffix.instrument_symbol
             or suffix.adjustment != Adjustment.RAW.value
             or suffix.revision != 0
+            or trigger_root_key <= submission_receipt.causal_root_key
+            or cast(MarketDataEnvelope, trigger_root).event_time
+            <= order.eligible_after_available_at
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "trade observation fields conflict")
     elif fact_kind == "expiry":
@@ -2076,6 +2124,8 @@ def canonical_historical_matcher_observation_bytes(
             or trigger_root_kind is not HistoricalDispatchKind.END_OF_RUN
             or type(suffix) is not _EndOfRunSuffix
             or suffix.kind_rank != END_OF_RUN_KIND_RANKS[EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED]
+            or type(trigger_root) is not EndOfRunRoot
+            or trigger_root.run_id != submission_receipt.run_id
             or occurred_text != available_text
             or available_text != _utc_text(trigger_root_key.available_at)
         ):
@@ -2615,7 +2665,9 @@ def _expected_decoded_batch_ingress(
         source_namespace=context.source_namespace,
         provenance_id=context.provenance_id,
         submission_receipt_sha256=receipt_sha256,
+        submission_receipt=receipt,
         order_sha256=receipt.order_sha256,
+        order=order,
         trigger_root_kind=batch.dispatch_kind,
         trigger_root_sha256=batch.trigger_root_sha256,
         trigger_root_key=batch.trigger_root_key,
@@ -2785,6 +2837,12 @@ def decode_historical_matcher_dispatch_batch(
     )
     if not root_digest_matches or runtime_root_order_key(trigger_root) != batch.trigger_root_key:
         raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch root evidence conflicts")
+    if batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN and (
+        type(trigger_root) is not EndOfRunRoot
+        or trigger_root.kind is not EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED
+        or trigger_root.run_id != context.run_id
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch end root conflicts")
 
     receipts = tuple(context.receipts_by_sha256.items())
     for index, (submission_sequence, order_id, ingress, ingress_sha256) in enumerate(

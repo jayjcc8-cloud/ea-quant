@@ -211,7 +211,9 @@ def _expiry_ingress(
         source_namespace=matcher.source_namespace,
         provenance_id=matcher.provenance_id,
         submission_receipt_sha256=receipt_sha256,
+        submission_receipt=receipt,
         order_sha256=receipt.order_sha256,
+        order=order,
         trigger_root_kind=HistoricalDispatchKind.END_OF_RUN,
         trigger_root_sha256=end_batch.trigger_root_sha256,
         trigger_root_key=end_batch.trigger_root_key,
@@ -267,9 +269,14 @@ class _OrderVerifier:
 
 class _DispatchVerifier:
     def __init__(self, run_id: RunId, spec_set: InstrumentExecutionSpecSet) -> None:
+        self._runtime_identity = object()
         self._run_id = run_id
         self.run_id = run_id
         self.spec_set = spec_set
+
+    @property
+    def runtime_identity(self) -> object:
+        return self._runtime_identity
 
     def verify_active_market_dispatch(
         self,
@@ -1361,6 +1368,46 @@ def test_state_decoder_rejects_ended_state_with_pending_orders() -> None:
     assert pending_after_end.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_empty_end_batch_decoder_requires_bounded_root_from_context_run() -> None:
+    _, matcher, _, _, _, end = _system()
+    actual = matcher.expire_at_active_end(end, dispatch_sequence=9)
+    invalid_roots = (
+        replace(end, kind=EndOfRunKind.REQUESTED_END),
+        replace(end, run_id=RunId("87654321-4321-4234-8234-cba987654321")),
+    )
+    for invalid_root in invalid_roots:
+        invalid_batch = _create_historical_matcher_dispatch_batch(
+            run_id=actual.run_id,
+            source_namespace=actual.source_namespace,
+            dispatch_kind=HistoricalDispatchKind.END_OF_RUN,
+            dispatch_sequence=actual.dispatch_sequence,
+            trigger_root_sha256=historical_end_root_digest(invalid_root),
+            trigger_root_key=runtime_root_order_key(invalid_root),
+            next_fact_sequence_before=actual.next_fact_sequence_before,
+            next_fact_sequence_after=actual.next_fact_sequence_after,
+            submission_sequences=(),
+            order_ids=(),
+            ingresses=(),
+            ingress_sha256s=(),
+        )
+        context = HistoricalMatcherDecodeContext(
+            run_id=matcher.run_id,
+            spec_set=matcher.spec_set,
+            execution_policy=matcher.execution_policy,
+            source_namespace=matcher.source_namespace,
+            provenance_id=matcher.provenance_id,
+            end_roots_by_sha256={
+                historical_end_root_digest(invalid_root): invalid_root,
+            },
+        )
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            decode_historical_matcher_dispatch_batch(
+                canonical_historical_matcher_dispatch_batch_bytes(invalid_batch),
+                context=context,
+            )
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_runtime_adapter_mints_market_and_terminal_proofs_only_while_active() -> None:
     _, matcher, _, _, _, _ = _system()
     header = (
@@ -1403,6 +1450,23 @@ def test_runtime_adapter_mints_market_and_terminal_proofs_only_while_active() ->
     )
     assert end_proof.end_root is terminal
     assert end_proof.end_root_sha256 == historical_end_root_digest(terminal)
+
+    replacement_runtime = create_phase1_historical_market_runtime(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        source=create_phase1_historical_market_source_bridge(
+            create_phase1_historical_market_data_source(dataset)
+        ),
+    )
+    replacement_lease = replacement_runtime.pop()
+    replacement_market = cast(MarketDataEnvelope, replacement_lease.root)
+    object.__setattr__(verifier, "_runtime", replacement_runtime)
+    with pytest.raises(RuntimeOrderingError) as replaced:
+        verifier.verify_active_market_dispatch(
+            replacement_market,
+            dispatch_sequence=replacement_lease.dispatch_sequence,
+        )
+    assert replaced.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_adverse_half_tick_is_buy_up_and_sell_down() -> None:
@@ -2141,7 +2205,9 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
         "source_namespace": matcher.source_namespace,
         "provenance_id": matcher.provenance_id,
         "submission_receipt_sha256": historical_submission_receipt_digest(receipt),
+        "submission_receipt": receipt,
         "order_sha256": order_digest(orders[0]),
+        "order": orders[0],
         "trigger_dispatch_sequence": 8,
         "trigger_root": causal,
         "instrument": orders[0].instrument,
@@ -2305,7 +2371,9 @@ def test_observation_encoder_binds_trade_price_to_trigger_root() -> None:
         "source_namespace": matcher.source_namespace,
         "provenance_id": matcher.provenance_id,
         "submission_receipt_sha256": historical_submission_receipt_digest(receipt),
+        "submission_receipt": receipt,
         "order_sha256": order_digest(order),
+        "order": order,
         "trigger_root_kind": HistoricalDispatchKind.MARKET,
         "trigger_root_sha256": historical_market_root_digest(delayed),
         "trigger_root_key": runtime_root_order_key(delayed),
@@ -2330,6 +2398,31 @@ def test_observation_encoder_binds_trade_price_to_trigger_root() -> None:
             **cast(Any, {**values, "price_text": wrong_price.text})
         )
     assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+    with pytest.raises(HistoricalMatcherError) as wrong_quantity:
+        canonical_historical_matcher_observation_bytes(
+            **cast(Any, {**values, "quantity_text": "2"})
+        )
+    assert wrong_quantity.value.code is OutcomeCode.CONFLICTING_ID
+
+    opposite_side = OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY
+    opposite_price = _quantized_close(
+        delayed.payload.close,
+        side=opposite_side,
+        specification=matcher.spec_set.require(order.instrument),
+    )
+    with pytest.raises(HistoricalMatcherError) as wrong_side:
+        canonical_historical_matcher_observation_bytes(
+            **cast(
+                Any,
+                {
+                    **values,
+                    "side": opposite_side,
+                    "price_text": opposite_price.text,
+                },
+            )
+        )
+    assert wrong_side.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_public_encoders_deep_validate_nested_root_and_instrument_values() -> None:
@@ -3069,7 +3162,9 @@ def test_final_uint64_fact_boundary_constructs_and_replays_canonical_evidence() 
         source_namespace=matcher.source_namespace,
         provenance_id=matcher.provenance_id,
         submission_receipt_sha256=historical_submission_receipt_digest(receipt),
+        submission_receipt=receipt,
         order_sha256=order_digest(order),
+        order=order,
         trigger_root_kind=HistoricalDispatchKind.MARKET,
         trigger_root_sha256=root_sha256,
         trigger_root_key=root_key,
@@ -3525,6 +3620,68 @@ def test_dispatch_revalidates_verifier_binding_before_market_and_end_publication
         matcher.expire_at_active_end(end, dispatch_sequence=9)
     assert changed_end_binding.value.code is OutcomeCode.CONFLICTING_ID
     assert matcher._state is initial
+
+
+def test_dispatch_callback_cannot_replace_runtime_identity_baseline() -> None:
+    for dispatch_kind in ("market", "end"):
+        _, matcher, _, _, delayed, end = _system()
+        verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+        construction_runtime_identity = matcher._active_dispatch_runtime_identity
+        replacement_runtime_identity = object()
+        initial = matcher._state
+
+        def replace_runtime_identity(
+            *,
+            bound_verifier: _DispatchVerifier = verifier,
+            bound_matcher: Phase1HistoricalMatcher = matcher,
+            replacement: object = replacement_runtime_identity,
+        ) -> None:
+            bound_verifier._runtime_identity = replacement
+            bound_matcher._active_dispatch_runtime_identity = replacement
+
+        if dispatch_kind == "market":
+            original_market = verifier.verify_active_market_dispatch
+
+            def market_callback(
+                root: MarketDataEnvelope,
+                *,
+                dispatch_sequence: int,
+                original: Any = original_market,
+            ) -> Any:
+                proof = original(root, dispatch_sequence=dispatch_sequence)
+                replace_runtime_identity()
+                return proof
+
+            cast(Any, verifier).verify_active_market_dispatch = market_callback
+        else:
+            original_end = verifier.verify_active_end_of_run_dispatch
+
+            def end_callback(
+                root: EndOfRunRoot,
+                *,
+                dispatch_sequence: int,
+                original: Any = original_end,
+            ) -> Any:
+                proof = original(root, dispatch_sequence=dispatch_sequence)
+                replace_runtime_identity()
+                return proof
+
+            cast(Any, verifier).verify_active_end_of_run_dispatch = end_callback
+
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            if dispatch_kind == "market":
+                matcher.match_active_market_root(delayed, dispatch_sequence=8)
+            else:
+                matcher.expire_at_active_end(end, dispatch_sequence=8)
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+        assert matcher._active_dispatch_runtime_identity is construction_runtime_identity
+        assert matcher._state.last_dispatch == initial.last_dispatch is None
+        assert matcher._state.ended is False
+        assert matcher._state.conflict is not None
+        assert (
+            matcher._state.conflict.conflict_kind
+            is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+        )
 
 
 def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() -> None:

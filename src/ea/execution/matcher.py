@@ -171,6 +171,9 @@ class HistoricalMatcherDispatchVerifier(Protocol):
     @property
     def spec_set(self) -> InstrumentExecutionSpecSet: ...
 
+    @property
+    def runtime_identity(self) -> object: ...
+
     def verify_active_market_dispatch(
         self,
         market_root: MarketDataEnvelope,
@@ -273,6 +276,7 @@ class _DispatchCallbackLease:
     conflict_bytes: bytes | None
     conflict_sha256: Sha256Digest | None
     active_dispatch_verifier: HistoricalMatcherDispatchVerifier
+    active_dispatch_runtime_identity: object
     execution_policy: ExecutionPolicyRef
     execution_policy_id_value: str
     execution_policy_sha256_value: str
@@ -458,6 +462,7 @@ def _quantized_close(
 class Phase1HistoricalMatcher:
     __slots__ = (
         "_active_dispatch_verifier",
+        "_active_dispatch_runtime_identity",
         "_execution_policy",
         "_execution_policy_id_value",
         "_execution_policy_identity",
@@ -481,6 +486,7 @@ class Phase1HistoricalMatcher:
         "_submission_authorization_verifier",
     )
     _active_dispatch_verifier: HistoricalMatcherDispatchVerifier
+    _active_dispatch_runtime_identity: object
     _execution_policy: ExecutionPolicyRef
     _execution_policy_id_value: str
     _execution_policy_identity: ExecutionPolicyRef
@@ -719,10 +725,13 @@ class Phase1HistoricalMatcher:
             order_specs = self._order_issuance_verifier.spec_set
             auth_spec_id = self._submission_authorization_verifier.instrument_spec_set_id
             auth_spec_digest = self._submission_authorization_verifier.instrument_spec_set_sha256
+            dispatch_runtime_identity = self._active_dispatch_verifier.runtime_identity
             dispatch_run_id = self._active_dispatch_verifier.run_id
             dispatch_specs = self._active_dispatch_verifier.spec_set
         except (AttributeError, TypeError) as error:
             raise _fail(OutcomeCode.INVALID_TYPE, "verifier spec binding failed") from error
+        except Exception as error:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "verifier binding changed") from error
         if (
             type(order_specs) is not InstrumentExecutionSpecSet
             or type(auth_spec_id) is not InstrumentSpecSetId
@@ -736,6 +745,7 @@ class Phase1HistoricalMatcher:
             or instrument_spec_set_digest(order_specs) != self._spec_sha256
             or auth_spec_id != self._spec_set.identifier
             or auth_spec_digest != self._spec_sha256
+            or dispatch_runtime_identity is not self._active_dispatch_runtime_identity
             or dispatch_run_id != self._run_id
             or canonical_instrument_spec_set_bytes(dispatch_specs) != self._spec_bytes
             or instrument_spec_set_digest(dispatch_specs) != self._spec_sha256
@@ -949,6 +959,7 @@ class Phase1HistoricalMatcher:
             conflict_bytes=self._conflict_bytes,
             conflict_sha256=self._conflict_sha256,
             active_dispatch_verifier=self._active_dispatch_verifier,
+            active_dispatch_runtime_identity=self._active_dispatch_runtime_identity,
             execution_policy=self._execution_policy,
             execution_policy_id_value=self._execution_policy_id_value,
             execution_policy_sha256_value=self._execution_policy_sha256_value,
@@ -990,6 +1001,7 @@ class Phase1HistoricalMatcher:
         current_conflict_bytes = current("_conflict_bytes")
         current_conflict_sha256 = current("_conflict_sha256")
         current_active_dispatch_verifier = current("_active_dispatch_verifier")
+        current_active_dispatch_runtime_identity = current("_active_dispatch_runtime_identity")
         current_execution_policy = current("_execution_policy")
         current_execution_policy_identity = current("_execution_policy_identity")
         current_execution_policy_id_value = current("_execution_policy_id_value")
@@ -1088,6 +1100,14 @@ class Phase1HistoricalMatcher:
             and current_order_issuance_verifier is lease.order_issuance_verifier
             and current_submission_authorization_verifier is lease.submission_authorization_verifier
         )
+        try:
+            dispatch_runtime_unchanged = (
+                current_active_dispatch_runtime_identity is lease.active_dispatch_runtime_identity
+                and lease.active_dispatch_verifier.runtime_identity
+                is lease.active_dispatch_runtime_identity
+            )
+        except Exception:
+            dispatch_runtime_unchanged = False
         drifted = (
             current_fence_accessed is not False
             or current_state is not lease.fence
@@ -1100,6 +1120,7 @@ class Phase1HistoricalMatcher:
             or not provenance_unchanged
             or not spec_unchanged
             or not verifier_identities_unchanged
+            or not dispatch_runtime_unchanged
             or not run_id_unchanged
             or current_mutation_active is not True
         )
@@ -1162,6 +1183,11 @@ class Phase1HistoricalMatcher:
             self,
             "_active_dispatch_verifier",
             lease.active_dispatch_verifier,
+        )
+        object.__setattr__(
+            self,
+            "_active_dispatch_runtime_identity",
+            lease.active_dispatch_runtime_identity,
         )
         object.__setattr__(
             self,
@@ -2018,7 +2044,9 @@ class Phase1HistoricalMatcher:
                 source_namespace=self._source_namespace,
                 provenance_id=self._provenance_id,
                 submission_receipt_sha256=record.receipt_sha256,
+                submission_receipt=record.receipt,
                 order_sha256=record.order_sha256,
+                order=record.order,
                 trigger_root_kind=kind,
                 trigger_root_sha256=root_sha256,
                 trigger_root_key=root_key,
@@ -2306,6 +2334,10 @@ def create_phase1_historical_matcher(
     value._order_issuance_verifier = order_issuance_verifier
     value._submission_authorization_verifier = submission_authorization_verifier
     value._active_dispatch_verifier = active_dispatch_verifier
+    try:
+        value._active_dispatch_runtime_identity = active_dispatch_verifier.runtime_identity
+    except Exception as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "dispatch runtime binding is invalid") from error
     value._state = _MatcherState(
         next_submission=1,
         next_fact=1,

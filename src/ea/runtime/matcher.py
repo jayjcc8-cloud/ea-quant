@@ -90,19 +90,39 @@ def _require_dispatch_sequence(value: object) -> int:
 
 @final
 class HistoricalMatcherDispatchVerifierAdapter:
-    __slots__ = ("_runtime",)
+    __slots__ = ("_runtime", "_runtime_identity")
     _runtime: Phase1HistoricalMarketRuntime
+    _runtime_identity: Phase1HistoricalMarketRuntime
 
     def __init__(self) -> None:
         raise TypeError("matcher dispatch verifiers are created only by their factory")
 
+    def _require_bound_runtime(self) -> Phase1HistoricalMarketRuntime:
+        try:
+            runtime = self._runtime
+            identity = self._runtime_identity
+        except (AttributeError, TypeError) as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "dispatch runtime binding is invalid") from error
+        if (
+            type(runtime) is not Phase1HistoricalMarketRuntime
+            or type(identity) is not Phase1HistoricalMarketRuntime
+            or runtime is not identity
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch runtime binding changed")
+        return identity
+
+    @property
+    def runtime_identity(self) -> object:
+        """Return the exact construction runtime for independent identity leasing."""
+        return self._require_bound_runtime()
+
     @property
     def run_id(self) -> RunId:
-        return self._runtime.run_id
+        return self._require_bound_runtime().run_id
 
     @property
     def spec_set(self) -> InstrumentExecutionSpecSet:
-        return self._runtime.spec_set
+        return self._require_bound_runtime().spec_set
 
     def verify_active_market_dispatch(
         self,
@@ -113,14 +133,15 @@ class HistoricalMatcherDispatchVerifierAdapter:
         if type(market_root) is not MarketDataEnvelope:
             raise _fail(OutcomeCode.INVALID_TYPE, "market root must be exact")
         sequence = _require_dispatch_sequence(dispatch_sequence)
+        runtime = self._require_bound_runtime()
         try:
-            market_bytes = self._runtime._require_active_market_dispatch_bytes(
+            market_bytes = runtime._require_active_market_dispatch_bytes(
                 market_root,
                 dispatch_sequence=sequence,
             )
             matcher_digest = historical_market_root_digest(market_root)
             causal_digest = _causal_market_digest_from_canonical_bytes(market_bytes)
-            confirmed = self._runtime._require_active_market_dispatch_bytes(
+            confirmed = runtime._require_active_market_dispatch_bytes(
                 market_root,
                 dispatch_sequence=sequence,
             )
@@ -135,7 +156,7 @@ class HistoricalMatcherDispatchVerifierAdapter:
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "active market dispatch changed")
         return _create_active_market_dispatch_proof(
-            run_id=self._runtime.run_id,
+            run_id=runtime.run_id,
             market_root=market_root,
             canonical_market_bytes=market_bytes,
             causal_market_sha256=causal_digest,
@@ -152,13 +173,14 @@ class HistoricalMatcherDispatchVerifierAdapter:
         if type(end_root) is not EndOfRunRoot:
             raise _fail(OutcomeCode.INVALID_TYPE, "end root must be exact")
         sequence = _require_dispatch_sequence(dispatch_sequence)
+        runtime = self._require_bound_runtime()
         try:
-            end_bytes = self._runtime._require_active_end_of_run_dispatch_bytes(
+            end_bytes = runtime._require_active_end_of_run_dispatch_bytes(
                 end_root,
                 dispatch_sequence=sequence,
             )
             end_digest = historical_end_root_digest(end_root)
-            confirmed = self._runtime._require_active_end_of_run_dispatch_bytes(
+            confirmed = runtime._require_active_end_of_run_dispatch_bytes(
                 end_root,
                 dispatch_sequence=sequence,
             )
@@ -169,7 +191,7 @@ class HistoricalMatcherDispatchVerifierAdapter:
         if confirmed != end_bytes or end_bytes != canonical_end_of_run_root_bytes(end_root):
             raise _fail(OutcomeCode.CONFLICTING_ID, "active end dispatch changed")
         return _create_active_end_of_run_dispatch_proof(
-            run_id=self._runtime.run_id,
+            run_id=runtime.run_id,
             end_root=end_root,
             canonical_end_bytes=end_bytes,
             end_root_sha256=end_digest,
@@ -186,6 +208,7 @@ def create_historical_matcher_dispatch_verifier(
         raise _fail(OutcomeCode.INVALID_TYPE, "runtime must be exact")
     value = object.__new__(HistoricalMatcherDispatchVerifierAdapter)
     value._runtime = runtime
+    value._runtime_identity = runtime
     return value
 
 
