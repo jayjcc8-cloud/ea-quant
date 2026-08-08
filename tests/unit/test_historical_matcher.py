@@ -702,6 +702,43 @@ def test_state_encoder_binds_every_dispatch_digest_to_history_evidence() -> None
     assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_state_encoder_binds_issued_ingresses_to_dispatch_history() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    valid_ingress = batch.ingresses[0]
+    fake_fact = create_trade_execution_fact(
+        source_namespace=matcher.source_namespace,
+        dedup_identity=SourceNativeSequence(1),
+        occurred_at=delayed.event_time,
+        provenance=valid_ingress.fact.provenance,
+        spec_set=matcher.spec_set,
+        instrument=orders[0].instrument,
+        side=orders[0].side,
+        quantity=orders[0].quantity,
+        price=CanonicalDecimal("102"),
+        client_submission_key=receipt.client_submission_key,
+        order_id=receipt.order_id,
+        correlation_id=orders[0].correlation_id,
+        causation_id=receipt.order_id,
+    )
+    fake_ingress = create_execution_fact_ingress(
+        available_at=delayed.available_at,
+        source_namespace=matcher.source_namespace,
+        ingress_sequence=1,
+        fact=fake_fact,
+    )
+    assert execution_fact_ingress_digest(fake_ingress) != execution_fact_ingress_digest(
+        valid_ingress
+    )
+    state = matcher.state
+    object.__setattr__(state, "issued_ingresses", (fake_ingress,))
+
+    with pytest.raises(HistoricalMatcherError) as contradictory:
+        canonical_historical_matcher_state_bytes(state)
+    assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
     _, matcher, _, _, delayed, _ = _system()
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)

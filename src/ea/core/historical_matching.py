@@ -83,6 +83,9 @@ HISTORICAL_MATCHER_DISPATCH_BATCH_DIGEST_DOMAIN = (
 _HISTORICAL_MATCHER_DISPATCH_HISTORY_DIGEST_DOMAIN = (
     b"ea.phase1-historical-matcher-dispatch-history.v1\0"
 )
+_HISTORICAL_MATCHER_DISPATCH_INGRESS_HISTORY_DIGEST_DOMAIN = (
+    b"ea.phase1-historical-matcher-dispatch-ingress-history.v1\0"
+)
 HISTORICAL_MATCHER_STATE_CANONICALIZATION = "ea-phase1-historical-matcher-state-v1"
 HISTORICAL_MATCHER_STATE_DIGEST_DOMAIN = b"ea.phase1-historical-matcher-state.v1\0"
 HISTORICAL_MATCHER_CONFLICT_CANONICALIZATION = "ea-phase1-historical-matcher-conflict-v1"
@@ -789,6 +792,7 @@ class HistoricalMatcherState:
     pending_order_ids: tuple[EconomicId, ...]
     issued_ingresses: tuple[ExecutionFactIngress, ...]
     _dispatch_batch_history_sha256: Sha256Digest = field(repr=False)
+    _dispatch_ingress_history_sha256: Sha256Digest = field(repr=False)
     _last_dispatch_batch: HistoricalMatcherDispatchBatch | None = field(repr=False)
     dispatch_batch_sha256s: tuple[Sha256Digest, ...]
     last_new_dispatch_sequence: int | None
@@ -1283,6 +1287,7 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         or type(state.pending_order_ids) is not tuple
         or type(state.issued_ingresses) is not tuple
         or type(state._dispatch_batch_history_sha256) is not Sha256Digest
+        or type(state._dispatch_ingress_history_sha256) is not Sha256Digest
         or type(state.dispatch_batch_sha256s) is not tuple
         or type(state.ended) is not bool
         or type(state.halted) is not bool
@@ -1313,6 +1318,10 @@ def _validate_state(state: HistoricalMatcherState) -> None:
     _validate_digest(
         state._dispatch_batch_history_sha256,
         field_name="state batch-history digest",
+    )
+    _validate_digest(
+        state._dispatch_ingress_history_sha256,
+        field_name="state batch/ingress-history digest",
     )
     if len(state._submission_receipts) != len(state.receipt_sha256s):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt evidence is not aligned")
@@ -1351,6 +1360,14 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         != state._dispatch_batch_history_sha256
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state batch digest history conflicts")
+    if (
+        _dispatch_ingress_history_digest(
+            state.dispatch_batch_sha256s,
+            state.issued_ingresses,
+        )
+        != state._dispatch_ingress_history_sha256
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state batch/ingress history conflicts")
     if state._last_dispatch_batch is not None:
         if type(state._last_dispatch_batch) is not HistoricalMatcherDispatchBatch:
             raise _fail(OutcomeCode.INVALID_TYPE, "state final batch evidence must be exact")
@@ -1776,6 +1793,32 @@ def _dispatch_batch_history_digest(
     return _framed_digest(
         _HISTORICAL_MATCHER_DISPATCH_HISTORY_DIGEST_DOMAIN,
         _canonical_json([digest.value for digest in digests]),
+    )
+
+
+def _dispatch_ingress_history_digest(
+    batch_digests: tuple[Sha256Digest, ...],
+    ingresses: tuple[ExecutionFactIngress, ...],
+) -> Sha256Digest:
+    if type(batch_digests) is not tuple or any(
+        type(value) is not Sha256Digest for value in batch_digests
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "batch/ingress-history digests must be exact")
+    if type(ingresses) is not tuple or any(
+        type(value) is not ExecutionFactIngress for value in ingresses
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "batch/ingress-history ingresses must be exact")
+    for digest in batch_digests:
+        _validate_digest(digest, field_name="batch/ingress-history batch digest")
+    ingress_digests = tuple(_execution_fact_ingress_digest(ingress) for ingress in ingresses)
+    return _framed_digest(
+        _HISTORICAL_MATCHER_DISPATCH_INGRESS_HISTORY_DIGEST_DOMAIN,
+        _canonical_json(
+            {
+                "dispatch_batch_sha256s": [digest.value for digest in batch_digests],
+                "issued_ingress_sha256s": [digest.value for digest in ingress_digests],
+            }
+        ),
     )
 
 
@@ -3011,6 +3054,10 @@ def decode_historical_matcher_state(
         ),
         issued_ingresses=tuple(issued),
         _dispatch_batch_history_sha256=_dispatch_batch_history_digest(tuple(batch_digests)),
+        _dispatch_ingress_history_sha256=_dispatch_ingress_history_digest(
+            tuple(batch_digests),
+            tuple(issued),
+        ),
         _last_dispatch_batch=None if not batches else batches[-1],
         dispatch_batch_sha256s=tuple(batch_digests),
         last_new_dispatch_sequence=_parse_uint64_or_none(
