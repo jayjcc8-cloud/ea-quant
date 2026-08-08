@@ -75,6 +75,7 @@ from ea.core.historical_matching import (
     decode_historical_submission_receipt,
     historical_end_root_digest,
     historical_market_root_digest,
+    historical_matcher_conflict_digest,
     historical_matcher_dispatch_batch_digest,
     historical_matcher_observation_digest,
     historical_submission_receipt_digest,
@@ -575,6 +576,48 @@ def test_state_encoder_rejects_terminal_state_with_pending_orders() -> None:
     with pytest.raises(HistoricalMatcherError) as contradictory:
         canonical_historical_matcher_state_bytes(state)
     assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
+    _, matcher, _, _, delayed, _ = _system()
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    different = replace(delayed, source_sequence=delayed.source_sequence + 1)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(different, dispatch_sequence=8)
+
+    state = matcher.state
+    assert state.conflict is not None
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        market_roots_by_sha256={historical_market_root_digest(delayed): delayed},
+        batches_by_sha256={historical_matcher_dispatch_batch_digest(batch): batch},
+        conflicts_by_sha256={historical_matcher_conflict_digest(state.conflict): state.conflict},
+    )
+    assert (
+        decode_historical_matcher_state(
+            canonical_historical_matcher_state_bytes(state),
+            context=context,
+        )
+        == state
+    )
+
+    mutations = (
+        ("pending_count", 1),
+        ("next_submission_sequence", 2),
+        ("next_fact_sequence", 2),
+        ("last_successful_dispatch_sequence", 9),
+    )
+    for field_name, replacement in mutations:
+        malformed = matcher.state
+        assert malformed.conflict is not None
+        object.__setattr__(malformed.conflict, field_name, replacement)
+        with pytest.raises(HistoricalMatcherError) as contradictory:
+            canonical_historical_matcher_state_bytes(malformed)
+        assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_batch_state_decoders_reject_uint64_and_cross_field_substitutions() -> None:

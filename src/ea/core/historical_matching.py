@@ -1338,6 +1338,13 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         _validate_conflict(state.conflict)
         if state.conflict.run_id != state.run_id:
             raise _fail(OutcomeCode.CONFLICTING_ID, "state conflict run binding conflicts")
+        if (
+            state.conflict.pending_count != len(state.pending_order_ids)
+            or state.conflict.next_submission_sequence != state.next_submission_sequence
+            or state.conflict.next_fact_sequence != state.next_fact_sequence
+            or state.conflict.last_successful_dispatch_sequence != state.last_new_dispatch_sequence
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state conflict snapshot conflicts")
     if state.ended != (state.end_batch_sha256 is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state end relationship conflicts")
     if state.ended and state.pending_order_ids:
