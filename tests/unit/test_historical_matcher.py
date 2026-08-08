@@ -749,6 +749,44 @@ def test_state_encoder_binds_issued_ingresses_to_dispatch_history() -> None:
         canonical_historical_matcher_state_bytes(state)
     assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
 
+    object.__setattr__(
+        state,
+        "_dispatch_ingress_history_sha256",
+        historical_matching_module._dispatch_ingress_history_digest(
+            state.dispatch_batch_sha256s,
+            state.issued_ingresses,
+        ),
+    )
+    with pytest.raises(HistoricalMatcherError) as coherently_rewritten:
+        canonical_historical_matcher_state_bytes(state)
+    assert coherently_rewritten.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_state_encoder_binds_receipts_to_state_specification_and_policy() -> None:
+    _, matcher, orders, causal, _, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    replacement_policy = ExecutionPolicyRef(
+        ExecutionPolicyId("replacement-policy"),
+        Sha256Digest("f" * 64),
+    )
+    cases = (
+        {"instrument_spec_set_id": InstrumentSpecSetId("replacement-spec-set")},
+        {"instrument_spec_set_sha256": Sha256Digest("e" * 64)},
+        {"execution_policy": replacement_policy},
+    )
+    for changes in cases:
+        forged_receipt = _clone_receipt(receipt, **changes)
+        state = matcher.state
+        object.__setattr__(state, "_submission_receipts", (forged_receipt,))
+        object.__setattr__(
+            state,
+            "receipt_sha256s",
+            (historical_submission_receipt_digest(forged_receipt),),
+        )
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            canonical_historical_matcher_state_bytes(state)
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
 
 def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
     _, matcher, _, _, delayed, _ = _system()
@@ -3546,7 +3584,10 @@ def test_retained_state_is_validated_before_filtering_and_after_halt() -> None:
 def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, matcher, _, _, delayed, _ = _system()
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    issued_batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert len(issued_batch.ingresses) == 1
     validations = 0
     core_validations = 0
     core_digests = 0
@@ -3599,7 +3640,7 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
     )
     batches_list = []
     core_work_by_dispatch = []
-    for sequence, root in enumerate(roots, start=1):
+    for sequence, root in enumerate(roots, start=9):
         before = core_validations + core_digests
         batches_list.append(matcher.match_active_market_root(root, dispatch_sequence=sequence))
         core_work_by_dispatch.append(core_validations + core_digests - before)
@@ -3610,7 +3651,7 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
     assert max(core_work_by_dispatch) == min(core_work_by_dispatch)
     assert callback_state_types == [_DispatchCallbackStateFence] * len(roots)
     assert _DispatchCallbackStateFence.__slots__ == ("_accessed",)
-    assert matcher.match_active_market_root(roots[0], dispatch_sequence=1) is batches[0]
+    assert matcher.match_active_market_root(roots[0], dispatch_sequence=9) is batches[0]
     assert validations == 1
     assert callback_state_types == [_DispatchCallbackStateFence] * len(roots)
 

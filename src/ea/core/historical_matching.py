@@ -751,6 +751,7 @@ class _HistoricalMatcherDispatchHistory:
 
 class _SealedHistoricalMatcherDispatchHistory(NamedTuple):
     batch_sha256_values: tuple[str, ...]
+    batch_ingress_sha256_values: tuple[tuple[str, ...], ...]
     root_sha256_by_sequence: MappingProxyType[int, str]
     sequence_by_root_sha256: MappingProxyType[str, int]
     run_id_value: str | None
@@ -1249,6 +1250,7 @@ def _empty_historical_matcher_dispatch_history() -> _HistoricalMatcherDispatchHi
     _SEALED_HISTORICAL_MATCHER_DISPATCH_HISTORIES[history] = (
         _SealedHistoricalMatcherDispatchHistory(
             batch_sha256_values=(),
+            batch_ingress_sha256_values=(),
             root_sha256_by_sequence=MappingProxyType({}),
             sequence_by_root_sha256=MappingProxyType({}),
             run_id_value=None,
@@ -1298,6 +1300,10 @@ def _append_historical_matcher_dispatch_history(
     _SEALED_HISTORICAL_MATCHER_DISPATCH_HISTORIES[appended] = (
         _SealedHistoricalMatcherDispatchHistory(
             batch_sha256_values=(*sealed.batch_sha256_values, batch_sha256.value),
+            batch_ingress_sha256_values=(
+                *sealed.batch_ingress_sha256_values,
+                tuple(digest.value for digest in batch.ingress_sha256s),
+            ),
             root_sha256_by_sequence=MappingProxyType(by_sequence),
             sequence_by_root_sha256=MappingProxyType(by_root),
             run_id_value=batch.run_id.value,
@@ -1518,6 +1524,9 @@ def _validate_state(state: HistoricalMatcherState) -> None:
             receipt.run_id != state.run_id
             or receipt.source_namespace != state.source_namespace
             or receipt.submission_sequence != sequence
+            or receipt.instrument_spec_set_id != state.instrument_spec_set_id
+            or receipt.instrument_spec_set_sha256 != state.instrument_spec_set_sha256
+            or receipt.execution_policy != state.execution_policy
             or historical_submission_receipt_digest(receipt) != digest
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt evidence conflicts")
@@ -1554,6 +1563,14 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         digest.value for digest in state.dispatch_batch_sha256s
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state dispatch-history witness conflicts")
+    if len(sealed_history.batch_ingress_sha256_values) != len(
+        sealed_history.batch_sha256_values
+    ) or tuple(
+        digest_value
+        for batch_values in sealed_history.batch_ingress_sha256_values
+        for digest_value in batch_values
+    ) != tuple(execution_fact_ingress_digest(ingress).value for ingress in state.issued_ingresses):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state ingress-history witness conflicts")
     if state.dispatch_batch_sha256s:
         if (
             sealed_history.run_id_value != state.run_id.value
@@ -1596,6 +1613,8 @@ def _validate_state(state: HistoricalMatcherState) -> None:
                 state._last_dispatch_batch.dispatch_sequence
             )
             or state._last_dispatch_batch.dispatch_kind is not sealed_history.last_dispatch_kind
+            or tuple(digest.value for digest in state._last_dispatch_batch.ingress_sha256s)
+            != sealed_history.batch_ingress_sha256_values[-1]
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "state final batch evidence conflicts")
     if len(set(state.pending_order_ids)) != len(state.pending_order_ids):
