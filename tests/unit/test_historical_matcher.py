@@ -70,10 +70,12 @@ from ea.core.historical_matching import (
     _create_historical_submission_receipt,
     _validate_descendant_binding,
     canonical_end_of_run_root_bytes,
+    canonical_historical_matcher_conflict_bytes,
     canonical_historical_matcher_dispatch_batch_bytes,
     canonical_historical_matcher_observation_bytes,
     canonical_historical_matcher_state_bytes,
     canonical_historical_submission_receipt_bytes,
+    decode_historical_matcher_conflict,
     decode_historical_matcher_dispatch_batch,
     decode_historical_matcher_state,
     decode_historical_submission_receipt,
@@ -790,6 +792,96 @@ def test_state_encoder_binds_conflict_snapshot_to_public_state() -> None:
         assert contradictory.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_state_decoder_enforces_non_monotone_conflict_precedence() -> None:
+    _, matcher, _, _, delayed, _ = _system()
+    first = matcher.match_active_market_root(delayed, dispatch_sequence=7)
+    later = replace(
+        delayed,
+        payload=replace(
+            delayed.payload,
+            interval_start=delayed.payload.interval_end,
+            interval_end=delayed.payload.interval_end + timedelta(minutes=1),
+        ),
+        available_at=delayed.available_at + timedelta(minutes=1),
+        source_sequence=delayed.source_sequence + 1,
+    )
+    second = matcher.match_active_market_root(later, dispatch_sequence=9)
+    conflicting = replace(later, source_sequence=later.source_sequence + 1)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(conflicting, dispatch_sequence=8)
+    state = matcher.state
+    conflict = state.conflict
+    assert conflict is not None
+    first_sha256 = historical_matcher_dispatch_batch_digest(first)
+    second_sha256 = historical_matcher_dispatch_batch_digest(second)
+    valid_context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        batches_by_sha256={first_sha256: first, second_sha256: second},
+        market_roots_by_sha256={
+            first.trigger_root_sha256: delayed,
+            second.trigger_root_sha256: later,
+        },
+        conflicts_by_sha256={historical_matcher_conflict_digest(conflict): conflict},
+    )
+    payload = canonical_historical_matcher_state_bytes(state)
+    assert decode_historical_matcher_state(payload, context=valid_context) == state
+
+    impossible_conflicts = (
+        _create_historical_matcher_conflict(
+            run_id=conflict.run_id,
+            conflict_kind=conflict.conflict_kind,
+            occupied_identity={"dispatch_sequence": 7, "kind": "dispatch_sequence"},
+            existing_sha256=None,
+            submitted_sha256=conflict.submitted_sha256,
+            submitted_dispatch_sequence=7,
+            last_successful_dispatch_sequence=9,
+            pending_count=conflict.pending_count,
+            next_submission_sequence=conflict.next_submission_sequence,
+            next_fact_sequence=conflict.next_fact_sequence,
+            trigger_root_sha256=conflict.trigger_root_sha256,
+        ),
+        _create_historical_matcher_conflict(
+            run_id=conflict.run_id,
+            conflict_kind=conflict.conflict_kind,
+            occupied_identity={"dispatch_sequence": 8, "kind": "dispatch_sequence"},
+            existing_sha256=None,
+            submitted_sha256=first.trigger_root_sha256,
+            submitted_dispatch_sequence=8,
+            last_successful_dispatch_sequence=9,
+            pending_count=conflict.pending_count,
+            next_submission_sequence=conflict.next_submission_sequence,
+            next_fact_sequence=conflict.next_fact_sequence,
+            trigger_root_sha256=first.trigger_root_sha256,
+        ),
+    )
+    document = json.loads(payload)
+    for impossible in impossible_conflicts:
+        impossible_sha256 = historical_matcher_conflict_digest(impossible)
+        impossible_context = HistoricalMatcherDecodeContext(
+            run_id=matcher.run_id,
+            spec_set=matcher.spec_set,
+            execution_policy=matcher.execution_policy,
+            source_namespace=matcher.source_namespace,
+            provenance_id=matcher.provenance_id,
+            batches_by_sha256={first_sha256: first, second_sha256: second},
+            market_roots_by_sha256={
+                first.trigger_root_sha256: delayed,
+                second.trigger_root_sha256: later,
+            },
+            conflicts_by_sha256={impossible_sha256: impossible},
+        )
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            decode_historical_matcher_state(
+                _canonical_document({**document, "conflict_sha256": impossible_sha256.value}),
+                context=impossible_context,
+            )
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_batch_state_decoders_reject_uint64_and_cross_field_substitutions() -> None:
     _, matcher, orders, causal, delayed, end = _system()
     receipts = [matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)]
@@ -1203,6 +1295,125 @@ def test_state_decoder_replays_non_eligible_empty_batch_before_fill() -> None:
             context=context,
         )
         == state
+    )
+
+
+def test_state_decoder_rejects_non_increasing_dispatch_root_history() -> None:
+    _, matcher, _, causal, delayed, end = _system()
+    first = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    state_document = json.loads(canonical_historical_matcher_state_bytes(matcher.state))
+    same_key_market = replace(
+        delayed,
+        payload=replace(delayed.payload, volume=delayed.payload.volume + 1.0),
+    )
+    early_end = replace(end, available_at=causal.available_at)
+    cases = (
+        (
+            HistoricalDispatchKind.MARKET,
+            causal,
+            historical_market_root_digest(causal),
+        ),
+        (
+            HistoricalDispatchKind.MARKET,
+            same_key_market,
+            historical_market_root_digest(same_key_market),
+        ),
+        (
+            HistoricalDispatchKind.END_OF_RUN,
+            early_end,
+            historical_end_root_digest(early_end),
+        ),
+    )
+    first_sha256 = historical_matcher_dispatch_batch_digest(first)
+    for dispatch_kind, root, root_sha256 in cases:
+        second = _create_historical_matcher_dispatch_batch(
+            run_id=matcher.run_id,
+            source_namespace=matcher.source_namespace,
+            dispatch_kind=dispatch_kind,
+            dispatch_sequence=9,
+            trigger_root_sha256=root_sha256,
+            trigger_root_key=runtime_root_order_key(root),
+            next_fact_sequence_before=1,
+            next_fact_sequence_after=1,
+            submission_sequences=(),
+            order_ids=(),
+            ingresses=(),
+            ingress_sha256s=(),
+        )
+        second_sha256 = historical_matcher_dispatch_batch_digest(second)
+        document = {
+            **state_document,
+            "dispatch_batch_sha256s": [first_sha256.value, second_sha256.value],
+            "last_new_dispatch_sequence": 9,
+            "ended": dispatch_kind is HistoricalDispatchKind.END_OF_RUN,
+            "end_batch_sha256": (
+                second_sha256.value if dispatch_kind is HistoricalDispatchKind.END_OF_RUN else None
+            ),
+        }
+        market_roots: dict[Sha256Digest, MarketDataEnvelope] = {first.trigger_root_sha256: delayed}
+        end_roots: dict[Sha256Digest, EndOfRunRoot] = {}
+        if type(root) is MarketDataEnvelope:
+            market_roots[root_sha256] = root
+        else:
+            assert type(root) is EndOfRunRoot
+            end_roots[root_sha256] = root
+        context = HistoricalMatcherDecodeContext(
+            run_id=matcher.run_id,
+            spec_set=matcher.spec_set,
+            execution_policy=matcher.execution_policy,
+            source_namespace=matcher.source_namespace,
+            provenance_id=matcher.provenance_id,
+            batches_by_sha256={first_sha256: first, second_sha256: second},
+            market_roots_by_sha256=market_roots,
+            end_roots_by_sha256=end_roots,
+        )
+        assert (
+            decode_historical_matcher_dispatch_batch(
+                canonical_historical_matcher_dispatch_batch_bytes(second),
+                context=context,
+            )
+            == second
+        )
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            decode_historical_matcher_state(_canonical_document(document), context=context)
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_state_decoder_allows_increasing_roots_with_dispatch_sequence_gap() -> None:
+    _, matcher, _, _, delayed, _ = _system()
+    first = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    later = replace(
+        delayed,
+        payload=replace(
+            delayed.payload,
+            interval_start=delayed.payload.interval_end,
+            interval_end=delayed.payload.interval_end + timedelta(minutes=1),
+        ),
+        available_at=delayed.available_at + timedelta(minutes=1),
+        source_sequence=delayed.source_sequence + 1,
+    )
+    second = matcher.match_active_market_root(later, dispatch_sequence=10)
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        batches_by_sha256={
+            historical_matcher_dispatch_batch_digest(first): first,
+            historical_matcher_dispatch_batch_digest(second): second,
+        },
+        market_roots_by_sha256={
+            first.trigger_root_sha256: delayed,
+            second.trigger_root_sha256: later,
+        },
+    )
+    assert (
+        decode_historical_matcher_state(
+            canonical_historical_matcher_state_bytes(matcher.state),
+            context=context,
+        )
+        == matcher.state
     )
 
 
@@ -2319,7 +2530,7 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
         end,
         available_at=causal.available_at - timedelta(microseconds=1),
     )
-    common = {
+    common: dict[str, object] = {
         "fact_sequence": 1,
         "source_namespace": matcher.source_namespace,
         "provenance_id": matcher.provenance_id,
@@ -2578,7 +2789,7 @@ def test_public_encoders_deep_validate_nested_root_and_instrument_values() -> No
 
 def test_conflict_evidence_uses_one_exact_tagged_identity_union() -> None:
     _, matcher, orders, _, _, _ = _system()
-    common = {
+    common: dict[str, object] = {
         "run_id": matcher.run_id,
         "existing_sha256": None,
         "submitted_sha256": None,
@@ -2589,34 +2800,62 @@ def test_conflict_evidence_uses_one_exact_tagged_identity_union() -> None:
         "next_fact_sequence": 1,
         "trigger_root_sha256": None,
     }
-    valid = {
+    digest_a = Sha256Digest("1" * 64)
+    digest_b = Sha256Digest("2" * 64)
+    valid: dict[HistoricalMatcherConflictKind, dict[str, object]] = {
         HistoricalMatcherConflictKind.SUBMISSION_IDENTITY: {
-            "kind": "order_id",
-            "order_id": {
-                "owner_kind": orders[0].order_id.owner_kind.value,
-                "owner_sequence": orders[0].order_id.owner_sequence,
-                "run_id": orders[0].order_id.run_id.value,
+            "occupied_identity": {
+                "kind": "order_id",
+                "order_id": {
+                    "owner_kind": orders[0].order_id.owner_kind.value,
+                    "owner_sequence": orders[0].order_id.owner_sequence,
+                    "run_id": orders[0].order_id.run_id.value,
+                },
             },
+            "existing_sha256": digest_a,
+            "submitted_sha256": digest_b,
+            "submitted_dispatch_sequence": 1,
+            "trigger_root_sha256": digest_a,
         },
         HistoricalMatcherConflictKind.CLIENT_SUBMISSION_KEY: {
-            "kind": "client_submission_key",
-            "sha256": "0" * 64,
+            "occupied_identity": {
+                "kind": "client_submission_key",
+                "sha256": "0" * 64,
+            },
+            "existing_sha256": digest_a,
+            "submitted_sha256": digest_b,
+            "submitted_dispatch_sequence": 1,
+            "trigger_root_sha256": digest_a,
         },
         HistoricalMatcherConflictKind.DISPATCH_IDENTITY: {
-            "dispatch_sequence": 1,
-            "kind": "dispatch_sequence",
+            "occupied_identity": {
+                "dispatch_sequence": 2,
+                "kind": "dispatch_sequence",
+            },
+            "existing_sha256": digest_a,
+            "submitted_sha256": digest_b,
+            "submitted_dispatch_sequence": 2,
+            "last_successful_dispatch_sequence": 2,
+            "trigger_root_sha256": digest_b,
         },
         HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH: {
-            "dispatch_sequence": 1,
-            "kind": "dispatch_sequence",
+            "occupied_identity": {
+                "dispatch_sequence": 1,
+                "kind": "dispatch_sequence",
+            },
+            "submitted_sha256": digest_b,
+            "submitted_dispatch_sequence": 1,
+            "last_successful_dispatch_sequence": 2,
+            "trigger_root_sha256": digest_b,
         },
-        HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT: None,
+        HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT: {
+            "occupied_identity": None,
+        },
     }
-    for kind, occupied in valid.items():
+    for kind, overrides in valid.items():
         conflict = _create_historical_matcher_conflict(
-            **common,
+            **{**common, **overrides},
             conflict_kind=kind,
-            occupied_identity=occupied,
         )
         assert conflict.conflict_kind is kind
 
@@ -2643,6 +2882,182 @@ def test_conflict_evidence_uses_one_exact_tagged_identity_union() -> None:
                 conflict_kind=kind,
                 occupied_identity=occupied,
             )
+
+
+def test_conflict_decoder_rejects_impossible_non_monotone_evidence() -> None:
+    _, matcher, _, _, _, _ = _system()
+    submitted = Sha256Digest("1" * 64)
+    conflict = _create_historical_matcher_conflict(
+        run_id=matcher.run_id,
+        conflict_kind=HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH,
+        occupied_identity={"dispatch_sequence": 1, "kind": "dispatch_sequence"},
+        existing_sha256=None,
+        submitted_sha256=submitted,
+        submitted_dispatch_sequence=1,
+        last_successful_dispatch_sequence=2,
+        pending_count=0,
+        next_submission_sequence=1,
+        next_fact_sequence=1,
+        trigger_root_sha256=submitted,
+    )
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+    )
+    payload = canonical_historical_matcher_conflict_bytes(conflict)
+    assert decode_historical_matcher_conflict(payload, context=context) == conflict
+    document = json.loads(payload)
+    invalid_documents = (
+        {**document, "submitted_dispatch_sequence": 2},
+        {**document, "submitted_dispatch_sequence": 3},
+        {**document, "existing_sha256": "2" * 64},
+        {**document, "trigger_root_sha256": "2" * 64},
+        {
+            **document,
+            "occupied_identity": {"dispatch_sequence": 2, "kind": "dispatch_sequence"},
+        },
+    )
+    for invalid in invalid_documents:
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            decode_historical_matcher_conflict(_canonical_document(invalid), context=context)
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_conflict_factory_enforces_dispatch_and_retained_kind_shapes() -> None:
+    _, matcher, _, _, _, _ = _system()
+    digest_a = Sha256Digest("1" * 64)
+    digest_b = Sha256Digest("2" * 64)
+    common = {
+        "run_id": matcher.run_id,
+        "pending_count": 0,
+        "next_submission_sequence": 1,
+        "next_fact_sequence": 1,
+    }
+    digest_identity = _create_historical_matcher_conflict(
+        **common,
+        conflict_kind=HistoricalMatcherConflictKind.DISPATCH_IDENTITY,
+        occupied_identity=None,
+        existing_sha256=digest_a,
+        submitted_sha256=digest_a,
+        submitted_dispatch_sequence=3,
+        last_successful_dispatch_sequence=2,
+        trigger_root_sha256=digest_a,
+    )
+    assert digest_identity.occupied_identity is None
+    invalid_dispatch = (
+        {"existing_sha256": digest_b},
+        {"trigger_root_sha256": digest_b},
+        {
+            "occupied_identity": {"dispatch_sequence": 2, "kind": "dispatch_sequence"},
+        },
+    )
+    for overrides in invalid_dispatch:
+        values = {
+            **common,
+            "conflict_kind": HistoricalMatcherConflictKind.DISPATCH_IDENTITY,
+            "occupied_identity": None,
+            "existing_sha256": digest_a,
+            "submitted_sha256": digest_a,
+            "submitted_dispatch_sequence": 3,
+            "last_successful_dispatch_sequence": 2,
+            "trigger_root_sha256": digest_a,
+            **overrides,
+        }
+        with pytest.raises(HistoricalMatcherError):
+            _create_historical_matcher_conflict(**values)
+    retained = {
+        **common,
+        "conflict_kind": HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT,
+        "occupied_identity": None,
+        "existing_sha256": None,
+        "submitted_sha256": None,
+        "submitted_dispatch_sequence": None,
+        "last_successful_dispatch_sequence": None,
+        "trigger_root_sha256": None,
+    }
+    _create_historical_matcher_conflict(**retained)
+    _create_historical_matcher_conflict(**{**retained, "submitted_dispatch_sequence": 9})
+    for field_name in (
+        "existing_sha256",
+        "submitted_sha256",
+        "trigger_root_sha256",
+    ):
+        with pytest.raises(HistoricalMatcherError):
+            _create_historical_matcher_conflict(**{**retained, field_name: digest_a})
+
+
+def test_every_runtime_conflict_kind_round_trips_without_canonical_change() -> None:
+    conflicts = []
+
+    _, matcher, orders, causal, _, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.submit(
+            _clone_order(orders[0], quantity=CanonicalDecimal("2")),
+            causal_market_root=causal,
+            dispatch_sequence=7,
+        )
+    conflicts.append((matcher, matcher._state.conflict))
+
+    _, matcher, orders, causal, _, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    client_key = order_client_submission_key(orders[1])
+    matcher._state = replace(
+        matcher._state,
+        submission_by_client=MappingProxyType(
+            {**matcher._state.submission_by_client, client_key: matcher._state.submissions[0]}
+        ),
+    )
+    with pytest.raises(HistoricalMatcherError):
+        matcher.submit(orders[1], causal_market_root=causal, dispatch_sequence=7)
+    conflicts.append((matcher, matcher._state.conflict))
+
+    _, matcher, _, _, delayed, _ = _system()
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(
+            replace(delayed, source_sequence=delayed.source_sequence + 1),
+            dispatch_sequence=8,
+        )
+    conflicts.append((matcher, matcher._state.conflict))
+
+    _, matcher, _, _, delayed, _ = _system()
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    with pytest.raises(HistoricalMatcherError):
+        matcher.match_active_market_root(
+            replace(delayed, source_sequence=delayed.source_sequence + 1),
+            dispatch_sequence=7,
+        )
+    conflicts.append((matcher, matcher._state.conflict))
+
+    _, matcher, orders, causal, _, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    object.__setattr__(receipt, "quantity_text", "999")
+    with pytest.raises(HistoricalMatcherError):
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    conflicts.append((matcher, matcher._state.conflict))
+
+    assert {conflict.conflict_kind for _, conflict in conflicts if conflict is not None} == set(
+        HistoricalMatcherConflictKind
+    )
+    for conflict_matcher, conflict in conflicts:
+        assert conflict is not None
+        context = HistoricalMatcherDecodeContext(
+            run_id=conflict_matcher.run_id,
+            spec_set=conflict_matcher.spec_set,
+            execution_policy=conflict_matcher.execution_policy,
+            source_namespace=conflict_matcher.source_namespace,
+            provenance_id=conflict_matcher.provenance_id,
+        )
+        payload = canonical_historical_matcher_conflict_bytes(conflict)
+        decoded = decode_historical_matcher_conflict(payload, context=context)
+        assert canonical_historical_matcher_conflict_bytes(decoded) == payload
+        assert historical_matcher_conflict_digest(decoded) == historical_matcher_conflict_digest(
+            conflict
+        )
 
 
 def test_unexpected_port_exceptions_escape_unchanged_and_publish_nothing() -> None:

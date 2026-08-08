@@ -1268,10 +1268,68 @@ def _validate_conflict(conflict: HistoricalMatcherConflictEvidence) -> None:
         if value is not None:
             _require_positive_uint64(value, field_name=field_name)
     _require_non_negative_uint64(conflict.pending_count, field_name="pending_count")
-    immutable_occupied_identity(
+    occupied = immutable_occupied_identity(
         conflict.occupied_identity,
         conflict_kind=conflict.conflict_kind,
     )
+    kind = conflict.conflict_kind
+    submitted_sequence = conflict.submitted_dispatch_sequence
+    last_sequence = conflict.last_successful_dispatch_sequence
+    existing = conflict.existing_sha256
+    submitted = conflict.submitted_sha256
+    trigger = conflict.trigger_root_sha256
+    required_submission_fields = (
+        occupied is not None
+        and existing is not None
+        and submitted is not None
+        and submitted_sequence is not None
+        and trigger is not None
+    )
+    if kind in {
+        HistoricalMatcherConflictKind.SUBMISSION_IDENTITY,
+        HistoricalMatcherConflictKind.CLIENT_SUBMISSION_KEY,
+    }:
+        if not required_submission_fields:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submission conflict evidence conflicts")
+        return
+    if kind is HistoricalMatcherConflictKind.DISPATCH_IDENTITY:
+        if (
+            existing is None
+            or submitted is None
+            or submitted_sequence is None
+            or last_sequence is None
+            or trigger != submitted
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch conflict evidence conflicts")
+        if occupied is None:
+            if existing != submitted:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch digest identity conflicts")
+        elif occupied["dispatch_sequence"] != submitted_sequence:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch sequence identity conflicts")
+        return
+    if kind is HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH:
+        if (
+            occupied is None
+            or existing is not None
+            or submitted is None
+            or submitted_sequence is None
+            or last_sequence is None
+            or trigger != submitted
+            or occupied["dispatch_sequence"] != submitted_sequence
+            or submitted_sequence >= last_sequence
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "non-monotone conflict evidence conflicts")
+        return
+    if kind is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT:
+        if (
+            occupied is not None
+            or existing is not None
+            or submitted is not None
+            or trigger is not None
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "retained-binding conflict evidence conflicts")
+        return
+    raise AssertionError("unreachable conflict kind")
 
 
 def _validate_state(state: HistoricalMatcherState) -> None:
@@ -1433,6 +1491,10 @@ def _validate_state(state: HistoricalMatcherState) -> None:
             or state.conflict.last_successful_dispatch_sequence != state.last_new_dispatch_sequence
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "state conflict snapshot conflicts")
+        _validate_conflict_state_bindings(
+            state.conflict,
+            receipts=state._submission_receipts,
+        )
     if state.ended != (state.end_batch_sha256 is not None):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state end relationship conflicts")
     if state.ended and state.pending_order_ids:
@@ -2236,6 +2298,72 @@ def _occupied_identity_document(
             "order_id": dict(cast(Mapping[str, object], immutable["order_id"])),
         }
     return dict(immutable)
+
+
+def _validate_conflict_state_bindings(
+    conflict: HistoricalMatcherConflictEvidence,
+    *,
+    receipts: tuple[HistoricalSubmissionReceipt, ...],
+    batches: tuple[HistoricalMatcherDispatchBatch, ...] | None = None,
+) -> None:
+    occupied = conflict.occupied_identity
+    kind = conflict.conflict_kind
+    if kind is HistoricalMatcherConflictKind.SUBMISSION_IDENTITY:
+        if occupied is None:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submission conflict identity is absent")
+        occupied_order_id = cast(Mapping[str, object], occupied["order_id"])
+        retained = next(
+            (
+                receipt
+                for receipt in receipts
+                if _economic_id_document(receipt.order_id) == dict(occupied_order_id)
+            ),
+            None,
+        )
+        if retained is None or conflict.existing_sha256 != retained.order_sha256:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submission conflict state binding conflicts")
+        return
+    if kind is HistoricalMatcherConflictKind.CLIENT_SUBMISSION_KEY:
+        if occupied is None:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "client conflict identity is absent")
+        retained = next(
+            (
+                receipt
+                for receipt in receipts
+                if receipt.client_submission_key.value == occupied["sha256"]
+            ),
+            None,
+        )
+        if retained is None or conflict.existing_sha256 != retained.order_sha256:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "client conflict state binding conflicts")
+        return
+    if batches is None:
+        return
+    if kind is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT:
+        return
+    submitted_sequence = cast(int, conflict.submitted_dispatch_sequence)
+    submitted_digest = cast(Sha256Digest, conflict.submitted_sha256)
+    retained_sequence = next(
+        (batch for batch in batches if batch.dispatch_sequence == submitted_sequence),
+        None,
+    )
+    retained_digest = next(
+        (batch for batch in batches if batch.trigger_root_sha256 == submitted_digest),
+        None,
+    )
+    if kind is HistoricalMatcherConflictKind.DISPATCH_IDENTITY:
+        if occupied is not None:
+            if retained_sequence is None or (
+                retained_sequence.trigger_root_sha256 != conflict.existing_sha256
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch conflict state binding conflicts")
+        elif retained_digest is None or retained_sequence is not None:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch digest state binding conflicts")
+        return
+    if kind is HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH and (
+        retained_sequence is not None or retained_digest is not None
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "non-monotone state precedence conflicts")
 
 
 def _decode_document(payload: bytes) -> dict[str, object]:
@@ -3163,6 +3291,11 @@ def decode_historical_matcher_state(
         sorted(batch.dispatch_sequence for batch in batches)
     ) or len({batch.dispatch_sequence for batch in batches}) != len(batches):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state dispatch append order conflicts")
+    if any(
+        previous.trigger_root_key >= current.trigger_root_key
+        for previous, current in zip(batches, batches[1:], strict=False)
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state root append order conflicts")
     receipt_records: list[tuple[HistoricalSubmissionReceipt, Order]] = []
     for receipt in receipts:
         order = context.orders_by_sha256.get(receipt.order_sha256)
@@ -3252,6 +3385,12 @@ def decode_historical_matcher_state(
         or conflict.last_successful_dispatch_sequence != state.last_new_dispatch_sequence
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state conflict snapshot conflicts")
+    if conflict is not None:
+        _validate_conflict_state_bindings(
+            conflict,
+            receipts=tuple(receipt for receipt, _ in receipt_records),
+            batches=tuple(batches),
+        )
     if canonical_historical_matcher_state_bytes(state) != payload:
         raise _fail(OutcomeCode.CONFLICTING_ID, "matcher state reconstruction conflicts")
     return state
