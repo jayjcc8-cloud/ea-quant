@@ -2278,6 +2278,10 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
     )
     revised_market = replace(causal, revision=1)
     requested_end = replace(end, kind=EndOfRunKind.REQUESTED_END)
+    early_end = replace(
+        end,
+        available_at=causal.available_at - timedelta(microseconds=1),
+    )
     common = {
         "fact_sequence": 1,
         "source_namespace": matcher.source_namespace,
@@ -2314,6 +2318,18 @@ def test_observation_encoder_rejects_root_fact_and_expiry_time_cross_bindings() 
             "trigger_root_key": runtime_root_order_key(causal),
             "occurred_at": causal.event_time,
             "available_at": causal.available_at,
+            "price_text": None,
+            "expiry_outcome_code": OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
+        },
+        {
+            **common,
+            "fact_kind": "expiry",
+            "trigger_root_kind": HistoricalDispatchKind.END_OF_RUN,
+            "trigger_root_sha256": historical_end_root_digest(early_end),
+            "trigger_root_key": runtime_root_order_key(early_end),
+            "trigger_root": early_end,
+            "occurred_at": early_end.available_at,
+            "available_at": early_end.available_at,
             "price_text": None,
             "expiry_outcome_code": OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
         },
@@ -2732,15 +2748,8 @@ def test_retained_public_artifact_mutation_halts_before_replay_or_membership() -
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     matcher.match_active_market_root(delayed, dispatch_sequence=8)
     dispatch = matcher._state.dispatch_by_sequence[8]
-    object.__setattr__(dispatch, "root_bytes", b"tampered retained root")
-    with pytest.raises(HistoricalMatcherError) as root_drift:
-        matcher.match_active_market_root(delayed, dispatch_sequence=8)
-    assert root_drift.value.code is OutcomeCode.CONFLICTING_ID
-    assert matcher._state.conflict is not None
-    assert (
-        matcher._state.conflict.conflict_kind
-        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
-    )
+    with pytest.raises(AttributeError):
+        object.__setattr__(dispatch, "root_bytes", b"tampered retained root")
 
     _, matcher, orders, causal, _, _ = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -2785,12 +2794,13 @@ def test_retained_public_artifact_mutation_halts_before_replay_or_membership() -
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
     ingress = batch.ingresses[0]
     object.__setattr__(ingress, "ingress_sequence", 99)
+    assert matcher.has_issued_ingress(
+        ingress_identity=matcher._state.issued[0].binding.ingress_identity,
+        canonical_ingress_bytes=matcher._state.issued[0].ingress_bytes,
+        canonical_fact_bytes=matcher._state.issued[0].fact_bytes,
+    )
     with pytest.raises(HistoricalMatcherError) as ingress_drift:
-        matcher.has_issued_ingress(
-            ingress_identity=matcher._state.issued[0].binding.ingress_identity,
-            canonical_ingress_bytes=matcher._state.issued[0].ingress_bytes,
-            canonical_fact_bytes=matcher._state.issued[0].fact_bytes,
-        )
+        matcher.match_active_market_root(delayed, dispatch_sequence=8)
     assert ingress_drift.value.code is OutcomeCode.CONFLICTING_ID
     assert matcher._state.conflict is not None
     assert (
@@ -2947,7 +2957,7 @@ def test_retained_state_is_validated_before_filtering_and_after_halt() -> None:
     for retained_kind in ("submission", "dispatch", "issued"):
         _, matcher, orders, causal, delayed, _ = _system()
         matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
-        matcher.match_active_market_root(delayed, dispatch_sequence=8)
+        retained_batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
         conflicting_root = replace(delayed, source_sequence=delayed.source_sequence + 1)
         with pytest.raises(HistoricalMatcherError):
             matcher.match_active_market_root(conflicting_root, dispatch_sequence=8)
@@ -2957,7 +2967,7 @@ def test_retained_state_is_validated_before_filtering_and_after_halt() -> None:
         if retained_kind == "submission":
             object.__setattr__(matcher._state.submissions[0], "order_id", orders[1].order_id)
         elif retained_kind == "dispatch":
-            object.__setattr__(matcher._state.dispatch_by_sequence[8], "root_bytes", b"drift")
+            object.__setattr__(retained_batch, "dispatch_sequence", 9)
         else:
             object.__setattr__(matcher._state.issued[0], "ingress_bytes", b"drift")
         with pytest.raises(HistoricalMatcherError) as after_halt:
@@ -3009,10 +3019,10 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
     def tracked(
         self: Phase1HistoricalMatcher,
         record: Any,
-    ) -> None:
+    ) -> Any:
         nonlocal validations
         validations += 1
-        original(self, record)
+        return original(self, record)
 
     monkeypatch.setattr(Phase1HistoricalMatcher, "_require_dispatch_record", tracked)
 
@@ -3062,6 +3072,117 @@ def test_new_empty_dispatches_do_not_revalidate_complete_dispatch_history(
     assert matcher.match_active_market_root(roots[0], dispatch_sequence=1) is batches[0]
     assert validations == 1
     assert callback_state_types == [_DispatchCallbackStateFence] * len(roots)
+
+
+@pytest.mark.parametrize("tamper", ["registry", "chain"])
+@pytest.mark.parametrize("next_kind", ["market", "end"])
+def test_dispatch_authority_rejects_coherent_frontier_replacement_before_verifier(
+    tamper: str,
+    next_kind: str,
+) -> None:
+    _, matcher, _, _, delayed, end = _system()
+    roots = tuple(
+        replace(delayed, source_sequence=delayed.source_sequence + offset) for offset in range(1, 4)
+    )
+    for sequence, root in enumerate(roots, start=1):
+        matcher.match_active_market_root(root, dispatch_sequence=sequence)
+
+    tokens = tuple(matcher._state.dispatch_by_sequence.values())
+    assert len(tokens) == 3
+    for token in tokens:
+        with pytest.raises(AttributeError):
+            object.__setattr__(token, "root_bytes", b"drift")
+
+    if tamper == "registry":
+        object.__setattr__(
+            matcher._state,
+            "dispatch_by_sequence",
+            MappingProxyType(dict(matcher._state.dispatch_by_sequence)),
+        )
+        object.__setattr__(
+            matcher._state,
+            "dispatch_by_digest",
+            MappingProxyType(dict(matcher._state.dispatch_by_digest)),
+        )
+    else:
+        object.__setattr__(matcher._state, "dispatch_chain_head", "0" * 64)
+
+    verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    verifier_calls = 0
+    operation: Callable[[], object]
+    if next_kind == "market":
+        original = verifier.verify_active_market_dispatch
+
+        def verify_market(root: MarketDataEnvelope, *, dispatch_sequence: int) -> Any:
+            nonlocal verifier_calls
+            verifier_calls += 1
+            return original(root, dispatch_sequence=dispatch_sequence)
+
+        cast(Any, verifier).verify_active_market_dispatch = verify_market
+
+        def dispatch_market() -> object:
+            return matcher.match_active_market_root(
+                replace(delayed, source_sequence=delayed.source_sequence + 100),
+                dispatch_sequence=4,
+            )
+
+        operation = dispatch_market
+    else:
+        original_end = verifier.verify_active_end_of_run_dispatch
+
+        def verify_end(root: EndOfRunRoot, *, dispatch_sequence: int) -> Any:
+            nonlocal verifier_calls
+            verifier_calls += 1
+            return original_end(root, dispatch_sequence=dispatch_sequence)
+
+        cast(Any, verifier).verify_active_end_of_run_dispatch = verify_end
+
+        def dispatch_end() -> object:
+            return matcher.expire_at_active_end(end, dispatch_sequence=4)
+
+        operation = dispatch_end
+
+    with pytest.raises(HistoricalMatcherError) as drift:
+        operation()
+    assert drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert verifier_calls == 0
+    assert 4 not in matcher._state.dispatch_by_sequence
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+
+@pytest.mark.parametrize("tampered_index", [0, 1, 2])
+def test_public_dispatch_mutation_cannot_poison_later_publication(
+    tampered_index: int,
+) -> None:
+    _, matcher, _, _, delayed, _ = _system()
+    roots = tuple(
+        replace(delayed, source_sequence=delayed.source_sequence + offset) for offset in range(1, 5)
+    )
+    batches = tuple(
+        matcher.match_active_market_root(root, dispatch_sequence=sequence)
+        for sequence, root in enumerate(roots[:3], start=1)
+    )
+    object.__setattr__(batches[tampered_index], "dispatch_sequence", 100)
+
+    fourth = matcher.match_active_market_root(roots[3], dispatch_sequence=4)
+    assert fourth.dispatch_sequence == 4
+    assert matcher._state.conflict is None
+
+    with pytest.raises(HistoricalMatcherError) as addressed_replay:
+        matcher.match_active_market_root(
+            roots[tampered_index],
+            dispatch_sequence=tampered_index + 1,
+        )
+    assert addressed_replay.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
 
 
 def test_no_fill_filters_and_first_later_fill_are_closed_and_replay_stable() -> None:

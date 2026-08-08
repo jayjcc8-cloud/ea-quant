@@ -2126,6 +2126,7 @@ def canonical_historical_matcher_observation_bytes(
             or suffix.kind_rank != END_OF_RUN_KIND_RANKS[EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED]
             or type(trigger_root) is not EndOfRunRoot
             or trigger_root.run_id != submission_receipt.run_id
+            or trigger_root_key <= submission_receipt.causal_root_key
             or occurred_text != available_text
             or available_text != _utc_text(trigger_root_key.available_at)
         ):
@@ -2647,10 +2648,13 @@ def _expected_decoded_batch_ingress(
         occurred_at = trigger_root.event_time
         available_at = trigger_root.available_at
     else:
+        root_key = runtime_root_order_key(trigger_root)
         if (
             type(trigger_root) is not EndOfRunRoot
             or trigger_root.kind is not EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED
             or trigger_root.run_id != context.run_id
+            or root_key != batch.trigger_root_key
+            or root_key <= receipt.causal_root_key
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "batch end root conflicts")
         fact_kind = "expiry"

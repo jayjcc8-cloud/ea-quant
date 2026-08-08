@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from types import MappingProxyType
-from typing import Protocol, final
+from typing import NamedTuple, Protocol, final
+from weakref import WeakKeyDictionary
 
 from ea.core.economics import CanonicalDecimal, EconomicValidationError, require_positive
 from ea.core.execution import (
@@ -220,6 +223,50 @@ class _DispatchRecord:
     batch_sha256: Sha256Digest
 
 
+@final
+class _DispatchRecordToken:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("dispatch record tokens are created only by the matcher")
+
+
+class _SealedDispatchRecord(NamedTuple):
+    root_bytes: bytes
+    root_sha256_value: str
+    root_key_document_bytes: bytes
+    batch_bytes: bytes
+    batch_sha256_value: str
+    run_id_value: str
+    source_namespace_value: str
+    dispatch_kind_value: str
+    dispatch_sequence: int
+    next_fact_sequence_before: int | None
+    next_fact_sequence_after: int | None
+    submission_sequences: tuple[int, ...]
+    order_id_values: tuple[tuple[str, str, int], ...]
+    ingress_bytes: tuple[bytes, ...]
+    ingress_sha256_values: tuple[str, ...]
+    replay_batch: HistoricalMatcherDispatchBatch
+
+
+class _DispatchAuthority(NamedTuple):
+    by_sequence: MappingProxyType[int, _DispatchRecordToken]
+    by_digest: MappingProxyType[str, _DispatchRecordToken]
+    record_count: int
+    last_sequence: int | None
+    last_token: _DispatchRecordToken | None
+    chain_head: str
+
+
+_DISPATCH_CHAIN_DOMAIN = b"ea.phase1.historical-matcher.dispatch-authority-chain.v1"
+_EMPTY_DISPATCH_CHAIN_HEAD = sha256(_DISPATCH_CHAIN_DOMAIN + b"\x00").hexdigest()
+_SEALED_DISPATCH_RECORDS: WeakKeyDictionary[
+    _DispatchRecordToken,
+    _SealedDispatchRecord,
+] = WeakKeyDictionary()
+
+
 @dataclass(frozen=True, slots=True)
 class _IssuedRecord:
     ingress: ExecutionFactIngress
@@ -238,8 +285,9 @@ class _MatcherState:
     pending: tuple[_SubmissionRecord, ...]
     submission_by_order: MappingProxyType[EconomicId, _SubmissionRecord]
     submission_by_client: MappingProxyType[Sha256Digest, _SubmissionRecord]
-    dispatch_by_sequence: MappingProxyType[int, _DispatchRecord]
-    dispatch_by_digest: MappingProxyType[Sha256Digest, _DispatchRecord]
+    dispatch_by_sequence: MappingProxyType[int, _DispatchRecordToken]
+    dispatch_by_digest: MappingProxyType[str, _DispatchRecordToken]
+    dispatch_chain_head: str
     issued: tuple[_IssuedRecord, ...]
     issued_by_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
     last_dispatch: int | None
@@ -460,9 +508,51 @@ def _quantized_close(
     return _quantized_historical_close(close, side=side, specification=specification)
 
 
+def _canonical_runtime_key_bytes(value: RuntimeRootOrderKey) -> bytes:
+    return json.dumps(
+        _runtime_key_document_from_key(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _runtime_key_from_canonical_bytes(value: bytes) -> RuntimeRootOrderKey:
+    document = json.loads(value.decode("utf-8"))
+    if type(document) is not dict:
+        raise _fail(OutcomeCode.INVALID_TYPE, "sealed runtime key is invalid")
+    key = runtime_root_key_from_document(document)
+    if _canonical_runtime_key_bytes(key) != value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "sealed runtime key is noncanonical")
+    return key
+
+
+def _append_dispatch_chain(
+    previous: str,
+    *,
+    dispatch_sequence: int,
+    root_key_bytes: bytes,
+    root_sha256_value: str,
+    batch_sha256_value: str,
+) -> str:
+    components = (
+        bytes.fromhex(previous),
+        dispatch_sequence.to_bytes(8, "big"),
+        root_key_bytes,
+        bytes.fromhex(root_sha256_value),
+        bytes.fromhex(batch_sha256_value),
+    )
+    digest = sha256(_DISPATCH_CHAIN_DOMAIN + b"\x01")
+    for component in components:
+        digest.update(len(component).to_bytes(8, "big"))
+        digest.update(component)
+    return digest.hexdigest()
+
+
 @final
 class Phase1HistoricalMatcher:
     __slots__ = (
+        "__weakref__",
         "_active_dispatch_verifier",
         "_active_dispatch_runtime_identity",
         "_execution_policy",
@@ -568,7 +658,9 @@ class Phase1HistoricalMatcher:
             execution_fact_ingress_digest(ingress): ingress for ingress in public_ingresses
         }
         last_dispatch_record = (
-            None if state.last_dispatch is None else state.dispatch_by_sequence[state.last_dispatch]
+            None
+            if state.last_dispatch is None
+            else self._require_dispatch_record(state.dispatch_by_sequence[state.last_dispatch])
         )
         public_last_batch = (
             None
@@ -605,8 +697,8 @@ class Phase1HistoricalMatcher:
             )
         )
         public_batch_sha256s = tuple(
-            Sha256Digest(record.batch_sha256.value)
-            for _, record in sorted(state.dispatch_by_sequence.items())
+            Sha256Digest(_SEALED_DISPATCH_RECORDS[token].batch_sha256_value)
+            for _, token in sorted(state.dispatch_by_sequence.items())
         )
         public_conflict = None
         if state.conflict is not None:
@@ -832,38 +924,133 @@ class Phase1HistoricalMatcher:
         if not self._submission_record_is_valid(record):
             self._retained_binding_drift(dispatch_sequence=record.dispatch_sequence)
 
-    def _require_dispatch_record(self, record: _DispatchRecord) -> None:
+    def _require_dispatch_authority(self) -> _DispatchAuthority:
+        state = self._state
         try:
-            batch = record.batch
+            authority = _MATCHER_DISPATCH_AUTHORITIES[self]
+            last_seal = (
+                None
+                if authority.last_token is None
+                else _SEALED_DISPATCH_RECORDS[authority.last_token]
+            )
             valid = (
-                type(record) is _DispatchRecord
-                and type(batch) is HistoricalMatcherDispatchBatch
-                and canonical_historical_matcher_dispatch_batch_bytes(batch) == record.batch_bytes
-                and historical_matcher_dispatch_batch_digest(batch) == record.batch_sha256
-                and batch.run_id == self._run_id
-                and batch.source_namespace == self._source_namespace
-                and batch.dispatch_sequence in self._state.dispatch_by_sequence
-                and self._state.dispatch_by_sequence[batch.dispatch_sequence] is record
-                and batch.trigger_root_sha256 == record.root_sha256
-                and batch.trigger_root_key == record.root_key
-                and _historical_root_digest_from_bytes(
-                    kind=batch.dispatch_kind,
-                    canonical_root_bytes=record.root_bytes,
+                type(authority) is _DispatchAuthority
+                and type(authority.by_sequence) is MappingProxyType
+                and type(authority.by_digest) is MappingProxyType
+                and state.dispatch_by_sequence is authority.by_sequence
+                and state.dispatch_by_digest is authority.by_digest
+                and type(state.dispatch_chain_head) is str
+                and state.dispatch_chain_head == authority.chain_head
+                and len(authority.chain_head) == 64
+                and len(bytes.fromhex(authority.chain_head)) == 32
+                and type(authority.record_count) is int
+                and authority.record_count == len(authority.by_sequence)
+                and authority.record_count == len(authority.by_digest)
+                and state.last_dispatch == authority.last_sequence
+                and (
+                    (
+                        authority.record_count == 0
+                        and authority.last_sequence is None
+                        and authority.last_token is None
+                        and not authority.by_sequence
+                        and not authority.by_digest
+                        and authority.chain_head == _EMPTY_DISPATCH_CHAIN_HEAD
+                    )
+                    or (
+                        authority.record_count > 0
+                        and type(authority.last_sequence) is int
+                        and authority.last_token is not None
+                        and authority.by_sequence.get(authority.last_sequence)
+                        is authority.last_token
+                        and last_seal is not None
+                        and last_seal.dispatch_sequence == authority.last_sequence
+                        and authority.by_digest.get(last_seal.root_sha256_value)
+                        is authority.last_token
+                    )
                 )
-                == record.root_sha256
             )
         except Exception:
             valid = False
         if not valid:
-            sequence = getattr(record.batch, "dispatch_sequence", None)
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
+        return authority
+
+    def _require_dispatch_record(self, token: _DispatchRecordToken) -> _DispatchRecord:
+        self._require_dispatch_authority()
+        sequence: int | None = None
+        try:
+            if type(token) is not _DispatchRecordToken:
+                raise TypeError
+            seal = _SEALED_DISPATCH_RECORDS[token]
+            sequence = seal.dispatch_sequence
+            root_key = _runtime_key_from_canonical_bytes(seal.root_key_document_bytes)
+            ingresses = tuple(
+                decode_execution_fact_ingress(
+                    payload,
+                    context=IndependentFactDecodeContext(self._spec_set),
+                )
+                for payload in seal.ingress_bytes
+            )
+            batch = _create_historical_matcher_dispatch_batch(
+                run_id=RunId(seal.run_id_value),
+                source_namespace=SourceNamespace(seal.source_namespace_value),
+                dispatch_kind=HistoricalDispatchKind(seal.dispatch_kind_value),
+                dispatch_sequence=seal.dispatch_sequence,
+                trigger_root_sha256=Sha256Digest(seal.root_sha256_value),
+                trigger_root_key=root_key,
+                next_fact_sequence_before=seal.next_fact_sequence_before,
+                next_fact_sequence_after=seal.next_fact_sequence_after,
+                submission_sequences=seal.submission_sequences,
+                order_ids=tuple(
+                    EconomicId(RunId(run_id), EconomicOwnerKind(owner_kind), owner_sequence)
+                    for run_id, owner_kind, owner_sequence in seal.order_id_values
+                ),
+                ingresses=ingresses,
+                ingress_sha256s=tuple(Sha256Digest(value) for value in seal.ingress_sha256_values),
+            )
+            root_sha256 = Sha256Digest(seal.root_sha256_value)
+            batch_sha256 = Sha256Digest(seal.batch_sha256_value)
+            valid = (
+                canonical_historical_matcher_dispatch_batch_bytes(batch) == seal.batch_bytes
+                and historical_matcher_dispatch_batch_digest(batch) == batch_sha256
+                and canonical_historical_matcher_dispatch_batch_bytes(seal.replay_batch)
+                == seal.batch_bytes
+                and historical_matcher_dispatch_batch_digest(seal.replay_batch) == batch_sha256
+                and batch.run_id == self._run_id
+                and batch.source_namespace == self._source_namespace
+                and self._state.dispatch_by_sequence.get(sequence) is token
+                and self._state.dispatch_by_digest.get(seal.root_sha256_value) is token
+                and batch.trigger_root_sha256 == root_sha256
+                and batch.trigger_root_key == root_key
+                and _historical_root_digest_from_bytes(
+                    kind=batch.dispatch_kind,
+                    canonical_root_bytes=seal.root_bytes,
+                )
+                == root_sha256
+            )
+            if not valid:
+                raise ValueError
+            return _DispatchRecord(
+                root_bytes=seal.root_bytes,
+                root_sha256=root_sha256,
+                root_key=root_key,
+                batch=batch,
+                batch_bytes=seal.batch_bytes,
+                batch_sha256=batch_sha256,
+            )
+        except Exception:
             self._retained_binding_drift(dispatch_sequence=sequence)
+            raise AssertionError("unreachable") from None
 
     def _require_issued_record(self, record: _IssuedRecord) -> None:
         try:
             ingress = record.ingress
             binding = record.binding
             _validate_descendant_binding(binding)
-            dispatch = self._state.dispatch_by_sequence.get(binding.parent_dispatch_sequence)
+            dispatch_token = self._state.dispatch_by_sequence.get(binding.parent_dispatch_sequence)
+            dispatch = (
+                None if dispatch_token is None else _SEALED_DISPATCH_RECORDS.get(dispatch_token)
+            )
             valid = (
                 type(record) is _IssuedRecord
                 and type(ingress) is ExecutionFactIngress
@@ -877,15 +1064,17 @@ class Phase1HistoricalMatcher:
                 and binding.ingress_sha256 == record.ingress_sha256
                 and binding.fact_sha256 == execution_fact_digest(ingress.fact)
                 and dispatch is not None
-                and binding.batch_sha256 == dispatch.batch_sha256
-                and binding.parent_kind is dispatch.batch.dispatch_kind
-                and binding.parent_root_sha256 == dispatch.root_sha256
-                and binding.parent_root_key == dispatch.root_key
-                and binding.parent_dispatch_sequence == dispatch.batch.dispatch_sequence
+                and binding.batch_sha256.value == dispatch.batch_sha256_value
+                and binding.parent_kind.value == dispatch.dispatch_kind_value
+                and binding.parent_root_sha256.value == dispatch.root_sha256_value
+                and _canonical_runtime_key_bytes(binding.parent_root_key)
+                == dispatch.root_key_document_bytes
+                and binding.parent_dispatch_sequence == dispatch.dispatch_sequence
                 and type(binding.batch_index) is int
-                and 0 <= binding.batch_index < len(dispatch.batch.ingresses)
-                and dispatch.batch.ingresses[binding.batch_index] is ingress
-                and dispatch.batch.ingress_sha256s[binding.batch_index] == record.ingress_sha256
+                and 0 <= binding.batch_index < len(dispatch.ingress_bytes)
+                and dispatch.ingress_bytes[binding.batch_index] == record.ingress_bytes
+                and dispatch.ingress_sha256_values[binding.batch_index]
+                == record.ingress_sha256.value
                 and self._state.issued_by_identity.get(record.ingress_identity) is record
             )
         except Exception:
@@ -1213,6 +1402,7 @@ class Phase1HistoricalMatcher:
 
     def _require_retained_state(self) -> None:
         self._require_issuance_registry()
+        authority = self._require_dispatch_authority()
         state = self._state
         for submission_record in state.submissions:
             self._require_submission_record(submission_record)
@@ -1229,6 +1419,11 @@ class Phase1HistoricalMatcher:
             expected_next_submission = _next_submission_after(state.submissions)
             issued_sequences = tuple(record.ingress.ingress_sequence for record in state.issued)
             dispatch_sequences = tuple(sorted(state.dispatch_by_sequence))
+            last_seal = (
+                None
+                if authority.last_token is None
+                else _SEALED_DISPATCH_RECORDS[authority.last_token]
+            )
             valid = (
                 type(state) is _MatcherState
                 and len(submission_ids) == len(state.submissions)
@@ -1248,9 +1443,12 @@ class Phase1HistoricalMatcher:
                 and len(state.dispatch_by_sequence) == len(state.dispatch_by_digest)
                 and all(
                     type(sequence) is int
-                    and record.batch.dispatch_sequence == sequence
-                    and state.dispatch_by_digest.get(record.root_sha256) is record
-                    for sequence, record in state.dispatch_by_sequence.items()
+                    and _SEALED_DISPATCH_RECORDS[token].dispatch_sequence == sequence
+                    and state.dispatch_by_digest.get(
+                        _SEALED_DISPATCH_RECORDS[token].root_sha256_value
+                    )
+                    is token
+                    for sequence, token in state.dispatch_by_sequence.items()
                 )
                 and state.last_dispatch
                 == (None if not dispatch_sequences else dispatch_sequences[-1])
@@ -1272,10 +1470,9 @@ class Phase1HistoricalMatcher:
                         and not state.pending
                         and state.last_dispatch is not None
                         and state.end_batch_sha256 is not None
-                        and state.dispatch_by_sequence[state.last_dispatch].batch.dispatch_kind
-                        is HistoricalDispatchKind.END_OF_RUN
-                        and state.dispatch_by_sequence[state.last_dispatch].batch_sha256
-                        == state.end_batch_sha256
+                        and last_seal is not None
+                        and last_seal.dispatch_kind_value == HistoricalDispatchKind.END_OF_RUN.value
+                        and last_seal.batch_sha256_value == state.end_batch_sha256.value
                     )
                     or (not state.ended and state.end_batch_sha256 is None)
                 )
@@ -1303,6 +1500,7 @@ class Phase1HistoricalMatcher:
 
     def _require_dispatch_eligibility_state(self) -> None:
         """Validate the mutable frontier and its lightweight submission-sequence spine."""
+        authority = self._require_dispatch_authority()
         state = self._state
         for submission_record in state.pending:
             self._require_submission_record(submission_record)
@@ -1311,10 +1509,10 @@ class Phase1HistoricalMatcher:
             submission_ids = (
                 {id(record) for record in state.submissions} if state.pending else set()
             )
-            last_record = (
+            last_seal = (
                 None
-                if state.last_dispatch is None
-                else state.dispatch_by_sequence.get(state.last_dispatch)
+                if authority.last_token is None
+                else _SEALED_DISPATCH_RECORDS.get(authority.last_token)
             )
             expected_next_submission = _next_submission_after(state.submissions)
             valid = (
@@ -1337,9 +1535,11 @@ class Phase1HistoricalMatcher:
                     (state.last_dispatch is None and not state.dispatch_by_sequence)
                     or (
                         type(state.last_dispatch) is int
-                        and last_record is not None
-                        and last_record.batch.dispatch_sequence == state.last_dispatch
-                        and state.dispatch_by_digest.get(last_record.root_sha256) is last_record
+                        and authority.last_token is not None
+                        and last_seal is not None
+                        and last_seal.dispatch_sequence == state.last_dispatch
+                        and state.dispatch_by_digest.get(last_seal.root_sha256_value)
+                        is authority.last_token
                     )
                 )
                 and type(state.ended) is bool
@@ -1347,10 +1547,10 @@ class Phase1HistoricalMatcher:
                     (
                         state.ended
                         and not state.pending
-                        and last_record is not None
+                        and last_seal is not None
                         and state.end_batch_sha256 is not None
-                        and last_record.batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN
-                        and last_record.batch_sha256 == state.end_batch_sha256
+                        and last_seal.dispatch_kind_value == HistoricalDispatchKind.END_OF_RUN.value
+                        and last_seal.batch_sha256_value == state.end_batch_sha256.value
                     )
                     or (not state.ended and state.end_batch_sha256 is None)
                 )
@@ -1720,6 +1920,7 @@ class Phase1HistoricalMatcher:
             submission_by_client=MappingProxyType(by_client),
             dispatch_by_sequence=publication_state.dispatch_by_sequence,
             dispatch_by_digest=publication_state.dispatch_by_digest,
+            dispatch_chain_head=publication_state.dispatch_chain_head,
             issued=publication_state.issued,
             issued_by_identity=publication_state.issued_by_identity,
             last_dispatch=publication_state.last_dispatch,
@@ -1738,27 +1939,30 @@ class Phase1HistoricalMatcher:
     ) -> HistoricalMatcherDispatchBatch | None:
         existing = self._state.dispatch_by_sequence.get(sequence)
         if existing is not None:
-            self._require_dispatch_record(existing)
-            if existing.root_bytes == root_bytes and existing.root_sha256 == root_sha256:
-                return existing.batch
+            existing_record = self._require_dispatch_record(existing)
+            if (
+                existing_record.root_bytes == root_bytes
+                and existing_record.root_sha256 == root_sha256
+            ):
+                return _SEALED_DISPATCH_RECORDS[existing].replay_batch
             self._publish_conflict(
                 kind=HistoricalMatcherConflictKind.DISPATCH_IDENTITY,
                 occupied_identity={
                     "dispatch_sequence": sequence,
                     "kind": "dispatch_sequence",
                 },
-                existing_sha256=existing.root_sha256,
+                existing_sha256=existing_record.root_sha256,
                 submitted_sha256=root_sha256,
                 submitted_dispatch_sequence=sequence,
                 trigger_root_sha256=root_sha256,
             )
-        existing = self._state.dispatch_by_digest.get(root_sha256)
+        existing = self._state.dispatch_by_digest.get(root_sha256.value)
         if existing is not None:
-            self._require_dispatch_record(existing)
+            existing_record = self._require_dispatch_record(existing)
             self._publish_conflict(
                 kind=HistoricalMatcherConflictKind.DISPATCH_IDENTITY,
                 occupied_identity=None,
-                existing_sha256=existing.root_sha256,
+                existing_sha256=existing_record.root_sha256,
                 submitted_sha256=root_sha256,
                 submitted_dispatch_sequence=sequence,
                 trigger_root_sha256=root_sha256,
@@ -2021,6 +2225,7 @@ class Phase1HistoricalMatcher:
         close: float | None,
         end: bool,
     ) -> HistoricalMatcherDispatchBatch:
+        dispatch_authority = self._require_dispatch_authority()
         for record in records:
             self._require_submission_record(record)
         fact_before = self._state.next_fact
@@ -2130,11 +2335,47 @@ class Phase1HistoricalMatcher:
         )
         batch_bytes = canonical_historical_matcher_dispatch_batch_bytes(batch)
         batch_sha256 = historical_matcher_dispatch_batch_digest(batch)
-        for index, (_record, ingress, ingress_sha256) in enumerate(
-            zip(records, ingresses, ingress_digests, strict=True)
+        ingress_bytes_values = tuple(
+            canonical_execution_fact_ingress_bytes(ingress) for ingress in ingresses
+        )
+        trusted_ingresses = tuple(
+            decode_execution_fact_ingress(
+                payload,
+                context=IndependentFactDecodeContext(self._spec_set),
+            )
+            for payload in ingress_bytes_values
+        )
+        trusted_batch = _create_historical_matcher_dispatch_batch(
+            run_id=RunId(self._run_id.value),
+            source_namespace=SourceNamespace(self._source_namespace.value),
+            dispatch_kind=kind,
+            dispatch_sequence=sequence,
+            trigger_root_sha256=Sha256Digest(root_sha256.value),
+            trigger_root_key=runtime_root_key_from_document(
+                _runtime_key_document_from_key(root_key)
+            ),
+            next_fact_sequence_before=fact_before,
+            next_fact_sequence_after=fact_sequence,
+            submission_sequences=tuple(record.receipt.submission_sequence for record in records),
+            order_ids=tuple(_clone_economic_id(record.order_id) for record in records),
+            ingresses=trusted_ingresses,
+            ingress_sha256s=tuple(Sha256Digest(value.value) for value in ingress_digests),
+        )
+        if (
+            canonical_historical_matcher_dispatch_batch_bytes(trusted_batch) != batch_bytes
+            or historical_matcher_dispatch_batch_digest(trusted_batch) != batch_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "private dispatch reconstruction conflicts")
+        for index, (_record, ingress, ingress_sha256, ingress_bytes) in enumerate(
+            zip(
+                records,
+                trusted_ingresses,
+                ingress_digests,
+                ingress_bytes_values,
+                strict=True,
+            )
         ):
             fact_bytes = canonical_execution_fact_bytes(ingress.fact)
-            ingress_bytes = canonical_execution_fact_ingress_bytes(ingress)
             binding = _create_historical_matcher_descendant_binding(
                 ingress_identity=_clone_ingress_identity(ingress.identity),
                 ingress_sha256=Sha256Digest(ingress_sha256.value),
@@ -2156,18 +2397,46 @@ class Phase1HistoricalMatcher:
                     binding=binding,
                 )
             )
-        dispatch_record = _DispatchRecord(
+        token = object.__new__(_DispatchRecordToken)
+        seal = _SealedDispatchRecord(
             root_bytes=root_bytes,
-            root_sha256=root_sha256,
-            root_key=root_key,
-            batch=batch,
+            root_sha256_value=root_sha256.value,
+            root_key_document_bytes=_canonical_runtime_key_bytes(root_key),
             batch_bytes=batch_bytes,
-            batch_sha256=batch_sha256,
+            batch_sha256_value=batch_sha256.value,
+            run_id_value=self._run_id.value,
+            source_namespace_value=self._source_namespace.value,
+            dispatch_kind_value=kind.value,
+            dispatch_sequence=sequence,
+            next_fact_sequence_before=fact_before,
+            next_fact_sequence_after=fact_sequence,
+            submission_sequences=tuple(record.receipt.submission_sequence for record in records),
+            order_id_values=tuple(
+                (
+                    record.order_id.run_id.value,
+                    record.order_id.owner_kind.value,
+                    record.order_id.owner_sequence,
+                )
+                for record in records
+            ),
+            ingress_bytes=ingress_bytes_values,
+            ingress_sha256_values=tuple(value.value for value in ingress_digests),
+            replay_batch=batch,
         )
+        _SEALED_DISPATCH_RECORDS[token] = seal
         by_sequence = dict(self._state.dispatch_by_sequence)
         by_digest = dict(self._state.dispatch_by_digest)
-        by_sequence[sequence] = dispatch_record
-        by_digest[root_sha256] = dispatch_record
+        by_sequence[sequence] = token
+        by_digest[root_sha256.value] = token
+        next_by_sequence = MappingProxyType(by_sequence)
+        next_by_digest = MappingProxyType(by_digest)
+        next_chain_head = _append_dispatch_chain(
+            dispatch_authority.chain_head,
+            dispatch_sequence=sequence,
+            root_key_bytes=seal.root_key_document_bytes,
+            root_sha256_value=root_sha256.value,
+            batch_sha256_value=batch_sha256.value,
+        )
         issued_by_identity = dict(self._state.issued_by_identity)
         for issued in issued_records:
             if issued.ingress_identity in issued_by_identity:
@@ -2187,8 +2456,9 @@ class Phase1HistoricalMatcher:
             pending=pending,
             submission_by_order=self._state.submission_by_order,
             submission_by_client=self._state.submission_by_client,
-            dispatch_by_sequence=MappingProxyType(by_sequence),
-            dispatch_by_digest=MappingProxyType(by_digest),
+            dispatch_by_sequence=next_by_sequence,
+            dispatch_by_digest=next_by_digest,
+            dispatch_chain_head=next_chain_head,
             issued=(*self._state.issued, *issued_records),
             issued_by_identity=MappingProxyType(issued_by_identity),
             last_dispatch=sequence,
@@ -2197,7 +2467,8 @@ class Phase1HistoricalMatcher:
             conflict=None,
         )
         next_batch_sha256s = tuple(
-            item.batch_sha256 for _, item in sorted(next_state.dispatch_by_sequence.items())
+            Sha256Digest(_SEALED_DISPATCH_RECORDS[item].batch_sha256_value)
+            for _, item in sorted(next_state.dispatch_by_sequence.items())
         )
         canonical_historical_matcher_state_bytes(
             _create_historical_matcher_state(
@@ -2218,7 +2489,7 @@ class Phase1HistoricalMatcher:
                     next_batch_sha256s,
                     tuple(item.ingress for item in next_state.issued),
                 ),
-                _last_dispatch_batch=next_state.dispatch_by_sequence[sequence].batch,
+                _last_dispatch_batch=trusted_batch,
                 dispatch_batch_sha256s=next_batch_sha256s,
                 last_new_dispatch_sequence=sequence,
                 ended=end,
@@ -2228,6 +2499,17 @@ class Phase1HistoricalMatcher:
             )
         )
         self._require_live_bindings()
+        if self._require_dispatch_authority() is not dispatch_authority:
+            self._retained_binding_drift(dispatch_sequence=sequence)
+        next_authority = _DispatchAuthority(
+            by_sequence=next_by_sequence,
+            by_digest=next_by_digest,
+            record_count=dispatch_authority.record_count + 1,
+            last_sequence=sequence,
+            last_token=token,
+            chain_head=next_chain_head,
+        )
+        _MATCHER_DISPATCH_AUTHORITIES[self] = next_authority
         self._state = next_state
         self._issued_history_identity = next_state.issued
         self._issued_registry_identity = next_state.issued_by_identity
@@ -2282,6 +2564,12 @@ class Phase1HistoricalMatcher:
         ):
             return None
         return record.binding
+
+
+_MATCHER_DISPATCH_AUTHORITIES: WeakKeyDictionary[
+    Phase1HistoricalMatcher,
+    _DispatchAuthority,
+] = WeakKeyDictionary()
 
 
 def create_phase1_historical_matcher(
@@ -2346,6 +2634,8 @@ def create_phase1_historical_matcher(
         value._active_dispatch_runtime_identity = active_dispatch_verifier.runtime_identity
     except Exception as error:
         raise _fail(OutcomeCode.INVALID_TYPE, "dispatch runtime binding is invalid") from error
+    empty_dispatch_by_sequence: MappingProxyType[int, _DispatchRecordToken] = MappingProxyType({})
+    empty_dispatch_by_digest: MappingProxyType[str, _DispatchRecordToken] = MappingProxyType({})
     value._state = _MatcherState(
         next_submission=1,
         next_fact=1,
@@ -2353,14 +2643,23 @@ def create_phase1_historical_matcher(
         pending=(),
         submission_by_order=MappingProxyType({}),
         submission_by_client=MappingProxyType({}),
-        dispatch_by_sequence=MappingProxyType({}),
-        dispatch_by_digest=MappingProxyType({}),
+        dispatch_by_sequence=empty_dispatch_by_sequence,
+        dispatch_by_digest=empty_dispatch_by_digest,
+        dispatch_chain_head=_EMPTY_DISPATCH_CHAIN_HEAD,
         issued=(),
         issued_by_identity=MappingProxyType({}),
         last_dispatch=None,
         ended=False,
         end_batch_sha256=None,
         conflict=None,
+    )
+    _MATCHER_DISPATCH_AUTHORITIES[value] = _DispatchAuthority(
+        by_sequence=empty_dispatch_by_sequence,
+        by_digest=empty_dispatch_by_digest,
+        record_count=0,
+        last_sequence=None,
+        last_token=None,
+        chain_head=_EMPTY_DISPATCH_CHAIN_HEAD,
     )
     value._issued_history_identity = value._state.issued
     value._issued_registry_identity = value._state.issued_by_identity
