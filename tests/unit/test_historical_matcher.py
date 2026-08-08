@@ -1676,11 +1676,33 @@ def test_descendant_fact_is_dispatchable_only_while_parent_root_is_active() -> N
         assert replaced_dependency.value.code is OutcomeCode.CONFLICTING_ID
         object.__setattr__(descendant, field_name, original_dependency)
 
-    original_registry = descendant._registered_source_namespace_values
+    construction_dependencies = (
+        descendant._runtime,
+        descendant._matcher,
+        descendant._direct,
+    )
+    object.__setattr__(descendant, "_runtime", replacement_runtime)
+    object.__setattr__(descendant, "_matcher", replacement_matcher)
+    object.__setattr__(descendant, "_direct", replacement_direct)
+    with pytest.raises(RuntimeOrderingError) as coherently_replaced_dependencies:
+        descendant.resolve_active_issued_fact_dispatch(
+            ingress_identity=ingress.identity,
+            canonical_ingress_bytes=ingress_bytes,
+            canonical_fact_bytes=fact_bytes,
+        )
+    assert coherently_replaced_dependencies.value.code is OutcomeCode.CONFLICTING_ID
+    for field_name, construction_dependency in zip(
+        ("_runtime", "_matcher", "_direct"),
+        construction_dependencies,
+        strict=True,
+    ):
+        object.__setattr__(descendant, field_name, construction_dependency)
+
+    original_registry = direct_queue._fact_issuance_verifiers
     object.__setattr__(
-        descendant,
-        "_registered_source_namespace_values",
-        (*original_registry, "forged-source"),
+        direct_queue,
+        "_fact_issuance_verifiers",
+        MappingProxyType({matcher.source_namespace: matcher}),
     )
     with pytest.raises(RuntimeOrderingError) as replaced_registry:
         descendant.resolve_active_issued_fact_dispatch(
@@ -1689,11 +1711,7 @@ def test_descendant_fact_is_dispatchable_only_while_parent_root_is_active() -> N
             canonical_fact_bytes=fact_bytes,
         )
     assert replaced_registry.value.code is OutcomeCode.CONFLICTING_ID
-    object.__setattr__(
-        descendant,
-        "_registered_source_namespace_values",
-        original_registry,
-    )
+    object.__setattr__(direct_queue, "_fact_issuance_verifiers", original_registry)
 
     object.__setattr__(
         matcher,

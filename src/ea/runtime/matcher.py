@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Protocol, final
+from types import MappingProxyType
+from typing import NamedTuple, Protocol, final
 from weakref import WeakKeyDictionary
 
 from ea.core.execution import InstrumentExecutionSpecSet, instrument_spec_set_digest
@@ -91,6 +92,20 @@ class DirectFactDispatchVerifier(Protocol):
         canonical_ingress_bytes: bytes,
         canonical_fact_bytes: bytes,
     ) -> int | None: ...
+
+
+class _CausalDescendantBindings(NamedTuple):
+    runtime: Phase1HistoricalMarketRuntime
+    matcher: HistoricalMatcherIssuanceCapability
+    direct: DeterministicRootQueue
+    run_id_value: str
+    spec_sha256_value: str
+    direct_registry_identity: MappingProxyType[SourceNamespace, object]
+    direct_registry_entries: tuple[tuple[str, object], ...]
+    direct_source_namespace_values: tuple[str, ...]
+    other_source_namespace_values: tuple[str, ...]
+    matcher_source_namespace_value: str
+    registered_source_namespace_values: tuple[str, ...]
 
 
 def _fail(code: OutcomeCode, message: str) -> RuntimeOrderingError:
@@ -236,33 +251,18 @@ def create_historical_matcher_dispatch_verifier(
 @final
 class CausalDescendantFactDispatchVerifier:
     __slots__ = (
+        "__weakref__",
         "_direct",
-        "_direct_identity",
-        "_direct_source_namespace_values",
         "_matcher",
-        "_matcher_identity",
-        "_matcher_source_namespace",
-        "_matcher_source_namespace_value",
-        "_other_source_namespace_values",
-        "_registered_source_namespace_values",
         "_run_id",
         "_runtime",
-        "_runtime_identity",
         "_spec_set",
         "_spec_sha256",
     )
     _direct: DeterministicRootQueue
-    _direct_identity: DeterministicRootQueue
-    _direct_source_namespace_values: tuple[str, ...]
     _matcher: HistoricalMatcherIssuanceCapability
-    _matcher_identity: HistoricalMatcherIssuanceCapability
-    _matcher_source_namespace: SourceNamespace
-    _matcher_source_namespace_value: str
-    _other_source_namespace_values: tuple[str, ...]
-    _registered_source_namespace_values: tuple[str, ...]
     _run_id: RunId
     _runtime: Phase1HistoricalMarketRuntime
-    _runtime_identity: Phase1HistoricalMarketRuntime
     _spec_set: InstrumentExecutionSpecSet
     _spec_sha256: Sha256Digest
 
@@ -271,10 +271,12 @@ class CausalDescendantFactDispatchVerifier:
 
     @property
     def run_id(self) -> RunId:
+        self._require_bindings()
         return self._run_id
 
     @property
     def spec_set(self) -> InstrumentExecutionSpecSet:
+        self._require_bindings()
         return self._spec_set
 
     def resolve_active_issued_fact_dispatch(
@@ -346,6 +348,17 @@ class CausalDescendantFactDispatchVerifier:
 
     def _require_bindings(self) -> None:
         try:
+            construction = _CAUSAL_DESCENDANT_BINDINGS.get(self)
+        except (AttributeError, TypeError) as error:
+            raise _fail(
+                OutcomeCode.INVALID_TYPE, "descendant verifier construction binding is invalid"
+            ) from error
+        if construction is None:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "descendant verifier construction binding is missing",
+            )
+        try:
             runtime_run_id = self._runtime.run_id
             matcher_run_id = self._matcher.run_id
             direct_run_id = self._direct.run_id
@@ -353,11 +366,15 @@ class CausalDescendantFactDispatchVerifier:
             matcher_specs = self._matcher.spec_set
             direct_specs = self._direct.spec_set
             matcher_source = self._matcher.source_namespace
+            direct_registry = self._direct._fact_issuance_verifiers
+            direct_registry_entries = tuple(
+                (source.value, verifier) for source, verifier in direct_registry.items()
+            )
             direct_sources = self._direct.registered_fact_source_namespaces
             direct_source_values = tuple(source.value for source in direct_sources)
             registered_values = (
                 *direct_source_values,
-                *self._other_source_namespace_values,
+                *construction.other_source_namespace_values,
                 matcher_source.value,
             )
         except (AttributeError, TypeError) as error:
@@ -373,40 +390,80 @@ class CausalDescendantFactDispatchVerifier:
             or type(direct_specs) is not InstrumentExecutionSpecSet
             or type(matcher_source) is not SourceNamespace
             or type(matcher_source.value) is not str
-            or type(self._matcher_source_namespace) is not SourceNamespace
-            or type(self._matcher_source_namespace.value) is not str
-            or type(self._matcher_source_namespace_value) is not str
+            or type(direct_registry) is not MappingProxyType
+            or any(
+                type(source) is not SourceNamespace or type(source.value) is not str
+                for source in direct_registry
+            )
             or type(direct_sources) is not tuple
             or any(
                 type(source) is not SourceNamespace or type(source.value) is not str
                 for source in direct_sources
             )
-            or type(self._direct_source_namespace_values) is not tuple
-            or any(type(value) is not str for value in self._direct_source_namespace_values)
-            or type(self._other_source_namespace_values) is not tuple
-            or any(type(value) is not str for value in self._other_source_namespace_values)
-            or type(self._registered_source_namespace_values) is not tuple
-            or any(type(value) is not str for value in self._registered_source_namespace_values)
+            or type(self._run_id) is not RunId
+            or type(self._run_id.value) is not str
+            or type(self._spec_set) is not InstrumentExecutionSpecSet
+            or type(self._spec_sha256) is not Sha256Digest
+            or type(self._spec_sha256.value) is not str
+            or type(construction) is not _CausalDescendantBindings
+            or type(construction.run_id_value) is not str
+            or type(construction.spec_sha256_value) is not str
+            or type(construction.direct_registry_identity) is not MappingProxyType
+            or type(construction.direct_registry_entries) is not tuple
+            or any(
+                type(entry) is not tuple or len(entry) != 2 or type(entry[0]) is not str
+                for entry in construction.direct_registry_entries
+            )
+            or type(construction.direct_source_namespace_values) is not tuple
+            or any(type(value) is not str for value in construction.direct_source_namespace_values)
+            or type(construction.other_source_namespace_values) is not tuple
+            or any(type(value) is not str for value in construction.other_source_namespace_values)
+            or type(construction.matcher_source_namespace_value) is not str
+            or type(construction.registered_source_namespace_values) is not tuple
+            or any(
+                type(value) is not str for value in construction.registered_source_namespace_values
+            )
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant verifier binding types changed")
         if (
-            self._runtime is not self._runtime_identity
-            or self._matcher is not self._matcher_identity
-            or self._direct is not self._direct_identity
-            or runtime_run_id != self._run_id
-            or matcher_run_id != self._run_id
-            or direct_run_id != self._run_id
-            or matcher_source != self._matcher_source_namespace
-            or matcher_source.value != self._matcher_source_namespace_value
-            or self._matcher_source_namespace.value != self._matcher_source_namespace_value
-            or direct_source_values != self._direct_source_namespace_values
-            or registered_values != self._registered_source_namespace_values
+            self._runtime is not construction.runtime
+            or self._matcher is not construction.matcher
+            or self._direct is not construction.direct
+            or self._run_id is not construction.runtime.run_id
+            or self._spec_set is not construction.runtime.spec_set
+            or runtime_run_id.value != construction.run_id_value
+            or matcher_run_id.value != construction.run_id_value
+            or direct_run_id.value != construction.run_id_value
+            or self._run_id.value != construction.run_id_value
+            or matcher_source.value != construction.matcher_source_namespace_value
+            or direct_registry is not construction.direct_registry_identity
+            or len(direct_registry_entries) != len(construction.direct_registry_entries)
+            or any(
+                current_source != expected_source or current_verifier is not expected_verifier
+                for (current_source, current_verifier), (
+                    expected_source,
+                    expected_verifier,
+                ) in zip(
+                    direct_registry_entries,
+                    construction.direct_registry_entries,
+                    strict=True,
+                )
+            )
+            or direct_source_values != construction.direct_source_namespace_values
+            or registered_values != construction.registered_source_namespace_values
             or len(set(registered_values)) != len(registered_values)
-            or instrument_spec_set_digest(runtime_specs) != self._spec_sha256
-            or instrument_spec_set_digest(matcher_specs) != self._spec_sha256
-            or instrument_spec_set_digest(direct_specs) != self._spec_sha256
+            or self._spec_sha256.value != construction.spec_sha256_value
+            or instrument_spec_set_digest(runtime_specs).value != construction.spec_sha256_value
+            or instrument_spec_set_digest(matcher_specs).value != construction.spec_sha256_value
+            or instrument_spec_set_digest(direct_specs).value != construction.spec_sha256_value
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "descendant verifier binding changed")
+
+
+_CAUSAL_DESCENDANT_BINDINGS: WeakKeyDictionary[
+    CausalDescendantFactDispatchVerifier,
+    _CausalDescendantBindings,
+] = WeakKeyDictionary()
 
 
 def create_causal_descendant_fact_dispatch_verifier(
@@ -447,12 +504,18 @@ def create_causal_descendant_fact_dispatch_verifier(
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "descendant verifier surface is incomplete")
     try:
+        direct_registry = direct_dispatch_verifier._fact_issuance_verifiers
         direct_sources = direct_dispatch_verifier.registered_fact_source_namespaces
         matcher_source = matcher.source_namespace
     except (AttributeError, TypeError) as error:
         raise _fail(OutcomeCode.INVALID_TYPE, "fact source registry is invalid") from error
     if (
-        type(direct_sources) is not tuple
+        type(direct_registry) is not MappingProxyType
+        or any(
+            type(source) is not SourceNamespace or type(source.value) is not str
+            for source in direct_registry
+        )
+        or type(direct_sources) is not tuple
         or any(
             type(source) is not SourceNamespace or type(source.value) is not str
             for source in direct_sources
@@ -478,22 +541,29 @@ def create_causal_descendant_fact_dispatch_verifier(
         raise _fail(OutcomeCode.CONFLICTING_ID, "descendant verifier bindings conflict")
     value = object.__new__(CausalDescendantFactDispatchVerifier)
     value._runtime = runtime
-    value._runtime_identity = runtime
     value._direct = direct_dispatch_verifier
-    value._direct_identity = direct_dispatch_verifier
-    value._direct_source_namespace_values = direct_source_values
     value._matcher = matcher
-    value._matcher_identity = matcher
-    value._matcher_source_namespace = SourceNamespace(matcher_source_value)
-    value._matcher_source_namespace_value = matcher_source_value
-    value._other_source_namespace_values = other_source_values
-    value._registered_source_namespace_values = (
-        *direct_source_values,
-        *other_source_values,
-        matcher_source_value,
-    )
     value._run_id = runtime.run_id
     value._spec_set = runtime.spec_set
     value._spec_sha256 = expected_digest
+    _CAUSAL_DESCENDANT_BINDINGS[value] = _CausalDescendantBindings(
+        runtime=runtime,
+        matcher=matcher,
+        direct=direct_dispatch_verifier,
+        run_id_value=runtime.run_id.value,
+        spec_sha256_value=expected_digest.value,
+        direct_registry_identity=direct_registry,
+        direct_registry_entries=tuple(
+            (source.value, verifier) for source, verifier in direct_registry.items()
+        ),
+        direct_source_namespace_values=direct_source_values,
+        other_source_namespace_values=other_source_values,
+        matcher_source_namespace_value=matcher_source_value,
+        registered_source_namespace_values=(
+            *direct_source_values,
+            *other_source_values,
+            matcher_source_value,
+        ),
+    )
     value._require_bindings()
     return value
