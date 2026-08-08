@@ -2158,6 +2158,43 @@ def test_receipt_decoder_binds_order_request_dispatch_eligibility_and_causal_roo
         )
     assert rejected_end.value.code is OutcomeCode.CONFLICTING_ID
 
+    early_end = replace(
+        end,
+        available_at=expiry_receipt.causal_root_key.available_at - timedelta(microseconds=1),
+    )
+    early_end_batch = _create_historical_matcher_dispatch_batch(
+        run_id=end_batch.run_id,
+        source_namespace=end_batch.source_namespace,
+        dispatch_kind=end_batch.dispatch_kind,
+        dispatch_sequence=end_batch.dispatch_sequence,
+        trigger_root_sha256=historical_end_root_digest(early_end),
+        trigger_root_key=runtime_root_order_key(early_end),
+        next_fact_sequence_before=end_batch.next_fact_sequence_before,
+        next_fact_sequence_after=end_batch.next_fact_sequence_after,
+        submission_sequences=end_batch.submission_sequences,
+        order_ids=end_batch.order_ids,
+        ingresses=end_batch.ingresses,
+        ingress_sha256s=end_batch.ingress_sha256s,
+    )
+    early_end_context = HistoricalMatcherDecodeContext(
+        run_id=context.run_id,
+        spec_set=context.spec_set,
+        execution_policy=context.execution_policy,
+        source_namespace=context.source_namespace,
+        provenance_id=context.provenance_id,
+        orders_by_sha256=context.orders_by_sha256,
+        receipts_by_sha256={historical_submission_receipt_digest(expiry_receipt): expiry_receipt},
+        ingresses_by_sha256=context.ingresses_by_sha256,
+        market_roots_by_sha256=context.market_roots_by_sha256,
+        end_roots_by_sha256={historical_end_root_digest(early_end): early_end},
+    )
+    with pytest.raises(HistoricalMatcherError) as early_terminal:
+        decode_historical_matcher_dispatch_batch(
+            canonical_historical_matcher_dispatch_batch_bytes(early_end_batch),
+            context=early_end_context,
+        )
+    assert early_terminal.value.code is OutcomeCode.CONFLICTING_ID
+
     off_grid_order = _clone_order(orders[1], quantity=CanonicalDecimal("5.5"))
     off_grid_receipt = _clone_receipt(
         expiry_receipt,
