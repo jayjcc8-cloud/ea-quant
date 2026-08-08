@@ -237,18 +237,32 @@ def create_historical_matcher_dispatch_verifier(
 class CausalDescendantFactDispatchVerifier:
     __slots__ = (
         "_direct",
+        "_direct_identity",
+        "_direct_source_namespace_values",
         "_matcher",
+        "_matcher_identity",
         "_matcher_source_namespace",
+        "_matcher_source_namespace_value",
+        "_other_source_namespace_values",
+        "_registered_source_namespace_values",
         "_run_id",
         "_runtime",
+        "_runtime_identity",
         "_spec_set",
         "_spec_sha256",
     )
     _direct: DeterministicRootQueue
+    _direct_identity: DeterministicRootQueue
+    _direct_source_namespace_values: tuple[str, ...]
     _matcher: HistoricalMatcherIssuanceCapability
+    _matcher_identity: HistoricalMatcherIssuanceCapability
     _matcher_source_namespace: SourceNamespace
+    _matcher_source_namespace_value: str
+    _other_source_namespace_values: tuple[str, ...]
+    _registered_source_namespace_values: tuple[str, ...]
     _run_id: RunId
     _runtime: Phase1HistoricalMarketRuntime
+    _runtime_identity: Phase1HistoricalMarketRuntime
     _spec_set: InstrumentExecutionSpecSet
     _spec_sha256: Sha256Digest
 
@@ -331,24 +345,66 @@ class CausalDescendantFactDispatchVerifier:
         return binding.parent_dispatch_sequence
 
     def _require_bindings(self) -> None:
+        try:
+            runtime_run_id = self._runtime.run_id
+            matcher_run_id = self._matcher.run_id
+            direct_run_id = self._direct.run_id
+            runtime_specs = self._runtime.spec_set
+            matcher_specs = self._matcher.spec_set
+            direct_specs = self._direct.spec_set
+            matcher_source = self._matcher.source_namespace
+            direct_sources = self._direct.registered_fact_source_namespaces
+            direct_source_values = tuple(source.value for source in direct_sources)
+            registered_values = (
+                *direct_source_values,
+                *self._other_source_namespace_values,
+                matcher_source.value,
+            )
+        except (AttributeError, TypeError) as error:
+            raise _fail(
+                OutcomeCode.INVALID_TYPE, "descendant verifier bindings are invalid"
+            ) from error
         if (
-            type(self._runtime.run_id) is not RunId
-            or type(self._matcher.run_id) is not RunId
-            or type(self._direct.run_id) is not RunId
-            or type(self._runtime.spec_set) is not InstrumentExecutionSpecSet
-            or type(self._matcher.spec_set) is not InstrumentExecutionSpecSet
-            or type(self._direct.spec_set) is not InstrumentExecutionSpecSet
-            or type(self._matcher.source_namespace) is not SourceNamespace
+            type(runtime_run_id) is not RunId
+            or type(matcher_run_id) is not RunId
+            or type(direct_run_id) is not RunId
+            or type(runtime_specs) is not InstrumentExecutionSpecSet
+            or type(matcher_specs) is not InstrumentExecutionSpecSet
+            or type(direct_specs) is not InstrumentExecutionSpecSet
+            or type(matcher_source) is not SourceNamespace
+            or type(matcher_source.value) is not str
+            or type(self._matcher_source_namespace) is not SourceNamespace
+            or type(self._matcher_source_namespace.value) is not str
+            or type(self._matcher_source_namespace_value) is not str
+            or type(direct_sources) is not tuple
+            or any(
+                type(source) is not SourceNamespace or type(source.value) is not str
+                for source in direct_sources
+            )
+            or type(self._direct_source_namespace_values) is not tuple
+            or any(type(value) is not str for value in self._direct_source_namespace_values)
+            or type(self._other_source_namespace_values) is not tuple
+            or any(type(value) is not str for value in self._other_source_namespace_values)
+            or type(self._registered_source_namespace_values) is not tuple
+            or any(type(value) is not str for value in self._registered_source_namespace_values)
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant verifier binding types changed")
         if (
-            self._runtime.run_id != self._run_id
-            or self._matcher.run_id != self._run_id
-            or self._direct.run_id != self._run_id
-            or self._matcher.source_namespace != self._matcher_source_namespace
-            or instrument_spec_set_digest(self._runtime.spec_set) != self._spec_sha256
-            or instrument_spec_set_digest(self._matcher.spec_set) != self._spec_sha256
-            or instrument_spec_set_digest(self._direct.spec_set) != self._spec_sha256
+            self._runtime is not self._runtime_identity
+            or self._matcher is not self._matcher_identity
+            or self._direct is not self._direct_identity
+            or runtime_run_id != self._run_id
+            or matcher_run_id != self._run_id
+            or direct_run_id != self._run_id
+            or matcher_source != self._matcher_source_namespace
+            or matcher_source.value != self._matcher_source_namespace_value
+            or self._matcher_source_namespace.value != self._matcher_source_namespace_value
+            or direct_source_values != self._direct_source_namespace_values
+            or registered_values != self._registered_source_namespace_values
+            or len(set(registered_values)) != len(registered_values)
+            or instrument_spec_set_digest(runtime_specs) != self._spec_sha256
+            or instrument_spec_set_digest(matcher_specs) != self._spec_sha256
+            or instrument_spec_set_digest(direct_specs) != self._spec_sha256
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "descendant verifier binding changed")
 
@@ -390,11 +446,26 @@ def create_causal_descendant_fact_dispatch_verifier(
         or not callable(getattr(matcher, "resolve_descendant_binding", None))
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "descendant verifier surface is incomplete")
-    sources = (
-        *direct_dispatch_verifier.registered_fact_source_namespaces,
-        *other_descendant_source_namespaces,
-        matcher.source_namespace,
-    )
+    try:
+        direct_sources = direct_dispatch_verifier.registered_fact_source_namespaces
+        matcher_source = matcher.source_namespace
+    except (AttributeError, TypeError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "fact source registry is invalid") from error
+    if (
+        type(direct_sources) is not tuple
+        or any(
+            type(source) is not SourceNamespace or type(source.value) is not str
+            for source in direct_sources
+        )
+        or any(type(source.value) is not str for source in other_descendant_source_namespaces)
+        or type(matcher_source) is not SourceNamespace
+        or type(matcher_source.value) is not str
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "fact source registry is invalid")
+    direct_source_values = tuple(source.value for source in direct_sources)
+    other_source_values = tuple(source.value for source in other_descendant_source_namespaces)
+    matcher_source_value = matcher_source.value
+    sources = (*direct_sources, *other_descendant_source_namespaces, matcher_source)
     if len(set(sources)) != len(sources):
         raise _fail(OutcomeCode.CONFLICTING_ID, "fact source registry collides")
     expected_digest = instrument_spec_set_digest(runtime.spec_set)
@@ -407,9 +478,20 @@ def create_causal_descendant_fact_dispatch_verifier(
         raise _fail(OutcomeCode.CONFLICTING_ID, "descendant verifier bindings conflict")
     value = object.__new__(CausalDescendantFactDispatchVerifier)
     value._runtime = runtime
+    value._runtime_identity = runtime
     value._direct = direct_dispatch_verifier
+    value._direct_identity = direct_dispatch_verifier
+    value._direct_source_namespace_values = direct_source_values
     value._matcher = matcher
-    value._matcher_source_namespace = SourceNamespace(matcher.source_namespace.value)
+    value._matcher_identity = matcher
+    value._matcher_source_namespace = SourceNamespace(matcher_source_value)
+    value._matcher_source_namespace_value = matcher_source_value
+    value._other_source_namespace_values = other_source_values
+    value._registered_source_namespace_values = (
+        *direct_source_values,
+        *other_source_values,
+        matcher_source_value,
+    )
     value._run_id = runtime.run_id
     value._spec_set = runtime.spec_set
     value._spec_sha256 = expected_digest

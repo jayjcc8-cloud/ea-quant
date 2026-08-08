@@ -1645,6 +1645,56 @@ def test_descendant_fact_is_dispatchable_only_while_parent_root_is_active() -> N
         )
         is None
     )
+
+    replacement_runtime = create_phase1_historical_market_runtime(
+        run_id=baseline.run_id,
+        spec_set=baseline.spec_set,
+        source=create_phase1_historical_market_source_bridge(
+            create_phase1_historical_market_data_source(dataset)
+        ),
+    )
+    replacement_matcher = _system()[1]
+    replacement_direct = create_deterministic_root_queue(
+        run_id=baseline.run_id,
+        spec_set=baseline.spec_set,
+        plan=prepare_bounded_runtime_roots((ingress,)),
+        fact_issuance_verifiers=(matcher,),
+    )
+    for field_name, replacement in (
+        ("_runtime", replacement_runtime),
+        ("_matcher", replacement_matcher),
+        ("_direct", replacement_direct),
+    ):
+        original_dependency = getattr(descendant, field_name)
+        object.__setattr__(descendant, field_name, replacement)
+        with pytest.raises(RuntimeOrderingError) as replaced_dependency:
+            descendant.resolve_active_issued_fact_dispatch(
+                ingress_identity=ingress.identity,
+                canonical_ingress_bytes=ingress_bytes,
+                canonical_fact_bytes=fact_bytes,
+            )
+        assert replaced_dependency.value.code is OutcomeCode.CONFLICTING_ID
+        object.__setattr__(descendant, field_name, original_dependency)
+
+    original_registry = descendant._registered_source_namespace_values
+    object.__setattr__(
+        descendant,
+        "_registered_source_namespace_values",
+        (*original_registry, "forged-source"),
+    )
+    with pytest.raises(RuntimeOrderingError) as replaced_registry:
+        descendant.resolve_active_issued_fact_dispatch(
+            ingress_identity=ingress.identity,
+            canonical_ingress_bytes=ingress_bytes,
+            canonical_fact_bytes=fact_bytes,
+        )
+    assert replaced_registry.value.code is OutcomeCode.CONFLICTING_ID
+    object.__setattr__(
+        descendant,
+        "_registered_source_namespace_values",
+        original_registry,
+    )
+
     object.__setattr__(
         matcher,
         "_source_namespace",
@@ -1806,6 +1856,7 @@ def test_submission_pointer_binds_complete_contiguous_history() -> None:
 
 def test_submission_rebinds_state_and_history_after_authorization_callback() -> None:
     _, matcher, orders, causal, _, _ = _system()
+    initial = matcher._state
     authorization = cast(
         _AuthorizationVerifier,
         matcher._submission_authorization_verifier,
@@ -1814,7 +1865,7 @@ def test_submission_rebinds_state_and_history_after_authorization_callback() -> 
 
     def replace_state(**kwargs: object) -> HistoricalSubmissionAuthorizationProof:
         proof = original_authorization(**cast(Any, kwargs))
-        matcher._state = replace(matcher._state)
+        matcher._state = replace(initial)
         return proof
 
     cast(Any, authorization).verify_authorized_historical_submission = replace_state
@@ -1840,35 +1891,34 @@ def test_submission_rebinds_state_and_history_after_authorization_callback() -> 
         matcher._submission_authorization_verifier,
     )
     original_authorization = authorization.verify_authorized_historical_submission
-    forged_records: list[Any] = []
+    original = initial.submissions[0]
+    receipt = _clone_receipt(original.receipt, submission_sequence=3)
+    forged = replace(
+        original,
+        receipt=receipt,
+        receipt_bytes=canonical_historical_submission_receipt_bytes(receipt),
+        receipt_sha256=historical_submission_receipt_digest(receipt),
+    )
+    forged_state = replace(
+        initial,
+        submissions=(forged,),
+        next_submission=4,
+    )
 
     def replace_history(**kwargs: object) -> HistoricalSubmissionAuthorizationProof:
         proof = original_authorization(**cast(Any, kwargs))
-        original = matcher._state.submissions[0]
-        receipt = _clone_receipt(original.receipt, submission_sequence=3)
-        forged = replace(
-            original,
-            receipt=receipt,
-            receipt_bytes=canonical_historical_submission_receipt_bytes(receipt),
-            receipt_sha256=historical_submission_receipt_digest(receipt),
-        )
-        forged_records.append(forged)
-        matcher._state = replace(
-            matcher._state,
-            submissions=(forged,),
-            next_submission=4,
-        )
+        matcher._state = forged_state
         return proof
 
     cast(Any, authorization).verify_authorized_historical_submission = replace_history
     with pytest.raises(HistoricalMatcherError) as history:
         matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8)
     assert history.value.code is OutcomeCode.CONFLICTING_ID
-    assert matcher._state.submissions == tuple(forged_records)
+    assert matcher._state.submissions == initial.submissions
     assert matcher._state.pending == initial.pending
     assert matcher._state.submission_by_order == initial.submission_by_order
     assert matcher._state.submission_by_client == initial.submission_by_client
-    assert matcher._state.next_submission == 4
+    assert matcher._state.next_submission == initial.next_submission
     assert all(record.receipt.submission_sequence != 2 for record in matcher._state.submissions)
     assert matcher._state.conflict is not None
     assert (
@@ -1886,29 +1936,28 @@ def test_submission_rebinds_state_on_every_authorization_exit() -> None:
             _AuthorizationVerifier,
             matcher._submission_authorization_verifier,
         )
-        forged_records: list[Any] = []
+        original = initial.submissions[0]
+        receipt = _clone_receipt(original.receipt, submission_sequence=3)
+        forged = replace(
+            original,
+            receipt=receipt,
+            receipt_bytes=canonical_historical_submission_receipt_bytes(receipt),
+            receipt_sha256=historical_submission_receipt_digest(receipt),
+        )
+        forged_state = replace(
+            initial,
+            submissions=(forged,),
+            next_submission=4,
+        )
 
         def fail_after_history_change(
             *,
             _matcher: Phase1HistoricalMatcher = matcher,
-            _forged_records: list[Any] = forged_records,
+            _forged_state: Any = forged_state,
             _exit_kind: str = exit_kind,
             **_kwargs: object,
         ) -> Any:
-            original = _matcher._state.submissions[0]
-            receipt = _clone_receipt(original.receipt, submission_sequence=3)
-            forged = replace(
-                original,
-                receipt=receipt,
-                receipt_bytes=canonical_historical_submission_receipt_bytes(receipt),
-                receipt_sha256=historical_submission_receipt_digest(receipt),
-            )
-            _forged_records.append(forged)
-            _matcher._state = replace(
-                _matcher._state,
-                submissions=(forged,),
-                next_submission=4,
-            )
+            _matcher._state = _forged_state
             if _exit_kind == "denied":
                 raise HistoricalPreEffectAuthorizationError(
                     OutcomeCode.RISK_STALE_APPROVAL,
@@ -1925,11 +1974,11 @@ def test_submission_rebinds_state_on_every_authorization_exit() -> None:
         with pytest.raises(HistoricalMatcherError) as rejected:
             matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8)
         assert rejected.value.code is OutcomeCode.CONFLICTING_ID
-        assert matcher._state.submissions == tuple(forged_records)
+        assert matcher._state.submissions == initial.submissions
         assert matcher._state.pending == initial.pending
         assert matcher._state.submission_by_order == initial.submission_by_order
         assert matcher._state.submission_by_client == initial.submission_by_client
-        assert matcher._state.next_submission == 4
+        assert matcher._state.next_submission == initial.next_submission
         assert all(record.receipt.submission_sequence != 2 for record in matcher._state.submissions)
         assert matcher._state.conflict is not None
         assert (
@@ -3453,6 +3502,35 @@ def test_submission_revalidates_every_verifier_binding_after_callbacks() -> None
         matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     assert changed_authorization_binding.value.code is OutcomeCode.CONFLICTING_ID
     assert matcher._state is initial
+
+    _, matcher, orders, causal, _, _ = _system()
+    authorization = cast(_AuthorizationVerifier, matcher._submission_authorization_verifier)
+    original_authorization = authorization.verify_authorized_historical_submission
+    construction_dispatch = matcher._active_dispatch_verifier
+    construction_runtime_identity = matcher._active_dispatch_runtime_identity
+    foreign_dispatch = _DispatchVerifier(matcher.run_id, matcher.spec_set)
+
+    def replace_dispatch_capability(
+        **kwargs: object,
+    ) -> HistoricalSubmissionAuthorizationProof:
+        proof = original_authorization(**cast(Any, kwargs))
+        matcher._active_dispatch_verifier = foreign_dispatch
+        matcher._active_dispatch_runtime_identity = foreign_dispatch.runtime_identity
+        return proof
+
+    cast(Any, authorization).verify_authorized_historical_submission = replace_dispatch_capability
+    with pytest.raises(HistoricalMatcherError) as replaced_dispatch:
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert replaced_dispatch.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._active_dispatch_verifier is construction_dispatch
+    assert matcher._active_dispatch_runtime_identity is construction_runtime_identity
+    assert matcher._state.submissions == ()
+    assert matcher._state.pending == ()
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
 
 
 @pytest.mark.parametrize("raises", [False, True])

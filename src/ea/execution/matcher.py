@@ -1595,9 +1595,11 @@ class Phase1HistoricalMatcher:
             raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "submission sequence exhausted")
         authorization_valid = False
         try:
+            authorization_lease = self._begin_dispatch_callback()
+            authorization_verifier = self._submission_authorization_verifier
             try:
-                auth_proof = (
-                    self._submission_authorization_verifier.verify_authorized_historical_submission(
+                try:
+                    auth_proof = authorization_verifier.verify_authorized_historical_submission(
                         order_id=owned_order.order_id,
                         canonical_order_bytes=submitted_order_bytes,
                         canonical_execution_request_bytes=request_bytes,
@@ -1606,11 +1608,15 @@ class Phase1HistoricalMatcher:
                         causal_root_key=causal_key,
                         dispatch_sequence=sequence,
                     )
+                except HistoricalPreEffectAuthorizationError:
+                    raise
+                except Exception as error:
+                    raise _VerifierFailure(error) from error
+            finally:
+                self._end_dispatch_callback(
+                    lease=authorization_lease,
+                    dispatch_sequence=sequence,
                 )
-            except HistoricalPreEffectAuthorizationError:
-                raise
-            except Exception as error:
-                raise _VerifierFailure(error) from error
             auth = _require_historical_submission_authorization_proof(
                 auth_proof,
                 run_id=self._run_id,
