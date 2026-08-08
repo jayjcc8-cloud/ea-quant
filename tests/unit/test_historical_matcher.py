@@ -22,6 +22,7 @@ from ea.core.execution import (
     PriceDomain,
     SettlementCurrency,
     build_instrument_spec_set,
+    canonical_instrument_spec_set_bytes,
     instrument_spec_set_digest,
 )
 from ea.core.execution_identity import (
@@ -3651,6 +3652,122 @@ def test_dispatch_callback_cannot_replace_complete_execution_policy_binding() ->
             matcher._state.conflict.conflict_kind
             is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
         )
+
+
+def test_issuance_callback_cannot_replace_matcher_lineage_bindings() -> None:
+    _, matcher, orders, causal, _, _ = _system()
+    baseline_namespace = matcher.source_namespace
+    baseline_provenance = matcher.provenance_id
+    verifier = cast(_OrderVerifier, matcher._order_issuance_verifier)
+    original = verifier.resolve_issued_order_by_id
+
+    def replace_lineage(order_id: EconomicId) -> Order | None:
+        issued = original(order_id)
+        replacement_namespace = SourceNamespace("replacement-source")
+        replacement_provenance = FactProvenanceId("replacement-provenance")
+        matcher._source_namespace = replacement_namespace
+        matcher._source_namespace_value = replacement_namespace.value
+        matcher._provenance_id = replacement_provenance
+        matcher._provenance_id_value = replacement_provenance.value
+        return issued
+
+    cast(Any, verifier).resolve_issued_order_by_id = replace_lineage
+
+    with pytest.raises(HistoricalMatcherError) as rejected:
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher.source_namespace == baseline_namespace
+    assert matcher.provenance_id == baseline_provenance
+    assert matcher._state.submissions == ()
+    assert matcher._state.pending == ()
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+
+def test_dispatch_callback_cannot_replace_matcher_spec_and_lineage_bindings() -> None:
+    def exercise(dispatch_kind: str) -> None:
+        _, matcher, _, _, delayed, end = _system()
+        baseline_namespace = matcher.source_namespace
+        baseline_provenance = matcher.provenance_id
+        baseline_spec_bytes = canonical_instrument_spec_set_bytes(matcher.spec_set)
+        initial = matcher._state
+        replacement_namespace = SourceNamespace("replacement-source")
+        replacement_provenance = FactProvenanceId("replacement-provenance")
+        replacement_specs = build_instrument_spec_set(
+            InstrumentSpecSetId("replacement-spec-set"),
+            matcher.spec_set.specifications,
+        )
+        replacement_spec_bytes = canonical_instrument_spec_set_bytes(replacement_specs)
+        replacement_spec_sha256 = instrument_spec_set_digest(replacement_specs)
+        dispatch_verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+        order_verifier = cast(_OrderVerifier, matcher._order_issuance_verifier)
+        authorization_verifier = cast(
+            _AuthorizationVerifier,
+            matcher._submission_authorization_verifier,
+        )
+
+        def replace_bindings() -> None:
+            matcher._source_namespace = replacement_namespace
+            matcher._source_namespace_value = replacement_namespace.value
+            matcher._provenance_id = replacement_provenance
+            matcher._provenance_id_value = replacement_provenance.value
+            matcher._spec_set = replacement_specs
+            matcher._spec_bytes = replacement_spec_bytes
+            matcher._spec_sha256 = replacement_spec_sha256
+            order_verifier.spec_set = replacement_specs
+            authorization_verifier.instrument_spec_set_id = replacement_specs.identifier
+            authorization_verifier.instrument_spec_set_sha256 = replacement_spec_sha256
+            dispatch_verifier.spec_set = replacement_specs
+
+        if dispatch_kind == "market":
+            original_market = dispatch_verifier.verify_active_market_dispatch
+
+            def replace_market(
+                root: MarketDataEnvelope,
+                *,
+                dispatch_sequence: int,
+            ) -> Any:
+                proof = original_market(root, dispatch_sequence=dispatch_sequence)
+                replace_bindings()
+                return proof
+
+            cast(Any, dispatch_verifier).verify_active_market_dispatch = replace_market
+        else:
+            original_end = dispatch_verifier.verify_active_end_of_run_dispatch
+
+            def replace_end(
+                root: EndOfRunRoot,
+                *,
+                dispatch_sequence: int,
+            ) -> Any:
+                proof = original_end(root, dispatch_sequence=dispatch_sequence)
+                replace_bindings()
+                return proof
+
+            cast(Any, dispatch_verifier).verify_active_end_of_run_dispatch = replace_end
+
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            if dispatch_kind == "market":
+                matcher.match_active_market_root(delayed, dispatch_sequence=8)
+            else:
+                matcher.expire_at_active_end(end, dispatch_sequence=8)
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+        assert matcher.source_namespace == baseline_namespace
+        assert matcher.provenance_id == baseline_provenance
+        assert canonical_instrument_spec_set_bytes(matcher.spec_set) == baseline_spec_bytes
+        assert matcher._state.last_dispatch == initial.last_dispatch is None
+        assert matcher._state.ended is False
+        assert matcher._state.conflict is not None
+        assert (
+            matcher._state.conflict.conflict_kind
+            is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+        )
+
+    exercise("market")
+    exercise("end")
 
 
 def test_dispatch_rebinds_complete_state_on_every_verifier_exit() -> None:

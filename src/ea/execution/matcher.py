@@ -272,11 +272,23 @@ class _DispatchCallbackLease:
     issued_registry_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
     conflict_bytes: bytes | None
     conflict_sha256: Sha256Digest | None
+    active_dispatch_verifier: HistoricalMatcherDispatchVerifier
     execution_policy: ExecutionPolicyRef
     execution_policy_id_value: str
     execution_policy_sha256_value: str
+    order_issuance_verifier: HistoricalOrderIssuanceVerifier
+    provenance_id: FactProvenanceId
+    provenance_id_value: str
     run_id: RunId
     run_id_value: str
+    source_namespace: SourceNamespace
+    source_namespace_value: str
+    spec_bytes: bytes
+    spec_set: InstrumentExecutionSpecSet
+    spec_set_identity: InstrumentExecutionSpecSet
+    spec_sha256: Sha256Digest
+    spec_sha256_value: str
+    submission_authorization_verifier: HistoricalSubmissionAuthorizationVerifier
     fence: _DispatchCallbackStateFence
 
 
@@ -656,6 +668,15 @@ class Phase1HistoricalMatcher:
             or type(self._source_namespace) is not SourceNamespace
             or type(self._provenance_id) is not FactProvenanceId
             or type(self._execution_policy) is not ExecutionPolicyRef
+            or type(self._run_id.value) is not str
+            or type(self._run_id_value) is not str
+            or type(self._source_namespace.value) is not str
+            or type(self._source_namespace_value) is not str
+            or type(self._provenance_id.value) is not str
+            or type(self._provenance_id_value) is not str
+            or type(self._spec_bytes) is not bytes
+            or type(self._spec_sha256) is not Sha256Digest
+            or type(self._spec_sha256.value) is not str
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "owned bindings must be exact")
         try:
@@ -920,17 +941,30 @@ class Phase1HistoricalMatcher:
         private objects through same-process reflection is outside that capability boundary.
         """
         fence = _DispatchCallbackStateFence()
+        trusted_spec_set = _clone_spec_set(self._spec_set)
         lease = _DispatchCallbackLease(
             state=self._state,
             issued_history_identity=self._issued_history_identity,
             issued_registry_identity=self._issued_registry_identity,
             conflict_bytes=self._conflict_bytes,
             conflict_sha256=self._conflict_sha256,
+            active_dispatch_verifier=self._active_dispatch_verifier,
             execution_policy=self._execution_policy,
             execution_policy_id_value=self._execution_policy_id_value,
             execution_policy_sha256_value=self._execution_policy_sha256_value,
+            order_issuance_verifier=self._order_issuance_verifier,
+            provenance_id=self._provenance_id,
+            provenance_id_value=self._provenance_id_value,
             run_id=self._run_id,
             run_id_value=self._run_id_value,
+            source_namespace=self._source_namespace,
+            source_namespace_value=self._source_namespace_value,
+            spec_bytes=self._spec_bytes,
+            spec_set=trusted_spec_set,
+            spec_set_identity=self._spec_set,
+            spec_sha256=self._spec_sha256,
+            spec_sha256_value=self._spec_sha256.value,
+            submission_authorization_verifier=self._submission_authorization_verifier,
             fence=fence,
         )
         object.__setattr__(self, "_state", fence)
@@ -955,12 +989,22 @@ class Phase1HistoricalMatcher:
         current_issued_registry_identity = current("_issued_registry_identity")
         current_conflict_bytes = current("_conflict_bytes")
         current_conflict_sha256 = current("_conflict_sha256")
+        current_active_dispatch_verifier = current("_active_dispatch_verifier")
         current_execution_policy = current("_execution_policy")
         current_execution_policy_identity = current("_execution_policy_identity")
         current_execution_policy_id_value = current("_execution_policy_id_value")
         current_execution_policy_sha256_value = current("_execution_policy_sha256_value")
+        current_order_issuance_verifier = current("_order_issuance_verifier")
+        current_provenance_id = current("_provenance_id")
+        current_provenance_id_value = current("_provenance_id_value")
         current_run_id = current("_run_id")
         current_run_id_value = current("_run_id_value")
+        current_source_namespace = current("_source_namespace")
+        current_source_namespace_value = current("_source_namespace_value")
+        current_spec_bytes = current("_spec_bytes")
+        current_spec_set = current("_spec_set")
+        current_spec_sha256 = current("_spec_sha256")
+        current_submission_authorization_verifier = current("_submission_authorization_verifier")
         current_mutation_active = current("_mutation_active")
         try:
             current_fence_accessed = object.__getattribute__(lease.fence, "_accessed")
@@ -970,6 +1014,9 @@ class Phase1HistoricalMatcher:
             run_id_unchanged = (
                 type(current_run_id) is RunId
                 and current_run_id is lease.run_id
+                and type(current_run_id.value) is str
+                and type(current_run_id_value) is str
+                and type(lease.run_id_value) is str
                 and current_run_id.value == lease.run_id_value
                 and current_run_id_value == lease.run_id_value
             )
@@ -995,6 +1042,52 @@ class Phase1HistoricalMatcher:
             )
         except Exception:
             execution_policy_unchanged = False
+        try:
+            source_namespace_unchanged = (
+                type(current_source_namespace) is SourceNamespace
+                and current_source_namespace is lease.source_namespace
+                and type(current_source_namespace.value) is str
+                and type(current_source_namespace_value) is str
+                and type(lease.source_namespace_value) is str
+                and current_source_namespace.value == lease.source_namespace_value
+                and current_source_namespace_value == lease.source_namespace_value
+            )
+        except Exception:
+            source_namespace_unchanged = False
+        try:
+            provenance_unchanged = (
+                type(current_provenance_id) is FactProvenanceId
+                and current_provenance_id is lease.provenance_id
+                and type(current_provenance_id.value) is str
+                and type(current_provenance_id_value) is str
+                and type(lease.provenance_id_value) is str
+                and current_provenance_id.value == lease.provenance_id_value
+                and current_provenance_id_value == lease.provenance_id_value
+            )
+        except Exception:
+            provenance_unchanged = False
+        try:
+            spec_unchanged = (
+                type(current_spec_set) is InstrumentExecutionSpecSet
+                and current_spec_set is lease.spec_set_identity
+                and type(current_spec_bytes) is bytes
+                and type(lease.spec_bytes) is bytes
+                and current_spec_bytes == lease.spec_bytes
+                and type(current_spec_sha256) is Sha256Digest
+                and current_spec_sha256 is lease.spec_sha256
+                and type(current_spec_sha256.value) is str
+                and type(lease.spec_sha256_value) is str
+                and current_spec_sha256.value == lease.spec_sha256_value
+                and canonical_instrument_spec_set_bytes(current_spec_set) == lease.spec_bytes
+                and instrument_spec_set_digest(current_spec_set).value == lease.spec_sha256_value
+            )
+        except Exception:
+            spec_unchanged = False
+        verifier_identities_unchanged = (
+            current_active_dispatch_verifier is lease.active_dispatch_verifier
+            and current_order_issuance_verifier is lease.order_issuance_verifier
+            and current_submission_authorization_verifier is lease.submission_authorization_verifier
+        )
         drifted = (
             current_fence_accessed is not False
             or current_state is not lease.fence
@@ -1003,6 +1096,10 @@ class Phase1HistoricalMatcher:
             or current_conflict_bytes is not lease.conflict_bytes
             or current_conflict_sha256 is not lease.conflict_sha256
             or not execution_policy_unchanged
+            or not source_namespace_unchanged
+            or not provenance_unchanged
+            or not spec_unchanged
+            or not verifier_identities_unchanged
             or not run_id_unchanged
             or current_mutation_active is not True
         )
@@ -1031,6 +1128,50 @@ class Phase1HistoricalMatcher:
             self,
             "_execution_policy_sha256_value",
             lease.execution_policy_sha256_value,
+        )
+        restored_source_namespace = (
+            lease.source_namespace
+            if source_namespace_unchanged
+            else SourceNamespace(lease.source_namespace_value)
+        )
+        object.__setattr__(self, "_source_namespace", restored_source_namespace)
+        object.__setattr__(
+            self,
+            "_source_namespace_value",
+            lease.source_namespace_value,
+        )
+        restored_provenance = (
+            lease.provenance_id
+            if provenance_unchanged
+            else FactProvenanceId(lease.provenance_id_value)
+        )
+        object.__setattr__(self, "_provenance_id", restored_provenance)
+        object.__setattr__(self, "_provenance_id_value", lease.provenance_id_value)
+        object.__setattr__(
+            self,
+            "_spec_set",
+            lease.spec_set_identity if spec_unchanged else lease.spec_set,
+        )
+        object.__setattr__(self, "_spec_bytes", lease.spec_bytes)
+        object.__setattr__(
+            self,
+            "_spec_sha256",
+            lease.spec_sha256 if spec_unchanged else Sha256Digest(lease.spec_sha256_value),
+        )
+        object.__setattr__(
+            self,
+            "_active_dispatch_verifier",
+            lease.active_dispatch_verifier,
+        )
+        object.__setattr__(
+            self,
+            "_order_issuance_verifier",
+            lease.order_issuance_verifier,
+        )
+        object.__setattr__(
+            self,
+            "_submission_authorization_verifier",
+            lease.submission_authorization_verifier,
         )
         object.__setattr__(
             self,
