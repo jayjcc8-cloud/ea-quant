@@ -1,6 +1,6 @@
 # ADR 0020: Durable Audit and Phase 1 Lifecycle Coordinator
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-09
 - Decision owners: Architecture, Runtime, Execution, Backtest, Durability
 - Related: ADR 0003, ADR 0004, ADR 0006, ADR 0008, ADR 0009, ADR 0010,
