@@ -347,6 +347,7 @@ class _DispatchCallbackLease:
     spec_sha256: Sha256Digest
     spec_sha256_value: str
     submission_authorization_verifier: HistoricalSubmissionAuthorizationVerifier
+    mutation_active: bool
     fence: _DispatchCallbackStateFence
 
 
@@ -1101,6 +1102,22 @@ class Phase1HistoricalMatcher:
         if not valid:
             self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
 
+    def _require_issuance_lookup_state(self) -> _MatcherState:
+        self._require_issuance_registry()
+        state = self._state
+        lease = self._begin_dispatch_callback()
+        try:
+            self._require_live_bindings()
+        finally:
+            self._end_dispatch_callback(
+                lease=lease,
+                dispatch_sequence=state.last_dispatch,
+            )
+        self._require_issuance_registry()
+        if self._state is not state:
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
+        return state
+
     def _require_submission_pointer(self, *, dispatch_sequence: int | None) -> None:
         state = self._state
         try:
@@ -1172,6 +1189,7 @@ class Phase1HistoricalMatcher:
             spec_sha256=self._spec_sha256,
             spec_sha256_value=self._spec_sha256.value,
             submission_authorization_verifier=self._submission_authorization_verifier,
+            mutation_active=self._mutation_active,
             fence=fence,
         )
         object.__setattr__(self, "_state", fence)
@@ -1181,7 +1199,7 @@ class Phase1HistoricalMatcher:
         self,
         *,
         lease: _DispatchCallbackLease,
-        dispatch_sequence: int,
+        dispatch_sequence: int | None,
     ) -> None:
         missing = object()
 
@@ -1318,7 +1336,7 @@ class Phase1HistoricalMatcher:
             or not verifier_identities_unchanged
             or not dispatch_runtime_unchanged
             or not run_id_unchanged
-            or current_mutation_active is not True
+            or current_mutation_active is not lease.mutation_active
         )
 
         object.__setattr__(self, "_state", lease.state)
@@ -1401,7 +1419,7 @@ class Phase1HistoricalMatcher:
             lease.run_id if run_id_unchanged else RunId(lease.run_id_value),
         )
         object.__setattr__(self, "_run_id_value", lease.run_id_value)
-        object.__setattr__(self, "_mutation_active", True)
+        object.__setattr__(self, "_mutation_active", lease.mutation_active)
         if drifted:
             self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
 
@@ -2541,9 +2559,8 @@ class Phase1HistoricalMatcher:
             or type(canonical_fact_bytes) is not bytes
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "issuance lookup inputs must be exact")
-        self._require_live_bindings()
-        self._require_issuance_registry()
-        record = self._state.issued_by_identity.get(ingress_identity)
+        state = self._require_issuance_lookup_state()
+        record = state.issued_by_identity.get(ingress_identity)
         if record is None:
             return False
         self._require_issued_record(record)
@@ -2565,9 +2582,8 @@ class Phase1HistoricalMatcher:
             or type(canonical_fact_bytes) is not bytes
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "descendant lookup inputs must be exact")
-        self._require_live_bindings()
-        self._require_issuance_registry()
-        record = self._state.issued_by_identity.get(ingress_identity)
+        state = self._require_issuance_lookup_state()
+        record = state.issued_by_identity.get(ingress_identity)
         if record is None:
             return None
         self._require_issued_record(record)

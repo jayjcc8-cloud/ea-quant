@@ -3572,6 +3572,64 @@ def test_descendant_lookup_validates_addressed_record_before_caller_evidence() -
 
 
 @pytest.mark.parametrize("lookup", ["has", "resolve"])
+def test_descendant_lookup_fences_binding_property_state_replacement(
+    lookup: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    prior_state = matcher._state
+    prior_issued_history = matcher._issued_history_identity
+    prior_issued_registry = matcher._issued_registry_identity
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    current_state = matcher._state
+    current_issued_history = matcher._issued_history_identity
+    current_issued_registry = matcher._issued_registry_identity
+    record = current_state.issued[0]
+    verifier = cast(_OrderVerifier, matcher._order_issuance_verifier)
+    fired = False
+
+    def replacing_run_id(candidate: _OrderVerifier) -> RunId:
+        nonlocal fired
+        if candidate is verifier and not fired:
+            fired = True
+            object.__setattr__(matcher, "_state", prior_state)
+            object.__setattr__(matcher, "_issued_history_identity", prior_issued_history)
+            object.__setattr__(matcher, "_issued_registry_identity", prior_issued_registry)
+        return cast(RunId, candidate.__dict__["run_id"])
+
+    monkeypatch.setattr(
+        _OrderVerifier,
+        "run_id",
+        property(replacing_run_id),
+        raising=False,
+    )
+    with pytest.raises(HistoricalMatcherError) as callback_drift:
+        if lookup == "has":
+            matcher.has_issued_ingress(
+                ingress_identity=record.ingress_identity,
+                canonical_ingress_bytes=record.ingress_bytes,
+                canonical_fact_bytes=record.fact_bytes,
+            )
+        else:
+            matcher.resolve_descendant_binding(
+                ingress_identity=record.ingress_identity,
+                canonical_ingress_bytes=record.ingress_bytes,
+                canonical_fact_bytes=record.fact_bytes,
+            )
+    assert fired
+    assert callback_drift.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher._issued_history_identity is current_issued_history
+    assert matcher._issued_registry_identity is current_issued_registry
+    assert matcher._state.issued_by_identity.get(record.ingress_identity) is record
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+
+@pytest.mark.parametrize("lookup", ["has", "resolve"])
 def test_descendant_lookup_validates_issuance_registry_before_absence(lookup: str) -> None:
     _, matcher, orders, causal, delayed, _ = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
