@@ -326,6 +326,7 @@ class _DispatchCallbackStateFence:
 @dataclass(frozen=True, slots=True)
 class _DispatchCallbackLease:
     state: _MatcherState
+    dispatch_authority: _DispatchAuthority
     issued_history_identity: tuple[_IssuedRecord, ...]
     issued_registry_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
     conflict_bytes: bytes | None
@@ -1176,8 +1177,10 @@ class Phase1HistoricalMatcher:
         """
         fence = _DispatchCallbackStateFence()
         trusted_spec_set = _clone_spec_set(self._spec_set)
+        dispatch_authority = self._require_dispatch_authority()
         lease = _DispatchCallbackLease(
             state=self._state,
+            dispatch_authority=dispatch_authority,
             issued_history_identity=self._issued_history_identity,
             issued_registry_identity=self._issued_registry_identity,
             conflict_bytes=self._conflict_bytes,
@@ -1220,7 +1223,13 @@ class Phase1HistoricalMatcher:
             except (AttributeError, TypeError):
                 return missing
 
+        try:
+            observed_dispatch_runtime_identity = lease.active_dispatch_verifier.runtime_identity
+        except Exception:
+            observed_dispatch_runtime_identity = missing
+
         current_state = current("_state")
+        current_dispatch_authority = _MATCHER_DISPATCH_AUTHORITIES.get(self, missing)
         current_issued_history_identity = current("_issued_history_identity")
         current_issued_registry_identity = current("_issued_registry_identity")
         current_conflict_bytes = current("_conflict_bytes")
@@ -1325,17 +1334,14 @@ class Phase1HistoricalMatcher:
             and current_order_issuance_verifier is lease.order_issuance_verifier
             and current_submission_authorization_verifier is lease.submission_authorization_verifier
         )
-        try:
-            dispatch_runtime_unchanged = (
-                current_active_dispatch_runtime_identity is lease.active_dispatch_runtime_identity
-                and lease.active_dispatch_verifier.runtime_identity
-                is lease.active_dispatch_runtime_identity
-            )
-        except Exception:
-            dispatch_runtime_unchanged = False
+        dispatch_runtime_unchanged = (
+            current_active_dispatch_runtime_identity is lease.active_dispatch_runtime_identity
+            and observed_dispatch_runtime_identity is lease.active_dispatch_runtime_identity
+        )
         drifted = (
             current_fence_accessed is not False
             or current_state is not lease.fence
+            or current_dispatch_authority is not lease.dispatch_authority
             or current_issued_history_identity is not lease.issued_history_identity
             or current_issued_registry_identity is not lease.issued_registry_identity
             or current_conflict_bytes is not lease.conflict_bytes
@@ -1351,6 +1357,7 @@ class Phase1HistoricalMatcher:
         )
 
         object.__setattr__(self, "_state", lease.state)
+        _MATCHER_DISPATCH_AUTHORITIES[self] = lease.dispatch_authority
         object.__setattr__(self, "_issued_history_identity", lease.issued_history_identity)
         object.__setattr__(self, "_issued_registry_identity", lease.issued_registry_identity)
         object.__setattr__(self, "_conflict_bytes", lease.conflict_bytes)

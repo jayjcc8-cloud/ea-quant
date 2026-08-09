@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 
 import ea.core.historical_matching as historical_matching_module
+import ea.execution.matcher as matcher_module
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import (
     InstrumentExecutionSpec,
@@ -3647,6 +3648,72 @@ def test_descendant_lookup_fences_binding_property_state_replacement(
     assert matcher._issued_history_identity is current_issued_history
     assert matcher._issued_registry_identity is current_issued_registry
     assert matcher._state.issued_by_identity.get(record.ingress_identity) is record
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
+
+
+@pytest.mark.parametrize("lookup", ["has", "resolve"])
+def test_descendant_lookup_restores_authority_after_teardown_getter_reentry(
+    lookup: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    trusted_state = matcher._state
+    trusted_issued_history = matcher._issued_history_identity
+    trusted_issued_registry = matcher._issued_registry_identity
+    trusted_authority = matcher_module._MATCHER_DISPATCH_AUTHORITIES[matcher]
+    record = trusted_state.issued[0]
+    verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    reentry_root = replace(delayed, source_sequence=delayed.source_sequence + 1)
+    getter_calls = 0
+    reentered = False
+
+    def reentering_runtime_identity(candidate: _DispatchVerifier) -> object:
+        nonlocal getter_calls, reentered
+        getter_calls += 1
+        if candidate is verifier and getter_calls == 2:
+            reentered = True
+            outer_fence = matcher._state
+            object.__setattr__(matcher, "_state", trusted_state)
+            object.__setattr__(matcher, "_mutation_active", False)
+            matcher.match_active_market_root(reentry_root, dispatch_sequence=9)
+            object.__setattr__(matcher, "_state", outer_fence)
+            object.__setattr__(matcher, "_issued_history_identity", trusted_issued_history)
+            object.__setattr__(matcher, "_issued_registry_identity", trusted_issued_registry)
+            object.__setattr__(matcher, "_mutation_active", False)
+        return candidate._runtime_identity
+
+    monkeypatch.setattr(
+        _DispatchVerifier,
+        "runtime_identity",
+        property(reentering_runtime_identity),
+    )
+    with pytest.raises(HistoricalMatcherError) as rejected:
+        if lookup == "has":
+            matcher.has_issued_ingress(
+                ingress_identity=record.ingress_identity,
+                canonical_ingress_bytes=record.ingress_bytes,
+                canonical_fact_bytes=record.fact_bytes,
+            )
+        else:
+            matcher.resolve_descendant_binding(
+                ingress_identity=record.ingress_identity,
+                canonical_ingress_bytes=record.ingress_bytes,
+                canonical_fact_bytes=record.fact_bytes,
+            )
+
+    assert reentered
+    assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+    assert matcher_module._MATCHER_DISPATCH_AUTHORITIES[matcher] is trusted_authority
+    assert matcher._state.last_dispatch == trusted_state.last_dispatch == 8
+    assert 9 not in matcher._state.dispatch_by_sequence
+    assert matcher._state.issued == trusted_state.issued
+    assert matcher._mutation_active is False
     assert matcher._state.conflict is not None
     assert (
         matcher._state.conflict.conflict_kind
