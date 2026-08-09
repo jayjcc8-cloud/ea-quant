@@ -141,10 +141,15 @@ run_terminal_state
 Each record kind maps to exactly one subject kind. Unknown values fail; human text never selects
 control flow.
 
-Every payload below is exact UTF-8, ASCII-safe, key-sorted compact JSON using
+Every audit-owned payload below is exact UTF-8, ASCII-safe, key-sorted compact JSON using
 `"canonicalization":"ea-canonical-json-v1"`. IDs, instruments, runtime root keys, policies, and
 UTC values reuse their existing accepted canonical JSON projections; they are never `repr` or
 free-form strings. Unknown, missing, extra, duplicate, coerced, or non-canonical fields fail.
+`execution.fact_processing_outcome` is the sole reuse exception: its payload is exactly the
+existing unchanged `canonical_execution_fact_processing_outcome_bytes(outcome)`, including
+`schema_version`, `message_type`, and canonicalization
+`ea-execution-fact-processing-outcome-v1`. The audit decoder delegates that payload to the existing
+strict outcome decoder and checks its existing digest; it never wraps or rewrites it.
 
 The seven schemas and subject digests are normative:
 
@@ -152,7 +157,7 @@ The seven schemas and subject digests are normative:
 |---|---|---|
 | `run.prepared` | `run_id`, `lineage_sha256`, `manifest_sha256` | the exact plain persisted `manifest_sha256` |
 | `matcher.dispatch_batch` | `run_id`, `dispatch_kind`, `dispatch_sequence`, `trigger_root_key`, `trigger_root_sha256`, `batch_sha256`, `ingress_count`, `ordered_ingress_sha256s_sha256` | existing `historical_matcher_dispatch_batch_digest(batch)` |
-| `execution.fact_processing_outcome` | the existing complete canonical `ExecutionFactProcessingOutcome` object, unchanged | existing `execution_fact_processing_outcome_digest(outcome)` |
+| `execution.fact_processing_outcome` | exact existing canonical outcome bytes; the audit-owned `schema`/canonicalization rule does not apply | existing `execution_fact_processing_outcome_digest(outcome)` |
 | `submission.pre_effect_authorization` | `run_id`, `order_id`, `order_sha256`, `execution_request_sha256`, `causal_market_sha256`, `causal_root_key`, `dispatch_sequence`, `portfolio_snapshot_version`, `risk_state_version`, `global_halt_epoch`, `risk_halt_epoch`, `held_for_order_id`, `instrument_gate_id`, `instrument_gate_version`, `authorization_state_version`, `instrument_spec_set_id`, `instrument_spec_set_sha256`, `execution_policy_id`, `execution_policy_sha256` | SHA-256 of `b"ea.audit-subject.submission-authorization.v1\0" + payload_length_u64 + payload` |
 | `runtime.failing_safety_transition` | `run_id`, `previous_state_sha256`, `failing_state_sha256`, `failure_code`, `failed_record_kind`, `failed_subject_kind`, `failed_subject_sha256`, `dispatch_sequence`, `trigger_root_sha256` | SHA-256 of `b"ea.audit-subject.failing-safety.v1\0" + payload_length_u64 + payload` |
 | `runtime.dispatch_completed` | `run_id`, `dispatch_kind`, `dispatch_sequence`, `trigger_root_key`, `trigger_root_sha256`, `batch_sha256`, `outcome_count`, `ordered_outcome_ack_sha256s_sha256`, `pre_ack_state_sha256` | SHA-256 of `b"ea.audit-subject.dispatch-completed.v1\0" + payload_length_u64 + payload` |
@@ -354,21 +359,36 @@ resolves the fixed audit child through the originating store registry and transf
 held writer lease described below.
 
 ADR 0006's prohibition on adopting or retrying an existing reservation remains the default, but
-this ADR narrowly supersedes it for recovery of the same incomplete attempt. A new outer
-`verify_incomplete_run_recovery` operation must consume a tracked-launcher preflight, no-follow
-open the configured result root and exact run-ID child, verify manifest bytes/digest and current
-code/configuration/data/runtime lineage, prove that no terminal audit record exists, and issue a
-factory-only `VerifiedRecoveryBinding`. Then and only then:
+this ADR narrowly supersedes it for recovery of the same attempt. A new outer
+`verify_run_recovery` operation consumes a tracked-launcher preflight, no-follow opens the
+configured result root and exact run-ID child, verifies the fixed writer-lock identity, acquires
+and holds its non-blocking exclusive lease, and only inside that lease verifies manifest
+bytes/digest, current code/configuration/data/runtime lineage, and the complete journal. There is
+no validate-then-lock gap.
+
+It issues exactly one factory-only classification:
+
+- `VerifiedIncompleteRecoveryBinding` when no terminal record exists; or
+- `VerifiedTerminalRecoveryBinding` when the final complete valid frame is one terminal record.
+
+Then and only then one matching store operation is allowed:
 
 ```python
 LocalResultStore.recover_incomplete_attempt(
-    verified: VerifiedRecoveryBinding,
+    verified: VerifiedIncompleteRecoveryBinding,
 ) -> RecoveredRun
+
+LocalResultStore.recover_terminal_attempt(
+    verified: VerifiedTerminalRecoveryBinding,
+) -> RecoveredTerminalRun
 ```
 
-reissues new process-local audit/output/manifest capabilities for the same `RunBinding`. It does
-not generate a run ID, reserve a directory, rewrite the manifest, adopt a different lineage, or
-permit recovery after terminal completion.
+Incomplete recovery reissues new process-local audit/output/manifest capabilities for the same
+`RunBinding`. Terminal recovery performs a new successful journal `fsync`, independently reads
+back and verifies the terminal frame, reconstructs its acknowledgement and final terminal state,
+and returns only read-only terminal evidence. It issues no append/output/effect capability and
+therefore handles crash-after-terminal-fsync/before-ack without reopening the run. Neither path
+generates a run ID, reserves a directory, rewrites the manifest, or adopts a different lineage.
 
 ### POSIX v1 journal format
 
@@ -588,6 +608,68 @@ acknowledgement digest, and resulting final chain head. The terminal record neve
 final state digest, so no digest cycle exists. All state codecs are strict and versioned. Same
 state version plus different bytes is a conflict.
 
+All lifecycle values are factory-only, exact canonical JSON with
+`"canonicalization":"ea-canonical-json-v1"`. Optional fields are present as JSON `null`; they are
+never omitted. The closed schemas and exact fields are:
+
+| Value / schema | Exact fields after `schema`, `canonicalization`, `run_id`, `lineage_sha256`, `manifest_sha256` |
+|---|---|
+| `CoordinatorRunState` / `ea.coordinator-state.v1` | `state_version`, `phase`, `active_dispatch_sequence`, `active_trigger_root_sha256`, `matcher_batch_sha256`, `ordered_ingress_sha256s_sha256`, `ordered_outcome_ack_sha256s_sha256`, `missing_audit_logical_keys`, `failure_code`, `last_completed_dispatch_sequence`, `last_audit_chain_head_sha256` |
+| `PreTerminalCoordinatorState` / `ea.coordinator-pre-terminal-state.v1` | `state_version`, `terminal_kind`, `last_dispatch_sequence`, `last_trigger_root_sha256`, `dispatch_completion_ack_sha256`, `previous_chain_head_sha256`, `failure_code` |
+| `TerminalCoordinatorState` / `ea.coordinator-terminal-state.v1` | `state_version`, `terminal_kind`, `pre_terminal_state_sha256`, `terminal_record_id`, `terminal_ack_sha256`, `final_chain_head_sha256`, `failure_code` |
+| `AuditedExecutionFactHandoff` / `ea.coordinator-audited-fact-handoff.v1` | `dispatch_sequence`, `ingress_identity`, `outcome_sha256`, `batch_ack_sha256`, `outcome_record_id`, `outcome_ack_sha256`, `fill_id`, `fill_sha256`, `projection_after_sha256` |
+| `CoordinatorDispatchOutcome` / `ea.coordinator-dispatch-outcome.v1` | `dispatch_kind`, `dispatch_sequence`, `trigger_root_key`, `trigger_root_sha256`, `batch_sha256`, `batch_ack_sha256`, `handoff_count`, `ordered_handoff_sha256s_sha256`, `dispatch_completion_ack_sha256`, `runtime_acknowledged`, `resulting_state_sha256` |
+| `CoordinatorTerminalOutcome` / `ea.coordinator-terminal-outcome.v1` | `pre_terminal_state_sha256`, `terminal_record_id`, `terminal_ack_sha256`, `terminal_state_sha256` |
+
+`phase` is exactly `admitted|running|draining|failing`; terminalizing and terminal values use their
+dedicated schemas. `failure_code` is `null` or one closed `OutcomeCode` string. A missing logical
+key is exactly `{record_kind, subject_kind, subject_sha256}` and is ordered by the coordinator's
+closed stage order, then ingress batch position; it is never map iteration order. Fill fields are
+both null or both present. Projection may be null. Every ID/identity/root-key value reuses its
+existing canonical object projection.
+
+Each lifecycle digest is framed as
+`SHA-256(domain + canonical_length_u64 + canonical_json)`. Domains are respectively:
+
+```text
+b"ea.coordinator-state.v1\0"
+b"ea.coordinator-pre-terminal-state.v1\0"
+b"ea.coordinator-terminal-state.v1\0"
+b"ea.coordinator-audited-fact-handoff.v1\0"
+b"ea.coordinator-dispatch-outcome.v1\0"
+b"ea.coordinator-terminal-outcome.v1\0"
+```
+
+The ordered handoff aggregate uses
+`b"ea.coordinator-ordered-handoff-digests.v1\0" || count_u64 || raw_digest_tuple`, identical to
+the audit tuple rule. The state/outcome factories independently reconstruct every referenced
+canonical digest and reject mismatches before publication.
+
+One normative failing-state vector is:
+
+```json
+{"active_dispatch_sequence":1,"active_trigger_root_sha256":"3333333333333333333333333333333333333333333333333333333333333333","canonicalization":"ea-canonical-json-v1","failure_code":"durability.audit_append_failed","last_audit_chain_head_sha256":"3fca3a84a1cf211e48b674197476396fc4be8184551c9a5f6fbf6f4c4200aa76","last_completed_dispatch_sequence":null,"lineage_sha256":"1111111111111111111111111111111111111111111111111111111111111111","manifest_sha256":"2222222222222222222222222222222222222222222222222222222222222222","matcher_batch_sha256":"4444444444444444444444444444444444444444444444444444444444444444","missing_audit_logical_keys":[{"record_kind":"matcher.dispatch_batch","subject_kind":"historical_matcher_dispatch_batch","subject_sha256":"4444444444444444444444444444444444444444444444444444444444444444"}],"ordered_ingress_sha256s_sha256":"2438409ca5926710ca25fea083cf1a53c582ed679a2bdb84fdfa3ce62dab8027","ordered_outcome_ack_sha256s_sha256":"6a2fb6988624cc65253db3cf79f653c16a6f2ad11aa7a1a1ca785f82bc8995a1","phase":"failing","run_id":"123e4567-e89b-42d3-a456-426614174000","schema":"ea.coordinator-state.v1","state_version":2}
+```
+
+It is 1,143 bytes and its framed state digest is
+`bce235bc2e946b303a8ececb38cd7f35af7922ef5ba6fbcae5b18a8da2be1009`.
+
+The matching normative pre-terminal vector is:
+
+```json
+{"canonicalization":"ea-canonical-json-v1","dispatch_completion_ack_sha256":"5555555555555555555555555555555555555555555555555555555555555555","failure_code":"durability.audit_append_failed","last_dispatch_sequence":2,"last_trigger_root_sha256":"3333333333333333333333333333333333333333333333333333333333333333","lineage_sha256":"1111111111111111111111111111111111111111111111111111111111111111","manifest_sha256":"2222222222222222222222222222222222222222222222222222222222222222","previous_chain_head_sha256":"6666666666666666666666666666666666666666666666666666666666666666","run_id":"123e4567-e89b-42d3-a456-426614174000","schema":"ea.coordinator-pre-terminal-state.v1","state_version":3,"terminal_kind":"failed"}
+```
+
+It is 716 bytes with digest
+`b6ada414685ae100c285cebf1ead44388d81ffb1896608e4ebe27292c6f45419`. The final state vector is:
+
+```json
+{"canonicalization":"ea-canonical-json-v1","failure_code":"durability.audit_append_failed","final_chain_head_sha256":"8888888888888888888888888888888888888888888888888888888888888888","lineage_sha256":"1111111111111111111111111111111111111111111111111111111111111111","manifest_sha256":"2222222222222222222222222222222222222222222222222222222222222222","pre_terminal_state_sha256":"b6ada414685ae100c285cebf1ead44388d81ffb1896608e4ebe27292c6f45419","run_id":"123e4567-e89b-42d3-a456-426614174000","schema":"ea.coordinator-terminal-state.v1","state_version":4,"terminal_ack_sha256":"7777777777777777777777777777777777777777777777777777777777777777","terminal_kind":"failed","terminal_record_id":{"owner_kind":"audit.record","owner_sequence":7,"run_id":"123e4567-e89b-42d3-a456-426614174000"}}
+```
+
+It is 790 bytes with digest
+`61be9dc163a64bf476adbb270534d91787da99a102df7e1c2f9d97dc41764753`.
+
 `CoordinatorDispatchOutcome` is immutable and binds the active root, matcher batch, every ordered
 audited handoff, dispatch-completion acknowledgement, runtime acknowledgement state, and the
 resulting coordinator state digest. Exact retry returns canonical-equivalent evidence and makes no
@@ -630,8 +712,9 @@ runtime-acknowledgement order. The unique terminal choreography is:
 3. rebind and call `runtime.acknowledge(lease)`;
 4. require `active_lease is None` and `terminal_acknowledged is True`, then publish the exact
    `PreTerminalCoordinatorState` and enter `terminalizing`;
-5. append/verify `run.terminal` whose subject is that pre-terminal-state digest and whose payload
-   binds the audit chain head before the terminal record; and
+5. append/verify `run.terminal` whose one subject identity is the domain-separated digest of its
+   complete canonical payload; that payload binds the pre-terminal-state digest and audit chain
+   head before the terminal record; and
 6. construct the final `TerminalCoordinatorState` from the verified terminal acknowledgement and
    enter `terminal` or `terminal_failed`.
 
@@ -640,8 +723,8 @@ runtime acknowledgement after rebinding the completion record. If the runtime re
 lease and exact terminal acknowledgement despite an exceptional return, the coordinator verifies
 the retained trace and proceeds to step 4; any contradictory state is a monotone conflict. Failure
 at step 5 retains `terminalizing`, no active lease, and the exact pre-terminal state;
-`retry_terminalization` retries only the same logical terminal record. No operation pops another
-root in either case.
+`retry_terminalization` reconstructs that identical full payload and retries only its
+domain-separated logical terminal key. No operation pops another root in either case.
 
 Terminal audit closes this coordinator slice but does not claim that result/report durability or
 the complete reproducible-run terminal verifier exists.
@@ -730,9 +813,25 @@ retaining the acknowledgement. The canonical payload binds:
 The method appends `submission.pre_effect_authorization` and retains the resulting exact
 acknowledgement keyed by the domain-separated authorization subject digest specified above. It
 performs no matcher call. If the Order's portfolio/risk versions are already stale, a halt is set,
-the gate is not held for that Order, or any binding changes during the reads, preparation rejects
-before append with `risk.stale_approval` or `submission.blocked_by_halt` as applicable. Thus
-ordinary freshness drift never becomes same-logical-key/different-payload journal conflict.
+the gate is not held for that Order, or any binding changes during the pre-append read set,
+preparation rejects before append with `risk.stale_approval` or
+`submission.blocked_by_halt` as applicable. Thus ordinary pre-append freshness drift never becomes
+same-logical-key/different-payload journal conflict.
+
+The authorization authority also owns a permanent attempt index keyed by
+`(order_id, execution_request_sha256)`. The first durable authorization record occupies that key
+regardless of whether later freshness verification succeeds. No second subject version may be
+appended for that Order/request. An exact retry may reuse only the occupied record and its original
+payload; a different proposed payload returns `risk.stale_approval` before audit access and
+requires a new Order/request.
+
+After append, the fixed second freshness read can observe drift that did not exist before the
+write. In that case the durable acknowledgement is retained as a burned attempt, no opaque proof
+is issued, and the method returns stale/halt. Recovery rebuilds the attempt index from every
+authorization record. It re-runs immediate freshness against the original payload: exact state may
+make the original acknowledgement usable, while different state leaves it burned and requires a
+new Order flow. It never appends another authorization for that key. Therefore each Order creates
+at most one authorization record and the `<= N` journal proof remains valid.
 
 The matcher immediately calls `verify_authorized_historical_submission`. That operation re-reads
 the active lease and all current halt, instrument, portfolio, risk, Order, request, causal-root,
@@ -753,13 +852,16 @@ acknowledgement nor poisons the global audit journal.
 The journal is durable evidence, not a serialized Python heap. Recovery proceeds from immutable
 manifest/data plus canonical authority histories:
 
-1. reopen and fully verify the audit journal;
-2. reconstruct the historical runtime and consumer-owned authorities from their canonical
+1. acquire and retain the exact verified writer lease;
+2. under that lease reverify manifest/lineage and fully scan the audit journal;
+3. if the final frame is terminal, perform terminal-only fsync/read-back/acknowledgement
+   reconstruction and return no mutation authority;
+4. otherwise reconstruct the historical runtime and consumer-owned authorities from their canonical
    inputs/history at the last completed dispatch;
-3. replay exact records in sequence, verifying every inner canonical result against its audit
+5. replay exact records in sequence, verifying every inner canonical result against its audit
    payload and digest;
-4. leave the first incomplete dispatch active and replay only its missing deterministic stages;
-5. resume new root admission only after all reconstructed bindings agree.
+6. leave the first incomplete dispatch active and replay only its missing deterministic stages;
+7. resume new root admission only after all reconstructed bindings agree.
 
 This Issue implements journal reopen and coordinator recovery against injected authoritative
 runtime/matcher/fact-authority evidence. Later ledger/strategy/result Issues extend the same replay
@@ -847,7 +949,8 @@ evidence to make durability appear clean is a reconciliation and live-safety fai
 - failure before and after journal `fsync`, lost acknowledgement, reopen, exact retry, and
   deterministic recovery;
 - fresh/recovery capability issuance, live-writer lease collision, stale/foreign recovery
-  evidence, second recovery, and post-terminal recovery rejection; and
+  evidence, second recovery, post-terminal mutation-capability rejection, and terminal lost-ack
+  read-only recovery; and
 - two writers, reentrancy, callback exception, and callback state-drift rejection.
 
 ### Coordinator traces
