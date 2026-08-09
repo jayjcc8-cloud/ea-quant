@@ -829,6 +829,31 @@ def test_state_encoder_binds_issued_ingresses_to_dispatch_history() -> None:
     assert coherently_rewritten.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_state_encoder_binds_submission_receipts_to_sealed_history() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+
+    for issued in (False, True):
+        if issued:
+            matcher.match_active_market_root(delayed, dispatch_sequence=8)
+        for changes in (
+            {"quantity_text": "2"},
+            {"order_sha256": Sha256Digest("f" * 64)},
+        ):
+            forged_receipt = _clone_receipt(receipt, **changes)
+            state = matcher.state
+            object.__setattr__(state, "_submission_receipts", (forged_receipt,))
+            object.__setattr__(
+                state,
+                "receipt_sha256s",
+                (historical_submission_receipt_digest(forged_receipt),),
+            )
+
+            with pytest.raises(HistoricalMatcherError) as rejected:
+                canonical_historical_matcher_state_bytes(state)
+            assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_state_encoder_binds_receipts_to_state_specification_and_policy() -> None:
     _, matcher, orders, causal, _, _ = _system()
     receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -4624,6 +4649,109 @@ def test_dispatch_revalidates_verifier_binding_before_market_and_end_publication
         matcher.expire_at_active_end(end, dispatch_sequence=9)
     assert changed_end_binding.value.code is OutcomeCode.CONFLICTING_ID
     assert matcher._state is initial
+
+
+def test_dispatch_fences_live_binding_getters_before_market_and_end_callbacks() -> None:
+    class StateRestoringOrderVerifier:
+        def __init__(
+            self,
+            *,
+            matcher: Phase1HistoricalMatcher,
+            delegate: _OrderVerifier,
+            restored_state: Any,
+        ) -> None:
+            self._matcher = matcher
+            self._delegate = delegate
+            self._restored_state = restored_state
+            self._restored = False
+            self.spec_set = delegate.spec_set
+            self.execution_policy = delegate.execution_policy
+
+        @property
+        def run_id(self) -> RunId:
+            if not self._restored:
+                self._restored = True
+                self._matcher._state = self._restored_state
+                self._matcher._issued_history_identity = self._restored_state.issued
+                self._matcher._issued_registry_identity = self._restored_state.issued_by_identity
+            return self._delegate.run_id
+
+        def resolve_issued_order_by_id(self, order_id: EconomicId) -> Order | None:
+            return self._delegate.resolve_issued_order_by_id(order_id)
+
+    class StateRestoringAuthorizationVerifier:
+        def __init__(
+            self,
+            *,
+            matcher: Phase1HistoricalMatcher,
+            delegate: _AuthorizationVerifier,
+            restored_state: Any,
+        ) -> None:
+            self._matcher = matcher
+            self._delegate = delegate
+            self._restored_state = restored_state
+            self._restored = False
+            self.instrument_spec_set_id = delegate.instrument_spec_set_id
+            self.instrument_spec_set_sha256 = delegate.instrument_spec_set_sha256
+            self.execution_policy = delegate.execution_policy
+
+        @property
+        def run_id(self) -> RunId:
+            if not self._restored:
+                self._restored = True
+                self._matcher._state = self._restored_state
+                self._matcher._issued_history_identity = self._restored_state.issued
+                self._matcher._issued_registry_identity = self._restored_state.issued_by_identity
+            return self._delegate.run_id
+
+    for dispatch_kind, verifier_kind in product(
+        ("market", "end"),
+        ("issuance", "authorization"),
+    ):
+        _, matcher, orders, causal, delayed, end = _system()
+        restored_state = matcher._state
+        matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+        trusted_state = matcher._state
+        if verifier_kind == "issuance":
+            delegate = cast(_OrderVerifier, matcher._order_issuance_verifier)
+            matcher._order_issuance_verifier = cast(
+                Any,
+                StateRestoringOrderVerifier(
+                    matcher=matcher,
+                    delegate=delegate,
+                    restored_state=restored_state,
+                ),
+            )
+        else:
+            authorization_delegate = cast(
+                _AuthorizationVerifier,
+                matcher._submission_authorization_verifier,
+            )
+            matcher._submission_authorization_verifier = cast(
+                Any,
+                StateRestoringAuthorizationVerifier(
+                    matcher=matcher,
+                    delegate=authorization_delegate,
+                    restored_state=restored_state,
+                ),
+            )
+
+        with pytest.raises(HistoricalMatcherError) as rejected:
+            if dispatch_kind == "market":
+                matcher.match_active_market_root(delayed, dispatch_sequence=8)
+            else:
+                matcher.expire_at_active_end(end, dispatch_sequence=8)
+        assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+        assert matcher._state.pending == trusted_state.pending
+        assert matcher._state.next_submission == trusted_state.next_submission
+        assert matcher._state.next_fact == trusted_state.next_fact
+        assert matcher._state.dispatch_by_sequence == trusted_state.dispatch_by_sequence == {}
+        assert matcher._state.ended is False
+        assert matcher._state.conflict is not None
+        assert (
+            matcher._state.conflict.conflict_kind
+            is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+        )
 
 
 def test_dispatch_callback_cannot_replace_runtime_identity_baseline() -> None:

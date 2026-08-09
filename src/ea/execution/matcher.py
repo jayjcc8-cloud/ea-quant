@@ -68,6 +68,7 @@ from ea.core.historical_matching import (
     HistoricalSubmissionAuthorizationProof,
     HistoricalSubmissionReceipt,
     _append_historical_matcher_dispatch_history,
+    _append_historical_matcher_submission_history,
     _create_historical_matcher_conflict,
     _create_historical_matcher_descendant_binding,
     _create_historical_matcher_dispatch_batch,
@@ -1104,6 +1105,17 @@ class Phase1HistoricalMatcher:
 
     def _require_issuance_lookup_state(self) -> _MatcherState:
         self._require_issuance_registry()
+        state = self._require_fenced_live_bindings(
+            dispatch_sequence=self._state.last_dispatch,
+        )
+        self._require_issuance_registry()
+        return state
+
+    def _require_fenced_live_bindings(
+        self,
+        *,
+        dispatch_sequence: int | None,
+    ) -> _MatcherState:
         state = self._state
         lease = self._begin_dispatch_callback()
         try:
@@ -1111,11 +1123,10 @@ class Phase1HistoricalMatcher:
         finally:
             self._end_dispatch_callback(
                 lease=lease,
-                dispatch_sequence=state.last_dispatch,
+                dispatch_sequence=dispatch_sequence,
             )
-        self._require_issuance_registry()
         if self._state is not state:
-            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
         return state
 
     def _require_submission_pointer(self, *, dispatch_sequence: int | None) -> None:
@@ -1714,7 +1725,7 @@ class Phase1HistoricalMatcher:
             or order.price_constraint is not None
         ):
             raise _fail(OutcomeCode.OUT_OF_RANGE, "Order is outside Phase 1 profile")
-        self._require_live_bindings()
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
         issuance_lease = self._begin_dispatch_callback()
         try:
             try:
@@ -1922,7 +1933,7 @@ class Phase1HistoricalMatcher:
         )
         if not self._submission_record_is_valid(record):
             raise _fail(OutcomeCode.CONFLICTING_ID, "submission record preflight failed")
-        self._require_live_bindings()
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
         self._require_submission_allocation_state(
             allocation_state=allocation_state,
             allocation_state_bytes=allocation_state_bytes,
@@ -1934,6 +1945,12 @@ class Phase1HistoricalMatcher:
         by_client = dict(publication_state.submission_by_client)
         by_order[record.order_id] = record
         by_client[client_key] = record
+        next_dispatch_history = _append_historical_matcher_submission_history(
+            publication_state.dispatch_history,
+            receipt=record.receipt,
+            receipt_sha256=record.receipt_sha256,
+            order_sha256=record.order_sha256,
+        )
         self._state = _MatcherState(
             next_submission=_advance(submission_sequence),
             next_fact=publication_state.next_fact,
@@ -1944,7 +1961,7 @@ class Phase1HistoricalMatcher:
             dispatch_by_sequence=publication_state.dispatch_by_sequence,
             dispatch_by_digest=publication_state.dispatch_by_digest,
             dispatch_chain_head=publication_state.dispatch_chain_head,
-            dispatch_history=publication_state.dispatch_history,
+            dispatch_history=next_dispatch_history,
             issued=publication_state.issued,
             issued_by_identity=publication_state.issued_by_identity,
             last_dispatch=publication_state.last_dispatch,
@@ -2045,7 +2062,7 @@ class Phase1HistoricalMatcher:
                 submitted_dispatch_sequence=sequence,
                 trigger_root_sha256=root_sha256,
             )
-        self._require_live_bindings()
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
         callback_lease = self._begin_dispatch_callback()
         try:
             try:
@@ -2173,7 +2190,7 @@ class Phase1HistoricalMatcher:
                 submitted_dispatch_sequence=sequence,
                 trigger_root_sha256=root_sha256,
             )
-        self._require_live_bindings()
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
         callback_lease = self._begin_dispatch_callback()
         try:
             try:
@@ -2529,7 +2546,7 @@ class Phase1HistoricalMatcher:
                 conflict=None,
             )
         )
-        self._require_live_bindings()
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
         if self._require_dispatch_authority() is not dispatch_authority:
             self._retained_binding_drift(dispatch_sequence=sequence)
         next_authority = _DispatchAuthority(

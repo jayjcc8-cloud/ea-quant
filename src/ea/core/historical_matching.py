@@ -87,6 +87,9 @@ _HISTORICAL_MATCHER_DISPATCH_HISTORY_DIGEST_DOMAIN = (
 _HISTORICAL_MATCHER_DISPATCH_INGRESS_HISTORY_DIGEST_DOMAIN = (
     b"ea.phase1-historical-matcher-dispatch-ingress-history.v1\0"
 )
+_HISTORICAL_MATCHER_SUBMISSION_HISTORY_DIGEST_DOMAIN = (
+    b"ea.phase1-historical-matcher-submission-history.v1\0"
+)
 HISTORICAL_MATCHER_STATE_CANONICALIZATION = "ea-phase1-historical-matcher-state-v1"
 HISTORICAL_MATCHER_STATE_DIGEST_DOMAIN = b"ea.phase1-historical-matcher-state.v1\0"
 HISTORICAL_MATCHER_CONFLICT_CANONICALIZATION = "ea-phase1-historical-matcher-conflict-v1"
@@ -752,6 +755,8 @@ class _HistoricalMatcherDispatchHistory:
 class _SealedHistoricalMatcherDispatchHistory(NamedTuple):
     batch_sha256_values: tuple[str, ...]
     batch_ingress_sha256_values: tuple[tuple[str, ...], ...]
+    submission_count: int
+    submission_chain_head: str
     root_sha256_by_sequence: MappingProxyType[int, str]
     sequence_by_root_sha256: MappingProxyType[str, int]
     run_id_value: str | None
@@ -1251,6 +1256,11 @@ def _empty_historical_matcher_dispatch_history() -> _HistoricalMatcherDispatchHi
         _SealedHistoricalMatcherDispatchHistory(
             batch_sha256_values=(),
             batch_ingress_sha256_values=(),
+            submission_count=0,
+            submission_chain_head=_framed_digest(
+                _HISTORICAL_MATCHER_SUBMISSION_HISTORY_DIGEST_DOMAIN,
+                b"",
+            ).value,
             root_sha256_by_sequence=MappingProxyType({}),
             sequence_by_root_sha256=MappingProxyType({}),
             run_id_value=None,
@@ -1262,6 +1272,64 @@ def _empty_historical_matcher_dispatch_history() -> _HistoricalMatcherDispatchHi
         )
     )
     return history
+
+
+def _next_historical_matcher_submission_chain_head(
+    *,
+    previous_head: str,
+    receipt: HistoricalSubmissionReceipt,
+    receipt_sha256: Sha256Digest,
+    order_sha256: Sha256Digest,
+) -> str:
+    if type(previous_head) is not str or len(previous_head) != 64:
+        raise _fail(OutcomeCode.INVALID_TYPE, "submission-history head must be exact")
+    try:
+        bytes.fromhex(previous_head)
+    except ValueError as error:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "submission-history head is invalid") from error
+    _validate_receipt(receipt)
+    _validate_digest(receipt_sha256, field_name="submission-history receipt digest")
+    _validate_digest(order_sha256, field_name="submission-history Order digest")
+    if (
+        historical_submission_receipt_digest(receipt) != receipt_sha256
+        or receipt.order_sha256 != order_sha256
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "submission-history evidence conflicts")
+    return _framed_digest(
+        _HISTORICAL_MATCHER_SUBMISSION_HISTORY_DIGEST_DOMAIN,
+        _canonical_json(
+            {
+                "order_id": _economic_id_document(receipt.order_id),
+                "order_sha256": order_sha256.value,
+                "previous_head": previous_head,
+                "receipt_sha256": receipt_sha256.value,
+                "submission_sequence": receipt.submission_sequence,
+            }
+        ),
+    ).value
+
+
+def _append_historical_matcher_submission_history(
+    history: _HistoricalMatcherDispatchHistory,
+    *,
+    receipt: HistoricalSubmissionReceipt,
+    receipt_sha256: Sha256Digest,
+    order_sha256: Sha256Digest,
+) -> _HistoricalMatcherDispatchHistory:
+    sealed = _require_historical_matcher_dispatch_history(history)
+    if receipt.submission_sequence != sealed.submission_count + 1:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "submission-history sequence conflicts")
+    appended = object.__new__(_HistoricalMatcherDispatchHistory)
+    _SEALED_HISTORICAL_MATCHER_DISPATCH_HISTORIES[appended] = sealed._replace(
+        submission_count=sealed.submission_count + 1,
+        submission_chain_head=_next_historical_matcher_submission_chain_head(
+            previous_head=sealed.submission_chain_head,
+            receipt=receipt,
+            receipt_sha256=receipt_sha256,
+            order_sha256=order_sha256,
+        ),
+    )
+    return appended
 
 
 def _append_historical_matcher_dispatch_history(
@@ -1304,6 +1372,8 @@ def _append_historical_matcher_dispatch_history(
                 *sealed.batch_ingress_sha256_values,
                 tuple(digest.value for digest in batch.ingress_sha256s),
             ),
+            submission_count=sealed.submission_count,
+            submission_chain_head=sealed.submission_chain_head,
             root_sha256_by_sequence=MappingProxyType(by_sequence),
             sequence_by_root_sha256=MappingProxyType(by_root),
             run_id_value=batch.run_id.value,
@@ -1321,10 +1391,12 @@ def _append_historical_matcher_dispatch_history(
 
 def _historical_matcher_dispatch_history_from_batches(
     batches: tuple[HistoricalMatcherDispatchBatch, ...],
+    *,
+    history: _HistoricalMatcherDispatchHistory,
 ) -> _HistoricalMatcherDispatchHistory:
     if type(batches) is not tuple:
         raise _fail(OutcomeCode.INVALID_TYPE, "dispatch-history batches must be exact tuple")
-    history = _empty_historical_matcher_dispatch_history()
+    _require_historical_matcher_dispatch_history(history)
     for batch in batches:
         history = _append_historical_matcher_dispatch_history(history, batch)
     return history
@@ -1571,6 +1643,26 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         for digest_value in batch_values
     ) != tuple(execution_fact_ingress_digest(ingress).value for ingress in state.issued_ingresses):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state ingress-history witness conflicts")
+    expected_submission_head = _framed_digest(
+        _HISTORICAL_MATCHER_SUBMISSION_HISTORY_DIGEST_DOMAIN,
+        b"",
+    ).value
+    for receipt, receipt_sha256 in zip(
+        state._submission_receipts,
+        state.receipt_sha256s,
+        strict=True,
+    ):
+        expected_submission_head = _next_historical_matcher_submission_chain_head(
+            previous_head=expected_submission_head,
+            receipt=receipt,
+            receipt_sha256=receipt_sha256,
+            order_sha256=receipt.order_sha256,
+        )
+    if (
+        sealed_history.submission_count != len(state.receipt_sha256s)
+        or sealed_history.submission_chain_head != expected_submission_head
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "state submission-history witness conflicts")
     if state.dispatch_batch_sha256s:
         if (
             sealed_history.run_id_value != state.run_id.value
@@ -3412,7 +3504,27 @@ def decode_historical_matcher_state(
         or historical_matcher_conflict_digest(conflict) != conflict_digest
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state conflict lookup conflicts")
-    dispatch_history = _historical_matcher_dispatch_history_from_batches(tuple(batches))
+    submission_history = _empty_historical_matcher_dispatch_history()
+    for receipt, receipt_sha256 in zip(receipts, receipt_digests, strict=True):
+        order = context.orders_by_sha256.get(receipt.order_sha256)
+        if type(order) is not Order:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "state receipt Order lookup conflicts")
+        _require_receipt_order_and_causal_root_bindings(
+            context=context,
+            receipt=receipt,
+            receipt_sha256=receipt_sha256,
+            order=order,
+        )
+        submission_history = _append_historical_matcher_submission_history(
+            submission_history,
+            receipt=receipt,
+            receipt_sha256=receipt_sha256,
+            order_sha256=order_digest(order),
+        )
+    dispatch_history = _historical_matcher_dispatch_history_from_batches(
+        tuple(batches),
+        history=submission_history,
+    )
     state = _create_historical_matcher_state(
         run_id=context.run_id,
         source_namespace=context.source_namespace,
