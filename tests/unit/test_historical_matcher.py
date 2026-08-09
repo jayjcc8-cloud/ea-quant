@@ -966,6 +966,126 @@ def test_dispatch_history_binds_receipts_and_batches_to_one_root_per_sequence() 
         )
     assert receipts_disagree.value.code is OutcomeCode.CONFLICTING_ID
 
+    repeated_root_receipt = _rebind_receipt_causal_root(
+        receipts[1],
+        causal,
+        dispatch_sequence=8,
+        eligible_after_available_at=causal.available_at,
+    )
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=receipts[0],
+        receipt_sha256=historical_submission_receipt_digest(receipts[0]),
+        order_sha256=receipts[0].order_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as repeated_receipt_root:
+        historical_matching_module._append_historical_matcher_submission_history(
+            history,
+            receipt=repeated_root_receipt,
+            receipt_sha256=historical_submission_receipt_digest(repeated_root_receipt),
+            order_sha256=repeated_root_receipt.order_sha256,
+        )
+    assert repeated_receipt_root.value.code is OutcomeCode.CONFLICTING_ID
+
+    later_first = _rebind_receipt_causal_root(
+        receipts[0],
+        delayed,
+        dispatch_sequence=7,
+        eligible_after_available_at=delayed.available_at,
+    )
+    earlier_second = _rebind_receipt_causal_root(
+        receipts[1],
+        causal,
+        dispatch_sequence=8,
+        eligible_after_available_at=causal.available_at,
+    )
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=later_first,
+        receipt_sha256=historical_submission_receipt_digest(later_first),
+        order_sha256=later_first.order_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as inverted_receipt_roots:
+        historical_matching_module._append_historical_matcher_submission_history(
+            history,
+            receipt=earlier_second,
+            receipt_sha256=historical_submission_receipt_digest(earlier_second),
+            order_sha256=earlier_second.order_sha256,
+        )
+    assert inverted_receipt_roots.value.code is OutcomeCode.CONFLICTING_ID
+
+    repeated_root_batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=causal,
+        run_id=market_batch.run_id,
+        source_namespace=market_batch.source_namespace,
+        dispatch_kind=HistoricalDispatchKind.MARKET,
+        dispatch_sequence=8,
+        trigger_root_sha256=historical_market_root_digest(causal),
+        trigger_root_key=runtime_root_order_key(causal),
+        next_fact_sequence_before=1,
+        next_fact_sequence_after=1,
+        submission_sequences=(),
+        order_ids=(),
+        ingresses=(),
+        ingress_sha256s=(),
+    )
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=receipts[0],
+        receipt_sha256=historical_submission_receipt_digest(receipts[0]),
+        order_sha256=receipts[0].order_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as repeated_batch_root:
+        historical_matching_module._append_historical_matcher_dispatch_history(
+            history,
+            repeated_root_batch,
+        )
+    assert repeated_batch_root.value.code is OutcomeCode.CONFLICTING_ID
+
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=later_first,
+        receipt_sha256=historical_submission_receipt_digest(later_first),
+        order_sha256=later_first.order_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as inverted_batch_root:
+        historical_matching_module._append_historical_matcher_dispatch_history(
+            history,
+            repeated_root_batch,
+        )
+    assert inverted_batch_root.value.code is OutcomeCode.CONFLICTING_ID
+
+    later_gap_batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=delayed,
+        run_id=market_batch.run_id,
+        source_namespace=market_batch.source_namespace,
+        dispatch_kind=HistoricalDispatchKind.MARKET,
+        dispatch_sequence=10,
+        trigger_root_sha256=historical_market_root_digest(delayed),
+        trigger_root_key=runtime_root_order_key(delayed),
+        next_fact_sequence_before=1,
+        next_fact_sequence_after=1,
+        submission_sequences=(),
+        order_ids=(),
+        ingresses=(),
+        ingress_sha256s=(),
+    )
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=receipts[0],
+        receipt_sha256=historical_submission_receipt_digest(receipts[0]),
+        order_sha256=receipts[0].order_sha256,
+    )
+    historical_matching_module._append_historical_matcher_dispatch_history(
+        history,
+        later_gap_batch,
+    )
+
     _, terminal_matcher, _, _, _, _ = _system()
     terminal_batch = terminal_matcher.expire_at_active_end(end, dispatch_sequence=9)
     receipt_at_end = _rebind_receipt_causal_root(
@@ -986,6 +1106,36 @@ def test_dispatch_history_binds_receipts_and_batches_to_one_root_per_sequence() 
             terminal_batch,
         )
     assert end_collision.value.code is OutcomeCode.CONFLICTING_ID
+
+    later_market = replace(
+        delayed,
+        payload=replace(
+            delayed.payload,
+            interval_start=end.available_at,
+            interval_end=end.available_at + timedelta(minutes=1),
+        ),
+        available_at=end.available_at + timedelta(minutes=1, seconds=5),
+        source_sequence=delayed.source_sequence + 100,
+    )
+    receipt_after_end = _rebind_receipt_causal_root(
+        receipts[0],
+        later_market,
+        dispatch_sequence=10,
+        eligible_after_available_at=later_market.available_at,
+    )
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_dispatch_history(
+        history,
+        terminal_batch,
+    )
+    with pytest.raises(HistoricalMatcherError) as after_end:
+        historical_matching_module._append_historical_matcher_submission_history(
+            history,
+            receipt=receipt_after_end,
+            receipt_sha256=historical_submission_receipt_digest(receipt_after_end),
+            order_sha256=receipt_after_end.order_sha256,
+        )
+    assert after_end.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_state_decoder_rejects_receipt_batch_root_conflict_at_same_sequence() -> None:
@@ -2083,6 +2233,12 @@ def test_runtime_adapter_mints_market_and_terminal_proofs_only_while_active() ->
     )
     assert market_proof.market_root is market
     runtime.acknowledge(market_lease)
+    with pytest.raises(RuntimeOrderingError) as acknowledged_root:
+        verifier.verify_active_market_dispatch(
+            market,
+            dispatch_sequence=market_lease.dispatch_sequence,
+        )
+    assert acknowledged_root.value.code is OutcomeCode.CONFLICTING_ID
     end_lease = runtime.pop()
     terminal = cast(EndOfRunRoot, end_lease.root)
     end_proof = verifier.verify_active_end_of_run_dispatch(
@@ -4353,15 +4509,15 @@ def test_no_fill_filters_and_first_later_fill_are_closed_and_replay_stable() -> 
             revision=revision,
         )
 
-    for root in (
-        lambda causal: causal,
+    no_fill_roots: tuple[Callable[[MarketDataEnvelope], MarketDataEnvelope], ...] = (
         lambda causal: raw_variant(causal, revision=1),
         lambda causal: raw_variant(
             causal,
             instrument=Instrument(VenueId("XNYS"), "MSFT"),
         ),
         lambda causal: raw_variant(causal, event_time=causal.event_time),
-    ):
+    )
+    for root in no_fill_roots:
         _, matcher, orders, causal, _, _ = _system()
         matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
         candidate = root(causal)

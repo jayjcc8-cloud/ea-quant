@@ -1470,6 +1470,55 @@ def _next_historical_matcher_submission_chain_head(
     ).value
 
 
+def _validate_observed_dispatch_root_history(
+    *,
+    causal_sha256_by_sequence: Mapping[int, str],
+    causal_key_bytes_by_sequence: Mapping[int, bytes],
+    batch_sha256_by_sequence: Mapping[int, str],
+    batch_key_bytes_by_sequence: Mapping[int, bytes],
+    terminal_sequence: int | None,
+) -> None:
+    if set(causal_sha256_by_sequence) != set(causal_key_bytes_by_sequence) or set(
+        batch_sha256_by_sequence
+    ) != set(batch_key_bytes_by_sequence):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "root-history maps are not aligned")
+    observed_sha256: dict[int, str] = dict(batch_sha256_by_sequence)
+    observed_key_bytes: dict[int, bytes] = dict(batch_key_bytes_by_sequence)
+    for sequence, causal_sha256 in causal_sha256_by_sequence.items():
+        causal_key_bytes = causal_key_bytes_by_sequence[sequence]
+        retained_sha256 = observed_sha256.get(sequence)
+        retained_key_bytes = observed_key_bytes.get(sequence)
+        if (retained_sha256 is None) != (retained_key_bytes is None) or (
+            retained_sha256 is not None
+            and (retained_sha256 != causal_sha256 or retained_key_bytes != causal_key_bytes)
+        ):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "submission and dispatch root histories conflict",
+            )
+        observed_sha256[sequence] = causal_sha256
+        observed_key_bytes[sequence] = causal_key_bytes
+    ordered_sequences = tuple(sorted(observed_sha256))
+    if terminal_sequence is not None and (
+        not ordered_sequences or terminal_sequence != ordered_sequences[-1]
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "terminal root history is not final")
+    previous_key: RuntimeRootOrderKey | None = None
+    seen_sha256: set[str] = set()
+    for sequence in ordered_sequences:
+        root_sha256 = observed_sha256[sequence]
+        root_key_bytes = observed_key_bytes[sequence]
+        root_key = runtime_root_key_from_document(_decode_document(root_key_bytes))
+        if (
+            _sealed_runtime_key_bytes(root_key) != root_key_bytes
+            or root_sha256 in seen_sha256
+            or (previous_key is not None and not previous_key < root_key)
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "observed root history is not monotone")
+        seen_sha256.add(root_sha256)
+        previous_key = root_key
+
+
 def _append_historical_matcher_submission_history(
     history: _HistoricalMatcherDispatchHistory,
     *,
@@ -1512,8 +1561,19 @@ def _append_historical_matcher_submission_history(
         )
     causal_by_sequence = dict(sealed.causal_root_sha256_by_sequence)
     causal_key_by_sequence = dict(sealed.causal_root_key_bytes_by_sequence)
+    if causal_by_sequence and dispatch_sequence < max(causal_by_sequence):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "submission dispatch order conflicts")
     causal_by_sequence[dispatch_sequence] = causal_root_sha256
     causal_key_by_sequence[dispatch_sequence] = causal_root_key_bytes
+    _validate_observed_dispatch_root_history(
+        causal_sha256_by_sequence=causal_by_sequence,
+        causal_key_bytes_by_sequence=causal_key_by_sequence,
+        batch_sha256_by_sequence=sealed.root_sha256_by_sequence,
+        batch_key_bytes_by_sequence=sealed.root_key_bytes_by_sequence,
+        terminal_sequence=(
+            sealed.last_dispatch_sequence if sealed.terminal_index is not None else None
+        ),
+    )
     appended = object.__new__(_HistoricalMatcherDispatchHistory)
     _SEALED_HISTORICAL_MATCHER_DISPATCH_HISTORIES[appended] = sealed._replace(
         submission_count=sealed.submission_count + 1,
@@ -1569,6 +1629,17 @@ def _append_historical_matcher_dispatch_history(
     by_sequence[batch.dispatch_sequence] = root_sha256_value
     key_by_sequence[batch.dispatch_sequence] = root_key_bytes
     by_root[root_sha256_value] = batch.dispatch_sequence
+    _validate_observed_dispatch_root_history(
+        causal_sha256_by_sequence=sealed.causal_root_sha256_by_sequence,
+        causal_key_bytes_by_sequence=sealed.causal_root_key_bytes_by_sequence,
+        batch_sha256_by_sequence=by_sequence,
+        batch_key_bytes_by_sequence=key_by_sequence,
+        terminal_sequence=(
+            batch.dispatch_sequence
+            if batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN
+            else None
+        ),
+    )
     terminal_index = (
         len(sealed.batch_sha256_values)
         if batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN
@@ -1868,6 +1939,17 @@ def _validate_state(state: HistoricalMatcherState) -> None:
         != set(sealed_history.root_key_bytes_by_sequence)
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "state root-history witness conflicts")
+    _validate_observed_dispatch_root_history(
+        causal_sha256_by_sequence=expected_causal_by_sequence,
+        causal_key_bytes_by_sequence=expected_causal_key_by_sequence,
+        batch_sha256_by_sequence=sealed_history.root_sha256_by_sequence,
+        batch_key_bytes_by_sequence=sealed_history.root_key_bytes_by_sequence,
+        terminal_sequence=(
+            sealed_history.last_dispatch_sequence
+            if sealed_history.terminal_index is not None
+            else None
+        ),
+    )
     for dispatch_sequence, causal_sha256 in expected_causal_by_sequence.items():
         retained_sha256 = sealed_history.root_sha256_by_sequence.get(dispatch_sequence)
         retained_key = sealed_history.root_key_bytes_by_sequence.get(dispatch_sequence)
