@@ -1176,6 +1176,76 @@ def test_state_decoder_rejects_receipt_batch_root_conflict_at_same_sequence() ->
     assert rejected.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_incremental_root_history_validation_decodes_only_neighbor_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=receipt,
+        receipt_sha256=historical_submission_receipt_digest(receipt),
+        order_sha256=receipt.order_sha256,
+    )
+    history = historical_matching_module._append_historical_matcher_dispatch_history(
+        history,
+        batch,
+    )
+    future_batch = batch
+    for offset in range(1, 7):
+        future = replace(
+            delayed,
+            payload=replace(
+                delayed.payload,
+                interval_start=delayed.payload.interval_end + timedelta(minutes=offset - 1),
+                interval_end=delayed.payload.interval_end + timedelta(minutes=offset),
+            ),
+            available_at=delayed.available_at + timedelta(minutes=offset),
+            source_sequence=delayed.source_sequence + offset,
+        )
+        future_batch = _create_historical_matcher_dispatch_batch(
+            trigger_root=future,
+            run_id=batch.run_id,
+            source_namespace=batch.source_namespace,
+            dispatch_kind=HistoricalDispatchKind.MARKET,
+            dispatch_sequence=8 + offset,
+            trigger_root_sha256=historical_market_root_digest(future),
+            trigger_root_key=runtime_root_order_key(future),
+            next_fact_sequence_before=batch.next_fact_sequence_after,
+            next_fact_sequence_after=batch.next_fact_sequence_after,
+            submission_sequences=(),
+            order_ids=(),
+            ingresses=(),
+            ingress_sha256s=(),
+        )
+        if offset < 6:
+            history = historical_matching_module._append_historical_matcher_dispatch_history(
+                history,
+                future_batch,
+            )
+    original = historical_matching_module.runtime_root_key_from_document
+    decoded = 0
+
+    def counted(document: object) -> Any:
+        nonlocal decoded
+        decoded += 1
+        return original(document)
+
+    monkeypatch.setattr(
+        historical_matching_module,
+        "runtime_root_key_from_document",
+        counted,
+    )
+    historical_matching_module._append_historical_matcher_dispatch_history(
+        history,
+        future_batch,
+    )
+
+    assert decoded <= 4
+
+
 def test_empty_batch_encoder_binds_trigger_digest_and_key_to_factory_root() -> None:
     _, matcher, _, _, delayed, _ = _system()
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
