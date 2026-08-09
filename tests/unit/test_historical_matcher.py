@@ -205,6 +205,25 @@ def _clone_receipt(
     return cloned
 
 
+def _rebind_receipt_causal_root(
+    receipt: HistoricalSubmissionReceipt,
+    causal_market_root: MarketDataEnvelope,
+    **changes: object,
+) -> HistoricalSubmissionReceipt:
+    values = {
+        name: getattr(receipt, name)
+        for name in type(receipt).__dataclass_fields__
+        if name != "_causal_root_witness"
+    }
+    values.update(changes)
+    values["causal_market_sha256"] = historical_market_root_digest(causal_market_root)
+    values["causal_root_key"] = runtime_root_order_key(causal_market_root)
+    return _create_historical_submission_receipt(
+        causal_market_root=causal_market_root,
+        **values,
+    )
+
+
 def _expiry_ingress(
     *,
     matcher: Phase1HistoricalMatcher,
@@ -879,6 +898,132 @@ def test_receipt_encoder_binds_causal_digest_and_key_to_factory_root() -> None:
         canonical_historical_submission_receipt_bytes(receipt)
     assert rejected.value.code is OutcomeCode.CONFLICTING_ID
     assert canonical
+
+
+def test_dispatch_history_binds_receipts_and_batches_to_one_root_per_sequence() -> None:
+    _, matcher, orders, causal, delayed, end = _system()
+    receipts = [matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)]
+    market_batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    receipts.append(matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8))
+    assert canonical_historical_matcher_state_bytes(matcher.state)
+
+    alternate = replace(delayed, source_sequence=delayed.source_sequence + 1)
+    conflicting_receipt = _rebind_receipt_causal_root(receipts[1], alternate)
+
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=receipts[0],
+        receipt_sha256=historical_submission_receipt_digest(receipts[0]),
+        order_sha256=receipts[0].order_sha256,
+    )
+    history = historical_matching_module._append_historical_matcher_dispatch_history(
+        history,
+        market_batch,
+    )
+    with pytest.raises(HistoricalMatcherError) as batch_first:
+        historical_matching_module._append_historical_matcher_submission_history(
+            history,
+            receipt=conflicting_receipt,
+            receipt_sha256=historical_submission_receipt_digest(conflicting_receipt),
+            order_sha256=conflicting_receipt.order_sha256,
+        )
+    assert batch_first.value.code is OutcomeCode.CONFLICTING_ID
+
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    for receipt in (receipts[0], conflicting_receipt):
+        history = historical_matching_module._append_historical_matcher_submission_history(
+            history,
+            receipt=receipt,
+            receipt_sha256=historical_submission_receipt_digest(receipt),
+            order_sha256=receipt.order_sha256,
+        )
+    with pytest.raises(HistoricalMatcherError) as receipt_first:
+        historical_matching_module._append_historical_matcher_dispatch_history(
+            history,
+            market_batch,
+        )
+    assert receipt_first.value.code is OutcomeCode.CONFLICTING_ID
+
+    first_at_eight = _rebind_receipt_causal_root(
+        receipts[0],
+        causal,
+        dispatch_sequence=8,
+    )
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=first_at_eight,
+        receipt_sha256=historical_submission_receipt_digest(first_at_eight),
+        order_sha256=first_at_eight.order_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as receipts_disagree:
+        historical_matching_module._append_historical_matcher_submission_history(
+            history,
+            receipt=receipts[1],
+            receipt_sha256=historical_submission_receipt_digest(receipts[1]),
+            order_sha256=receipts[1].order_sha256,
+        )
+    assert receipts_disagree.value.code is OutcomeCode.CONFLICTING_ID
+
+    _, terminal_matcher, _, _, _, _ = _system()
+    terminal_batch = terminal_matcher.expire_at_active_end(end, dispatch_sequence=9)
+    receipt_at_end = _rebind_receipt_causal_root(
+        receipts[0],
+        causal,
+        dispatch_sequence=9,
+    )
+    history = historical_matching_module._empty_historical_matcher_dispatch_history()
+    history = historical_matching_module._append_historical_matcher_submission_history(
+        history,
+        receipt=receipt_at_end,
+        receipt_sha256=historical_submission_receipt_digest(receipt_at_end),
+        order_sha256=receipt_at_end.order_sha256,
+    )
+    with pytest.raises(HistoricalMatcherError) as end_collision:
+        historical_matching_module._append_historical_matcher_dispatch_history(
+            history,
+            terminal_batch,
+        )
+    assert end_collision.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_state_decoder_rejects_receipt_batch_root_conflict_at_same_sequence() -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    receipts = [matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)]
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    receipts.append(matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8))
+    state_document = json.loads(canonical_historical_matcher_state_bytes(matcher.state))
+
+    alternate = replace(delayed, source_sequence=delayed.source_sequence + 1)
+    conflicting_receipt = _rebind_receipt_causal_root(receipts[1], alternate)
+    conflicting_digest = historical_submission_receipt_digest(conflicting_receipt)
+    state_document["receipt_sha256s"][1] = conflicting_digest.value
+    context = HistoricalMatcherDecodeContext(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        source_namespace=matcher.source_namespace,
+        provenance_id=matcher.provenance_id,
+        orders_by_sha256={order_digest(order): order for order in orders},
+        receipts_by_sha256={
+            historical_submission_receipt_digest(receipts[0]): receipts[0],
+            conflicting_digest: conflicting_receipt,
+        },
+        batches_by_sha256={historical_matcher_dispatch_batch_digest(batch): batch},
+        ingresses_by_sha256={
+            execution_fact_ingress_digest(ingress): ingress for ingress in batch.ingresses
+        },
+        market_roots_by_sha256={
+            historical_market_root_digest(causal): causal,
+            historical_market_root_digest(delayed): delayed,
+            historical_market_root_digest(alternate): alternate,
+        },
+    )
+
+    with pytest.raises(HistoricalMatcherError) as rejected:
+        decode_historical_matcher_state(_canonical_document(state_document), context=context)
+    assert rejected.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_empty_batch_encoder_binds_trigger_digest_and_key_to_factory_root() -> None:
@@ -2764,10 +2909,8 @@ def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:
         dispatch_sequence=7,
     )
     canonical_historical_submission_receipt_bytes(receipt)
-    batch = matcher.match_active_market_root(
-        replace(delayed, source_sequence=unbounded + 1),
-        dispatch_sequence=8,
-    )
+    unbounded_delayed = replace(delayed, source_sequence=unbounded + 1)
+    batch = matcher.match_active_market_root(unbounded_delayed, dispatch_sequence=8)
     canonical_historical_matcher_dispatch_batch_bytes(batch)
 
     unbounded_end = replace(end, producer_sequence=unbounded + 2)
@@ -2776,7 +2919,7 @@ def test_root_key_decoder_rejects_open_or_malformed_documents() -> None:
     )
     matcher.submit(
         orders[1],
-        causal_market_root=delayed,
+        causal_market_root=unbounded_delayed,
         dispatch_sequence=8,
     )
     end_batch = matcher.expire_at_active_end(unbounded_end, dispatch_sequence=9)
