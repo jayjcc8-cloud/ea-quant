@@ -12,6 +12,11 @@ from types import FunctionType
 from typing import Protocol, cast
 
 from ea.config.settings import Settings
+from ea.core.audit import (
+    AuditRecordKind,
+    AuditSubjectKind,
+    canonical_run_prepared_audit_payload,
+)
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.numeric import OrderedFloat64Policy
 from ea.core.run import RunContractError, RunReference
@@ -40,7 +45,7 @@ from ea.experiments.provenance import (
     verify_provenance,
 )
 from ea.experiments.randomness import Pcg64StreamFactory
-from ea.experiments.store import LocalResultStore, PreparedRun, RunIdProvider
+from ea.experiments.store import AuditRunBinding, LocalResultStore, PreparedRun, RunIdProvider
 
 _PREPARED_SEAL = object()
 _PREFLIGHT_SLOT = "_ea_reproducible_preflight_grant_v1"
@@ -200,7 +205,7 @@ def _accept_launcher_preflight(grant: object) -> PreflightSession:
 class AuditPortFactory(Protocol):
     """Construct/start the mandatory audit adapter after manifest durability."""
 
-    def __call__(self) -> RawAuditPort: ...
+    def __call__(self, prepared: AuditRunBinding) -> RawAuditPort: ...
 
 
 class OutputPortFactory(Protocol):
@@ -392,22 +397,27 @@ def admit_reproducible_run[StartResult](
     *,
     audit_factory: AuditPortFactory,
     output_factory: OutputPortFactory,
-    first_audit_payload: bytes,
     start: Callable[[AdmittedRun], StartResult],
 ) -> StartResult:
     """Enforce durable manifest < adapters/audit ack < feed/runtime startup."""
     if type(prepared) is not PreparedReproducibleRun:
         raise RunCompositionError("prepared must be a PreparedReproducibleRun")
-    if type(first_audit_payload) is not bytes:
-        raise RunCompositionError("first audit payload must be exact bytes")
     if not callable(audit_factory) or not callable(output_factory) or not callable(start):
         raise RunCompositionError("adapter factories and start callback must be callable")
 
     # The store returned before this function can construct or start any adapter.
-    audit = BoundAuditPort(prepared._prepared.audit, audit_factory())
+    audit = BoundAuditPort(
+        prepared._prepared.audit,
+        audit_factory(prepared._prepared.audit),
+    )
     output = BoundOutputPort(prepared._prepared.output, output_factory())
     # Runtime/feed admission is impossible until the mandatory first append acknowledges.
-    audit.append(prepared.reference, first_audit_payload)
+    audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=prepared._prepared.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(prepared._prepared.audit.binding),
+    )
 
     admitted = AdmittedRun(
         reference=prepared.reference,

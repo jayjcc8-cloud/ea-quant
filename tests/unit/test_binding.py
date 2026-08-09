@@ -7,13 +7,20 @@ from uuid import UUID
 import pytest
 
 from ea.core import (
+    EMPTY_CHAIN_HEAD_SHA256,
+    EMPTY_RECORD_SHA256,
+    AuditAppendAcknowledgement,
+    AuditRecordKind,
+    AuditSubjectKind,
     DataFingerprint,
     ReplayWindow,
     RunBinding,
-    RunBindingMismatchError,
     RunId,
     RunReference,
     Sha256Digest,
+    canonical_run_prepared_audit_payload,
+    create_audit_append_acknowledgement,
+    create_audit_record,
 )
 from ea.experiments.binding import (
     BoundaryBindingError,
@@ -81,18 +88,40 @@ def _prepared(tmp_path: Path) -> PreparedRun:
 
 
 class RecordingAudit:
-    def __init__(self, acknowledgement: RunBinding) -> None:
+    def __init__(
+        self,
+        binding: RunBinding,
+        acknowledgement: AuditAppendAcknowledgement | None = None,
+    ) -> None:
+        self.binding = binding
         self.acknowledgement = acknowledgement
-        self.calls: list[tuple[RunBinding, AuditCapability, bytes]] = []
+        self.calls: list[tuple[AuditRecordKind, AuditSubjectKind, Sha256Digest, bytes]] = []
 
     def append(
         self,
-        binding: RunBinding,
-        capability: AuditCapability,
-        payload: bytes,
-    ) -> RunBinding:
-        self.calls.append((binding, capability, payload))
-        return self.acknowledgement
+        *,
+        record_kind: AuditRecordKind,
+        subject_kind: AuditSubjectKind,
+        subject_sha256: Sha256Digest,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement:
+        self.calls.append((record_kind, subject_kind, subject_sha256, canonical_payload))
+        return self.acknowledgement or _prepared_ack(self.binding)
+
+
+def _prepared_ack(binding: RunBinding) -> AuditAppendAcknowledgement:
+    return create_audit_append_acknowledgement(
+        create_audit_record(
+            binding=binding,
+            owner_sequence=1,
+            record_kind=AuditRecordKind.RUN_PREPARED,
+            subject_kind=AuditSubjectKind.RUN_MANIFEST,
+            subject_sha256=binding.manifest_sha256,
+            canonical_payload=canonical_run_prepared_audit_payload(binding),
+            previous_record_sha256=EMPTY_RECORD_SHA256,
+            previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+        )
+    )
 
 
 class RecordingOutput:
@@ -115,18 +144,30 @@ def test_bound_audit_and_output_forward_only_store_binding_and_capability(
 ) -> None:
     prepared = _prepared(tmp_path)
     binding = prepared.audit.binding
-    audit_capability = prepared.audit.capability
     output_capability = prepared.output.capability
     audit_raw = RecordingAudit(binding)
     output_raw = RecordingOutput(binding)
     audit = BoundAuditPort(prepared.audit, audit_raw)
     output = BoundOutputPort(prepared.output, output_raw)
 
-    audit.append(binding.reference, b"audit")
+    payload = canonical_run_prepared_audit_payload(binding)
+    audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=binding.manifest_sha256,
+        canonical_payload=payload,
+    )
     output.write(binding.reference, b"output")
 
     assert audit.reference == output.reference == binding.reference
-    assert audit_raw.calls == [(binding, audit_capability, b"audit")]
+    assert audit_raw.calls == [
+        (
+            AuditRecordKind.RUN_PREPARED,
+            AuditSubjectKind.RUN_MANIFEST,
+            binding.manifest_sha256,
+            payload,
+        )
+    ]
     assert output_raw.calls == [(binding, output_capability, b"output")]
 
 
@@ -134,18 +175,10 @@ def test_attempt_or_lineage_mismatch_fails_before_raw_persistence(tmp_path: Path
     prepared = _prepared(tmp_path)
     expected = prepared.audit.binding
     other_attempt = _binding(run_id="123e4567-e89b-42d3-b456-426614174000")
-    wrong_lineage = RunReference(
-        run_id=expected.reference.run_id,
-        lineage_sha256=Sha256Digest("3" * 64),
-    )
-    raw = RecordingAudit(expected)
-    port = BoundAuditPort(prepared.audit, raw)
-
-    with pytest.raises(RunBindingMismatchError):
-        port.append(other_attempt.reference, b"audit")
-    with pytest.raises(RunBindingMismatchError):
-        port.append(wrong_lineage, b"audit")
-
+    raw = RecordingAudit(other_attempt)
+    with pytest.raises(BoundaryBindingError, match="binding"):
+        BoundAuditPort(prepared.audit, raw)
+    assert expected != other_attempt
     assert raw.calls == []
 
 

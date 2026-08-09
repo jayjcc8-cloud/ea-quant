@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import stat
 from contextlib import suppress
@@ -119,6 +120,9 @@ class _AttemptRecord:
     root_identity: tuple[int, int]
     run_identity: tuple[int, int]
     manifest_identity: tuple[int, int]
+    audit_identity: tuple[int, int]
+    writer_lock_identity: tuple[int, int]
+    writer_lock_fd: int
 
 
 class _AttemptCapability:
@@ -172,8 +176,9 @@ class ManifestVerificationCapability(_AttemptCapability):
 class AuditRunBinding:
     """Immutable association between one audit role and its exact attempt authority."""
 
-    __slots__ = ("_authority", "binding", "capability")
+    __slots__ = ("_authority", "_store", "binding", "capability")
     _authority: _AttemptAuthority
+    _store: LocalResultStore
     binding: RunBinding
     capability: AuditCapability
 
@@ -184,18 +189,22 @@ class AuditRunBinding:
         capability: AuditCapability,
         authority: _AttemptAuthority,
         seal: object,
+        store: LocalResultStore | None = None,
     ) -> None:
         if (
             seal is not _BINDING_SEAL
             or type(binding) is not RunBinding
             or type(capability) is not AuditCapability
             or type(authority) is not _AttemptAuthority
+            or type(store) is not LocalResultStore
             or not capability._matches(binding, authority)
+            or authority.store_id is not store._store_id
         ):
             raise StoreError("audit binding requires its exact attempt authority and capability")
         object.__setattr__(self, "binding", binding)
         object.__setattr__(self, "capability", capability)
         object.__setattr__(self, "_authority", authority)
+        object.__setattr__(self, "_store", store)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("audit run binding is immutable")
@@ -366,6 +375,58 @@ class LocalResultStore:
             raise StoreError("child capability does not match its registered attempt")
         return record, child
 
+    def _open_audit_directory(self, prepared: AuditRunBinding) -> tuple[int, _AttemptRecord]:
+        """Open and rebind the fixed audit directory for its opaque prepared binding."""
+        if type(prepared) is not AuditRunBinding or prepared._store is not self:
+            raise StoreError("audit binding belongs to another result store")
+        record = self._record_for(prepared._authority)
+        if not prepared.capability._matches(record.authority.binding, record.authority):
+            raise StoreError("audit binding does not match its registered attempt")
+        root_fd: int | None = None
+        run_fd: int | None = None
+        audit_fd: int | None = None
+        try:
+            root_fd = self._ops.open_root(self._root)
+            root_stat = self._ops.fstat(root_fd)
+            if (
+                not stat.S_ISDIR(root_stat.st_mode)
+                or self._identity(root_stat) != record.root_identity
+            ):
+                raise StoreError("result root identity changed after preparation")
+            run_fd = self._ops.open_dir_at(root_fd, record.run_name)
+            run_stat = self._ops.fstat(run_fd)
+            if (
+                not stat.S_ISDIR(run_stat.st_mode)
+                or stat.S_IMODE(run_stat.st_mode) != 0o700
+                or self._identity(run_stat) != record.run_identity
+            ):
+                raise StoreError("attempt directory identity changed after preparation")
+            audit_fd = self._ops.open_dir_at(run_fd, "audit")
+            audit_stat = self._ops.fstat(audit_fd)
+            lock_stat = os.fstat(record.writer_lock_fd)
+            if (
+                not stat.S_ISDIR(audit_stat.st_mode)
+                or stat.S_IMODE(audit_stat.st_mode) != 0o700
+                or self._identity(audit_stat) != record.audit_identity
+                or not stat.S_ISREG(lock_stat.st_mode)
+                or stat.S_IMODE(lock_stat.st_mode) != 0o600
+                or lock_stat.st_nlink != 1
+                or self._identity(lock_stat) != record.writer_lock_identity
+            ):
+                raise StoreError("audit directory or writer-lock identity changed")
+            returned = audit_fd
+            audit_fd = None
+            return returned, record
+        except StoreError:
+            raise
+        except OSError as exc:
+            raise StoreError("audit directory could not be opened without following links") from exc
+        finally:
+            for descriptor in (audit_fd, run_fd, root_fd):
+                if descriptor is not None:
+                    with suppress(OSError):
+                        self._ops.close(descriptor)
+
     def verify_manifest(
         self,
         capability: ManifestVerificationCapability,
@@ -456,6 +517,10 @@ class LocalResultStore:
         root_identity: tuple[int, int] | None = None
         run_identity: tuple[int, int] | None = None
         manifest_identity: tuple[int, int] | None = None
+        audit_identity: tuple[int, int] | None = None
+        writer_lock_identity: tuple[int, int] | None = None
+        audit_fd: int | None = None
+        writer_lock_fd: int | None = None
         reserved = False
         try:
             if self._root.is_symlink() or self._root.resolve(strict=True) != self._root:
@@ -480,6 +545,33 @@ class LocalResultStore:
 
             self._ops.mkdir_at(run_fd, "audit", 0o700)
             self._ops.mkdir_at(run_fd, "outputs", 0o700)
+            audit_fd = self._ops.open_dir_at(run_fd, "audit")
+            audit_stat = self._ops.fstat(audit_fd)
+            if not stat.S_ISDIR(audit_stat.st_mode) or stat.S_IMODE(audit_stat.st_mode) != 0o700:
+                raise StoreError("audit directory must be a real 0700 directory")
+            audit_identity = self._identity(audit_stat)
+            writer_lock_fd = os.open(
+                "writer-v1.lock",
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=audit_fd,
+            )
+            writer_lock_stat = os.fstat(writer_lock_fd)
+            if (
+                not stat.S_ISREG(writer_lock_stat.st_mode)
+                or stat.S_IMODE(writer_lock_stat.st_mode) != 0o600
+                or writer_lock_stat.st_nlink != 1
+            ):
+                raise StoreError("writer lock must be one regular 0600 file")
+            writer_lock_identity = self._identity(writer_lock_stat)
+            try:
+                fcntl.flock(writer_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise StoreError("writer lock already has an active owner") from exc
+            os.fsync(writer_lock_fd)
+            os.fsync(audit_fd)
+            self._close(audit_fd)
+            audit_fd = None
             manifest_fd = self._ops.create_file_at(run_fd, "manifest.json", 0o600)
             manifest_stat = self._ops.fstat(manifest_fd)
             if (
@@ -515,7 +607,14 @@ class LocalResultStore:
                 reference=manifest.reference,
                 manifest_sha256=manifest_digest,
             )
-            if root_identity is None or run_identity is None or manifest_identity is None:
+            if (
+                root_identity is None
+                or run_identity is None
+                or manifest_identity is None
+                or audit_identity is None
+                or writer_lock_identity is None
+                or writer_lock_fd is None
+            ):
                 raise StoreError("durable attempt identities were not captured")
             authority = _AttemptAuthority(
                 store_id=self._store_id,
@@ -537,6 +636,7 @@ class LocalResultStore:
                     capability=audit_capability,
                     authority=authority,
                     seal=_BINDING_SEAL,
+                    store=self,
                 ),
                 output=OutputRunBinding(
                     binding=binding,
@@ -553,9 +653,13 @@ class LocalResultStore:
                 root_identity=root_identity,
                 run_identity=run_identity,
                 manifest_identity=manifest_identity,
+                audit_identity=audit_identity,
+                writer_lock_identity=writer_lock_identity,
+                writer_lock_fd=writer_lock_fd,
             )
             with self._registry_lock:
                 self._attempts[authority.attempt_token] = record
+            writer_lock_fd = None
             return prepared
         except StoreError:
             raise
@@ -572,7 +676,10 @@ class LocalResultStore:
             raise StoreError(message) from exc
         finally:
             # Cleanup is descriptor-only. Files and directories are deliberately never removed.
-            for descriptor in (read_fd, manifest_fd, run_fd, root_fd):
+            for descriptor in (writer_lock_fd, audit_fd, read_fd, manifest_fd, run_fd, root_fd):
                 if descriptor is not None:
                     with suppress(OSError):
-                        self._ops.close(descriptor)
+                        if descriptor is writer_lock_fd:
+                            os.close(descriptor)
+                        else:
+                            self._ops.close(descriptor)
