@@ -81,17 +81,28 @@ runtime closure do not fit this repository's accepted boundaries.
 Ownership is fixed:
 
 ```text
-ea.core.audit                immutable records, acknowledgements, codecs, digests
-ea.runtime.coordinator       serialized lifecycle and audit-gate policy
-ea.experiments.audit         concrete local POSIX journal adapter
-ea.composition               construction and binding of all concrete/inner owners
+ea.core.audit                 immutable records, acknowledgements, codecs, digests
+ea.core.lifecycle             dependency-neutral lifecycle ports and values
+ea.runtime.coordinator        serialized lifecycle and audit-gate policy over core ports
+ea.runtime.authorization      dormant/active submission-authorization authority
+ea.experiments.audit          concrete local POSIX journal adapter
+ea.composition.lifecycle      sealed joint construction of concrete/inner owners
 ```
 
 `ea.runtime` may import `ea.core` and consumer-owned protocols. It must not import
-`ea.experiments`, configuration, composition, a filesystem adapter, or a vendor SDK.
+`ea.execution`, `ea.strategy`, `ea.portfolio`, `ea.risk`, `ea.experiments`, configuration,
+composition, a filesystem adapter, or a vendor SDK. `ea.core.lifecycle` defines structural
+`HistoricalMatcherPort`, `ExecutionFactAuthorityPort`, `ExecutionEvidenceResolverPort`,
+`PortfolioFreshnessPort`, `RiskFreshnessPort`, `GlobalHaltFreshnessPort`,
+`InstrumentGateFreshnessPort`, and
+`RuntimeLifecyclePort`. Their arguments and results are focused immutable `ea.core` values.
+Execution, portfolio, risk, and runtime authorities satisfy these protocols structurally or
+through sealed composition-owned adapters; the coordinator never checks or imports their concrete
+classes.
+
 `ea.experiments.audit` may import the core audit/run values and the store capability, but no
 strategy, portfolio, risk, execution, matcher, or runtime policy. Composition is the only layer
-that imports both the concrete journal and the runtime coordinator.
+that imports concrete execution/runtime authorities, the journal, and the coordinator.
 
 The audit authority owns durable audit identity and order. It does not decide whether a strategy,
 risk decision, Order, Fill, or ledger mutation is correct. The coordinator owns stage order and
@@ -130,26 +141,62 @@ run_terminal_state
 Each record kind maps to exactly one subject kind. Unknown values fail; human text never selects
 control flow.
 
-Every kind also owns one closed canonical payload schema:
+Every payload below is exact UTF-8, ASCII-safe, key-sorted compact JSON using
+`"canonicalization":"ea-canonical-json-v1"`. IDs, instruments, runtime root keys, policies, and
+UTC values reuse their existing accepted canonical JSON projections; they are never `repr` or
+free-form strings. Unknown, missing, extra, duplicate, coerced, or non-canonical fields fail.
 
-- `run.prepared` carries the exact `RunBinding` and manifest-file digest;
-- `matcher.dispatch_batch` carries dispatch kind/sequence, trigger-root key/digest, canonical
-  batch digest, ingress count, and the domain-separated digest of the ordered ingress-digest
-  tuple; it does not duplicate an arbitrarily large batch body;
-- `execution.fact_processing_outcome` carries the complete canonical outcome bytes;
-- `submission.pre_effect_authorization` carries the exact Order/request/root and current
-  portfolio/risk/halt/instrument-gate/authorization-state bindings defined below;
-- `runtime.failing_safety_transition` carries the prior/new coordinator-state digests, one closed
-  failure code, failed logical record key, and active dispatch identity;
-- `runtime.dispatch_completed` carries the root and batch digests, outcome count, the
-  domain-separated digest of the ordered outcome-acknowledgement digest tuple, and resulting
-  coordinator-state digest; and
-- `run.terminal` carries the terminal coordinator-state digest, last dispatch identity, and audit
-  chain head before the terminal record.
+The seven schemas and subject digests are normative:
 
-The batch and dispatch-completion schemas use count plus ordered aggregate digest so record size
-does not grow with the number of pending Orders. The authoritative matcher/fact-owner histories
-retain the complete canonical subjects and must reproduce the aggregates during recovery.
+| Record kind | Exact payload fields in addition to `schema` and `canonicalization` | Subject digest |
+|---|---|---|
+| `run.prepared` | `run_id`, `lineage_sha256`, `manifest_sha256` | the exact plain persisted `manifest_sha256` |
+| `matcher.dispatch_batch` | `run_id`, `dispatch_kind`, `dispatch_sequence`, `trigger_root_key`, `trigger_root_sha256`, `batch_sha256`, `ingress_count`, `ordered_ingress_sha256s_sha256` | existing `historical_matcher_dispatch_batch_digest(batch)` |
+| `execution.fact_processing_outcome` | the existing complete canonical `ExecutionFactProcessingOutcome` object, unchanged | existing `execution_fact_processing_outcome_digest(outcome)` |
+| `submission.pre_effect_authorization` | `run_id`, `order_id`, `order_sha256`, `execution_request_sha256`, `causal_market_sha256`, `causal_root_key`, `dispatch_sequence`, `portfolio_snapshot_version`, `risk_state_version`, `global_halt_epoch`, `risk_halt_epoch`, `held_for_order_id`, `instrument_gate_id`, `instrument_gate_version`, `authorization_state_version`, `instrument_spec_set_id`, `instrument_spec_set_sha256`, `execution_policy_id`, `execution_policy_sha256` | SHA-256 of `b"ea.audit-subject.submission-authorization.v1\0" + payload_length_u64 + payload` |
+| `runtime.failing_safety_transition` | `run_id`, `previous_state_sha256`, `failing_state_sha256`, `failure_code`, `failed_record_kind`, `failed_subject_kind`, `failed_subject_sha256`, `dispatch_sequence`, `trigger_root_sha256` | SHA-256 of `b"ea.audit-subject.failing-safety.v1\0" + payload_length_u64 + payload` |
+| `runtime.dispatch_completed` | `run_id`, `dispatch_kind`, `dispatch_sequence`, `trigger_root_key`, `trigger_root_sha256`, `batch_sha256`, `outcome_count`, `ordered_outcome_ack_sha256s_sha256`, `pre_ack_state_sha256` | SHA-256 of `b"ea.audit-subject.dispatch-completed.v1\0" + payload_length_u64 + payload` |
+| `run.terminal` | `run_id`, `terminal_kind`, `last_dispatch_sequence`, `last_trigger_root_sha256`, `pre_terminal_state_sha256`, `previous_chain_head_sha256` | SHA-256 of `b"ea.audit-subject.run-terminal.v1\0" + payload_length_u64 + payload` |
+
+Their schema literals are respectively `ea.audit-run-prepared.v1`,
+`ea.audit-matcher-dispatch-batch.v1`, the already accepted execution-outcome schema,
+`ea.audit-submission-authorization.v1`, `ea.audit-failing-safety.v1`,
+`ea.audit-dispatch-completed.v1`, and `ea.audit-run-terminal.v1`. `terminal_kind` is exactly
+`success|failed`.
+
+An ordered digest tuple aggregate is exactly:
+
+```text
+SHA-256(domain || count_u64 || digest_1_raw_32 || ... || digest_count_raw_32)
+```
+
+The domains are `b"ea.audit-ordered-ingress-digests.v1\0"` and
+`b"ea.audit-ordered-outcome-ack-digests.v1\0"`. Count zero is allowed and hashes the domain plus
+eight zero bytes, producing respectively
+`2438409ca5926710ca25fea083cf1a53c582ed679a2bdb84fdfa3ce62dab8027` and
+`6a2fb6988624cc65253db3cf79f653c16a6f2ad11aa7a1a1ca785f82bc8995a1`.
+Count must equal the authoritative tuple length. Batch and completion payloads use only count plus
+this aggregate, so record size does not grow with pending Orders; recovery must reproduce the
+complete tuple from matcher/fact-owner histories.
+
+For schema-wire evidence, the exact empty-batch audit payload projection is:
+
+```json
+{"batch_sha256":"3333333333333333333333333333333333333333333333333333333333333333","canonicalization":"ea-canonical-json-v1","dispatch_kind":"market","dispatch_sequence":1,"ingress_count":0,"ordered_ingress_sha256s_sha256":"2438409ca5926710ca25fea083cf1a53c582ed679a2bdb84fdfa3ce62dab8027","run_id":"123e4567-e89b-42d3-a456-426614174000","schema":"ea.audit-matcher-dispatch-batch.v1","trigger_root_key":{"adjustment":"raw","available_at":"2026-01-02T09:31:00.000000Z","domain_rank":30,"event_time":"2026-01-02T09:31:00.000000Z","instrument":{"symbol":"AAPL","venue":"XNAS"},"interval_end":"2026-01-02T09:31:00.000000Z","interval_start":"2026-01-02T09:30:00.000000Z","kind_rank":0,"revision":0,"root_domain":"market_data","source":"primary.raw","source_sequence":0},"trigger_root_sha256":"4444444444444444444444444444444444444444444444444444444444444444"}
+```
+
+It is 854 bytes with plain payload SHA-256
+`3844a34eae4ec7ea554295efac053e296c867e2e0f94fb2aba7fbb414926e670`. The `batch_sha256`
+field remains subject to independent reconstruction from a real canonical matcher batch.
+
+The exact pre-terminal payload projection is:
+
+```json
+{"canonicalization":"ea-canonical-json-v1","last_dispatch_sequence":2,"last_trigger_root_sha256":"3333333333333333333333333333333333333333333333333333333333333333","pre_terminal_state_sha256":"4444444444444444444444444444444444444444444444444444444444444444","previous_chain_head_sha256":"5555555555555555555555555555555555555555555555555555555555555555","run_id":"123e4567-e89b-42d3-a456-426614174000","schema":"ea.audit-run-terminal.v1","terminal_kind":"success"}
+```
+
+It is 465 bytes and its domain-separated terminal subject digest is
+`b1f57635f5e910d7c64f2caee133efe8c388ff5f357a2e1325b51f0f10b23514`.
 
 Audit identity reuses the existing `EconomicId` with
 `owner_kind == EconomicOwnerKind.AUDIT_RECORD`. Its owner sequence equals the journal sequence.
@@ -158,11 +205,11 @@ excludes journal sequence and payload so an exact logical retry finds the origin
 `EconomicId` after a crash before the caller received its acknowledgement. The same logical key
 plus different canonical payload is a conflict.
 
-`AuditRecord` is factory-only, immutable, schema version one, and contains:
+`AuditRecord` is factory-only and immutable. Its canonical header is the exact JSON object:
 
 ```text
-schema_version
-canonicalization = "ea-audit-record-v1"
+schema = "ea.audit-record-header.v1"
+canonicalization = "ea-canonical-json-v1"
 run_id
 lineage_sha256
 manifest_sha256
@@ -171,21 +218,33 @@ record_kind
 subject_kind
 subject_sha256
 payload_sha256
-payload_hex
 previous_record_sha256
 previous_chain_head_sha256
 ```
 
 The record ID owner sequence is in `1..2**64-1`, begins at one, and is contiguous. Sequence one
-uses the domain-defined empty record digest and empty chain head. `payload_hex` is the lowercase,
-even-length encoding of exact canonical payload bytes; the decoded payload is non-empty and at
-most 786,432 bytes. The plain payload SHA-256 is checked before record construction.
-
-Record bytes are sorted compact UTF-8 JSON with no insignificant whitespace. UTC time does not
-appear in the envelope. The record digest domain is:
+uses these literal constants:
 
 ```text
-b"ea.audit-record.v1\0"
+empty_record_sha256 = SHA-256(b"ea.audit-empty-record.v1\0")
+                    = 4af7f9585d80e83ffefb82fd9993e42a0e5bcca05a957c2d66f7e6ec5af602cd
+empty_chain_head_sha256 = SHA-256(b"ea.audit-empty-chain.v1\0")
+                        = daf430a5dce8e5d21acb79e2c4aa92b0da9f42108d96847e3da260cdbf271b75
+```
+
+The raw canonical payload is stored separately from the header. Its plain SHA-256 must equal the
+header field. The canonical audit-record byte sequence is exact binary framing, not JSON hex:
+
+```text
+header_length_u64 || canonical_header_json || payload_length_u64 || canonical_payload
+```
+
+Header length is in `1..4_096`. Payload length is constrained by kind: `run.prepared`, batch,
+failing-safety, completion, and terminal are at most 4,096 bytes; fact outcome and submission
+authorization are at most 16,384 bytes. The record digest is:
+
+```text
+SHA-256(b"ea.audit-record.v1\0" || canonical_audit_record_bytes)
 ```
 
 The next chain head is SHA-256 over:
@@ -197,13 +256,33 @@ b"ea.audit-chain.v1\0" + previous_chain_head_raw_32 + record_sha256_raw_32
 Wall time, monotonic time, process ID, thread ID, filesystem inode, Python hash, object identity,
 and exception text never enter canonical bytes or ordering.
 
+One normative sequence-one vector uses run ID `123e4567-e89b-42d3-a456-426614174000`, lineage
+`11` repeated 32 bytes, and manifest digest `22` repeated 32 bytes. Its exact payload is:
+
+```json
+{"canonicalization":"ea-canonical-json-v1","lineage_sha256":"1111111111111111111111111111111111111111111111111111111111111111","manifest_sha256":"2222222222222222222222222222222222222222222222222222222222222222","run_id":"123e4567-e89b-42d3-a456-426614174000","schema":"ea.audit-run-prepared.v1"}
+```
+
+Payload length is `296` and payload SHA-256 is
+`6186ae20684529abcb8b9008e94548235cf9979f76ec72f1aab50455c2db44a1`. Its exact header is:
+
+```json
+{"canonicalization":"ea-canonical-json-v1","lineage_sha256":"1111111111111111111111111111111111111111111111111111111111111111","manifest_sha256":"2222222222222222222222222222222222222222222222222222222222222222","payload_sha256":"6186ae20684529abcb8b9008e94548235cf9979f76ec72f1aab50455c2db44a1","previous_chain_head_sha256":"daf430a5dce8e5d21acb79e2c4aa92b0da9f42108d96847e3da260cdbf271b75","previous_record_sha256":"4af7f9585d80e83ffefb82fd9993e42a0e5bcca05a957c2d66f7e6ec5af602cd","record_id":{"owner_kind":"audit.record","owner_sequence":1,"run_id":"123e4567-e89b-42d3-a456-426614174000"},"record_kind":"run.prepared","run_id":"123e4567-e89b-42d3-a456-426614174000","schema":"ea.audit-record-header.v1","subject_kind":"run_manifest","subject_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}
+```
+
+Header length is `821`; record digest is
+`d8a3dce4093e148449b1c07b66b99c640732adb49446135be12645b64875b1b8`; resulting chain head is
+`3fca3a84a1cf211e48b674197476396fc4be8184551c9a5f6fbf6f4c4200aa76`; and frame checksum is
+`578e6e89482f060c57521d2b1c22379004c7d8125d3d38480bc7fac6de09fe7b`.
+
 ### Canonical acknowledgement
 
-`AuditAppendAcknowledgement` is a factory-only immutable value containing:
+`AuditAppendAcknowledgement` is a factory-only immutable value whose exact canonical JSON fields
+are:
 
 ```text
-schema_version
-canonicalization = "ea-audit-append-acknowledgement-v1"
+schema = "ea.audit-append-acknowledgement.v1"
+canonicalization = "ea-canonical-json-v1"
 run_id
 lineage_sha256
 manifest_sha256
@@ -216,11 +295,20 @@ record_sha256
 chain_head_sha256
 ```
 
-Its canonical digest domain is:
+Its digest is:
 
 ```text
-b"ea.audit-append-acknowledgement.v1\0"
+SHA-256(b"ea.audit-append-acknowledgement.v1\0" + canonical_acknowledgement_json)
 ```
+
+For the sequence-one vector, the exact acknowledgement JSON is:
+
+```json
+{"canonicalization":"ea-canonical-json-v1","chain_head_sha256":"3fca3a84a1cf211e48b674197476396fc4be8184551c9a5f6fbf6f4c4200aa76","lineage_sha256":"1111111111111111111111111111111111111111111111111111111111111111","manifest_sha256":"2222222222222222222222222222222222222222222222222222222222222222","payload_sha256":"6186ae20684529abcb8b9008e94548235cf9979f76ec72f1aab50455c2db44a1","record_id":{"owner_kind":"audit.record","owner_sequence":1,"run_id":"123e4567-e89b-42d3-a456-426614174000"},"record_kind":"run.prepared","record_sha256":"d8a3dce4093e148449b1c07b66b99c640732adb49446135be12645b64875b1b8","run_id":"123e4567-e89b-42d3-a456-426614174000","schema":"ea.audit-append-acknowledgement.v1","subject_kind":"run_manifest","subject_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}
+```
+
+Its acknowledgement digest is
+`d9c5b61de36ae0a60c57d8975239470af0c99d211d9fcd736b1decbbd35dbc4d`.
 
 An acknowledgement is valid only when reconstructed from a frame read back from the journal and
 all fields bind the requested record. A run-binding-only response, caller-constructed value,
@@ -260,6 +348,28 @@ The existing `RawAuditPort`/`BoundAuditPort` boundary evolves to return the type
 and verify the complete `RunBinding`. The store capability remains pathless outside
 `ea.experiments`; no runtime caller receives an audit directory or file descriptor.
 
+Fresh construction remains possible only from the exact `AuditRunBinding` issued by
+`LocalResultStore.prepare`. The adapter factory receives that opaque binding, not a path. It
+resolves the fixed audit child through the originating store registry and transfers the already
+held writer lease described below.
+
+ADR 0006's prohibition on adopting or retrying an existing reservation remains the default, but
+this ADR narrowly supersedes it for recovery of the same incomplete attempt. A new outer
+`verify_incomplete_run_recovery` operation must consume a tracked-launcher preflight, no-follow
+open the configured result root and exact run-ID child, verify manifest bytes/digest and current
+code/configuration/data/runtime lineage, prove that no terminal audit record exists, and issue a
+factory-only `VerifiedRecoveryBinding`. Then and only then:
+
+```python
+LocalResultStore.recover_incomplete_attempt(
+    verified: VerifiedRecoveryBinding,
+) -> RecoveredRun
+```
+
+reissues new process-local audit/output/manifest capabilities for the same `RunBinding`. It does
+not generate a run ID, reserve a directory, rewrite the manifest, adopt a different lineage, or
+permit recovery after terminal completion.
+
 ### POSIX v1 journal format
 
 The concrete adapter owns one file at the fixed store-controlled name:
@@ -268,30 +378,44 @@ The concrete adapter owns one file at the fixed store-controlled name:
 <attempt>/audit/audit-v1.journal
 ```
 
-It is created exactly once with `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`, mode `0600`, beneath
-already verified no-follow directory descriptors. There is no caller-supplied path or filename.
-The preamble is the exact ASCII bytes `EA-AUDIT-V1\n`.
+During initial attempt reservation the store exclusively creates
+`<attempt>/audit/writer-v1.lock` with `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`, mode `0600`, and takes
+one non-blocking POSIX exclusive `flock` before the prepared attempt can escape. The store retains
+that descriptor across manifest publication and transfers its lease to the audit adapter. A
+recovery process no-follow opens the verified existing lock file and must acquire the same lock
+before capabilities are reissued. Failure to acquire it returns `validation.conflicting_id`; it
+never waits, steals, or guesses. Process exit releases the OS lease. Advisory locking is the
+project's accidental-concurrent-writer boundary, not a defense against a malicious process that
+ignores it.
+
+The journal is created exactly once with `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`, mode `0600`,
+beneath already verified no-follow directory descriptors. Recovery opens only that existing file.
+There is no caller-supplied path or filename. The preamble is the exact ASCII bytes
+`EA-AUDIT-V1\n`.
 
 Every frame is:
 
 ```text
-8-byte unsigned big-endian payload length
-canonical AuditRecord bytes
-32 raw bytes: SHA-256(b"ea.audit-frame.v1\0" + length_bytes + record_bytes)
+header_length_u64
+canonical AuditRecord header JSON
+payload_length_u64
+raw canonical payload
+32 raw bytes: SHA-256(b"ea.audit-frame.v1\0" + canonical_audit_record_bytes)
 ```
 
-The length is in `1..1_048_576`. A complete frame with a bad checksum, non-canonical record,
-invalid sequence, duplicate/conflicting ID, broken record link, broken chain head, wrong binding,
-or bytes after an invalid frame is committed corruption. Reopen fails closed and does not append,
-truncate, skip, resynchronize, or guess.
+The two lengths obey the kind-specific limits above. A complete frame with a bad checksum,
+non-canonical header/payload, invalid sequence, duplicate/conflicting ID, broken record link,
+broken chain head, or wrong binding is committed corruption. Reopen fails closed and does not
+append, truncate, skip, resynchronize, or guess.
 
-An EOF inside only the final header, final payload, or final checksum is an uncommitted torn tail.
-Because no acknowledgement can precede a complete read-back and `fsync`, reopen may truncate
-exactly that mechanically identified incomplete suffix to the last verified frame, `fsync` the
-journal, and `fsync` the audit directory. It records no synthetic business event. Any incomplete
-region followed by other bytes is not a tail and is corruption. An empty file, wrong/partial
-preamble, or torn first frame before a durable `run.prepared` acknowledgement leaves the attempt
-failed/incomplete and cannot admit runtime.
+While the exclusive writer lease is held, EOF before all bytes declared by the final frame lengths
+or before its complete checksum is the one mechanically identifiable uncommitted torn suffix. All
+remaining bytes are part of that incomplete suffix; v1 makes no impossible claim that a scanner
+can identify separately appended garbage inside it. Recovery may truncate exactly from the first
+byte of that incomplete final frame to the last verified offset, `fsync` the journal, and `fsync`
+the audit directory. It records no synthetic business event. A wrong/partial preamble or any
+complete bad frame is corruption. A preamble-only journal or recovered torn first frame remains
+incomplete and cannot admit runtime until an exact `run.prepared` retry is acknowledged.
 
 This narrow suffix recovery is the only automatic destructive operation. A complete but corrupt
 frame is never repaired in place.
@@ -311,9 +435,11 @@ For one genuinely new record the adapter:
 
 Failure before step 4 returns `durability.audit_append_failed` and publishes no in-memory record.
 The next operation must rescan/recover the physical tail before proceeding. Failure or mismatch
-after step 4 returns `durability.audit_ack_mismatch`, enters a monotone failed state, and never
-authorizes an effect. Recovery may later discover a complete valid record and make an exact retry
-return its acknowledgement; it may not assume success from the previous exception.
+at or after step 4 returns `durability.audit_ack_mismatch`, enters a monotone failed state, and
+never authorizes an effect. If rescan finds a complete valid uncertain frame, an exact retry must
+perform a new successful journal `fsync`, independent positioned read-back, full verification,
+and acknowledgement reconstruction before returning that acknowledgement. Merely observing bytes
+written by the failed attempt never restores effect authority.
 
 The initial file creation writes and `fsync`s the preamble and then `fsync`s the audit directory
 before the first record. The journal file identity and mode are rebound before every append and
@@ -322,24 +448,38 @@ or directory identity drift fails closed.
 
 ### Reopen and bounded resources
 
-Reopen scans from the preamble to EOF, verifies every frame, reconstructs the sequence/index/chain,
-and returns no acknowledgement until scanning completes. It enforces:
+Reopen first holds the writer lease, then scans from the preamble to EOF, verifies every frame,
+reconstructs the sequence/index/chain, and returns no acknowledgement until scanning completes. It
+enforces:
 
-- at most `2**64-1` records and contiguous sequences;
-- maximum 786,432-byte payload and 1,048,576-byte canonical record;
+- at most 400,005 records and contiguous audit owner sequences;
+- the 4,096-byte header and kind-specific 4,096/16,384-byte payload limits;
 - one `run.prepared` at sequence one and no second preparation record;
 - at most one terminal record, after which only exact replay is allowed; and
 - no duplicate logical record ID with different bytes.
 
-For the Phase 1 historical profile let `N <= 1_000_000` be the admitted market-event count from
-ADR 0015. ADR 0017 permits at most one new signal and therefore at most one new Order chain per
-market dispatch. The coordinator admits at most `N` submission authorizations, at most `N`
-matcher fact outcomes, and exactly `N + 1` matcher-batch/dispatch-completion pairs including the
-bounded end. With preparation, at most one failing transition, and one terminal record, the
-journal limit is exactly `4*N + 5`, no more than `4_000_005` frames. The maximum file size is
-therefore the preamble length plus `4_000_005 * (8 + 1_048_576 + 32)` bytes. Construction or
-reopen rejects an authority history that already exceeds the applicable count; later external
-fact sources require a new bounded profile rather than silently increasing it.
+ADR 0015 still permits up to 1,000,000 market events as a data-source capability. This executable
+coordinator profile deliberately admits only `N <= 100_000` market events. ADR 0017 permits at
+most one new signal and one Order chain per market dispatch. The coordinator therefore admits at
+most `N` authorization records, at most `N` matcher outcomes, and exactly `N + 1`
+batch/completion pairs including bounded end. Preparation, at most one failing transition, and one
+terminal record give `4*N + 5 <= 400_005` frames.
+
+A small frame is at most `4_096 + 4_096 + 48 = 8_240` bytes; an outcome/authorization frame is at
+most `4_096 + 16_384 + 48 = 20_528` bytes. The exact worst-case journal bound including the
+12-byte preamble is:
+
+```text
+12 + (2*N + 5) * 8_240 + (2*N) * 20_528
+= 5_753_641_212 bytes when N = 100_000
+```
+
+Composition requires at least 6 GiB currently free on the verified result filesystem before
+runtime admission, sets a hard 6 GiB journal limit, and rejects a proposed frame before writing if
+it would cross that limit. The reopen index is capped at 400,005 entries and 256 MiB measured
+resident memory; construction fails before runtime if the selected implementation cannot honor
+that budget. Scanning must be linear in verified bytes plus records, with no per-record historical
+rescan. Later external facts or a larger executable profile require a new bounded decision.
 
 The implementation may keep an in-memory record-ID to verified-offset index for the current
 process. That index is a cache; reopen derives authority only from the journal. Iteration order of
@@ -350,12 +490,50 @@ a dictionary never selects canonical order.
 `Phase1HistoricalLifecycleCoordinator` is factory-only and bound by identity to:
 
 - one `RunBinding` and admitted `AuditAppendPort`;
-- one `Phase1HistoricalMarketRuntime`;
-- one `Phase1HistoricalMatcher`;
-- one `CausalDescendantFactDispatchVerifier` already bound to those authorities;
-- one `Phase1ExecutionFactAuthority`; and
-- focused read-only resolver ports needed to reconstruct a Fill or projection named by an
-  `ExecutionFactProcessingOutcome`.
+- one dependency-neutral `RuntimeLifecyclePort`;
+- one `HistoricalMatcherPort`;
+- one descendant verification port already bound to those authorities;
+- one `ExecutionFactAuthorityPort`;
+- one `ExecutionEvidenceResolverPort` that resolves the exact historical Fill/projection named by
+  an outcome; and
+- one dormant-then-active `HistoricalSubmissionAuthorizationAuthority` plus its independent
+  portfolio, risk, global-halt, and instrument-gate freshness ports.
+
+The matcher port exposes only `run_id`, `spec_set`, `source_namespace`,
+`match_active_market_root`, `expire_at_active_end`, and read-only exact batch resolution by
+dispatch sequence/root digest. The fact port exposes only `run_id`, `spec_set`,
+`process_ingress`, exact outcome lookup by ingress identity, and read-only Fill/projection
+resolution. The runtime port exposes exact run/spec bindings, `active_lease`, `pop`,
+`acknowledge`, `terminal_acknowledged`, and retained trace evidence. These structural protocols are
+defined in `ea.core.lifecycle`; they do not reveal private authority state or concrete modules.
+
+#### Joint construction and authorization cycle
+
+One outer factory is the only production construction surface:
+
+```python
+create_phase1_historical_lifecycle(...) -> Phase1HistoricalLifecycle
+```
+
+It executes in one stack frame, publishes nothing until complete, and performs exactly:
+
+1. create a dormant authorization authority with static run/spec/policy/audit/runtime and
+   freshness-port bindings; its public binding properties are readable, but authorization and
+   proof verification always fail `durability.audit_append_failed` while dormant;
+2. create the matcher with that dormant object as its required structural verifier;
+3. create descendant verification and the fact authority from runtime/matcher/order issuance;
+4. create the coordinator over only the dependency-neutral ports;
+5. consume a private one-use factory seal to bind the dormant authorization authority to the exact
+   coordinator identity and a private preparation capability, revalidate every static binding,
+   and atomically activate it; and
+6. return one immutable `Phase1HistoricalLifecycle` bundle containing the coordinator and
+   intentionally public read-only views, while keeping the preparation capability private.
+
+No dormant or partially constructed object is stored globally, passed to a callback, or returned.
+Any exception clears the local one-use seal and abandons all objects; none can later activate. A
+second activation, foreign coordinator, equal clone, changed binding, or verification call during
+construction fails closed. This is the only two-phase construction in the lifecycle and does not
+permit general mutable rebinding.
 
 Construction verifies exact run/spec/policy/source bindings and performs no pop, append, match,
 fact processing, handoff, or acknowledgement. The authority exposes:
@@ -363,34 +541,52 @@ fact processing, handoff, or acknowledgement. The authority exposes:
 ```python
 coordinator.process_next_dispatch() -> CoordinatorDispatchOutcome
 coordinator.retry_active_dispatch() -> CoordinatorDispatchOutcome
-coordinator.prepare_submission_authorization(...) -> AuditAppendAcknowledgement
-coordinator.verify_authorized_historical_submission(...) -> HistoricalSubmissionAuthorizationProof
+coordinator.retry_terminalization() -> CoordinatorTerminalOutcome
+coordinator.prepare_submission_authorization(
+    order: Order,
+    *,
+    causal_market_root: MarketDataEnvelope,
+    dispatch_sequence: int,
+) -> AuditAppendAcknowledgement
 ```
 
 `process_next_dispatch` requires no active lease, pops exactly one runtime root, and then executes
 that active causal unit. `retry_active_dispatch` requires the exact retained active lease and
 replays only missing stages. Neither operation loops over an unbounded run.
 
-The coordinator itself satisfies `HistoricalSubmissionAuthorizationVerifier`. No other production
-object can mint the opaque matcher proof.
+The separate authorization authority structurally satisfies the execution-owned
+`HistoricalSubmissionAuthorizationVerifier`; runtime does not import that Protocol. Only the
+coordinator owns its private preparation capability. The matcher receives only the verifier
+surface, and no other production object can append authorization or mint the opaque proof.
 
 ### Coordinator state
 
 `CoordinatorRunState` is closed and monotone:
 
 ```text
-admitted -> running -> draining -> terminal
-                    \-> failing -> draining -> terminal_failed
+admitted -> running -> draining -> terminalizing -> terminal
+                    \-> failing -> draining -> terminalizing -> terminal_failed
 ```
 
 `failing` blocks new strategy, portfolio, risk, Order creation, and submission authorization. It
-does not discard already admitted roots or real matcher facts. `terminal` and `terminal_failed`
-never reopen.
+does not discard already admitted roots or real matcher facts. `terminalizing` has no active lease,
+admits no root or submission, and permits only exact `retry_terminalization`. `terminal` and
+`terminal_failed` never reopen.
 
-The canonical coordinator state records the run binding, state version, current/last dispatch
-sequence and root digest, matcher batch digest, ordered ingress/outcome/audit acknowledgement
-digests, missing audit record IDs, monotone halt/failing reason code, and terminal audit chain
-head. Its codec is strict and versioned. Same state version plus different bytes is a conflict.
+The canonical non-terminal coordinator state records the run binding, state version, current/last
+dispatch sequence and root digest, matcher batch digest, ordered ingress/outcome/audit
+acknowledgement digests, missing audit logical keys, monotone halt/failing reason code, and the
+last already acknowledged audit chain head. A missing append has no record ID; its logical key is
+replaced by the assigned `EconomicId` only after a verified acknowledgement.
+
+`PreTerminalCoordinatorState` is constructed only after the bounded-end dispatch-completion
+record is acknowledged and the runtime terminal lease is acknowledged. It contains the intended
+terminal kind and audit chain head before `run.terminal`; it contains no terminal-record ID,
+terminal acknowledgement, or final chain head. The terminal payload binds its digest. After the
+terminal record is acknowledged, `TerminalCoordinatorState` adds that record ID,
+acknowledgement digest, and resulting final chain head. The terminal record never contains the
+final state digest, so no digest cycle exists. All state codecs are strict and versioned. Same
+state version plus different bytes is a conflict.
 
 `CoordinatorDispatchOutcome` is immutable and binds the active root, matcher batch, every ordered
 audited handoff, dispatch-completion acknowledgement, runtime acknowledgement state, and the
@@ -405,7 +601,7 @@ For one active market root the coordinator performs exactly:
 2. call `match_active_market_root(root, dispatch_sequence=lease.dispatch_sequence)`;
 3. append/verify `matcher.dispatch_batch` for the exact canonical batch;
 4. for each returned ingress in batch order, call the bound descendant verifier through
-   `Phase1ExecutionFactAuthority.process_ingress`;
+   `ExecutionFactAuthorityPort.process_ingress`;
 5. append/verify `execution.fact_processing_outcome` for that exact immutable outcome;
 6. construct an `AuditedExecutionFactHandoff` only from the outcome plus its exact
    acknowledgement and authority-resolved Fill/projection evidence;
@@ -427,15 +623,57 @@ only after every descendant and audited economic handoff for the active root has
 For an active `EndOfRunRoot`, step 2 calls
 `expire_at_active_end(end_root, dispatch_sequence=lease.dispatch_sequence)`. Every expiry ingress
 uses the identical descendant, fact-processing, audit-before-handoff, dispatch-completion, and
-runtime-acknowledgement order. Only after all expiry outcomes are durable may the coordinator
-append `run.terminal` and enter `terminal` or `terminal_failed`.
+runtime-acknowledgement order. The unique terminal choreography is:
+
+1. verify the exact bounded-end matcher batch and every outcome acknowledgement;
+2. append/verify `runtime.dispatch_completed` while the terminal lease remains active;
+3. rebind and call `runtime.acknowledge(lease)`;
+4. require `active_lease is None` and `terminal_acknowledged is True`, then publish the exact
+   `PreTerminalCoordinatorState` and enter `terminalizing`;
+5. append/verify `run.terminal` whose subject is that pre-terminal-state digest and whose payload
+   binds the audit chain head before the terminal record; and
+6. construct the final `TerminalCoordinatorState` from the verified terminal acknowledgement and
+   enter `terminal` or `terminal_failed`.
+
+If step 3 raises while the exact active lease remains, `retry_active_dispatch` repeats only the
+runtime acknowledgement after rebinding the completion record. If the runtime reports no active
+lease and exact terminal acknowledgement despite an exceptional return, the coordinator verifies
+the retained trace and proceeds to step 4; any contradictory state is a monotone conflict. Failure
+at step 5 retains `terminalizing`, no active lease, and the exact pre-terminal state;
+`retry_terminalization` retries only the same logical terminal record. No operation pops another
+root in either case.
 
 Terminal audit closes this coordinator slice but does not claim that result/report durability or
 the complete reproducible-run terminal verifier exists.
 
+### Closed failure and retry matrix
+
+Every stage has one controlling recovery operation:
+
+| Failed boundary | Authoritative retained evidence | State and permitted drain | Only retry path |
+|---|---|---|---|
+| matcher call before batch publication | active lease plus matcher state; no assumed batch | enter `failing`; query exact batch resolution; no handoff/submission | `retry_active_dispatch`, which reuses a resolved batch or repeats the failure-atomic matcher call |
+| `matcher.dispatch_batch` append/ack | matcher-issued batch and all ingresses | enter `failing`; process every already issued ingress and attempt its outcome audit, but expose no handoff | `retry_active_dispatch` exact logical batch append |
+| one outcome append/ack | fact authority's ingress/outcome/Fill/projection | enter `failing`; continue later ingresses in the same batch and attempt their audits; expose only independently acknowledged handoffs after the batch ack also exists | `retry_active_dispatch` exact logical outcome append |
+| failing-safety append/ack | monotone in-memory failing state and failed logical key | remain `failing`; drain issued ingresses; no submission or runtime ack | `retry_active_dispatch` first retries the one failing-safety logical key |
+| dispatch-completion append/ack | batch plus every required outcome acknowledgement | remain current `running|failing`; no runtime ack | `retry_active_dispatch` exact completion append |
+| runtime/source acknowledgement | durable completion ack and exact active lease, or authoritative terminal-ack/trace evidence | no new root; submission remains blocked when failing/end | `retry_active_dispatch` rebinds and repeats only runtime ack, or validates the already committed terminal transition |
+| terminal append/ack | no active lease plus exact `PreTerminalCoordinatorState` | remain `terminalizing`; no root, handoff, or submission | `retry_terminalization` exact logical terminal append |
+
+Any structural/canonical conflict in retained evidence enters monotone `failing` and is not
+automatically repaired. An unallocated failed append is tracked only by logical key. A verified
+acknowledgement replaces it with the assigned record ID; later records cannot steal that identity
+because the journal sequence is derived only from verified prefix order.
+
+The Phase 1 coordinator accepts only the official historical runtime/source commit contract from
+ADR 0016: a declared acknowledgement failure leaves the exact active lease and source candidate
+unchanged. After any unexpected exception it accepts only those same unchanged bindings, or for
+bounded end the independently verifiable `active_lease is None`, terminal acknowledgement, and
+matching retained trace. Any third state is a conflict and no later root is admitted.
+
 ### Inbound audit failure and mandatory drain
 
-If one outcome append or acknowledgement fails:
+If a batch or one outcome append/acknowledgement fails:
 
 - the fact authority's already accepted ingress, fact, Fill, projection, and processing outcome
   remain authoritative and are never rolled back or fabricated;
@@ -450,7 +688,7 @@ If one outcome append or acknowledgement fails:
   dispatch-completion record are durable.
 
 After durability recovers, `retry_active_dispatch` replays the matcher batch and fact outcomes,
-uses stable logical record IDs to fill only missing audit records, reconstructs the audited
+uses stable logical keys to fill only missing audit records, reconstructs the audited
 handoffs, writes dispatch completion, and acknowledges the same lease. Failing state remains
 monotone. Later roots may continue mandatory matcher/fact drain, but no new submission is allowed.
 
@@ -461,7 +699,26 @@ transaction, or treats an unavailable acknowledgement as permission.
 
 The later strategy/portfolio/risk extension calls
 `prepare_submission_authorization` only while the same causal market lease remains active. The
-canonical payload binds:
+authorization authority is statically bound to these independent read-only ports:
+
+```python
+portfolio.current_snapshot() -> PortfolioSnapshot
+risk.current_state() -> RiskStateSnapshot
+global_halt.current_state() -> GlobalHaltSnapshot
+instrument_gate.current_for(instrument: Instrument) -> InstrumentGateSnapshot
+```
+
+`GlobalHaltSnapshot` contains exact `run_id`, `halted`, and `global_halt_epoch`.
+`InstrumentGateSnapshot` contains exact `run_id`, instrument, `held_for_order_id|None`,
+`instrument_gate_id`, `instrument_gate_version`, and `halted`. These factory-only core values have
+strict canonical codecs. The concrete existing ledger/risk authorities and later gate authority
+are adapted in composition; no caller supplies their versions or epochs.
+
+The preparation method accepts only the exact Order, active causal root, and dispatch sequence.
+It reads and validates in this fixed order: active runtime lease/root, Order canonical evidence,
+portfolio snapshot, risk state, global halt, instrument gate, then the coordinator's private
+authorization-state version. It then re-reads all six bindings after audit append and before
+retaining the acknowledgement. The canonical payload binds:
 
 - exact Order and execution-request bytes/digests;
 - causal market bytes/digest/root key and dispatch sequence;
@@ -471,7 +728,11 @@ canonical payload binds:
 - coordinator authorization-state version.
 
 The method appends `submission.pre_effect_authorization` and retains the resulting exact
-acknowledgement keyed by Order ID and request digest. It performs no matcher call.
+acknowledgement keyed by the domain-separated authorization subject digest specified above. It
+performs no matcher call. If the Order's portfolio/risk versions are already stale, a halt is set,
+the gate is not held for that Order, or any binding changes during the reads, preparation rejects
+before append with `risk.stale_approval` or `submission.blocked_by_halt` as applicable. Thus
+ordinary freshness drift never becomes same-logical-key/different-payload journal conflict.
 
 The matcher immediately calls `verify_authorized_historical_submission`. That operation re-reads
 the active lease and all current halt, instrument, portfolio, risk, Order, request, causal-root,
@@ -480,9 +741,12 @@ acknowledgement binds the exact request and every state remains fresh. Drift ret
 `risk.stale_approval`, `durability.audit_append_failed`, or
 `durability.audit_ack_mismatch` outcome as applicable and consumes no matcher sequence.
 
-An exact authorization retry may reuse an identical acknowledged record. Any changed economic or
-state-version field produces a different subject/payload and requires a new Order flow; it cannot
-reuse the prior acknowledgement.
+The error priority is structural/canonical conflict, stale portfolio/risk state, active halt or
+lost instrument gate, missing acknowledgement, then acknowledgement mismatch. An exact
+authorization retry may reuse an identical acknowledged record only after the same immediate
+freshness reads pass again. A changed valid Order flow has a new Order/request and authorization
+subject digest. State drift on the old Order rejects before append; it neither reuses the prior
+acknowledgement nor poisons the global audit journal.
 
 ### Recovery boundary
 
@@ -569,7 +833,8 @@ evidence to make durability appear clean is a reconciliation and live-safety fai
   terminal replay;
 - cross-process equality under changed hash seed, timezone, locale, current directory, and
   ambient Decimal context; and
-- unknown/missing/extra fields, non-canonical JSON/hex, wrong binding, and malformed carriers.
+- unknown/missing/extra fields, non-canonical JSON/raw payload, wrong binding, and malformed
+  carriers.
 
 ### Filesystem and failure injection
 
@@ -580,7 +845,9 @@ evidence to make durability appear clean is a reconciliation and live-safety fai
 - complete checksum, canonical-record, sequence, record-link, chain-head, ID, and payload
   corruption with no automatic repair;
 - failure before and after journal `fsync`, lost acknowledgement, reopen, exact retry, and
-  deterministic recovery; and
+  deterministic recovery;
+- fresh/recovery capability issuance, live-writer lease collision, stale/foreign recovery
+  evidence, second recovery, and post-terminal recovery rejection; and
 - two writers, reentrancy, callback exception, and callback state-drift rejection.
 
 ### Coordinator traces
@@ -595,8 +862,11 @@ evidence to make durability appear clean is a reconciliation and live-safety fai
 - real Fill retained while audit is unavailable, with zero ledger/strategy calls;
 - exact active-dispatch retry and restart with no duplicate inner mutation;
 - submission authorization success, stale portfolio/risk/halt/gate/root state, missing ack,
-  mismatched ack, exact retry, and zero matcher sequence on failure; and
-- terminal success/failure with no reopen.
+  mismatched ack, exact retry, and zero matcher sequence on failure;
+- dormant verifier, joint-factory activation failure at every step, no partial escape, and exact
+  coordinator binding; and
+- terminal success/failure, runtime-ack exceptional seams, terminal append failure, and
+  no-active-lease `retry_terminalization`.
 
 ### Properties and boundaries
 
@@ -605,7 +875,8 @@ evidence to make durability appear clean is a reconciliation and live-safety fai
 - no audited handoff exists without the exact outcome acknowledgement;
 - no runtime acknowledgement exists before every required causal record is durable;
 - independently supplied input container order cannot change matcher batch or descendant order;
-- resource limits remain bounded by the Phase 1 source and closed stage vocabulary;
+- `N=100_000` admission, 6 GiB disk, 400,005-entry/256 MiB index, per-kind payload, and linear
+  reopen bounds fail before runtime or before an overflowing frame write;
 - AST imports enforce the declared dependency direction; and
 - focused, official quality/full, coverage, reproducible-wheel, clean-install/doctor, and exact-head
   CI profiles pass on macOS and Linux before independent exact-SHA Verification.
