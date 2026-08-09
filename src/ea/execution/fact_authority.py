@@ -36,6 +36,7 @@ from ea.core.execution_messages import (
     create_fill,
     decode_execution_fact,
     execution_fact_digest,
+    execution_fact_ingress_digest,
     fill_digest,
     order_client_submission_key,
 )
@@ -195,6 +196,7 @@ class _FactAuthorityState:
     client_key_index: Mapping[Sha256Digest, Order]
     venue_index: Mapping[tuple[SourceNamespace, VenueOrderId], Order]
     projection_index: Mapping[EconomicId, OrderProjectionSnapshot]
+    projection_history_index: Mapping[tuple[EconomicId, Sha256Digest], OrderProjectionSnapshot]
     observed_quantity: Mapping[EconomicId, CanonicalDecimal]
     ingresses: tuple[ExecutionFactIngress, ...]
     outcomes: tuple[ExecutionFactProcessingOutcome, ...]
@@ -294,6 +296,57 @@ class Phase1ExecutionFactAuthority:
                 "order_id must be an exact EconomicId",
             )
         return self._state.projection_index.get(order_id)
+
+    def resolve_processing_outcome(
+        self,
+        *,
+        ingress_identity: IngressIdentity,
+        ingress_sha256: Sha256Digest,
+    ) -> ExecutionFactProcessingOutcome | None:
+        """Resolve one exact retained outcome without scanning public history."""
+        if (
+            type(ingress_identity) is not IngressIdentity
+            or type(ingress_sha256) is not Sha256Digest
+        ):
+            raise ExecutionFactAuthorityError(
+                OutcomeCode.INVALID_TYPE,
+                "outcome resolution requires exact ingress identity and digest",
+            )
+        record = self._state.ingress_index.get(ingress_identity)
+        if record is None or execution_fact_ingress_digest(record.ingress) != ingress_sha256:
+            return None
+        return record.outcome
+
+    def resolve_fill(
+        self,
+        *,
+        fill_id: EconomicId,
+        fill_sha256: Sha256Digest,
+    ) -> Fill | None:
+        """Resolve one exact retained Fill by identity and canonical digest."""
+        if type(fill_id) is not EconomicId or type(fill_sha256) is not Sha256Digest:
+            raise ExecutionFactAuthorityError(
+                OutcomeCode.INVALID_TYPE,
+                "Fill resolution requires exact identity and digest",
+            )
+        value = self._state.fill_index.get(fill_id)
+        if value is None or fill_digest(value) != fill_sha256:
+            return None
+        return value
+
+    def resolve_projection_after(
+        self,
+        *,
+        order_id: EconomicId,
+        projection_sha256: Sha256Digest,
+    ) -> OrderProjectionSnapshot | None:
+        """Resolve a historical projection version, not merely the current snapshot."""
+        if type(order_id) is not EconomicId or type(projection_sha256) is not Sha256Digest:
+            raise ExecutionFactAuthorityError(
+                OutcomeCode.INVALID_TYPE,
+                "projection resolution requires exact identity and digest",
+            )
+        return self._state.projection_history_index.get((order_id, projection_sha256))
 
     def observed_quantity_for_order(
         self,
@@ -775,6 +828,7 @@ class Phase1ExecutionFactAuthority:
         client_index = dict(self._state.client_key_index)
         venue_index = dict(self._state.venue_index)
         projection_index = dict(self._state.projection_index)
+        projection_history_index = dict(self._state.projection_history_index)
         observed_quantity = dict(self._state.observed_quantity)
         ingress_index[ingress.identity] = _IngressRecord(
             ingress=ingress,
@@ -803,6 +857,12 @@ class Phase1ExecutionFactAuthority:
         projections = self._state.projections
         if projection.new_projection is not None and resolution.selected_order is not None:
             projection_index[resolution.selected_order.order_id] = projection.new_projection
+            projection_history_index[
+                (
+                    resolution.selected_order.order_id,
+                    order_projection_snapshot_digest(projection.new_projection),
+                )
+            ] = projection.new_projection
             projections = (*projections, projection.new_projection)
         if projection.observed_quantity is not None and resolution.selected_order is not None:
             observed_quantity[resolution.selected_order.order_id] = projection.observed_quantity
@@ -824,6 +884,7 @@ class Phase1ExecutionFactAuthority:
             client_key_index=MappingProxyType(dict(client_index)),
             venue_index=MappingProxyType(dict(venue_index)),
             projection_index=MappingProxyType(dict(projection_index)),
+            projection_history_index=MappingProxyType(dict(projection_history_index)),
             observed_quantity=MappingProxyType(dict(observed_quantity)),
             ingresses=(*self._state.ingresses, ingress),
             outcomes=(*self._state.outcomes, outcome),
@@ -887,6 +948,7 @@ def create_phase1_execution_fact_authority(
         client_key_index=MappingProxyType({}),
         venue_index=MappingProxyType({}),
         projection_index=MappingProxyType({}),
+        projection_history_index=MappingProxyType({}),
         observed_quantity=MappingProxyType({}),
         ingresses=(),
         outcomes=(),
@@ -1135,6 +1197,7 @@ def _state_with_ingress_outcome(
         client_key_index=state.client_key_index,
         venue_index=state.venue_index,
         projection_index=state.projection_index,
+        projection_history_index=state.projection_history_index,
         observed_quantity=state.observed_quantity,
         ingresses=(*state.ingresses, ingress),
         outcomes=(*state.outcomes, outcome),

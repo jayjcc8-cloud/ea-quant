@@ -1,5 +1,9 @@
 """Mode-neutral trusted ingress and runtime ordering primitives."""
 
+from ea.runtime.coordinator import (
+    Phase1HistoricalLifecycleCoordinator,
+    create_phase1_lifecycle_coordinator,
+)
 from ea.runtime.historical import (
     HISTORICAL_RUNTIME_PRODUCER_NAMESPACE,
     HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN,
@@ -20,8 +24,10 @@ from ea.runtime.ingress import (
 )
 from ea.runtime.matcher import (
     CausalDescendantFactDispatchVerifier,
+    HistoricalMatcherDescendantFactDispatchVerifier,
     HistoricalMatcherDispatchVerifierAdapter,
     create_causal_descendant_fact_dispatch_verifier,
+    create_historical_matcher_descendant_fact_dispatch_verifier,
     create_historical_matcher_dispatch_verifier,
 )
 from ea.runtime.queue import (
@@ -33,8 +39,11 @@ from ea.runtime.queue import (
 from ea.runtime.strategy import create_active_market_dispatch_verifier
 
 __all__ = [
+    "Phase1HistoricalLifecycleCoordinator",
+    "create_phase1_lifecycle_coordinator",
     "DeterministicRootQueue",
     "CausalDescendantFactDispatchVerifier",
+    "HistoricalMatcherDescendantFactDispatchVerifier",
     "ExecutionFactIssuanceVerifier",
     "HISTORICAL_RUNTIME_PRODUCER_NAMESPACE",
     "HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN",
@@ -52,6 +61,7 @@ __all__ = [
     "create_deterministic_root_queue",
     "create_causal_descendant_fact_dispatch_verifier",
     "create_historical_matcher_dispatch_verifier",
+    "create_historical_matcher_descendant_fact_dispatch_verifier",
     "create_active_market_dispatch_verifier",
     "create_phase1_execution_fact_ingress_authority",
     "create_phase1_historical_market_runtime",

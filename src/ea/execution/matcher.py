@@ -643,6 +643,25 @@ class Phase1HistoricalMatcher:
     def source_namespace(self) -> SourceNamespace:
         return SourceNamespace(self._source_namespace.value)
 
+    def resolve_dispatch_batch(
+        self,
+        *,
+        dispatch_sequence: int,
+        trigger_root_sha256: Sha256Digest,
+    ) -> HistoricalMatcherDispatchBatch | None:
+        """Resolve one exact retained dispatch batch without replaying mutation."""
+        sequence = _require_dispatch_sequence(dispatch_sequence)
+        if type(trigger_root_sha256) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "trigger_root_sha256 must be exact")
+        self._require_retained_state()
+        token = self._state.dispatch_by_sequence.get(sequence)
+        if token is None:
+            return None
+        record = self._require_dispatch_record(token)
+        if record.root_sha256 != trigger_root_sha256:
+            return None
+        return _SEALED_DISPATCH_RECORDS[token].replay_batch
+
     @property
     def execution_policy(self) -> ExecutionPolicyRef:
         return _clone_policy(self._execution_policy)

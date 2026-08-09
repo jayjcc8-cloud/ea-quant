@@ -2549,6 +2549,11 @@ def _runtime_key_document_from_key(key: RuntimeRootOrderKey) -> dict[str, object
     raise _fail(OutcomeCode.CONFLICTING_ID, "matcher key has unsupported suffix")
 
 
+def runtime_root_order_key_document(key: RuntimeRootOrderKey) -> dict[str, object]:
+    """Return the closed projection for one already-derived runtime root key."""
+    return _runtime_key_document_from_key(key)
+
+
 def canonical_historical_submission_receipt_bytes(
     receipt: HistoricalSubmissionReceipt,
 ) -> bytes:

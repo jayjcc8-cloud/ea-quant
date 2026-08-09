@@ -45,6 +45,8 @@ MAX_AUDIT_JOURNAL_BYTES = 6 * 1024 * 1024 * 1024
 class _AuditOps(Protocol):
     def create_journal(self, audit_fd: int) -> int: ...
 
+    def open_journal(self, audit_fd: int) -> int: ...
+
     def pread(self, journal_fd: int, size: int, offset: int) -> bytes: ...
 
     def pwrite(self, journal_fd: int, data: memoryview, offset: int) -> int: ...
@@ -64,6 +66,13 @@ class _OsAuditOps:
             AUDIT_JOURNAL_NAME,
             os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
             0o600,
+            dir_fd=audit_fd,
+        )
+
+    def open_journal(self, audit_fd: int) -> int:
+        return os.open(
+            AUDIT_JOURNAL_NAME,
+            os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
             dir_fd=audit_fd,
         )
 
@@ -501,6 +510,49 @@ def create_posix_audit_journal(
         raise
     except (FileExistsError, OSError) as error:
         raise StoreError("audit journal could not be durably initialized") from error
+    finally:
+        for descriptor in (journal_fd, audit_fd):
+            if descriptor is not None:
+                with suppress(OSError):
+                    ops.close(descriptor)
+
+
+def reopen_posix_audit_journal(
+    prepared: AuditRunBinding,
+    *,
+    _ops: _AuditOps | None = None,
+) -> PosixAuditJournal:
+    """Reopen, linearly verify and recover only a mechanically torn final suffix."""
+    if type(prepared) is not AuditRunBinding:
+        raise StoreError("audit journal reopen requires an exact AuditRunBinding")
+    ops = _ops or _OsAuditOps()
+    audit_fd: int | None = None
+    journal_fd: int | None = None
+    try:
+        audit_fd, _ = prepared._store._open_audit_directory(prepared)
+        journal_fd = ops.open_journal(audit_fd)
+        value = ops.fstat(journal_fd)
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or stat.S_IMODE(value.st_mode) != 0o600
+            or value.st_nlink != 1
+        ):
+            raise StoreError("reopened audit journal must be one regular 0600 file")
+        journal = PosixAuditJournal(
+            binding=prepared.binding,
+            audit_fd=audit_fd,
+            journal_fd=journal_fd,
+            journal_identity=(value.st_dev, value.st_ino),
+            ops=ops,
+        )
+        journal._rescan(permit_torn_tail=True)
+        audit_fd = None
+        journal_fd = None
+        return journal
+    except (AuditContractError, StoreError):
+        raise
+    except OSError as error:
+        raise StoreError("audit journal could not be reopened") from error
     finally:
         for descriptor in (journal_fd, audit_fd):
             if descriptor is not None:
