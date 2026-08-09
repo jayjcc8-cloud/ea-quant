@@ -3710,7 +3710,7 @@ def test_descendant_lookup_fences_binding_property_state_replacement(
 
 
 @pytest.mark.parametrize("lookup", ["has", "resolve"])
-def test_descendant_lookup_restores_authority_after_teardown_getter_reentry(
+def test_descendant_lookup_does_not_invoke_getter_during_teardown(
     lookup: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3747,6 +3747,80 @@ def test_descendant_lookup_restores_authority_after_teardown_getter_reentry(
         "runtime_identity",
         property(reentering_runtime_identity),
     )
+    if lookup == "has":
+        result: object = matcher.has_issued_ingress(
+            ingress_identity=record.ingress_identity,
+            canonical_ingress_bytes=record.ingress_bytes,
+            canonical_fact_bytes=record.fact_bytes,
+        )
+        assert result is True
+    else:
+        result = matcher.resolve_descendant_binding(
+            ingress_identity=record.ingress_identity,
+            canonical_ingress_bytes=record.ingress_bytes,
+            canonical_fact_bytes=record.fact_bytes,
+        )
+        assert result is record.binding
+
+    assert getter_calls == 1
+    assert not reentered
+    assert matcher_module._MATCHER_DISPATCH_AUTHORITIES[matcher] is trusted_authority
+    assert matcher._state.last_dispatch == trusted_state.last_dispatch == 8
+    assert 9 not in matcher._state.dispatch_by_sequence
+    assert matcher._state.issued == trusted_state.issued
+    assert matcher._mutation_active is False
+    assert matcher._state.conflict is None
+
+
+@pytest.mark.parametrize("lookup", ["has", "resolve"])
+def test_descendant_lookup_blocks_submission_reentry_during_binding_getter(
+    lookup: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, matcher, orders, causal, delayed, _ = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    trusted_state = matcher._state
+    trusted_authority = matcher_module._MATCHER_DISPATCH_AUTHORITIES[matcher]
+    trusted_issued_history = matcher._issued_history_identity
+    trusted_issued_registry = matcher._issued_registry_identity
+    record = trusted_state.issued[0]
+    verifier = cast(_DispatchVerifier, matcher._active_dispatch_verifier)
+    authorization = cast(
+        _AuthorizationVerifier,
+        matcher._submission_authorization_verifier,
+    )
+    authorization_calls = authorization.calls
+    nested_error: HistoricalMatcherError | None = None
+    fired = False
+
+    def reentering_runtime_identity(candidate: _DispatchVerifier) -> object:
+        nonlocal fired, nested_error
+        if candidate is verifier and not fired:
+            fired = True
+            outer_fence = matcher._state
+            object.__setattr__(matcher, "_state", trusted_state)
+            object.__setattr__(matcher, "_mutation_active", False)
+            try:
+                matcher.submit(
+                    orders[1],
+                    causal_market_root=delayed,
+                    dispatch_sequence=8,
+                )
+            except HistoricalMatcherError as error:
+                nested_error = error
+            finally:
+                object.__setattr__(matcher, "_state", outer_fence)
+                object.__setattr__(matcher, "_issued_history_identity", trusted_issued_history)
+                object.__setattr__(matcher, "_issued_registry_identity", trusted_issued_registry)
+                object.__setattr__(matcher, "_mutation_active", False)
+        return candidate._runtime_identity
+
+    monkeypatch.setattr(
+        _DispatchVerifier,
+        "runtime_identity",
+        property(reentering_runtime_identity),
+    )
     with pytest.raises(HistoricalMatcherError) as rejected:
         if lookup == "has":
             matcher.has_issued_ingress(
@@ -3761,13 +3835,20 @@ def test_descendant_lookup_restores_authority_after_teardown_getter_reentry(
                 canonical_fact_bytes=record.fact_bytes,
             )
 
-    assert reentered
+    assert fired
+    assert nested_error is not None
+    assert nested_error.code is OutcomeCode.CONFLICTING_ID
     assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+    assert authorization.calls == authorization_calls
     assert matcher_module._MATCHER_DISPATCH_AUTHORITIES[matcher] is trusted_authority
+    assert matcher._state.submissions == trusted_state.submissions
+    assert matcher._state.pending == trusted_state.pending
+    assert matcher._state.next_submission == trusted_state.next_submission == 2
     assert matcher._state.last_dispatch == trusted_state.last_dispatch == 8
-    assert 9 not in matcher._state.dispatch_by_sequence
-    assert matcher._state.issued == trusted_state.issued
+    assert matcher._issued_history_identity is trusted_issued_history
+    assert matcher._issued_registry_identity is trusted_issued_registry
     assert matcher._mutation_active is False
+    assert matcher not in matcher_module._MATCHER_CALLBACK_GUARDS
     assert matcher._state.conflict is not None
     assert (
         matcher._state.conflict.conflict_kind
@@ -4675,10 +4756,16 @@ def test_matcher_rejects_reentrant_mutations_from_all_verifier_callbacks() -> No
     with pytest.raises(HistoricalMatcherError) as submission_reentry:
         matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     assert submission_reentry.value.code is OutcomeCode.CONFLICTING_ID
-    assert matcher._state is initial
+    assert matcher._state is not initial
+    assert matcher._state.submissions == initial.submissions
+    assert matcher._state.pending == initial.pending
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
     assert matcher._mutation_active is False
-    cast(Any, authorization).verify_authorized_historical_submission = original_authorization
-    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    assert matcher not in matcher_module._MATCHER_CALLBACK_GUARDS
 
     _, matcher, orders, causal, delayed, _ = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -4698,10 +4785,16 @@ def test_matcher_rejects_reentrant_mutations_from_all_verifier_callbacks() -> No
     with pytest.raises(HistoricalMatcherError) as market_reentry:
         matcher.match_active_market_root(delayed, dispatch_sequence=8)
     assert market_reentry.value.code is OutcomeCode.CONFLICTING_ID
-    assert matcher._state is initial
+    assert matcher._state is not initial
+    assert matcher._state.submissions == initial.submissions
+    assert matcher._state.pending == initial.pending
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
     assert matcher._mutation_active is False
-    cast(Any, dispatch).verify_active_market_dispatch = original_market
-    matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert matcher not in matcher_module._MATCHER_CALLBACK_GUARDS
 
     _, matcher, orders, causal, _, end = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -4721,10 +4814,16 @@ def test_matcher_rejects_reentrant_mutations_from_all_verifier_callbacks() -> No
     with pytest.raises(HistoricalMatcherError) as end_reentry:
         matcher.expire_at_active_end(end, dispatch_sequence=9)
     assert end_reentry.value.code is OutcomeCode.CONFLICTING_ID
-    assert matcher._state is initial
+    assert matcher._state is not initial
+    assert matcher._state.submissions == initial.submissions
+    assert matcher._state.pending == initial.pending
+    assert matcher._state.conflict is not None
+    assert (
+        matcher._state.conflict.conflict_kind
+        is HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT
+    )
     assert matcher._mutation_active is False
-    cast(Any, dispatch).verify_active_end_of_run_dispatch = original_end
-    matcher.expire_at_active_end(end, dispatch_sequence=9)
+    assert matcher not in matcher_module._MATCHER_CALLBACK_GUARDS
 
 
 def test_dispatch_revalidates_verifier_binding_before_market_and_end_publication() -> None:

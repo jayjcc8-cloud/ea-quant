@@ -324,6 +324,24 @@ class _DispatchCallbackStateFence:
         raise _DispatchCallbackStateAccess("matcher state is isolated during verifier callback")
 
 
+@final
+class _DispatchCallbackGuardToken:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("callback guard tokens are created only by the matcher")
+
+
+_MATCHER_CALLBACK_GUARDS: WeakKeyDictionary[
+    object,
+    _DispatchCallbackGuardToken,
+] = WeakKeyDictionary()
+_CALLBACK_GUARD_VIOLATIONS: WeakKeyDictionary[
+    _DispatchCallbackGuardToken,
+    bool,
+] = WeakKeyDictionary()
+
+
 @dataclass(frozen=True, slots=True)
 class _DispatchCallbackLease:
     state: _MatcherState
@@ -352,6 +370,7 @@ class _DispatchCallbackLease:
     submission_authorization_verifier: HistoricalSubmissionAuthorizationVerifier
     mutation_active: bool
     fence: _DispatchCallbackStateFence
+    callback_guard: _DispatchCallbackGuardToken
 
 
 def _fail(code: OutcomeCode, message: str) -> HistoricalMatcherError:
@@ -874,6 +893,13 @@ class Phase1HistoricalMatcher:
         )
 
     def _enter_mutation(self) -> None:
+        callback_guard = _MATCHER_CALLBACK_GUARDS.get(self)
+        if callback_guard is not None:
+            _CALLBACK_GUARD_VIOLATIONS[callback_guard] = True
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "matcher mutation is forbidden during verifier callback",
+            )
         if type(self._mutation_active) is not bool:
             raise _fail(OutcomeCode.INVALID_TYPE, "matcher mutation guard must be exact")
         if self._mutation_active:
@@ -1182,7 +1208,15 @@ class Phase1HistoricalMatcher:
         The verifier port receives only the root and dispatch sequence. Pre-capturing matcher-
         private objects through same-process reflection is outside that capability boundary.
         """
+        active_guard = _MATCHER_CALLBACK_GUARDS.get(self)
+        if active_guard is not None:
+            _CALLBACK_GUARD_VIOLATIONS[active_guard] = True
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reentrant verifier callback is forbidden",
+            )
         fence = _DispatchCallbackStateFence()
+        callback_guard = object.__new__(_DispatchCallbackGuardToken)
         trusted_spec_set = _clone_spec_set(self._spec_set)
         dispatch_authority = self._require_dispatch_authority()
         lease = _DispatchCallbackLease(
@@ -1212,7 +1246,10 @@ class Phase1HistoricalMatcher:
             submission_authorization_verifier=self._submission_authorization_verifier,
             mutation_active=self._mutation_active,
             fence=fence,
+            callback_guard=callback_guard,
         )
+        _MATCHER_CALLBACK_GUARDS[self] = callback_guard
+        _CALLBACK_GUARD_VIOLATIONS[callback_guard] = False
         object.__setattr__(self, "_state", fence)
         return lease
 
@@ -1230,12 +1267,12 @@ class Phase1HistoricalMatcher:
             except (AttributeError, TypeError):
                 return missing
 
-        try:
-            observed_dispatch_runtime_identity = lease.active_dispatch_verifier.runtime_identity
-        except Exception:
-            observed_dispatch_runtime_identity = missing
-
         current_state = current("_state")
+        current_callback_guard = _MATCHER_CALLBACK_GUARDS.get(self, missing)
+        current_callback_guard_violation = _CALLBACK_GUARD_VIOLATIONS.get(
+            lease.callback_guard,
+            missing,
+        )
         current_dispatch_authority = _MATCHER_DISPATCH_AUTHORITIES.get(self, missing)
         current_issued_history_identity = current("_issued_history_identity")
         current_issued_registry_identity = current("_issued_registry_identity")
@@ -1343,11 +1380,12 @@ class Phase1HistoricalMatcher:
         )
         dispatch_runtime_unchanged = (
             current_active_dispatch_runtime_identity is lease.active_dispatch_runtime_identity
-            and observed_dispatch_runtime_identity is lease.active_dispatch_runtime_identity
         )
         drifted = (
             current_fence_accessed is not False
             or current_state is not lease.fence
+            or current_callback_guard is not lease.callback_guard
+            or current_callback_guard_violation is not False
             or current_dispatch_authority is not lease.dispatch_authority
             or current_issued_history_identity is not lease.issued_history_identity
             or current_issued_registry_identity is not lease.issued_registry_identity
@@ -1363,6 +1401,8 @@ class Phase1HistoricalMatcher:
             or current_mutation_active is not lease.mutation_active
         )
 
+        _MATCHER_CALLBACK_GUARDS.pop(self, None)
+        _CALLBACK_GUARD_VIOLATIONS.pop(lease.callback_guard, None)
         object.__setattr__(self, "_state", lease.state)
         _MATCHER_DISPATCH_AUTHORITIES[self] = lease.dispatch_authority
         object.__setattr__(self, "_issued_history_identity", lease.issued_history_identity)
