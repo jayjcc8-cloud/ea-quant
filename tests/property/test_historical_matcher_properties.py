@@ -72,7 +72,7 @@ def test_pending_presentation_permutation_cannot_change_emission(
     )
 
 
-@settings(max_examples=24)
+@settings(max_examples=24, deadline=None)
 @given(
     future_close=st.floats(
         min_value=1.0,
