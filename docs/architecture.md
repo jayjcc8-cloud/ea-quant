@@ -271,7 +271,7 @@ storage 或 external attestation。
 | Fill / Account / Position | matcher facts -> shared OMS -> shared ledger -> updated immutable snapshot | simulator facts -> shared OMS -> shared ledger -> updated immutable snapshot | broker reports/snapshots -> shared OMS/reconciler -> shared ledger -> updated immutable snapshot |
 | audit / result | mandatory run-scoped audit 和 deterministic result；terminal failure fails run | mandatory durable audit/result；terminal failure fails run | mandatory durable audit/result；terminal failure fails run |
 | optional telemetry | best effort，不影响 decision | best effort，不影响 decision | best effort，不影响 decision |
-| 当前状态 | bounded historical source、virtual clock、incremental frontier 和 run-wide dispatcher 已实现；完整 lifecycle/stage coordinator、matcher/result 待实现 | contract only，Phase 3 待实现 | unavailable；不得由现有 flag 构建 |
+| 当前状态 | bounded historical source、virtual clock、incremental frontier、run-wide dispatcher 和 deterministic matcher 已实现；完整 lifecycle/stage coordinator、ledger/result 串接待实现 | contract only，Phase 3 待实现 | unavailable；不得由现有 flag 构建 |
 
 任何 mode 都不能移除 risk/execution/audit gate 或以 mode branch 替换 inner policy。配置值可以不同，inner code 不读取 mode。Historical matcher 和 paper simulator 不得主动访问 feed、market-data store、future iterator 或 clock；Runtime 提供的 as-of context schema 与 ordering 由 #12/#15 决定。
 
@@ -380,7 +380,10 @@ Phase 1 入口门禁的历史状态审查基线为
   signed PortfolioTarget、显式 planning outcome、latest-snapshot target-current conversion、
   optional OrderIntent 与 replay/conflict authority 已实现当前切片。完整 lifecycle/stage
   coordinator、venue submission、ledger/runtime integration、reconciliation correction、
-  concrete strategy、historical matcher、result adapter 和完整 backtest 仍未实现。
+  concrete strategy、result adapter 和完整 backtest 仍未实现。Accepted ADR 0018 的
+  deterministic historical matcher、pre-effect authorization proof、active market/end
+  dispatch verification、first-later-eligible matching、bounded-end expiry 和 causal-descendant
+  fact dispatch 已实现当前切片。
 - 专家审查、单写入者、Draft PR、CI 和用户批准继续作为每次迭代的版本治理门禁。
 
 ### Phase 1：回测 MVP
@@ -428,6 +431,12 @@ Phase 1 入口门禁的历史状态审查基线为
   OrderIntent、retained-snapshot Risk handoff、exact replay/conflict/halt 与跨进程
   golden/property evidence（已实现；concrete strategy、coordinator、matcher 与 result adapter
   尚未实现）。
+- deterministic historical matcher：Accepted ADR 0018 的 authority-issued Order membership、
+  persisted-audit/freshness/halt/gate pre-effect proof、exact active market/end proof、strict
+  no-look-ahead eligibility、binary64 rational tick quantization、full trade/no-data expiry、
+  canonical receipt/batch/state/conflict codec、replay/halt、source issuance 与
+  causal-descendant fact dispatch（已实现；完整 coordinator、concrete audit store、ledger
+  串接与 result adapter 尚未实现）。
 - 实现 mode-neutral runtime kernel 和 backtest adapters。
 - 样例策略：buy-and-hold、moving-average crossover。
 - 固定 fixture 的 deterministic golden tests。

@@ -738,6 +738,44 @@ class _RunWideDispatcher:
             )
         return active.offer.canonical_root_bytes
 
+    def _require_active_end_of_run_dispatch_bytes(
+        self,
+        end_root: EndOfRunRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> bytes:
+        """Return retained bytes for one exact live end-of-run dispatch."""
+        if type(end_root) is not EndOfRunRoot:
+            raise _fail(OutcomeCode.INVALID_TYPE, "active end root must be exact")
+        if type(dispatch_sequence) is not int:
+            raise _fail(OutcomeCode.INVALID_TYPE, "active dispatch sequence must be exact int")
+        if not 1 <= dispatch_sequence <= _MAX_UINT64:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "active dispatch sequence is outside uint64")
+        state = self._state
+        active = state.active
+        if (
+            active is None
+            or active.lease.root is not end_root
+            or active.offer.root is not end_root
+            or active.dispatch_sequence != dispatch_sequence
+            or active.lease.dispatch_sequence != dispatch_sequence
+        ):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "end root is not the exact active runtime dispatch",
+            )
+        live_bytes = _terminal_root_bytes(end_root)
+        if (
+            self._state is not state
+            or state.active is not active
+            or active.offer.canonical_root_bytes != live_bytes
+        ):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "active end dispatch canonical bytes changed",
+            )
+        return active.offer.canonical_root_bytes
+
     @property
     def trace_records(self) -> tuple[bytes, ...]:
         return _materialize_trace_records(self._state.trace_tail)
@@ -1026,6 +1064,17 @@ class Phase1HistoricalMarketRuntime:
     ) -> bytes:
         return self._dispatcher._require_active_market_dispatch_bytes(
             market_root,
+            dispatch_sequence=dispatch_sequence,
+        )
+
+    def _require_active_end_of_run_dispatch_bytes(
+        self,
+        end_root: EndOfRunRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> bytes:
+        return self._dispatcher._require_active_end_of_run_dispatch_bytes(
+            end_root,
             dispatch_sequence=dispatch_sequence,
         )
 

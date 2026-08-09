@@ -36,6 +36,7 @@ _RUNTIME_ERROR_CODES = frozenset(
 )
 
 _ACTIVE_MARKET_DISPATCH_PROOF_SEAL = object()
+_ACTIVE_END_OF_RUN_DISPATCH_PROOF_SEAL = object()
 
 
 class RuntimeOrderingError(ValueError):
@@ -148,6 +149,14 @@ def _require_active_market_dispatch_proof(
     if type(proof) is not ActiveMarketDispatchProof:
         raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier returned a non-exact proof")
     try:
+        if (
+            type(proof._run_id) is not RunId
+            or type(proof._market_root) is not MarketDataEnvelope
+            or type(proof._canonical_market_bytes) is not bytes
+            or type(proof._causal_market_sha256) is not Sha256Digest
+            or type(proof._dispatch_sequence) is not int
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "active market proof carriers must be exact")
         matches = (
             proof._seal is _ACTIVE_MARKET_DISPATCH_PROOF_SEAL
             and proof._issuer is issuer
@@ -155,12 +164,120 @@ def _require_active_market_dispatch_proof(
             and proof._market_root is market_root
             and proof._canonical_market_bytes == canonical_market_bytes
             and proof._causal_market_sha256 == causal_market_sha256
+            and 1 <= proof._dispatch_sequence <= (1 << 64) - 1
             and proof._dispatch_sequence == dispatch_sequence
         )
     except (AttributeError, TypeError, ValueError) as error:
         raise _fail(OutcomeCode.INVALID_TYPE, "active market proof carriers are invalid") from error
     if not matches:
         raise _fail(OutcomeCode.CONFLICTING_ID, "active market dispatch proof conflicts")
+    return proof
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ActiveEndOfRunDispatchProof:
+    """Opaque process-local proof of one exact live end-of-run dispatch."""
+
+    _run_id: RunId
+    _end_root: EndOfRunRoot
+    _canonical_end_bytes: bytes
+    _end_root_sha256: Sha256Digest
+    _dispatch_sequence: int
+    _issuer: object
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError(
+            "ActiveEndOfRunDispatchProof values are created only by the runtime verifier"
+        )
+
+    @property
+    def run_id(self) -> RunId:
+        return self._run_id
+
+    @property
+    def end_root(self) -> EndOfRunRoot:
+        return self._end_root
+
+    @property
+    def canonical_end_bytes(self) -> bytes:
+        return self._canonical_end_bytes
+
+    @property
+    def end_root_sha256(self) -> Sha256Digest:
+        return self._end_root_sha256
+
+    @property
+    def dispatch_sequence(self) -> int:
+        return self._dispatch_sequence
+
+
+def _create_active_end_of_run_dispatch_proof(
+    *,
+    run_id: RunId,
+    end_root: EndOfRunRoot,
+    canonical_end_bytes: bytes,
+    end_root_sha256: Sha256Digest,
+    dispatch_sequence: int,
+    issuer: object,
+) -> ActiveEndOfRunDispatchProof:
+    if (
+        type(run_id) is not RunId
+        or type(end_root) is not EndOfRunRoot
+        or type(canonical_end_bytes) is not bytes
+        or type(end_root_sha256) is not Sha256Digest
+        or type(dispatch_sequence) is not int
+        or dispatch_sequence < 1
+        or dispatch_sequence > (1 << 64) - 1
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "active end proof inputs are invalid")
+    value = object.__new__(ActiveEndOfRunDispatchProof)
+    object.__setattr__(value, "_run_id", run_id)
+    object.__setattr__(value, "_end_root", end_root)
+    object.__setattr__(value, "_canonical_end_bytes", canonical_end_bytes)
+    object.__setattr__(value, "_end_root_sha256", end_root_sha256)
+    object.__setattr__(value, "_dispatch_sequence", dispatch_sequence)
+    object.__setattr__(value, "_issuer", issuer)
+    object.__setattr__(value, "_seal", _ACTIVE_END_OF_RUN_DISPATCH_PROOF_SEAL)
+    return value
+
+
+def _require_active_end_of_run_dispatch_proof(
+    proof: object,
+    *,
+    run_id: RunId,
+    end_root: EndOfRunRoot,
+    canonical_end_bytes: bytes,
+    end_root_sha256: Sha256Digest,
+    dispatch_sequence: int,
+    issuer: object,
+) -> ActiveEndOfRunDispatchProof:
+    if type(proof) is not ActiveEndOfRunDispatchProof:
+        raise _fail(OutcomeCode.INVALID_TYPE, "active end verifier returned a non-exact proof")
+    try:
+        if (
+            type(proof._run_id) is not RunId
+            or type(proof._end_root) is not EndOfRunRoot
+            or type(proof._canonical_end_bytes) is not bytes
+            or type(proof._end_root_sha256) is not Sha256Digest
+            or type(proof._dispatch_sequence) is not int
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "active end proof carriers must be exact")
+        matches = (
+            proof._seal is _ACTIVE_END_OF_RUN_DISPATCH_PROOF_SEAL
+            and proof._issuer is issuer
+            and proof._run_id == run_id
+            and proof._end_root is end_root
+            and proof._canonical_end_bytes == canonical_end_bytes
+            and proof._end_root_sha256 == end_root_sha256
+            and 1 <= proof._dispatch_sequence <= (1 << 64) - 1
+            and proof._dispatch_sequence == dispatch_sequence
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "active end proof carriers are invalid") from error
+    if not matches:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "active end dispatch proof conflicts")
     return proof
 
 

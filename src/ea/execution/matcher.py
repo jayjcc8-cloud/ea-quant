@@ -1,0 +1,2771 @@
+"""Deterministic Phase 1 historical matcher and simulated venue."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from hashlib import sha256
+from types import MappingProxyType
+from typing import NamedTuple, Protocol, final
+from weakref import WeakKeyDictionary
+
+from ea.core.economics import CanonicalDecimal, EconomicValidationError, require_positive
+from ea.core.execution import (
+    InstrumentExecutionSpec,
+    InstrumentExecutionSpecSet,
+    InstrumentSpecId,
+    InstrumentSpecSetId,
+    PriceDomain,
+    SettlementCurrency,
+    build_instrument_spec_set,
+    canonical_instrument_spec_set_bytes,
+    instrument_spec_set_digest,
+)
+from ea.core.execution_identity import (
+    EconomicId,
+    EconomicOwnerKind,
+    IngressIdentity,
+    SourceNamespace,
+    SourceNativeSequence,
+)
+from ea.core.execution_messages import (
+    ExecutionFactIngress,
+    ExecutionFactKind,
+    ExecutionPolicyId,
+    ExecutionPolicyRef,
+    FactProvenance,
+    FactProvenanceId,
+    IndependentFactDecodeContext,
+    Order,
+    OrderKind,
+    OrderSide,
+    TimeInForce,
+    canonical_execution_fact_bytes,
+    canonical_execution_fact_ingress_bytes,
+    canonical_execution_request_bytes,
+    canonical_order_bytes,
+    create_execution_fact_ingress,
+    create_lifecycle_execution_fact,
+    create_trade_execution_fact,
+    decode_execution_fact_ingress,
+    execution_fact_digest,
+    execution_fact_ingress_digest,
+    execution_request_digest,
+    order_client_submission_key,
+    order_digest,
+)
+from ea.core.historical_matching import (
+    HistoricalDispatchKind,
+    HistoricalMatcherConflictEvidence,
+    HistoricalMatcherConflictKind,
+    HistoricalMatcherDecodeContext,
+    HistoricalMatcherDescendantBinding,
+    HistoricalMatcherDispatchBatch,
+    HistoricalMatcherError,
+    HistoricalMatcherState,
+    HistoricalPreEffectAuthorizationError,
+    HistoricalSubmissionAuthorizationProof,
+    HistoricalSubmissionReceipt,
+    _append_historical_matcher_dispatch_history,
+    _append_historical_matcher_submission_history,
+    _create_historical_matcher_conflict,
+    _create_historical_matcher_descendant_binding,
+    _create_historical_matcher_dispatch_batch,
+    _create_historical_matcher_state,
+    _create_historical_submission_receipt,
+    _dispatch_batch_history_digest,
+    _dispatch_ingress_history_digest,
+    _empty_historical_matcher_dispatch_history,
+    _historical_root_digest_from_bytes,
+    _HistoricalMatcherDispatchHistory,
+    _quantized_historical_close,
+    _require_historical_matcher_dispatch_batch_trigger_root,
+    _require_historical_submission_authorization_proof,
+    _runtime_key_document_from_key,
+    _validate_descendant_binding,
+    canonical_end_of_run_root_bytes,
+    canonical_historical_matcher_conflict_bytes,
+    canonical_historical_matcher_dispatch_batch_bytes,
+    canonical_historical_matcher_state_bytes,
+    canonical_historical_submission_receipt_bytes,
+    decode_historical_matcher_conflict,
+    decode_historical_submission_receipt,
+    historical_end_root_digest,
+    historical_market_root_digest,
+    historical_matcher_conflict_digest,
+    historical_matcher_dispatch_batch_digest,
+    historical_matcher_observation_digest,
+    historical_matcher_state_digest,
+    historical_submission_receipt_digest,
+    runtime_root_key_from_document,
+)
+from ea.core.identity import Instrument, VenueId
+from ea.core.market_data import Adjustment, Bar, MarketDataEnvelope, SourceId
+from ea.core.market_data_codec import canonical_market_data_record_bytes
+from ea.core.outcomes import OutcomeCode
+from ea.core.run import RunId, Sha256Digest
+from ea.core.runtime import (
+    ActiveEndOfRunDispatchProof,
+    ActiveMarketDispatchProof,
+    EndOfRunKind,
+    EndOfRunRoot,
+    RuntimeOrderingError,
+    RuntimeRootOrderKey,
+    _require_active_end_of_run_dispatch_proof,
+    _require_active_market_dispatch_proof,
+    runtime_root_order_key,
+)
+from ea.core.strategy import causal_market_digest
+
+_MAX_UINT64 = (1 << 64) - 1
+
+
+class _VerifierFailure(Exception):
+    """Preserve an unexpected verifier exception across matcher translation."""
+
+    error: Exception
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        super().__init__(str(error))
+
+
+class HistoricalOrderIssuanceVerifier(Protocol):
+    @property
+    def run_id(self) -> RunId: ...
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet: ...
+
+    @property
+    def execution_policy(self) -> ExecutionPolicyRef: ...
+
+    def resolve_issued_order_by_id(self, order_id: EconomicId) -> Order | None: ...
+
+
+class HistoricalSubmissionAuthorizationVerifier(Protocol):
+    @property
+    def run_id(self) -> RunId: ...
+
+    @property
+    def instrument_spec_set_id(self) -> InstrumentSpecSetId: ...
+
+    @property
+    def instrument_spec_set_sha256(self) -> Sha256Digest: ...
+
+    @property
+    def execution_policy(self) -> ExecutionPolicyRef: ...
+
+    def verify_authorized_historical_submission(
+        self,
+        *,
+        order_id: EconomicId,
+        canonical_order_bytes: bytes,
+        canonical_execution_request_bytes: bytes,
+        canonical_causal_market_bytes: bytes,
+        causal_market_sha256: Sha256Digest,
+        causal_root_key: RuntimeRootOrderKey,
+        dispatch_sequence: int,
+    ) -> HistoricalSubmissionAuthorizationProof: ...
+
+
+class HistoricalMatcherDispatchVerifier(Protocol):
+    """Root-proof capability only; matcher-private state is not part of this port."""
+
+    @property
+    def run_id(self) -> RunId: ...
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet: ...
+
+    @property
+    def runtime_identity(self) -> object:
+        """Return a capability-free opaque construction-runtime witness."""
+        ...
+
+    def verify_active_market_dispatch(
+        self,
+        market_root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> ActiveMarketDispatchProof: ...
+
+    def verify_active_end_of_run_dispatch(
+        self,
+        end_root: EndOfRunRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> ActiveEndOfRunDispatchProof: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _SubmissionRecord:
+    order: Order
+    order_id: EconomicId
+    order_bytes: bytes
+    order_sha256: Sha256Digest
+    request_bytes: bytes
+    request_sha256: Sha256Digest
+    client_key: Sha256Digest
+    causal_market_root: MarketDataEnvelope
+    causal_market_bytes: bytes
+    causal_market_sha256: Sha256Digest
+    causal_root_key: RuntimeRootOrderKey
+    dispatch_sequence: int
+    receipt: HistoricalSubmissionReceipt
+    receipt_bytes: bytes
+    receipt_sha256: Sha256Digest
+
+
+@dataclass(frozen=True, slots=True)
+class _DispatchRecord:
+    root_bytes: bytes
+    root_sha256: Sha256Digest
+    root_key: RuntimeRootOrderKey
+    batch: HistoricalMatcherDispatchBatch
+    batch_bytes: bytes
+    batch_sha256: Sha256Digest
+
+
+@final
+class _DispatchRecordToken:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("dispatch record tokens are created only by the matcher")
+
+
+class _SealedDispatchRecord(NamedTuple):
+    root_bytes: bytes
+    root_sha256_value: str
+    root_key_document_bytes: bytes
+    batch_bytes: bytes
+    batch_sha256_value: str
+    run_id_value: str
+    source_namespace_value: str
+    dispatch_kind_value: str
+    dispatch_sequence: int
+    next_fact_sequence_before: int | None
+    next_fact_sequence_after: int | None
+    submission_sequences: tuple[int, ...]
+    order_id_values: tuple[tuple[str, str, int], ...]
+    ingress_bytes: tuple[bytes, ...]
+    ingress_sha256_values: tuple[str, ...]
+    replay_batch: HistoricalMatcherDispatchBatch
+
+
+class _DispatchAuthority(NamedTuple):
+    by_sequence: MappingProxyType[int, _DispatchRecordToken]
+    by_digest: MappingProxyType[str, _DispatchRecordToken]
+    record_count: int
+    last_sequence: int | None
+    last_token: _DispatchRecordToken | None
+    chain_head: str
+
+
+_DISPATCH_CHAIN_DOMAIN = b"ea.phase1.historical-matcher.dispatch-authority-chain.v1"
+_EMPTY_DISPATCH_CHAIN_HEAD = sha256(_DISPATCH_CHAIN_DOMAIN + b"\x00").hexdigest()
+_SEALED_DISPATCH_RECORDS: WeakKeyDictionary[
+    _DispatchRecordToken,
+    _SealedDispatchRecord,
+] = WeakKeyDictionary()
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuedRecord:
+    ingress: ExecutionFactIngress
+    ingress_identity: IngressIdentity
+    ingress_bytes: bytes
+    ingress_sha256: Sha256Digest
+    fact_bytes: bytes
+    binding: HistoricalMatcherDescendantBinding
+
+
+@dataclass(frozen=True, slots=True)
+class _MatcherState:
+    next_submission: int | None
+    next_fact: int | None
+    submissions: tuple[_SubmissionRecord, ...]
+    pending: tuple[_SubmissionRecord, ...]
+    submission_by_order: MappingProxyType[EconomicId, _SubmissionRecord]
+    submission_by_client: MappingProxyType[Sha256Digest, _SubmissionRecord]
+    dispatch_by_sequence: MappingProxyType[int, _DispatchRecordToken]
+    dispatch_by_digest: MappingProxyType[str, _DispatchRecordToken]
+    dispatch_chain_head: str
+    dispatch_history: _HistoricalMatcherDispatchHistory
+    issued: tuple[_IssuedRecord, ...]
+    issued_by_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
+    last_dispatch: int | None
+    ended: bool
+    end_batch_sha256: Sha256Digest | None
+    conflict: HistoricalMatcherConflictEvidence | None
+
+
+class _DispatchCallbackStateAccess(RuntimeError):
+    pass
+
+
+@final
+class _DispatchCallbackStateFence:
+    __slots__ = ("_accessed",)
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_accessed", False)
+
+    def __getattribute__(self, name: str) -> object:
+        del name
+        object.__setattr__(self, "_accessed", True)
+        raise _DispatchCallbackStateAccess("matcher state is isolated during verifier callback")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        object.__setattr__(self, "_accessed", True)
+        raise _DispatchCallbackStateAccess("matcher state is isolated during verifier callback")
+
+
+@final
+class _DispatchCallbackGuardToken:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("callback guard tokens are created only by the matcher")
+
+
+_MATCHER_CALLBACK_GUARDS: WeakKeyDictionary[
+    object,
+    _DispatchCallbackGuardToken,
+] = WeakKeyDictionary()
+_CALLBACK_GUARD_VIOLATIONS: WeakKeyDictionary[
+    _DispatchCallbackGuardToken,
+    bool,
+] = WeakKeyDictionary()
+
+
+@dataclass(frozen=True, slots=True)
+class _DispatchCallbackLease:
+    state: _MatcherState
+    dispatch_authority: _DispatchAuthority
+    issued_history_identity: tuple[_IssuedRecord, ...]
+    issued_registry_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
+    conflict_bytes: bytes | None
+    conflict_sha256: Sha256Digest | None
+    active_dispatch_verifier: HistoricalMatcherDispatchVerifier
+    active_dispatch_runtime_identity: object
+    execution_policy: ExecutionPolicyRef
+    execution_policy_id_value: str
+    execution_policy_sha256_value: str
+    order_issuance_verifier: HistoricalOrderIssuanceVerifier
+    provenance_id: FactProvenanceId
+    provenance_id_value: str
+    run_id: RunId
+    run_id_value: str
+    source_namespace: SourceNamespace
+    source_namespace_value: str
+    spec_bytes: bytes
+    spec_set: InstrumentExecutionSpecSet
+    spec_set_identity: InstrumentExecutionSpecSet
+    spec_sha256: Sha256Digest
+    spec_sha256_value: str
+    submission_authorization_verifier: HistoricalSubmissionAuthorizationVerifier
+    mutation_active: bool
+    fence: _DispatchCallbackStateFence
+    callback_guard: _DispatchCallbackGuardToken
+
+
+def _fail(code: OutcomeCode, message: str) -> HistoricalMatcherError:
+    return HistoricalMatcherError(code, message)
+
+
+def _advance(value: int) -> int | None:
+    return None if value == _MAX_UINT64 else value + 1
+
+
+def _next_submission_after(records: tuple[_SubmissionRecord, ...]) -> int | None:
+    if type(records) is not tuple:
+        raise ValueError("submission history must be a tuple")
+    expected: int | None = 1
+    for record in records:
+        sequence = record.receipt.submission_sequence
+        if expected is None or type(sequence) is not int or sequence != expected:
+            raise ValueError("submission history must be contiguous from one")
+        expected = _advance(expected)
+    return expected
+
+
+def _require_dispatch_sequence(value: object) -> int:
+    if type(value) is not int:
+        raise _fail(OutcomeCode.INVALID_TYPE, "dispatch_sequence must be exact int")
+    if not 1 <= value <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch_sequence must be positive uint64")
+    return value
+
+
+def _clone_instrument(value: Instrument) -> Instrument:
+    return Instrument(VenueId(value.venue.code), value.symbol)
+
+
+def _clone_run_id(value: RunId) -> RunId:
+    return RunId(value.value)
+
+
+def _clone_economic_id(value: EconomicId) -> EconomicId:
+    return EconomicId(
+        _clone_run_id(value.run_id),
+        EconomicOwnerKind(value.owner_kind.value),
+        value.owner_sequence,
+    )
+
+
+def _clone_ingress_identity(value: IngressIdentity) -> IngressIdentity:
+    return IngressIdentity(
+        SourceNamespace(value.source_namespace.value),
+        value.ingress_sequence,
+    )
+
+
+def _clone_market_root(value: MarketDataEnvelope) -> MarketDataEnvelope:
+    payload = value.payload
+    owned = MarketDataEnvelope(
+        payload=Bar(
+            instrument=_clone_instrument(payload.instrument),
+            interval_start=payload.interval_start,
+            interval_end=payload.interval_end,
+            adjustment=Adjustment(payload.adjustment.value),
+            open=payload.open,
+            high=payload.high,
+            low=payload.low,
+            close=payload.close,
+            volume=payload.volume,
+        ),
+        source=SourceId(value.source.code),
+        available_at=value.available_at,
+        source_sequence=value.source_sequence,
+        revision=value.revision,
+    )
+    if canonical_market_data_record_bytes(owned) != canonical_market_data_record_bytes(value):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "owned market root reconstruction conflicts")
+    return owned
+
+
+def _clone_end_root(value: EndOfRunRoot) -> EndOfRunRoot:
+    owned = EndOfRunRoot(
+        available_at=value.available_at,
+        kind=EndOfRunKind(value.kind.value),
+        producer_namespace=SourceNamespace(value.producer_namespace.value),
+        producer_sequence=value.producer_sequence,
+        run_id=_clone_run_id(value.run_id),
+    )
+    if canonical_end_of_run_root_bytes(owned) != canonical_end_of_run_root_bytes(value):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "owned end root reconstruction conflicts")
+    return owned
+
+
+def _clone_spec_set(value: InstrumentExecutionSpecSet) -> InstrumentExecutionSpecSet:
+    if type(value) is not InstrumentExecutionSpecSet:
+        raise _fail(OutcomeCode.INVALID_TYPE, "spec_set must be exact")
+    try:
+        owned = build_instrument_spec_set(
+            InstrumentSpecSetId(value.identifier.value),
+            (
+                InstrumentExecutionSpec(
+                    instrument=_clone_instrument(spec.instrument),
+                    specification_id=InstrumentSpecId(spec.specification_id.value),
+                    price_quantum=CanonicalDecimal(spec.price_quantum.text),
+                    quantity_quantum=CanonicalDecimal(spec.quantity_quantum.text),
+                    settlement_currency=SettlementCurrency(spec.settlement_currency.code),
+                    currency_quantum=CanonicalDecimal(spec.currency_quantum.text),
+                    contract_multiplier=CanonicalDecimal(spec.contract_multiplier.text),
+                    price_domain=PriceDomain(spec.price_domain.value),
+                )
+                for spec in value.specifications
+            ),
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "spec_set cannot be reconstructed") from error
+    if canonical_instrument_spec_set_bytes(owned) != canonical_instrument_spec_set_bytes(
+        value
+    ) or instrument_spec_set_digest(owned) != instrument_spec_set_digest(value):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "spec_set reconstruction conflicts")
+    return owned
+
+
+def _clone_policy(value: ExecutionPolicyRef) -> ExecutionPolicyRef:
+    if type(value) is not ExecutionPolicyRef:
+        raise _fail(OutcomeCode.INVALID_TYPE, "execution_policy must be exact")
+    return ExecutionPolicyRef(
+        ExecutionPolicyId(value.identifier.value),
+        Sha256Digest(value.sha256.value),
+    )
+
+
+def _clone_order(value: Order) -> Order:
+    """Own an immutable scalar reconstruction after authority membership was proved."""
+    owned = object.__new__(Order)
+    for name in Order.__dataclass_fields__:
+        submitted = getattr(value, name)
+        if type(submitted) is Instrument:
+            submitted = _clone_instrument(submitted)
+        elif type(submitted) is RunId:
+            submitted = _clone_run_id(submitted)
+        elif type(submitted) is EconomicId:
+            submitted = _clone_economic_id(submitted)
+        elif type(submitted) is Sha256Digest:
+            submitted = Sha256Digest(submitted.value)
+        elif type(submitted) is InstrumentSpecId:
+            submitted = InstrumentSpecId(submitted.value)
+        elif type(submitted) is InstrumentSpecSetId:
+            submitted = InstrumentSpecSetId(submitted.value)
+        elif type(submitted) is CanonicalDecimal:
+            submitted = CanonicalDecimal(submitted.text)
+        elif type(submitted) is ExecutionPolicyRef:
+            submitted = _clone_policy(submitted)
+        object.__setattr__(owned, name, submitted)
+    if canonical_order_bytes(owned) != canonical_order_bytes(value):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "owned Order reconstruction conflicts")
+    return owned
+
+
+def _quantized_close(
+    close: object,
+    *,
+    side: OrderSide,
+    specification: InstrumentExecutionSpec,
+) -> CanonicalDecimal:
+    return _quantized_historical_close(close, side=side, specification=specification)
+
+
+def _canonical_runtime_key_bytes(value: RuntimeRootOrderKey) -> bytes:
+    return json.dumps(
+        _runtime_key_document_from_key(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _runtime_key_from_canonical_bytes(value: bytes) -> RuntimeRootOrderKey:
+    document = json.loads(value.decode("utf-8"))
+    if type(document) is not dict:
+        raise _fail(OutcomeCode.INVALID_TYPE, "sealed runtime key is invalid")
+    key = runtime_root_key_from_document(document)
+    if _canonical_runtime_key_bytes(key) != value:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "sealed runtime key is noncanonical")
+    return key
+
+
+def _append_dispatch_chain(
+    previous: str,
+    *,
+    dispatch_sequence: int,
+    root_key_bytes: bytes,
+    root_sha256_value: str,
+    batch_sha256_value: str,
+) -> str:
+    components = (
+        bytes.fromhex(previous),
+        dispatch_sequence.to_bytes(8, "big"),
+        root_key_bytes,
+        bytes.fromhex(root_sha256_value),
+        bytes.fromhex(batch_sha256_value),
+    )
+    digest = sha256(_DISPATCH_CHAIN_DOMAIN + b"\x01")
+    for component in components:
+        digest.update(len(component).to_bytes(8, "big"))
+        digest.update(component)
+    return digest.hexdigest()
+
+
+@final
+class Phase1HistoricalMatcher:
+    __slots__ = (
+        "__weakref__",
+        "_active_dispatch_verifier",
+        "_active_dispatch_runtime_identity",
+        "_execution_policy",
+        "_execution_policy_id_value",
+        "_execution_policy_identity",
+        "_execution_policy_sha256_value",
+        "_conflict_bytes",
+        "_conflict_sha256",
+        "_issued_history_identity",
+        "_issued_registry_identity",
+        "_mutation_active",
+        "_order_issuance_verifier",
+        "_provenance_id",
+        "_provenance_id_value",
+        "_run_id",
+        "_run_id_value",
+        "_source_namespace",
+        "_source_namespace_value",
+        "_spec_bytes",
+        "_spec_set",
+        "_spec_sha256",
+        "_state",
+        "_submission_authorization_verifier",
+    )
+    _active_dispatch_verifier: HistoricalMatcherDispatchVerifier
+    _active_dispatch_runtime_identity: object
+    _execution_policy: ExecutionPolicyRef
+    _execution_policy_id_value: str
+    _execution_policy_identity: ExecutionPolicyRef
+    _execution_policy_sha256_value: str
+    _conflict_bytes: bytes | None
+    _conflict_sha256: Sha256Digest | None
+    _issued_history_identity: tuple[_IssuedRecord, ...]
+    _issued_registry_identity: MappingProxyType[IngressIdentity, _IssuedRecord]
+    _mutation_active: bool
+    _order_issuance_verifier: HistoricalOrderIssuanceVerifier
+    _provenance_id: FactProvenanceId
+    _provenance_id_value: str
+    _run_id: RunId
+    _run_id_value: str
+    _source_namespace: SourceNamespace
+    _source_namespace_value: str
+    _spec_bytes: bytes
+    _spec_set: InstrumentExecutionSpecSet
+    _spec_sha256: Sha256Digest
+    _state: _MatcherState
+    _submission_authorization_verifier: HistoricalSubmissionAuthorizationVerifier
+
+    def __init__(self) -> None:
+        raise TypeError("matchers are created only by create_phase1_historical_matcher")
+
+    @property
+    def run_id(self) -> RunId:
+        return _clone_run_id(self._run_id)
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self._spec_set
+
+    @property
+    def source_namespace(self) -> SourceNamespace:
+        return SourceNamespace(self._source_namespace.value)
+
+    @property
+    def execution_policy(self) -> ExecutionPolicyRef:
+        return _clone_policy(self._execution_policy)
+
+    @property
+    def provenance_id(self) -> FactProvenanceId:
+        return FactProvenanceId(self._provenance_id.value)
+
+    @property
+    def state(self) -> HistoricalMatcherState:
+        self._require_retained_state()
+        state = self._state
+        receipt_context = HistoricalMatcherDecodeContext(
+            run_id=_clone_run_id(self._run_id),
+            spec_set=self._spec_set,
+            execution_policy=_clone_policy(self._execution_policy),
+            source_namespace=SourceNamespace(self._source_namespace.value),
+            provenance_id=FactProvenanceId(self._provenance_id.value),
+            orders_by_sha256={record.order_sha256: record.order for record in state.submissions},
+            market_roots_by_sha256={
+                record.causal_market_sha256: record.causal_market_root
+                for record in state.submissions
+            },
+        )
+        public_receipts = tuple(
+            decode_historical_submission_receipt(
+                record.receipt_bytes,
+                context=receipt_context,
+            )
+            for record in state.submissions
+        )
+        public_ingresses = tuple(
+            decode_execution_fact_ingress(
+                record.ingress_bytes,
+                context=IndependentFactDecodeContext(self._spec_set),
+            )
+            for record in state.issued
+        )
+        public_ingresses_by_sha256 = {
+            execution_fact_ingress_digest(ingress): ingress for ingress in public_ingresses
+        }
+        last_dispatch_record = (
+            None
+            if state.last_dispatch is None
+            else self._require_dispatch_record(state.dispatch_by_sequence[state.last_dispatch])
+        )
+        public_last_batch = (
+            None
+            if last_dispatch_record is None
+            else (
+                _create_historical_matcher_dispatch_batch(
+                    trigger_root=_require_historical_matcher_dispatch_batch_trigger_root(
+                        last_dispatch_record.batch
+                    ),
+                    run_id=_clone_run_id(last_dispatch_record.batch.run_id),
+                    source_namespace=SourceNamespace(
+                        last_dispatch_record.batch.source_namespace.value
+                    ),
+                    dispatch_kind=last_dispatch_record.batch.dispatch_kind,
+                    dispatch_sequence=last_dispatch_record.batch.dispatch_sequence,
+                    trigger_root_sha256=Sha256Digest(
+                        last_dispatch_record.batch.trigger_root_sha256.value
+                    ),
+                    trigger_root_key=runtime_root_key_from_document(
+                        _runtime_key_document_from_key(last_dispatch_record.batch.trigger_root_key)
+                    ),
+                    next_fact_sequence_before=last_dispatch_record.batch.next_fact_sequence_before,
+                    next_fact_sequence_after=last_dispatch_record.batch.next_fact_sequence_after,
+                    submission_sequences=tuple(last_dispatch_record.batch.submission_sequences),
+                    order_ids=tuple(
+                        _clone_economic_id(value) for value in last_dispatch_record.batch.order_ids
+                    ),
+                    ingresses=tuple(
+                        public_ingresses_by_sha256[ingress_sha256]
+                        for ingress_sha256 in last_dispatch_record.batch.ingress_sha256s
+                    ),
+                    ingress_sha256s=tuple(
+                        Sha256Digest(value.value)
+                        for value in last_dispatch_record.batch.ingress_sha256s
+                    ),
+                )
+            )
+        )
+        public_batch_sha256s = tuple(
+            Sha256Digest(_SEALED_DISPATCH_RECORDS[token].batch_sha256_value)
+            for _, token in sorted(state.dispatch_by_sequence.items())
+        )
+        public_conflict = None
+        if state.conflict is not None:
+            if (
+                self._conflict_bytes is None
+                or self._conflict_sha256 is None
+                or canonical_historical_matcher_conflict_bytes(state.conflict)
+                != self._conflict_bytes
+                or historical_matcher_conflict_digest(state.conflict) != self._conflict_sha256
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "retained conflict evidence changed")
+            public_conflict = decode_historical_matcher_conflict(
+                self._conflict_bytes,
+                context=HistoricalMatcherDecodeContext(
+                    run_id=_clone_run_id(self._run_id),
+                    spec_set=self._spec_set,
+                    execution_policy=_clone_policy(self._execution_policy),
+                    source_namespace=SourceNamespace(self._source_namespace.value),
+                    provenance_id=FactProvenanceId(self._provenance_id.value),
+                ),
+            )
+        public = _create_historical_matcher_state(
+            run_id=_clone_run_id(self._run_id),
+            source_namespace=SourceNamespace(self._source_namespace.value),
+            provenance_id=FactProvenanceId(self._provenance_id.value),
+            instrument_spec_set_id=InstrumentSpecSetId(self._spec_set.identifier.value),
+            instrument_spec_set_sha256=Sha256Digest(self._spec_sha256.value),
+            execution_policy=_clone_policy(self._execution_policy),
+            next_submission_sequence=state.next_submission,
+            next_fact_sequence=state.next_fact,
+            _submission_receipts=public_receipts,
+            receipt_sha256s=tuple(
+                Sha256Digest(record.receipt_sha256.value) for record in state.submissions
+            ),
+            pending_order_ids=tuple(
+                _clone_economic_id(record.order_id)
+                for record in sorted(
+                    state.pending,
+                    key=lambda item: item.receipt.submission_sequence,
+                )
+            ),
+            issued_ingresses=public_ingresses,
+            _dispatch_batch_history_sha256=_dispatch_batch_history_digest(public_batch_sha256s),
+            _dispatch_ingress_history_sha256=_dispatch_ingress_history_digest(
+                public_batch_sha256s,
+                public_ingresses,
+            ),
+            _dispatch_history=state.dispatch_history,
+            _last_dispatch_batch=public_last_batch,
+            dispatch_batch_sha256s=public_batch_sha256s,
+            last_new_dispatch_sequence=state.last_dispatch,
+            ended=state.ended,
+            end_batch_sha256=(
+                None
+                if state.end_batch_sha256 is None
+                else Sha256Digest(state.end_batch_sha256.value)
+            ),
+            halted=state.conflict is not None,
+            conflict=public_conflict,
+        )
+        canonical_historical_matcher_state_bytes(public)
+        historical_matcher_state_digest(public)
+        return public
+
+    def _require_live_bindings(self) -> None:
+        if (
+            type(self._run_id) is not RunId
+            or type(self._source_namespace) is not SourceNamespace
+            or type(self._provenance_id) is not FactProvenanceId
+            or type(self._execution_policy) is not ExecutionPolicyRef
+            or type(self._run_id.value) is not str
+            or type(self._run_id_value) is not str
+            or type(self._source_namespace.value) is not str
+            or type(self._source_namespace_value) is not str
+            or type(self._provenance_id.value) is not str
+            or type(self._provenance_id_value) is not str
+            or type(self._spec_bytes) is not bytes
+            or type(self._spec_sha256) is not Sha256Digest
+            or type(self._spec_sha256.value) is not str
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "owned bindings must be exact")
+        try:
+            policy_unchanged = (
+                self._execution_policy is self._execution_policy_identity
+                and type(self._execution_policy.identifier) is ExecutionPolicyId
+                and type(self._execution_policy.sha256) is Sha256Digest
+                and type(self._execution_policy.identifier.value) is str
+                and type(self._execution_policy.sha256.value) is str
+                and type(self._execution_policy_id_value) is str
+                and type(self._execution_policy_sha256_value) is str
+                and self._execution_policy.identifier.value == self._execution_policy_id_value
+                and self._execution_policy.sha256.value == self._execution_policy_sha256_value
+            )
+        except (AttributeError, TypeError):
+            policy_unchanged = False
+        if (
+            self._run_id.value != self._run_id_value
+            or self._source_namespace.value != self._source_namespace_value
+            or self._provenance_id.value != self._provenance_id_value
+            or not policy_unchanged
+            or canonical_instrument_spec_set_bytes(self._spec_set) != self._spec_bytes
+            or instrument_spec_set_digest(self._spec_set) != self._spec_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "owned spec binding changed")
+        for verifier in (
+            self._order_issuance_verifier,
+            self._submission_authorization_verifier,
+        ):
+            try:
+                run_id = verifier.run_id
+                policy = verifier.execution_policy
+            except (AttributeError, TypeError) as error:
+                raise _fail(OutcomeCode.INVALID_TYPE, "verifier binding failed") from error
+            if type(run_id) is not RunId or type(policy) is not ExecutionPolicyRef:
+                raise _fail(OutcomeCode.INVALID_TYPE, "verifier bindings must be exact")
+            if run_id != self._run_id or policy != self._execution_policy:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "verifier binding changed")
+        try:
+            order_specs = self._order_issuance_verifier.spec_set
+            auth_spec_id = self._submission_authorization_verifier.instrument_spec_set_id
+            auth_spec_digest = self._submission_authorization_verifier.instrument_spec_set_sha256
+            dispatch_runtime_identity = self._active_dispatch_verifier.runtime_identity
+            dispatch_run_id = self._active_dispatch_verifier.run_id
+            dispatch_specs = self._active_dispatch_verifier.spec_set
+        except (AttributeError, TypeError) as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "verifier spec binding failed") from error
+        except Exception as error:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "verifier binding changed") from error
+        if (
+            type(order_specs) is not InstrumentExecutionSpecSet
+            or type(auth_spec_id) is not InstrumentSpecSetId
+            or type(auth_spec_digest) is not Sha256Digest
+            or type(dispatch_run_id) is not RunId
+            or type(dispatch_specs) is not InstrumentExecutionSpecSet
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "verifier spec bindings must be exact")
+        if (
+            canonical_instrument_spec_set_bytes(order_specs) != self._spec_bytes
+            or instrument_spec_set_digest(order_specs) != self._spec_sha256
+            or auth_spec_id != self._spec_set.identifier
+            or auth_spec_digest != self._spec_sha256
+            or dispatch_runtime_identity is not self._active_dispatch_runtime_identity
+            or dispatch_run_id != self._run_id
+            or canonical_instrument_spec_set_bytes(dispatch_specs) != self._spec_bytes
+            or instrument_spec_set_digest(dispatch_specs) != self._spec_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "verifier spec binding changed")
+
+    def _retained_binding_drift(self, *, dispatch_sequence: object = None) -> None:
+        sequence = (
+            dispatch_sequence
+            if type(dispatch_sequence) is int and 1 <= dispatch_sequence <= _MAX_UINT64
+            else None
+        )
+        self._publish_conflict(
+            kind=HistoricalMatcherConflictKind.RETAINED_BINDING_DRIFT,
+            occupied_identity=None,
+            existing_sha256=None,
+            submitted_sha256=None,
+            submitted_dispatch_sequence=sequence,
+            trigger_root_sha256=None,
+        )
+
+    def _enter_mutation(self) -> None:
+        callback_guard = _MATCHER_CALLBACK_GUARDS.get(self)
+        if callback_guard is not None:
+            _CALLBACK_GUARD_VIOLATIONS[callback_guard] = True
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "matcher mutation is forbidden during verifier callback",
+            )
+        if type(self._mutation_active) is not bool:
+            raise _fail(OutcomeCode.INVALID_TYPE, "matcher mutation guard must be exact")
+        if self._mutation_active:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reentrant matcher mutation is forbidden")
+        self._mutation_active = True
+
+    def _leave_mutation(self) -> None:
+        self._mutation_active = False
+
+    def _submission_record_is_valid(self, record: _SubmissionRecord) -> bool:
+        try:
+            receipt = record.receipt
+            valid = (
+                type(record) is _SubmissionRecord
+                and type(record.order) is Order
+                and type(record.order_id) is EconomicId
+                and record.order.order_id == record.order_id
+                and canonical_order_bytes(record.order) == record.order_bytes
+                and order_digest(record.order) == record.order_sha256
+                and canonical_execution_request_bytes(record.order) == record.request_bytes
+                and execution_request_digest(record.order) == record.request_sha256
+                and order_client_submission_key(record.order) == record.client_key
+                and type(record.causal_market_root) is MarketDataEnvelope
+                and type(record.causal_market_bytes) is bytes
+                and type(record.causal_market_sha256) is Sha256Digest
+                and type(record.causal_root_key) is RuntimeRootOrderKey
+                and canonical_market_data_record_bytes(record.causal_market_root)
+                == record.causal_market_bytes
+                and historical_market_root_digest(record.causal_market_root)
+                == record.causal_market_sha256
+                and runtime_root_order_key(record.causal_market_root) == record.causal_root_key
+                and record.causal_market_root.payload.instrument == record.order.instrument
+                and record.causal_market_root.available_at
+                == record.order.eligible_after_available_at
+                and type(receipt) is HistoricalSubmissionReceipt
+                and canonical_historical_submission_receipt_bytes(receipt) == record.receipt_bytes
+                and historical_submission_receipt_digest(receipt) == record.receipt_sha256
+                and receipt.run_id == self._run_id
+                and receipt.source_namespace == self._source_namespace
+                and receipt.order_id == record.order.order_id
+                and receipt.order_sha256 == record.order_sha256
+                and receipt.execution_request_sha256 == record.request_sha256
+                and receipt.client_submission_key == record.client_key
+                and receipt.instrument == record.order.instrument
+                and receipt.side is record.order.side
+                and receipt.quantity_text == record.order.quantity.text
+                and receipt.causal_market_sha256 == record.causal_market_sha256
+                and receipt.causal_root_key == record.causal_root_key
+                and receipt.dispatch_sequence == record.dispatch_sequence
+                and receipt.eligible_after_available_at == record.order.eligible_after_available_at
+                and receipt.instrument_spec_set_id == self._spec_set.identifier
+                and receipt.instrument_spec_set_sha256 == self._spec_sha256
+                and receipt.execution_policy == self._execution_policy
+            )
+        except Exception:
+            valid = False
+        return valid
+
+    def _require_submission_record(self, record: _SubmissionRecord) -> None:
+        if not self._submission_record_is_valid(record):
+            self._retained_binding_drift(dispatch_sequence=record.dispatch_sequence)
+
+    def _require_dispatch_authority(self) -> _DispatchAuthority:
+        state = self._state
+        try:
+            authority = _MATCHER_DISPATCH_AUTHORITIES[self]
+            last_seal = (
+                None
+                if authority.last_token is None
+                else _SEALED_DISPATCH_RECORDS[authority.last_token]
+            )
+            valid = (
+                type(authority) is _DispatchAuthority
+                and type(authority.by_sequence) is MappingProxyType
+                and type(authority.by_digest) is MappingProxyType
+                and state.dispatch_by_sequence is authority.by_sequence
+                and state.dispatch_by_digest is authority.by_digest
+                and type(state.dispatch_chain_head) is str
+                and state.dispatch_chain_head == authority.chain_head
+                and len(authority.chain_head) == 64
+                and len(bytes.fromhex(authority.chain_head)) == 32
+                and type(authority.record_count) is int
+                and authority.record_count == len(authority.by_sequence)
+                and authority.record_count == len(authority.by_digest)
+                and state.last_dispatch == authority.last_sequence
+                and (
+                    (
+                        authority.record_count == 0
+                        and authority.last_sequence is None
+                        and authority.last_token is None
+                        and not authority.by_sequence
+                        and not authority.by_digest
+                        and authority.chain_head == _EMPTY_DISPATCH_CHAIN_HEAD
+                    )
+                    or (
+                        authority.record_count > 0
+                        and type(authority.last_sequence) is int
+                        and authority.last_token is not None
+                        and authority.by_sequence.get(authority.last_sequence)
+                        is authority.last_token
+                        and last_seal is not None
+                        and last_seal.dispatch_sequence == authority.last_sequence
+                        and authority.by_digest.get(last_seal.root_sha256_value)
+                        is authority.last_token
+                    )
+                )
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
+        return authority
+
+    def _require_dispatch_record(self, token: _DispatchRecordToken) -> _DispatchRecord:
+        self._require_dispatch_authority()
+        sequence: int | None = None
+        try:
+            if type(token) is not _DispatchRecordToken:
+                raise TypeError
+            seal = _SEALED_DISPATCH_RECORDS[token]
+            sequence = seal.dispatch_sequence
+            root_key = _runtime_key_from_canonical_bytes(seal.root_key_document_bytes)
+            ingresses = tuple(
+                decode_execution_fact_ingress(
+                    payload,
+                    context=IndependentFactDecodeContext(self._spec_set),
+                )
+                for payload in seal.ingress_bytes
+            )
+            batch = _create_historical_matcher_dispatch_batch(
+                trigger_root=_require_historical_matcher_dispatch_batch_trigger_root(
+                    seal.replay_batch
+                ),
+                run_id=RunId(seal.run_id_value),
+                source_namespace=SourceNamespace(seal.source_namespace_value),
+                dispatch_kind=HistoricalDispatchKind(seal.dispatch_kind_value),
+                dispatch_sequence=seal.dispatch_sequence,
+                trigger_root_sha256=Sha256Digest(seal.root_sha256_value),
+                trigger_root_key=root_key,
+                next_fact_sequence_before=seal.next_fact_sequence_before,
+                next_fact_sequence_after=seal.next_fact_sequence_after,
+                submission_sequences=seal.submission_sequences,
+                order_ids=tuple(
+                    EconomicId(RunId(run_id), EconomicOwnerKind(owner_kind), owner_sequence)
+                    for run_id, owner_kind, owner_sequence in seal.order_id_values
+                ),
+                ingresses=ingresses,
+                ingress_sha256s=tuple(Sha256Digest(value) for value in seal.ingress_sha256_values),
+            )
+            root_sha256 = Sha256Digest(seal.root_sha256_value)
+            batch_sha256 = Sha256Digest(seal.batch_sha256_value)
+            valid = (
+                canonical_historical_matcher_dispatch_batch_bytes(batch) == seal.batch_bytes
+                and historical_matcher_dispatch_batch_digest(batch) == batch_sha256
+                and canonical_historical_matcher_dispatch_batch_bytes(seal.replay_batch)
+                == seal.batch_bytes
+                and historical_matcher_dispatch_batch_digest(seal.replay_batch) == batch_sha256
+                and batch.run_id == self._run_id
+                and batch.source_namespace == self._source_namespace
+                and self._state.dispatch_by_sequence.get(sequence) is token
+                and self._state.dispatch_by_digest.get(seal.root_sha256_value) is token
+                and batch.trigger_root_sha256 == root_sha256
+                and batch.trigger_root_key == root_key
+                and _historical_root_digest_from_bytes(
+                    kind=batch.dispatch_kind,
+                    canonical_root_bytes=seal.root_bytes,
+                )
+                == root_sha256
+            )
+            if not valid:
+                raise ValueError
+            return _DispatchRecord(
+                root_bytes=seal.root_bytes,
+                root_sha256=root_sha256,
+                root_key=root_key,
+                batch=batch,
+                batch_bytes=seal.batch_bytes,
+                batch_sha256=batch_sha256,
+            )
+        except Exception:
+            self._retained_binding_drift(dispatch_sequence=sequence)
+            raise AssertionError("unreachable") from None
+
+    def _require_issued_record(self, record: _IssuedRecord) -> None:
+        try:
+            ingress = record.ingress
+            binding = record.binding
+            _validate_descendant_binding(binding)
+            dispatch_token = self._state.dispatch_by_sequence.get(binding.parent_dispatch_sequence)
+            dispatch = (
+                None if dispatch_token is None else _SEALED_DISPATCH_RECORDS.get(dispatch_token)
+            )
+            valid = (
+                type(record) is _IssuedRecord
+                and type(ingress) is ExecutionFactIngress
+                and type(record.ingress_identity) is IngressIdentity
+                and type(binding) is HistoricalMatcherDescendantBinding
+                and canonical_execution_fact_ingress_bytes(ingress) == record.ingress_bytes
+                and execution_fact_ingress_digest(ingress) == record.ingress_sha256
+                and canonical_execution_fact_bytes(ingress.fact) == record.fact_bytes
+                and binding.ingress_identity == ingress.identity
+                and record.ingress_identity == ingress.identity
+                and binding.ingress_sha256 == record.ingress_sha256
+                and binding.fact_sha256 == execution_fact_digest(ingress.fact)
+                and dispatch is not None
+                and binding.batch_sha256.value == dispatch.batch_sha256_value
+                and binding.parent_kind.value == dispatch.dispatch_kind_value
+                and binding.parent_root_sha256.value == dispatch.root_sha256_value
+                and _canonical_runtime_key_bytes(binding.parent_root_key)
+                == dispatch.root_key_document_bytes
+                and binding.parent_dispatch_sequence == dispatch.dispatch_sequence
+                and type(binding.batch_index) is int
+                and 0 <= binding.batch_index < len(dispatch.ingress_bytes)
+                and dispatch.ingress_bytes[binding.batch_index] == record.ingress_bytes
+                and dispatch.ingress_sha256_values[binding.batch_index]
+                == record.ingress_sha256.value
+                and self._state.issued_by_identity.get(record.ingress_identity) is record
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            sequence = getattr(record.binding, "parent_dispatch_sequence", None)
+            self._retained_binding_drift(dispatch_sequence=sequence)
+
+    def _require_issuance_registry(self) -> None:
+        state = self._state
+        try:
+            valid = (
+                state.issued is self._issued_history_identity
+                and state.issued_by_identity is self._issued_registry_identity
+                and len(state.issued_by_identity) == len(state.issued)
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
+
+    def _require_issuance_lookup_state(self) -> _MatcherState:
+        self._require_issuance_registry()
+        state = self._require_fenced_live_bindings(
+            dispatch_sequence=self._state.last_dispatch,
+        )
+        self._require_issuance_registry()
+        return state
+
+    def _require_fenced_live_bindings(
+        self,
+        *,
+        dispatch_sequence: int | None,
+    ) -> _MatcherState:
+        state = self._state
+        lease = self._begin_dispatch_callback()
+        try:
+            self._require_live_bindings()
+        finally:
+            self._end_dispatch_callback(
+                lease=lease,
+                dispatch_sequence=dispatch_sequence,
+            )
+        if self._state is not state:
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+        return state
+
+    def _require_submission_pointer(self, *, dispatch_sequence: int | None) -> None:
+        state = self._state
+        try:
+            expected = _next_submission_after(state.submissions)
+            valid = (
+                state.next_submission is None or type(state.next_submission) is int
+            ) and state.next_submission == expected
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+
+    def _require_submission_allocation_state(
+        self,
+        *,
+        allocation_state: _MatcherState,
+        allocation_state_bytes: bytes,
+        submission_sequence: int,
+        dispatch_sequence: int,
+    ) -> None:
+        self._require_callback_state(
+            callback_state=allocation_state,
+            callback_state_bytes=allocation_state_bytes,
+            dispatch_sequence=dispatch_sequence,
+        )
+        if self._state.next_submission != submission_sequence:
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+
+    def _require_callback_state(
+        self,
+        *,
+        callback_state: _MatcherState,
+        callback_state_bytes: bytes,
+        dispatch_sequence: int,
+    ) -> None:
+        current_state_bytes = canonical_historical_matcher_state_bytes(self.state)
+        if self._state is not callback_state or current_state_bytes != callback_state_bytes:
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+
+    def _begin_dispatch_callback(self) -> _DispatchCallbackLease:
+        """Fence state reachable through the matcher during a verifier callback.
+
+        The verifier port receives only the root and dispatch sequence. Pre-capturing matcher-
+        private objects through same-process reflection is outside that capability boundary.
+        """
+        active_guard = _MATCHER_CALLBACK_GUARDS.get(self)
+        if active_guard is not None:
+            _CALLBACK_GUARD_VIOLATIONS[active_guard] = True
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reentrant verifier callback is forbidden",
+            )
+        fence = _DispatchCallbackStateFence()
+        callback_guard = object.__new__(_DispatchCallbackGuardToken)
+        trusted_spec_set = _clone_spec_set(self._spec_set)
+        dispatch_authority = self._require_dispatch_authority()
+        lease = _DispatchCallbackLease(
+            state=self._state,
+            dispatch_authority=dispatch_authority,
+            issued_history_identity=self._issued_history_identity,
+            issued_registry_identity=self._issued_registry_identity,
+            conflict_bytes=self._conflict_bytes,
+            conflict_sha256=self._conflict_sha256,
+            active_dispatch_verifier=self._active_dispatch_verifier,
+            active_dispatch_runtime_identity=self._active_dispatch_runtime_identity,
+            execution_policy=self._execution_policy,
+            execution_policy_id_value=self._execution_policy_id_value,
+            execution_policy_sha256_value=self._execution_policy_sha256_value,
+            order_issuance_verifier=self._order_issuance_verifier,
+            provenance_id=self._provenance_id,
+            provenance_id_value=self._provenance_id_value,
+            run_id=self._run_id,
+            run_id_value=self._run_id_value,
+            source_namespace=self._source_namespace,
+            source_namespace_value=self._source_namespace_value,
+            spec_bytes=self._spec_bytes,
+            spec_set=trusted_spec_set,
+            spec_set_identity=self._spec_set,
+            spec_sha256=self._spec_sha256,
+            spec_sha256_value=self._spec_sha256.value,
+            submission_authorization_verifier=self._submission_authorization_verifier,
+            mutation_active=self._mutation_active,
+            fence=fence,
+            callback_guard=callback_guard,
+        )
+        _MATCHER_CALLBACK_GUARDS[self] = callback_guard
+        _CALLBACK_GUARD_VIOLATIONS[callback_guard] = False
+        object.__setattr__(self, "_state", fence)
+        return lease
+
+    def _end_dispatch_callback(
+        self,
+        *,
+        lease: _DispatchCallbackLease,
+        dispatch_sequence: int | None,
+    ) -> None:
+        missing = object()
+
+        def current(name: str) -> object:
+            try:
+                return object.__getattribute__(self, name)
+            except (AttributeError, TypeError):
+                return missing
+
+        current_state = current("_state")
+        current_callback_guard = _MATCHER_CALLBACK_GUARDS.get(self, missing)
+        current_callback_guard_violation = _CALLBACK_GUARD_VIOLATIONS.get(
+            lease.callback_guard,
+            missing,
+        )
+        current_dispatch_authority = _MATCHER_DISPATCH_AUTHORITIES.get(self, missing)
+        current_issued_history_identity = current("_issued_history_identity")
+        current_issued_registry_identity = current("_issued_registry_identity")
+        current_conflict_bytes = current("_conflict_bytes")
+        current_conflict_sha256 = current("_conflict_sha256")
+        current_active_dispatch_verifier = current("_active_dispatch_verifier")
+        current_active_dispatch_runtime_identity = current("_active_dispatch_runtime_identity")
+        current_execution_policy = current("_execution_policy")
+        current_execution_policy_identity = current("_execution_policy_identity")
+        current_execution_policy_id_value = current("_execution_policy_id_value")
+        current_execution_policy_sha256_value = current("_execution_policy_sha256_value")
+        current_order_issuance_verifier = current("_order_issuance_verifier")
+        current_provenance_id = current("_provenance_id")
+        current_provenance_id_value = current("_provenance_id_value")
+        current_run_id = current("_run_id")
+        current_run_id_value = current("_run_id_value")
+        current_source_namespace = current("_source_namespace")
+        current_source_namespace_value = current("_source_namespace_value")
+        current_spec_bytes = current("_spec_bytes")
+        current_spec_set = current("_spec_set")
+        current_spec_sha256 = current("_spec_sha256")
+        current_submission_authorization_verifier = current("_submission_authorization_verifier")
+        current_mutation_active = current("_mutation_active")
+        try:
+            current_fence_accessed = object.__getattribute__(lease.fence, "_accessed")
+        except (AttributeError, TypeError):
+            current_fence_accessed = missing
+        try:
+            run_id_unchanged = (
+                type(current_run_id) is RunId
+                and current_run_id is lease.run_id
+                and type(current_run_id.value) is str
+                and type(current_run_id_value) is str
+                and type(lease.run_id_value) is str
+                and current_run_id.value == lease.run_id_value
+                and current_run_id_value == lease.run_id_value
+            )
+        except Exception:
+            run_id_unchanged = False
+        try:
+            execution_policy_unchanged = (
+                type(current_execution_policy) is ExecutionPolicyRef
+                and current_execution_policy is lease.execution_policy
+                and current_execution_policy_identity is lease.execution_policy
+                and type(current_execution_policy.identifier) is ExecutionPolicyId
+                and type(current_execution_policy.sha256) is Sha256Digest
+                and type(current_execution_policy.identifier.value) is str
+                and type(current_execution_policy.sha256.value) is str
+                and type(current_execution_policy_id_value) is str
+                and type(current_execution_policy_sha256_value) is str
+                and type(lease.execution_policy_id_value) is str
+                and type(lease.execution_policy_sha256_value) is str
+                and current_execution_policy.identifier.value == lease.execution_policy_id_value
+                and current_execution_policy.sha256.value == lease.execution_policy_sha256_value
+                and current_execution_policy_id_value == lease.execution_policy_id_value
+                and current_execution_policy_sha256_value == lease.execution_policy_sha256_value
+            )
+        except Exception:
+            execution_policy_unchanged = False
+        try:
+            source_namespace_unchanged = (
+                type(current_source_namespace) is SourceNamespace
+                and current_source_namespace is lease.source_namespace
+                and type(current_source_namespace.value) is str
+                and type(current_source_namespace_value) is str
+                and type(lease.source_namespace_value) is str
+                and current_source_namespace.value == lease.source_namespace_value
+                and current_source_namespace_value == lease.source_namespace_value
+            )
+        except Exception:
+            source_namespace_unchanged = False
+        try:
+            provenance_unchanged = (
+                type(current_provenance_id) is FactProvenanceId
+                and current_provenance_id is lease.provenance_id
+                and type(current_provenance_id.value) is str
+                and type(current_provenance_id_value) is str
+                and type(lease.provenance_id_value) is str
+                and current_provenance_id.value == lease.provenance_id_value
+                and current_provenance_id_value == lease.provenance_id_value
+            )
+        except Exception:
+            provenance_unchanged = False
+        try:
+            spec_unchanged = (
+                type(current_spec_set) is InstrumentExecutionSpecSet
+                and current_spec_set is lease.spec_set_identity
+                and type(current_spec_bytes) is bytes
+                and type(lease.spec_bytes) is bytes
+                and current_spec_bytes == lease.spec_bytes
+                and type(current_spec_sha256) is Sha256Digest
+                and current_spec_sha256 is lease.spec_sha256
+                and type(current_spec_sha256.value) is str
+                and type(lease.spec_sha256_value) is str
+                and current_spec_sha256.value == lease.spec_sha256_value
+                and canonical_instrument_spec_set_bytes(current_spec_set) == lease.spec_bytes
+                and instrument_spec_set_digest(current_spec_set).value == lease.spec_sha256_value
+            )
+        except Exception:
+            spec_unchanged = False
+        verifier_identities_unchanged = (
+            current_active_dispatch_verifier is lease.active_dispatch_verifier
+            and current_order_issuance_verifier is lease.order_issuance_verifier
+            and current_submission_authorization_verifier is lease.submission_authorization_verifier
+        )
+        dispatch_runtime_unchanged = (
+            current_active_dispatch_runtime_identity is lease.active_dispatch_runtime_identity
+        )
+        drifted = (
+            current_fence_accessed is not False
+            or current_state is not lease.fence
+            or current_callback_guard is not lease.callback_guard
+            or current_callback_guard_violation is not False
+            or current_dispatch_authority is not lease.dispatch_authority
+            or current_issued_history_identity is not lease.issued_history_identity
+            or current_issued_registry_identity is not lease.issued_registry_identity
+            or current_conflict_bytes is not lease.conflict_bytes
+            or current_conflict_sha256 is not lease.conflict_sha256
+            or not execution_policy_unchanged
+            or not source_namespace_unchanged
+            or not provenance_unchanged
+            or not spec_unchanged
+            or not verifier_identities_unchanged
+            or not dispatch_runtime_unchanged
+            or not run_id_unchanged
+            or current_mutation_active is not lease.mutation_active
+        )
+
+        _MATCHER_CALLBACK_GUARDS.pop(self, None)
+        _CALLBACK_GUARD_VIOLATIONS.pop(lease.callback_guard, None)
+        object.__setattr__(self, "_state", lease.state)
+        _MATCHER_DISPATCH_AUTHORITIES[self] = lease.dispatch_authority
+        object.__setattr__(self, "_issued_history_identity", lease.issued_history_identity)
+        object.__setattr__(self, "_issued_registry_identity", lease.issued_registry_identity)
+        object.__setattr__(self, "_conflict_bytes", lease.conflict_bytes)
+        object.__setattr__(self, "_conflict_sha256", lease.conflict_sha256)
+        restored_policy = (
+            lease.execution_policy
+            if execution_policy_unchanged
+            else ExecutionPolicyRef(
+                ExecutionPolicyId(lease.execution_policy_id_value),
+                Sha256Digest(lease.execution_policy_sha256_value),
+            )
+        )
+        object.__setattr__(self, "_execution_policy", restored_policy)
+        object.__setattr__(self, "_execution_policy_identity", restored_policy)
+        object.__setattr__(
+            self,
+            "_execution_policy_id_value",
+            lease.execution_policy_id_value,
+        )
+        object.__setattr__(
+            self,
+            "_execution_policy_sha256_value",
+            lease.execution_policy_sha256_value,
+        )
+        restored_source_namespace = (
+            lease.source_namespace
+            if source_namespace_unchanged
+            else SourceNamespace(lease.source_namespace_value)
+        )
+        object.__setattr__(self, "_source_namespace", restored_source_namespace)
+        object.__setattr__(
+            self,
+            "_source_namespace_value",
+            lease.source_namespace_value,
+        )
+        restored_provenance = (
+            lease.provenance_id
+            if provenance_unchanged
+            else FactProvenanceId(lease.provenance_id_value)
+        )
+        object.__setattr__(self, "_provenance_id", restored_provenance)
+        object.__setattr__(self, "_provenance_id_value", lease.provenance_id_value)
+        object.__setattr__(
+            self,
+            "_spec_set",
+            lease.spec_set_identity if spec_unchanged else lease.spec_set,
+        )
+        object.__setattr__(self, "_spec_bytes", lease.spec_bytes)
+        object.__setattr__(
+            self,
+            "_spec_sha256",
+            lease.spec_sha256 if spec_unchanged else Sha256Digest(lease.spec_sha256_value),
+        )
+        object.__setattr__(
+            self,
+            "_active_dispatch_verifier",
+            lease.active_dispatch_verifier,
+        )
+        object.__setattr__(
+            self,
+            "_active_dispatch_runtime_identity",
+            lease.active_dispatch_runtime_identity,
+        )
+        object.__setattr__(
+            self,
+            "_order_issuance_verifier",
+            lease.order_issuance_verifier,
+        )
+        object.__setattr__(
+            self,
+            "_submission_authorization_verifier",
+            lease.submission_authorization_verifier,
+        )
+        object.__setattr__(
+            self,
+            "_run_id",
+            lease.run_id if run_id_unchanged else RunId(lease.run_id_value),
+        )
+        object.__setattr__(self, "_run_id_value", lease.run_id_value)
+        object.__setattr__(self, "_mutation_active", lease.mutation_active)
+        if drifted:
+            self._retained_binding_drift(dispatch_sequence=dispatch_sequence)
+
+    def _require_retained_state(self) -> None:
+        self._require_issuance_registry()
+        authority = self._require_dispatch_authority()
+        state = self._state
+        for submission_record in state.submissions:
+            self._require_submission_record(submission_record)
+        for _, dispatch_record in sorted(state.dispatch_by_sequence.items()):
+            self._require_dispatch_record(dispatch_record)
+        for issued_record in state.issued:
+            self._require_issued_record(issued_record)
+        try:
+            submission_ids = {id(record) for record in state.submissions}
+            pending_ids = tuple(id(record) for record in state.pending)
+            submission_sequences = tuple(
+                record.receipt.submission_sequence for record in state.submissions
+            )
+            expected_next_submission = _next_submission_after(state.submissions)
+            issued_sequences = tuple(record.ingress.ingress_sequence for record in state.issued)
+            dispatch_sequences = tuple(sorted(state.dispatch_by_sequence))
+            last_seal = (
+                None
+                if authority.last_token is None
+                else _SEALED_DISPATCH_RECORDS[authority.last_token]
+            )
+            valid = (
+                type(state) is _MatcherState
+                and len(submission_ids) == len(state.submissions)
+                and submission_sequences == tuple(sorted(submission_sequences))
+                and len(set(submission_sequences)) == len(submission_sequences)
+                and (state.next_submission is None or type(state.next_submission) is int)
+                and state.next_submission == expected_next_submission
+                and len(state.submission_by_order) == len(state.submissions)
+                and len(state.submission_by_client) == len(state.submissions)
+                and all(
+                    state.submission_by_order.get(record.order_id) is record
+                    and state.submission_by_client.get(record.client_key) is record
+                    for record in state.submissions
+                )
+                and len(set(pending_ids)) == len(pending_ids)
+                and all(record_id in submission_ids for record_id in pending_ids)
+                and len(state.dispatch_by_sequence) == len(state.dispatch_by_digest)
+                and all(
+                    type(sequence) is int
+                    and _SEALED_DISPATCH_RECORDS[token].dispatch_sequence == sequence
+                    and state.dispatch_by_digest.get(
+                        _SEALED_DISPATCH_RECORDS[token].root_sha256_value
+                    )
+                    is token
+                    for sequence, token in state.dispatch_by_sequence.items()
+                )
+                and state.last_dispatch
+                == (None if not dispatch_sequences else dispatch_sequences[-1])
+                and issued_sequences == tuple(sorted(issued_sequences))
+                and len(set(issued_sequences)) == len(issued_sequences)
+                and (
+                    state.next_fact is None
+                    or (type(state.next_fact) is int and 1 <= state.next_fact <= _MAX_UINT64)
+                )
+                and len(state.issued_by_identity) == len(state.issued)
+                and all(
+                    state.issued_by_identity.get(record.ingress_identity) is record
+                    for record in state.issued
+                )
+                and type(state.ended) is bool
+                and (
+                    (
+                        state.ended
+                        and not state.pending
+                        and state.last_dispatch is not None
+                        and state.end_batch_sha256 is not None
+                        and last_seal is not None
+                        and last_seal.dispatch_kind_value == HistoricalDispatchKind.END_OF_RUN.value
+                        and last_seal.batch_sha256_value == state.end_batch_sha256.value
+                    )
+                    or (not state.ended and state.end_batch_sha256 is None)
+                )
+                and (
+                    (
+                        state.conflict is None
+                        and self._conflict_bytes is None
+                        and self._conflict_sha256 is None
+                    )
+                    or (
+                        state.conflict is not None
+                        and self._conflict_bytes is not None
+                        and self._conflict_sha256 is not None
+                        and canonical_historical_matcher_conflict_bytes(state.conflict)
+                        == self._conflict_bytes
+                        and historical_matcher_conflict_digest(state.conflict)
+                        == self._conflict_sha256
+                    )
+                )
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
+
+    def _require_dispatch_eligibility_state(self) -> None:
+        """Validate the mutable frontier and its lightweight submission-sequence spine."""
+        authority = self._require_dispatch_authority()
+        state = self._state
+        for submission_record in state.pending:
+            self._require_submission_record(submission_record)
+        try:
+            pending_ids = tuple(id(record) for record in state.pending)
+            submission_ids = (
+                {id(record) for record in state.submissions} if state.pending else set()
+            )
+            last_seal = (
+                None
+                if authority.last_token is None
+                else _SEALED_DISPATCH_RECORDS.get(authority.last_token)
+            )
+            expected_next_submission = _next_submission_after(state.submissions)
+            valid = (
+                type(state) is _MatcherState
+                and (state.next_submission is None or type(state.next_submission) is int)
+                and state.next_submission == expected_next_submission
+                and (
+                    state.next_fact is None
+                    or (type(state.next_fact) is int and 1 <= state.next_fact <= _MAX_UINT64)
+                )
+                and len(set(pending_ids)) == len(pending_ids)
+                and all(record_id in submission_ids for record_id in pending_ids)
+                and all(
+                    state.submission_by_order.get(record.order_id) is record
+                    and state.submission_by_client.get(record.client_key) is record
+                    for record in state.pending
+                )
+                and len(state.dispatch_by_sequence) == len(state.dispatch_by_digest)
+                and (
+                    (state.last_dispatch is None and not state.dispatch_by_sequence)
+                    or (
+                        type(state.last_dispatch) is int
+                        and authority.last_token is not None
+                        and last_seal is not None
+                        and last_seal.dispatch_sequence == state.last_dispatch
+                        and state.dispatch_by_digest.get(last_seal.root_sha256_value)
+                        is authority.last_token
+                    )
+                )
+                and type(state.ended) is bool
+                and (
+                    (
+                        state.ended
+                        and not state.pending
+                        and last_seal is not None
+                        and state.end_batch_sha256 is not None
+                        and last_seal.dispatch_kind_value == HistoricalDispatchKind.END_OF_RUN.value
+                        and last_seal.batch_sha256_value == state.end_batch_sha256.value
+                    )
+                    or (not state.ended and state.end_batch_sha256 is None)
+                )
+                and (
+                    (state.conflict is None and self._conflict_bytes is None)
+                    or (state.conflict is not None and self._conflict_bytes is not None)
+                )
+            )
+        except Exception:
+            valid = False
+        if not valid:
+            self._retained_binding_drift(dispatch_sequence=state.last_dispatch)
+
+    def _publish_conflict(
+        self,
+        *,
+        kind: HistoricalMatcherConflictKind,
+        occupied_identity: dict[str, object] | None,
+        existing_sha256: Sha256Digest | None,
+        submitted_sha256: Sha256Digest | None,
+        submitted_dispatch_sequence: int | None,
+        trigger_root_sha256: Sha256Digest | None,
+    ) -> None:
+        if self._state.conflict is None:
+            conflict = _create_historical_matcher_conflict(
+                run_id=self._run_id,
+                conflict_kind=kind,
+                occupied_identity=occupied_identity,
+                existing_sha256=existing_sha256,
+                submitted_sha256=submitted_sha256,
+                submitted_dispatch_sequence=submitted_dispatch_sequence,
+                last_successful_dispatch_sequence=self._state.last_dispatch,
+                pending_count=len(self._state.pending),
+                next_submission_sequence=self._state.next_submission,
+                next_fact_sequence=self._state.next_fact,
+                trigger_root_sha256=trigger_root_sha256,
+            )
+            conflict_bytes = canonical_historical_matcher_conflict_bytes(conflict)
+            conflict_sha256 = historical_matcher_conflict_digest(conflict)
+            self._conflict_bytes = conflict_bytes
+            self._conflict_sha256 = conflict_sha256
+            self._state = _MatcherState(
+                **{
+                    name: getattr(self._state, name)
+                    for name in _MatcherState.__dataclass_fields__
+                    if name != "conflict"
+                },
+                conflict=conflict,
+            )
+        raise _fail(OutcomeCode.CONFLICTING_ID, "matcher identity conflict")
+
+    def submit(
+        self,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+    ) -> HistoricalSubmissionReceipt:
+        self._enter_mutation()
+        try:
+            return self._submit(
+                order,
+                causal_market_root=causal_market_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+        finally:
+            self._leave_mutation()
+
+    def _submit(
+        self,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+    ) -> HistoricalSubmissionReceipt:
+        if type(order) is not Order or type(causal_market_root) is not MarketDataEnvelope:
+            raise _fail(OutcomeCode.INVALID_TYPE, "submission carriers must be exact")
+        sequence = _require_dispatch_sequence(dispatch_sequence)
+        try:
+            submitted_order_bytes = canonical_order_bytes(order)
+            submitted_order_sha256 = order_digest(order)
+            request_bytes = canonical_execution_request_bytes(order)
+            request_sha256 = execution_request_digest(order)
+            client_key = order_client_submission_key(order)
+            causal_bytes = canonical_market_data_record_bytes(causal_market_root)
+            causal_sha256 = historical_market_root_digest(causal_market_root)
+            causal_key = runtime_root_order_key(causal_market_root)
+        except HistoricalMatcherError:
+            raise
+        except Exception as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "submission cannot be canonicalized") from error
+
+        existing = self._state.submission_by_order.get(order.order_id)
+        if existing is not None:
+            self._require_submission_record(existing)
+            if (
+                existing.order_bytes == submitted_order_bytes
+                and existing.causal_market_bytes == causal_bytes
+                and existing.dispatch_sequence == sequence
+            ):
+                return existing.receipt
+            self._publish_conflict(
+                kind=HistoricalMatcherConflictKind.SUBMISSION_IDENTITY,
+                occupied_identity={
+                    "kind": "order_id",
+                    "order_id": {
+                        "owner_kind": order.order_id.owner_kind.value,
+                        "owner_sequence": order.order_id.owner_sequence,
+                        "run_id": order.order_id.run_id.value,
+                    },
+                },
+                existing_sha256=existing.order_sha256,
+                submitted_sha256=submitted_order_sha256,
+                submitted_dispatch_sequence=sequence,
+                trigger_root_sha256=causal_sha256,
+            )
+        existing = self._state.submission_by_client.get(client_key)
+        if existing is not None:
+            self._require_submission_record(existing)
+            self._publish_conflict(
+                kind=HistoricalMatcherConflictKind.CLIENT_SUBMISSION_KEY,
+                occupied_identity={
+                    "kind": "client_submission_key",
+                    "sha256": client_key.value,
+                },
+                existing_sha256=existing.order_sha256,
+                submitted_sha256=submitted_order_sha256,
+                submitted_dispatch_sequence=sequence,
+                trigger_root_sha256=causal_sha256,
+            )
+        if self._state.conflict is not None:
+            raise _fail(OutcomeCode.SUBMISSION_BLOCKED_BY_HALT, "matcher is halted")
+        if self._state.ended:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "matcher already ended")
+        if (
+            order.order_kind is not OrderKind.MARKET
+            or order.time_in_force is not TimeInForce.GOOD_FOR_NEXT_ELIGIBLE_MARKET_EVENT
+            or order.price_constraint is not None
+        ):
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "Order is outside Phase 1 profile")
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
+        issuance_lease = self._begin_dispatch_callback()
+        try:
+            try:
+                issued = self._order_issuance_verifier.resolve_issued_order_by_id(order.order_id)
+            except Exception as error:
+                raise _VerifierFailure(error) from error
+            finally:
+                self._end_dispatch_callback(
+                    lease=issuance_lease,
+                    dispatch_sequence=sequence,
+                )
+        except _VerifierFailure as failure:
+            raise failure.error from None
+        if type(issued) is not Order or canonical_order_bytes(issued) != submitted_order_bytes:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "Order was not issued by authority")
+        if (
+            canonical_order_bytes(order) != submitted_order_bytes
+            or order_digest(order) != submitted_order_sha256
+            or canonical_execution_request_bytes(order) != request_bytes
+            or execution_request_digest(order) != request_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submitted Order changed during issuance")
+        owned_order = _clone_order(order)
+        causal_dispatch_lease = self._begin_dispatch_callback()
+        try:
+            try:
+                proof = self._active_dispatch_verifier.verify_active_market_dispatch(
+                    causal_market_root,
+                    dispatch_sequence=sequence,
+                )
+            except RuntimeOrderingError:
+                raise
+            except Exception as error:
+                raise _VerifierFailure(error) from error
+            finally:
+                self._end_dispatch_callback(
+                    lease=causal_dispatch_lease,
+                    dispatch_sequence=sequence,
+                )
+            _require_active_market_dispatch_proof(
+                proof,
+                run_id=self._run_id,
+                market_root=causal_market_root,
+                canonical_market_bytes=causal_bytes,
+                causal_market_sha256=causal_market_digest(causal_market_root),
+                dispatch_sequence=sequence,
+                issuer=self._active_dispatch_verifier,
+            )
+            if (
+                canonical_market_data_record_bytes(causal_market_root) != causal_bytes
+                or historical_market_root_digest(causal_market_root) != causal_sha256
+                or runtime_root_order_key(causal_market_root) != causal_key
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "causal market root changed")
+            owned_causal_root = _clone_market_root(causal_market_root)
+        except _VerifierFailure as failure:
+            raise failure.error from None
+        except HistoricalMatcherError:
+            raise
+        except RuntimeOrderingError as error:
+            raise _fail(error.code, "active market proof is invalid") from error
+        except (AttributeError, TypeError) as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "active market proof is invalid") from error
+        if (
+            owned_order.run_id != self._run_id
+            or owned_order.dispatch_sequence != sequence
+            or owned_order.eligible_after_available_at != owned_causal_root.available_at
+            or owned_order.instrument != owned_causal_root.payload.instrument
+            or owned_order.instrument_spec_set_id != self._spec_set.identifier
+            or owned_order.instrument_spec_set_sha256 != self._spec_sha256
+            or owned_order.execution_policy != self._execution_policy
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submission bindings conflict")
+        try:
+            specification = self._spec_set.require(owned_order.instrument)
+            require_positive(owned_order.quantity, field_name="quantity")
+            from ea.core.economics import require_quantized
+
+            require_quantized(
+                owned_order.quantity,
+                specification.quantity_quantum,
+                field_name="quantity",
+            )
+        except EconomicValidationError as error:
+            code = (
+                error.code
+                if error.code
+                in {
+                    OutcomeCode.INVALID_TYPE,
+                    OutcomeCode.OUT_OF_RANGE,
+                    OutcomeCode.NOT_QUANTIZED,
+                }
+                else OutcomeCode.CONFLICTING_ID
+            )
+            raise _fail(code, "Order quantity is invalid") from error
+        self._require_submission_pointer(dispatch_sequence=sequence)
+        allocation_state = self._state
+        allocation_state_bytes = canonical_historical_matcher_state_bytes(self.state)
+        submission_sequence = allocation_state.next_submission
+        if submission_sequence is None:
+            raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "submission sequence exhausted")
+        authorization_valid = False
+        try:
+            authorization_lease = self._begin_dispatch_callback()
+            authorization_verifier = self._submission_authorization_verifier
+            try:
+                try:
+                    auth_proof = authorization_verifier.verify_authorized_historical_submission(
+                        order_id=owned_order.order_id,
+                        canonical_order_bytes=submitted_order_bytes,
+                        canonical_execution_request_bytes=request_bytes,
+                        canonical_causal_market_bytes=causal_bytes,
+                        causal_market_sha256=causal_sha256,
+                        causal_root_key=causal_key,
+                        dispatch_sequence=sequence,
+                    )
+                except HistoricalPreEffectAuthorizationError:
+                    raise
+                except Exception as error:
+                    raise _VerifierFailure(error) from error
+            finally:
+                self._end_dispatch_callback(
+                    lease=authorization_lease,
+                    dispatch_sequence=sequence,
+                )
+            auth = _require_historical_submission_authorization_proof(
+                auth_proof,
+                run_id=self._run_id,
+                spec_set=self._spec_set,
+                execution_policy=self._execution_policy,
+                order=owned_order,
+                order_sha256=submitted_order_sha256,
+                execution_request_sha256=request_sha256,
+                causal_market_sha256=causal_sha256,
+                causal_root_key=causal_key,
+                dispatch_sequence=sequence,
+                issuer=self._submission_authorization_verifier,
+            )
+            authorization_valid = True
+        except _VerifierFailure as failure:
+            raise failure.error from None
+        except HistoricalPreEffectAuthorizationError:
+            raise
+        except HistoricalMatcherError:
+            raise
+        except (AttributeError, TypeError) as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "authorization proof is invalid") from error
+        finally:
+            if not authorization_valid:
+                self._require_submission_allocation_state(
+                    allocation_state=allocation_state,
+                    allocation_state_bytes=allocation_state_bytes,
+                    submission_sequence=submission_sequence,
+                    dispatch_sequence=sequence,
+                )
+        if (
+            canonical_order_bytes(order) != submitted_order_bytes
+            or canonical_market_data_record_bytes(causal_market_root) != causal_bytes
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submission input changed during authorization")
+        receipt = _create_historical_submission_receipt(
+            causal_market_root=owned_causal_root,
+            run_id=_clone_run_id(self._run_id),
+            source_namespace=SourceNamespace(self._source_namespace.value),
+            submission_sequence=submission_sequence,
+            order_id=_clone_economic_id(owned_order.order_id),
+            order_sha256=Sha256Digest(submitted_order_sha256.value),
+            execution_request_sha256=Sha256Digest(request_sha256.value),
+            client_submission_key=Sha256Digest(client_key.value),
+            instrument=_clone_instrument(owned_order.instrument),
+            side=owned_order.side,
+            quantity_text=owned_order.quantity.text,
+            causal_market_sha256=Sha256Digest(causal_sha256.value),
+            causal_root_key=runtime_root_order_key(owned_causal_root),
+            dispatch_sequence=sequence,
+            eligible_after_available_at=owned_order.eligible_after_available_at,
+            audit_acknowledgement_id=auth.audit_acknowledgement_id,
+            audit_acknowledgement_sha256=Sha256Digest(auth.audit_acknowledgement_sha256.value),
+            global_halt_epoch=auth.global_halt_epoch,
+            risk_halt_epoch=auth.risk_halt_epoch,
+            instrument_gate_id=auth.instrument_gate_id,
+            instrument_gate_version=auth.instrument_gate_version,
+            authorization_state_version=auth.authorization_state_version,
+            instrument_spec_set_id=InstrumentSpecSetId(self._spec_set.identifier.value),
+            instrument_spec_set_sha256=Sha256Digest(self._spec_sha256.value),
+            execution_policy=_clone_policy(self._execution_policy),
+        )
+        receipt_bytes = canonical_historical_submission_receipt_bytes(receipt)
+        receipt_sha256 = historical_submission_receipt_digest(receipt)
+        record = _SubmissionRecord(
+            order=owned_order,
+            order_id=_clone_economic_id(owned_order.order_id),
+            order_bytes=submitted_order_bytes,
+            order_sha256=submitted_order_sha256,
+            request_bytes=request_bytes,
+            request_sha256=request_sha256,
+            client_key=client_key,
+            causal_market_root=owned_causal_root,
+            causal_market_bytes=causal_bytes,
+            causal_market_sha256=causal_sha256,
+            causal_root_key=causal_key,
+            dispatch_sequence=sequence,
+            receipt=receipt,
+            receipt_bytes=receipt_bytes,
+            receipt_sha256=receipt_sha256,
+        )
+        if not self._submission_record_is_valid(record):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "submission record preflight failed")
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
+        self._require_submission_allocation_state(
+            allocation_state=allocation_state,
+            allocation_state_bytes=allocation_state_bytes,
+            submission_sequence=submission_sequence,
+            dispatch_sequence=sequence,
+        )
+        publication_state = allocation_state
+        by_order = dict(publication_state.submission_by_order)
+        by_client = dict(publication_state.submission_by_client)
+        by_order[record.order_id] = record
+        by_client[client_key] = record
+        next_dispatch_history = _append_historical_matcher_submission_history(
+            publication_state.dispatch_history,
+            receipt=record.receipt,
+            receipt_sha256=record.receipt_sha256,
+            order_sha256=record.order_sha256,
+        )
+        self._state = _MatcherState(
+            next_submission=_advance(submission_sequence),
+            next_fact=publication_state.next_fact,
+            submissions=(*publication_state.submissions, record),
+            pending=(*publication_state.pending, record),
+            submission_by_order=MappingProxyType(by_order),
+            submission_by_client=MappingProxyType(by_client),
+            dispatch_by_sequence=publication_state.dispatch_by_sequence,
+            dispatch_by_digest=publication_state.dispatch_by_digest,
+            dispatch_chain_head=publication_state.dispatch_chain_head,
+            dispatch_history=next_dispatch_history,
+            issued=publication_state.issued,
+            issued_by_identity=publication_state.issued_by_identity,
+            last_dispatch=publication_state.last_dispatch,
+            ended=False,
+            end_batch_sha256=None,
+            conflict=None,
+        )
+        return receipt
+
+    def _dispatch_replay(
+        self,
+        *,
+        sequence: int,
+        root_bytes: bytes,
+        root_sha256: Sha256Digest,
+    ) -> HistoricalMatcherDispatchBatch | None:
+        existing = self._state.dispatch_by_sequence.get(sequence)
+        if existing is not None:
+            existing_record = self._require_dispatch_record(existing)
+            if (
+                existing_record.root_bytes == root_bytes
+                and existing_record.root_sha256 == root_sha256
+            ):
+                return _SEALED_DISPATCH_RECORDS[existing].replay_batch
+            self._publish_conflict(
+                kind=HistoricalMatcherConflictKind.DISPATCH_IDENTITY,
+                occupied_identity={
+                    "dispatch_sequence": sequence,
+                    "kind": "dispatch_sequence",
+                },
+                existing_sha256=existing_record.root_sha256,
+                submitted_sha256=root_sha256,
+                submitted_dispatch_sequence=sequence,
+                trigger_root_sha256=root_sha256,
+            )
+        existing = self._state.dispatch_by_digest.get(root_sha256.value)
+        if existing is not None:
+            existing_record = self._require_dispatch_record(existing)
+            self._publish_conflict(
+                kind=HistoricalMatcherConflictKind.DISPATCH_IDENTITY,
+                occupied_identity=None,
+                existing_sha256=existing_record.root_sha256,
+                submitted_sha256=root_sha256,
+                submitted_dispatch_sequence=sequence,
+                trigger_root_sha256=root_sha256,
+            )
+        return None
+
+    def match_active_market_root(
+        self,
+        market_root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> HistoricalMatcherDispatchBatch:
+        self._enter_mutation()
+        try:
+            return self._match_active_market_root(
+                market_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+        finally:
+            self._leave_mutation()
+
+    def _match_active_market_root(
+        self,
+        market_root: MarketDataEnvelope,
+        *,
+        dispatch_sequence: int,
+    ) -> HistoricalMatcherDispatchBatch:
+        if type(market_root) is not MarketDataEnvelope:
+            raise _fail(OutcomeCode.INVALID_TYPE, "market_root must be exact")
+        sequence = _require_dispatch_sequence(dispatch_sequence)
+        try:
+            root_bytes = canonical_market_data_record_bytes(market_root)
+            root_sha256 = historical_market_root_digest(market_root)
+            root_key = runtime_root_order_key(market_root)
+        except Exception as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "market root cannot be encoded") from error
+        replay = self._dispatch_replay(
+            sequence=sequence,
+            root_bytes=root_bytes,
+            root_sha256=root_sha256,
+        )
+        if replay is not None:
+            return replay
+        self._require_dispatch_eligibility_state()
+        if self._state.conflict is not None or self._state.ended:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "matcher is halted or ended")
+        if self._state.last_dispatch is not None and sequence <= self._state.last_dispatch:
+            self._publish_conflict(
+                kind=HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH,
+                occupied_identity={
+                    "dispatch_sequence": sequence,
+                    "kind": "dispatch_sequence",
+                },
+                existing_sha256=None,
+                submitted_sha256=root_sha256,
+                submitted_dispatch_sequence=sequence,
+                trigger_root_sha256=root_sha256,
+            )
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
+        callback_lease = self._begin_dispatch_callback()
+        try:
+            try:
+                proof = self._active_dispatch_verifier.verify_active_market_dispatch(
+                    market_root,
+                    dispatch_sequence=sequence,
+                )
+            except RuntimeOrderingError:
+                raise
+            except Exception as error:
+                raise _VerifierFailure(error) from error
+            finally:
+                self._end_dispatch_callback(
+                    lease=callback_lease,
+                    dispatch_sequence=sequence,
+                )
+            _require_active_market_dispatch_proof(
+                proof,
+                run_id=self._run_id,
+                market_root=market_root,
+                canonical_market_bytes=root_bytes,
+                causal_market_sha256=causal_market_digest(market_root),
+                dispatch_sequence=sequence,
+                issuer=self._active_dispatch_verifier,
+            )
+            if (
+                canonical_market_data_record_bytes(market_root) != root_bytes
+                or historical_market_root_digest(market_root) != root_sha256
+                or runtime_root_order_key(market_root) != root_key
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "market root changed during proof")
+            owned_market_root = _clone_market_root(market_root)
+        except _VerifierFailure as failure:
+            raise failure.error from None
+        except HistoricalMatcherError:
+            raise
+        except RuntimeOrderingError as error:
+            raise _fail(error.code, "active market proof is invalid") from error
+        except Exception as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "active market verifier failed") from error
+        self._require_dispatch_eligibility_state()
+        eligible = tuple(
+            sorted(
+                (
+                    record
+                    for record in self._state.pending
+                    if (
+                        record.order.instrument == owned_market_root.payload.instrument
+                        and owned_market_root.payload.adjustment is Adjustment.RAW
+                        and owned_market_root.revision == 0
+                        and root_key > record.causal_root_key
+                        and owned_market_root.event_time > record.order.eligible_after_available_at
+                    )
+                ),
+                key=lambda record: record.receipt.submission_sequence,
+            )
+        )
+        return self._publish_batch(
+            kind=HistoricalDispatchKind.MARKET,
+            sequence=sequence,
+            root_key=root_key,
+            root_bytes=root_bytes,
+            root_sha256=root_sha256,
+            trigger_root=owned_market_root,
+            records=eligible,
+            occurred_at=owned_market_root.event_time,
+            available_at=owned_market_root.available_at,
+            close=owned_market_root.payload.close,
+            end=False,
+        )
+
+    def expire_at_active_end(
+        self,
+        end_root: EndOfRunRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> HistoricalMatcherDispatchBatch:
+        self._enter_mutation()
+        try:
+            return self._expire_at_active_end(
+                end_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+        finally:
+            self._leave_mutation()
+
+    def _expire_at_active_end(
+        self,
+        end_root: EndOfRunRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> HistoricalMatcherDispatchBatch:
+        if type(end_root) is not EndOfRunRoot:
+            raise _fail(OutcomeCode.INVALID_TYPE, "end_root must be exact")
+        sequence = _require_dispatch_sequence(dispatch_sequence)
+        try:
+            root_bytes = canonical_end_of_run_root_bytes(end_root)
+            root_sha256 = historical_end_root_digest(end_root)
+            root_key = runtime_root_order_key(end_root)
+        except Exception as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "end root cannot be encoded") from error
+        replay = self._dispatch_replay(
+            sequence=sequence,
+            root_bytes=root_bytes,
+            root_sha256=root_sha256,
+        )
+        if replay is not None:
+            return replay
+        self._require_dispatch_eligibility_state()
+        if self._state.conflict is not None or self._state.ended:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "matcher is halted or ended")
+        if end_root.kind is not EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "unsupported terminal root kind")
+        if end_root.run_id != self._run_id:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "terminal root run conflicts")
+        if self._state.last_dispatch is not None and sequence <= self._state.last_dispatch:
+            self._publish_conflict(
+                kind=HistoricalMatcherConflictKind.NON_MONOTONE_DISPATCH,
+                occupied_identity={
+                    "dispatch_sequence": sequence,
+                    "kind": "dispatch_sequence",
+                },
+                existing_sha256=None,
+                submitted_sha256=root_sha256,
+                submitted_dispatch_sequence=sequence,
+                trigger_root_sha256=root_sha256,
+            )
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
+        callback_lease = self._begin_dispatch_callback()
+        try:
+            try:
+                proof = self._active_dispatch_verifier.verify_active_end_of_run_dispatch(
+                    end_root,
+                    dispatch_sequence=sequence,
+                )
+            except RuntimeOrderingError:
+                raise
+            except Exception as error:
+                raise _VerifierFailure(error) from error
+            finally:
+                self._end_dispatch_callback(
+                    lease=callback_lease,
+                    dispatch_sequence=sequence,
+                )
+            _require_active_end_of_run_dispatch_proof(
+                proof,
+                run_id=self._run_id,
+                end_root=end_root,
+                canonical_end_bytes=root_bytes,
+                end_root_sha256=root_sha256,
+                dispatch_sequence=sequence,
+                issuer=self._active_dispatch_verifier,
+            )
+            if (
+                canonical_end_of_run_root_bytes(end_root) != root_bytes
+                or historical_end_root_digest(end_root) != root_sha256
+                or runtime_root_order_key(end_root) != root_key
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "end root changed during proof")
+            owned_end_root = _clone_end_root(end_root)
+        except _VerifierFailure as failure:
+            raise failure.error from None
+        except HistoricalMatcherError:
+            raise
+        except RuntimeOrderingError as error:
+            raise _fail(error.code, "active end proof is invalid") from error
+        except Exception as error:
+            raise _fail(OutcomeCode.INVALID_TYPE, "active end verifier failed") from error
+        self._require_dispatch_eligibility_state()
+        return self._publish_batch(
+            kind=HistoricalDispatchKind.END_OF_RUN,
+            sequence=sequence,
+            root_key=root_key,
+            root_bytes=root_bytes,
+            root_sha256=root_sha256,
+            trigger_root=owned_end_root,
+            records=tuple(
+                sorted(
+                    self._state.pending,
+                    key=lambda record: record.receipt.submission_sequence,
+                )
+            ),
+            occurred_at=owned_end_root.available_at,
+            available_at=owned_end_root.available_at,
+            close=None,
+            end=True,
+        )
+
+    def _publish_batch(
+        self,
+        *,
+        kind: HistoricalDispatchKind,
+        sequence: int,
+        root_key: RuntimeRootOrderKey,
+        root_bytes: bytes,
+        root_sha256: Sha256Digest,
+        trigger_root: MarketDataEnvelope | EndOfRunRoot,
+        records: tuple[_SubmissionRecord, ...],
+        occurred_at: datetime,
+        available_at: datetime,
+        close: float | None,
+        end: bool,
+    ) -> HistoricalMatcherDispatchBatch:
+        dispatch_authority = self._require_dispatch_authority()
+        for record in records:
+            self._require_submission_record(record)
+        fact_before = self._state.next_fact
+        if records and fact_before is None:
+            raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "fact sequence exhausted")
+        if fact_before is not None and len(records) > _MAX_UINT64 - fact_before + 1:
+            raise _fail(OutcomeCode.ARITHMETIC_OVERFLOW, "fact batch exceeds capacity")
+        ingresses: list[ExecutionFactIngress] = []
+        ingress_digests: list[Sha256Digest] = []
+        issued_records: list[_IssuedRecord] = []
+        fact_sequence = fact_before
+        for record in records:
+            assert fact_sequence is not None
+            price = None
+            expiry_code = None
+            fact_kind = "expiry" if end else "trade"
+            if end:
+                expiry_code = OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA
+            else:
+                assert close is not None
+                price = _quantized_close(
+                    close,
+                    side=record.order.side,
+                    specification=self._spec_set.require(record.order.instrument),
+                )
+            observation_sha256 = historical_matcher_observation_digest(
+                fact_sequence=fact_sequence,
+                fact_kind=fact_kind,
+                source_namespace=self._source_namespace,
+                provenance_id=self._provenance_id,
+                submission_receipt_sha256=record.receipt_sha256,
+                submission_receipt=record.receipt,
+                causal_market_root=record.causal_market_root,
+                order_sha256=record.order_sha256,
+                order=record.order,
+                trigger_root_kind=kind,
+                trigger_root_sha256=root_sha256,
+                trigger_root_key=root_key,
+                trigger_root=trigger_root,
+                trigger_dispatch_sequence=sequence,
+                occurred_at=occurred_at,
+                available_at=available_at,
+                instrument=record.order.instrument,
+                side=record.order.side,
+                quantity_text=record.order.quantity.text,
+                price_text=None if price is None else price.text,
+                expiry_outcome_code=expiry_code,
+                spec_set=self._spec_set,
+                execution_policy=self._execution_policy,
+            )
+            provenance = FactProvenance(
+                FactProvenanceId(self._provenance_id.value),
+                Sha256Digest(observation_sha256.value),
+            )
+            if end:
+                fact = create_lifecycle_execution_fact(
+                    kind=ExecutionFactKind.EXPIRY,
+                    outcome_code=expiry_code,
+                    source_namespace=SourceNamespace(self._source_namespace.value),
+                    dedup_identity=SourceNativeSequence(fact_sequence),
+                    occurred_at=occurred_at,
+                    provenance=provenance,
+                    instrument=_clone_instrument(record.order.instrument),
+                    client_submission_key=Sha256Digest(record.client_key.value),
+                    order_id=_clone_economic_id(record.order_id),
+                    correlation_id=_clone_economic_id(record.order.correlation_id),
+                    causation_id=_clone_economic_id(record.order_id),
+                )
+            else:
+                assert price is not None
+                fact = create_trade_execution_fact(
+                    spec_set=self._spec_set,
+                    side=record.order.side,
+                    quantity=CanonicalDecimal(record.order.quantity.text),
+                    price=CanonicalDecimal(price.text),
+                    source_namespace=SourceNamespace(self._source_namespace.value),
+                    dedup_identity=SourceNativeSequence(fact_sequence),
+                    occurred_at=occurred_at,
+                    provenance=provenance,
+                    instrument=_clone_instrument(record.order.instrument),
+                    client_submission_key=Sha256Digest(record.client_key.value),
+                    order_id=_clone_economic_id(record.order_id),
+                    correlation_id=_clone_economic_id(record.order.correlation_id),
+                    causation_id=_clone_economic_id(record.order_id),
+                )
+            ingress = create_execution_fact_ingress(
+                available_at=available_at,
+                source_namespace=SourceNamespace(self._source_namespace.value),
+                ingress_sequence=fact_sequence,
+                fact=fact,
+            )
+            ingresses.append(ingress)
+            ingress_digests.append(execution_fact_ingress_digest(ingress))
+            fact_sequence = _advance(fact_sequence)
+        batch = _create_historical_matcher_dispatch_batch(
+            trigger_root=trigger_root,
+            run_id=_clone_run_id(self._run_id),
+            source_namespace=SourceNamespace(self._source_namespace.value),
+            dispatch_kind=kind,
+            dispatch_sequence=sequence,
+            trigger_root_sha256=Sha256Digest(root_sha256.value),
+            trigger_root_key=root_key,
+            next_fact_sequence_before=fact_before,
+            next_fact_sequence_after=fact_sequence,
+            submission_sequences=tuple(record.receipt.submission_sequence for record in records),
+            order_ids=tuple(_clone_economic_id(record.order_id) for record in records),
+            ingresses=tuple(ingresses),
+            ingress_sha256s=tuple(ingress_digests),
+        )
+        batch_bytes = canonical_historical_matcher_dispatch_batch_bytes(batch)
+        batch_sha256 = historical_matcher_dispatch_batch_digest(batch)
+        ingress_bytes_values = tuple(
+            canonical_execution_fact_ingress_bytes(ingress) for ingress in ingresses
+        )
+        trusted_ingresses = tuple(
+            decode_execution_fact_ingress(
+                payload,
+                context=IndependentFactDecodeContext(self._spec_set),
+            )
+            for payload in ingress_bytes_values
+        )
+        trusted_batch = _create_historical_matcher_dispatch_batch(
+            trigger_root=trigger_root,
+            run_id=RunId(self._run_id.value),
+            source_namespace=SourceNamespace(self._source_namespace.value),
+            dispatch_kind=kind,
+            dispatch_sequence=sequence,
+            trigger_root_sha256=Sha256Digest(root_sha256.value),
+            trigger_root_key=runtime_root_key_from_document(
+                _runtime_key_document_from_key(root_key)
+            ),
+            next_fact_sequence_before=fact_before,
+            next_fact_sequence_after=fact_sequence,
+            submission_sequences=tuple(record.receipt.submission_sequence for record in records),
+            order_ids=tuple(_clone_economic_id(record.order_id) for record in records),
+            ingresses=trusted_ingresses,
+            ingress_sha256s=tuple(Sha256Digest(value.value) for value in ingress_digests),
+        )
+        if (
+            canonical_historical_matcher_dispatch_batch_bytes(trusted_batch) != batch_bytes
+            or historical_matcher_dispatch_batch_digest(trusted_batch) != batch_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "private dispatch reconstruction conflicts")
+        for index, (_record, ingress, ingress_sha256, ingress_bytes) in enumerate(
+            zip(
+                records,
+                trusted_ingresses,
+                ingress_digests,
+                ingress_bytes_values,
+                strict=True,
+            )
+        ):
+            fact_bytes = canonical_execution_fact_bytes(ingress.fact)
+            binding = _create_historical_matcher_descendant_binding(
+                ingress_identity=_clone_ingress_identity(ingress.identity),
+                ingress_sha256=Sha256Digest(ingress_sha256.value),
+                fact_sha256=Sha256Digest(execution_fact_digest(ingress.fact).value),
+                batch_sha256=Sha256Digest(batch_sha256.value),
+                batch_index=index,
+                parent_kind=kind,
+                parent_root_sha256=Sha256Digest(root_sha256.value),
+                parent_root_key=root_key,
+                parent_dispatch_sequence=sequence,
+            )
+            issued_records.append(
+                _IssuedRecord(
+                    ingress=ingress,
+                    ingress_identity=_clone_ingress_identity(ingress.identity),
+                    ingress_bytes=ingress_bytes,
+                    ingress_sha256=ingress_sha256,
+                    fact_bytes=fact_bytes,
+                    binding=binding,
+                )
+            )
+        token = object.__new__(_DispatchRecordToken)
+        seal = _SealedDispatchRecord(
+            root_bytes=root_bytes,
+            root_sha256_value=root_sha256.value,
+            root_key_document_bytes=_canonical_runtime_key_bytes(root_key),
+            batch_bytes=batch_bytes,
+            batch_sha256_value=batch_sha256.value,
+            run_id_value=self._run_id.value,
+            source_namespace_value=self._source_namespace.value,
+            dispatch_kind_value=kind.value,
+            dispatch_sequence=sequence,
+            next_fact_sequence_before=fact_before,
+            next_fact_sequence_after=fact_sequence,
+            submission_sequences=tuple(record.receipt.submission_sequence for record in records),
+            order_id_values=tuple(
+                (
+                    record.order_id.run_id.value,
+                    record.order_id.owner_kind.value,
+                    record.order_id.owner_sequence,
+                )
+                for record in records
+            ),
+            ingress_bytes=ingress_bytes_values,
+            ingress_sha256_values=tuple(value.value for value in ingress_digests),
+            replay_batch=batch,
+        )
+        _SEALED_DISPATCH_RECORDS[token] = seal
+        by_sequence = dict(self._state.dispatch_by_sequence)
+        by_digest = dict(self._state.dispatch_by_digest)
+        by_sequence[sequence] = token
+        by_digest[root_sha256.value] = token
+        next_by_sequence = MappingProxyType(by_sequence)
+        next_by_digest = MappingProxyType(by_digest)
+        next_chain_head = _append_dispatch_chain(
+            dispatch_authority.chain_head,
+            dispatch_sequence=sequence,
+            root_key_bytes=seal.root_key_document_bytes,
+            root_sha256_value=root_sha256.value,
+            batch_sha256_value=batch_sha256.value,
+        )
+        issued_by_identity = dict(self._state.issued_by_identity)
+        for issued in issued_records:
+            if issued.ingress_identity in issued_by_identity:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "issued ingress identity collided")
+            issued_by_identity[issued.ingress_identity] = issued
+        matched_ids = {record.order_id for record in records}
+        pending = tuple(
+            sorted(
+                (record for record in self._state.pending if record.order_id not in matched_ids),
+                key=lambda record: record.receipt.submission_sequence,
+            )
+        )
+        next_dispatch_history = _append_historical_matcher_dispatch_history(
+            self._state.dispatch_history,
+            trusted_batch,
+        )
+        next_state = _MatcherState(
+            next_submission=self._state.next_submission,
+            next_fact=fact_sequence,
+            submissions=self._state.submissions,
+            pending=pending,
+            submission_by_order=self._state.submission_by_order,
+            submission_by_client=self._state.submission_by_client,
+            dispatch_by_sequence=next_by_sequence,
+            dispatch_by_digest=next_by_digest,
+            dispatch_chain_head=next_chain_head,
+            dispatch_history=next_dispatch_history,
+            issued=(*self._state.issued, *issued_records),
+            issued_by_identity=MappingProxyType(issued_by_identity),
+            last_dispatch=sequence,
+            ended=end,
+            end_batch_sha256=batch_sha256 if end else None,
+            conflict=None,
+        )
+        next_batch_sha256s = tuple(
+            Sha256Digest(_SEALED_DISPATCH_RECORDS[item].batch_sha256_value)
+            for _, item in sorted(next_state.dispatch_by_sequence.items())
+        )
+        canonical_historical_matcher_state_bytes(
+            _create_historical_matcher_state(
+                run_id=self._run_id,
+                source_namespace=self._source_namespace,
+                provenance_id=self._provenance_id,
+                instrument_spec_set_id=self._spec_set.identifier,
+                instrument_spec_set_sha256=self._spec_sha256,
+                execution_policy=self._execution_policy,
+                next_submission_sequence=next_state.next_submission,
+                next_fact_sequence=next_state.next_fact,
+                _submission_receipts=tuple(item.receipt for item in next_state.submissions),
+                receipt_sha256s=tuple(item.receipt_sha256 for item in next_state.submissions),
+                pending_order_ids=tuple(item.order_id for item in next_state.pending),
+                issued_ingresses=tuple(item.ingress for item in next_state.issued),
+                _dispatch_batch_history_sha256=_dispatch_batch_history_digest(next_batch_sha256s),
+                _dispatch_ingress_history_sha256=_dispatch_ingress_history_digest(
+                    next_batch_sha256s,
+                    tuple(item.ingress for item in next_state.issued),
+                ),
+                _dispatch_history=next_dispatch_history,
+                _last_dispatch_batch=trusted_batch,
+                dispatch_batch_sha256s=next_batch_sha256s,
+                last_new_dispatch_sequence=sequence,
+                ended=end,
+                end_batch_sha256=batch_sha256 if end else None,
+                halted=False,
+                conflict=None,
+            )
+        )
+        self._require_fenced_live_bindings(dispatch_sequence=sequence)
+        if self._require_dispatch_authority() is not dispatch_authority:
+            self._retained_binding_drift(dispatch_sequence=sequence)
+        next_authority = _DispatchAuthority(
+            by_sequence=next_by_sequence,
+            by_digest=next_by_digest,
+            record_count=dispatch_authority.record_count + 1,
+            last_sequence=sequence,
+            last_token=token,
+            chain_head=next_chain_head,
+        )
+        _MATCHER_DISPATCH_AUTHORITIES[self] = next_authority
+        self._state = next_state
+        self._issued_history_identity = next_state.issued
+        self._issued_registry_identity = next_state.issued_by_identity
+        return batch
+
+    def has_issued_ingress(
+        self,
+        *,
+        ingress_identity: IngressIdentity,
+        canonical_ingress_bytes: bytes,
+        canonical_fact_bytes: bytes,
+    ) -> bool:
+        if (
+            type(ingress_identity) is not IngressIdentity
+            or type(canonical_ingress_bytes) is not bytes
+            or type(canonical_fact_bytes) is not bytes
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "issuance lookup inputs must be exact")
+        state = self._require_issuance_lookup_state()
+        record = state.issued_by_identity.get(ingress_identity)
+        if record is None:
+            return False
+        self._require_issued_record(record)
+        return bool(
+            record.ingress_bytes == canonical_ingress_bytes
+            and record.fact_bytes == canonical_fact_bytes
+        )
+
+    def resolve_descendant_binding(
+        self,
+        *,
+        ingress_identity: IngressIdentity,
+        canonical_ingress_bytes: bytes,
+        canonical_fact_bytes: bytes,
+    ) -> HistoricalMatcherDescendantBinding | None:
+        if (
+            type(ingress_identity) is not IngressIdentity
+            or type(canonical_ingress_bytes) is not bytes
+            or type(canonical_fact_bytes) is not bytes
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "descendant lookup inputs must be exact")
+        state = self._require_issuance_lookup_state()
+        record = state.issued_by_identity.get(ingress_identity)
+        if record is None:
+            return None
+        self._require_issued_record(record)
+        if (
+            record.ingress_bytes != canonical_ingress_bytes
+            or record.fact_bytes != canonical_fact_bytes
+        ):
+            return None
+        return record.binding
+
+
+_MATCHER_DISPATCH_AUTHORITIES: WeakKeyDictionary[
+    Phase1HistoricalMatcher,
+    _DispatchAuthority,
+] = WeakKeyDictionary()
+
+
+def create_phase1_historical_matcher(
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    source_namespace: SourceNamespace,
+    provenance_id: FactProvenanceId,
+    order_issuance_verifier: HistoricalOrderIssuanceVerifier,
+    submission_authorization_verifier: HistoricalSubmissionAuthorizationVerifier,
+    active_dispatch_verifier: HistoricalMatcherDispatchVerifier,
+) -> Phase1HistoricalMatcher:
+    if (
+        type(run_id) is not RunId
+        or type(source_namespace) is not SourceNamespace
+        or type(provenance_id) is not FactProvenanceId
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "matcher bindings must be exact")
+    owned_specs = _clone_spec_set(spec_set)
+    owned_policy = _clone_policy(execution_policy)
+    owned_run_id = _clone_run_id(run_id)
+    owned_source_namespace = SourceNamespace(source_namespace.value)
+    owned_provenance_id = FactProvenanceId(provenance_id.value)
+    for verifier, operations in (
+        (order_issuance_verifier, ("resolve_issued_order_by_id",)),
+        (
+            submission_authorization_verifier,
+            ("verify_authorized_historical_submission",),
+        ),
+        (
+            active_dispatch_verifier,
+            (
+                "verify_active_market_dispatch",
+                "verify_active_end_of_run_dispatch",
+            ),
+        ),
+    ):
+        if any(not callable(getattr(verifier, operation, None)) for operation in operations):
+            raise _fail(OutcomeCode.INVALID_TYPE, "matcher verifier surface is incomplete")
+    value = object.__new__(Phase1HistoricalMatcher)
+    value._run_id = owned_run_id
+    value._run_id_value = owned_run_id.value
+    value._spec_set = owned_specs
+    value._spec_bytes = canonical_instrument_spec_set_bytes(owned_specs)
+    value._spec_sha256 = instrument_spec_set_digest(owned_specs)
+    value._execution_policy = owned_policy
+    value._execution_policy_identity = owned_policy
+    value._execution_policy_id_value = owned_policy.identifier.value
+    value._execution_policy_sha256_value = owned_policy.sha256.value
+    value._conflict_bytes = None
+    value._conflict_sha256 = None
+    value._mutation_active = False
+    value._source_namespace = owned_source_namespace
+    value._source_namespace_value = owned_source_namespace.value
+    value._provenance_id = owned_provenance_id
+    value._provenance_id_value = owned_provenance_id.value
+    value._order_issuance_verifier = order_issuance_verifier
+    value._submission_authorization_verifier = submission_authorization_verifier
+    value._active_dispatch_verifier = active_dispatch_verifier
+    try:
+        value._active_dispatch_runtime_identity = active_dispatch_verifier.runtime_identity
+    except Exception as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "dispatch runtime binding is invalid") from error
+    empty_dispatch_by_sequence: MappingProxyType[int, _DispatchRecordToken] = MappingProxyType({})
+    empty_dispatch_by_digest: MappingProxyType[str, _DispatchRecordToken] = MappingProxyType({})
+    value._state = _MatcherState(
+        next_submission=1,
+        next_fact=1,
+        submissions=(),
+        pending=(),
+        submission_by_order=MappingProxyType({}),
+        submission_by_client=MappingProxyType({}),
+        dispatch_by_sequence=empty_dispatch_by_sequence,
+        dispatch_by_digest=empty_dispatch_by_digest,
+        dispatch_chain_head=_EMPTY_DISPATCH_CHAIN_HEAD,
+        dispatch_history=_empty_historical_matcher_dispatch_history(),
+        issued=(),
+        issued_by_identity=MappingProxyType({}),
+        last_dispatch=None,
+        ended=False,
+        end_batch_sha256=None,
+        conflict=None,
+    )
+    _MATCHER_DISPATCH_AUTHORITIES[value] = _DispatchAuthority(
+        by_sequence=empty_dispatch_by_sequence,
+        by_digest=empty_dispatch_by_digest,
+        record_count=0,
+        last_sequence=None,
+        last_token=None,
+        chain_head=_EMPTY_DISPATCH_CHAIN_HEAD,
+    )
+    value._issued_history_identity = value._state.issued
+    value._issued_registry_identity = value._state.issued_by_identity
+    value._require_live_bindings()
+    return value

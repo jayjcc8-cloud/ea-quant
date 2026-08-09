@@ -454,6 +454,55 @@ def test_lifecycle_fact_kind_and_outcome_pairing_is_closed() -> None:
         )
 
 
+def test_precise_no_data_expiry_is_the_only_explicit_lifecycle_override() -> None:
+    order = _order()
+    precise = create_lifecycle_execution_fact(
+        kind=ExecutionFactKind.EXPIRY,
+        source_namespace=SOURCE,
+        dedup_identity=SourceNativeSequence(42),
+        occurred_at=CAUSAL_TIME + timedelta(minutes=1),
+        provenance=PROVENANCE,
+        instrument=INSTRUMENT,
+        client_submission_key=order.client_submission_key,
+        order_id=order.order_id,
+        correlation_id=order.correlation_id,
+        causation_id=order.order_id,
+        outcome_code=OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
+    )
+    payload = canonical_execution_fact_bytes(precise)
+
+    assert precise.payload.outcome_code is (  # type: ignore[union-attr]
+        OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA
+    )
+    assert (
+        canonical_execution_fact_bytes(
+            decode_execution_fact(
+                payload,
+                context=IndependentFactDecodeContext(SPEC_SET),
+            )
+        )
+        == payload
+    )
+
+    for kind, code in (
+        (ExecutionFactKind.ACKNOWLEDGEMENT, OutcomeCode.ORDER_ACKNOWLEDGED),
+        (ExecutionFactKind.REJECTION, OutcomeCode.ORDER_REJECTED),
+        (ExecutionFactKind.EXPIRY, OutcomeCode.ORDER_EXPIRED),
+        (ExecutionFactKind.CANCELLATION, OutcomeCode.ORDER_CANCELLED),
+        (ExecutionFactKind.ACKNOWLEDGEMENT, OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA),
+    ):
+        with pytest.raises(ExecutionMessageError) as error:
+            create_lifecycle_execution_fact(
+                kind=kind,
+                source_namespace=SOURCE,
+                dedup_identity=ExternalFactId(f"explicit-{kind.value}"),
+                occurred_at=CAUSAL_TIME,
+                provenance=PROVENANCE,
+                outcome_code=code,
+            )
+        _assert_message_code(error, OutcomeCode.OUT_OF_RANGE)
+
+
 def test_trade_fact_has_exact_zero_commission_spec_lineage_and_digest() -> None:
     fact = _trade_fact()
     assert fact.kind is ExecutionFactKind.TRADE

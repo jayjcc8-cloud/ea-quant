@@ -126,6 +126,7 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.execution",
             "ea.core.execution_identity",
             "ea.core.execution_messages",
+            "ea.core.historical_matching",
             "ea.core.market_data",
             "ea.core.market_data_codec",
             "ea.core.outcomes",
@@ -135,6 +136,7 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.time",
             "ea.runtime.historical",
             "ea.runtime.ingress",
+            "ea.runtime.matcher",
             "ea.runtime.queue",
             "ea.runtime.strategy",
         }
@@ -218,12 +220,19 @@ def test_inner_execution_package_depends_only_on_core_and_itself() -> None:
             "ea.core.execution_identity",
             "ea.core.execution_messages",
             "ea.core.execution_state",
+            "ea.core.historical_matching",
+            "ea.core.identity",
+            "ea.core.market_data",
+            "ea.core.market_data_codec",
             "ea.core.outcomes",
             "ea.core.risk",
             "ea.core.run",
+            "ea.core.runtime",
+            "ea.core.strategy",
             "ea.core.time",
             "ea.execution.authority",
             "ea.execution.fact_authority",
+            "ea.execution.matcher",
         }
     )
     imported_ea_modules: set[str] = set()
