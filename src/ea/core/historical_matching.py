@@ -56,7 +56,7 @@ from ea.core.execution_messages import (
     order_digest,
 )
 from ea.core.identity import Instrument, VenueId
-from ea.core.market_data import Adjustment, MarketDataEnvelope, SourceId
+from ea.core.market_data import Adjustment, Bar, MarketDataEnvelope, SourceId
 from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunId, Sha256Digest
@@ -685,6 +685,47 @@ def _require_historical_submission_authorization_proof(
 
 
 @final
+class _HistoricalSubmissionReceiptRootWitness:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("receipt root witnesses are created only by the sealed factory")
+
+
+@final
+class _HistoricalMatcherDispatchBatchRootWitness:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("batch root witnesses are created only by the sealed factory")
+
+
+class _SealedHistoricalSubmissionReceiptRoot(NamedTuple):
+    receipt_identity: int
+    root: MarketDataEnvelope
+    root_sha256_value: str
+    root_key_document_bytes: bytes
+
+
+class _SealedHistoricalMatcherDispatchBatchRoot(NamedTuple):
+    batch_identity: int
+    root: MarketDataEnvelope | EndOfRunRoot
+    dispatch_kind: HistoricalDispatchKind
+    root_sha256_value: str
+    root_key_document_bytes: bytes
+
+
+_SEALED_HISTORICAL_SUBMISSION_RECEIPT_ROOTS: WeakKeyDictionary[
+    _HistoricalSubmissionReceiptRootWitness,
+    _SealedHistoricalSubmissionReceiptRoot,
+] = WeakKeyDictionary()
+_SEALED_HISTORICAL_MATCHER_DISPATCH_BATCH_ROOTS: WeakKeyDictionary[
+    _HistoricalMatcherDispatchBatchRootWitness,
+    _SealedHistoricalMatcherDispatchBatchRoot,
+] = WeakKeyDictionary()
+
+
+@final
 @dataclass(frozen=True, slots=True, init=False)
 class HistoricalSubmissionReceipt:
     run_id: RunId
@@ -711,6 +752,10 @@ class HistoricalSubmissionReceipt:
     instrument_spec_set_id: InstrumentSpecSetId
     instrument_spec_set_sha256: Sha256Digest
     execution_policy: ExecutionPolicyRef
+    _causal_root_witness: _HistoricalSubmissionReceiptRootWitness = field(
+        repr=False,
+        compare=False,
+    )
 
     def __init__(self) -> None:
         raise TypeError("submission receipts are created only by the matcher or decoder")
@@ -735,6 +780,10 @@ class HistoricalMatcherDispatchBatch:
     order_ids: tuple[EconomicId, ...]
     ingresses: tuple[ExecutionFactIngress, ...]
     ingress_sha256s: tuple[Sha256Digest, ...]
+    _trigger_root_witness: _HistoricalMatcherDispatchBatchRootWitness = field(
+        repr=False,
+        compare=False,
+    )
 
     def __init__(self) -> None:
         raise TypeError("dispatch batches are created only by the matcher or decoder")
@@ -742,6 +791,110 @@ class HistoricalMatcherDispatchBatch:
     @property
     def ingress_identities(self) -> tuple[IngressIdentity, ...]:
         return tuple(ingress.identity for ingress in self.ingresses)
+
+
+def _owned_market_root(root: MarketDataEnvelope) -> MarketDataEnvelope:
+    if type(root) is not MarketDataEnvelope or type(root.payload) is not Bar:
+        raise _fail(OutcomeCode.INVALID_TYPE, "historical market root must be exact")
+    payload = root.payload
+    return MarketDataEnvelope(
+        payload=Bar(
+            instrument=Instrument(
+                VenueId(payload.instrument.venue.code),
+                payload.instrument.symbol,
+            ),
+            interval_start=payload.interval_start,
+            interval_end=payload.interval_end,
+            adjustment=payload.adjustment,
+            open=payload.open,
+            high=payload.high,
+            low=payload.low,
+            close=payload.close,
+            volume=payload.volume,
+        ),
+        source=SourceId(root.source.code),
+        available_at=root.available_at,
+        source_sequence=root.source_sequence,
+        revision=root.revision,
+    )
+
+
+def _owned_end_root(root: EndOfRunRoot) -> EndOfRunRoot:
+    if type(root) is not EndOfRunRoot:
+        raise _fail(OutcomeCode.INVALID_TYPE, "historical end root must be exact")
+    return EndOfRunRoot(
+        available_at=root.available_at,
+        kind=root.kind,
+        producer_namespace=SourceNamespace(root.producer_namespace.value),
+        producer_sequence=root.producer_sequence,
+        run_id=RunId(root.run_id.value),
+    )
+
+
+def _sealed_runtime_key_bytes(key: RuntimeRootOrderKey) -> bytes:
+    return _canonical_json(_runtime_key_document_from_key(key))
+
+
+def _require_historical_submission_receipt_causal_root(
+    receipt: HistoricalSubmissionReceipt,
+) -> MarketDataEnvelope:
+    try:
+        witness = receipt._causal_root_witness
+        seal = _SEALED_HISTORICAL_SUBMISSION_RECEIPT_ROOTS.get(witness)
+        root = None if seal is None else seal.root
+        valid = (
+            type(witness) is _HistoricalSubmissionReceiptRootWitness
+            and seal is not None
+            and seal.receipt_identity == id(receipt)
+            and type(root) is MarketDataEnvelope
+            and historical_market_root_digest(root).value == seal.root_sha256_value
+            and _sealed_runtime_key_bytes(runtime_root_order_key(root))
+            == seal.root_key_document_bytes
+            and receipt.causal_market_sha256.value == seal.root_sha256_value
+            and _sealed_runtime_key_bytes(receipt.causal_root_key) == seal.root_key_document_bytes
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        valid = False
+        root = None
+    if not valid or type(root) is not MarketDataEnvelope:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt causal root witness conflicts")
+    return root
+
+
+def _require_historical_matcher_dispatch_batch_trigger_root(
+    batch: HistoricalMatcherDispatchBatch,
+) -> MarketDataEnvelope | EndOfRunRoot:
+    try:
+        witness = batch._trigger_root_witness
+        seal = _SEALED_HISTORICAL_MATCHER_DISPATCH_BATCH_ROOTS.get(witness)
+        if type(witness) is not _HistoricalMatcherDispatchBatchRootWitness or seal is None:
+            raise ValueError
+        root = seal.root
+        if batch.dispatch_kind is HistoricalDispatchKind.MARKET:
+            root_matches = (
+                type(root) is MarketDataEnvelope
+                and historical_market_root_digest(root).value == seal.root_sha256_value
+            )
+        else:
+            root_matches = (
+                type(root) is EndOfRunRoot
+                and historical_end_root_digest(root).value == seal.root_sha256_value
+            )
+        valid = (
+            seal.batch_identity == id(batch)
+            and seal.dispatch_kind is batch.dispatch_kind
+            and root_matches
+            and _sealed_runtime_key_bytes(runtime_root_order_key(root))
+            == seal.root_key_document_bytes
+            and batch.trigger_root_sha256.value == seal.root_sha256_value
+            and _sealed_runtime_key_bytes(batch.trigger_root_key) == seal.root_key_document_bytes
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        valid = False
+        root = None
+    if not valid or type(root) not in {MarketDataEnvelope, EndOfRunRoot}:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "batch trigger root witness conflicts")
+    return cast(MarketDataEnvelope | EndOfRunRoot, root)
 
 
 @final
@@ -1086,6 +1239,7 @@ def _validate_receipt(receipt: HistoricalSubmissionReceipt) -> None:
         or type(receipt.instrument_spec_set_id) is not InstrumentSpecSetId
         or type(receipt.instrument_spec_set_sha256) is not Sha256Digest
         or type(receipt.execution_policy) is not ExecutionPolicyRef
+        or type(receipt._causal_root_witness) is not _HistoricalSubmissionReceiptRootWitness
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "submission receipt carriers must be exact")
     _validate_run_id(receipt.run_id)
@@ -1161,6 +1315,7 @@ def _validate_batch(batch: HistoricalMatcherDispatchBatch) -> None:
         or type(batch.order_ids) is not tuple
         or type(batch.ingresses) is not tuple
         or type(batch.ingress_sha256s) is not tuple
+        or type(batch._trigger_root_witness) is not _HistoricalMatcherDispatchBatchRootWitness
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "dispatch batch carriers must be exact")
     _validate_run_id(batch.run_id)
@@ -1804,22 +1959,69 @@ def _new_immutable(value_type: type[object], values: Mapping[str, object]) -> ob
 def _create_historical_submission_receipt(
     **values: object,
 ) -> HistoricalSubmissionReceipt:
+    causal_market_root = values.pop("causal_market_root", None)
+    if type(causal_market_root) is not MarketDataEnvelope:
+        raise _fail(OutcomeCode.INVALID_TYPE, "receipt causal market root must be exact")
+    owned_root = _owned_market_root(causal_market_root)
+    witness = object.__new__(_HistoricalSubmissionReceiptRootWitness)
+    values["_causal_root_witness"] = witness
     receipt = cast(
         HistoricalSubmissionReceipt,
         _new_immutable(HistoricalSubmissionReceipt, values),
     )
     _validate_receipt(receipt)
+    root_sha256 = historical_market_root_digest(owned_root)
+    root_key = runtime_root_order_key(owned_root)
+    if receipt.causal_market_sha256 != root_sha256 or receipt.causal_root_key != root_key:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt causal root evidence conflicts")
+    _SEALED_HISTORICAL_SUBMISSION_RECEIPT_ROOTS[witness] = _SealedHistoricalSubmissionReceiptRoot(
+        receipt_identity=id(receipt),
+        root=owned_root,
+        root_sha256_value=root_sha256.value,
+        root_key_document_bytes=_sealed_runtime_key_bytes(root_key),
+    )
+    _require_historical_submission_receipt_causal_root(receipt)
     return receipt
 
 
 def _create_historical_matcher_dispatch_batch(
     **values: object,
 ) -> HistoricalMatcherDispatchBatch:
+    trigger_root = values.pop("trigger_root", None)
+    dispatch_kind = values.get("dispatch_kind")
+    if dispatch_kind is HistoricalDispatchKind.MARKET:
+        if type(trigger_root) is not MarketDataEnvelope:
+            raise _fail(OutcomeCode.INVALID_TYPE, "market batch trigger root must be exact")
+        owned_market_root = _owned_market_root(trigger_root)
+        owned_root: MarketDataEnvelope | EndOfRunRoot = owned_market_root
+        root_sha256 = historical_market_root_digest(owned_market_root)
+    elif dispatch_kind is HistoricalDispatchKind.END_OF_RUN:
+        if type(trigger_root) is not EndOfRunRoot:
+            raise _fail(OutcomeCode.INVALID_TYPE, "end batch trigger root must be exact")
+        owned_root = _owned_end_root(trigger_root)
+        root_sha256 = historical_end_root_digest(owned_root)
+    else:
+        raise _fail(OutcomeCode.INVALID_TYPE, "batch dispatch kind must be exact")
+    root_key = runtime_root_order_key(owned_root)
+    witness = object.__new__(_HistoricalMatcherDispatchBatchRootWitness)
+    values["_trigger_root_witness"] = witness
     batch = cast(
         HistoricalMatcherDispatchBatch,
         _new_immutable(HistoricalMatcherDispatchBatch, values),
     )
     _validate_batch(batch)
+    if batch.trigger_root_sha256 != root_sha256 or batch.trigger_root_key != root_key:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "batch trigger root evidence conflicts")
+    _SEALED_HISTORICAL_MATCHER_DISPATCH_BATCH_ROOTS[witness] = (
+        _SealedHistoricalMatcherDispatchBatchRoot(
+            batch_identity=id(batch),
+            root=owned_root,
+            dispatch_kind=dispatch_kind,
+            root_sha256_value=root_sha256.value,
+            root_key_document_bytes=_sealed_runtime_key_bytes(root_key),
+        )
+    )
+    _require_historical_matcher_dispatch_batch_trigger_root(batch)
     return batch
 
 
@@ -1984,6 +2186,7 @@ def _receipt_document(receipt: HistoricalSubmissionReceipt) -> dict[str, object]
     if type(receipt) is not HistoricalSubmissionReceipt:
         raise _fail(OutcomeCode.INVALID_TYPE, "receipt must be exact")
     _validate_receipt(receipt)
+    _require_historical_submission_receipt_causal_root(receipt)
     return {
         "audit_acknowledgement_id": receipt.audit_acknowledgement_id,
         "audit_acknowledgement_sha256": receipt.audit_acknowledgement_sha256.value,
@@ -2076,6 +2279,7 @@ def _batch_document(batch: HistoricalMatcherDispatchBatch) -> dict[str, object]:
     if type(batch) is not HistoricalMatcherDispatchBatch:
         raise _fail(OutcomeCode.INVALID_TYPE, "batch must be exact")
     _validate_batch(batch)
+    _require_historical_matcher_dispatch_batch_trigger_root(batch)
     return {
         "canonicalization": HISTORICAL_MATCHER_DISPATCH_BATCH_CANONICALIZATION,
         "dispatch_kind": batch.dispatch_kind.value,
@@ -2928,7 +3132,22 @@ def decode_historical_submission_receipt(
         side = OrderSide(_require_string(document["side"], field_name="side"))
     except (TypeError, ValueError) as error:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "receipt side is invalid") from error
+    causal_market_sha256 = _parse_digest(
+        document["causal_market_sha256"],
+        field_name="causal_market_sha256",
+    )
+    causal_root_key = runtime_root_key_from_document(document["causal_root_key"])
+    causal_market_root = context.market_roots_by_sha256.get(causal_market_sha256)
+    if (
+        type(causal_market_root) is not MarketDataEnvelope
+        or historical_market_root_digest(causal_market_root) != causal_market_sha256
+        or runtime_root_order_key(causal_market_root) != causal_root_key
+        or causal_market_root.payload.instrument != order.instrument
+        or causal_market_root.available_at != order.eligible_after_available_at
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "receipt causal market evidence conflicts")
     receipt = _create_historical_submission_receipt(
+        causal_market_root=causal_market_root,
         run_id=context.run_id,
         source_namespace=context.source_namespace,
         submission_sequence=_require_positive_uint64(
@@ -2942,11 +3161,8 @@ def decode_historical_submission_receipt(
         instrument=_parse_instrument(document["instrument"]),
         side=side,
         quantity_text=_require_string(document["quantity"], field_name="quantity"),
-        causal_market_sha256=_parse_digest(
-            document["causal_market_sha256"],
-            field_name="causal_market_sha256",
-        ),
-        causal_root_key=runtime_root_key_from_document(document["causal_root_key"]),
+        causal_market_sha256=causal_market_sha256,
+        causal_root_key=causal_root_key,
         dispatch_sequence=_require_positive_uint64(
             document["dispatch_sequence"],
             field_name="dispatch_sequence",
@@ -3205,7 +3421,36 @@ def decode_historical_matcher_dispatch_batch(
             raise _fail(OutcomeCode.CONFLICTING_ID, "batch ingress lookup conflicts")
         ingresses.append(ingress)
         ingress_sha256s.append(digest)
+    trigger_root_sha256 = _parse_digest(
+        document["trigger_root_sha256"],
+        field_name="trigger_root_sha256",
+    )
+    trigger_root_key = runtime_root_key_from_document(document["trigger_root_key"])
+    if kind is HistoricalDispatchKind.MARKET:
+        trigger_root: MarketDataEnvelope | EndOfRunRoot | None = context.market_roots_by_sha256.get(
+            trigger_root_sha256
+        )
+    else:
+        trigger_root = context.end_roots_by_sha256.get(trigger_root_sha256)
+    if trigger_root is None:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch root evidence conflicts")
+    root_digest_matches = (
+        type(trigger_root) is MarketDataEnvelope
+        and historical_market_root_digest(trigger_root) == trigger_root_sha256
+    ) or (
+        type(trigger_root) is EndOfRunRoot
+        and historical_end_root_digest(trigger_root) == trigger_root_sha256
+    )
+    if not root_digest_matches or runtime_root_order_key(trigger_root) != trigger_root_key:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch root evidence conflicts")
+    if kind is HistoricalDispatchKind.END_OF_RUN and (
+        type(trigger_root) is not EndOfRunRoot
+        or trigger_root.kind is not EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED
+        or trigger_root.run_id != context.run_id
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch end root conflicts")
     batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=trigger_root,
         run_id=context.run_id,
         source_namespace=context.source_namespace,
         dispatch_kind=kind,
@@ -3213,11 +3458,8 @@ def decode_historical_matcher_dispatch_batch(
             document["dispatch_sequence"],
             field_name="dispatch_sequence",
         ),
-        trigger_root_sha256=_parse_digest(
-            document["trigger_root_sha256"],
-            field_name="trigger_root_sha256",
-        ),
-        trigger_root_key=runtime_root_key_from_document(document["trigger_root_key"]),
+        trigger_root_sha256=trigger_root_sha256,
+        trigger_root_key=trigger_root_key,
         next_fact_sequence_before=_parse_uint64_or_none(
             document["next_fact_sequence_before"],
             field_name="next_fact_sequence_before",
@@ -3234,30 +3476,6 @@ def decode_historical_matcher_dispatch_batch(
         ingresses=tuple(ingresses),
         ingress_sha256s=tuple(ingress_sha256s),
     )
-    if batch.dispatch_kind is HistoricalDispatchKind.MARKET:
-        trigger_root: MarketDataEnvelope | EndOfRunRoot | None = context.market_roots_by_sha256.get(
-            batch.trigger_root_sha256
-        )
-    else:
-        trigger_root = context.end_roots_by_sha256.get(batch.trigger_root_sha256)
-    if trigger_root is None:
-        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch root evidence conflicts")
-    root_digest_matches = (
-        type(trigger_root) is MarketDataEnvelope
-        and historical_market_root_digest(trigger_root) == batch.trigger_root_sha256
-    ) or (
-        type(trigger_root) is EndOfRunRoot
-        and historical_end_root_digest(trigger_root) == batch.trigger_root_sha256
-    )
-    if not root_digest_matches or runtime_root_order_key(trigger_root) != batch.trigger_root_key:
-        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch root evidence conflicts")
-    if batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN and (
-        type(trigger_root) is not EndOfRunRoot
-        or trigger_root.kind is not EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED
-        or trigger_root.run_id != context.run_id
-    ):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch batch end root conflicts")
-
     receipts = tuple(context.receipts_by_sha256.items())
     for index, (submission_sequence, order_id, ingress, ingress_sha256) in enumerate(
         zip(

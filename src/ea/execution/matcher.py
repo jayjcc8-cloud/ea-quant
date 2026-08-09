@@ -80,6 +80,7 @@ from ea.core.historical_matching import (
     _historical_root_digest_from_bytes,
     _HistoricalMatcherDispatchHistory,
     _quantized_historical_close,
+    _require_historical_matcher_dispatch_batch_trigger_root,
     _require_historical_submission_authorization_proof,
     _runtime_key_document_from_key,
     _validate_descendant_binding,
@@ -674,6 +675,9 @@ class Phase1HistoricalMatcher:
             if last_dispatch_record is None
             else (
                 _create_historical_matcher_dispatch_batch(
+                    trigger_root=_require_historical_matcher_dispatch_batch_trigger_root(
+                        last_dispatch_record.batch
+                    ),
                     run_id=_clone_run_id(last_dispatch_record.batch.run_id),
                     source_namespace=SourceNamespace(
                         last_dispatch_record.batch.source_namespace.value
@@ -1000,6 +1004,9 @@ class Phase1HistoricalMatcher:
                 for payload in seal.ingress_bytes
             )
             batch = _create_historical_matcher_dispatch_batch(
+                trigger_root=_require_historical_matcher_dispatch_batch_trigger_root(
+                    seal.replay_batch
+                ),
                 run_id=RunId(seal.run_id_value),
                 source_namespace=SourceNamespace(seal.source_namespace_value),
                 dispatch_kind=HistoricalDispatchKind(seal.dispatch_kind_value),
@@ -1894,6 +1901,7 @@ class Phase1HistoricalMatcher:
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "submission input changed during authorization")
         receipt = _create_historical_submission_receipt(
+            causal_market_root=owned_causal_root,
             run_id=_clone_run_id(self._run_id),
             source_namespace=SourceNamespace(self._source_namespace.value),
             submission_sequence=submission_sequence,
@@ -2369,6 +2377,7 @@ class Phase1HistoricalMatcher:
             ingress_digests.append(execution_fact_ingress_digest(ingress))
             fact_sequence = _advance(fact_sequence)
         batch = _create_historical_matcher_dispatch_batch(
+            trigger_root=trigger_root,
             run_id=_clone_run_id(self._run_id),
             source_namespace=SourceNamespace(self._source_namespace.value),
             dispatch_kind=kind,
@@ -2395,6 +2404,7 @@ class Phase1HistoricalMatcher:
             for payload in ingress_bytes_values
         )
         trusted_batch = _create_historical_matcher_dispatch_batch(
+            trigger_root=trigger_root,
             run_id=RunId(self._run_id.value),
             source_namespace=SourceNamespace(self._source_namespace.value),
             dispatch_kind=kind,

@@ -190,12 +190,19 @@ def _clone_receipt(
     receipt: HistoricalSubmissionReceipt,
     **changes: object,
 ) -> HistoricalSubmissionReceipt:
-    return _create_historical_submission_receipt(
+    cloned = _create_historical_submission_receipt(
+        causal_market_root=(
+            historical_matching_module._require_historical_submission_receipt_causal_root(receipt)
+        ),
         **{
-            name: changes.get(name, getattr(receipt, name))
+            name: getattr(receipt, name)
             for name in type(receipt).__dataclass_fields__
-        }
+            if name != "_causal_root_witness"
+        },
     )
+    for name, value in changes.items():
+        object.__setattr__(cloned, name, value)
+    return cloned
 
 
 def _expiry_ingress(
@@ -855,6 +862,45 @@ def test_state_encoder_binds_submission_receipts_to_sealed_history() -> None:
             assert rejected.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def test_receipt_encoder_binds_causal_digest_and_key_to_factory_root() -> None:
+    _, matcher, orders, causal, _, _ = _system()
+    receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    canonical = canonical_historical_submission_receipt_bytes(receipt)
+    alternate = replace(causal, source_sequence=causal.source_sequence + 1)
+
+    object.__setattr__(
+        receipt,
+        "causal_market_sha256",
+        historical_market_root_digest(alternate),
+    )
+    object.__setattr__(receipt, "causal_root_key", runtime_root_order_key(alternate))
+
+    with pytest.raises(HistoricalMatcherError) as rejected:
+        canonical_historical_submission_receipt_bytes(receipt)
+    assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+    assert canonical
+
+
+def test_empty_batch_encoder_binds_trigger_digest_and_key_to_factory_root() -> None:
+    _, matcher, _, _, delayed, _ = _system()
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    assert batch.ingresses == ()
+    canonical = canonical_historical_matcher_dispatch_batch_bytes(batch)
+    alternate = replace(delayed, source_sequence=delayed.source_sequence + 1)
+
+    object.__setattr__(
+        batch,
+        "trigger_root_sha256",
+        historical_market_root_digest(alternate),
+    )
+    object.__setattr__(batch, "trigger_root_key", runtime_root_order_key(alternate))
+
+    with pytest.raises(HistoricalMatcherError) as rejected:
+        canonical_historical_matcher_dispatch_batch_bytes(batch)
+    assert rejected.value.code is OutcomeCode.CONFLICTING_ID
+    assert canonical
+
+
 def test_state_encoder_binds_receipts_to_state_specification_and_policy() -> None:
     _, matcher, orders, causal, _, _ = _system()
     receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -1267,6 +1313,7 @@ def test_batch_decoder_rebuilds_fact_economics_lineage_and_provenance_from_roots
         )
         fake_ingress_sha256 = execution_fact_ingress_digest(fake_ingress)
         fake_batch = _create_historical_matcher_dispatch_batch(
+            trigger_root=delayed,
             run_id=matcher.run_id,
             source_namespace=matcher.source_namespace,
             dispatch_kind=HistoricalDispatchKind.MARKET,
@@ -1330,6 +1377,7 @@ def test_state_decoder_rebuilds_registered_batch_before_accepting_state() -> Non
     )
     fake_ingress_sha256 = execution_fact_ingress_digest(fake_ingress)
     fake_batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=delayed,
         run_id=valid_batch.run_id,
         source_namespace=valid_batch.source_namespace,
         dispatch_kind=valid_batch.dispatch_kind,
@@ -1390,6 +1438,7 @@ def test_state_decoder_rejects_fill_delayed_past_first_eligible_batch() -> None:
         dispatch_sequence=9,
     )
     omitted_first_batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=first_eligible,
         run_id=matcher.run_id,
         source_namespace=matcher.source_namespace,
         dispatch_kind=HistoricalDispatchKind.MARKET,
@@ -1547,6 +1596,7 @@ def test_state_decoder_rejects_non_increasing_dispatch_root_history() -> None:
     first_sha256 = historical_matcher_dispatch_batch_digest(first)
     for dispatch_kind, root, root_sha256 in cases:
         second = _create_historical_matcher_dispatch_batch(
+            trigger_root=root,
             run_id=matcher.run_id,
             source_namespace=matcher.source_namespace,
             dispatch_kind=dispatch_kind,
@@ -1691,6 +1741,7 @@ def test_state_decoder_binds_batch_history_to_unique_state_receipts() -> None:
     )
     duplicate_expiry_sha256 = execution_fact_ingress_digest(duplicate_expiry_ingress)
     duplicate_end_batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=end,
         run_id=batches[1].run_id,
         source_namespace=batches[1].source_namespace,
         dispatch_kind=batches[1].dispatch_kind,
@@ -1757,6 +1808,7 @@ def test_state_decoder_rejects_ended_state_with_pending_orders() -> None:
     receipt = matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     actual_end_batch = matcher.expire_at_active_end(end, dispatch_sequence=9)
     empty_end_batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=end,
         run_id=actual_end_batch.run_id,
         source_namespace=actual_end_batch.source_namespace,
         dispatch_kind=actual_end_batch.dispatch_kind,
@@ -1809,6 +1861,7 @@ def test_empty_end_batch_decoder_requires_bounded_root_from_context_run() -> Non
     )
     for invalid_root in invalid_roots:
         invalid_batch = _create_historical_matcher_dispatch_batch(
+            trigger_root=invalid_root,
             run_id=actual.run_id,
             source_namespace=actual.source_namespace,
             dispatch_kind=HistoricalDispatchKind.END_OF_RUN,
@@ -2631,6 +2684,7 @@ def test_receipt_decoder_binds_order_request_dispatch_eligibility_and_causal_roo
         available_at=expiry_receipt.causal_root_key.available_at - timedelta(microseconds=1),
     )
     early_end_batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=early_end,
         run_id=end_batch.run_id,
         source_namespace=end_batch.source_namespace,
         dispatch_kind=end_batch.dispatch_kind,
@@ -4270,6 +4324,7 @@ def test_final_uint64_fact_boundary_constructs_and_replays_canonical_evidence() 
     )
     ingress_sha256 = execution_fact_ingress_digest(ingress)
     values = {
+        "trigger_root": delayed,
         "run_id": matcher.run_id,
         "source_namespace": matcher.source_namespace,
         "dispatch_kind": HistoricalDispatchKind.MARKET,
