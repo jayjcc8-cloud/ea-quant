@@ -10,6 +10,7 @@ from uuid import UUID
 
 import pytest
 
+import ea.composition.lifecycle as lifecycle_composition
 import ea.composition.run as run_composition
 from ea.composition.lifecycle import (
     ExecutionFactHistoryView,
@@ -412,6 +413,67 @@ def test_composed_staged_window_authorizes_and_submits_before_completion() -> No
     assert completion_document["submission_count"] == 1
 
 
+def test_public_facade_forwards_only_staged_state_and_retry_operations() -> None:
+    lifecycle, _order_authority, _orders, _runtime, audit, _freshness = _staged_lifecycle()
+    coordinator = lifecycle.coordinator
+
+    assert coordinator.binding == audit.binding
+    assert coordinator.state.phase is CoordinatorPhase.ADMITTED
+    assert coordinator.pre_terminal_state is None
+    assert coordinator.terminal_state is None
+    assert coordinator.terminal_outcome is None
+    with pytest.raises(LifecycleError, match="completion-only retry"):
+        coordinator.retry_active_dispatch_completion()
+    with pytest.raises(LifecycleError, match="terminalization"):
+        coordinator.retry_terminalization()
+
+    coordinator.begin_next_dispatch()
+    with pytest.raises(LifecycleError, match="completion-only retry"):
+        coordinator.retry_active_dispatch_completion()
+
+
+def test_public_bundle_and_facade_reject_each_foreign_carrier() -> None:
+    lifecycle, _order_authority, _orders, _runtime, _audit, _freshness = _staged_lifecycle()
+    seal = lifecycle_composition._LIFECYCLE_SEAL
+    with pytest.raises(TypeError, match="created only by composition"):
+        Phase1HistoricalLifecycle(
+            _seal=seal,
+            coordinator=object(),  # type: ignore[arg-type]
+            matcher=lifecycle.matcher,
+            fact_authority=lifecycle.fact_authority,
+            runtime=lifecycle.runtime,
+        )
+    with pytest.raises(TypeError, match="created only by composition"):
+        Phase1HistoricalLifecycle(
+            _seal=seal,
+            coordinator=lifecycle.coordinator,
+            matcher=object(),  # type: ignore[arg-type]
+            fact_authority=lifecycle.fact_authority,
+            runtime=lifecycle.runtime,
+        )
+    with pytest.raises(TypeError, match="created only by composition"):
+        Phase1HistoricalLifecycle(
+            _seal=seal,
+            coordinator=lifecycle.coordinator,
+            matcher=lifecycle.matcher,
+            fact_authority=object(),  # type: ignore[arg-type]
+            runtime=lifecycle.runtime,
+        )
+    with pytest.raises(TypeError, match="created only by composition"):
+        Phase1HistoricalLifecycle(
+            _seal=seal,
+            coordinator=lifecycle.coordinator,
+            matcher=lifecycle.matcher,
+            fact_authority=lifecycle.fact_authority,
+            runtime=object(),  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError, match="created only by composition"):
+        Phase1HistoricalLifecycleCoordinatorFacade(
+            object(),  # type: ignore[arg-type]
+            seal=lifecycle_composition._COORDINATOR_FACADE_SEAL,
+        )
+
+
 def test_recovered_durable_authorization_reopens_the_same_submission_window() -> None:
     lifecycle, order_authority, orders, runtime, audit, freshness = _staged_lifecycle()
     order = orders[0]
@@ -434,6 +496,25 @@ def test_recovered_durable_authorization_reopens_the_same_submission_window() ->
         audit=audit,
         freshness=freshness,
     )
+    raw = cast(Any, recovered)
+    authorization = raw._authorization
+    raw._authorization = None
+    with pytest.raises(LifecycleError, match="authority is unavailable"):
+        recovered._reconcile_recovered_authorization()
+    raw._authorization = SimpleNamespace(
+        resolve_attempt=lambda **_values: None,
+        resolve_attempt_acknowledgement=lambda **_values: None,
+    )
+    with pytest.raises(LifecycleError, match="activation conflicts"):
+        recovered._reconcile_recovered_authorization()
+    raw._authorization = authorization
+    assert raw._mutation_lock.acquire(blocking=False)
+    try:
+        with pytest.raises(LifecycleError, match="reentrant"):
+            recovered._reconcile_recovered_authorization()
+    finally:
+        raw._mutation_lock.release()
+    recovered._reconcile_recovered_authorization()
     recovered_window = recovered.resume_active_dispatch()
 
     assert (
@@ -478,6 +559,14 @@ def test_recovered_matcher_receipt_is_replayed_without_second_submission() -> No
         audit=audit,
         freshness=freshness,
     )
+    active = cast(Any, recovered)._active
+    assert active is not None
+    retained_attempt = active.authorization_attempt
+    active.authorization_attempt = None
+    with pytest.raises(LifecycleError, match="frontier is not authorized"):
+        recovered._reconcile_recovered_authorization()
+    active.authorization_attempt = retained_attempt
+    recovered._reconcile_recovered_authorization()
     recovered_window = recovered.resume_active_dispatch()
     replayed_receipt = recovered.submit_authorized_order(recovered_window, order)
     outcome = recovered.complete_active_dispatch(recovered_window)
