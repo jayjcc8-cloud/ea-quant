@@ -137,9 +137,9 @@ class _RecoveredDispatch:
     ] = field(default_factory=dict)
     failing_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
     completion_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
-    authorization_records: list[
-        tuple[int, AuditRecord, AuditAppendAcknowledgement]
-    ] = field(default_factory=list)
+    authorization_records: list[tuple[int, AuditRecord, AuditAppendAcknowledgement]] = field(
+        default_factory=list
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2382,9 +2382,7 @@ def _recover_authorization_frontier(
             authorization_payload_sha256=record_acknowledgement.payload_sha256,
             status=SubmissionAuthorizationAttemptStatus.AUTHORIZED,
             logical_key=record.logical_key,
-            acknowledgement_sha256=audit_append_acknowledgement_digest(
-                record_acknowledgement
-            ),
+            acknowledgement_sha256=audit_append_acknowledgement_digest(record_acknowledgement),
             error_code=None,
         )
     if (
