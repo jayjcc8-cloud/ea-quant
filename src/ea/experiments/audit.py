@@ -14,10 +14,14 @@ from weakref import WeakValueDictionary
 
 from ea.core.audit import (
     AUDIT_FRAME_DIGEST_DOMAIN,
+    AUDIT_RECOVERY_RECORD_FIXED_RESIDENT_BYTES,
+    AUDIT_RECOVERY_SEQUENCE_FIXED_RESIDENT_BYTES,
+    AUDIT_RECOVERY_SEQUENCE_ITEM_RESIDENT_BYTES,
     EMPTY_CHAIN_HEAD_SHA256,
     EMPTY_RECORD_SHA256,
     MAX_AUDIT_HEADER_BYTES,
     MAX_AUDIT_RECORDS,
+    MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES,
     MAX_LARGE_AUDIT_PAYLOAD_BYTES,
     AuditAppendAcknowledgement,
     AuditContractError,
@@ -45,8 +49,6 @@ AUDIT_JOURNAL_NAME = "audit-v1.journal"
 MAX_AUDIT_JOURNAL_BYTES = 6 * 1024 * 1024 * 1024
 MIN_AUDIT_FILESYSTEM_FREE_BYTES = MAX_AUDIT_JOURNAL_BYTES
 MAX_AUDIT_INDEX_RESIDENT_BYTES = 256 * 1024 * 1024
-MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES = MAX_AUDIT_INDEX_RESIDENT_BYTES
-_RECOVERY_RECORD_FIXED_RESIDENT_BYTES = 2_048
 
 
 class _AuditOps(Protocol):
@@ -252,9 +254,13 @@ class PosixAuditJournal:
 
     @property
     def records(self) -> tuple[AuditRecord, ...]:
-        resident_bytes = tuple.__basicsize__ + len(self._entries) * tuple.__itemsize__
+        resident_bytes = (
+            AUDIT_RECOVERY_SEQUENCE_FIXED_RESIDENT_BYTES
+            + len(self._entries) * AUDIT_RECOVERY_SEQUENCE_ITEM_RESIDENT_BYTES
+        )
         resident_bytes += sum(
-            entry.frame_length + _RECOVERY_RECORD_FIXED_RESIDENT_BYTES for entry in self._entries
+            entry.frame_length + AUDIT_RECOVERY_RECORD_FIXED_RESIDENT_BYTES
+            for entry in self._entries
         )
         _require_recovery_record_resident_budget(resident_bytes)
         return tuple(self._read_entry_record(entry) for entry in self._entries)

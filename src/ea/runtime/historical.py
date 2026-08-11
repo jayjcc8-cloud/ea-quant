@@ -10,6 +10,7 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, Protocol, cast, final
 
+from ea.core.audit import MAX_PHASE1_RECOVERABLE_MARKET_RECORDS
 from ea.core.execution import (
     InstrumentExecutionSpecSet,
     instrument_spec_set_digest,
@@ -39,7 +40,7 @@ HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN = b"ea.phase1-historical-runtime-trace.v1
 HISTORICAL_RUNTIME_PRODUCER_NAMESPACE = "runtime.phase1.historical"
 
 _MAX_UINT64 = (1 << 64) - 1
-_MAX_PHASE1_MARKET_RECORDS = 100_000
+_MAX_PHASE1_MARKET_RECORDS = MAX_PHASE1_RECOVERABLE_MARKET_RECORDS
 _CLOCK_SEAL = object()
 _OFFER_SEAL = object()
 _PREPARED_SEAL = object()
@@ -1166,7 +1167,8 @@ def create_phase1_historical_market_runtime(
     if binding.data_fingerprint.record_count > _MAX_PHASE1_MARKET_RECORDS:
         raise _fail(
             OutcomeCode.OUT_OF_RANGE,
-            "Phase 1 historical runtime exceeds the 100,000-record admission bound",
+            "Phase 1 historical runtime exceeds the "
+            f"{_MAX_PHASE1_MARKET_RECORDS:,}-record recoverable admission bound",
         )
     if binding.data_fingerprint.record_count + 1 > _MAX_UINT64:
         raise _fail(

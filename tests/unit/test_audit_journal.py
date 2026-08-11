@@ -12,12 +12,15 @@ import pytest
 import ea.experiments.audit as audit_module
 from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.audit import (
+    MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES,
+    MAX_PHASE1_RECOVERABLE_MARKET_RECORDS,
     AuditContractError,
     AuditRecordKind,
     AuditSubjectKind,
     audit_append_acknowledgement_digest,
     audit_chain_head,
     audit_subject_digest,
+    phase1_audit_recovery_resident_bytes,
 )
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import Sha256Digest
@@ -217,6 +220,18 @@ def test_records_reject_recovery_representation_before_materialization(
 
     assert captured.value.code is OutcomeCode.OUT_OF_RANGE
     assert len(reopened._entries) == 1
+
+
+def test_phase1_runtime_admission_is_proven_by_recovery_resident_budget() -> None:
+    assert MAX_PHASE1_RECOVERABLE_MARKET_RECORDS == 4_081
+    assert (
+        phase1_audit_recovery_resident_bytes(MAX_PHASE1_RECOVERABLE_MARKET_RECORDS)
+        <= MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES
+    )
+    assert (
+        phase1_audit_recovery_resident_bytes(MAX_PHASE1_RECOVERABLE_MARKET_RECORDS + 1)
+        > MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES
+    )
 
 
 def test_append_rejects_projected_index_growth_before_writing(

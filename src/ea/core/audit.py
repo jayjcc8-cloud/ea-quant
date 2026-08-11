@@ -30,6 +30,34 @@ MAX_AUDIT_RECORDS = 400_005
 MAX_AUDIT_HEADER_BYTES = 4_096
 MAX_SMALL_AUDIT_PAYLOAD_BYTES = 4_096
 MAX_LARGE_AUDIT_PAYLOAD_BYTES = 16_384
+AUDIT_FRAME_FIXED_BYTES = 48
+MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES = 256 * 1024 * 1024
+AUDIT_RECOVERY_SEQUENCE_FIXED_RESIDENT_BYTES = 64
+AUDIT_RECOVERY_SEQUENCE_ITEM_RESIDENT_BYTES = 8
+AUDIT_RECOVERY_RECORD_FIXED_RESIDENT_BYTES = 2_048
+MAX_SMALL_AUDIT_FRAME_BYTES = (
+    MAX_AUDIT_HEADER_BYTES + MAX_SMALL_AUDIT_PAYLOAD_BYTES + AUDIT_FRAME_FIXED_BYTES
+)
+MAX_LARGE_AUDIT_FRAME_BYTES = (
+    MAX_AUDIT_HEADER_BYTES + MAX_LARGE_AUDIT_PAYLOAD_BYTES + AUDIT_FRAME_FIXED_BYTES
+)
+_SMALL_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES = (
+    MAX_SMALL_AUDIT_FRAME_BYTES
+    + AUDIT_RECOVERY_RECORD_FIXED_RESIDENT_BYTES
+    + AUDIT_RECOVERY_SEQUENCE_ITEM_RESIDENT_BYTES
+)
+_LARGE_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES = (
+    MAX_LARGE_AUDIT_FRAME_BYTES
+    + AUDIT_RECOVERY_RECORD_FIXED_RESIDENT_BYTES
+    + AUDIT_RECOVERY_SEQUENCE_ITEM_RESIDENT_BYTES
+)
+MAX_PHASE1_RECOVERABLE_MARKET_RECORDS = (
+    MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES
+    - AUDIT_RECOVERY_SEQUENCE_FIXED_RESIDENT_BYTES
+    - 5 * _SMALL_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES
+) // (
+    2 * (_SMALL_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES + _LARGE_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES)
+)
 
 _MAX_UINT64 = (1 << 64) - 1
 _RECORD_SEAL = object()
@@ -59,6 +87,25 @@ class AuditContractError(ValueError):
 
 def _fail(code: OutcomeCode, message: str) -> AuditContractError:
     return AuditContractError(code, message)
+
+
+def phase1_audit_recovery_resident_bytes(market_record_count: int) -> int:
+    """Project the selected Phase 1 recovery representation's worst-case resident bytes."""
+    if type(market_record_count) is not int:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "Phase 1 recovery market record count must be an exact int",
+        )
+    if market_record_count < 0:
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE,
+            "Phase 1 recovery market record count must be non-negative",
+        )
+    return (
+        AUDIT_RECOVERY_SEQUENCE_FIXED_RESIDENT_BYTES
+        + (2 * market_record_count + 5) * _SMALL_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES
+        + (2 * market_record_count) * _LARGE_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES
+    )
 
 
 class AuditRecordKind(StrEnum):
