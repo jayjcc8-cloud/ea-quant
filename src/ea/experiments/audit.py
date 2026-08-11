@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
@@ -193,6 +194,48 @@ def _require_recovery_record_resident_budget(resident_bytes: int) -> None:
 
 
 @final
+class PosixAuditRecoveryRecordSource:
+    """Repeatable O(1)-materialization view over one verified journal prefix."""
+
+    __slots__ = ("_journal", "_record_count", "_verified_eof", "binding")
+
+    def __init__(self, journal: PosixAuditJournal) -> None:
+        self._journal = journal
+        self._record_count = len(journal._entries)
+        self._verified_eof = journal._verified_eof
+        self.binding = journal.binding
+
+    @property
+    def record_count(self) -> int:
+        return self._record_count
+
+    def __iter__(self) -> Iterator[AuditRecord]:
+        journal = self._journal
+        if journal._closed or journal._failed or journal._needs_rescan:
+            raise _audit_error(
+                OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "audit recovery record source is no longer readable",
+            )
+        file_stat = journal._require_file_identity()
+        if (
+            file_stat.st_size < self._verified_eof
+            or len(journal._entries) < self._record_count
+            or (
+                self._record_count > 0
+                and journal._entries[self._record_count - 1].offset
+                + journal._entries[self._record_count - 1].frame_length
+                != self._verified_eof
+            )
+        ):
+            raise _audit_error(
+                OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                "audit recovery record prefix changed",
+            )
+        for index in range(self._record_count):
+            yield journal._read_entry_record(journal._entries[index])
+
+
+@final
 class PosixAuditJournal:
     """One serialized journal owner bound to an opaque prepared attempt."""
 
@@ -264,6 +307,16 @@ class PosixAuditJournal:
         )
         _require_recovery_record_resident_budget(resident_bytes)
         return tuple(self._read_entry_record(entry) for entry in self._entries)
+
+    @property
+    def recovery_records(self) -> PosixAuditRecoveryRecordSource:
+        """Return a repeatable prefix stream without materializing every AuditRecord."""
+        if self._closed or self._failed or self._needs_rescan:
+            raise _audit_error(
+                OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "audit recovery record source is unavailable",
+            )
+        return PosixAuditRecoveryRecordSource(self)
 
     @property
     def terminal(self) -> bool:

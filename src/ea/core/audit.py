@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
@@ -315,6 +316,18 @@ class AuditAppendAcknowledgement:
         raise TypeError(
             "AuditAppendAcknowledgement values are created only from verified audit records"
         )
+
+
+class AuditRecoveryRecordSource(Protocol):
+    """Repeatable bounded-memory view over one verified journal prefix."""
+
+    @property
+    def binding(self) -> RunBinding: ...
+
+    @property
+    def record_count(self) -> int: ...
+
+    def __iter__(self) -> Iterator[AuditRecord]: ...
 
 
 class AuditAppendPort(Protocol):

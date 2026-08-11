@@ -213,6 +213,7 @@ def test_records_reject_recovery_representation_before_materialization(
     journal = create_posix_audit_journal(prepared.audit)
     journal.close()
     reopened = reopen_posix_audit_journal(prepared.audit)
+    streamed = reopened.recovery_records
     monkeypatch.setattr(audit_module, "MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES", 1)
 
     with pytest.raises(AuditContractError, match="recovery record representation") as captured:
@@ -220,6 +221,30 @@ def test_records_reject_recovery_representation_before_materialization(
 
     assert captured.value.code is OutcomeCode.OUT_OF_RANGE
     assert len(reopened._entries) == 1
+    assert tuple(streamed) == tuple(streamed)
+    assert streamed.record_count == 1
+
+
+def test_recovery_record_source_is_repeatable_and_snapshot_bound(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    prefix = journal.recovery_records
+    initial = tuple(prefix)
+
+    journal.append(
+        record_kind=AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        subject_kind=AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+        subject_sha256=Sha256Digest("33" * 32),
+        canonical_payload=_batch_payload(),
+    )
+
+    assert tuple(prefix) == initial
+    assert prefix.record_count == 1
+    assert tuple(journal.recovery_records) == journal.records
+    journal.close()
+    with pytest.raises(AuditContractError, match="no longer readable"):
+        tuple(prefix)
 
 
 def test_phase1_runtime_admission_is_proven_by_recovery_resident_budget() -> None:
