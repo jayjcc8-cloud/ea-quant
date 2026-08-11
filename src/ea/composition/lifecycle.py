@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, final
 
-from ea.core.audit import AuditAppendPort
+from ea.core.audit import AuditAppendPort, AuditRecord
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import ExecutionPolicyRef, FactProvenanceId
@@ -32,6 +32,7 @@ from ea.runtime.authorization import (
 from ea.runtime.coordinator import (
     Phase1HistoricalLifecycleCoordinator,
     create_phase1_lifecycle_coordinator,
+    recover_phase1_lifecycle_coordinator,
 )
 from ea.runtime.historical import Phase1HistoricalMarketRuntime
 from ea.runtime.matcher import (
@@ -80,6 +81,7 @@ def create_phase1_historical_lifecycle(
     risk: RiskFreshnessPort,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
+    recovery_records: tuple[AuditRecord, ...] | None = None,
 ) -> Phase1HistoricalLifecycle:
     """Construct dormant authority, matcher, facts, coordinator, then activate once."""
     authorization, preparation_capability, activation_seal = (
@@ -116,16 +118,35 @@ def create_phase1_historical_lifecycle(
         order_verifier=order_issuance_verifier,
         dispatch_verifier=descendant,
     )
-    coordinator = create_phase1_lifecycle_coordinator(
-        binding=binding,
-        audit=audit,
-        runtime=runtime,
-        matcher=matcher,
-        fact_authority=fact_authority,
-        evidence_resolver=fact_authority,
-        authorization=authorization,
-        authorization_capability=preparation_capability,
-    )
+    if recovery_records is None:
+        coordinator = create_phase1_lifecycle_coordinator(
+            binding=binding,
+            audit=audit,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=fact_authority,
+            evidence_resolver=fact_authority,
+            authorization=authorization,
+            authorization_capability=preparation_capability,
+        )
+    else:
+        authorization.recover_attempts(
+            recovery_records,
+            orders=order_issuance_verifier,
+            submissions=matcher,
+            seal=activation_seal,
+        )
+        coordinator = recover_phase1_lifecycle_coordinator(
+            binding=binding,
+            audit=audit,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=fact_authority,
+            evidence_resolver=fact_authority,
+            records=recovery_records,
+            authorization=authorization,
+            authorization_capability=preparation_capability,
+        )
     try:
         authorization.activate(coordinator, seal=activation_seal)
     except Exception:

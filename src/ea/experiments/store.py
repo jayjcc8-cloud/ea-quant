@@ -13,6 +13,12 @@ from threading import Lock
 from typing import Protocol
 from uuid import UUID
 
+from ea.core.audit import (
+    AuditAppendAcknowledgement,
+    AuditRecord,
+    AuditRecordKind,
+    create_audit_append_acknowledgement,
+)
 from ea.core.run import RunBinding, RunContractError, RunId, RunReference, Sha256Digest
 from ea.experiments.manifest import (
     LineageSpec,
@@ -25,6 +31,8 @@ from ea.experiments.manifest import (
 _CAPABILITY_SEAL = object()
 _BINDING_SEAL = object()
 _PREPARED_SEAL = object()
+_RECOVERY_SEAL = object()
+_RECOVERED_SEAL = object()
 
 
 class StoreError(RuntimeError):
@@ -121,6 +129,7 @@ class _AttemptRecord:
     run_identity: tuple[int, int]
     manifest_identity: tuple[int, int]
     audit_identity: tuple[int, int]
+    output_identity: tuple[int, int]
     writer_lock_identity: tuple[int, int]
     writer_lock_fd: int
 
@@ -300,6 +309,139 @@ class PreparedRun:
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("prepared run is immutable")
+
+
+class VerifiedIncompleteRecoveryBinding:
+    """One-use store-local classification for an incomplete existing attempt."""
+
+    __slots__ = ("_authority", "_consumed", "_store", "binding", "record_count")
+    _authority: _AttemptAuthority
+    _consumed: bool
+    _store: LocalResultStore
+    binding: RunBinding
+    record_count: int
+
+    def __init__(
+        self,
+        seal: object,
+        *,
+        store: LocalResultStore,
+        authority: _AttemptAuthority,
+        record_count: int,
+    ) -> None:
+        if seal is not _RECOVERY_SEAL:
+            raise StoreError("recovery classifications are store-issued")
+        object.__setattr__(self, "_store", store)
+        object.__setattr__(self, "_authority", authority)
+        object.__setattr__(self, "binding", authority.binding)
+        object.__setattr__(self, "record_count", record_count)
+        object.__setattr__(self, "_consumed", False)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("recovery classification is immutable")
+
+
+class VerifiedTerminalRecoveryBinding:
+    """One-use store-local classification retaining the exact terminal evidence."""
+
+    __slots__ = (
+        "_authority",
+        "_consumed",
+        "_store",
+        "_terminal_payload",
+        "binding",
+        "record_count",
+        "terminal_acknowledgement",
+        "terminal_record",
+    )
+    _authority: _AttemptAuthority
+    _consumed: bool
+    _store: LocalResultStore
+    _terminal_payload: bytes
+    binding: RunBinding
+    record_count: int
+    terminal_acknowledgement: AuditAppendAcknowledgement
+    terminal_record: AuditRecord
+
+    def __init__(
+        self,
+        seal: object,
+        *,
+        store: LocalResultStore,
+        authority: _AttemptAuthority,
+        records: tuple[AuditRecord, ...],
+    ) -> None:
+        if seal is not _RECOVERY_SEAL or not records:
+            raise StoreError("terminal recovery classifications are store-issued")
+        terminal = records[-1]
+        if terminal.record_kind is not AuditRecordKind.RUN_TERMINAL:
+            raise StoreError("terminal recovery requires one final terminal record")
+        object.__setattr__(self, "_store", store)
+        object.__setattr__(self, "_authority", authority)
+        object.__setattr__(self, "binding", authority.binding)
+        object.__setattr__(self, "record_count", len(records))
+        object.__setattr__(self, "terminal_record", terminal)
+        object.__setattr__(
+            self,
+            "terminal_acknowledgement",
+            create_audit_append_acknowledgement(terminal),
+        )
+        object.__setattr__(self, "_terminal_payload", terminal.canonical_payload)
+        object.__setattr__(self, "_consumed", False)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("recovery classification is immutable")
+
+
+class RecoveredRun:
+    """Reissued process-local capabilities for the same incomplete durable attempt."""
+
+    __slots__ = (
+        "_authority",
+        "audit",
+        "manifest_sha256",
+        "manifest_verification",
+        "output",
+        "reference",
+    )
+    _authority: _AttemptAuthority
+    audit: AuditRunBinding
+    manifest_sha256: Sha256Digest
+    manifest_verification: ManifestVerificationCapability
+    output: OutputRunBinding
+    reference: RunReference
+
+    def __init__(
+        self,
+        seal: object,
+        *,
+        authority: _AttemptAuthority,
+        audit: AuditRunBinding,
+        output: OutputRunBinding,
+        manifest_verification: ManifestVerificationCapability,
+    ) -> None:
+        if seal is not _RECOVERED_SEAL:
+            raise StoreError("recovered runs are store-issued")
+        object.__setattr__(self, "_authority", authority)
+        object.__setattr__(self, "reference", authority.binding.reference)
+        object.__setattr__(self, "manifest_sha256", authority.binding.manifest_sha256)
+        object.__setattr__(self, "manifest_verification", manifest_verification)
+        object.__setattr__(self, "audit", audit)
+        object.__setattr__(self, "output", output)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("recovered run is immutable")
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveredTerminalRun:
+    """Read-only terminal recovery evidence; no mutation capability is present."""
+
+    binding: RunBinding
+    record_count: int
+    records: tuple[AuditRecord, ...]
+    terminal_record: AuditRecord
+    terminal_acknowledgement: AuditAppendAcknowledgement
 
 
 class LocalResultStore:
@@ -489,6 +631,244 @@ class LocalResultStore:
                     with suppress(OSError):
                         self._ops.close(descriptor)
 
+    def verify_recovery_attempt(
+        self,
+        expected_manifest: RunManifest,
+    ) -> VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding:
+        """Lock, rebind, scan and classify one exact existing attempt."""
+        if type(expected_manifest) is not RunManifest:
+            raise StoreError("recovery requires one exact expected RunManifest")
+        expected_payload = canonical_manifest_bytes(expected_manifest)
+        run_name = expected_manifest.run_id.value
+        root_fd: int | None = None
+        run_fd: int | None = None
+        audit_fd: int | None = None
+        output_fd: int | None = None
+        manifest_fd: int | None = None
+        writer_lock_fd: int | None = None
+        authority: _AttemptAuthority | None = None
+        classified = False
+        try:
+            root_fd = self._ops.open_root(self._root)
+            root_stat = self._ops.fstat(root_fd)
+            run_fd = self._ops.open_dir_at(root_fd, run_name)
+            run_stat = self._ops.fstat(run_fd)
+            audit_fd = self._ops.open_dir_at(run_fd, "audit")
+            audit_stat = self._ops.fstat(audit_fd)
+            output_fd = self._ops.open_dir_at(run_fd, "outputs")
+            output_stat = self._ops.fstat(output_fd)
+            if (
+                not stat.S_ISDIR(root_stat.st_mode)
+                or not stat.S_ISDIR(run_stat.st_mode)
+                or stat.S_IMODE(run_stat.st_mode) != 0o700
+                or not stat.S_ISDIR(audit_stat.st_mode)
+                or stat.S_IMODE(audit_stat.st_mode) != 0o700
+                or not stat.S_ISDIR(output_stat.st_mode)
+                or stat.S_IMODE(output_stat.st_mode) != 0o700
+            ):
+                raise StoreError("recovery directory identity or mode is invalid")
+            writer_lock_fd = os.open(
+                "writer-v1.lock",
+                os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=audit_fd,
+            )
+            lock_stat = os.fstat(writer_lock_fd)
+            if (
+                not stat.S_ISREG(lock_stat.st_mode)
+                or stat.S_IMODE(lock_stat.st_mode) != 0o600
+                or lock_stat.st_nlink != 1
+            ):
+                raise StoreError("recovery writer lock identity is invalid")
+            try:
+                fcntl.flock(writer_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise StoreError("writer lock already has an active owner") from error
+            rebound_lock_fd = os.open(
+                "writer-v1.lock",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=audit_fd,
+            )
+            try:
+                if self._identity(os.fstat(rebound_lock_fd)) != self._identity(lock_stat):
+                    raise StoreError("writer lock name changed after lease acquisition")
+            finally:
+                os.close(rebound_lock_fd)
+            manifest_fd = self._ops.open_file_read_at(run_fd, "manifest.json")
+            manifest_stat = self._ops.fstat(manifest_fd)
+            manifest_payload = self._read_all(manifest_fd)
+            if (
+                not stat.S_ISREG(manifest_stat.st_mode)
+                or stat.S_IMODE(manifest_stat.st_mode) != 0o600
+                or manifest_stat.st_nlink != 1
+                or manifest_payload != expected_payload
+                or read_manifest(manifest_payload) != expected_manifest
+            ):
+                raise StoreError("recovery manifest differs from exact expected evidence")
+            binding = RunBinding(
+                reference=expected_manifest.reference,
+                manifest_sha256=Sha256Digest(sha256(manifest_payload).hexdigest()),
+            )
+            authority = _AttemptAuthority(self._store_id, object(), binding)
+            record = _AttemptRecord(
+                authority=authority,
+                run_name=run_name,
+                root_identity=self._identity(root_stat),
+                run_identity=self._identity(run_stat),
+                manifest_identity=self._identity(manifest_stat),
+                audit_identity=self._identity(audit_stat),
+                output_identity=self._identity(output_stat),
+                writer_lock_identity=self._identity(lock_stat),
+                writer_lock_fd=writer_lock_fd,
+            )
+            with self._registry_lock:
+                self._attempts[authority.attempt_token] = record
+            writer_lock_fd = None
+            capability = AuditCapability(_CAPABILITY_SEAL, authority)
+            audit_binding = AuditRunBinding(
+                binding=binding,
+                capability=capability,
+                authority=authority,
+                seal=_BINDING_SEAL,
+                store=self,
+            )
+            from ea.experiments.audit import reopen_posix_audit_journal
+
+            journal = reopen_posix_audit_journal(audit_binding)
+            try:
+                records = journal.records
+            finally:
+                journal.close()
+            if records and records[-1].record_kind is AuditRecordKind.RUN_TERMINAL:
+                result: VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding = (
+                    VerifiedTerminalRecoveryBinding(
+                        _RECOVERY_SEAL,
+                        store=self,
+                        authority=authority,
+                        records=records,
+                    )
+                )
+            else:
+                result = VerifiedIncompleteRecoveryBinding(
+                    _RECOVERY_SEAL,
+                    store=self,
+                    authority=authority,
+                    record_count=len(records),
+                )
+            classified = True
+            return result
+        except StoreError:
+            raise
+        except (OSError, RunContractError) as error:
+            raise StoreError("existing attempt could not be verified for recovery") from error
+        finally:
+            if authority is not None and not classified:
+                with self._registry_lock:
+                    registered = self._attempts.pop(authority.attempt_token, None)
+                if registered is not None:
+                    with suppress(OSError):
+                        os.close(registered.writer_lock_fd)
+            for descriptor in (
+                writer_lock_fd,
+                manifest_fd,
+                output_fd,
+                audit_fd,
+                run_fd,
+                root_fd,
+            ):
+                if descriptor is not None:
+                    with suppress(OSError):
+                        if descriptor is writer_lock_fd:
+                            os.close(descriptor)
+                        else:
+                            self._ops.close(descriptor)
+
+    def recover_incomplete_attempt(
+        self,
+        verified: VerifiedIncompleteRecoveryBinding,
+    ) -> RecoveredRun:
+        """Consume one incomplete classification and reissue process-local capabilities."""
+        if (
+            type(verified) is not VerifiedIncompleteRecoveryBinding
+            or verified._store is not self
+            or verified._consumed
+        ):
+            raise StoreError("incomplete recovery classification is stale or foreign")
+        record = self._record_for(verified._authority)
+        object.__setattr__(verified, "_consumed", True)
+        authority = record.authority
+        audit_capability = AuditCapability(_CAPABILITY_SEAL, authority)
+        output_capability = OutputCapability(_CAPABILITY_SEAL, authority)
+        manifest_capability = ManifestVerificationCapability(_CAPABILITY_SEAL, authority)
+        return RecoveredRun(
+            _RECOVERED_SEAL,
+            authority=authority,
+            manifest_verification=manifest_capability,
+            audit=AuditRunBinding(
+                binding=authority.binding,
+                capability=audit_capability,
+                authority=authority,
+                seal=_BINDING_SEAL,
+                store=self,
+            ),
+            output=OutputRunBinding(
+                binding=authority.binding,
+                capability=output_capability,
+                authority=authority,
+                seal=_BINDING_SEAL,
+            ),
+        )
+
+    def recover_terminal_attempt(
+        self,
+        verified: VerifiedTerminalRecoveryBinding,
+    ) -> RecoveredTerminalRun:
+        """Consume one terminal classification after a fresh fsync and exact read-back."""
+        if (
+            type(verified) is not VerifiedTerminalRecoveryBinding
+            or verified._store is not self
+            or verified._consumed
+        ):
+            raise StoreError("terminal recovery classification is stale or foreign")
+        record = self._record_for(verified._authority)
+        authority = record.authority
+        capability = AuditCapability(_CAPABILITY_SEAL, authority)
+        audit_binding = AuditRunBinding(
+            binding=authority.binding,
+            capability=capability,
+            authority=authority,
+            seal=_BINDING_SEAL,
+            store=self,
+        )
+        from ea.experiments.audit import reopen_posix_audit_journal
+
+        journal = reopen_posix_audit_journal(audit_binding)
+        try:
+            terminal = verified.terminal_record
+            acknowledgement = journal.append(
+                record_kind=terminal.record_kind,
+                subject_kind=terminal.subject_kind,
+                subject_sha256=terminal.subject_sha256,
+                canonical_payload=verified._terminal_payload,
+            )
+            if acknowledgement != verified.terminal_acknowledgement:
+                raise StoreError("terminal recovery acknowledgement changed")
+            records = journal.records
+            if len(records) != verified.record_count or records[-1] != terminal:
+                raise StoreError("terminal recovery record prefix changed")
+        finally:
+            journal.close()
+        object.__setattr__(verified, "_consumed", True)
+        with self._registry_lock:
+            self._attempts.pop(authority.attempt_token, None)
+        os.close(record.writer_lock_fd)
+        return RecoveredTerminalRun(
+            binding=authority.binding,
+            record_count=verified.record_count,
+            records=records,
+            terminal_record=verified.terminal_record,
+            terminal_acknowledgement=acknowledgement,
+        )
+
     def prepare(
         self,
         spec: LineageSpec,
@@ -518,8 +898,10 @@ class LocalResultStore:
         run_identity: tuple[int, int] | None = None
         manifest_identity: tuple[int, int] | None = None
         audit_identity: tuple[int, int] | None = None
+        output_identity: tuple[int, int] | None = None
         writer_lock_identity: tuple[int, int] | None = None
         audit_fd: int | None = None
+        output_fd: int | None = None
         writer_lock_fd: int | None = None
         reserved = False
         try:
@@ -550,6 +932,13 @@ class LocalResultStore:
             if not stat.S_ISDIR(audit_stat.st_mode) or stat.S_IMODE(audit_stat.st_mode) != 0o700:
                 raise StoreError("audit directory must be a real 0700 directory")
             audit_identity = self._identity(audit_stat)
+            output_fd = self._ops.open_dir_at(run_fd, "outputs")
+            output_stat = self._ops.fstat(output_fd)
+            if not stat.S_ISDIR(output_stat.st_mode) or stat.S_IMODE(output_stat.st_mode) != 0o700:
+                raise StoreError("output directory must be a real 0700 directory")
+            output_identity = self._identity(output_stat)
+            self._close(output_fd)
+            output_fd = None
             writer_lock_fd = os.open(
                 "writer-v1.lock",
                 os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -613,6 +1002,7 @@ class LocalResultStore:
                 or manifest_identity is None
                 or audit_identity is None
                 or writer_lock_identity is None
+                or output_identity is None
                 or writer_lock_fd is None
             ):
                 raise StoreError("durable attempt identities were not captured")
@@ -654,6 +1044,7 @@ class LocalResultStore:
                 run_identity=run_identity,
                 manifest_identity=manifest_identity,
                 audit_identity=audit_identity,
+                output_identity=output_identity,
                 writer_lock_identity=writer_lock_identity,
                 writer_lock_fd=writer_lock_fd,
             )
@@ -676,7 +1067,15 @@ class LocalResultStore:
             raise StoreError(message) from exc
         finally:
             # Cleanup is descriptor-only. Files and directories are deliberately never removed.
-            for descriptor in (writer_lock_fd, audit_fd, read_fd, manifest_fd, run_fd, root_fd):
+            for descriptor in (
+                writer_lock_fd,
+                output_fd,
+                audit_fd,
+                read_fd,
+                manifest_fd,
+                run_fd,
+                root_fd,
+            ):
                 if descriptor is not None:
                     with suppress(OSError):
                         if descriptor is writer_lock_fd:

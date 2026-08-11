@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from ea.core.audit import (
     EMPTY_CHAIN_HEAD_SHA256,
     EMPTY_RECORD_SHA256,
+    AuditContractError,
     AuditRecordKind,
     AuditSubjectKind,
     audit_append_acknowledgement_digest,
@@ -14,6 +19,7 @@ from ea.core.audit import (
     create_audit_append_acknowledgement,
     create_audit_record,
     ordered_digest_tuple,
+    require_canonical_audit_payload,
 )
 from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 
@@ -81,3 +87,74 @@ def test_empty_ordered_digest_vectors_are_stable() -> None:
     assert ordered_digest_tuple(b"ea.audit-ordered-outcome-ack-digests.v1\0", ()) == Sha256Digest(
         "6a2fb6988624cc65253db3cf79f653c16a6f2ad11aa7a1a1ca785f82bc8995a1"
     )
+
+
+def _canonical(document: dict[str, object]) -> bytes:
+    return json.dumps(
+        document,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+@pytest.mark.parametrize(
+    ("record_kind", "document", "field", "invalid"),
+    [
+        (
+            AuditRecordKind.RUN_PREPARED,
+            {
+                "canonicalization": "ea-canonical-json-v1",
+                "lineage_sha256": "11" * 32,
+                "manifest_sha256": "22" * 32,
+                "run_id": "123e4567-e89b-42d3-a456-426614174000",
+                "schema": "ea.audit-run-prepared.v1",
+            },
+            "lineage_sha256",
+            "not-a-digest",
+        ),
+        (
+            AuditRecordKind.MATCHER_DISPATCH_BATCH,
+            {
+                "batch_sha256": "33" * 32,
+                "canonicalization": "ea-canonical-json-v1",
+                "dispatch_kind": "market",
+                "dispatch_sequence": 1,
+                "ingress_count": 0,
+                "ordered_ingress_sha256s_sha256": "44" * 32,
+                "run_id": "123e4567-e89b-42d3-a456-426614174000",
+                "schema": "ea.audit-matcher-dispatch-batch.v1",
+                "trigger_root_key": {},
+                "trigger_root_sha256": "55" * 32,
+            },
+            "dispatch_sequence",
+            True,
+        ),
+        (
+            AuditRecordKind.RUN_TERMINAL,
+            {
+                "canonicalization": "ea-canonical-json-v1",
+                "last_dispatch_sequence": 2,
+                "last_trigger_root_sha256": "33" * 32,
+                "pre_terminal_state_sha256": "44" * 32,
+                "previous_chain_head_sha256": "55" * 32,
+                "run_id": "123e4567-e89b-42d3-a456-426614174000",
+                "schema": "ea.audit-run-terminal.v1",
+                "terminal_kind": "success",
+            },
+            "terminal_kind",
+            "unknown",
+        ),
+    ],
+)
+def test_canonical_payload_rejects_wrong_typed_or_unknown_committed_values(
+    record_kind: AuditRecordKind,
+    document: dict[str, object],
+    field: str,
+    invalid: object,
+) -> None:
+    invalid_document = {**document, field: invalid}
+
+    with pytest.raises(AuditContractError):
+        require_canonical_audit_payload(record_kind, _canonical(invalid_document))

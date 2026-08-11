@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import stat
 from contextlib import suppress
+from dataclasses import dataclass
 from hashlib import sha256
 from threading import Lock
 from typing import Protocol, final
+from weakref import WeakValueDictionary
 
 from ea.core.audit import (
     AUDIT_FRAME_DIGEST_DOMAIN,
@@ -130,14 +132,36 @@ def _frame_bytes(record: AuditRecord) -> bytes:
     return canonical_audit_record_bytes(record) + bytes.fromhex(audit_frame_checksum(record).value)
 
 
+@dataclass(frozen=True, slots=True)
+class _JournalEntry:
+    offset: int
+    frame_length: int
+    payload_length: int
+    payload_sha256: bytes
+    record_sha256: bytes
+    chain_head_sha256: bytes
+
+
+def _compact_logical_key(value: AuditLogicalKey) -> bytes:
+    return (
+        value.record_kind.value.encode("ascii")
+        + b"\0"
+        + value.subject_kind.value.encode("ascii")
+        + b"\0"
+        + bytes.fromhex(value.subject_sha256.value)
+    )
+
+
 @final
 class PosixAuditJournal:
     """One serialized journal owner bound to an opaque prepared attempt."""
 
     __slots__ = (
         "_audit_fd",
+        "_ack_cache",
         "_binding",
         "_closed",
+        "_entries",
         "_failed",
         "_index",
         "_journal_fd",
@@ -145,7 +169,7 @@ class PosixAuditJournal:
         "_lock",
         "_needs_rescan",
         "_ops",
-        "_records",
+        "_recovered_sequences",
         "_terminal",
         "_verified_eof",
     )
@@ -160,13 +184,17 @@ class PosixAuditJournal:
         ops: _AuditOps,
     ) -> None:
         self._binding = binding
+        self._ack_cache: WeakValueDictionary[int, AuditAppendAcknowledgement] = (
+            WeakValueDictionary()
+        )
         self._audit_fd = audit_fd
         self._journal_fd = journal_fd
         self._journal_identity = journal_identity
         self._ops = ops
         self._lock = Lock()
-        self._records: list[AuditRecord] = []
-        self._index: dict[AuditLogicalKey, tuple[bytes, AuditAppendAcknowledgement]] = {}
+        self._entries: list[_JournalEntry] = []
+        self._index: dict[bytes, int] = {}
+        self._recovered_sequences: set[int] = set()
         self._verified_eof = len(AUDIT_JOURNAL_PREAMBLE)
         self._needs_rescan = False
         self._failed = False
@@ -179,11 +207,53 @@ class PosixAuditJournal:
 
     @property
     def records(self) -> tuple[AuditRecord, ...]:
-        return tuple(self._records)
+        return tuple(self._read_entry_record(entry) for entry in self._entries)
 
     @property
     def terminal(self) -> bool:
         return self._terminal
+
+    def _read_entry_record(self, entry: _JournalEntry) -> AuditRecord:
+        frame = _pread_exact(self._ops, self._journal_fd, entry.frame_length, entry.offset)
+        if len(frame) != entry.frame_length:
+            raise _audit_error(OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH, "audit frame is short")
+        header_length = int.from_bytes(frame[:8], "big")
+        payload_length_offset = 8 + header_length
+        payload_length = int.from_bytes(
+            frame[payload_length_offset : payload_length_offset + 8], "big"
+        )
+        payload_offset = payload_length_offset + 8
+        payload_end = payload_offset + payload_length
+        checksum = frame[payload_end:]
+        if (
+            payload_length != entry.payload_length
+            or len(checksum) != 32
+            or checksum != sha256(AUDIT_FRAME_DIGEST_DOMAIN + frame[:payload_end]).digest()
+        ):
+            raise _audit_error(
+                OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                "audit frame compact index conflicts",
+            )
+        payload = frame[payload_offset:payload_end]
+        if sha256(payload).digest() != entry.payload_sha256:
+            raise _audit_error(
+                OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                "audit payload compact index conflicts",
+            )
+        record = decode_audit_record(
+            binding=self._binding,
+            canonical_header=frame[8 : 8 + header_length],
+            canonical_payload=payload,
+        )
+        if (
+            bytes.fromhex(audit_record_digest(record).value) != entry.record_sha256
+            or bytes.fromhex(audit_chain_head(record).value) != entry.chain_head_sha256
+        ):
+            raise _audit_error(
+                OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                "audit record compact index conflicts",
+            )
+        return record
 
     def _require_file_identity(self) -> os.stat_result:
         try:
@@ -212,8 +282,8 @@ class PosixAuditJournal:
         preamble = _pread_exact(self._ops, self._journal_fd, len(AUDIT_JOURNAL_PREAMBLE), 0)
         if preamble != AUDIT_JOURNAL_PREAMBLE:
             raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit journal preamble is invalid")
-        records: list[AuditRecord] = []
-        index: dict[AuditLogicalKey, tuple[bytes, AuditAppendAcknowledgement]] = {}
+        entries: list[_JournalEntry] = []
+        index: dict[bytes, int] = {}
         terminal = False
         offset = len(AUDIT_JOURNAL_PREAMBLE)
         torn_offset: int | None = None
@@ -267,24 +337,35 @@ class PosixAuditJournal:
                 )
             except AuditContractError as error:
                 raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit frame is invalid") from error
-            expected_sequence = len(records) + 1
+            expected_sequence = len(entries) + 1
+            compact_key = _compact_logical_key(record.logical_key)
             if (
                 record.record_id.owner_sequence != expected_sequence
                 or record.previous_record_sha256 != previous_record
                 or record.previous_chain_head_sha256 != previous_chain
                 or terminal
-                or record.logical_key in index
+                or compact_key in index
             ):
                 raise _audit_error(
                     OutcomeCode.CONFLICTING_ID, "audit record sequence or chain conflicts"
                 )
-            acknowledgement = create_audit_append_acknowledgement(record)
-            records.append(record)
-            index[record.logical_key] = (record.canonical_payload, acknowledgement)
-            previous_record = audit_record_digest(record)
-            previous_chain = audit_chain_head(record)
+            record_sha256 = audit_record_digest(record)
+            chain_head_sha256 = audit_chain_head(record)
+            entries.append(
+                _JournalEntry(
+                    offset=frame_start,
+                    frame_length=offset - frame_start,
+                    payload_length=payload_length,
+                    payload_sha256=sha256(payload).digest(),
+                    record_sha256=bytes.fromhex(record_sha256.value),
+                    chain_head_sha256=bytes.fromhex(chain_head_sha256.value),
+                )
+            )
+            index[compact_key] = expected_sequence
+            previous_record = record_sha256
+            previous_chain = chain_head_sha256
             terminal = record.record_kind is AuditRecordKind.RUN_TERMINAL
-            if len(records) > MAX_AUDIT_RECORDS:
+            if len(entries) > MAX_AUDIT_RECORDS:
                 raise _audit_error(OutcomeCode.OUT_OF_RANGE, "audit record count exceeds v1 bound")
         if torn_offset is not None:
             if not permit_torn_tail:
@@ -302,8 +383,9 @@ class PosixAuditJournal:
                     "audit torn-tail recovery did not become durable",
                 ) from error
             offset = torn_offset
-        self._records = records
+        self._entries = entries
         self._index = index
+        self._recovered_sequences = set(range(1, len(entries) + 1))
         self._terminal = terminal
         self._verified_eof = offset
         self._needs_rescan = False
@@ -325,15 +407,36 @@ class PosixAuditJournal:
             if self._closed:
                 raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit journal is closed")
             logical_key = AuditLogicalKey(record_kind, subject_kind, subject_sha256)
-            existing = self._index.get(logical_key)
-            if existing is not None:
-                prior_payload, acknowledgement = existing
-                if prior_payload != canonical_payload:
+            compact_key = _compact_logical_key(logical_key)
+            existing_sequence = self._index.get(compact_key)
+            if existing_sequence is not None:
+                entry = self._entries[existing_sequence - 1]
+                if (
+                    entry.payload_length != len(canonical_payload)
+                    or entry.payload_sha256 != sha256(canonical_payload).digest()
+                ):
                     self._failed = True
                     raise _audit_error(
                         OutcomeCode.CONFLICTING_ID,
                         "audit logical retry conflicts with the original payload",
                     )
+                if existing_sequence in self._recovered_sequences:
+                    try:
+                        self._ops.fsync(self._journal_fd)
+                        record = self._read_entry_record(entry)
+                    except (AuditContractError, OSError) as error:
+                        self._failed = True
+                        raise _audit_error(
+                            OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                            "recovered audit frame did not revalidate",
+                        ) from error
+                    self._recovered_sequences.remove(existing_sequence)
+                else:
+                    record = self._read_entry_record(entry)
+                acknowledgement = self._ack_cache.get(existing_sequence)
+                if acknowledgement is None:
+                    acknowledgement = create_audit_append_acknowledgement(record)
+                    self._ack_cache[existing_sequence] = acknowledgement
                 return require_audit_acknowledgement(
                     acknowledgement,
                     binding=self._binding,
@@ -349,10 +452,13 @@ class PosixAuditJournal:
                 raise _audit_error(OutcomeCode.CONFLICTING_ID, "terminal audit journal is closed")
             if self._needs_rescan:
                 self._rescan(permit_torn_tail=True)
-                existing = self._index.get(logical_key)
-                if existing is not None:
-                    prior_payload, acknowledgement = existing
-                    if prior_payload != canonical_payload:
+                existing_sequence = self._index.get(compact_key)
+                if existing_sequence is not None:
+                    entry = self._entries[existing_sequence - 1]
+                    if (
+                        entry.payload_length != len(canonical_payload)
+                        or entry.payload_sha256 != sha256(canonical_payload).digest()
+                    ):
                         self._failed = True
                         raise _audit_error(
                             OutcomeCode.CONFLICTING_ID,
@@ -360,17 +466,16 @@ class PosixAuditJournal:
                         )
                     try:
                         self._ops.fsync(self._journal_fd)
-                        record = self._records[acknowledgement.record_id.owner_sequence - 1]
-                        frame = _frame_bytes(record)
-                        start = self._frame_offset(record.record_id.owner_sequence)
-                        if _pread_exact(self._ops, self._journal_fd, len(frame), start) != frame:
-                            raise OSError("recovered frame read-back mismatch")
-                    except OSError as error:
+                        record = self._read_entry_record(entry)
+                    except (AuditContractError, OSError) as error:
                         self._failed = True
                         raise _audit_error(
                             OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
                             "recovered audit frame did not revalidate",
                         ) from error
+                    self._recovered_sequences.discard(existing_sequence)
+                    acknowledgement = create_audit_append_acknowledgement(record)
+                    self._ack_cache[existing_sequence] = acknowledgement
                     return require_audit_acknowledgement(
                         acknowledgement,
                         binding=self._binding,
@@ -382,16 +487,18 @@ class PosixAuditJournal:
                 self._failed = True
                 raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit EOF changed unexpectedly")
             previous_record = (
-                EMPTY_RECORD_SHA256 if not self._records else audit_record_digest(self._records[-1])
+                EMPTY_RECORD_SHA256
+                if not self._entries
+                else Sha256Digest(self._entries[-1].record_sha256.hex())
             )
             previous_chain = (
                 EMPTY_CHAIN_HEAD_SHA256
-                if not self._records
-                else audit_chain_head(self._records[-1])
+                if not self._entries
+                else Sha256Digest(self._entries[-1].chain_head_sha256.hex())
             )
             record = create_audit_record(
                 binding=self._binding,
-                owner_sequence=len(self._records) + 1,
+                owner_sequence=len(self._entries) + 1,
                 record_kind=record_kind,
                 subject_kind=subject_kind,
                 subject_sha256=subject_sha256,
@@ -438,19 +545,23 @@ class PosixAuditJournal:
                     code, "audit append did not produce verified durability"
                 ) from error
             acknowledgement = create_audit_append_acknowledgement(record)
-            self._records.append(record)
-            self._index[logical_key] = (canonical_payload, acknowledgement)
+            self._ack_cache[record.record_id.owner_sequence] = acknowledgement
+            self._entries.append(
+                _JournalEntry(
+                    offset=start,
+                    frame_length=len(frame),
+                    payload_length=len(canonical_payload),
+                    payload_sha256=sha256(canonical_payload).digest(),
+                    record_sha256=bytes.fromhex(audit_record_digest(record).value),
+                    chain_head_sha256=bytes.fromhex(audit_chain_head(record).value),
+                )
+            )
+            self._index[compact_key] = record.record_id.owner_sequence
             self._verified_eof += len(frame)
             self._terminal = record_kind is AuditRecordKind.RUN_TERMINAL
             return acknowledgement
         finally:
             self._lock.release()
-
-    def _frame_offset(self, sequence: int) -> int:
-        offset = len(AUDIT_JOURNAL_PREAMBLE)
-        for record in self._records[: sequence - 1]:
-            offset += len(_frame_bytes(record))
-        return offset
 
     def close(self) -> None:
         if not self._lock.acquire(blocking=False):

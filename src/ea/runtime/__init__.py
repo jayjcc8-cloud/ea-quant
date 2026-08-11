@@ -2,7 +2,10 @@
 
 from ea.runtime.coordinator import (
     Phase1HistoricalLifecycleCoordinator,
+    RecoveredTerminalCoordinatorEvidence,
     create_phase1_lifecycle_coordinator,
+    recover_phase1_lifecycle_coordinator,
+    recover_phase1_terminal_evidence,
 )
 from ea.runtime.historical import (
     HISTORICAL_RUNTIME_PRODUCER_NAMESPACE,
@@ -40,7 +43,10 @@ from ea.runtime.strategy import create_active_market_dispatch_verifier
 
 __all__ = [
     "Phase1HistoricalLifecycleCoordinator",
+    "RecoveredTerminalCoordinatorEvidence",
     "create_phase1_lifecycle_coordinator",
+    "recover_phase1_lifecycle_coordinator",
+    "recover_phase1_terminal_evidence",
     "DeterministicRootQueue",
     "CausalDescendantFactDispatchVerifier",
     "HistoricalMatcherDescendantFactDispatchVerifier",

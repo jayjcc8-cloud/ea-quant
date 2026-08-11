@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import stat
 from pathlib import Path
 
@@ -10,6 +12,8 @@ from ea.core.audit import (
     AuditRecordKind,
     AuditSubjectKind,
     audit_append_acknowledgement_digest,
+    audit_chain_head,
+    audit_subject_digest,
 )
 from ea.core.run import Sha256Digest
 from ea.experiments.audit import (
@@ -17,23 +21,48 @@ from ea.experiments.audit import (
     create_posix_audit_journal,
     reopen_posix_audit_journal,
 )
-from ea.experiments.store import LocalResultStore
+from ea.experiments.store import (
+    LocalResultStore,
+    PreparedRun,
+    StoreError,
+    VerifiedIncompleteRecoveryBinding,
+    VerifiedTerminalRecoveryBinding,
+)
 from unit.test_store import RUN_UUID, _root, _spec
 
 
 def _batch_payload() -> bytes:
-    return (
-        b'{"batch_sha256":"'
-        + b"33" * 32
-        + b'","canonicalization":"ea-canonical-json-v1","dispatch_kind":"market",'
-        b'"dispatch_sequence":1,"ingress_count":0,'
-        b'"ordered_ingress_sha256s_sha256":"'
-        + b"24"
-        * 32
-        + b'","run_id":"123e4567-e89b-42d3-a456-426614174000",'
-        b'"schema":"ea.audit-matcher-dispatch-batch.v1","trigger_root_key":{},'
-        b'"trigger_root_sha256":"' + b"44" * 32 + b'"}'
-    )
+    return json.dumps(
+        {
+            "batch_sha256": "33" * 32,
+            "canonicalization": "ea-canonical-json-v1",
+            "dispatch_kind": "market",
+            "dispatch_sequence": 1,
+            "ingress_count": 0,
+            "ordered_ingress_sha256s_sha256": "24" * 32,
+            "run_id": "123e4567-e89b-42d3-a456-426614174000",
+            "schema": "ea.audit-matcher-dispatch-batch.v1",
+            "trigger_root_key": {
+                "adjustment": "raw",
+                "available_at": "2026-01-02T09:31:00.000000Z",
+                "domain_rank": 30,
+                "event_time": "2026-01-02T09:31:00.000000Z",
+                "instrument": {"symbol": "AAPL", "venue": "XNAS"},
+                "interval_end": "2026-01-02T09:31:00.000000Z",
+                "interval_start": "2026-01-02T09:30:00.000000Z",
+                "kind_rank": 0,
+                "revision": 0,
+                "root_domain": "market_data",
+                "source": "primary.raw",
+                "source_sequence": 0,
+            },
+            "trigger_root_sha256": "44" * 32,
+        },
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
 
 def test_fresh_journal_is_prepared_before_general_append_and_exact_retry(tmp_path: Path) -> None:
@@ -163,3 +192,85 @@ def test_reopen_rejects_complete_checksum_corruption_without_repair(tmp_path: Pa
         reopen_posix_audit_journal(prepared.audit)
 
     assert path.read_bytes() == original
+
+
+def _release_simulated_process_writer(store: LocalResultStore, prepared: PreparedRun) -> None:
+    record = store._record_for(prepared._authority)
+    os.close(record.writer_lock_fd)
+
+
+def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    original_store = LocalResultStore(root)
+    prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = original_store.verify_manifest(prepared.manifest_verification)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    _release_simulated_process_writer(original_store, prepared)
+
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedIncompleteRecoveryBinding
+    recovered = recovered_store.recover_incomplete_attempt(verified)
+    reopened = reopen_posix_audit_journal(recovered.audit)
+
+    assert recovered.reference == prepared.reference
+    assert len(reopened.records) == 1
+    with pytest.raises(StoreError, match="stale or foreign"):
+        recovered_store.recover_incomplete_attempt(verified)
+
+
+def test_recovery_refuses_a_live_writer_before_journal_adoption(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    active_store = LocalResultStore(root)
+    prepared = active_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = active_store.verify_manifest(prepared.manifest_verification)
+    create_posix_audit_journal(prepared.audit)
+
+    with pytest.raises(StoreError, match="active owner"):
+        LocalResultStore(root).verify_recovery_attempt(manifest)
+
+
+def test_terminal_recovery_returns_read_only_lost_ack_evidence(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    original_store = LocalResultStore(root)
+    prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = original_store.verify_manifest(prepared.manifest_verification)
+    journal = create_posix_audit_journal(prepared.audit)
+    previous_chain = audit_chain_head(journal.records[-1]).value
+    payload = json.dumps(
+        {
+            "canonicalization": "ea-canonical-json-v1",
+            "last_dispatch_sequence": 1,
+            "last_trigger_root_sha256": "33" * 32,
+            "pre_terminal_state_sha256": "44" * 32,
+            "previous_chain_head_sha256": previous_chain,
+            "run_id": str(RUN_UUID),
+            "schema": "ea.audit-run-terminal.v1",
+            "terminal_kind": "success",
+        },
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    journal.append(
+        record_kind=AuditRecordKind.RUN_TERMINAL,
+        subject_kind=AuditSubjectKind.RUN_TERMINAL_STATE,
+        subject_sha256=audit_subject_digest(AuditRecordKind.RUN_TERMINAL, payload),
+        canonical_payload=payload,
+    )
+    journal.close()
+    _release_simulated_process_writer(original_store, prepared)
+
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedTerminalRecoveryBinding
+    terminal = recovered_store.recover_terminal_attempt(verified)
+
+    assert terminal.record_count == 2
+    assert terminal.terminal_record.record_kind is AuditRecordKind.RUN_TERMINAL
+    assert not hasattr(terminal, "audit")
+    assert not hasattr(terminal, "output")
+    with pytest.raises(StoreError, match="stale or foreign"):
+        recovered_store.recover_terminal_attempt(verified)

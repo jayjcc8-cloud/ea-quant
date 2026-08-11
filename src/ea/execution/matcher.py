@@ -662,6 +662,21 @@ class Phase1HistoricalMatcher:
             return None
         return _SEALED_DISPATCH_RECORDS[token].replay_batch
 
+    def resolve_submission_receipt(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> HistoricalSubmissionReceipt | None:
+        """Resolve one retained submission receipt without replaying submission mutation."""
+        if type(order_id) is not EconomicId or type(execution_request_sha256) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "submission recovery key must be exact")
+        self._require_retained_state()
+        record = self._state.submission_by_order.get(order_id)
+        if record is None or record.request_sha256 != execution_request_sha256:
+            return None
+        return record.receipt
+
     @property
     def execution_policy(self) -> ExecutionPolicyRef:
         return _clone_policy(self._execution_policy)

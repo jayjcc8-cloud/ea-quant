@@ -10,11 +10,13 @@ from ea.core.audit import (
     AuditAppendAcknowledgement,
     AuditAppendPort,
     AuditLogicalKey,
+    AuditRecord,
     AuditRecordKind,
     AuditSubjectKind,
     audit_acknowledgement_id,
     audit_append_acknowledgement_digest,
     audit_subject_digest,
+    create_audit_append_acknowledgement,
     require_audit_acknowledgement,
 )
 from ea.core.execution import (
@@ -22,7 +24,7 @@ from ea.core.execution import (
     InstrumentSpecSetId,
     instrument_spec_set_digest,
 )
-from ea.core.execution_identity import EconomicId
+from ea.core.execution_identity import EconomicId, EconomicOwnerKind
 from ea.core.execution_messages import (
     ExecutionPolicyRef,
     Order,
@@ -34,8 +36,10 @@ from ea.core.execution_messages import (
 from ea.core.historical_matching import (
     HistoricalPreEffectAuthorizationError,
     HistoricalSubmissionAuthorizationProof,
+    HistoricalSubmissionReceipt,
     _create_historical_submission_authorization_proof,
     runtime_root_key_document,
+    runtime_root_order_key_document,
 )
 from ea.core.lifecycle import (
     CoordinatorPhase,
@@ -65,10 +69,23 @@ class _CoordinatorAuthorizationView(Protocol):
     def state(self) -> object: ...
 
 
+class AuthorizationOrderRecoveryResolver(Protocol):
+    def resolve_issued_order_by_id(self, order_id: EconomicId) -> Order | None: ...
+
+
+class AuthorizationSubmissionRecoveryResolver(Protocol):
+    def resolve_submission_receipt(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> HistoricalSubmissionReceipt | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _AuthorizationAttempt:
     order: Order
-    causal_market_root: MarketDataEnvelope
+    causal_market_root: MarketDataEnvelope | None
     payload: bytes
     acknowledgement: AuditAppendAcknowledgement
     burned: bool
@@ -113,6 +130,49 @@ def _economic_id_document(value: EconomicId) -> dict[str, object]:
     }
 
 
+def _economic_id_from_document(value: object, run_id: RunId) -> EconomicId:
+    if type(value) is not dict or set(value) != {"owner_kind", "owner_sequence", "run_id"}:
+        raise ValueError("economic ID document is invalid")
+    if (
+        value["owner_kind"] != EconomicOwnerKind.EXECUTION_ORDER.value
+        or value["run_id"] != run_id.value
+        or type(value["owner_sequence"]) is not int
+        or not 1 <= value["owner_sequence"] <= (1 << 64) - 1
+    ):
+        raise ValueError("economic ID binding is invalid")
+    return EconomicId(run_id, EconomicOwnerKind.EXECUTION_ORDER, value["owner_sequence"])
+
+
+def _receipt_matches_authorization(
+    receipt: HistoricalSubmissionReceipt,
+    document: dict[str, object],
+    acknowledgement: AuditAppendAcknowledgement,
+    order: Order,
+) -> bool:
+    return (
+        type(receipt) is HistoricalSubmissionReceipt
+        and receipt.order_id == order.order_id
+        and receipt.order_sha256 == order_digest(order)
+        and receipt.execution_request_sha256 == execution_request_digest(order)
+        and receipt.causal_market_sha256.value == document.get("causal_market_sha256")
+        and runtime_root_order_key_document(receipt.causal_root_key)
+        == document.get("causal_root_key")
+        and receipt.dispatch_sequence == document.get("dispatch_sequence")
+        and receipt.audit_acknowledgement_id == audit_acknowledgement_id(acknowledgement)
+        and receipt.audit_acknowledgement_sha256
+        == audit_append_acknowledgement_digest(acknowledgement)
+        and receipt.global_halt_epoch == document.get("global_halt_epoch")
+        and receipt.risk_halt_epoch == document.get("risk_halt_epoch")
+        and receipt.instrument_gate_id == document.get("instrument_gate_id")
+        and receipt.instrument_gate_version == document.get("instrument_gate_version")
+        and receipt.authorization_state_version == document.get("authorization_state_version")
+        and receipt.instrument_spec_set_id.value == document.get("instrument_spec_set_id")
+        and receipt.instrument_spec_set_sha256.value == document.get("instrument_spec_set_sha256")
+        and receipt.execution_policy.identifier.value == document.get("execution_policy_id")
+        and receipt.execution_policy.sha256.value == document.get("execution_policy_sha256")
+    )
+
+
 @final
 class HistoricalSubmissionAuthorizationAuthority:
     """Single owner of durable authorization attempts and opaque matcher proofs."""
@@ -120,6 +180,7 @@ class HistoricalSubmissionAuthorizationAuthority:
     __slots__ = (
         "_active",
         "_attempts",
+        "_attempt_by_order",
         "_activation_seal",
         "_audit",
         "_binding",
@@ -130,6 +191,7 @@ class HistoricalSubmissionAuthorizationAuthority:
         "_portfolio",
         "_preparation_capability",
         "_risk",
+        "_recovery_loaded",
         "_runtime",
         "_spec_set",
         "_spec_sha256",
@@ -137,6 +199,7 @@ class HistoricalSubmissionAuthorizationAuthority:
     _active: bool
     _activation_seal: _ActivationSeal | None
     _attempts: dict[tuple[EconomicId, Sha256Digest], _AuthorizationAttempt]
+    _attempt_by_order: dict[EconomicId, Sha256Digest]
     _audit: AuditAppendPort
     _binding: RunBinding
     _coordinator: _CoordinatorAuthorizationView | None
@@ -146,6 +209,7 @@ class HistoricalSubmissionAuthorizationAuthority:
     _portfolio: PortfolioFreshnessPort
     _preparation_capability: _PreparationCapability
     _risk: RiskFreshnessPort
+    _recovery_loaded: bool
     _runtime: RuntimeLifecyclePort
     _spec_set: InstrumentExecutionSpecSet
     _spec_sha256: Sha256Digest
@@ -185,6 +249,140 @@ class HistoricalSubmissionAuthorizationAuthority:
         self._coordinator = coordinator
         self._activation_seal = None
         self._active = True
+        for key, attempt in tuple(self._attempts.items()):
+            causal_root = attempt.causal_market_root
+            if causal_root is None:
+                continue
+            burned = True
+            try:
+                freshness = self._freshness(
+                    attempt.order,
+                    causal_market_root=causal_root,
+                    dispatch_sequence=attempt.order.dispatch_sequence,
+                )
+                burned = (
+                    self._payload(
+                        attempt.order,
+                        causal_market_root=causal_root,
+                        dispatch_sequence=attempt.order.dispatch_sequence,
+                        freshness=freshness,
+                    )
+                    != attempt.payload
+                )
+            except Exception:
+                burned = True
+            self._attempts[key] = _AuthorizationAttempt(
+                attempt.order,
+                causal_root,
+                attempt.payload,
+                attempt.acknowledgement,
+                burned,
+            )
+
+    def recover_attempts(
+        self,
+        records: tuple[AuditRecord, ...],
+        *,
+        orders: AuthorizationOrderRecoveryResolver,
+        submissions: AuthorizationSubmissionRecoveryResolver,
+        seal: object,
+    ) -> None:
+        """Rebuild the permanent attempt index before sealed activation."""
+        if (
+            seal is not self._activation_seal
+            or self._activation_seal is None
+            or self._active
+            or self._coordinator is not None
+            or self._recovery_loaded
+        ):
+            raise _deny(OutcomeCode.CONFLICTING_ID, "authorization recovery seal conflicts")
+        if type(records) is not tuple or any(type(record) is not AuditRecord for record in records):
+            raise _deny(OutcomeCode.INVALID_TYPE, "authorization recovery records are invalid")
+        attempts: dict[tuple[EconomicId, Sha256Digest], _AuthorizationAttempt] = {}
+        by_order: dict[EconomicId, Sha256Digest] = {}
+        for record in records:
+            if record.record_kind is not AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
+                continue
+            if record.binding != self._binding:
+                raise _deny(OutcomeCode.CONFLICTING_ID, "authorization record binding conflicts")
+            try:
+                document = json.loads(record.canonical_payload)
+                if type(document) is not dict:
+                    raise ValueError("authorization payload is not one object")
+                order_id = _economic_id_from_document(document["order_id"], self.run_id)
+                held_for_order_id = _economic_id_from_document(
+                    document["held_for_order_id"],
+                    self.run_id,
+                )
+                request_sha256 = Sha256Digest(document["execution_request_sha256"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise _deny(
+                    OutcomeCode.CONFLICTING_ID,
+                    "authorization recovery payload is invalid",
+                ) from error
+            if held_for_order_id != order_id:
+                raise _deny(OutcomeCode.CONFLICTING_ID, "authorization held order conflicts")
+            existing_request = by_order.get(order_id)
+            key = (order_id, request_sha256)
+            if existing_request is not None or key in attempts:
+                raise _deny(OutcomeCode.CONFLICTING_ID, "authorization recovery key is duplicated")
+            order = orders.resolve_issued_order_by_id(order_id)
+            if (
+                type(order) is not Order
+                or order.run_id != self.run_id
+                or order_digest(order).value != document.get("order_sha256")
+                or execution_request_digest(order) != request_sha256
+                or order.instrument_spec_set_id != self._spec_set.identifier
+                or order.instrument_spec_set_sha256 != self._spec_sha256
+                or order.execution_policy != self._execution_policy
+                or order.dispatch_sequence != document.get("dispatch_sequence")
+            ):
+                raise _deny(OutcomeCode.CONFLICTING_ID, "authorization Order evidence conflicts")
+            acknowledgement = create_audit_append_acknowledgement(record)
+            require_audit_acknowledgement(
+                acknowledgement,
+                binding=self._binding,
+                logical_key=record.logical_key,
+                canonical_payload=record.canonical_payload,
+            )
+            receipt = submissions.resolve_submission_receipt(
+                order_id=order_id,
+                execution_request_sha256=request_sha256,
+            )
+            causal_root: MarketDataEnvelope | None = None
+            if receipt is not None:
+                if not _receipt_matches_authorization(
+                    receipt,
+                    document,
+                    acknowledgement,
+                    order,
+                ):
+                    raise _deny(
+                        OutcomeCode.CONFLICTING_ID,
+                        "authorization receipt evidence conflicts",
+                    )
+            else:
+                active = self._runtime.active_lease
+                if (
+                    active is not None
+                    and type(active.root) is MarketDataEnvelope
+                    and active.dispatch_sequence == document.get("dispatch_sequence")
+                    and causal_market_digest(active.root).value
+                    == document.get("causal_market_sha256")
+                    and runtime_root_key_document(active.root) == document.get("causal_root_key")
+                ):
+                    causal_root = active.root
+            attempts[key] = _AuthorizationAttempt(
+                order,
+                causal_root,
+                record.canonical_payload,
+                acknowledgement,
+                True,
+            )
+            by_order[order_id] = request_sha256
+        self._attempts = attempts
+        self._attempt_by_order = by_order
+        self._recovery_loaded = True
 
     def _require_active(self) -> _CoordinatorAuthorizationView:
         if not self._active or self._coordinator is None:
@@ -227,6 +425,9 @@ class HistoricalSubmissionAuthorizationAuthority:
             or risk.run_id != self.run_id
             or global_halt.run_id != self.run_id
             or gate.run_id != self.run_id
+            or gate.instrument != order.instrument
+            or portfolio.instrument_spec_set_id != self._spec_set.identifier
+            or portfolio.instrument_spec_set_sha256 != self._spec_sha256
             or portfolio.snapshot_version != order.portfolio_snapshot_version
             or risk.risk_state_version != order.risk_state_version
         ):
@@ -305,6 +506,7 @@ class HistoricalSubmissionAuthorizationAuthority:
             or order.instrument_spec_set_id != self._spec_set.identifier
             or order.instrument_spec_set_sha256 != self._spec_sha256
             or order.execution_policy != self._execution_policy
+            or order.dispatch_sequence != dispatch_sequence
         ):
             raise _deny(OutcomeCode.CONFLICTING_ID, "Order binding conflicts")
         before = self._freshness(
@@ -319,6 +521,9 @@ class HistoricalSubmissionAuthorizationAuthority:
             freshness=before,
         )
         key = (order.order_id, execution_request_digest(order))
+        occupied_request = self._attempt_by_order.get(order.order_id)
+        if occupied_request is not None and occupied_request != key[1]:
+            raise _deny(OutcomeCode.RISK_STALE_APPROVAL, "authorization Order is occupied")
         existing = self._attempts.get(key)
         if existing is not None:
             if existing.payload != payload:
@@ -364,6 +569,7 @@ class HistoricalSubmissionAuthorizationAuthority:
             acknowledgement,
             burned,
         )
+        self._attempt_by_order[order.order_id] = key[1]
         if burned:
             raise _deny(OutcomeCode.RISK_STALE_APPROVAL, "freshness changed after append")
         return acknowledgement
@@ -391,9 +597,11 @@ class HistoricalSubmissionAuthorizationAuthority:
             or type(dispatch_sequence) is not int
         ):
             raise _deny(OutcomeCode.INVALID_TYPE, "verification inputs must be exact")
-        attempt_entry = next(
-            (value for key, value in self._attempts.items() if key[0] == order_id),
-            None,
+        retained_request_digest = self._attempt_by_order.get(order_id)
+        attempt_entry = (
+            None
+            if retained_request_digest is None
+            else self._attempts.get((order_id, retained_request_digest))
         )
         order = None if attempt_entry is None else attempt_entry.order
         if order is None:
@@ -434,6 +642,23 @@ class HistoricalSubmissionAuthorizationAuthority:
             causal_market_root=causal_root,
             dispatch_sequence=dispatch_sequence,
         )
+        if (
+            self._payload(
+                order,
+                causal_market_root=causal_root,
+                dispatch_sequence=dispatch_sequence,
+                freshness=freshness,
+            )
+            != attempt.payload
+        ):
+            self._attempts[(order_id, request_digest)] = _AuthorizationAttempt(
+                attempt.order,
+                attempt.causal_market_root,
+                attempt.payload,
+                attempt.acknowledgement,
+                True,
+            )
+            raise _deny(OutcomeCode.RISK_STALE_APPROVAL, "authorization state changed")
         risk = freshness.risk
         global_halt = freshness.global_halt
         gate = freshness.gate
@@ -503,8 +728,10 @@ def create_dormant_historical_submission_authorization_authority(
     value._global_halt = global_halt
     value._instrument_gate = instrument_gate
     value._attempts = {}
+    value._attempt_by_order = {}
     value._coordinator = None
     value._active = False
+    value._recovery_loaded = False
     value._preparation_capability = _PreparationCapability()
     value._activation_seal = _ActivationSeal()
     return value, value._preparation_capability, value._activation_seal

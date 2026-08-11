@@ -62,6 +62,12 @@ class _Runtime:
         self.active_lease = SimpleNamespace(root=root, dispatch_sequence=1)
 
 
+class _NoSubmissions:
+    def resolve_submission_receipt(self, **values: Any) -> None:
+        del values
+        return None
+
+
 def _market() -> MarketDataEnvelope:
     spec_set, _authority, orders = _orders()
     instrument = orders[0].instrument
@@ -180,3 +186,114 @@ def test_dormant_authority_activates_once_and_issues_one_durable_proof() -> None
     ]
     with pytest.raises(HistoricalPreEffectAuthorizationError, match="already activated"):
         authority.activate(coordinator, seal=activation_seal)
+
+
+def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
+    spec_set, order_authority, orders = _orders()
+    order = orders[0]
+    root = _market()
+    binding = RunBinding(
+        RunReference(order.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=binding.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(binding),
+    )
+    policy = _policy(spec_set)
+    portfolio = _snapshot(spec_set)
+    risk = _create_risk_state_snapshot(
+        run_id=order.run_id,
+        policy_id=policy.policy_id,
+        policy_sha256=phase1_risk_policy_digest(policy),
+        risk_state_version=0,
+        halted=False,
+        halt_reason=None,
+        halt_causal_root_available_at=None,
+        halt_dispatch_sequence=None,
+        conflict_existing_intent_sha256=None,
+        conflict_submitted_intent_sha256=None,
+    )
+    global_halt = _Port(GlobalHaltSnapshot(order.run_id, False, 0))
+    gate = _Port(
+        InstrumentGateSnapshot(
+            order.run_id,
+            order.instrument,
+            order.order_id,
+            Sha256Digest("33" * 32),
+            1,
+            False,
+        )
+    )
+    runtime = _Runtime(order.run_id, spec_set, root)
+    portfolio_port = _Port(portfolio)
+    risk_port = _Port(risk)
+
+    def create_authority() -> tuple[Any, object, object]:
+        return create_dormant_historical_submission_authorization_authority(
+            binding=binding,
+            audit=audit,
+            runtime=cast(RuntimeLifecyclePort, runtime),
+            spec_set=spec_set,
+            execution_policy=EXECUTION_POLICY,
+            portfolio=portfolio_port,
+            risk=risk_port,
+            global_halt=global_halt,
+            instrument_gate=gate,
+        )
+
+    first, capability, seal = create_authority()
+    coordinator: Any = SimpleNamespace(
+        binding=binding,
+        state=SimpleNamespace(state_version=1, phase=CoordinatorPhase.RUNNING),
+    )
+    first.activate(coordinator, seal=seal)
+    original_ack = first.prepare(
+        order,
+        causal_market_root=root,
+        dispatch_sequence=1,
+        capability=capability,
+    )
+
+    recovered, recovered_capability, recovered_seal = create_authority()
+    recovered.recover_attempts(
+        tuple(audit.records),
+        orders=order_authority,
+        submissions=_NoSubmissions(),
+        seal=recovered_seal,
+    )
+    recovered.activate(coordinator, seal=recovered_seal)
+    recovered_ack = recovered.prepare(
+        order,
+        causal_market_root=root,
+        dispatch_sequence=1,
+        capability=recovered_capability,
+    )
+    proof = recovered.verify_authorized_historical_submission(
+        order_id=order.order_id,
+        canonical_order_bytes=canonical_order_bytes(order),
+        canonical_execution_request_bytes=canonical_execution_request_bytes(order),
+        canonical_causal_market_bytes=canonical_market_data_record_bytes(root),
+        causal_market_sha256=causal_market_digest(root),
+        causal_root_key=runtime_root_order_key(root),
+        dispatch_sequence=1,
+    )
+
+    assert recovered_ack == original_ack
+    assert proof.audit_acknowledgement_sha256.value
+    assert len(audit.records) == 2
+
+    global_halt.value = GlobalHaltSnapshot(order.run_id, False, 1)
+    with pytest.raises(HistoricalPreEffectAuthorizationError, match="state changed"):
+        recovered.verify_authorized_historical_submission(
+            order_id=order.order_id,
+            canonical_order_bytes=canonical_order_bytes(order),
+            canonical_execution_request_bytes=canonical_execution_request_bytes(order),
+            canonical_causal_market_bytes=canonical_market_data_record_bytes(root),
+            causal_market_sha256=causal_market_digest(root),
+            causal_root_key=runtime_root_order_key(root),
+            dispatch_sequence=1,
+        )

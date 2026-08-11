@@ -250,7 +250,7 @@ class AuditRecord:
 
 
 @final
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
 class AuditAppendAcknowledgement:
     """Factory-only proof reconstructed from an independently read-back frame."""
 
@@ -330,6 +330,249 @@ def _require_kind_subject(
     return record_kind, subject_kind
 
 
+def _require_json_text(document: dict[str, object], field: str) -> str:
+    value = document[field]
+    if type(value) is not str:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} must be one JSON string")
+    return value
+
+
+def _require_json_digest(document: dict[str, object], field: str) -> None:
+    try:
+        Sha256Digest(_require_json_text(document, field))
+    except RunContractError as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} is not one SHA-256 digest") from error
+
+
+def _require_json_uint64(
+    document: dict[str, object],
+    field: str,
+    *,
+    positive: bool,
+) -> int:
+    value = document[field]
+    lower = 1 if positive else 0
+    if type(value) is not int or not lower <= value <= _MAX_UINT64:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} is outside its uint64 domain")
+    return value
+
+
+def _require_json_bool(document: dict[str, object], field: str) -> None:
+    if type(document[field]) is not bool:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} must be one JSON boolean")
+
+
+def _require_json_id(
+    document: dict[str, object],
+    field: str,
+    *,
+    expected_owner: EconomicOwnerKind | None = None,
+    positive: bool = False,
+) -> None:
+    value = document[field]
+    if type(value) is not dict or set(value) != {"owner_kind", "owner_sequence", "run_id"}:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} must be one canonical economic ID")
+    if (
+        type(value["owner_kind"]) is not str
+        or value["owner_kind"] not in {owner.value for owner in EconomicOwnerKind}
+        or type(value["run_id"]) is not str
+        or value["run_id"] != document.get("run_id")
+        or type(value["owner_sequence"]) is not int
+        or not (1 if positive else 0) <= value["owner_sequence"] <= _MAX_UINT64
+        or (expected_owner is not None and value["owner_kind"] != expected_owner.value)
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} economic ID carriers are invalid")
+
+
+def _require_json_root_key(
+    document: dict[str, object],
+    field: str,
+    *,
+    expected_domain: str | None,
+) -> None:
+    from ea.core.historical_matching import (
+        runtime_root_key_from_document,
+        runtime_root_order_key_document,
+    )
+
+    value = document[field]
+    if type(value) is not dict:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} must be one JSON object")
+    try:
+        key = runtime_root_key_from_document(value)
+        if runtime_root_order_key_document(key) != value:
+            raise ValueError("root key round-trip changed")
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} is not one canonical root key") from error
+    if expected_domain is not None and value.get("root_domain") != expected_domain:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} domain conflicts with its record")
+
+
+def _require_audit_owned_payload_values(
+    record_kind: AuditRecordKind,
+    document: dict[str, object],
+) -> None:
+    _require_json_text(document, "run_id")
+    if record_kind is AuditRecordKind.RUN_PREPARED:
+        _require_json_digest(document, "lineage_sha256")
+        _require_json_digest(document, "manifest_sha256")
+    elif record_kind is AuditRecordKind.MATCHER_DISPATCH_BATCH:
+        if _require_json_text(document, "dispatch_kind") not in {"market", "end_of_run"}:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch_kind is outside its closed enum")
+        _require_json_uint64(document, "dispatch_sequence", positive=True)
+        expected_domain = "market_data" if document["dispatch_kind"] == "market" else "end_of_run"
+        _require_json_root_key(
+            document,
+            "trigger_root_key",
+            expected_domain=expected_domain,
+        )
+        for field in ("trigger_root_sha256", "batch_sha256", "ordered_ingress_sha256s_sha256"):
+            _require_json_digest(document, field)
+        _require_json_uint64(document, "ingress_count", positive=False)
+    elif record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
+        for field in ("order_id", "held_for_order_id"):
+            _require_json_id(
+                document,
+                field,
+                expected_owner=EconomicOwnerKind.EXECUTION_ORDER,
+                positive=True,
+            )
+        if document["order_id"] != document["held_for_order_id"]:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "authorization held order conflicts")
+        for field in (
+            "order_sha256",
+            "execution_request_sha256",
+            "causal_market_sha256",
+            "instrument_gate_id",
+            "instrument_spec_set_sha256",
+            "execution_policy_sha256",
+        ):
+            _require_json_digest(document, field)
+        _require_json_root_key(document, "causal_root_key", expected_domain="market_data")
+        for field in (
+            "dispatch_sequence",
+            "instrument_gate_version",
+            "authorization_state_version",
+        ):
+            _require_json_uint64(document, field, positive=True)
+        for field in (
+            "portfolio_snapshot_version",
+            "risk_state_version",
+            "global_halt_epoch",
+            "risk_halt_epoch",
+        ):
+            _require_json_uint64(document, field, positive=False)
+        _require_json_text(document, "instrument_spec_set_id")
+        _require_json_text(document, "execution_policy_id")
+    elif record_kind is AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION:
+        for field in (
+            "previous_state_sha256",
+            "failing_state_sha256",
+            "failed_subject_sha256",
+            "trigger_root_sha256",
+        ):
+            _require_json_digest(document, field)
+        try:
+            OutcomeCode(_require_json_text(document, "failure_code"))
+            AuditRecordKind(_require_json_text(document, "failed_record_kind"))
+            AuditSubjectKind(_require_json_text(document, "failed_subject_kind"))
+        except ValueError as error:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "failing payload enum is invalid") from error
+        _require_json_uint64(document, "dispatch_sequence", positive=True)
+    elif record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
+        if _require_json_text(document, "dispatch_kind") not in {"market", "end_of_run"}:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch_kind is outside its closed enum")
+        _require_json_uint64(document, "dispatch_sequence", positive=True)
+        _require_json_uint64(document, "outcome_count", positive=False)
+        expected_domain = "market_data" if document["dispatch_kind"] == "market" else "end_of_run"
+        _require_json_root_key(
+            document,
+            "trigger_root_key",
+            expected_domain=expected_domain,
+        )
+        for field in (
+            "trigger_root_sha256",
+            "batch_sha256",
+            "ordered_outcome_ack_sha256s_sha256",
+            "pre_ack_state_sha256",
+        ):
+            _require_json_digest(document, field)
+    elif record_kind is AuditRecordKind.RUN_TERMINAL:
+        if _require_json_text(document, "terminal_kind") not in {"success", "failed"}:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "terminal_kind is outside its closed enum")
+        _require_json_uint64(document, "last_dispatch_sequence", positive=True)
+        for field in (
+            "last_trigger_root_sha256",
+            "pre_terminal_state_sha256",
+            "previous_chain_head_sha256",
+        ):
+            _require_json_digest(document, field)
+
+
+def _require_execution_outcome_payload_values(document: dict[str, object]) -> None:
+    expected_fields = {
+        "action",
+        "anomalies",
+        "canonicalization",
+        "client_submission_key",
+        "fact_key",
+        "fact_sha256",
+        "fill",
+        "halt_requested",
+        "ingress_identity",
+        "ingress_sha256",
+        "message_type",
+        "order_resolutions",
+        "outcome_code",
+        "projection_after_sha256",
+        "projection_before_sha256",
+        "reported_order_id",
+        "reported_venue_order",
+        "requires_reconciliation",
+        "resolved_order_id",
+        "run_id",
+        "runtime_dispatch_sequence",
+        "schema_version",
+    }
+    if set(document) != expected_fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "execution outcome fields conflict")
+    if (
+        document["canonicalization"] != "ea-execution-fact-processing-outcome-v1"
+        or document["message_type"] != "execution_fact_processing_outcome"
+        or document["schema_version"] != 1
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "execution outcome schema is invalid")
+    _require_json_text(document, "run_id")
+    _require_json_text(document, "action")
+    try:
+        OutcomeCode(_require_json_text(document, "outcome_code"))
+    except ValueError as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "execution outcome code is invalid") from error
+    _require_json_uint64(document, "runtime_dispatch_sequence", positive=True)
+    for field in ("fact_sha256", "ingress_sha256"):
+        _require_json_digest(document, field)
+    for field in ("halt_requested", "requires_reconciliation"):
+        _require_json_bool(document, field)
+    for field in ("anomalies", "order_resolutions"):
+        if type(document[field]) is not list:
+            raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} must be one JSON array")
+    for field in (
+        "client_submission_key",
+        "projection_after_sha256",
+        "projection_before_sha256",
+    ):
+        if document[field] is not None:
+            _require_json_digest(document, field)
+    for field in ("reported_order_id", "resolved_order_id"):
+        if document[field] is not None:
+            _require_json_id(
+                document,
+                field,
+                expected_owner=EconomicOwnerKind.EXECUTION_ORDER,
+                positive=True,
+            )
+
+
 def require_canonical_audit_payload(
     record_kind: AuditRecordKind,
     canonical_payload: bytes,
@@ -366,6 +609,9 @@ def require_canonical_audit_payload(
             or document.get("canonicalization") != AUDIT_CANONICALIZATION
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload schema is invalid")
+        _require_audit_owned_payload_values(record_kind, document)
+    else:
+        _require_execution_outcome_payload_values(document)
     return canonical_payload
 
 

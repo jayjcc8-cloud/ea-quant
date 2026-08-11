@@ -30,6 +30,7 @@ from ea.core.execution_state import (
 from ea.core.historical_matching import (
     HistoricalDispatchKind,
     HistoricalMatcherDispatchBatch,
+    HistoricalSubmissionReceipt,
     historical_matcher_dispatch_batch_digest,
     runtime_root_order_key_document,
 )
@@ -180,6 +181,13 @@ class HistoricalMatcherPort(Protocol):
         dispatch_sequence: int,
         trigger_root_sha256: Sha256Digest,
     ) -> HistoricalMatcherDispatchBatch | None: ...
+
+    def resolve_submission_receipt(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> HistoricalSubmissionReceipt | None: ...
 
 
 class ExecutionFactAuthorityPort(Protocol):

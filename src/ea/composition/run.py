@@ -19,7 +19,7 @@ from ea.core.audit import (
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.numeric import OrderedFloat64Policy
-from ea.core.run import RunContractError, RunReference
+from ea.core.run import RunContractError, RunId, RunReference
 from ea.data.fingerprint import MarketDataSelection
 from ea.experiments.binding import (
     BoundAuditPort,
@@ -45,7 +45,14 @@ from ea.experiments.provenance import (
     verify_provenance,
 )
 from ea.experiments.randomness import Pcg64StreamFactory
-from ea.experiments.store import AuditRunBinding, LocalResultStore, PreparedRun, RunIdProvider
+from ea.experiments.store import (
+    AuditRunBinding,
+    LocalResultStore,
+    PreparedRun,
+    RunIdProvider,
+    VerifiedIncompleteRecoveryBinding,
+    VerifiedTerminalRecoveryBinding,
+)
 
 _PREPARED_SEAL = object()
 _PREFLIGHT_SLOT = "_ea_reproducible_preflight_grant_v1"
@@ -363,6 +370,69 @@ def prepare_reproducible_run(
         provenance=provenance,
         _store=store,
     )
+
+
+def verify_run_recovery(
+    *,
+    preflight: PreflightSession,
+    settings: Settings,
+    market_data: MarketDataSelection,
+    parameters: tuple[EffectiveParameter, ...],
+    master_seed: int,
+    stream_labels: tuple[str, ...],
+    store: LocalResultStore,
+    run_id: RunId,
+) -> VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding:
+    """Rebuild current lineage, acquire the writer lease, and classify one attempt."""
+    if (
+        type(preflight) is not PreflightSession
+        or type(settings) is not Settings
+        or type(market_data) is not MarketDataSelection
+        or type(store) is not LocalResultStore
+        or type(run_id) is not RunId
+    ):
+        raise RunCompositionError("recovery inputs require exact trusted carriers")
+    if type(parameters) is not tuple or any(
+        type(parameter) is not EffectiveParameter for parameter in parameters
+    ):
+        raise RunCompositionError("recovery parameters must be one exact tuple")
+    if len({parameter.name for parameter in parameters}) != len(parameters):
+        raise RunCompositionError("recovery parameter names must be unique")
+    if type(stream_labels) is not tuple:
+        raise RunCompositionError("recovery stream labels must be one exact tuple")
+    RandomnessSpec(master_seed=master_seed, stream_labels=tuple(sorted(stream_labels)))
+    normalized_configuration = NormalizedConfiguration(
+        schema_version=settings.schema_version,
+        environment=settings.environment.value,
+        mode=settings.run.mode.value,
+    )
+    repository, preflight_commit = _consume_preflight_session(preflight)
+    provenance = collect_provenance(repository, repository / "uv.lock")
+    if provenance.code.commit != preflight_commit:
+        raise RunCompositionError("collector observed a different commit than recovery preflight")
+    spec = build_lineage_spec(
+        LineageInputs(
+            code=provenance.code,
+            configuration=normalized_configuration,
+            data=market_data.fingerprint,
+            replay_window=market_data.window,
+            parameters=parameters,
+            runtime=provenance.runtime,
+            master_seed=master_seed,
+            stream_labels=stream_labels,
+        )
+    )
+    manifest = build_manifest(spec, run_id)
+    verify_manifest_evidence(
+        manifest,
+        code=provenance.code,
+        runtime=provenance.runtime,
+        data=market_data.fingerprint,
+    )
+    try:
+        return store.verify_recovery_attempt(manifest)
+    except Exception as error:
+        raise RunCompositionError("existing attempt failed locked recovery verification") from error
 
 
 def verify_reproducible_run(

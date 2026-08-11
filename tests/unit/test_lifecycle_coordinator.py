@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -22,11 +23,20 @@ from ea.core.audit import (
 )
 from ea.core.execution_state import ExecutionFactProcessingOutcome
 from ea.core.historical_matching import canonical_end_of_run_root_bytes
-from ea.core.lifecycle import CoordinatorPhase
+from ea.core.lifecycle import CoordinatorPhase, LifecycleError
+from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunBinding, RunReference, Sha256Digest
-from ea.runtime.coordinator import create_phase1_lifecycle_coordinator
-from ea.runtime.historical import historical_runtime_trace_digest
+from ea.core.runtime import runtime_root_order_key
+from ea.runtime.coordinator import (
+    create_phase1_lifecycle_coordinator,
+    recover_phase1_lifecycle_coordinator,
+    recover_phase1_terminal_evidence,
+)
+from ea.runtime.historical import (
+    HISTORICAL_RUNTIME_TRACE_SCHEMA,
+    historical_runtime_trace_digest,
+)
 from unit.test_historical_matcher import _system
 
 
@@ -99,6 +109,13 @@ class _Runtime:
         if type(lease.root).__name__ == "EndOfRunRoot":
             self.terminal_acknowledged = True
             root_document = json.loads(canonical_end_of_run_root_bytes(lease.root))
+            root_order_key = []
+            for value in runtime_root_order_key(lease.root).as_tuple():
+                root_order_key.append(
+                    value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                    if type(value) is datetime
+                    else value
+                )
             document = {
                 "clock_now": root_document["available_at"],
                 "committed_cursor_as_of": None,
@@ -106,9 +123,9 @@ class _Runtime:
                 "data_sha256": "00" * 32,
                 "dispatch_sequence": lease.dispatch_sequence,
                 "root": root_document,
-                "root_order_key": [],
+                "root_order_key": root_order_key,
                 "run_id": self.run_id.value,
-                "schema": "ea.historical-runtime-trace.v1",
+                "schema": HISTORICAL_RUNTIME_TRACE_SCHEMA,
                 "terminal_acknowledged": True,
             }
             record = json.dumps(
@@ -145,6 +162,95 @@ class _CommittedThenRaisedRuntime(_Runtime):
     def acknowledge(self, lease: Any) -> None:
         super().acknowledge(lease)
         raise RuntimeError("injected post-commit return failure")
+
+
+class _CommittedMarketThenRaisedRuntime(_Runtime):
+    acknowledgement_calls = 0
+
+    def acknowledge(self, lease: Any) -> None:
+        self.acknowledgement_calls += 1
+        assert lease is self._lease
+        self._popped = False
+        root_document = json.loads(canonical_market_data_record_bytes(lease.root))
+        root_order_key = []
+        for value in runtime_root_order_key(lease.root).as_tuple():
+            root_order_key.append(
+                value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                if type(value) is datetime
+                else value
+            )
+        document = {
+            "clock_now": root_document["available_at"],
+            "committed_cursor_as_of": root_document["available_at"],
+            "committed_event_count": 1,
+            "data_sha256": "00" * 32,
+            "dispatch_sequence": lease.dispatch_sequence,
+            "root": root_document,
+            "root_order_key": root_order_key,
+            "run_id": self.run_id.value,
+            "schema": HISTORICAL_RUNTIME_TRACE_SCHEMA,
+            "terminal_acknowledged": False,
+        }
+        record = json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        self.trace_records = (record,)
+        self.trace_digest = historical_runtime_trace_digest(self.trace_records)
+        raise RuntimeError("injected committed market acknowledgement failure")
+
+
+class _FailFirstRuntimeAcknowledgement(_Runtime):
+    failed = False
+    acknowledgement_calls = 0
+
+    def acknowledge(self, lease: Any) -> None:
+        self.acknowledgement_calls += 1
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("injected pre-commit acknowledgement failure")
+        super().acknowledge(lease)
+
+
+class _ResolverOnlyMatcher:
+    def __init__(self, matcher: Any) -> None:
+        self._matcher = matcher
+        self.mutation_calls = 0
+
+    @property
+    def run_id(self) -> Any:
+        return self._matcher.run_id
+
+    @property
+    def spec_set(self) -> Any:
+        return self._matcher.spec_set
+
+    @property
+    def source_namespace(self) -> Any:
+        return self._matcher.source_namespace
+
+    def resolve_dispatch_batch(self, **values: Any) -> Any:
+        return self._matcher.resolve_dispatch_batch(**values)
+
+    def resolve_submission_receipt(self, **values: Any) -> Any:
+        return self._matcher.resolve_submission_receipt(**values)
+
+    def match_active_market_root(self, root: Any, *, dispatch_sequence: int) -> Any:
+        self.mutation_calls += 1
+        return self._matcher.match_active_market_root(
+            root,
+            dispatch_sequence=dispatch_sequence,
+        )
+
+    def expire_at_active_end(self, root: Any, *, dispatch_sequence: int) -> Any:
+        self.mutation_calls += 1
+        return self._matcher.expire_at_active_end(
+            root,
+            dispatch_sequence=dispatch_sequence,
+        )
 
 
 class _NoEvidence:
@@ -366,3 +472,151 @@ def test_terminal_append_failure_retains_exact_retryable_preterminal_state() -> 
     assert coordinator.pre_terminal_state is retained
     assert coordinator.terminal_outcome is terminal
     assert [record.record_kind for record in audit.records].count(AuditRecordKind.RUN_TERMINAL) == 1
+
+
+def test_recovery_reuses_resolved_batch_when_batch_audit_was_missing() -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _FailFirstBatchAudit(binding)
+    runtime = _Runtime(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    with pytest.raises(AuditContractError, match="injected batch"):
+        coordinator.process_next_dispatch()
+    resolver_only = _ResolverOnlyMatcher(matcher)
+
+    recovered = recover_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=resolver_only,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+        records=tuple(audit.records),
+    )
+    dispatch = recovered.retry_active_dispatch()
+
+    assert dispatch.runtime_acknowledged is True
+    assert resolver_only.mutation_calls == 0
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.MATCHER_DISPATCH_BATCH
+    ) == 1
+
+
+def test_recovery_with_durable_completion_retries_only_runtime_acknowledgement() -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _FailFirstRuntimeAcknowledgement(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    with pytest.raises(RuntimeError, match="pre-commit"):
+        coordinator.process_next_dispatch()
+    resolver_only = _ResolverOnlyMatcher(matcher)
+
+    recovered = recover_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=resolver_only,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+        records=tuple(audit.records),
+    )
+    dispatch = recovered.retry_active_dispatch()
+
+    assert dispatch.runtime_acknowledged is True
+    assert runtime.acknowledgement_calls == 2
+    assert resolver_only.mutation_calls == 0
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    ) == 1
+
+
+def test_recovery_accepts_committed_market_trace_without_second_acknowledgement() -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _CommittedMarketThenRaisedRuntime(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    with pytest.raises(RuntimeError, match="committed market"):
+        coordinator.process_next_dispatch()
+    resolver_only = _ResolverOnlyMatcher(matcher)
+
+    recovered = recover_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=resolver_only,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+        records=tuple(audit.records),
+    )
+
+    assert recovered.state.last_completed_dispatch_sequence == 1
+    assert recovered.state.phase is CoordinatorPhase.FAILING
+    assert runtime.acknowledgement_calls == 1
+    assert resolver_only.mutation_calls == 0
+    with pytest.raises(LifecycleError, match="no active dispatch"):
+        recovered.retry_active_dispatch()
+
+
+def test_terminal_recovery_reconstructs_read_only_terminal_evidence() -> None:
+    _fixture, matcher, _orders, _causal, _delayed, end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _Runtime(matcher, end)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    coordinator.process_next_dispatch()
+    original_terminal = coordinator.terminal_outcome
+
+    recovered = recover_phase1_terminal_evidence(
+        binding=binding,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+        records=tuple(audit.records),
+    )
+
+    assert original_terminal is not None
+    assert recovered.terminal_outcome == original_terminal
+    assert recovered.terminal_state.final_chain_head_sha256 == audit_chain_head(audit.records[-1])
