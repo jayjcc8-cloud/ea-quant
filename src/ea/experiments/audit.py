@@ -763,19 +763,39 @@ class PosixAuditJournal:
                     "audit journal is in a monotone failed state",
                 )
             if self._needs_rescan:
-                self._rescan(permit_torn_tail=True)
+                try:
+                    self._rescan(permit_torn_tail=True)
+                except AuditContractError as error:
+                    if error.code is not OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED:
+                        self._failed = True
+                    else:
+                        self._needs_rescan = True
+                    raise
+                except OSError as error:
+                    self._needs_rescan = True
+                    raise _audit_error(
+                        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                        "audit settlement rescan could not complete",
+                    ) from error
             compact_key = _compact_logical_key(logical_key)
             sequence = self._index.get(compact_key)
             if sequence is None:
                 try:
                     self._ops.fsync(self._journal_fd)
-                    file_stat = self._require_file_identity()
-                except (AuditContractError, OSError) as error:
+                except OSError as error:
                     self._needs_rescan = True
                     raise _audit_error(
                         OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
                         "audit absence could not be settled durably",
                     ) from error
+                try:
+                    file_stat = self._require_file_identity()
+                except AuditContractError as error:
+                    if error.code is not OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED:
+                        self._failed = True
+                    else:
+                        self._needs_rescan = True
+                    raise
                 if file_stat.st_size != self._verified_eof:
                     self._needs_rescan = True
                     raise _audit_error(
@@ -795,20 +815,37 @@ class PosixAuditJournal:
                 )
             try:
                 self._ops.fsync(self._journal_fd)
-                record = self._read_entry_record(entry)
-            except (AuditContractError, OSError) as error:
+            except OSError as error:
                 self._needs_rescan = True
                 raise _audit_error(
                     OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
-                    "settled audit frame did not revalidate",
+                    "settled audit frame could not be read durably",
+                ) from error
+            try:
+                record = self._read_entry_record(entry)
+            except AuditContractError as error:
+                self._failed = True
+                raise _audit_error(
+                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                    "settled audit frame integrity mismatched",
+                ) from error
+            except OSError as error:
+                self._needs_rescan = True
+                raise _audit_error(
+                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                    "settled audit frame could not be read durably",
                 ) from error
             acknowledgement = create_audit_append_acknowledgement(record)
-            acknowledgement = require_audit_acknowledgement(
-                acknowledgement,
-                binding=self._binding,
-                logical_key=logical_key,
-                canonical_payload=canonical_payload,
-            )
+            try:
+                acknowledgement = require_audit_acknowledgement(
+                    acknowledgement,
+                    binding=self._binding,
+                    logical_key=logical_key,
+                    canonical_payload=canonical_payload,
+                )
+            except AuditContractError:
+                self._failed = True
+                raise
             if sequence <= len(self._recovered_sequences):
                 self._recovered_sequences[sequence - 1] = 0
             self._ack_cache[sequence] = acknowledgement

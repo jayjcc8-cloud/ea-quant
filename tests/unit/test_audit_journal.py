@@ -117,6 +117,24 @@ class _ReadbackMismatchAuditOps(_OsAuditOps):
         return value
 
 
+class _SettlementReadbackMismatchAuditOps(_PostFsyncFailureAuditOps):
+    mismatch_after_next_fsync = False
+    corrupt_next_read = False
+
+    def fsync(self, descriptor: int) -> None:
+        super().fsync(descriptor)
+        if self.mismatch_after_next_fsync:
+            self.mismatch_after_next_fsync = False
+            self.corrupt_next_read = True
+
+    def pread(self, journal_fd: int, size: int, offset: int) -> bytes:
+        value = super().pread(journal_fd, size, offset)
+        if self.corrupt_next_read and value:
+            self.corrupt_next_read = False
+            return value[:-1] + bytes((value[-1] ^ 1,))
+        return value
+
+
 def test_fresh_journal_rejects_less_than_six_gib_free_before_creation(tmp_path: Path) -> None:
     root = _root(tmp_path)
     prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
@@ -232,6 +250,43 @@ def test_observed_readback_mismatch_fails_monotonically_without_settlement(
 
     with pytest.raises(AuditContractError, match="failed state"):
         journal.settle_append(logical_key=key, canonical_payload=payload)
+
+
+def test_settlement_readback_mismatch_fails_monotonically(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    ops = _SettlementReadbackMismatchAuditOps()
+    journal = create_posix_audit_journal(prepared.audit, _ops=ops)
+    payload = _batch_payload()
+    key = AuditLogicalKey(
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+        Sha256Digest("33" * 32),
+    )
+    ops.armed = True
+    with pytest.raises(AuditContractError, match="verified durability"):
+        journal.append(
+            record_kind=key.record_kind,
+            subject_kind=key.subject_kind,
+            subject_sha256=key.subject_sha256,
+            canonical_payload=payload,
+        )
+    ops.mismatch_after_next_fsync = True
+
+    with pytest.raises(AuditContractError, match="integrity mismatched"):
+        journal.settle_append(logical_key=key, canonical_payload=payload)
+
+    with pytest.raises(AuditContractError, match="failed state"):
+        journal.settle_append(logical_key=key, canonical_payload=payload)
+    with pytest.raises(AuditContractError, match="failed state"):
+        journal.append(
+            record_kind=AuditRecordKind.MATCHER_DISPATCH_BATCH,
+            subject_kind=AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+            subject_sha256=Sha256Digest("55" * 32),
+            canonical_payload=payload,
+        )
 
 
 def test_same_logical_key_with_different_payload_fails_monotonically(tmp_path: Path) -> None:
