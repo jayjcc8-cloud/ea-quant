@@ -95,6 +95,12 @@ class _MemoryAudit:
         self.index[key] = (canonical_payload, acknowledgement)
         return acknowledgement
 
+    def resolve_record(self, logical_key: AuditLogicalKey) -> AuditRecord | None:
+        return next(
+            (record for record in self.records if record.logical_key == logical_key),
+            None,
+        )
+
 
 def create_phase1_lifecycle_coordinator(
     *,

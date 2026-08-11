@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Protocol, final
 
 from ea.core.audit import (
@@ -54,6 +55,9 @@ from ea.core.lifecycle import (
     PortfolioFreshnessPort,
     RiskFreshnessPort,
     RuntimeLifecyclePort,
+    SubmissionAuthorizationAttemptOutcome,
+    SubmissionAuthorizationAttemptStatus,
+    create_submission_authorization_attempt_outcome,
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.market_data_codec import canonical_market_data_record_bytes
@@ -124,6 +128,26 @@ def _canonical_json(document: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _attempt_request_digest(
+    order: Order,
+    causal_market_root: MarketDataEnvelope,
+    dispatch_sequence: int,
+) -> Sha256Digest:
+    payload = _canonical_json(
+        {
+            "canonicalization": "ea-canonical-json-v1",
+            "dispatch_sequence": dispatch_sequence,
+            "execution_request_sha256": execution_request_digest(order).value,
+            "order_id": _economic_id_document(order.order_id),
+            "run_id": order.run_id.value,
+            "schema": "ea.submission-authorization-attempt-request.v1",
+            "trigger_root_sha256": historical_market_root_digest(causal_market_root).value,
+        }
+    )
+    domain = b"ea.submission-authorization-attempt-request.v1\0"
+    return Sha256Digest(sha256(domain + len(payload).to_bytes(8, "big") + payload).hexdigest())
 
 
 def _economic_id_document(value: EconomicId) -> dict[str, object]:
@@ -400,6 +424,7 @@ class HistoricalSubmissionAuthorizationAuthority:
             )
             causal_root: MarketDataEnvelope | None = None
             if receipt is not None:
+                causal_root = _require_historical_submission_receipt_causal_root(receipt)
                 recovered_payload = _authorization_payload_from_receipt(
                     receipt,
                     acknowledgement,
@@ -622,6 +647,244 @@ class HistoricalSubmissionAuthorizationAuthority:
         if burned:
             raise _deny(OutcomeCode.RISK_STALE_APPROVAL, "freshness changed after append")
         return acknowledgement
+
+    def _attempt_outcome(
+        self,
+        *,
+        order: Order,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+        payload_sha256: Sha256Digest,
+        status: SubmissionAuthorizationAttemptStatus,
+        acknowledgement: AuditAppendAcknowledgement | None,
+        error_code: OutcomeCode | None,
+        logical_key: AuditLogicalKey | None,
+    ) -> SubmissionAuthorizationAttemptOutcome:
+        return create_submission_authorization_attempt_outcome(
+            binding=self._binding,
+            dispatch_sequence=dispatch_sequence,
+            trigger_root_sha256=historical_market_root_digest(causal_market_root),
+            order_id=order.order_id,
+            execution_request_sha256=execution_request_digest(order),
+            authorization_payload_sha256=payload_sha256,
+            status=status,
+            logical_key=logical_key,
+            acknowledgement_sha256=(
+                None
+                if acknowledgement is None
+                else audit_append_acknowledgement_digest(acknowledgement)
+            ),
+            error_code=error_code,
+        )
+
+    def _resolve_committed_acknowledgement(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        payload: bytes,
+    ) -> tuple[bool, AuditAppendAcknowledgement | None]:
+        resolver = getattr(self._audit, "resolve_record", None)
+        if not callable(resolver):
+            return False, None
+        record = resolver(logical_key)
+        if record is None:
+            return True, None
+        if type(record) is not AuditRecord or record.canonical_payload != payload:
+            raise _deny(OutcomeCode.CONFLICTING_ID, "resolved authorization record conflicts")
+        acknowledgement = create_audit_append_acknowledgement(record)
+        require_audit_acknowledgement(
+            acknowledgement,
+            binding=self._binding,
+            logical_key=logical_key,
+            canonical_payload=payload,
+        )
+        return True, acknowledgement
+
+    def prepare_attempt(
+        self,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+        capability: object,
+    ) -> SubmissionAuthorizationAttemptOutcome:
+        """Return one closed outcome without allowing an exception to hide a durable record."""
+        if capability is not self._preparation_capability:
+            raise _deny(
+                OutcomeCode.CONFLICTING_ID,
+                "authorization preparation capability conflicts",
+            )
+        if type(order) is not Order or type(causal_market_root) is not MarketDataEnvelope:
+            raise _deny(OutcomeCode.INVALID_TYPE, "authorization inputs must be exact")
+        fallback_digest = _attempt_request_digest(
+            order,
+            causal_market_root,
+            dispatch_sequence,
+        )
+        try:
+            before = self._freshness(
+                order,
+                causal_market_root=causal_market_root,
+                dispatch_sequence=dispatch_sequence,
+            )
+            payload = self._payload(
+                order,
+                causal_market_root=causal_market_root,
+                dispatch_sequence=dispatch_sequence,
+                freshness=before,
+            )
+        except HistoricalPreEffectAuthorizationError as error:
+            return self._attempt_outcome(
+                order=order,
+                causal_market_root=causal_market_root,
+                dispatch_sequence=dispatch_sequence,
+                payload_sha256=fallback_digest,
+                status=SubmissionAuthorizationAttemptStatus.DENIED,
+                acknowledgement=None,
+                error_code=error.code,
+                logical_key=None,
+            )
+        subject = audit_subject_digest(
+            AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+            payload,
+        )
+        logical_key = AuditLogicalKey(
+            AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+            AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
+            subject,
+        )
+        payload_sha256 = Sha256Digest(sha256(payload).hexdigest())
+        try:
+            acknowledgement = self.prepare(
+                order,
+                causal_market_root=causal_market_root,
+                dispatch_sequence=dispatch_sequence,
+                capability=capability,
+            )
+        except Exception as error:
+            key = (order.order_id, execution_request_digest(order))
+            retained = self._attempts.get(key)
+            if retained is not None:
+                return self._attempt_outcome(
+                    order=order,
+                    causal_market_root=causal_market_root,
+                    dispatch_sequence=dispatch_sequence,
+                    payload_sha256=retained.acknowledgement.payload_sha256,
+                    status=(
+                        SubmissionAuthorizationAttemptStatus.BURNED
+                        if retained.burned
+                        else SubmissionAuthorizationAttemptStatus.AUTHORIZED
+                    ),
+                    acknowledgement=retained.acknowledgement,
+                    error_code=(OutcomeCode.RISK_STALE_APPROVAL if retained.burned else None),
+                    logical_key=logical_key,
+                )
+            resolved, resolved_acknowledgement = self._resolve_committed_acknowledgement(
+                logical_key=logical_key,
+                payload=payload,
+            )
+            if resolved_acknowledgement is not None:
+                burned = True
+                try:
+                    burned = (
+                        self._freshness(
+                            order,
+                            causal_market_root=causal_market_root,
+                            dispatch_sequence=dispatch_sequence,
+                        )
+                        != before
+                    )
+                except Exception:
+                    burned = True
+                self._attempts[key] = _AuthorizationAttempt(
+                    order,
+                    causal_market_root,
+                    payload,
+                    resolved_acknowledgement,
+                    burned,
+                )
+                self._attempt_by_order[order.order_id] = key[1]
+                return self._attempt_outcome(
+                    order=order,
+                    causal_market_root=causal_market_root,
+                    dispatch_sequence=dispatch_sequence,
+                    payload_sha256=resolved_acknowledgement.payload_sha256,
+                    status=(
+                        SubmissionAuthorizationAttemptStatus.BURNED
+                        if burned
+                        else SubmissionAuthorizationAttemptStatus.AUTHORIZED
+                    ),
+                    acknowledgement=resolved_acknowledgement,
+                    error_code=(OutcomeCode.RISK_STALE_APPROVAL if burned else None),
+                    logical_key=logical_key,
+                )
+            error_code = getattr(error, "code", OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED)
+            if type(error_code) is not OutcomeCode:
+                error_code = OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+            return self._attempt_outcome(
+                order=order,
+                causal_market_root=causal_market_root,
+                dispatch_sequence=dispatch_sequence,
+                payload_sha256=payload_sha256,
+                status=(
+                    SubmissionAuthorizationAttemptStatus.FAILED
+                    if resolved
+                    else SubmissionAuthorizationAttemptStatus.UNRESOLVED
+                ),
+                acknowledgement=None,
+                error_code=error_code,
+                logical_key=logical_key,
+            )
+        return self._attempt_outcome(
+            order=order,
+            causal_market_root=causal_market_root,
+            dispatch_sequence=dispatch_sequence,
+            payload_sha256=acknowledgement.payload_sha256,
+            status=SubmissionAuthorizationAttemptStatus.AUTHORIZED,
+            acknowledgement=acknowledgement,
+            error_code=None,
+            logical_key=logical_key,
+        )
+
+    def resolve_attempt(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> SubmissionAuthorizationAttemptOutcome | None:
+        attempt = self._attempts.get((order_id, execution_request_sha256))
+        if attempt is None or attempt.causal_market_root is None:
+            return None
+        return self._attempt_outcome(
+            order=attempt.order,
+            causal_market_root=attempt.causal_market_root,
+            dispatch_sequence=attempt.order.dispatch_sequence,
+            payload_sha256=attempt.acknowledgement.payload_sha256,
+            status=(
+                SubmissionAuthorizationAttemptStatus.BURNED
+                if attempt.burned
+                else SubmissionAuthorizationAttemptStatus.AUTHORIZED
+            ),
+            acknowledgement=attempt.acknowledgement,
+            error_code=(OutcomeCode.RISK_STALE_APPROVAL if attempt.burned else None),
+            logical_key=AuditLogicalKey(
+                AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+                AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
+                audit_subject_digest(
+                    AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+                    attempt.payload,
+                ),
+            ),
+        )
+
+    def resolve_attempt_acknowledgement(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> AuditAppendAcknowledgement | None:
+        attempt = self._attempts.get((order_id, execution_request_sha256))
+        return None if attempt is None else attempt.acknowledgement
 
     def verify_authorized_historical_submission(
         self,

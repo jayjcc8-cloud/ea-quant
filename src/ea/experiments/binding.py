@@ -7,6 +7,7 @@ from typing import Protocol
 from ea.core.audit import (
     AuditAppendAcknowledgement,
     AuditLogicalKey,
+    AuditRecord,
     AuditRecordKind,
     AuditSubjectKind,
     require_audit_acknowledgement,
@@ -114,6 +115,20 @@ class BoundAuditPort:
             )
         except ValueError as exc:
             raise BoundaryBindingError("audit acknowledgement binding does not match") from exc
+
+    def resolve_record(self, logical_key: AuditLogicalKey) -> AuditRecord | None:
+        """Expose only exact read-only retry evidence from the bound raw journal."""
+        if type(logical_key) is not AuditLogicalKey:
+            raise BoundaryBindingError("audit resolution requires one exact logical key")
+        resolver = getattr(self._raw, "resolve_record", None)
+        if not callable(resolver):
+            raise BoundaryBindingError("raw audit port does not support exact resolution")
+        record = resolver(logical_key)
+        if record is not None and (
+            type(record) is not AuditRecord or record.binding != self._binding
+        ):
+            raise BoundaryBindingError("resolved audit record binding does not match")
+        return record
 
 
 class BoundOutputPort:

@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from ea.core.audit import (
+    AuditContractError,
     AuditRecordKind,
     AuditSubjectKind,
     audit_acknowledgement_id,
@@ -18,6 +19,7 @@ from ea.core.audit import (
 )
 from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import (
+    Order,
     canonical_execution_request_bytes,
     canonical_order_bytes,
     execution_request_digest,
@@ -34,9 +36,11 @@ from ea.core.lifecycle import (
     GlobalHaltSnapshot,
     InstrumentGateSnapshot,
     RuntimeLifecyclePort,
+    SubmissionAuthorizationAttemptStatus,
 )
 from ea.core.market_data import Adjustment, Bar, MarketDataEnvelope, SourceId
 from ea.core.market_data_codec import canonical_market_data_record_bytes
+from ea.core.outcomes import OutcomeCode
 from ea.core.risk import _create_risk_state_snapshot, phase1_risk_policy_digest
 from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 from ea.core.runtime import runtime_root_order_key
@@ -76,6 +80,47 @@ class _Port:
 
     def current_for(self, instrument: Any) -> Any:
         return self.value
+
+
+class _CommitThenRaiseAudit(_MemoryAudit):
+    raised = False
+
+    def append(self, **values: Any) -> Any:
+        acknowledgement = super().append(**values)
+        if (
+            values["record_kind"] is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+            and not self.raised
+        ):
+            self.raised = True
+            raise AuditContractError(
+                OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected committed authorization return failure",
+            )
+        return acknowledgement
+
+
+class _FailBeforeAuthorizationAudit(_MemoryAudit):
+    def append(self, **values: Any) -> Any:
+        if values["record_kind"] is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
+            raise AuditContractError(
+                OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected definite authorization append failure",
+            )
+        return super().append(**values)
+
+
+class _UnresolvableAuthorizationAudit:
+    def __init__(self, binding: RunBinding) -> None:
+        self.binding = binding
+        self._inner = _MemoryAudit(binding)
+
+    def append(self, **values: Any) -> Any:
+        if values["record_kind"] is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
+            raise AuditContractError(
+                OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected uncertain authorization append failure",
+            )
+        return self._inner.append(**values)
 
 
 class _Runtime:
@@ -161,6 +206,131 @@ def _market() -> MarketDataEnvelope:
         source_sequence=0,
         revision=0,
     )
+
+
+def _attempt_system(audit_type: Any) -> tuple[Any, object, Any, Any, Order, MarketDataEnvelope]:
+    spec_set, _order_authority, orders = _orders()
+    order = orders[0]
+    root = _market()
+    binding = RunBinding(
+        RunReference(order.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = audit_type(binding)
+    audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=binding.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(binding),
+    )
+    policy = _policy(spec_set)
+    risk = _create_risk_state_snapshot(
+        run_id=order.run_id,
+        policy_id=policy.policy_id,
+        policy_sha256=phase1_risk_policy_digest(policy),
+        risk_state_version=0,
+        halted=False,
+        halt_reason=None,
+        halt_causal_root_available_at=None,
+        halt_dispatch_sequence=None,
+        conflict_existing_intent_sha256=None,
+        conflict_submitted_intent_sha256=None,
+    )
+    gate = _Port(
+        InstrumentGateSnapshot(
+            order.run_id,
+            order.instrument,
+            order.order_id,
+            Sha256Digest("33" * 32),
+            1,
+            False,
+        )
+    )
+    runtime = _Runtime(order.run_id, spec_set, root)
+    authority, capability, activation_seal = (
+        create_dormant_historical_submission_authorization_authority(
+            binding=binding,
+            audit=audit,
+            runtime=cast(RuntimeLifecyclePort, runtime),
+            spec_set=spec_set,
+            execution_policy=EXECUTION_POLICY,
+            portfolio=_Port(_snapshot(spec_set)),
+            risk=_Port(risk),
+            global_halt=_Port(GlobalHaltSnapshot(order.run_id, False, 0)),
+            instrument_gate=gate,
+        )
+    )
+    authority.activate(
+        SimpleNamespace(
+            binding=binding,
+            state=SimpleNamespace(state_version=1, phase=CoordinatorPhase.RUNNING),
+        ),
+        seal=activation_seal,
+    )
+    return authority, capability, audit, gate, order, root
+
+
+@pytest.mark.parametrize(
+    ("audit_type", "expected_status"),
+    [
+        (_CommitThenRaiseAudit, SubmissionAuthorizationAttemptStatus.AUTHORIZED),
+        (_FailBeforeAuthorizationAudit, SubmissionAuthorizationAttemptStatus.FAILED),
+        (_UnresolvableAuthorizationAudit, SubmissionAuthorizationAttemptStatus.UNRESOLVED),
+    ],
+)
+def test_prepare_attempt_closes_append_failure_state(
+    audit_type: Any,
+    expected_status: SubmissionAuthorizationAttemptStatus,
+) -> None:
+    authority, capability, audit, _gate, order, root = _attempt_system(audit_type)
+
+    outcome = authority.prepare_attempt(
+        order,
+        causal_market_root=root,
+        dispatch_sequence=1,
+        capability=capability,
+    )
+
+    assert outcome.status is expected_status
+    if expected_status is SubmissionAuthorizationAttemptStatus.AUTHORIZED:
+        assert outcome.acknowledgement_sha256 is not None
+        assert (
+            authority.resolve_attempt(
+                order_id=order.order_id,
+                execution_request_sha256=execution_request_digest(order),
+            )
+            is not None
+        )
+        assert [record.record_kind for record in audit.records].count(
+            AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+        ) == 1
+    else:
+        assert outcome.acknowledgement_sha256 is None
+
+
+def test_prepare_attempt_returns_denied_without_append() -> None:
+    authority, capability, audit, gate, order, root = _attempt_system(_MemoryAudit)
+    gate.value = InstrumentGateSnapshot(
+        order.run_id,
+        order.instrument,
+        order.order_id,
+        Sha256Digest("33" * 32),
+        1,
+        True,
+    )
+
+    outcome = authority.prepare_attempt(
+        order,
+        causal_market_root=root,
+        dispatch_sequence=1,
+        capability=capability,
+    )
+
+    assert outcome.status is SubmissionAuthorizationAttemptStatus.DENIED
+    assert outcome.error_code is OutcomeCode.SUBMISSION_BLOCKED_BY_HALT
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ) == 0
 
 
 def test_dormant_authority_activates_once_and_issues_one_durable_proof() -> None:

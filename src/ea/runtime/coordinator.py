@@ -89,7 +89,6 @@ from ea.core.lifecycle import (
     create_coordinator_run_state,
     create_coordinator_terminal_outcome,
     create_pre_terminal_coordinator_state,
-    create_submission_authorization_attempt_outcome,
     create_terminal_coordinator_state,
     dispatch_completed_subject_digest,
 )
@@ -313,6 +312,15 @@ class Phase1HistoricalLifecycleCoordinator:
                     OutcomeCode.CONFLICTING_ID,
                     "authorized window requires its exact matcher receipt",
                 )
+            if (
+                active.authorization_attempt is not None
+                and active.authorization_attempt.status
+                is SubmissionAuthorizationAttemptStatus.UNRESOLVED
+            ):
+                raise LifecycleError(
+                    OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                    "unresolved authorization attempt blocks completion",
+                )
             return self._complete_active(active)
         finally:
             self._mutation_lock.release()
@@ -429,50 +437,79 @@ class Phase1HistoricalLifecycleCoordinator:
                         OutcomeCode.RISK_STALE_APPROVAL,
                         "active window authorization chain is occupied",
                     )
-                if active.authorization_ack is None:
-                    raise LifecycleError(
-                        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
-                        "active authorization outcome is unresolved",
-                    )
-                return active.authorization_ack
-            acknowledgement = authorization.prepare(
+                retained_attempt = active.authorization_attempt
+                if (
+                    retained_attempt is not None
+                    and retained_attempt.status is SubmissionAuthorizationAttemptStatus.AUTHORIZED
+                    and active.authorization_ack is not None
+                ):
+                    return active.authorization_ack
+                raise LifecycleError(
+                    (
+                        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+                        if retained_attempt is None or retained_attempt.error_code is None
+                        else retained_attempt.error_code
+                    ),
+                    "active authorization attempt did not authorize",
+                )
+            attempt = authorization.prepare_attempt(
                 order,
                 causal_market_root=causal_market_root,
                 dispatch_sequence=dispatch_sequence,
                 capability=self._authorization_capability,
             )
-            self._require_window(window)
             if (
-                type(acknowledgement) is not AuditAppendAcknowledgement
-                or acknowledgement.binding != self._binding
-                or acknowledgement.record_kind
-                is not AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
-                or acknowledgement.subject_kind is not AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
+                type(attempt) is not SubmissionAuthorizationAttemptOutcome
+                or attempt.binding != self._binding
+                or attempt.dispatch_sequence != dispatch_sequence
+                or attempt.trigger_root_sha256 != active.trigger_sha256
+                or attempt.order_id != order.order_id
+                or attempt.execution_request_sha256 != request_sha256
             ):
                 raise LifecycleError(
                     OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
-                    "authorization acknowledgement conflicts",
+                    "authorization attempt outcome conflicts",
                 )
-            attempt = create_submission_authorization_attempt_outcome(
-                binding=self._binding,
-                dispatch_sequence=dispatch_sequence,
-                trigger_root_sha256=active.trigger_sha256,
-                order_id=order.order_id,
-                execution_request_sha256=request_sha256,
-                authorization_payload_sha256=acknowledgement.payload_sha256,
-                status=SubmissionAuthorizationAttemptStatus.AUTHORIZED,
-                logical_key=AuditLogicalKey(
-                    acknowledgement.record_kind,
-                    acknowledgement.subject_kind,
-                    acknowledgement.subject_sha256,
-                ),
-                acknowledgement_sha256=audit_append_acknowledgement_digest(acknowledgement),
-                error_code=None,
-            )
             active.authorization_order = order
-            active.authorization_ack = acknowledgement
             active.authorization_attempt = attempt
-            return acknowledgement
+            if attempt.acknowledgement_sha256 is not None:
+                acknowledgement = authorization.resolve_attempt_acknowledgement(
+                    order_id=order.order_id,
+                    execution_request_sha256=request_sha256,
+                )
+                if (
+                    type(acknowledgement) is not AuditAppendAcknowledgement
+                    or acknowledgement.binding != self._binding
+                    or acknowledgement.record_kind
+                    is not AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+                    or acknowledgement.subject_kind
+                    is not AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
+                    or audit_append_acknowledgement_digest(acknowledgement)
+                    != attempt.acknowledgement_sha256
+                ):
+                    raise LifecycleError(
+                        OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                        "authorization acknowledgement conflicts",
+                    )
+                active.authorization_ack = acknowledgement
+            self._require_window(window)
+            if attempt.status is SubmissionAuthorizationAttemptStatus.AUTHORIZED:
+                if active.authorization_ack is None:
+                    raise LifecycleError(
+                        OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                        "authorized attempt acknowledgement is missing",
+                    )
+                return active.authorization_ack
+            error_code = attempt.error_code or OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+            if attempt.status is SubmissionAuthorizationAttemptStatus.FAILED:
+                self._enter_failing(
+                    active,
+                    (() if attempt.logical_key is None else (attempt.logical_key,)),
+                    code=error_code,
+                )
+                active.window = None
+                active.window_stage = None
+            raise LifecycleError(error_code, "submission authorization attempt did not authorize")
         finally:
             self._mutation_lock.release()
 

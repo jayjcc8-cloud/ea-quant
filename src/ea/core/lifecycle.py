@@ -329,6 +329,29 @@ class SubmissionAuthorizationPreparationPort(Protocol):
         capability: object,
     ) -> AuditAppendAcknowledgement: ...
 
+    def prepare_attempt(
+        self,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+        capability: object,
+    ) -> SubmissionAuthorizationAttemptOutcome: ...
+
+    def resolve_attempt(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> SubmissionAuthorizationAttemptOutcome | None: ...
+
+    def resolve_attempt_acknowledgement(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> AuditAppendAcknowledgement | None: ...
+
 
 @final
 @dataclass(frozen=True, slots=True, init=False)
