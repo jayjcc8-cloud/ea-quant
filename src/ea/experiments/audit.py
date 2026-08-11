@@ -106,6 +106,10 @@ class _OsAuditOps:
         os.close(descriptor)
 
 
+class _ObservedAuditMismatch(Exception):
+    """A completed readback proved bytes or derived integrity evidence differ."""
+
+
 def _audit_error(code: OutcomeCode, message: str) -> AuditContractError:
     return AuditContractError(code, message)
 
@@ -690,7 +694,7 @@ class PosixAuditJournal:
                 fsync_started = True
                 read_back = _pread_exact(self._ops, self._journal_fd, len(frame), start)
                 if read_back != frame:
-                    raise OSError("audit frame read-back mismatch")
+                    raise _ObservedAuditMismatch("audit frame read-back mismatch")
                 verified = decode_audit_record(
                     binding=self._binding,
                     canonical_header=canonical_audit_record_header_bytes(record),
@@ -699,12 +703,18 @@ class PosixAuditJournal:
                 if audit_record_digest(verified) != audit_record_digest(record) or audit_chain_head(
                     verified
                 ) != audit_chain_head(record):
-                    raise OSError("audit frame reconstruction mismatch")
+                    raise _ObservedAuditMismatch("audit frame reconstruction mismatch")
             except AuditContractError as error:
                 self._failed = True
                 raise _audit_error(
                     OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
                     "audit frame reconstruction failed",
+                ) from error
+            except _ObservedAuditMismatch as error:
+                self._failed = True
+                raise _audit_error(
+                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                    "audit frame readback or integrity evidence mismatched",
                 ) from error
             except OSError as error:
                 self._needs_rescan = True

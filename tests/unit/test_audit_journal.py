@@ -106,6 +106,17 @@ class _PostCommitReadFailureAuditOps(_OsAuditOps):
         return super().pread(journal_fd, size, offset)
 
 
+class _ReadbackMismatchAuditOps(_OsAuditOps):
+    armed = False
+
+    def pread(self, journal_fd: int, size: int, offset: int) -> bytes:
+        value = super().pread(journal_fd, size, offset)
+        if self.armed and value:
+            self.armed = False
+            return value[:-1] + bytes((value[-1] ^ 1,))
+        return value
+
+
 def test_fresh_journal_rejects_less_than_six_gib_free_before_creation(tmp_path: Path) -> None:
     root = _root(tmp_path)
     prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
@@ -194,6 +205,33 @@ def test_uncertain_physical_append_is_settled_by_rescan_fsync_and_readback(
     assert acknowledgement.record_id.owner_sequence == 2
     assert journal.settle_append(logical_key=key, canonical_payload=payload) is not None
     assert len(journal.records) == 2
+
+
+def test_observed_readback_mismatch_fails_monotonically_without_settlement(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    ops = _ReadbackMismatchAuditOps()
+    journal = create_posix_audit_journal(prepared.audit, _ops=ops)
+    payload = _batch_payload()
+    key = AuditLogicalKey(
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+        Sha256Digest("33" * 32),
+    )
+    ops.armed = True
+
+    with pytest.raises(AuditContractError, match="integrity evidence mismatched"):
+        journal.append(
+            record_kind=key.record_kind,
+            subject_kind=key.subject_kind,
+            subject_sha256=key.subject_sha256,
+            canonical_payload=payload,
+        )
+
+    with pytest.raises(AuditContractError, match="failed state"):
+        journal.settle_append(logical_key=key, canonical_payload=payload)
 
 
 def test_same_logical_key_with_different_payload_fails_monotonically(tmp_path: Path) -> None:
