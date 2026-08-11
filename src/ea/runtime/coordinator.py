@@ -136,6 +136,7 @@ class RecoveredTerminalCoordinatorEvidence:
 @dataclass(frozen=True, slots=True)
 class _ReadOnlyRecoveryAudit:
     binding: RunBinding
+    records: tuple[AuditRecord, ...]
 
     def append(
         self,
@@ -145,11 +146,16 @@ class _ReadOnlyRecoveryAudit:
         subject_sha256: Sha256Digest,
         canonical_payload: bytes,
     ) -> AuditAppendAcknowledgement:
-        del record_kind, subject_kind, subject_sha256, canonical_payload
-        raise LifecycleError(
-            OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
-            "read-only terminal recovery cannot append",
-        )
+        key = AuditLogicalKey(record_kind, subject_kind, subject_sha256)
+        for record in self.records:
+            if record.logical_key == key:
+                if record.canonical_payload != canonical_payload:
+                    raise LifecycleError(
+                        OutcomeCode.CONFLICTING_ID,
+                        "read-only terminal recovery payload conflicts",
+                    )
+                return create_audit_append_acknowledgement(record)
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "terminal recovery record is missing")
 
 
 @final
@@ -1020,7 +1026,7 @@ def recover_phase1_lifecycle_coordinator(
         authorization=authorization,
         authorization_capability=authorization_capability,
     )
-    recovered = _require_recovery_records(binding, records)
+    recovered = _require_recovery_records(binding, records, audit=audit)
     value = _allocate_coordinator(
         binding=binding,
         audit=audit,
@@ -1085,7 +1091,7 @@ def recover_phase1_terminal_evidence(
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "terminal recovery record conflicts")
     prefix = records[:-1]
-    _require_recovery_records(binding, prefix)
+    _require_recovery_records(binding, prefix, audit=None)
     prior = prefix[-1]
     if terminal_record.previous_record_sha256 != audit_record_digest(
         prior
@@ -1093,7 +1099,7 @@ def recover_phase1_terminal_evidence(
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "terminal recovery chain conflicts")
     coordinator = recover_phase1_lifecycle_coordinator(
         binding=binding,
-        audit=_ReadOnlyRecoveryAudit(binding),
+        audit=_ReadOnlyRecoveryAudit(binding, prefix),
         runtime=runtime,
         matcher=matcher,
         fact_authority=fact_authority,
@@ -1249,6 +1255,8 @@ def _admitted_state(
 def _require_recovery_records(
     binding: RunBinding,
     records: tuple[AuditRecord, ...],
+    *,
+    audit: AuditAppendPort | None,
 ) -> tuple[tuple[AuditRecord, AuditAppendAcknowledgement], ...]:
     if type(records) is not tuple or not records:
         raise LifecycleError(OutcomeCode.INVALID_TYPE, "recovery records must be non-empty tuple")
@@ -1265,7 +1273,27 @@ def _require_recovery_records(
             or record.previous_chain_head_sha256 != previous_chain_head_sha256
         ):
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery audit chain conflicts")
-        acknowledgement = create_audit_append_acknowledgement(record)
+        if audit is None:
+            acknowledgement = create_audit_append_acknowledgement(record)
+        else:
+            try:
+                acknowledgement = audit.append(
+                    record_kind=record.record_kind,
+                    subject_kind=record.subject_kind,
+                    subject_sha256=record.subject_sha256,
+                    canonical_payload=record.canonical_payload,
+                )
+                require_audit_acknowledgement(
+                    acknowledgement,
+                    binding=binding,
+                    logical_key=record.logical_key,
+                    canonical_payload=record.canonical_payload,
+                )
+            except AuditContractError as error:
+                raise LifecycleError(
+                    error.code,
+                    "recovery audit acknowledgement could not be reconfirmed",
+                ) from error
         checked.append((record, acknowledgement))
         previous_record_sha256 = audit_record_digest(record)
         previous_chain_head_sha256 = audit_chain_head(record)

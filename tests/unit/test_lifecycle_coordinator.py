@@ -45,6 +45,7 @@ class _MemoryAudit:
         self.binding = binding
         self.records: list[AuditRecord] = []
         self.index: dict[AuditLogicalKey, tuple[bytes, AuditAppendAcknowledgement]] = {}
+        self.retry_keys: list[AuditLogicalKey] = []
 
     def append(
         self,
@@ -58,6 +59,7 @@ class _MemoryAudit:
         existing = self.index.get(key)
         if existing is not None:
             assert existing[0] == canonical_payload
+            self.retry_keys.append(key)
             return existing[1]
         record = create_audit_record(
             binding=self.binding,
@@ -77,6 +79,31 @@ class _MemoryAudit:
         self.records.append(record)
         self.index[key] = (canonical_payload, acknowledgement)
         return acknowledgement
+
+
+class _RejectRecoveredFrameAudit(_MemoryAudit):
+    reject_retries = False
+
+    def append(
+        self,
+        *,
+        record_kind: AuditRecordKind,
+        subject_kind: AuditSubjectKind,
+        subject_sha256: Sha256Digest,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement:
+        key = AuditLogicalKey(record_kind, subject_kind, subject_sha256)
+        if self.reject_retries and key in self.index:
+            raise AuditContractError(
+                OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                "injected recovered frame acknowledgement failure",
+            )
+        return super().append(
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,6 +558,7 @@ def test_recovery_with_durable_completion_retries_only_runtime_acknowledgement()
     with pytest.raises(RuntimeError, match="pre-commit"):
         coordinator.process_next_dispatch()
     resolver_only = _ResolverOnlyMatcher(matcher)
+    retained_keys = tuple(record.logical_key for record in audit.records)
 
     recovered = recover_phase1_lifecycle_coordinator(
         binding=binding,
@@ -541,6 +569,7 @@ def test_recovery_with_durable_completion_retries_only_runtime_acknowledgement()
         evidence_resolver=_NoEvidence(),
         records=tuple(audit.records),
     )
+    assert tuple(audit.retry_keys) == retained_keys
     dispatch = recovered.retry_active_dispatch()
 
     assert dispatch.runtime_acknowledged is True
@@ -549,6 +578,40 @@ def test_recovery_with_durable_completion_retries_only_runtime_acknowledgement()
     assert [record.record_kind for record in audit.records].count(
         AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
     ) == 1
+
+
+def test_recovery_stops_before_runtime_retry_when_durable_ack_cannot_be_reconfirmed() -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _RejectRecoveredFrameAudit(binding)
+    runtime = _FailFirstRuntimeAcknowledgement(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    with pytest.raises(RuntimeError, match="pre-commit"):
+        coordinator.process_next_dispatch()
+    audit.reject_retries = True
+
+    with pytest.raises(LifecycleError, match="could not be reconfirmed"):
+        recover_phase1_lifecycle_coordinator(
+            binding=binding,
+            audit=audit,
+            runtime=runtime,
+            matcher=_ResolverOnlyMatcher(matcher),
+            fact_authority=_NoFacts(matcher),
+            evidence_resolver=_NoEvidence(),
+            records=tuple(audit.records),
+        )
+
+    assert runtime.acknowledgement_calls == 1
 
 
 def test_recovery_accepts_committed_market_trace_without_second_acknowledgement() -> None:

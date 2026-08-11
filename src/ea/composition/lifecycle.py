@@ -130,12 +130,6 @@ def create_phase1_historical_lifecycle(
             authorization_capability=preparation_capability,
         )
     else:
-        authorization.recover_attempts(
-            recovery_records,
-            orders=order_issuance_verifier,
-            submissions=matcher,
-            seal=activation_seal,
-        )
         coordinator = recover_phase1_lifecycle_coordinator(
             binding=binding,
             audit=audit,
@@ -146,6 +140,16 @@ def create_phase1_historical_lifecycle(
             records=recovery_records,
             authorization=authorization,
             authorization_capability=preparation_capability,
+        )
+        # Coordinator recovery exact-retries every retained record through this
+        # same audit authority before an authorization attempt can be restored
+        # or activated.  A crash-visible frame therefore cannot authorize an
+        # effect until fresh fsync/read-back acknowledgement has succeeded.
+        authorization.recover_attempts(
+            recovery_records,
+            orders=order_issuance_verifier,
+            submissions=matcher,
+            seal=activation_seal,
         )
     try:
         authorization.activate(coordinator, seal=activation_seal)
