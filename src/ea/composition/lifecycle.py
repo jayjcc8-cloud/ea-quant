@@ -474,6 +474,12 @@ def recover_phase1_historical_lifecycle(
         order_verifier=order_issuance_verifier,
         dispatch_verifier=descendant,
     )
+    authorization.recover_attempts(
+        records,
+        orders=order_issuance_verifier,
+        submissions=matcher,
+        seal=activation_seal,
+    )
     coordinator = recover_phase1_lifecycle_coordinator(
         binding=binding,
         audit=audit,
@@ -492,16 +498,8 @@ def recover_phase1_historical_lifecycle(
         fact_authority=fact_authority,
         coordinator=coordinator,
     )
-    # Coordinator recovery exact-retries every retained record through this
-    # same store-bound audit authority before an authorization attempt can be
-    # restored or activated.
-    authorization.recover_attempts(
-        records,
-        orders=order_issuance_verifier,
-        submissions=matcher,
-        seal=activation_seal,
-    )
     authorization.activate(coordinator, seal=activation_seal)
+    coordinator._reconcile_recovered_authorization()
     return Phase1HistoricalLifecycle(
         _seal=_LIFECYCLE_SEAL,
         coordinator=coordinator,

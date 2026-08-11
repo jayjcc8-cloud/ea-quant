@@ -30,6 +30,7 @@ from ea.core.audit import (
     require_audit_acknowledgement,
 )
 from ea.core.execution import instrument_spec_set_digest
+from ea.core.execution_identity import EconomicId, EconomicOwnerKind
 from ea.core.execution_messages import (
     ExecutionFactIngress,
     Order,
@@ -89,7 +90,9 @@ from ea.core.lifecycle import (
     create_coordinator_run_state,
     create_coordinator_terminal_outcome,
     create_pre_terminal_coordinator_state,
+    create_submission_authorization_attempt_outcome,
     create_terminal_coordinator_state,
+    decode_submission_authorization_attempt_outcome_document,
     dispatch_completed_subject_digest,
 )
 from ea.core.market_data import MarketDataEnvelope
@@ -134,7 +137,9 @@ class _RecoveredDispatch:
     ] = field(default_factory=dict)
     failing_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
     completion_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
-    authorization_positions: list[int] = field(default_factory=list)
+    authorization_records: list[
+        tuple[int, AuditRecord, AuditAppendAcknowledgement]
+    ] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +343,61 @@ class Phase1HistoricalLifecycleCoordinator:
                 )
             active.window_stage = ActiveDispatchWindowStage.COMPLETION_ACKNOWLEDGED
             return self._complete_active(active)
+        finally:
+            self._mutation_lock.release()
+
+    def _reconcile_recovered_authorization(self) -> None:
+        """Refresh one incomplete durable attempt after sealed authority activation."""
+        if not self._mutation_lock.acquire(blocking=False):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
+        try:
+            active = self._active
+            authorization = self._authorization
+            order = None if active is None else active.authorization_order
+            if active is None or order is None:
+                return
+            if authorization is None:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "recovered authorization authority is unavailable",
+                )
+            request_sha256 = execution_request_digest(order)
+            if active.submission_receipt is not None:
+                if (
+                    active.authorization_attempt is None
+                    or active.authorization_attempt.status
+                    is not SubmissionAuthorizationAttemptStatus.AUTHORIZED
+                    or active.authorization_ack is None
+                ):
+                    raise LifecycleError(
+                        OutcomeCode.CONFLICTING_ID,
+                        "recovered submission frontier is not authorized",
+                    )
+                return
+            attempt = authorization.resolve_attempt(
+                order_id=order.order_id,
+                execution_request_sha256=request_sha256,
+            )
+            acknowledgement = authorization.resolve_attempt_acknowledgement(
+                order_id=order.order_id,
+                execution_request_sha256=request_sha256,
+            )
+            if (
+                type(attempt) is not SubmissionAuthorizationAttemptOutcome
+                or type(acknowledgement) is not AuditAppendAcknowledgement
+                or attempt.order_id != order.order_id
+                or attempt.execution_request_sha256 != request_sha256
+                or attempt.acknowledgement_sha256
+                != audit_append_acknowledgement_digest(acknowledgement)
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "recovered authorization activation conflicts",
+                )
+            active.authorization_attempt = attempt
+            active.authorization_ack = acknowledgement
+            active.window = None
+            active.window_stage = None
         finally:
             self._mutation_lock.release()
 
@@ -1819,7 +1879,12 @@ def _group_recovery_records(
             current = _RecoveredDispatch(sequence_value)
         group = current
         if kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
-            group.authorization_positions.append(position)
+            if group.authorization_records:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "duplicate recovered authorization",
+                )
+            group.authorization_records.append((position, record, acknowledgement))
             continue
         trigger_value = document.get("trigger_root_sha256")
         if trigger_value is not None:
@@ -1872,9 +1937,23 @@ def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
         for position in (entry[0],)
     ]
     positions.extend(entry[0] for entry in group.outcome_records.values())
-    positions.extend(group.authorization_positions)
+    positions.extend(entry[0] for entry in group.authorization_records)
     if not positions:
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery dispatch is empty")
+    if group.authorization_records:
+        authorization_position = group.authorization_records[0][0]
+        inbound_positions = [
+            entry[0]
+            for entry in (group.batch_record, *group.outcome_records.values())
+            if entry is not None
+        ]
+        if group.batch_record is None or any(
+            position >= authorization_position for position in inbound_positions
+        ):
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovery authorization stage order conflicts",
+            )
     completion = group.completion_record
     if completion is not None:
         completion_position = completion[0]
@@ -1883,7 +1962,7 @@ def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
             for entry in (group.batch_record, *group.outcome_records.values())
             if entry is not None
         ]
-        required_before_completion.extend(group.authorization_positions)
+        required_before_completion.extend(entry[0] for entry in group.authorization_records)
         if group.batch_record is None or any(
             position >= completion_position for position in required_before_completion
         ):
@@ -2084,6 +2163,7 @@ def _recover_dispatch(
         matched_outcome_digests.add(outcome_digest)
     if matched_outcome_digests != set(recovered.outcome_records):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "orphan recovered outcome record")
+    _recover_authorization_frontier(coordinator, active, recovered)
     if not pre_batch_failure:
         _recover_failing_transition(coordinator, active, recovered)
     for index, outcome in enumerate(active.outcomes):
@@ -2119,6 +2199,10 @@ def _recover_dispatch(
             batch=batch,
             outcome_acknowledgements=outcome_acks,
             pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+            authorization_attempt_outcome=active.authorization_attempt,
+            submission_receipts=(
+                () if active.submission_receipt is None else (active.submission_receipt,)
+            ),
         )
         active.completion_payload = expected_completion_payload
     _completion_position, completion_record, completion_ack = completion_entry
@@ -2170,6 +2254,152 @@ def _recover_dispatch(
         )
     elif trace_document.get("terminal_acknowledged") is not False:
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "market trace claims terminal state")
+
+
+def _recover_authorization_frontier(
+    coordinator: Phase1HistoricalLifecycleCoordinator,
+    active: _ActiveDispatch,
+    recovered: _RecoveredDispatch,
+) -> None:
+    completion_attempt: SubmissionAuthorizationAttemptOutcome | None = None
+    if recovered.completion_record is not None:
+        completion_document = _record_document(recovered.completion_record[1])
+        attempt_count = completion_document.get("authorization_attempt_count")
+        nested_attempt = completion_document.get("authorization_attempt_outcome")
+        if attempt_count == 1:
+            completion_attempt = decode_submission_authorization_attempt_outcome_document(
+                nested_attempt
+            )
+            if (
+                completion_attempt.binding != coordinator._binding
+                or completion_attempt.dispatch_sequence != active.lease.dispatch_sequence
+                or completion_attempt.trigger_root_sha256 != active.trigger_sha256
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "completion authorization frontier conflicts",
+                )
+        elif attempt_count != 0 or nested_attempt is not None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "completion authorization frontier is invalid",
+            )
+    if not recovered.authorization_records:
+        if completion_attempt is not None:
+            if (
+                completion_attempt.status
+                in {
+                    SubmissionAuthorizationAttemptStatus.AUTHORIZED,
+                    SubmissionAuthorizationAttemptStatus.BURNED,
+                }
+                or completion_attempt.acknowledgement_sha256 is not None
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "completion authorization record is missing",
+                )
+            active.authorization_attempt = completion_attempt
+        return
+    authorization = coordinator._authorization
+    if authorization is None or len(recovered.authorization_records) != 1:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovered authorization authority is unavailable",
+        )
+    _position, record, record_acknowledgement = recovered.authorization_records[0]
+    document = _record_document(record)
+    order_document = document.get("order_id")
+    try:
+        if type(order_document) is not dict:
+            raise TypeError("order identity is not an object")
+        order_id = EconomicId(
+            coordinator._binding.reference.run_id,
+            EconomicOwnerKind(order_document["owner_kind"]),
+            order_document["owner_sequence"],
+        )
+        request_sha256 = Sha256Digest(cast(str, document["execution_request_sha256"]))
+    except (KeyError, TypeError, ValueError) as error:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovered authorization identity is invalid",
+        ) from error
+    order = authorization.resolve_attempt_order(
+        order_id=order_id,
+        execution_request_sha256=request_sha256,
+    )
+    attempt = authorization.resolve_attempt(
+        order_id=order_id,
+        execution_request_sha256=request_sha256,
+    )
+    acknowledgement = authorization.resolve_attempt_acknowledgement(
+        order_id=order_id,
+        execution_request_sha256=request_sha256,
+    )
+    if (
+        type(order) is not Order
+        or type(attempt) is not SubmissionAuthorizationAttemptOutcome
+        or type(acknowledgement) is not AuditAppendAcknowledgement
+        or audit_append_acknowledgement_digest(acknowledgement)
+        != audit_append_acknowledgement_digest(record_acknowledgement)
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovered authorization evidence conflicts",
+        )
+    receipt = coordinator._matcher.resolve_submission_receipt(
+        order_id=order_id,
+        execution_request_sha256=request_sha256,
+    )
+    if receipt is not None and type(receipt) is not HistoricalSubmissionReceipt:
+        raise LifecycleError(
+            OutcomeCode.INVALID_TYPE,
+            "recovered matcher receipt is invalid",
+        )
+    if completion_attempt is not None:
+        if (
+            completion_attempt.order_id != order_id
+            or completion_attempt.execution_request_sha256 != request_sha256
+            or completion_attempt.acknowledgement_sha256
+            != audit_append_acknowledgement_digest(record_acknowledgement)
+        ):
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "completion authorization frontier conflicts",
+            )
+        attempt = completion_attempt
+    elif recovered.completion_record is not None:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "completion authorization attempt is missing",
+        )
+    elif receipt is not None:
+        attempt = create_submission_authorization_attempt_outcome(
+            binding=coordinator._binding,
+            dispatch_sequence=active.lease.dispatch_sequence,
+            trigger_root_sha256=active.trigger_sha256,
+            order_id=order_id,
+            execution_request_sha256=request_sha256,
+            authorization_payload_sha256=record_acknowledgement.payload_sha256,
+            status=SubmissionAuthorizationAttemptStatus.AUTHORIZED,
+            logical_key=record.logical_key,
+            acknowledgement_sha256=audit_append_acknowledgement_digest(
+                record_acknowledgement
+            ),
+            error_code=None,
+        )
+    if (
+        receipt is not None
+        and receipt.audit_acknowledgement_sha256
+        != audit_append_acknowledgement_digest(record_acknowledgement)
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovered matcher receipt authorization conflicts",
+        )
+    active.authorization_order = order
+    active.authorization_ack = acknowledgement
+    active.authorization_attempt = attempt
+    active.submission_receipt = receipt
 
 
 def _recover_failing_transition(
@@ -2237,6 +2467,10 @@ def _recover_failing_transition(
             batch=active.batch,
             outcome_acknowledgements=ordered_outcome_acks,
             pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+            authorization_attempt_outcome=active.authorization_attempt,
+            submission_receipts=(
+                () if active.submission_receipt is None else (active.submission_receipt,)
+            ),
         )
         completion_key = AuditLogicalKey(
             AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,

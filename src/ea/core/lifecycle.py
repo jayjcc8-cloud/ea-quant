@@ -352,6 +352,13 @@ class SubmissionAuthorizationPreparationPort(Protocol):
         execution_request_sha256: Sha256Digest,
     ) -> AuditAppendAcknowledgement | None: ...
 
+    def resolve_attempt_order(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> Order | None: ...
+
 
 @final
 @dataclass(frozen=True, slots=True, init=False)

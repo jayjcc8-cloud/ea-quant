@@ -1396,9 +1396,8 @@ def test_recovery_validation_rejects_malformed_prefix_groups_and_runtime_traces(
     with pytest.raises(LifecycleError, match="unsupported recovery record kind"):
         tuple(coordinator_module._group_recovery_records(iter(((prepared, checked[0][1]),))))
     object.__setattr__(prepared, "record_kind", AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION)
-    assert tuple(coordinator_module._group_recovery_records(iter(((prepared, checked[0][1]),))))[
-        0
-    ].authorization_positions
+    with pytest.raises(LifecycleError, match="authorization stage order"):
+        tuple(coordinator_module._group_recovery_records(iter(((prepared, checked[0][1]),))))
     object.__setattr__(prepared, "record_kind", original_prepared_kind)
     object.__setattr__(prepared, "canonical_payload", original_prepared_payload)
 

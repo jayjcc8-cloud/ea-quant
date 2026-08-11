@@ -886,6 +886,15 @@ class HistoricalSubmissionAuthorizationAuthority:
         attempt = self._attempts.get((order_id, execution_request_sha256))
         return None if attempt is None else attempt.acknowledgement
 
+    def resolve_attempt_order(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> Order | None:
+        attempt = self._attempts.get((order_id, execution_request_sha256))
+        return None if attempt is None else attempt.order
+
     def verify_authorized_historical_submission(
         self,
         *,
