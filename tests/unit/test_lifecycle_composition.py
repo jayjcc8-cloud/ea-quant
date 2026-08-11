@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from inspect import signature
 from pathlib import Path
@@ -18,8 +19,23 @@ from ea.composition.lifecycle import (
     recover_phase1_historical_terminal_evidence,
 )
 from ea.composition.run import RunCompositionError, admit_recovered_run
-from ea.core.lifecycle import CoordinatorPhase, LifecycleError
-from ea.core.run import RunBinding, Sha256Digest
+from ea.core.audit import (
+    AuditRecordKind,
+    AuditSubjectKind,
+    canonical_run_prepared_audit_payload,
+)
+from ea.core.execution_identity import SourceNamespace
+from ea.core.execution_messages import FactProvenanceId
+from ea.core.lifecycle import (
+    CoordinatorPhase,
+    GlobalHaltSnapshot,
+    InstrumentGateSnapshot,
+    LifecycleError,
+)
+from ea.core.market_data import MarketDataEnvelope
+from ea.core.outcomes import OutcomeCode
+from ea.core.risk import _create_risk_state_snapshot, phase1_risk_policy_digest
+from ea.core.run import RunBinding, RunReference, Sha256Digest
 from ea.data import create_phase1_historical_market_source_bridge
 from ea.execution.fact_authority import create_phase1_execution_fact_authority
 from ea.experiments.audit import (
@@ -35,8 +51,15 @@ from ea.experiments.store import (
 )
 from ea.runtime.historical import create_phase1_historical_market_runtime
 from unit.test_audit_journal import _release_simulated_process_writer
+from unit.test_execution_fact_authority import (
+    EXECUTION_POLICY,
+    _orders,
+    _policy,
+    _snapshot,
+)
 from unit.test_historical_matcher import _system
 from unit.test_historical_runtime import _row, _source
+from unit.test_lifecycle_coordinator import _MemoryAudit
 from unit.test_store import _root, _spec
 
 
@@ -50,6 +73,21 @@ class _UnusedFreshness:
     def current_for(self, instrument: Any) -> Any:
         del instrument
         return None
+
+
+class _Freshness:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def current_snapshot(self) -> Any:
+        return self.value
+
+    def current_state(self) -> Any:
+        return self.value
+
+    def current_for(self, instrument: Any) -> Any:
+        del instrument
+        return self.value
 
 
 class _RecoveryOrderVerifier:
@@ -95,6 +133,126 @@ def _empty_runtime_for(matcher: Any) -> Any:
         spec_set=matcher.spec_set,
         source=source,
     )
+
+
+def test_composed_staged_window_authorizes_and_submits_before_completion() -> None:
+    spec_set, order_authority, orders = _orders(count=2)
+    order = orders[0]
+    binding = RunBinding(
+        RunReference(order.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    prepared_acknowledgement = audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=binding.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(binding),
+    )
+    source = create_phase1_historical_market_source_bridge(
+        _source(
+            _row(
+                start="2026-01-02T09:30:00.000000Z",
+                end="2026-01-02T09:31:00.000000Z",
+                available="2026-01-02T09:31:00.000000Z",
+                sequence=0,
+            )
+        )
+    )
+    runtime = create_phase1_historical_market_runtime(
+        run_id=order.run_id,
+        spec_set=spec_set,
+        source=source,
+    )
+    risk_policy = _policy(spec_set)
+    risk = _create_risk_state_snapshot(
+        run_id=order.run_id,
+        policy_id=risk_policy.policy_id,
+        policy_sha256=phase1_risk_policy_digest(risk_policy),
+        risk_state_version=0,
+        halted=False,
+        halt_reason=None,
+        halt_causal_root_available_at=None,
+        halt_dispatch_sequence=None,
+        conflict_existing_intent_sha256=None,
+        conflict_submitted_intent_sha256=None,
+    )
+    lifecycle = create_phase1_historical_lifecycle(
+        binding=binding,
+        prepared_acknowledgement=prepared_acknowledgement,
+        audit=audit,
+        runtime=runtime,
+        spec_set=spec_set,
+        execution_policy=EXECUTION_POLICY,
+        source_namespace=SourceNamespace("phase1.historical-matcher.v1"),
+        provenance_id=FactProvenanceId("phase1.simulator.v1"),
+        order_issuance_verifier=order_authority,
+        portfolio=_Freshness(_snapshot(spec_set)),
+        risk=_Freshness(risk),
+        global_halt=_Freshness(GlobalHaltSnapshot(order.run_id, False, 0)),
+        instrument_gate=_Freshness(
+            InstrumentGateSnapshot(
+                order.run_id,
+                order.instrument,
+                order.order_id,
+                Sha256Digest("33" * 32),
+                1,
+                False,
+            )
+        ),
+    )
+
+    window = lifecycle.coordinator.begin_next_dispatch()
+    lease = runtime.active_lease
+    assert lease is not None
+    root = lease.root
+    assert type(root) is MarketDataEnvelope
+    acknowledgement = lifecycle.coordinator.prepare_submission_authorization(
+        window,
+        order,
+        causal_market_root=root,
+        dispatch_sequence=lease.dispatch_sequence,
+    )
+    with pytest.raises(LifecycleError, match="exact matcher receipt"):
+        lifecycle.coordinator.complete_active_dispatch(window)
+    with pytest.raises(LifecycleError) as occupied:
+        lifecycle.coordinator.prepare_submission_authorization(
+            window,
+            orders[1],
+            causal_market_root=root,
+            dispatch_sequence=lease.dispatch_sequence,
+        )
+    assert occupied.value.code is OutcomeCode.RISK_STALE_APPROVAL
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ) == 1
+    receipt = lifecycle.coordinator.submit_authorized_order(window, order)
+
+    assert (
+        lifecycle.coordinator.prepare_submission_authorization(
+            window,
+            order,
+            causal_market_root=root,
+            dispatch_sequence=lease.dispatch_sequence,
+        )
+        is acknowledgement
+    )
+    assert lifecycle.coordinator.submit_authorized_order(window, order) is receipt
+    assert runtime.active_lease is lease
+
+    outcome = lifecycle.coordinator.complete_active_dispatch(window)
+
+    assert outcome.runtime_acknowledged is True
+    assert runtime.active_lease is None
+    assert [record.record_kind for record in audit.records] == [
+        AuditRecordKind.RUN_PREPARED,
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
+    ]
+    completion_document = json.loads(audit.records[-1].canonical_payload)
+    assert completion_document["authorization_attempt_outcome"]["status"] == "authorized"
+    assert completion_document["submission_count"] == 1
 
 
 def test_recovery_frontier_rejects_future_matcher_dispatch() -> None:

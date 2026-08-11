@@ -227,7 +227,7 @@ def test_completion_v2_binds_authorized_attempt_and_exact_receipt() -> None:
         authorization_payload_sha256=Sha256Digest("55" * 32),
         status=SubmissionAuthorizationAttemptStatus.AUTHORIZED,
         logical_key=logical_key,
-        acknowledgement_sha256=Sha256Digest("77" * 32),
+        acknowledgement_sha256=receipt.audit_acknowledgement_sha256,
         error_code=None,
     )
 

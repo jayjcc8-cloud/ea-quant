@@ -40,7 +40,6 @@ from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.risk import _create_risk_state_snapshot, phase1_risk_policy_digest
 from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 from ea.core.runtime import runtime_root_order_key
-from ea.core.strategy import causal_market_digest
 from ea.runtime.authorization import (
     _authorization_payload_from_receipt,
     create_dormant_historical_submission_authorization_authority,
@@ -247,7 +246,7 @@ def test_dormant_authority_activates_once_and_issues_one_durable_proof() -> None
         canonical_order_bytes=canonical_order_bytes(order),
         canonical_execution_request_bytes=canonical_execution_request_bytes(order),
         canonical_causal_market_bytes=canonical_market_data_record_bytes(root),
-        causal_market_sha256=causal_market_digest(root),
+        causal_market_sha256=historical_market_root_digest(root),
         causal_root_key=runtime_root_order_key(root),
         dispatch_sequence=1,
     )
@@ -388,7 +387,7 @@ def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
         canonical_order_bytes=canonical_order_bytes(order),
         canonical_execution_request_bytes=canonical_execution_request_bytes(order),
         canonical_causal_market_bytes=canonical_market_data_record_bytes(root),
-        causal_market_sha256=causal_market_digest(root),
+        causal_market_sha256=historical_market_root_digest(root),
         causal_root_key=runtime_root_order_key(root),
         dispatch_sequence=1,
     )
@@ -479,7 +478,7 @@ def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
             canonical_order_bytes=canonical_order_bytes(order),
             canonical_execution_request_bytes=canonical_execution_request_bytes(order),
             canonical_causal_market_bytes=canonical_market_data_record_bytes(root),
-            causal_market_sha256=causal_market_digest(root),
+            causal_market_sha256=historical_market_root_digest(root),
             causal_root_key=runtime_root_order_key(root),
             dispatch_sequence=1,
         )

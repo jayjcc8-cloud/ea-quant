@@ -34,6 +34,8 @@ from ea.core.execution_messages import (
     ExecutionFactIngress,
     Order,
     execution_fact_ingress_digest,
+    execution_request_digest,
+    order_digest,
 )
 from ea.core.execution_state import (
     ExecutionFactProcessingOutcome,
@@ -45,10 +47,12 @@ from ea.core.historical_matching import (
     HISTORICAL_MATCHER_MARKET_ROOT_DIGEST_DOMAIN,
     HistoricalDispatchKind,
     HistoricalMatcherDispatchBatch,
+    HistoricalSubmissionReceipt,
     canonical_end_of_run_root_bytes,
     historical_end_root_digest,
     historical_market_root_digest,
     historical_matcher_dispatch_batch_digest,
+    historical_submission_receipt_digest,
 )
 from ea.core.lifecycle import (
     ORDERED_INGRESS_DIGEST_DOMAIN,
@@ -68,6 +72,8 @@ from ea.core.lifecycle import (
     PreTerminalCoordinatorState,
     RuntimeDispatchLeaseView,
     RuntimeLifecyclePort,
+    SubmissionAuthorizationAttemptOutcome,
+    SubmissionAuthorizationAttemptStatus,
     SubmissionAuthorizationPreparationPort,
     TerminalCoordinatorState,
     _create_active_dispatch_window,
@@ -83,6 +89,7 @@ from ea.core.lifecycle import (
     create_coordinator_run_state,
     create_coordinator_terminal_outcome,
     create_pre_terminal_coordinator_state,
+    create_submission_authorization_attempt_outcome,
     create_terminal_coordinator_state,
     dispatch_completed_subject_digest,
 )
@@ -111,6 +118,10 @@ class _ActiveDispatch:
     completion_ack: AuditAppendAcknowledgement | None = None
     window: ActiveDispatchWindow | None = None
     window_stage: ActiveDispatchWindowStage | None = None
+    authorization_order: Order | None = None
+    authorization_ack: AuditAppendAcknowledgement | None = None
+    authorization_attempt: SubmissionAuthorizationAttemptOutcome | None = None
+    submission_receipt: HistoricalSubmissionReceipt | None = None
 
 
 @dataclass(slots=True)
@@ -292,6 +303,16 @@ class Phase1HistoricalLifecycleCoordinator:
                     OutcomeCode.CONFLICTING_ID,
                     "window requires completion-only retry",
                 )
+            if (
+                active.authorization_attempt is not None
+                and active.authorization_attempt.status
+                is SubmissionAuthorizationAttemptStatus.AUTHORIZED
+                and active.submission_receipt is None
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "authorized window requires its exact matcher receipt",
+                )
             return self._complete_active(active)
         finally:
             self._mutation_lock.release()
@@ -367,6 +388,7 @@ class Phase1HistoricalLifecycleCoordinator:
 
     def prepare_submission_authorization(
         self,
+        window: ActiveDispatchWindow,
         order: Order,
         *,
         causal_market_root: MarketDataEnvelope,
@@ -377,15 +399,17 @@ class Phase1HistoricalLifecycleCoordinator:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
         try:
             authorization = self._authorization
-            active = self._active
             if authorization is None:
                 raise LifecycleError(
                     OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
                     "authorization authority is not bound",
                 )
+            active = self._require_window(window)
             if (
-                self._state.phase in (CoordinatorPhase.FAILING, CoordinatorPhase.DRAINING)
-                or active is None
+                active.window_stage is not ActiveDispatchWindowStage.OPEN
+                or not window.authorization_allowed
+                or self._state.phase is not CoordinatorPhase.RUNNING
+                or type(active.lease.root) is not MarketDataEnvelope
                 or active.lease.root is not causal_market_root
                 or active.lease.dispatch_sequence != dispatch_sequence
             ):
@@ -393,12 +417,137 @@ class Phase1HistoricalLifecycleCoordinator:
                     OutcomeCode.RISK_STALE_APPROVAL,
                     "authorization requires the exact active market dispatch",
                 )
-            return authorization.prepare(
+            request_sha256 = execution_request_digest(order)
+            retained_order = active.authorization_order
+            if retained_order is not None:
+                if (
+                    retained_order.order_id != order.order_id
+                    or order_digest(retained_order) != order_digest(order)
+                    or execution_request_digest(retained_order) != request_sha256
+                ):
+                    raise LifecycleError(
+                        OutcomeCode.RISK_STALE_APPROVAL,
+                        "active window authorization chain is occupied",
+                    )
+                if active.authorization_ack is None:
+                    raise LifecycleError(
+                        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                        "active authorization outcome is unresolved",
+                    )
+                return active.authorization_ack
+            acknowledgement = authorization.prepare(
                 order,
                 causal_market_root=causal_market_root,
                 dispatch_sequence=dispatch_sequence,
                 capability=self._authorization_capability,
             )
+            self._require_window(window)
+            if (
+                type(acknowledgement) is not AuditAppendAcknowledgement
+                or acknowledgement.binding != self._binding
+                or acknowledgement.record_kind
+                is not AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+                or acknowledgement.subject_kind is not AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
+            ):
+                raise LifecycleError(
+                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                    "authorization acknowledgement conflicts",
+                )
+            attempt = create_submission_authorization_attempt_outcome(
+                binding=self._binding,
+                dispatch_sequence=dispatch_sequence,
+                trigger_root_sha256=active.trigger_sha256,
+                order_id=order.order_id,
+                execution_request_sha256=request_sha256,
+                authorization_payload_sha256=acknowledgement.payload_sha256,
+                status=SubmissionAuthorizationAttemptStatus.AUTHORIZED,
+                logical_key=AuditLogicalKey(
+                    acknowledgement.record_kind,
+                    acknowledgement.subject_kind,
+                    acknowledgement.subject_sha256,
+                ),
+                acknowledgement_sha256=audit_append_acknowledgement_digest(acknowledgement),
+                error_code=None,
+            )
+            active.authorization_order = order
+            active.authorization_ack = acknowledgement
+            active.authorization_attempt = attempt
+            return acknowledgement
+        finally:
+            self._mutation_lock.release()
+
+    def submit_authorized_order(
+        self,
+        window: ActiveDispatchWindow,
+        order: Order,
+    ) -> HistoricalSubmissionReceipt:
+        """Submit one exact authorized Order while its causal lease remains open."""
+        if not self._mutation_lock.acquire(blocking=False):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
+        try:
+            active = self._require_window(window)
+            retained_order = active.authorization_order
+            attempt = active.authorization_attempt
+            acknowledgement = active.authorization_ack
+            root = active.lease.root
+            if (
+                active.window_stage is not ActiveDispatchWindowStage.OPEN
+                or type(root) is not MarketDataEnvelope
+                or retained_order is None
+                or order_digest(retained_order) != order_digest(order)
+                or execution_request_digest(retained_order) != execution_request_digest(order)
+                or attempt is None
+                or attempt.status is not SubmissionAuthorizationAttemptStatus.AUTHORIZED
+                or acknowledgement is None
+            ):
+                raise LifecycleError(
+                    OutcomeCode.RISK_STALE_APPROVAL,
+                    "matcher submission requires the exact authorized window chain",
+                )
+            retained_receipt = active.submission_receipt
+            if retained_receipt is not None:
+                resolved = self._matcher.resolve_submission_receipt(
+                    order_id=order.order_id,
+                    execution_request_sha256=execution_request_digest(order),
+                )
+                if type(
+                    resolved
+                ) is not HistoricalSubmissionReceipt or historical_submission_receipt_digest(
+                    resolved
+                ) != historical_submission_receipt_digest(retained_receipt):
+                    raise LifecycleError(
+                        OutcomeCode.CONFLICTING_ID,
+                        "retained matcher submission receipt drifted",
+                    )
+                return retained_receipt
+            receipt = self._matcher.submit(
+                order,
+                causal_market_root=root,
+                dispatch_sequence=active.lease.dispatch_sequence,
+            )
+            self._require_window(window)
+            resolved = self._matcher.resolve_submission_receipt(
+                order_id=order.order_id,
+                execution_request_sha256=execution_request_digest(order),
+            )
+            if (
+                type(receipt) is not HistoricalSubmissionReceipt
+                or type(resolved) is not HistoricalSubmissionReceipt
+                or historical_submission_receipt_digest(resolved)
+                != historical_submission_receipt_digest(receipt)
+                or receipt.order_id != order.order_id
+                or receipt.execution_request_sha256 != execution_request_digest(order)
+                or receipt.dispatch_sequence != active.lease.dispatch_sequence
+                or receipt.causal_market_sha256 != active.trigger_sha256
+                or receipt.audit_acknowledgement_sha256
+                != audit_append_acknowledgement_digest(acknowledgement)
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "matcher submission receipt conflicts with authorization",
+                )
+            active.submission_receipt = receipt
+            return receipt
         finally:
             self._mutation_lock.release()
 
@@ -672,6 +821,10 @@ class Phase1HistoricalLifecycleCoordinator:
                     batch=batch,
                     outcome_acknowledgements=outcome_acks,
                     pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+                    authorization_attempt_outcome=active.authorization_attempt,
+                    submission_receipts=(
+                        () if active.submission_receipt is None else (active.submission_receipt,)
+                    ),
                 )
                 active.completion_payload = completion_payload
                 completion_acknowledgement = self._audit.append(
@@ -1101,9 +1254,13 @@ class Phase1HistoricalLifecycleCoordinator:
             failure_code=state.failure_code,
             last_completed_dispatch_sequence=state.last_completed_dispatch_sequence,
             last_audit_chain_head_sha256=(
-                active.batch_ack.chain_head_sha256
-                if not outcome_acks and active.batch_ack is not None
-                else outcome_acks[-1].chain_head_sha256
+                active.authorization_ack.chain_head_sha256
+                if active.authorization_ack is not None
+                else (
+                    active.batch_ack.chain_head_sha256
+                    if not outcome_acks and active.batch_ack is not None
+                    else outcome_acks[-1].chain_head_sha256
+                )
             ),
         )
 
@@ -2266,6 +2423,7 @@ def _latest_active_chain_head(
         for acknowledgement in (
             active.batch_ack,
             *active.outcome_acks,
+            active.authorization_ack,
             active.completion_ack,
         )
         if acknowledgement is not None

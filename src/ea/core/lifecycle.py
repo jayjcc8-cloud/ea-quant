@@ -1352,6 +1352,8 @@ def canonical_dispatch_completed_audit_payload(
             or receipt.order_id != authorization_attempt_outcome.order_id
             or receipt.execution_request_sha256
             != authorization_attempt_outcome.execution_request_sha256
+            or receipt.audit_acknowledgement_sha256
+            != authorization_attempt_outcome.acknowledgement_sha256
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "completion submission receipt conflicts")
     if batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN and (

@@ -41,6 +41,7 @@ from ea.core.historical_matching import (
     _create_historical_submission_authorization_proof,
     _require_historical_submission_receipt_causal_root,
     canonical_historical_submission_receipt_bytes,
+    historical_market_root_digest,
     runtime_root_key_document,
     runtime_root_order_key_document,
 )
@@ -679,7 +680,7 @@ class HistoricalSubmissionAuthorizationAuthority:
             canonical_order_bytes != canonical_order_bytes_fn(order)
             or canonical_execution_request_bytes != canonical_execution_request_bytes_fn(order)
             or canonical_causal_market_bytes != canonical_market_data_record_bytes(causal_root)
-            or causal_market_sha256 != causal_market_digest(causal_root)
+            or causal_market_sha256 != historical_market_root_digest(causal_root)
             or causal_root_key != runtime_root_order_key(causal_root)
         ):
             raise _deny(
