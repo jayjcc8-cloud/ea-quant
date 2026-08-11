@@ -12,6 +12,7 @@ from ea.core.audit import (
     AuditLogicalKey,
     AuditRecord,
     AuditRecordKind,
+    AuditRecoveryRecordSource,
     AuditSubjectKind,
     audit_acknowledgement_id,
     audit_append_acknowledgement_digest,
@@ -313,7 +314,7 @@ class HistoricalSubmissionAuthorizationAuthority:
 
     def recover_attempts(
         self,
-        records: tuple[AuditRecord, ...],
+        records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
         *,
         orders: AuthorizationOrderRecoveryResolver,
         submissions: AuthorizationSubmissionRecoveryResolver,
@@ -328,11 +329,26 @@ class HistoricalSubmissionAuthorizationAuthority:
             or self._recovery_loaded
         ):
             raise _deny(OutcomeCode.CONFLICTING_ID, "authorization recovery seal conflicts")
-        if type(records) is not tuple or any(type(record) is not AuditRecord for record in records):
-            raise _deny(OutcomeCode.INVALID_TYPE, "authorization recovery records are invalid")
+        if not isinstance(records, tuple):
+            try:
+                if records.record_count < 1 or records.binding != self._binding:
+                    raise _deny(
+                        OutcomeCode.CONFLICTING_ID,
+                        "authorization recovery record source conflicts",
+                    )
+            except AttributeError as error:
+                raise _deny(
+                    OutcomeCode.INVALID_TYPE,
+                    "authorization recovery records are invalid",
+                ) from error
         attempts: dict[tuple[EconomicId, Sha256Digest], _AuthorizationAttempt] = {}
         by_order: dict[EconomicId, Sha256Digest] = {}
         for record in records:
+            if type(record) is not AuditRecord:
+                raise _deny(
+                    OutcomeCode.INVALID_TYPE,
+                    "authorization recovery records are invalid",
+                )
             if record.record_kind is not AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
                 continue
             if record.binding != self._binding:

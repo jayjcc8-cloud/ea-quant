@@ -55,6 +55,16 @@ from unit.test_execution_fact_authority import (
 from unit.test_lifecycle_coordinator import _MemoryAudit
 
 
+class _RepeatableRecordSource:
+    def __init__(self, records: tuple[Any, ...]) -> None:
+        self._records = records
+        self.record_count = len(records)
+        self.binding = records[0].binding
+
+    def __iter__(self) -> Any:
+        return iter(self._records)
+
+
 class _Port:
     def __init__(self, value: Any) -> None:
         self.value = value
@@ -361,7 +371,7 @@ def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
 
     recovered, recovered_capability, recovered_seal = create_authority()
     recovered.recover_attempts(
-        tuple(audit.records),
+        _RepeatableRecordSource(tuple(audit.records)),
         orders=order_authority,
         submissions=_NoSubmissions(),
         seal=recovered_seal,
