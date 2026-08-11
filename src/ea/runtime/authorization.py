@@ -244,10 +244,10 @@ class HistoricalSubmissionAuthorizationAuthority:
             raise _deny(OutcomeCode.CONFLICTING_ID, "authorization authority already activated")
         if seal is not self._activation_seal or self._activation_seal is None:
             raise _deny(OutcomeCode.CONFLICTING_ID, "authorization activation seal conflicts")
+        self._activation_seal = None
         if coordinator.binding != self._binding:
             raise _deny(OutcomeCode.CONFLICTING_ID, "coordinator binding conflicts")
         self._coordinator = coordinator
-        self._activation_seal = None
         self._active = True
         for key, attempt in tuple(self._attempts.items()):
             causal_root = attempt.causal_market_root

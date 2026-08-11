@@ -18,6 +18,7 @@ from ea.core.audit import (
     AuditSubjectKind,
     audit_chain_head,
     audit_record_digest,
+    canonical_run_prepared_audit_payload,
     create_audit_append_acknowledgement,
     create_audit_record,
 )
@@ -39,7 +40,9 @@ from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunBinding, RunReference, Sha256Digest
 from ea.core.runtime import runtime_root_order_key
 from ea.runtime.coordinator import (
-    create_phase1_lifecycle_coordinator,
+    create_phase1_lifecycle_coordinator as _create_phase1_lifecycle_coordinator,
+)
+from ea.runtime.coordinator import (
     recover_phase1_lifecycle_coordinator,
     recover_phase1_terminal_evidence,
 )
@@ -89,6 +92,26 @@ class _MemoryAudit:
         self.records.append(record)
         self.index[key] = (canonical_payload, acknowledgement)
         return acknowledgement
+
+
+def create_phase1_lifecycle_coordinator(
+    *,
+    binding: RunBinding,
+    audit: _MemoryAudit,
+    **ports: Any,
+) -> Any:
+    prepared_acknowledgement = audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=binding.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(binding),
+    )
+    return _create_phase1_lifecycle_coordinator(
+        binding=binding,
+        prepared_acknowledgement=prepared_acknowledgement,
+        audit=audit,
+        **ports,
+    )
 
 
 class _RejectRecoveredFrameAudit(_MemoryAudit):
@@ -553,6 +576,39 @@ def test_empty_market_dispatch_is_audited_before_runtime_acknowledgement() -> No
         AuditRecordKind.MATCHER_DISPATCH_BATCH,
         AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
     ]
+
+
+def test_fresh_construction_consumes_preverified_prepared_ack_without_append() -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    foreign_binding = RunBinding(
+        binding.reference,
+        Sha256Digest("33" * 32),
+    )
+    foreign_audit = _MemoryAudit(foreign_binding)
+    foreign_ack = foreign_audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=foreign_binding.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(foreign_binding),
+    )
+
+    with pytest.raises(LifecycleError, match="acknowledgement conflicts"):
+        _create_phase1_lifecycle_coordinator(
+            binding=binding,
+            prepared_acknowledgement=foreign_ack,
+            audit=audit,
+            runtime=_Runtime(matcher, delayed),
+            matcher=matcher,
+            fact_authority=_NoFacts(matcher),
+            evidence_resolver=_NoEvidence(),
+        )
+
+    assert audit.records == []
 
 
 def test_recovery_rejects_completion_physically_before_required_batch() -> None:

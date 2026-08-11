@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, final
 
-from ea.core.audit import AuditAppendPort, AuditRecord
+from ea.core.audit import AuditAppendAcknowledgement, AuditAppendPort, AuditRecord
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import ExecutionPolicyRef, FactProvenanceId
@@ -70,6 +70,7 @@ class Phase1HistoricalLifecycle:
 def create_phase1_historical_lifecycle(
     *,
     binding: RunBinding,
+    prepared_acknowledgement: AuditAppendAcknowledgement | None,
     audit: AuditAppendPort,
     runtime: Phase1HistoricalMarketRuntime,
     spec_set: InstrumentExecutionSpecSet,
@@ -84,6 +85,10 @@ def create_phase1_historical_lifecycle(
     recovery_records: tuple[AuditRecord, ...] | None = None,
 ) -> Phase1HistoricalLifecycle:
     """Construct dormant authority, matcher, facts, coordinator, then activate once."""
+    if (recovery_records is None) != (type(prepared_acknowledgement) is AuditAppendAcknowledgement):
+        raise TypeError(
+            "fresh lifecycle construction requires exactly one prepared acknowledgement"
+        )
     authorization, preparation_capability, activation_seal = (
         create_dormant_historical_submission_authorization_authority(
             binding=binding,
@@ -119,8 +124,10 @@ def create_phase1_historical_lifecycle(
         dispatch_verifier=descendant,
     )
     if recovery_records is None:
+        assert prepared_acknowledgement is not None
         coordinator = create_phase1_lifecycle_coordinator(
             binding=binding,
+            prepared_acknowledgement=prepared_acknowledgement,
             audit=audit,
             runtime=runtime,
             matcher=matcher,

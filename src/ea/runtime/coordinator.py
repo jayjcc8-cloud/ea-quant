@@ -956,6 +956,7 @@ class Phase1HistoricalLifecycleCoordinator:
 def create_phase1_lifecycle_coordinator(
     *,
     binding: RunBinding,
+    prepared_acknowledgement: AuditAppendAcknowledgement,
     audit: AuditAppendPort,
     runtime: RuntimeLifecyclePort,
     matcher: HistoricalMatcherPort,
@@ -989,14 +990,8 @@ def create_phase1_lifecycle_coordinator(
         or len(set(spec_digests)) != 1
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator bindings conflict")
-    prepared_ack = audit.append(
-        record_kind=AuditRecordKind.RUN_PREPARED,
-        subject_kind=AuditSubjectKind.RUN_MANIFEST,
-        subject_sha256=binding.manifest_sha256,
-        canonical_payload=canonical_run_prepared_audit_payload(binding),
-    )
     _require_exact_ack(
-        prepared_ack,
+        prepared_acknowledgement,
         binding=binding,
         key=AuditLogicalKey(
             AuditRecordKind.RUN_PREPARED,
@@ -1015,7 +1010,7 @@ def create_phase1_lifecycle_coordinator(
         authorization=authorization,
         authorization_capability=authorization_capability,
     )
-    value._state = _admitted_state(binding, prepared_ack.chain_head_sha256)
+    value._state = _admitted_state(binding, prepared_acknowledgement.chain_head_sha256)
     return value
 
 

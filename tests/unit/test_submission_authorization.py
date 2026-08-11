@@ -187,6 +187,31 @@ def test_dormant_authority_activates_once_and_issues_one_durable_proof() -> None
     with pytest.raises(HistoricalPreEffectAuthorizationError, match="already activated"):
         authority.activate(coordinator, seal=activation_seal)
 
+    failed_authority, _failed_capability, failed_seal = (
+        create_dormant_historical_submission_authorization_authority(
+            binding=binding,
+            audit=audit,
+            runtime=cast(RuntimeLifecyclePort, runtime),
+            spec_set=spec_set,
+            execution_policy=EXECUTION_POLICY,
+            portfolio=_Port(portfolio),
+            risk=_Port(risk),
+            global_halt=_Port(global_halt),
+            instrument_gate=_Port(gate),
+        )
+    )
+    foreign_coordinator: Any = SimpleNamespace(
+        binding=RunBinding(
+            binding.reference,
+            Sha256Digest("44" * 32),
+        ),
+        state=coordinator.state,
+    )
+    with pytest.raises(HistoricalPreEffectAuthorizationError, match="binding conflicts"):
+        failed_authority.activate(foreign_coordinator, seal=failed_seal)
+    with pytest.raises(HistoricalPreEffectAuthorizationError, match="seal conflicts"):
+        failed_authority.activate(coordinator, seal=failed_seal)
+
 
 def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
     spec_set, order_authority, orders = _orders()
