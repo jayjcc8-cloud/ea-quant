@@ -377,11 +377,11 @@ def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(tmp_pat
 
     assert recovered.reference == prepared.reference
     assert recovered.record_count == 1
-    assert recovered.records[0].record_kind is AuditRecordKind.RUN_PREPARED
+    assert admitted.records.record_at(0).record_kind is AuditRecordKind.RUN_PREPARED
     binding, admitted_audit, admitted_records = admitted._consume()
     assert binding == recovered.audit.binding
     assert admitted_audit.binding == binding
-    assert admitted_records == recovered.records
+    assert tuple(admitted_records) == reopened.records
     assert len(reopened.records) == 1
     with pytest.raises(RunCompositionError, match="already consumed"):
         admitted._consume()
@@ -448,14 +448,16 @@ def test_terminal_recovery_returns_read_only_lost_ack_evidence(tmp_path: Path) -
         RecoveredTerminalRun(
             object(),
             binding=terminal.binding,
-            records=(terminal.terminal_record,),
+            records=terminal._records,
+            journal=terminal._journal,  # type: ignore[arg-type]
             terminal_record=terminal.terminal_record,
             terminal_acknowledgement=terminal.terminal_acknowledgement,
         )
     terminal_binding, terminal_records = terminal._consume()
     assert terminal_binding == terminal.binding
-    assert terminal_records[-1] == terminal.terminal_record
+    assert terminal_records.record_at(terminal_records.record_count - 1) == terminal.terminal_record
     with pytest.raises(StoreError, match="already consumed"):
         terminal._consume()
     with pytest.raises(StoreError, match="stale or foreign"):
         recovered_store.recover_terminal_attempt(verified)
+    terminal._finish()

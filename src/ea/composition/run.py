@@ -13,8 +13,8 @@ from typing import Protocol, cast
 
 from ea.config.settings import Settings
 from ea.core.audit import (
-    AuditRecord,
     AuditRecordKind,
+    AuditRecoveryRecordSource,
     AuditSubjectKind,
     canonical_run_prepared_audit_payload,
 )
@@ -315,7 +315,7 @@ class AdmittedRecoveredRun:
     _consumed: bool
     audit: BoundAuditPort
     binding: RunBinding
-    records: tuple[AuditRecord, ...]
+    records: AuditRecoveryRecordSource
 
     def __init__(
         self,
@@ -323,6 +323,7 @@ class AdmittedRecoveredRun:
         *,
         recovered: RecoveredRun,
         audit: BoundAuditPort,
+        records: AuditRecoveryRecordSource,
     ) -> None:
         if seal is not _RECOVERED_ADMISSION_SEAL or type(recovered) is not RecoveredRun:
             raise RunCompositionError("recovery admission must consume store-issued evidence")
@@ -330,26 +331,21 @@ class AdmittedRecoveredRun:
         if (
             type(audit) is not BoundAuditPort
             or audit.binding != binding
-            or type(recovered.records) is not tuple
-            or not recovered.records
-            or recovered.record_count != len(recovered.records)
-            or any(
-                type(record) is not AuditRecord or record.binding != binding
-                for record in recovered.records
-            )
+            or records.binding != binding
+            or records.record_count != recovered.record_count
         ):
             raise RunCompositionError("recovered prefix is not bound to one admitted audit port")
         self._consumed = False
         self.audit = audit
         self.binding = binding
-        self.records = recovered.records
+        self.records = records
 
     def __setattr__(self, name: str, value: object) -> None:
         if hasattr(self, name):
             raise AttributeError("admitted recovery evidence is immutable")
         object.__setattr__(self, name, value)
 
-    def _consume(self) -> tuple[RunBinding, BoundAuditPort, tuple[AuditRecord, ...]]:
+    def _consume(self) -> tuple[RunBinding, BoundAuditPort, AuditRecoveryRecordSource]:
         if self._consumed:
             raise RunCompositionError("recovery admission was already consumed")
         object.__setattr__(self, "_consumed", True)
@@ -577,4 +573,5 @@ def admit_recovered_run(
         _RECOVERED_ADMISSION_SEAL,
         recovered=recovered,
         audit=audit,
+        records=raw_audit.recovery_records,
     )

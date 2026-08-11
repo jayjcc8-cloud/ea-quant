@@ -17,6 +17,7 @@ from ea.core.audit import (
     AuditAppendAcknowledgement,
     AuditRecord,
     AuditRecordKind,
+    AuditRecoveryRecordSource,
     create_audit_append_acknowledgement,
 )
 from ea.core.run import RunBinding, RunContractError, RunId, RunReference, Sha256Digest
@@ -70,6 +71,10 @@ class _StoreOps(Protocol):
     def close(self, file_fd: int) -> None: ...
 
     def fstat(self, file_fd: int) -> os.stat_result: ...
+
+
+class _RecoveryJournal(Protocol):
+    def close(self) -> None: ...
 
 
 class _OsStoreOps:
@@ -370,24 +375,30 @@ class VerifiedTerminalRecoveryBinding:
         *,
         store: LocalResultStore,
         authority: _AttemptAuthority,
-        records: tuple[AuditRecord, ...],
+        record_count: int,
+        terminal_record: AuditRecord,
     ) -> None:
-        if seal is not _RECOVERY_SEAL or not records:
+        if (
+            seal is not _RECOVERY_SEAL
+            or type(record_count) is not int
+            or record_count < 2
+            or type(terminal_record) is not AuditRecord
+            or terminal_record.record_id.owner_sequence != record_count
+        ):
             raise StoreError("terminal recovery classifications are store-issued")
-        terminal = records[-1]
-        if terminal.record_kind is not AuditRecordKind.RUN_TERMINAL:
+        if terminal_record.record_kind is not AuditRecordKind.RUN_TERMINAL:
             raise StoreError("terminal recovery requires one final terminal record")
         object.__setattr__(self, "_store", store)
         object.__setattr__(self, "_authority", authority)
         object.__setattr__(self, "binding", authority.binding)
-        object.__setattr__(self, "record_count", len(records))
-        object.__setattr__(self, "terminal_record", terminal)
+        object.__setattr__(self, "record_count", record_count)
+        object.__setattr__(self, "terminal_record", terminal_record)
         object.__setattr__(
             self,
             "terminal_acknowledgement",
-            create_audit_append_acknowledgement(terminal),
+            create_audit_append_acknowledgement(terminal_record),
         )
-        object.__setattr__(self, "_terminal_payload", terminal.canonical_payload)
+        object.__setattr__(self, "_terminal_payload", terminal_record.canonical_payload)
         object.__setattr__(self, "_consumed", False)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -405,7 +416,6 @@ class RecoveredRun:
         "manifest_verification",
         "output",
         "record_count",
-        "records",
         "reference",
     )
     _admitted: bool
@@ -415,7 +425,6 @@ class RecoveredRun:
     manifest_verification: ManifestVerificationCapability
     output: OutputRunBinding
     record_count: int
-    records: tuple[AuditRecord, ...]
     reference: RunReference
 
     def __init__(
@@ -426,9 +435,9 @@ class RecoveredRun:
         audit: AuditRunBinding,
         output: OutputRunBinding,
         manifest_verification: ManifestVerificationCapability,
-        records: tuple[AuditRecord, ...],
+        record_count: int,
     ) -> None:
-        if seal is not _RECOVERED_SEAL:
+        if seal is not _RECOVERED_SEAL or type(record_count) is not int or record_count < 1:
             raise StoreError("recovered runs are store-issued")
         object.__setattr__(self, "_admitted", False)
         object.__setattr__(self, "_authority", authority)
@@ -437,8 +446,7 @@ class RecoveredRun:
         object.__setattr__(self, "manifest_verification", manifest_verification)
         object.__setattr__(self, "audit", audit)
         object.__setattr__(self, "output", output)
-        object.__setattr__(self, "record_count", len(records))
-        object.__setattr__(self, "records", records)
+        object.__setattr__(self, "record_count", record_count)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("recovered run is immutable")
@@ -454,6 +462,7 @@ class RecoveredTerminalRun:
 
     __slots__ = (
         "_consumed",
+        "_journal",
         "_records",
         "binding",
         "record_count",
@@ -462,7 +471,8 @@ class RecoveredTerminalRun:
     )
     binding: RunBinding
     _consumed: bool
-    _records: tuple[AuditRecord, ...]
+    _journal: _RecoveryJournal | None
+    _records: AuditRecoveryRecordSource
     record_count: int
     terminal_record: AuditRecord
     terminal_acknowledgement: AuditAppendAcknowledgement
@@ -472,27 +482,40 @@ class RecoveredTerminalRun:
         seal: object,
         *,
         binding: RunBinding,
-        records: tuple[AuditRecord, ...],
+        records: AuditRecoveryRecordSource,
+        journal: _RecoveryJournal,
         terminal_record: AuditRecord,
         terminal_acknowledgement: AuditAppendAcknowledgement,
     ) -> None:
-        if seal is not _RECOVERED_TERMINAL_SEAL or not records or records[-1] != terminal_record:
+        if (
+            seal is not _RECOVERED_TERMINAL_SEAL
+            or records.record_count < 2
+            or records.binding != binding
+            or records.record_at(records.record_count - 1) != terminal_record
+        ):
             raise StoreError("terminal recovery evidence is store-issued")
         object.__setattr__(self, "_consumed", False)
         object.__setattr__(self, "_records", records)
+        object.__setattr__(self, "_journal", journal)
         object.__setattr__(self, "binding", binding)
-        object.__setattr__(self, "record_count", len(records))
+        object.__setattr__(self, "record_count", records.record_count)
         object.__setattr__(self, "terminal_record", terminal_record)
         object.__setattr__(self, "terminal_acknowledgement", terminal_acknowledgement)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("terminal recovery evidence is immutable")
 
-    def _consume(self) -> tuple[RunBinding, tuple[AuditRecord, ...]]:
+    def _consume(self) -> tuple[RunBinding, AuditRecoveryRecordSource]:
         if self._consumed:
             raise StoreError("terminal recovery evidence was already consumed")
         object.__setattr__(self, "_consumed", True)
         return self.binding, self._records
+
+    def _finish(self) -> None:
+        journal = self._journal
+        if journal is not None:
+            object.__setattr__(self, "_journal", None)
+            journal.close()
 
 
 class LocalResultStore:
@@ -786,16 +809,18 @@ class LocalResultStore:
 
             journal = reopen_posix_audit_journal(audit_binding)
             try:
-                records = journal.records
+                records = journal.recovery_records
+                terminal_record = records.record_at(records.record_count - 1)
             finally:
                 journal.close()
-            if records and records[-1].record_kind is AuditRecordKind.RUN_TERMINAL:
+            if terminal_record.record_kind is AuditRecordKind.RUN_TERMINAL:
                 result: VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding = (
                     VerifiedTerminalRecoveryBinding(
                         _RECOVERY_SEAL,
                         store=self,
                         authority=authority,
-                        records=records,
+                        record_count=records.record_count,
+                        terminal_record=terminal_record,
                     )
                 )
             else:
@@ -803,7 +828,7 @@ class LocalResultStore:
                     _RECOVERY_SEAL,
                     store=self,
                     authority=authority,
-                    record_count=len(records),
+                    record_count=records.record_count,
                 )
             classified = True
             return result
@@ -860,10 +885,10 @@ class LocalResultStore:
 
         journal = reopen_posix_audit_journal(audit_binding)
         try:
-            records = journal.records
+            record_count = journal.recovery_records.record_count
         finally:
             journal.close()
-        if len(records) != verified.record_count:
+        if record_count != verified.record_count:
             raise StoreError("incomplete recovery record prefix changed")
         object.__setattr__(verified, "_consumed", True)
         return RecoveredRun(
@@ -877,7 +902,7 @@ class LocalResultStore:
                 authority=authority,
                 seal=_BINDING_SEAL,
             ),
-            records=records,
+            record_count=record_count,
         )
 
     def recover_terminal_attempt(
@@ -904,6 +929,7 @@ class LocalResultStore:
         from ea.experiments.audit import reopen_posix_audit_journal
 
         journal = reopen_posix_audit_journal(audit_binding)
+        keep_journal = False
         try:
             terminal = verified.terminal_record
             acknowledgement = journal.append(
@@ -914,11 +940,16 @@ class LocalResultStore:
             )
             if acknowledgement != verified.terminal_acknowledgement:
                 raise StoreError("terminal recovery acknowledgement changed")
-            records = journal.records
-            if len(records) != verified.record_count or records[-1] != terminal:
+            records = journal.recovery_records
+            if (
+                records.record_count != verified.record_count
+                or records.record_at(records.record_count - 1) != terminal
+            ):
                 raise StoreError("terminal recovery record prefix changed")
+            keep_journal = True
         finally:
-            journal.close()
+            if not keep_journal:
+                journal.close()
         object.__setattr__(verified, "_consumed", True)
         with self._registry_lock:
             self._attempts.pop(authority.attempt_token, None)
@@ -927,6 +958,7 @@ class LocalResultStore:
             _RECOVERED_TERMINAL_SEAL,
             binding=authority.binding,
             records=records,
+            journal=journal,
             terminal_record=verified.terminal_record,
             terminal_acknowledgement=acknowledgement,
         )

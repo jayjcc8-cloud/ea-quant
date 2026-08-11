@@ -220,7 +220,7 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     assert lifecycle.matcher is not matcher
     assert lifecycle.fact_authority is not fact_history
     assert lifecycle.matcher.state == matcher.state
-    assert admitted_journals[0].records == recovered.records
+    assert admitted_journals[0].records == tuple(admitted.records)
     recovery_parameters = signature(recover_phase1_historical_lifecycle).parameters
     assert "authorization" not in recovery_parameters
     assert "authorization_capability" not in recovery_parameters
@@ -276,12 +276,14 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
             object(),
             recovered=recovered,
             audit=admitted.audit,
+            records=admitted.records,
         )
     with pytest.raises(RunCompositionError, match="one admitted audit port"):
         run_composition.AdmittedRecoveredRun(
             seal,
             recovered=recovered,
             audit=object(),  # type: ignore[arg-type]
+            records=admitted.records,
         )
     foreign_binding = RunBinding(
         admitted.binding.reference,
@@ -295,42 +297,36 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
             seal,
             recovered=recovered,
             audit=foreign_audit,
+            records=admitted.records,
         )
-    original_records = recovered.records
-    invalid_record_sets: tuple[object, ...] = ([], (), (object(),))
-    for invalid_records in invalid_record_sets:
-        object.__setattr__(recovered, "records", invalid_records)
-        with pytest.raises(RunCompositionError, match="one admitted audit port"):
-            run_composition.AdmittedRecoveredRun(
-                seal,
-                recovered=recovered,
-                audit=admitted.audit,
-            )
-    object.__setattr__(recovered, "records", original_records)
-    object.__setattr__(recovered, "record_count", len(original_records) + 1)
+    object.__setattr__(recovered, "record_count", admitted.records.record_count + 1)
     with pytest.raises(RunCompositionError, match="one admitted audit port"):
         run_composition.AdmittedRecoveredRun(
             seal,
             recovered=recovered,
             audit=admitted.audit,
+            records=admitted.records,
         )
-    object.__setattr__(recovered, "record_count", len(original_records))
-    original_record_binding = original_records[0].binding
-    object.__setattr__(original_records[0], "binding", foreign_binding)
+    object.__setattr__(recovered, "record_count", admitted.records.record_count)
+    foreign_records = SimpleNamespace(
+        binding=foreign_binding,
+        record_count=admitted.records.record_count,
+    )
     with pytest.raises(RunCompositionError, match="one admitted audit port"):
         run_composition.AdmittedRecoveredRun(
             seal,
             recovered=recovered,
             audit=admitted.audit,
+            records=foreign_records,
         )
-    object.__setattr__(original_records[0], "binding", original_record_binding)
     probe = run_composition.AdmittedRecoveredRun(
         seal,
         recovered=recovered,
         audit=admitted.audit,
+        records=admitted.records,
     )
     with pytest.raises(AttributeError, match="immutable"):
-        probe.records = ()
+        probe.records = ()  # type: ignore[assignment]
     with pytest.raises(RunCompositionError, match="already consumed"):
         admitted._consume()
     admitted_journals[0].close()

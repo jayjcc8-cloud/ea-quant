@@ -11,6 +11,7 @@ from ea.core.audit import (
     AuditAppendPort,
     AuditRecord,
     AuditRecordKind,
+    AuditRecoveryRecordSource,
     audit_acknowledgement_id,
     audit_append_acknowledgement_digest,
     create_audit_append_acknowledgement,
@@ -86,7 +87,7 @@ class Phase1HistoricalLifecycle:
 
 def _require_recovery_history_frontier(
     *,
-    records: tuple[AuditRecord, ...],
+    records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
     runtime: Phase1HistoricalMarketRuntime,
     matcher: Phase1HistoricalMatcher,
     fact_authority: Phase1ExecutionFactAuthority,
@@ -344,27 +345,30 @@ def recover_phase1_historical_terminal_evidence(
         binding, records = recovery._consume()
     except StoreError as error:
         raise TypeError("historical terminal recovery evidence was already consumed") from error
-    if (
-        runtime.run_id != binding.reference.run_id
-        or matcher_history.run_id != binding.reference.run_id
-        or fact_history.run_id != binding.reference.run_id
-        or runtime.spec_set.identifier != matcher_history.spec_set.identifier
-        or fact_history.spec_set.identifier != matcher_history.spec_set.identifier
-    ):
-        raise TypeError("historical terminal recovery authority bindings conflict")
-    terminal = recover_phase1_terminal_evidence(
-        binding=binding,
-        runtime=runtime,
-        matcher=matcher_history,
-        fact_authority=fact_history,
-        evidence_resolver=fact_history,
-        records=records,
-    )
-    _require_recovery_history_frontier(
-        records=records,
-        runtime=runtime,
-        matcher=matcher_history,
-        fact_authority=fact_history,
-        coordinator=None,
-    )
-    return terminal
+    try:
+        if (
+            runtime.run_id != binding.reference.run_id
+            or matcher_history.run_id != binding.reference.run_id
+            or fact_history.run_id != binding.reference.run_id
+            or runtime.spec_set.identifier != matcher_history.spec_set.identifier
+            or fact_history.spec_set.identifier != matcher_history.spec_set.identifier
+        ):
+            raise TypeError("historical terminal recovery authority bindings conflict")
+        terminal = recover_phase1_terminal_evidence(
+            binding=binding,
+            runtime=runtime,
+            matcher=matcher_history,
+            fact_authority=fact_history,
+            evidence_resolver=fact_history,
+            records=records,
+        )
+        _require_recovery_history_frontier(
+            records=records,
+            runtime=runtime,
+            matcher=matcher_history,
+            fact_authority=fact_history,
+            coordinator=None,
+        )
+        return terminal
+    finally:
+        recovery._finish()
