@@ -1592,6 +1592,14 @@ def _recover_dispatch(
         return
 
     batch_entry = recovered.batch_record
+    failing_entry = recovered.failing_record
+    pre_batch_failure = (
+        failing_entry is not None
+        and (batch_entry is None or failing_entry[0] < batch_entry[0])
+        and _is_pre_batch_failing_record(failing_entry[1], active.trigger_sha256)
+    )
+    if pre_batch_failure:
+        _recover_pre_batch_failing_transition(coordinator, active, failing_entry)
     if batch_entry is not None:
         _batch_position, batch_record, batch_ack = batch_entry
         expected_batch_payload = canonical_matcher_batch_audit_payload(coordinator._binding, batch)
@@ -1626,7 +1634,8 @@ def _recover_dispatch(
         matched_outcome_digests.add(outcome_digest)
     if matched_outcome_digests != set(recovered.outcome_records):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "orphan recovered outcome record")
-    _recover_failing_transition(coordinator, active, recovered)
+    if not pre_batch_failure:
+        _recover_failing_transition(coordinator, active, recovered)
     for index, outcome in enumerate(active.outcomes):
         acknowledgement = active.outcome_acks[index]
         if outcome is not None and acknowledgement is not None and active.batch_ack is not None:
@@ -1954,6 +1963,16 @@ def _recover_pre_batch_failing_transition(
         audit_subject_digest(AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION, payload),
     )
     coordinator._failing_ack = acknowledgement
+
+
+def _is_pre_batch_failing_record(record: AuditRecord, trigger_sha256: Sha256Digest) -> bool:
+    document = _record_document(record)
+    return (
+        document.get("failed_record_kind") == AuditRecordKind.MATCHER_DISPATCH_BATCH.value
+        and document.get("failed_subject_kind")
+        == AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH.value
+        and document.get("failed_subject_sha256") == trigger_sha256.value
+    )
 
 
 def _root_digest(root: object) -> Sha256Digest:

@@ -265,6 +265,15 @@ class _CommittedMarketThenRaisedRuntime(_Runtime):
         raise RuntimeError("injected committed market acknowledgement failure")
 
 
+class _TracingMarketRuntime(_CommittedMarketThenRaisedRuntime):
+    def acknowledge(self, lease: Any) -> None:
+        try:
+            super().acknowledge(lease)
+        except RuntimeError as error:
+            if str(error) != "injected committed market acknowledgement failure":
+                raise
+
+
 class _FailFirstRuntimeAcknowledgement(_Runtime):
     failed = False
     acknowledgement_calls = 0
@@ -1018,7 +1027,7 @@ def test_recovery_keeps_pre_batch_matcher_failure_monotone(
     audit: _MemoryAudit = (
         _MemoryAudit(binding) if durable_failing_record else _FailFirstFailingAudit(binding)
     )
-    runtime = _Runtime(matcher, delayed)
+    runtime = _TracingMarketRuntime(matcher, delayed)
     fail_first = _FailFirstMatcher(matcher)
     coordinator = create_phase1_lifecycle_coordinator(
         binding=binding,
@@ -1052,6 +1061,23 @@ def test_recovery_keeps_pre_batch_matcher_failure_monotone(
     assert [record.record_kind for record in audit.records].count(
         AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
     ) == 1
+
+    resolver_only = _ResolverOnlyMatcher(matcher)
+    restarted = recover_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=resolver_only,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+        records=tuple(audit.records),
+    )
+
+    assert restarted.state.phase is CoordinatorPhase.FAILING
+    assert restarted.state.last_completed_dispatch_sequence == 1
+    assert resolver_only.mutation_calls == 0
+    with pytest.raises(LifecycleError, match="no active dispatch"):
+        restarted.retry_active_dispatch()
 
 
 def test_recovery_with_durable_completion_retries_only_runtime_acknowledgement() -> None:
