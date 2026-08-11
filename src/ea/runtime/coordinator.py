@@ -397,14 +397,14 @@ class Phase1HistoricalLifecycleCoordinator:
                     first_error = error
             if active.batch_ack is None:
                 try:
-                    active.batch_ack = self._audit.append(
+                    batch_acknowledgement = self._audit.append(
                         record_kind=AuditRecordKind.MATCHER_DISPATCH_BATCH,
                         subject_kind=AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
                         subject_sha256=batch_digest,
                         canonical_payload=batch_payload,
                     )
                     _require_exact_ack(
-                        active.batch_ack,
+                        batch_acknowledgement,
                         binding=self._binding,
                         key=AuditLogicalKey(
                             AuditRecordKind.MATCHER_DISPATCH_BATCH,
@@ -414,6 +414,7 @@ class Phase1HistoricalLifecycleCoordinator:
                         payload=batch_payload,
                     )
                     self._rebind_active_authorities(active)
+                    active.batch_ack = batch_acknowledgement
                 except Exception as error:
                     first_error = first_error or error
             count = len(batch.ingresses)
@@ -436,15 +437,14 @@ class Phase1HistoricalLifecycleCoordinator:
                     outcome_digest = execution_fact_processing_outcome_digest(processing_outcome)
                     acknowledgement = active.outcome_acks[index]
                     if acknowledgement is None:
-                        acknowledgement = self._audit.append(
+                        candidate_acknowledgement = self._audit.append(
                             record_kind=AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME,
                             subject_kind=AuditSubjectKind.EXECUTION_FACT_PROCESSING_OUTCOME,
                             subject_sha256=outcome_digest,
                             canonical_payload=outcome_payload,
                         )
-                        active.outcome_acks[index] = acknowledgement
                         _require_exact_ack(
-                            acknowledgement,
+                            candidate_acknowledgement,
                             binding=self._binding,
                             key=AuditLogicalKey(
                                 AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME,
@@ -454,6 +454,8 @@ class Phase1HistoricalLifecycleCoordinator:
                             payload=outcome_payload,
                         )
                         self._rebind_active_authorities(active)
+                        acknowledgement = candidate_acknowledgement
+                        active.outcome_acks[index] = acknowledgement
                     if active.handoffs[index] is None and active.batch_ack is not None:
                         self._require_evidence(processing_outcome)
                         self._rebind_active_authorities(active)
@@ -464,7 +466,11 @@ class Phase1HistoricalLifecycleCoordinator:
                         )
                 except Exception as error:
                     first_error = first_error or error
-            missing = self._missing_keys(active)
+            missing = tuple(
+                key
+                for key in self._missing_keys(active)
+                if key.record_kind is not AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+            )
             if first_error is not None or missing:
                 self._enter_failing(active, missing)
                 if first_error is not None:
@@ -484,14 +490,14 @@ class Phase1HistoricalLifecycleCoordinator:
             )
             active.completion_payload = completion_payload
             if active.completion_ack is None:
-                active.completion_ack = self._audit.append(
+                completion_acknowledgement = self._audit.append(
                     record_kind=AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
                     subject_kind=AuditSubjectKind.RUNTIME_DISPATCH,
                     subject_sha256=dispatch_completed_subject_digest(completion_payload),
                     canonical_payload=completion_payload,
                 )
                 _require_exact_ack(
-                    active.completion_ack,
+                    completion_acknowledgement,
                     binding=self._binding,
                     key=AuditLogicalKey(
                         AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
@@ -501,6 +507,7 @@ class Phase1HistoricalLifecycleCoordinator:
                     payload=completion_payload,
                 )
                 self._rebind_active_authorities(active)
+                active.completion_ack = completion_acknowledgement
             self._rebind_active_authorities(active)
             try:
                 self._runtime.acknowledge(active.lease)
@@ -625,14 +632,14 @@ class Phase1HistoricalLifecycleCoordinator:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "runtime terminal evidence changed")
         payload = canonical_run_terminal_audit_payload(pre_terminal)
         if self._terminal_ack is None:
-            self._terminal_ack = self._audit.append(
+            terminal_acknowledgement = self._audit.append(
                 record_kind=AuditRecordKind.RUN_TERMINAL,
                 subject_kind=AuditSubjectKind.RUN_TERMINAL_STATE,
                 subject_sha256=audit_subject_digest(AuditRecordKind.RUN_TERMINAL, payload),
                 canonical_payload=payload,
             )
             _require_exact_ack(
-                self._terminal_ack,
+                terminal_acknowledgement,
                 binding=self._binding,
                 key=AuditLogicalKey(
                     AuditRecordKind.RUN_TERMINAL,
@@ -641,6 +648,7 @@ class Phase1HistoricalLifecycleCoordinator:
                 ),
                 payload=payload,
             )
+            self._terminal_ack = terminal_acknowledgement
         terminal_state = create_terminal_coordinator_state(
             pre_terminal_state=pre_terminal,
             terminal_acknowledgement=self._terminal_ack,
@@ -855,18 +863,19 @@ class Phase1HistoricalLifecycleCoordinator:
         key = self._failing_key
         if payload is None or key is None or self._failing_ack is not None:
             return
-        self._failing_ack = self._audit.append(
+        acknowledgement = self._audit.append(
             record_kind=key.record_kind,
             subject_kind=key.subject_kind,
             subject_sha256=key.subject_sha256,
             canonical_payload=payload,
         )
         _require_exact_ack(
-            self._failing_ack,
+            acknowledgement,
             binding=self._binding,
             key=key,
             payload=payload,
         )
+        self._failing_ack = acknowledgement
 
     def _pre_ack_state(
         self,

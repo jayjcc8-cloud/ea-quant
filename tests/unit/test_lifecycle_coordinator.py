@@ -343,6 +343,63 @@ class _FailFirstTerminalAudit(_MemoryAudit):
         )
 
 
+class _WrongAckOnceAudit(_MemoryAudit):
+    def __init__(self, binding: RunBinding, target: AuditRecordKind) -> None:
+        super().__init__(binding)
+        self.target = target
+        self.returned_wrong_ack = False
+
+    def append(
+        self,
+        *,
+        record_kind: AuditRecordKind,
+        subject_kind: AuditSubjectKind,
+        subject_sha256: Sha256Digest,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement:
+        if record_kind is self.target and not self.returned_wrong_ack:
+            self.returned_wrong_ack = True
+            return create_audit_append_acknowledgement(self.records[0])
+        return super().append(
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
+
+
+class _WrongFailingAckAfterBatchFailureAudit(_MemoryAudit):
+    batch_failed = False
+    failing_ack_mismatched = False
+
+    def append(
+        self,
+        *,
+        record_kind: AuditRecordKind,
+        subject_kind: AuditSubjectKind,
+        subject_sha256: Sha256Digest,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement:
+        if record_kind is AuditRecordKind.MATCHER_DISPATCH_BATCH and not self.batch_failed:
+            self.batch_failed = True
+            raise AuditContractError(
+                OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected batch append failure",
+            )
+        if (
+            record_kind is AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
+            and not self.failing_ack_mismatched
+        ):
+            self.failing_ack_mismatched = True
+            return create_audit_append_acknowledgement(self.records[0])
+        return super().append(
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
+
+
 class _CountingFacts(_NoFacts):
     calls = 0
 
@@ -382,6 +439,75 @@ def test_empty_market_dispatch_is_audited_before_runtime_acknowledgement() -> No
     ]
 
 
+@pytest.mark.parametrize(
+    "target",
+    (
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
+    ),
+)
+def test_wrong_live_ack_is_not_retained_and_exact_retry_can_complete(
+    target: AuditRecordKind,
+) -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _WrongAckOnceAudit(binding, target)
+    runtime = _Runtime(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+
+    with pytest.raises(LifecycleError, match="acknowledgement conflicts"):
+        coordinator.process_next_dispatch()
+    assert runtime.active_lease is not None
+
+    outcome = coordinator.retry_active_dispatch()
+
+    assert outcome.runtime_acknowledged is True
+    assert runtime.active_lease is None
+    assert [record.record_kind for record in audit.records].count(target) == 1
+
+
+def test_wrong_failing_ack_is_not_retained_and_retry_reconfirms_it() -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _WrongFailingAckAfterBatchFailureAudit(binding)
+    runtime = _Runtime(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+
+    with pytest.raises(AuditContractError, match="injected batch"):
+        coordinator.process_next_dispatch()
+    assert coordinator.state.phase is CoordinatorPhase.FAILING
+    assert AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION not in (
+        record.record_kind for record in audit.records
+    )
+
+    outcome = coordinator.retry_active_dispatch()
+
+    assert outcome.runtime_acknowledged is True
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
+    ) == 1
+
+
 def test_bounded_end_closes_with_one_exact_terminal_record() -> None:
     _fixture, matcher, _orders, _causal, _delayed, end = _system()
     binding = RunBinding(
@@ -413,6 +539,34 @@ def test_bounded_end_closes_with_one_exact_terminal_record() -> None:
         AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
         AuditRecordKind.RUN_TERMINAL,
     ]
+
+
+def test_wrong_terminal_ack_is_not_retained_and_terminal_retry_can_complete() -> None:
+    _fixture, matcher, _orders, _causal, _delayed, end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _WrongAckOnceAudit(binding, AuditRecordKind.RUN_TERMINAL)
+    runtime = _Runtime(matcher, end)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+
+    with pytest.raises(LifecycleError, match="acknowledgement conflicts"):
+        coordinator.process_next_dispatch()
+    assert coordinator.pre_terminal_state is not None
+    assert coordinator.terminal_outcome is None
+
+    terminal = coordinator.retry_terminalization()
+
+    assert terminal is coordinator.terminal_outcome
+    assert [record.record_kind for record in audit.records].count(AuditRecordKind.RUN_TERMINAL) == 1
 
 
 def test_batch_audit_failure_still_drains_every_issued_ingress() -> None:
