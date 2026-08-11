@@ -689,6 +689,38 @@ def test_bounded_end_closes_with_one_exact_terminal_record() -> None:
     ]
 
 
+def test_terminal_after_runtime_retry_binds_latest_failing_chain_head() -> None:
+    _fixture, matcher, _orders, _causal, _delayed, end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _FailFirstRuntimeAcknowledgement(matcher, end)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+
+    with pytest.raises(RuntimeError, match="pre-commit"):
+        coordinator.process_next_dispatch()
+    failing_record = audit.records[-1]
+    assert failing_record.record_kind is AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
+
+    dispatch = coordinator.retry_active_dispatch()
+    pre_terminal = coordinator.pre_terminal_state
+
+    assert dispatch.runtime_acknowledged is True
+    assert pre_terminal is not None
+    assert coordinator.state.last_audit_chain_head_sha256 == audit_chain_head(failing_record)
+    assert pre_terminal.previous_chain_head_sha256 == audit_chain_head(failing_record)
+    assert audit.records[-1].record_kind is AuditRecordKind.RUN_TERMINAL
+
+
 def test_wrong_terminal_ack_is_not_retained_and_terminal_retry_can_complete() -> None:
     _fixture, matcher, _orders, _causal, _delayed, end = _system()
     binding = RunBinding(
@@ -877,6 +909,7 @@ def test_recovery_with_durable_completion_retries_only_runtime_acknowledgement()
     assert dispatch.runtime_acknowledged is True
     assert runtime.acknowledgement_calls == 2
     assert resolver_only.mutation_calls == 0
+    assert recovered.state.last_audit_chain_head_sha256 == audit_chain_head(audit.records[-1])
     assert [record.record_kind for record in audit.records].count(
         AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
     ) == 1
@@ -948,6 +981,7 @@ def test_recovery_accepts_committed_market_trace_without_second_acknowledgement(
 
     assert recovered.state.last_completed_dispatch_sequence == 1
     assert recovered.state.phase is CoordinatorPhase.FAILING
+    assert recovered.state.last_audit_chain_head_sha256 == audit_chain_head(audit.records[-1])
     assert runtime.acknowledgement_calls == 1
     assert resolver_only.mutation_calls == 0
     with pytest.raises(LifecycleError, match="no active dispatch"):

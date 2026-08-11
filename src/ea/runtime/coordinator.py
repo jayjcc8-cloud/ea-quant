@@ -580,7 +580,7 @@ class Phase1HistoricalLifecycleCoordinator:
             last_dispatch_sequence=active.lease.dispatch_sequence,
             last_trigger_root_sha256=active.trigger_sha256,
             dispatch_completion_ack_sha256=audit_append_acknowledgement_digest(completion),
-            previous_chain_head_sha256=completion.chain_head_sha256,
+            previous_chain_head_sha256=resulting_state.last_audit_chain_head_sha256,
             failure_code=resulting_state.failure_code,
         )
 
@@ -945,7 +945,10 @@ class Phase1HistoricalLifecycleCoordinator:
             missing_audit_logical_keys=(),
             failure_code=state.failure_code,
             last_completed_dispatch_sequence=batch.dispatch_sequence,
-            last_audit_chain_head_sha256=completion.chain_head_sha256,
+            last_audit_chain_head_sha256=_latest_completion_chain_head(
+                completion,
+                self._failing_ack,
+            ),
         )
 
 
@@ -1633,6 +1636,7 @@ def _recover_dispatch(
         coordinator._state,
         active,
         completion_ack,
+        failing_ack=coordinator._failing_ack,
         is_end=is_end,
     )
     coordinator._state = resulting_state
@@ -1652,7 +1656,7 @@ def _recover_dispatch(
             last_dispatch_sequence=recovered.sequence,
             last_trigger_root_sha256=trigger_sha256,
             dispatch_completion_ack_sha256=audit_append_acknowledgement_digest(completion_ack),
-            previous_chain_head_sha256=completion_ack.chain_head_sha256,
+            previous_chain_head_sha256=resulting_state.last_audit_chain_head_sha256,
             failure_code=resulting_state.failure_code,
         )
     elif trace_document.get("terminal_acknowledged") is not False:
@@ -1912,6 +1916,7 @@ def _recovered_completed_state(
     active: _ActiveDispatch,
     completion_ack: AuditAppendAcknowledgement,
     *,
+    failing_ack: AuditAppendAcknowledgement | None,
     is_end: bool,
 ) -> CoordinatorRunState:
     if state.state_version > _MAX_UINT64 - 2:
@@ -1931,5 +1936,19 @@ def _recovered_completed_state(
         missing_audit_logical_keys=(),
         failure_code=state.failure_code,
         last_completed_dispatch_sequence=active.lease.dispatch_sequence,
-        last_audit_chain_head_sha256=completion_ack.chain_head_sha256,
+        last_audit_chain_head_sha256=_latest_completion_chain_head(
+            completion_ack,
+            failing_ack,
+        ),
     )
+
+
+def _latest_completion_chain_head(
+    completion: AuditAppendAcknowledgement,
+    failing: AuditAppendAcknowledgement | None,
+) -> Sha256Digest:
+    candidates = (completion,) if failing is None else (completion, failing)
+    return max(
+        candidates,
+        key=lambda acknowledgement: acknowledgement.record_id.owner_sequence,
+    ).chain_head_sha256
