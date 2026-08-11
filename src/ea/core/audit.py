@@ -112,7 +112,7 @@ _AUDIT_PAYLOAD_SCHEMA_BY_KIND: dict[AuditRecordKind, str] = {
     AuditRecordKind.MATCHER_DISPATCH_BATCH: "ea.audit-matcher-dispatch-batch.v1",
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: ("ea.audit-submission-authorization.v1"),
     AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION: "ea.audit-failing-safety.v1",
-    AuditRecordKind.RUNTIME_DISPATCH_COMPLETED: "ea.audit-dispatch-completed.v1",
+    AuditRecordKind.RUNTIME_DISPATCH_COMPLETED: "ea.audit-dispatch-completed.v2",
     AuditRecordKind.RUN_TERMINAL: "ea.audit-run-terminal.v1",
 }
 _AUDIT_PAYLOAD_FIELDS_BY_KIND: dict[AuditRecordKind, frozenset[str]] = {
@@ -186,6 +186,11 @@ _AUDIT_PAYLOAD_FIELDS_BY_KIND: dict[AuditRecordKind, frozenset[str]] = {
             "outcome_count",
             "ordered_outcome_ack_sha256s_sha256",
             "pre_ack_state_sha256",
+            "authorization_attempt_count",
+            "authorization_attempt_outcome",
+            "authorization_attempt_outcome_sha256",
+            "submission_count",
+            "ordered_submission_receipt_sha256s_sha256",
         }
     ),
     AuditRecordKind.RUN_TERMINAL: frozenset(
@@ -499,10 +504,29 @@ def _require_audit_owned_payload_values(
             raise _fail(OutcomeCode.CONFLICTING_ID, "failing payload enum is invalid") from error
         _require_json_uint64(document, "dispatch_sequence", positive=True)
     elif record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
+        from ea.core.lifecycle import (
+            ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN,
+            SubmissionAuthorizationAttemptStatus,
+            decode_submission_authorization_attempt_outcome_document,
+            submission_authorization_attempt_outcome_digest,
+        )
+
         if _require_json_text(document, "dispatch_kind") not in {"market", "end_of_run"}:
             raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch_kind is outside its closed enum")
         _require_json_uint64(document, "dispatch_sequence", positive=True)
         _require_json_uint64(document, "outcome_count", positive=False)
+        attempt_count = _require_json_uint64(
+            document,
+            "authorization_attempt_count",
+            positive=False,
+        )
+        submission_count = _require_json_uint64(
+            document,
+            "submission_count",
+            positive=False,
+        )
+        if attempt_count not in {0, 1} or submission_count not in {0, 1}:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "completion frontier count exceeds one")
         expected_domain = "market_data" if document["dispatch_kind"] == "market" else "end_of_run"
         _require_json_root_key(
             document,
@@ -513,9 +537,63 @@ def _require_audit_owned_payload_values(
             "trigger_root_sha256",
             "batch_sha256",
             "ordered_outcome_ack_sha256s_sha256",
+            "ordered_submission_receipt_sha256s_sha256",
             "pre_ack_state_sha256",
         ):
             _require_json_digest(document, field)
+        attempt_document = document["authorization_attempt_outcome"]
+        attempt_sha256 = document["authorization_attempt_outcome_sha256"]
+        if attempt_count == 0:
+            if attempt_document is not None or attempt_sha256 is not None:
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "empty completion authorization frontier contains evidence",
+                )
+            authorized = False
+        else:
+            if type(attempt_sha256) is not str:
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "completion authorization digest is missing",
+                )
+            _require_json_digest(document, "authorization_attempt_outcome_sha256")
+            attempt = decode_submission_authorization_attempt_outcome_document(attempt_document)
+            if submission_authorization_attempt_outcome_digest(attempt).value != attempt_sha256:
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "completion authorization outcome digest conflicts",
+                )
+            if (
+                attempt.binding.reference.run_id.value != document["run_id"]
+                or attempt.dispatch_sequence != document["dispatch_sequence"]
+                or attempt.trigger_root_sha256.value != document["trigger_root_sha256"]
+            ):
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "completion authorization identity conflicts",
+                )
+            authorized = attempt.status is SubmissionAuthorizationAttemptStatus.AUTHORIZED
+        if authorized != (submission_count == 1):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "completion authorization receipt bijection fails",
+            )
+        if document["dispatch_kind"] == "end_of_run" and (
+            attempt_count != 0 or submission_count != 0
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "bounded-end completion contains submission")
+        if submission_count == 0:
+            empty_receipt_digest = ordered_digest_tuple(
+                ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN,
+                (),
+            )
+            if document["ordered_submission_receipt_sha256s_sha256"] != (
+                empty_receipt_digest.value
+            ):
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "empty completion receipt aggregate conflicts",
+                )
     elif record_kind is AuditRecordKind.RUN_TERMINAL:
         if _require_json_text(document, "terminal_kind") not in {"success", "failed"}:
             raise _fail(OutcomeCode.CONFLICTING_ID, "terminal_kind is outside its closed enum")

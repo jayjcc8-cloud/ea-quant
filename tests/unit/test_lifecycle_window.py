@@ -6,8 +6,13 @@ from pickle import dumps
 
 import pytest
 
-from ea.core.audit import AuditLogicalKey, AuditRecordKind, AuditSubjectKind
-from ea.core.execution_messages import Order
+from ea.core.audit import (
+    AuditLogicalKey,
+    AuditRecordKind,
+    AuditSubjectKind,
+    require_canonical_audit_payload,
+)
+from ea.core.execution_messages import Order, execution_request_digest
 from ea.core.historical_matching import HistoricalDispatchKind
 from ea.core.lifecycle import (
     ActiveDispatchWindow,
@@ -16,8 +21,10 @@ from ea.core.lifecycle import (
     _create_active_dispatch_window,
     active_dispatch_window_digest,
     canonical_active_dispatch_window_bytes,
+    canonical_dispatch_completed_audit_payload,
     canonical_submission_authorization_attempt_outcome_bytes,
     create_submission_authorization_attempt_outcome,
+    decode_submission_authorization_attempt_outcome_document,
     submission_authorization_attempt_outcome_digest,
 )
 from ea.core.market_data import MarketDataEnvelope
@@ -171,3 +178,85 @@ def test_authorization_attempt_outcome_rejects_status_evidence_mismatch() -> Non
             error_code=None,
         )
     assert raised.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_authorization_attempt_outcome_document_round_trips_strictly() -> None:
+    binding, order, _causal = _binding_and_order()
+    outcome = create_submission_authorization_attempt_outcome(
+        binding=binding,
+        dispatch_sequence=order.dispatch_sequence,
+        trigger_root_sha256=Sha256Digest("33" * 32),
+        order_id=order.order_id,
+        execution_request_sha256=execution_request_digest(order),
+        authorization_payload_sha256=Sha256Digest("55" * 32),
+        status=SubmissionAuthorizationAttemptStatus.DENIED,
+        logical_key=None,
+        acknowledgement_sha256=None,
+        error_code=OutcomeCode.RISK_REJECTED,
+    )
+    document = json.loads(canonical_submission_authorization_attempt_outcome_bytes(outcome))
+
+    recovered = decode_submission_authorization_attempt_outcome_document(document)
+    assert canonical_submission_authorization_attempt_outcome_bytes(recovered) == (
+        canonical_submission_authorization_attempt_outcome_bytes(outcome)
+    )
+    document["dispatch_sequence"] = True
+    with pytest.raises(LifecycleError):
+        decode_submission_authorization_attempt_outcome_document(document)
+
+
+def test_completion_v2_binds_authorized_attempt_and_exact_receipt() -> None:
+    _fixture, matcher, orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    receipt = matcher.submit(orders[1], causal_market_root=delayed, dispatch_sequence=8)
+    logical_key = AuditLogicalKey(
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+        AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
+        Sha256Digest("66" * 32),
+    )
+    attempt = create_submission_authorization_attempt_outcome(
+        binding=binding,
+        dispatch_sequence=8,
+        trigger_root_sha256=batch.trigger_root_sha256,
+        order_id=orders[1].order_id,
+        execution_request_sha256=execution_request_digest(orders[1]),
+        authorization_payload_sha256=Sha256Digest("55" * 32),
+        status=SubmissionAuthorizationAttemptStatus.AUTHORIZED,
+        logical_key=logical_key,
+        acknowledgement_sha256=Sha256Digest("77" * 32),
+        error_code=None,
+    )
+
+    payload = canonical_dispatch_completed_audit_payload(
+        binding=binding,
+        batch=batch,
+        outcome_acknowledgements=(),
+        pre_ack_state_sha256=Sha256Digest("88" * 32),
+        authorization_attempt_outcome=attempt,
+        submission_receipts=(receipt,),
+    )
+    document = json.loads(payload)
+    assert document["schema"] == "ea.audit-dispatch-completed.v2"
+    assert document["authorization_attempt_count"] == 1
+    assert document["authorization_attempt_outcome"]["status"] == "authorized"
+    assert document["submission_count"] == 1
+    assert (
+        require_canonical_audit_payload(
+            AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
+            payload,
+        )
+        == payload
+    )
+
+    with pytest.raises(LifecycleError, match="bijection"):
+        canonical_dispatch_completed_audit_payload(
+            binding=binding,
+            batch=batch,
+            outcome_acknowledgements=(),
+            pre_ack_state_sha256=Sha256Digest("88" * 32),
+            authorization_attempt_outcome=attempt,
+        )

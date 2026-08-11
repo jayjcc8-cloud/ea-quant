@@ -37,6 +37,7 @@ from ea.core.historical_matching import (
     HistoricalMatcherDispatchBatch,
     HistoricalSubmissionReceipt,
     historical_matcher_dispatch_batch_digest,
+    historical_submission_receipt_digest,
     runtime_root_order_key_document,
 )
 from ea.core.identity import Instrument
@@ -44,7 +45,7 @@ from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import PortfolioSnapshot
 from ea.core.risk import RiskStateSnapshot
-from ea.core.run import RunBinding, RunId, Sha256Digest
+from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 from ea.core.runtime import EndOfRunRoot, RuntimeRoot, RuntimeRootOrderKey
 
 ORDERED_INGRESS_DIGEST_DOMAIN = b"ea.audit-ordered-ingress-digests.v1\0"
@@ -585,6 +586,93 @@ def submission_authorization_attempt_outcome_digest(
         _AUTHORIZATION_ATTEMPT_OUTCOME_DOMAIN,
         canonical_submission_authorization_attempt_outcome_bytes(outcome),
     )
+
+
+def decode_submission_authorization_attempt_outcome_document(
+    document: object,
+) -> SubmissionAuthorizationAttemptOutcome:
+    expected_fields = {
+        "acknowledgement_sha256",
+        "authorization_payload_sha256",
+        "canonicalization",
+        "dispatch_sequence",
+        "error_code",
+        "execution_request_sha256",
+        "lineage_sha256",
+        "logical_key",
+        "manifest_sha256",
+        "order_id",
+        "run_id",
+        "schema",
+        "status",
+        "trigger_root_sha256",
+    }
+    if type(document) is not dict or set(document) != expected_fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization outcome document fields conflict")
+    if (
+        document["schema"] != "ea.submission-authorization-attempt-outcome.v1"
+        or document["canonicalization"] != "ea-canonical-json-v1"
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization outcome schema conflicts")
+    order_document = document["order_id"]
+    logical_document = document["logical_key"]
+    if type(order_document) is not dict or set(order_document) != {
+        "owner_kind",
+        "owner_sequence",
+        "run_id",
+    }:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization Order document conflicts")
+    if logical_document is not None and (
+        type(logical_document) is not dict
+        or set(logical_document) != {"record_kind", "subject_kind", "subject_sha256"}
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization logical key document conflicts")
+    try:
+        run_id = RunId(document["run_id"])
+        binding = RunBinding(
+            RunReference(run_id, Sha256Digest(document["lineage_sha256"])),
+            Sha256Digest(document["manifest_sha256"]),
+        )
+        order_id = EconomicId(
+            RunId(order_document["run_id"]),
+            EconomicOwnerKind(order_document["owner_kind"]),
+            order_document["owner_sequence"],
+        )
+        logical_key = (
+            None
+            if logical_document is None
+            else AuditLogicalKey(
+                AuditRecordKind(logical_document["record_kind"]),
+                AuditSubjectKind(logical_document["subject_kind"]),
+                Sha256Digest(logical_document["subject_sha256"]),
+            )
+        )
+        acknowledgement_sha256 = (
+            None
+            if document["acknowledgement_sha256"] is None
+            else Sha256Digest(document["acknowledgement_sha256"])
+        )
+        error_code = None if document["error_code"] is None else OutcomeCode(document["error_code"])
+        value = create_submission_authorization_attempt_outcome(
+            binding=binding,
+            dispatch_sequence=document["dispatch_sequence"],
+            trigger_root_sha256=Sha256Digest(document["trigger_root_sha256"]),
+            order_id=order_id,
+            execution_request_sha256=Sha256Digest(document["execution_request_sha256"]),
+            authorization_payload_sha256=Sha256Digest(document["authorization_payload_sha256"]),
+            status=SubmissionAuthorizationAttemptStatus(document["status"]),
+            logical_key=logical_key,
+            acknowledgement_sha256=acknowledgement_sha256,
+            error_code=error_code,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "authorization outcome document carriers conflict",
+        ) from error
+    if json.loads(canonical_submission_authorization_attempt_outcome_bytes(value)) != document:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization outcome is not canonical")
+    return value
 
 
 @final
@@ -1224,19 +1312,76 @@ def canonical_dispatch_completed_audit_payload(
     batch: HistoricalMatcherDispatchBatch,
     outcome_acknowledgements: tuple[AuditAppendAcknowledgement, ...],
     pre_ack_state_sha256: Sha256Digest,
+    authorization_attempt_outcome: SubmissionAuthorizationAttemptOutcome | None = None,
+    submission_receipts: tuple[HistoricalSubmissionReceipt, ...] = (),
 ) -> bytes:
     if (
         type(binding) is not RunBinding
         or type(batch) is not HistoricalMatcherDispatchBatch
         or type(outcome_acknowledgements) is not tuple
         or type(pre_ack_state_sha256) is not Sha256Digest
+        or (
+            authorization_attempt_outcome is not None
+            and type(authorization_attempt_outcome) is not SubmissionAuthorizationAttemptOutcome
+        )
+        or type(submission_receipts) is not tuple
+        or any(type(value) is not HistoricalSubmissionReceipt for value in submission_receipts)
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "completion payload carriers are invalid")
+    if len(submission_receipts) > 1:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "completion admits at most one submission receipt")
+    if authorization_attempt_outcome is not None and (
+        authorization_attempt_outcome.binding != binding
+        or authorization_attempt_outcome.dispatch_sequence != batch.dispatch_sequence
+        or authorization_attempt_outcome.trigger_root_sha256 != batch.trigger_root_sha256
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion authorization frontier conflicts")
+    authorized = (
+        authorization_attempt_outcome is not None
+        and authorization_attempt_outcome.status is SubmissionAuthorizationAttemptStatus.AUTHORIZED
+    )
+    if authorized != (len(submission_receipts) == 1):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion authorization receipt bijection fails")
+    if submission_receipts:
+        receipt = submission_receipts[0]
+        assert authorization_attempt_outcome is not None
+        if (
+            receipt.run_id != binding.reference.run_id
+            or receipt.dispatch_sequence != batch.dispatch_sequence
+            or receipt.causal_market_sha256 != batch.trigger_root_sha256
+            or receipt.order_id != authorization_attempt_outcome.order_id
+            or receipt.execution_request_sha256
+            != authorization_attempt_outcome.execution_request_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "completion submission receipt conflicts")
+    if batch.dispatch_kind is HistoricalDispatchKind.END_OF_RUN and (
+        authorization_attempt_outcome is not None or submission_receipts
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "bounded-end completion cannot submit")
     ack_digests = tuple(
         audit_append_acknowledgement_digest(value) for value in outcome_acknowledgements
     )
+    attempt_document = (
+        None
+        if authorization_attempt_outcome is None
+        else json.loads(
+            canonical_submission_authorization_attempt_outcome_bytes(authorization_attempt_outcome)
+        )
+    )
+    receipt_digests = tuple(
+        historical_submission_receipt_digest(value) for value in submission_receipts
+    )
     return _canonical_json(
         {
+            "authorization_attempt_count": (0 if authorization_attempt_outcome is None else 1),
+            "authorization_attempt_outcome": attempt_document,
+            "authorization_attempt_outcome_sha256": (
+                None
+                if authorization_attempt_outcome is None
+                else submission_authorization_attempt_outcome_digest(
+                    authorization_attempt_outcome
+                ).value
+            ),
             "batch_sha256": historical_matcher_dispatch_batch_digest(batch).value,
             "canonicalization": "ea-canonical-json-v1",
             "dispatch_kind": batch.dispatch_kind.value,
@@ -1248,7 +1393,12 @@ def canonical_dispatch_completed_audit_payload(
             ).value,
             "pre_ack_state_sha256": pre_ack_state_sha256.value,
             "run_id": binding.reference.run_id.value,
-            "schema": "ea.audit-dispatch-completed.v1",
+            "schema": "ea.audit-dispatch-completed.v2",
+            "submission_count": len(receipt_digests),
+            "ordered_submission_receipt_sha256s_sha256": ordered_digest_tuple(
+                ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN,
+                receipt_digests,
+            ).value,
             "trigger_root_key": runtime_root_order_key_document(batch.trigger_root_key),
             "trigger_root_sha256": batch.trigger_root_sha256.value,
         }
