@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -11,12 +12,13 @@ import pytest
 import ea.composition.run as run_composition
 from ea.composition.lifecycle import (
     Phase1HistoricalLifecycle,
+    _require_recovery_history_frontier,
     create_phase1_historical_lifecycle,
     recover_phase1_historical_lifecycle,
     recover_phase1_historical_terminal_evidence,
 )
 from ea.composition.run import RunCompositionError, admit_recovered_run
-from ea.core.lifecycle import CoordinatorPhase
+from ea.core.lifecycle import CoordinatorPhase, LifecycleError
 from ea.core.run import RunBinding, Sha256Digest
 from ea.data import create_phase1_historical_market_source_bridge
 from ea.execution.fact_authority import create_phase1_execution_fact_authority
@@ -75,6 +77,83 @@ class _UnusedDispatch:
     def resolve_active_issued_fact_dispatch(self, **values: Any) -> None:
         del values
         return None
+
+
+def _empty_runtime_for(matcher: Any) -> Any:
+    source = create_phase1_historical_market_source_bridge(
+        _source(
+            _row(
+                start="2026-01-02T09:30:00.000000Z",
+                end="2026-01-02T09:31:00.000000Z",
+                available="2026-01-02T09:31:00.000000Z",
+                sequence=0,
+            )
+        )
+    )
+    return create_phase1_historical_market_runtime(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        source=source,
+    )
+
+
+def test_recovery_frontier_rejects_future_matcher_dispatch() -> None:
+    _fixture, matcher, orders, _causal, delayed, _end = _system()
+    matcher.match_active_market_root(delayed, dispatch_sequence=1)
+    fact_history = create_phase1_execution_fact_authority(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        order_verifier=_RecoveryOrderVerifier(matcher, orders),
+        dispatch_verifier=_UnusedDispatch(matcher),
+    )
+
+    with pytest.raises(LifecycleError, match="dispatch frontier"):
+        _require_recovery_history_frontier(
+            records=(),
+            runtime=_empty_runtime_for(matcher),
+            matcher=matcher,
+            fact_authority=fact_history,
+            coordinator=None,
+        )
+
+
+def test_recovery_frontier_rejects_submission_without_durable_authorization() -> None:
+    _fixture, matcher, orders, causal, _delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fact_history = create_phase1_execution_fact_authority(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        order_verifier=_RecoveryOrderVerifier(matcher, orders),
+        dispatch_verifier=_UnusedDispatch(matcher),
+    )
+
+    with pytest.raises(LifecycleError, match="authorization evidence"):
+        _require_recovery_history_frontier(
+            records=(),
+            runtime=_empty_runtime_for(matcher),
+            matcher=matcher,
+            fact_authority=fact_history,
+            coordinator=None,
+        )
+
+
+def test_recovery_frontier_rejects_fact_history_without_matcher_ingress() -> None:
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    future_fact_history = SimpleNamespace(
+        ingresses=(object(),),
+        outcomes=(object(),),
+        fills=(),
+        projections=(),
+    )
+
+    with pytest.raises(LifecycleError, match="fact recovery history"):
+        _require_recovery_history_frontier(
+            records=(),
+            runtime=_empty_runtime_for(matcher),
+            matcher=matcher,
+            fact_authority=future_fact_history,  # type: ignore[arg-type]
+            coordinator=None,
+        )
 
 
 def test_recovery_composition_consumes_store_prefix_and_injected_histories(

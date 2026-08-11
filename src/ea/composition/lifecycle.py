@@ -6,16 +6,27 @@ from dataclasses import dataclass
 from typing import Protocol, final
 
 from ea.composition.run import AdmittedRecoveredRun
-from ea.core.audit import AuditAppendAcknowledgement, AuditAppendPort
+from ea.core.audit import (
+    AuditAppendAcknowledgement,
+    AuditAppendPort,
+    AuditRecord,
+    AuditRecordKind,
+    audit_acknowledgement_id,
+    audit_append_acknowledgement_digest,
+    create_audit_append_acknowledgement,
+)
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_identity import SourceNamespace
-from ea.core.execution_messages import ExecutionPolicyRef, FactProvenanceId
+from ea.core.execution_messages import ExecutionPolicyRef, FactProvenanceId, fill_digest
+from ea.core.execution_state import order_projection_snapshot_digest
 from ea.core.lifecycle import (
     GlobalHaltFreshnessPort,
     InstrumentGateFreshnessPort,
+    LifecycleError,
     PortfolioFreshnessPort,
     RiskFreshnessPort,
 )
+from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunBinding
 from ea.execution.fact_authority import (
     OrderResolutionVerifier,
@@ -71,6 +82,82 @@ class Phase1HistoricalLifecycle:
     def __post_init__(self) -> None:
         if self._seal is not _LIFECYCLE_SEAL:
             raise TypeError("historical lifecycle bundles are created only by composition")
+
+
+def _require_recovery_history_frontier(
+    *,
+    records: tuple[AuditRecord, ...],
+    runtime: Phase1HistoricalMarketRuntime,
+    matcher: Phase1HistoricalMatcher,
+    fact_authority: Phase1ExecutionFactAuthority,
+    coordinator: Phase1HistoricalLifecycleCoordinator | None,
+) -> None:
+    """Reject canonical inner histories that extend beyond durable recovery evidence."""
+    matcher_state = matcher.state
+    completed_sequence = len(runtime.trace_records)
+    expected_matcher_sequence = completed_sequence
+    if coordinator is not None:
+        active = coordinator._active
+        if active is not None and active.batch is not None:
+            expected_matcher_sequence = active.lease.dispatch_sequence
+    actual_matcher_sequence = matcher_state.last_new_dispatch_sequence or 0
+    if actual_matcher_sequence != expected_matcher_sequence:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "matcher recovery history extends beyond the durable dispatch frontier",
+        )
+
+    retained_authorizations = {
+        (
+            audit_acknowledgement_id(acknowledgement),
+            audit_append_acknowledgement_digest(acknowledgement),
+        )
+        for record in records
+        if record.record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+        for acknowledgement in (create_audit_append_acknowledgement(record),)
+    }
+    if any(
+        (receipt.audit_acknowledgement_id, receipt.audit_acknowledgement_sha256)
+        not in retained_authorizations
+        for receipt in matcher_state._submission_receipts
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "matcher submission history extends beyond durable authorization evidence",
+        )
+
+    processed_ingresses = fact_authority.ingresses
+    outcomes = fact_authority.outcomes
+    issued_ingresses = matcher_state.issued_ingresses
+    if (
+        len(processed_ingresses) != len(outcomes)
+        or len(processed_ingresses) > len(issued_ingresses)
+        or processed_ingresses != issued_ingresses[: len(processed_ingresses)]
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "fact recovery history extends beyond the matcher dispatch frontier",
+        )
+    if tuple(fill_digest(fill) for fill in fact_authority.fills) != tuple(
+        outcome.fill_sha256 for outcome in outcomes if outcome.fill_sha256 is not None
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "Fill recovery history extends beyond processing outcomes",
+        )
+    retained_projection_sha256s = {
+        outcome.projection_after_sha256
+        for outcome in outcomes
+        if outcome.projection_after_sha256 is not None
+    }
+    if any(
+        order_projection_snapshot_digest(projection) not in retained_projection_sha256s
+        for projection in fact_authority.projections
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "projection recovery history extends beyond processing outcomes",
+        )
 
 
 def create_phase1_historical_lifecycle(
@@ -212,6 +299,13 @@ def recover_phase1_historical_lifecycle(
         authorization=authorization,
         authorization_capability=authorization_capability,
     )
+    _require_recovery_history_frontier(
+        records=records,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=fact_authority,
+        coordinator=coordinator,
+    )
     # Coordinator recovery exact-retries every retained record through this
     # same store-bound audit authority before an authorization attempt can be
     # restored or activated.
@@ -258,7 +352,7 @@ def recover_phase1_historical_terminal_evidence(
         or fact_history.spec_set.identifier != matcher_history.spec_set.identifier
     ):
         raise TypeError("historical terminal recovery authority bindings conflict")
-    return recover_phase1_terminal_evidence(
+    terminal = recover_phase1_terminal_evidence(
         binding=binding,
         runtime=runtime,
         matcher=matcher_history,
@@ -266,3 +360,11 @@ def recover_phase1_historical_terminal_evidence(
         evidence_resolver=fact_history,
         records=records,
     )
+    _require_recovery_history_frontier(
+        records=records,
+        runtime=runtime,
+        matcher=matcher_history,
+        fact_authority=fact_history,
+        coordinator=None,
+    )
+    return terminal
