@@ -397,18 +397,24 @@ class RecoveredRun:
     """Reissued process-local capabilities for the same incomplete durable attempt."""
 
     __slots__ = (
+        "_admitted",
         "_authority",
         "audit",
         "manifest_sha256",
         "manifest_verification",
         "output",
+        "record_count",
+        "records",
         "reference",
     )
+    _admitted: bool
     _authority: _AttemptAuthority
     audit: AuditRunBinding
     manifest_sha256: Sha256Digest
     manifest_verification: ManifestVerificationCapability
     output: OutputRunBinding
+    record_count: int
+    records: tuple[AuditRecord, ...]
     reference: RunReference
 
     def __init__(
@@ -419,18 +425,27 @@ class RecoveredRun:
         audit: AuditRunBinding,
         output: OutputRunBinding,
         manifest_verification: ManifestVerificationCapability,
+        records: tuple[AuditRecord, ...],
     ) -> None:
         if seal is not _RECOVERED_SEAL:
             raise StoreError("recovered runs are store-issued")
+        object.__setattr__(self, "_admitted", False)
         object.__setattr__(self, "_authority", authority)
         object.__setattr__(self, "reference", authority.binding.reference)
         object.__setattr__(self, "manifest_sha256", authority.binding.manifest_sha256)
         object.__setattr__(self, "manifest_verification", manifest_verification)
         object.__setattr__(self, "audit", audit)
         object.__setattr__(self, "output", output)
+        object.__setattr__(self, "record_count", len(records))
+        object.__setattr__(self, "records", records)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("recovered run is immutable")
+
+    def _consume_for_admission(self) -> None:
+        if self._admitted:
+            raise StoreError("recovered run was already admitted")
+        object.__setattr__(self, "_admitted", True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -794,28 +809,39 @@ class LocalResultStore:
         ):
             raise StoreError("incomplete recovery classification is stale or foreign")
         record = self._record_for(verified._authority)
-        object.__setattr__(verified, "_consumed", True)
         authority = record.authority
         audit_capability = AuditCapability(_CAPABILITY_SEAL, authority)
         output_capability = OutputCapability(_CAPABILITY_SEAL, authority)
         manifest_capability = ManifestVerificationCapability(_CAPABILITY_SEAL, authority)
+        audit_binding = AuditRunBinding(
+            binding=authority.binding,
+            capability=audit_capability,
+            authority=authority,
+            seal=_BINDING_SEAL,
+            store=self,
+        )
+        from ea.experiments.audit import reopen_posix_audit_journal
+
+        journal = reopen_posix_audit_journal(audit_binding)
+        try:
+            records = journal.records
+        finally:
+            journal.close()
+        if len(records) != verified.record_count:
+            raise StoreError("incomplete recovery record prefix changed")
+        object.__setattr__(verified, "_consumed", True)
         return RecoveredRun(
             _RECOVERED_SEAL,
             authority=authority,
             manifest_verification=manifest_capability,
-            audit=AuditRunBinding(
-                binding=authority.binding,
-                capability=audit_capability,
-                authority=authority,
-                seal=_BINDING_SEAL,
-                store=self,
-            ),
+            audit=audit_binding,
             output=OutputRunBinding(
                 binding=authority.binding,
                 capability=output_capability,
                 authority=authority,
                 seal=_BINDING_SEAL,
             ),
+            records=records,
         )
 
     def recover_terminal_attempt(

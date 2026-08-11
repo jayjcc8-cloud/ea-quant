@@ -13,14 +13,16 @@ from typing import Protocol, cast
 
 from ea.config.settings import Settings
 from ea.core.audit import (
+    AuditRecord,
     AuditRecordKind,
     AuditSubjectKind,
     canonical_run_prepared_audit_payload,
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.numeric import OrderedFloat64Policy
-from ea.core.run import RunContractError, RunId, RunReference
+from ea.core.run import RunBinding, RunContractError, RunId, RunReference
 from ea.data.fingerprint import MarketDataSelection
+from ea.experiments.audit import PosixAuditJournal
 from ea.experiments.binding import (
     BoundAuditPort,
     BoundOutputPort,
@@ -49,12 +51,15 @@ from ea.experiments.store import (
     AuditRunBinding,
     LocalResultStore,
     PreparedRun,
+    RecoveredRun,
     RunIdProvider,
+    StoreError,
     VerifiedIncompleteRecoveryBinding,
     VerifiedTerminalRecoveryBinding,
 )
 
 _PREPARED_SEAL = object()
+_RECOVERED_ADMISSION_SEAL = object()
 _PREFLIGHT_SLOT = "_ea_reproducible_preflight_grant_v1"
 _MISSING = object()
 _is_preflight_seal: Callable[[object], bool]
@@ -303,6 +308,54 @@ class AdmittedRun:
             raise RunCompositionError("admitted numeric policy is not lineage-bound")
 
 
+class AdmittedRecoveredRun:
+    """One-use store-issued recovery prefix bound to its reopened audit port."""
+
+    __slots__ = ("_consumed", "audit", "binding", "records")
+    _consumed: bool
+    audit: BoundAuditPort
+    binding: RunBinding
+    records: tuple[AuditRecord, ...]
+
+    def __init__(
+        self,
+        seal: object,
+        *,
+        recovered: RecoveredRun,
+        audit: BoundAuditPort,
+    ) -> None:
+        if seal is not _RECOVERED_ADMISSION_SEAL or type(recovered) is not RecoveredRun:
+            raise RunCompositionError("recovery admission must consume store-issued evidence")
+        binding = RunBinding(recovered.reference, recovered.manifest_sha256)
+        if (
+            type(audit) is not BoundAuditPort
+            or audit.binding != binding
+            or type(recovered.records) is not tuple
+            or not recovered.records
+            or recovered.record_count != len(recovered.records)
+            or any(
+                type(record) is not AuditRecord or record.binding != binding
+                for record in recovered.records
+            )
+        ):
+            raise RunCompositionError("recovered prefix is not bound to one admitted audit port")
+        self._consumed = False
+        self.audit = audit
+        self.binding = binding
+        self.records = recovered.records
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if hasattr(self, name):
+            raise AttributeError("admitted recovery evidence is immutable")
+        object.__setattr__(self, name, value)
+
+    def _consume(self) -> tuple[RunBinding, BoundAuditPort, tuple[AuditRecord, ...]]:
+        if self._consumed:
+            raise RunCompositionError("recovery admission was already consumed")
+        object.__setattr__(self, "_consumed", True)
+        return self.binding, self.audit, self.records
+
+
 def prepare_reproducible_run(
     *,
     preflight: PreflightSession,
@@ -498,3 +551,30 @@ def admit_reproducible_run[StartResult](
         numeric=OrderedFloat64Policy(prepared.spec.runtime.numeric_policy),
     )
     return start(admitted)
+
+
+def admit_recovered_run(
+    recovered: RecoveredRun,
+    *,
+    audit_factory: AuditPortFactory,
+) -> AdmittedRecoveredRun:
+    """Bind one store-issued incomplete recovery prefix to its reopened journal."""
+    if type(recovered) is not RecoveredRun:
+        raise RunCompositionError("recovery admission requires an exact RecoveredRun")
+    if not callable(audit_factory):
+        raise RunCompositionError("recovery audit factory must be callable")
+    try:
+        recovered._consume_for_admission()
+    except StoreError as error:
+        raise RunCompositionError("recovered run was already admitted") from error
+    raw_audit = audit_factory(recovered.audit)
+    if type(raw_audit) is not PosixAuditJournal or raw_audit._authority is not recovered._authority:
+        if type(raw_audit) is PosixAuditJournal:
+            raw_audit.close()
+        raise RunCompositionError("recovery audit is not the store-bound reopened journal")
+    audit = BoundAuditPort(recovered.audit, raw_audit)
+    return AdmittedRecoveredRun(
+        _RECOVERED_ADMISSION_SEAL,
+        recovered=recovered,
+        audit=audit,
+    )

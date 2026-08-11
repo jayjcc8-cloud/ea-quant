@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, final
+from typing import Any, Protocol, cast, final
 
-from ea.core.audit import AuditAppendAcknowledgement, AuditAppendPort, AuditRecord
+from ea.composition.run import AdmittedRecoveredRun
+from ea.core.audit import AuditAppendAcknowledgement, AuditAppendPort
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import ExecutionPolicyRef, FactProvenanceId
@@ -27,6 +28,7 @@ from ea.execution.matcher import (
     create_phase1_historical_matcher,
 )
 from ea.runtime.authorization import (
+    HistoricalSubmissionAuthorizationAuthority,
     create_dormant_historical_submission_authorization_authority,
 )
 from ea.runtime.coordinator import (
@@ -70,7 +72,7 @@ class Phase1HistoricalLifecycle:
 def create_phase1_historical_lifecycle(
     *,
     binding: RunBinding,
-    prepared_acknowledgement: AuditAppendAcknowledgement | None,
+    prepared_acknowledgement: AuditAppendAcknowledgement,
     audit: AuditAppendPort,
     runtime: Phase1HistoricalMarketRuntime,
     spec_set: InstrumentExecutionSpecSet,
@@ -82,13 +84,10 @@ def create_phase1_historical_lifecycle(
     risk: RiskFreshnessPort,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
-    recovery_records: tuple[AuditRecord, ...] | None = None,
 ) -> Phase1HistoricalLifecycle:
     """Construct dormant authority, matcher, facts, coordinator, then activate once."""
-    if (recovery_records is None) != (type(prepared_acknowledgement) is AuditAppendAcknowledgement):
-        raise TypeError(
-            "fresh lifecycle construction requires exactly one prepared acknowledgement"
-        )
+    if type(prepared_acknowledgement) is not AuditAppendAcknowledgement:
+        raise TypeError("fresh lifecycle construction requires one prepared acknowledgement")
     authorization, preparation_capability, activation_seal = (
         create_dormant_historical_submission_authorization_authority(
             binding=binding,
@@ -123,46 +122,90 @@ def create_phase1_historical_lifecycle(
         order_verifier=order_issuance_verifier,
         dispatch_verifier=descendant,
     )
-    if recovery_records is None:
-        assert prepared_acknowledgement is not None
-        coordinator = create_phase1_lifecycle_coordinator(
-            binding=binding,
-            prepared_acknowledgement=prepared_acknowledgement,
-            audit=audit,
-            runtime=runtime,
-            matcher=matcher,
-            fact_authority=fact_authority,
-            evidence_resolver=fact_authority,
-            authorization=authorization,
-            authorization_capability=preparation_capability,
-        )
-    else:
-        coordinator = recover_phase1_lifecycle_coordinator(
-            binding=binding,
-            audit=audit,
-            runtime=runtime,
-            matcher=matcher,
-            fact_authority=fact_authority,
-            evidence_resolver=fact_authority,
-            records=recovery_records,
-            authorization=authorization,
-            authorization_capability=preparation_capability,
-        )
-        # Coordinator recovery exact-retries every retained record through this
-        # same audit authority before an authorization attempt can be restored
-        # or activated.  A crash-visible frame therefore cannot authorize an
-        # effect until fresh fsync/read-back acknowledgement has succeeded.
-        authorization.recover_attempts(
-            recovery_records,
-            orders=order_issuance_verifier,
-            submissions=matcher,
-            seal=activation_seal,
-        )
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        prepared_acknowledgement=prepared_acknowledgement,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=fact_authority,
+        evidence_resolver=fact_authority,
+        authorization=authorization,
+        authorization_capability=preparation_capability,
+    )
     try:
         authorization.activate(coordinator, seal=activation_seal)
     except Exception:
         # No partially constructed object has escaped this stack frame.
         raise
+    return Phase1HistoricalLifecycle(
+        _seal=_LIFECYCLE_SEAL,
+        coordinator=coordinator,
+        matcher=matcher,
+        fact_authority=fact_authority,
+        runtime=runtime,
+    )
+
+
+def recover_phase1_historical_lifecycle(
+    *,
+    recovery: AdmittedRecoveredRun,
+    runtime: Phase1HistoricalMarketRuntime,
+    matcher: Phase1HistoricalMatcher,
+    fact_authority: Phase1ExecutionFactAuthority,
+    authorization: HistoricalSubmissionAuthorizationAuthority,
+    authorization_capability: object,
+    activation_seal: object,
+    order_issuance_verifier: HistoricalLifecycleOrderVerifier,
+) -> Phase1HistoricalLifecycle:
+    """Consume one store-bound prefix and injected authoritative inner histories."""
+    if (
+        type(recovery) is not AdmittedRecoveredRun
+        or type(runtime) is not Phase1HistoricalMarketRuntime
+        or type(matcher) is not Phase1HistoricalMatcher
+        or type(fact_authority) is not Phase1ExecutionFactAuthority
+        or type(authorization) is not HistoricalSubmissionAuthorizationAuthority
+    ):
+        raise TypeError("historical lifecycle recovery requires exact authoritative carriers")
+    try:
+        matcher_dispatch = cast(Any, matcher._active_dispatch_verifier)
+        fact_dispatch = cast(Any, fact_authority._dispatch_verifier)
+        matcher_runtime = matcher_dispatch._runtime
+        descendant_runtime = fact_dispatch._runtime
+        descendant_matcher = fact_dispatch._matcher
+        if (
+            matcher._submission_authorization_verifier is not authorization
+            or matcher_runtime is not runtime
+            or matcher._order_issuance_verifier is not order_issuance_verifier
+            or fact_authority._order_verifier is not order_issuance_verifier
+            or descendant_runtime is not runtime
+            or descendant_matcher is not matcher
+        ):
+            raise TypeError("injected historical authority identities conflict")
+    except AttributeError as error:
+        raise TypeError("injected historical authority bindings are incomplete") from error
+    binding, audit, records = recovery._consume()
+    coordinator = recover_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=fact_authority,
+        evidence_resolver=fact_authority,
+        records=records,
+        authorization=authorization,
+        authorization_capability=authorization_capability,
+    )
+    # Coordinator recovery exact-retries every retained record through this
+    # same store-bound audit authority before an authorization attempt can be
+    # restored or activated.
+    authorization.recover_attempts(
+        records,
+        orders=order_issuance_verifier,
+        submissions=matcher,
+        seal=activation_seal,
+    )
+    authorization.activate(coordinator, seal=activation_seal)
     return Phase1HistoricalLifecycle(
         _seal=_LIFECYCLE_SEAL,
         coordinator=coordinator,

@@ -187,6 +187,7 @@ class PosixAuditJournal:
     __slots__ = (
         "_audit_fd",
         "_ack_cache",
+        "_authority",
         "_binding",
         "_closed",
         "_entries",
@@ -206,12 +207,14 @@ class PosixAuditJournal:
     def __init__(
         self,
         *,
+        authority: object,
         binding: RunBinding,
         audit_fd: int,
         journal_fd: int,
         journal_identity: tuple[int, int],
         ops: _AuditOps,
     ) -> None:
+        self._authority = authority
         self._binding = binding
         self._ack_cache: WeakValueDictionary[int, AuditAppendAcknowledgement] = (
             WeakValueDictionary()
@@ -671,6 +674,7 @@ def create_posix_audit_journal(
         ops.fsync(journal_fd)
         ops.fsync(audit_fd)
         journal = PosixAuditJournal(
+            authority=prepared._authority,
             binding=prepared.binding,
             audit_fd=audit_fd,
             journal_fd=journal_fd,
@@ -719,6 +723,7 @@ def reopen_posix_audit_journal(
         ):
             raise StoreError("reopened audit journal must be one regular 0600 file")
         journal = PosixAuditJournal(
+            authority=prepared._authority,
             binding=prepared.binding,
             audit_fd=audit_fd,
             journal_fd=journal_fd,

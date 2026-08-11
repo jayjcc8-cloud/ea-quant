@@ -4,10 +4,12 @@ from ea.composition.lifecycle import (
     HistoricalLifecycleOrderVerifier,
     Phase1HistoricalLifecycle,
     create_phase1_historical_lifecycle,
+    recover_phase1_historical_lifecycle,
 )
 
 __all__ = [
     "HistoricalLifecycleOrderVerifier",
     "Phase1HistoricalLifecycle",
     "create_phase1_historical_lifecycle",
+    "recover_phase1_historical_lifecycle",
 ]

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import ea.experiments.audit as audit_module
+from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.audit import (
     AuditContractError,
     AuditRecordKind,
@@ -276,12 +277,36 @@ def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(tmp_pat
     verified = recovered_store.verify_recovery_attempt(manifest)
     assert type(verified) is VerifiedIncompleteRecoveryBinding
     recovered = recovered_store.recover_incomplete_attempt(verified)
+    admitted_journals = []
+
+    def reopen_for_admission(binding: Any) -> Any:
+        journal = reopen_posix_audit_journal(binding)
+        admitted_journals.append(journal)
+        return journal
+
+    admitted = admit_recovered_run(
+        recovered,
+        audit_factory=reopen_for_admission,
+    )
+    with pytest.raises(RunCompositionError, match="already admitted"):
+        admit_recovered_run(recovered, audit_factory=reopen_for_admission)
+    assert len(admitted_journals) == 1
     reopened = reopen_posix_audit_journal(recovered.audit)
 
     assert recovered.reference == prepared.reference
+    assert recovered.record_count == 1
+    assert recovered.records[0].record_kind is AuditRecordKind.RUN_PREPARED
+    binding, admitted_audit, admitted_records = admitted._consume()
+    assert binding == recovered.audit.binding
+    assert admitted_audit.binding == binding
+    assert admitted_records == recovered.records
     assert len(reopened.records) == 1
+    with pytest.raises(RunCompositionError, match="already consumed"):
+        admitted._consume()
     with pytest.raises(StoreError, match="stale or foreign"):
         recovered_store.recover_incomplete_attempt(verified)
+    reopened.close()
+    admitted_journals[0].close()
 
 
 def test_recovery_refuses_a_live_writer_before_journal_adoption(tmp_path: Path) -> None:
