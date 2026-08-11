@@ -15,6 +15,7 @@ import ea.composition.run as run_composition
 from ea.composition.lifecycle import (
     ExecutionFactHistoryView,
     HistoricalMatcherHistoryView,
+    HistoricalRuntimeHistoryView,
     Phase1HistoricalLifecycle,
     Phase1HistoricalLifecycleCoordinatorFacade,
     _require_recovery_history_frontier,
@@ -472,6 +473,13 @@ def test_public_bundle_and_facade_reject_each_foreign_carrier() -> None:
             object(),  # type: ignore[arg-type]
             seal=lifecycle_composition._COORDINATOR_FACADE_SEAL,
         )
+    read_view_seal = lifecycle_composition._READ_VIEW_SEAL
+    with pytest.raises(TypeError, match="created only by composition"):
+        HistoricalMatcherHistoryView(object(), seal=read_view_seal)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="created only by composition"):
+        ExecutionFactHistoryView(object(), seal=read_view_seal)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="created only by composition"):
+        HistoricalRuntimeHistoryView(object(), seal=read_view_seal)  # type: ignore[arg-type]
 
 
 def test_recovered_durable_authorization_reopens_the_same_submission_window() -> None:

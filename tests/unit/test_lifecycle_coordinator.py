@@ -651,6 +651,48 @@ def test_staged_market_dispatch_retains_one_window_before_completion() -> None:
         coordinator.complete_active_dispatch(window)
 
 
+def test_every_staged_operation_rejects_reentrant_mutation() -> None:
+    _fixture, matcher, orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _Runtime(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    placeholder = cast(Any, object())
+    assert coordinator._mutation_lock.acquire(blocking=False)
+    try:
+        operations = (
+            coordinator.begin_next_dispatch,
+            coordinator.resume_active_dispatch,
+            lambda: coordinator.complete_active_dispatch(placeholder),
+            coordinator.retry_active_dispatch_completion,
+            coordinator.retry_terminalization,
+            lambda: coordinator.prepare_submission_authorization(
+                placeholder,
+                orders[0],
+                causal_market_root=delayed,
+                dispatch_sequence=1,
+            ),
+            lambda: coordinator.submit_authorized_order(placeholder, orders[0]),
+            coordinator.process_next_dispatch,
+            coordinator.retry_active_dispatch,
+        )
+        for operation in operations:
+            with pytest.raises(LifecycleError, match="reentrant"):
+                operation()
+    finally:
+        coordinator._mutation_lock.release()
+
+
 def test_fresh_construction_consumes_preverified_prepared_ack_without_append() -> None:
     _fixture, matcher, _orders, _causal, delayed, _end = _system()
     binding = RunBinding(
@@ -915,7 +957,7 @@ def test_terminal_after_runtime_retry_binds_latest_failing_chain_head() -> None:
     failing_record = audit.records[-1]
     assert failing_record.record_kind is AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
 
-    dispatch = coordinator.retry_active_dispatch()
+    dispatch = coordinator.retry_active_dispatch_completion()
     pre_terminal = coordinator.pre_terminal_state
 
     assert dispatch.runtime_acknowledged is True
@@ -1173,7 +1215,7 @@ def test_recovery_with_durable_completion_retries_only_runtime_acknowledgement()
         records=tuple(audit.records),
     )
     assert tuple(audit.retry_keys) == retained_keys
-    dispatch = recovered.retry_active_dispatch()
+    dispatch = recovered.retry_active_dispatch_completion()
 
     assert dispatch.runtime_acknowledged is True
     assert runtime.acknowledgement_calls == 2
