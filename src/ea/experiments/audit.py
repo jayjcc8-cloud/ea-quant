@@ -955,6 +955,26 @@ def reopen_posix_audit_journal(
             ops=ops,
         )
         journal._rescan(permit_torn_tail=True)
+        prepared_payload = canonical_run_prepared_audit_payload(prepared.binding)
+        if journal._entries:
+            first_record = journal._read_entry_record(journal._entries[0])
+            if (
+                first_record.record_kind is not AuditRecordKind.RUN_PREPARED
+                or first_record.subject_kind is not AuditSubjectKind.RUN_MANIFEST
+                or first_record.subject_sha256 != prepared.binding.manifest_sha256
+                or first_record.canonical_payload != prepared_payload
+            ):
+                journal._failed = True
+                raise _audit_error(
+                    OutcomeCode.CONFLICTING_ID,
+                    "audit journal does not begin with the exact run preparation",
+                )
+        journal.append(
+            record_kind=AuditRecordKind.RUN_PREPARED,
+            subject_kind=AuditSubjectKind.RUN_MANIFEST,
+            subject_sha256=prepared.binding.manifest_sha256,
+            canonical_payload=prepared_payload,
+        )
         audit_fd = None
         journal_fd = None
         return journal

@@ -21,6 +21,7 @@ from ea.core.audit import (
     audit_append_acknowledgement_digest,
     audit_chain_head,
     audit_subject_digest,
+    canonical_run_prepared_audit_payload,
 )
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import Sha256Digest
@@ -133,6 +134,22 @@ class _SettlementReadbackMismatchAuditOps(_PostFsyncFailureAuditOps):
             self.corrupt_next_read = False
             return value[:-1] + bytes((value[-1] ^ 1,))
         return value
+
+
+class _FirstFrameFailureAuditOps(_OsAuditOps):
+    def __init__(self, *, partial_frame: bool) -> None:
+        self.partial_frame = partial_frame
+        self.frame_write_started = False
+
+    def pwrite(self, journal_fd: int, data: memoryview, offset: int) -> int:
+        if offset < len(AUDIT_JOURNAL_PREAMBLE):
+            return super().pwrite(journal_fd, data, offset)
+        if not self.frame_write_started:
+            self.frame_write_started = True
+            if self.partial_frame:
+                prefix_length = max(1, len(data) // 2)
+                return super().pwrite(journal_fd, data[:prefix_length], offset)
+        raise OSError("injected first audit frame write failure")
 
 
 def test_fresh_journal_rejects_less_than_six_gib_free_before_creation(tmp_path: Path) -> None:
@@ -560,6 +577,44 @@ def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(
         recovered_store.recover_incomplete_attempt(verified)
     reopened.close()
     admitted_journals[0].close()
+
+
+@pytest.mark.parametrize("partial_frame", [False, True])
+def test_recovery_retries_run_prepared_after_empty_or_torn_first_frame(
+    tmp_path: Path,
+    partial_frame: bool,
+) -> None:
+    root = _root(tmp_path)
+    original_store = LocalResultStore(root)
+    prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = original_store.verify_manifest(prepared.manifest_verification)
+    with pytest.raises(AuditContractError, match="verified durability"):
+        create_posix_audit_journal(
+            prepared.audit,
+            _ops=_FirstFrameFailureAuditOps(partial_frame=partial_frame),
+        )
+    journal_path = root / str(RUN_UUID) / "audit" / "audit-v1.journal"
+    assert journal_path.read_bytes().startswith(AUDIT_JOURNAL_PREAMBLE)
+    assert (len(journal_path.read_bytes()) > len(AUDIT_JOURNAL_PREAMBLE)) is partial_frame
+    _release_simulated_process_writer(original_store, prepared)
+
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedIncompleteRecoveryBinding
+    assert verified.record_count == 1
+    recovered = recovered_store.recover_incomplete_attempt(verified)
+    journal = reopen_posix_audit_journal(recovered.audit)
+    records = journal.recovery_records
+
+    assert records.record_count == 1
+    prepared_record = records.record_at(0)
+    assert prepared_record.record_kind is AuditRecordKind.RUN_PREPARED
+    assert prepared_record.subject_kind is AuditSubjectKind.RUN_MANIFEST
+    assert prepared_record.subject_sha256 == recovered.audit.binding.manifest_sha256
+    assert prepared_record.canonical_payload == canonical_run_prepared_audit_payload(
+        recovered.audit.binding
+    )
+    journal.close()
 
 
 def test_recovery_refuses_a_live_writer_before_journal_adoption(tmp_path: Path) -> None:
