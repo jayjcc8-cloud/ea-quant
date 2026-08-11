@@ -7,6 +7,7 @@ import stat
 from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
+from sys import getsizeof
 from threading import Lock
 from typing import Protocol, final
 from weakref import WeakValueDictionary
@@ -43,6 +44,7 @@ AUDIT_JOURNAL_PREAMBLE = b"EA-AUDIT-V1\n"
 AUDIT_JOURNAL_NAME = "audit-v1.journal"
 MAX_AUDIT_JOURNAL_BYTES = 6 * 1024 * 1024 * 1024
 MIN_AUDIT_FILESYSTEM_FREE_BYTES = MAX_AUDIT_JOURNAL_BYTES
+MAX_AUDIT_INDEX_RESIDENT_BYTES = 256 * 1024 * 1024
 
 
 class _AuditOps(Protocol):
@@ -158,6 +160,26 @@ def _compact_logical_key(value: AuditLogicalKey) -> bytes:
     )
 
 
+def _entry_resident_bytes(entry: _JournalEntry) -> int:
+    return (
+        getsizeof(entry)
+        + getsizeof(entry.offset)
+        + getsizeof(entry.frame_length)
+        + getsizeof(entry.payload_length)
+        + getsizeof(entry.payload_sha256)
+        + getsizeof(entry.record_sha256)
+        + getsizeof(entry.chain_head_sha256)
+    )
+
+
+def _require_index_resident_budget(resident_bytes: int) -> None:
+    if resident_bytes > MAX_AUDIT_INDEX_RESIDENT_BYTES:
+        raise _audit_error(
+            OutcomeCode.OUT_OF_RANGE,
+            "audit reopen index exceeds the 256 MiB resident-memory bound",
+        )
+
+
 @final
 class PosixAuditJournal:
     """One serialized journal owner bound to an opaque prepared attempt."""
@@ -170,6 +192,7 @@ class PosixAuditJournal:
         "_entries",
         "_failed",
         "_index",
+        "_index_resident_bytes",
         "_journal_fd",
         "_journal_identity",
         "_lock",
@@ -200,7 +223,10 @@ class PosixAuditJournal:
         self._lock = Lock()
         self._entries: list[_JournalEntry] = []
         self._index: dict[bytes, int] = {}
-        self._recovered_sequences: set[int] = set()
+        self._recovered_sequences = bytearray()
+        self._index_resident_bytes = (
+            getsizeof(self._entries) + getsizeof(self._index) + getsizeof(self._recovered_sequences)
+        )
         self._verified_eof = len(AUDIT_JOURNAL_PREAMBLE)
         self._needs_rescan = False
         self._failed = False
@@ -290,6 +316,7 @@ class PosixAuditJournal:
             raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit journal preamble is invalid")
         entries: list[_JournalEntry] = []
         index: dict[bytes, int] = {}
+        resident_bytes = getsizeof(entries) + getsizeof(index) + getsizeof(bytearray())
         terminal = False
         offset = len(AUDIT_JOURNAL_PREAMBLE)
         torn_offset: int | None = None
@@ -357,17 +384,27 @@ class PosixAuditJournal:
                 )
             record_sha256 = audit_record_digest(record)
             chain_head_sha256 = audit_chain_head(record)
-            entries.append(
-                _JournalEntry(
-                    offset=frame_start,
-                    frame_length=offset - frame_start,
-                    payload_length=payload_length,
-                    payload_sha256=sha256(payload).digest(),
-                    record_sha256=bytes.fromhex(record_sha256.value),
-                    chain_head_sha256=bytes.fromhex(chain_head_sha256.value),
-                )
+            entry = _JournalEntry(
+                offset=frame_start,
+                frame_length=offset - frame_start,
+                payload_length=payload_length,
+                payload_sha256=sha256(payload).digest(),
+                record_sha256=bytes.fromhex(record_sha256.value),
+                chain_head_sha256=bytes.fromhex(chain_head_sha256.value),
             )
+            previous_container_bytes = getsizeof(entries) + getsizeof(index)
+            entries.append(entry)
             index[compact_key] = expected_sequence
+            resident_bytes += (
+                getsizeof(entries)
+                + getsizeof(index)
+                - previous_container_bytes
+                + _entry_resident_bytes(entry)
+                + getsizeof(compact_key)
+                + getsizeof(expected_sequence)
+                + 1
+            )
+            _require_index_resident_budget(resident_bytes)
             previous_record = record_sha256
             previous_chain = chain_head_sha256
             terminal = record.record_kind is AuditRecordKind.RUN_TERMINAL
@@ -391,7 +428,9 @@ class PosixAuditJournal:
             offset = torn_offset
         self._entries = entries
         self._index = index
-        self._recovered_sequences = set(range(1, len(entries) + 1))
+        recovered_sequences = bytearray(b"\x01") * len(entries)
+        self._recovered_sequences = recovered_sequences
+        self._index_resident_bytes = resident_bytes
         self._terminal = terminal
         self._verified_eof = offset
         self._needs_rescan = False
@@ -426,7 +465,10 @@ class PosixAuditJournal:
                         OutcomeCode.CONFLICTING_ID,
                         "audit logical retry conflicts with the original payload",
                     )
-                if existing_sequence in self._recovered_sequences:
+                if (
+                    existing_sequence <= len(self._recovered_sequences)
+                    and self._recovered_sequences[existing_sequence - 1]
+                ):
                     try:
                         self._ops.fsync(self._journal_fd)
                         record = self._read_entry_record(entry)
@@ -436,7 +478,7 @@ class PosixAuditJournal:
                             OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
                             "recovered audit frame did not revalidate",
                         ) from error
-                    self._recovered_sequences.remove(existing_sequence)
+                    self._recovered_sequences[existing_sequence - 1] = 0
                 else:
                     record = self._read_entry_record(entry)
                 acknowledgement = self._ack_cache.get(existing_sequence)
@@ -479,7 +521,8 @@ class PosixAuditJournal:
                             OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
                             "recovered audit frame did not revalidate",
                         ) from error
-                    self._recovered_sequences.discard(existing_sequence)
+                    if existing_sequence <= len(self._recovered_sequences):
+                        self._recovered_sequences[existing_sequence - 1] = 0
                     acknowledgement = create_audit_append_acknowledgement(record)
                     self._ack_cache[existing_sequence] = acknowledgement
                     return require_audit_acknowledgement(
@@ -518,6 +561,31 @@ class PosixAuditJournal:
                     OutcomeCode.OUT_OF_RANGE, "audit journal hard bound would be crossed"
                 )
             start = self._verified_eof
+            entry = _JournalEntry(
+                offset=start,
+                frame_length=len(frame),
+                payload_length=len(canonical_payload),
+                payload_sha256=sha256(canonical_payload).digest(),
+                record_sha256=bytes.fromhex(audit_record_digest(record).value),
+                chain_head_sha256=bytes.fromhex(audit_chain_head(record).value),
+            )
+            previous_container_bytes = getsizeof(self._entries) + getsizeof(self._index)
+            self._entries.append(entry)
+            self._index[compact_key] = record.record_id.owner_sequence
+            expanded_container_bytes = getsizeof(self._entries) + getsizeof(self._index)
+            self._entries.pop()
+            del self._index[compact_key]
+            retained_container_bytes = getsizeof(self._entries) + getsizeof(self._index)
+            self._index_resident_bytes += retained_container_bytes - previous_container_bytes
+            projected_resident_bytes = (
+                self._index_resident_bytes
+                + expanded_container_bytes
+                - retained_container_bytes
+                + _entry_resident_bytes(entry)
+                + getsizeof(compact_key)
+                + getsizeof(record.record_id.owner_sequence)
+            )
+            _require_index_resident_budget(projected_resident_bytes)
             try:
                 _write_all(self._ops, self._journal_fd, frame, start)
                 self._ops.fsync(self._journal_fd)
@@ -552,17 +620,9 @@ class PosixAuditJournal:
                 ) from error
             acknowledgement = create_audit_append_acknowledgement(record)
             self._ack_cache[record.record_id.owner_sequence] = acknowledgement
-            self._entries.append(
-                _JournalEntry(
-                    offset=start,
-                    frame_length=len(frame),
-                    payload_length=len(canonical_payload),
-                    payload_sha256=sha256(canonical_payload).digest(),
-                    record_sha256=bytes.fromhex(audit_record_digest(record).value),
-                    chain_head_sha256=bytes.fromhex(audit_chain_head(record).value),
-                )
-            )
+            self._entries.append(entry)
             self._index[compact_key] = record.record_id.owner_sequence
+            self._index_resident_bytes = projected_resident_bytes
             self._verified_eof += len(frame)
             self._terminal = record_kind is AuditRecordKind.RUN_TERMINAL
             return acknowledgement

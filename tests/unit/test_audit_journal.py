@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import ea.experiments.audit as audit_module
 from ea.core.audit import (
     AuditContractError,
     AuditRecordKind,
@@ -17,6 +18,7 @@ from ea.core.audit import (
     audit_chain_head,
     audit_subject_digest,
 )
+from ea.core.outcomes import OutcomeCode
 from ea.core.run import Sha256Digest
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
@@ -167,6 +169,49 @@ def test_reopen_reconstructs_exact_index_and_acknowledgement(tmp_path: Path) -> 
 
     assert len(reopened.records) == 2
     assert replay == acknowledgement
+
+
+def test_reopen_rejects_index_that_exceeds_resident_memory_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    monkeypatch.setattr(audit_module, "MAX_AUDIT_INDEX_RESIDENT_BYTES", 1)
+
+    with pytest.raises(AuditContractError, match="256 MiB") as captured:
+        reopen_posix_audit_journal(prepared.audit)
+
+    assert captured.value.code is OutcomeCode.OUT_OF_RANGE
+
+
+def test_append_rejects_projected_index_growth_before_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    path = root / str(RUN_UUID) / "audit" / "audit-v1.journal"
+    original_size = path.stat().st_size
+    monkeypatch.setattr(
+        audit_module,
+        "MAX_AUDIT_INDEX_RESIDENT_BYTES",
+        journal._index_resident_bytes,
+    )
+
+    with pytest.raises(AuditContractError, match="256 MiB"):
+        journal.append(
+            record_kind=AuditRecordKind.MATCHER_DISPATCH_BATCH,
+            subject_kind=AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+            subject_sha256=Sha256Digest("33" * 32),
+            canonical_payload=_batch_payload(),
+        )
+
+    assert path.stat().st_size == original_size
+    assert len(journal.records) == 1
 
 
 def test_reopen_truncates_only_the_incomplete_final_frame(tmp_path: Path) -> None:
