@@ -42,6 +42,7 @@ from ea.experiments.store import AuditRunBinding, StoreError
 AUDIT_JOURNAL_PREAMBLE = b"EA-AUDIT-V1\n"
 AUDIT_JOURNAL_NAME = "audit-v1.journal"
 MAX_AUDIT_JOURNAL_BYTES = 6 * 1024 * 1024 * 1024
+MIN_AUDIT_FILESYSTEM_FREE_BYTES = MAX_AUDIT_JOURNAL_BYTES
 
 
 class _AuditOps(Protocol):
@@ -56,6 +57,8 @@ class _AuditOps(Protocol):
     def fsync(self, descriptor: int) -> None: ...
 
     def fstat(self, descriptor: int) -> os.stat_result: ...
+
+    def fstatvfs(self, descriptor: int) -> os.statvfs_result: ...
 
     def ftruncate(self, descriptor: int, length: int) -> None: ...
 
@@ -89,6 +92,9 @@ class _OsAuditOps:
 
     def fstat(self, descriptor: int) -> os.stat_result:
         return os.fstat(descriptor)
+
+    def fstatvfs(self, descriptor: int) -> os.statvfs_result:
+        return os.fstatvfs(descriptor)
 
     def ftruncate(self, descriptor: int, length: int) -> None:
         os.ftruncate(descriptor, length)
@@ -590,6 +596,9 @@ def create_posix_audit_journal(
     journal_fd: int | None = None
     try:
         audit_fd, _ = prepared._store._open_audit_directory(prepared)
+        filesystem = ops.fstatvfs(audit_fd)
+        if filesystem.f_bavail * filesystem.f_frsize < MIN_AUDIT_FILESYSTEM_FREE_BYTES:
+            raise StoreError("audit filesystem has less than the required 6 GiB free")
         journal_fd = ops.create_journal(audit_fd)
         value = ops.fstat(journal_fd)
         if (

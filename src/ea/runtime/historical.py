@@ -39,6 +39,7 @@ HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN = b"ea.phase1-historical-runtime-trace.v1
 HISTORICAL_RUNTIME_PRODUCER_NAMESPACE = "runtime.phase1.historical"
 
 _MAX_UINT64 = (1 << 64) - 1
+_MAX_PHASE1_MARKET_RECORDS = 100_000
 _CLOCK_SEAL = object()
 _OFFER_SEAL = object()
 _PREPARED_SEAL = object()
@@ -1162,6 +1163,11 @@ def create_phase1_historical_market_runtime(
     port, binding = _require_source_port(source)
     if binding.profile != PHASE1_HISTORICAL_MARKET_PROFILE:
         raise _fail(OutcomeCode.CONFLICTING_ID, "historical source profile conflicts")
+    if binding.data_fingerprint.record_count > _MAX_PHASE1_MARKET_RECORDS:
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE,
+            "Phase 1 historical runtime exceeds the 100,000-record admission bound",
+        )
     if binding.data_fingerprint.record_count + 1 > _MAX_UINT64:
         raise _fail(
             OutcomeCode.OUT_OF_RANGE,

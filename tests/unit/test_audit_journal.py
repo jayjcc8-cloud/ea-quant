@@ -4,6 +4,8 @@ import json
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -18,6 +20,7 @@ from ea.core.audit import (
 from ea.core.run import Sha256Digest
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
+    _OsAuditOps,
     create_posix_audit_journal,
     reopen_posix_audit_journal,
 )
@@ -63,6 +66,22 @@ def _batch_payload() -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
+
+
+class _LowSpaceAuditOps(_OsAuditOps):
+    def fstatvfs(self, descriptor: int) -> Any:
+        del descriptor
+        return SimpleNamespace(f_bavail=1, f_frsize=1)
+
+
+def test_fresh_journal_rejects_less_than_six_gib_free_before_creation(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+
+    with pytest.raises(StoreError, match="6 GiB"):
+        create_posix_audit_journal(prepared.audit, _ops=_LowSpaceAuditOps())
+
+    assert not (root / str(RUN_UUID) / "audit" / "audit-v1.journal").exists()
 
 
 def test_fresh_journal_is_prepared_before_general_append_and_exact_retry(tmp_path: Path) -> None:
