@@ -17,9 +17,25 @@ from ea.core.audit import (
     create_audit_append_acknowledgement,
 )
 from ea.core.execution import InstrumentExecutionSpecSet
-from ea.core.execution_identity import SourceNamespace
-from ea.core.execution_messages import ExecutionPolicyRef, FactProvenanceId, fill_digest
-from ea.core.execution_state import order_projection_snapshot_digest
+from ea.core.execution_identity import EconomicId, IngressIdentity, SourceNamespace
+from ea.core.execution_messages import (
+    ExecutionFact,
+    ExecutionFactIngress,
+    ExecutionPolicyRef,
+    FactProvenanceId,
+    Fill,
+    fill_digest,
+)
+from ea.core.execution_state import (
+    ExecutionFactProcessingOutcome,
+    OrderProjectionSnapshot,
+    order_projection_snapshot_digest,
+)
+from ea.core.historical_matching import (
+    HistoricalMatcherDispatchBatch,
+    HistoricalMatcherState,
+    HistoricalSubmissionReceipt,
+)
 from ea.core.lifecycle import (
     GlobalHaltFreshnessPort,
     InstrumentGateFreshnessPort,
@@ -28,7 +44,7 @@ from ea.core.lifecycle import (
     RiskFreshnessPort,
 )
 from ea.core.outcomes import OutcomeCode
-from ea.core.run import RunBinding
+from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.execution.fact_authority import (
     OrderResolutionVerifier,
     Phase1ExecutionFactAuthority,
@@ -59,6 +75,7 @@ from ea.runtime.matcher import (
 )
 
 _LIFECYCLE_SEAL = object()
+_READ_VIEW_SEAL = object()
 
 
 class HistoricalLifecycleOrderVerifier(
@@ -70,15 +87,183 @@ class HistoricalLifecycleOrderVerifier(
 
 
 @final
+class HistoricalMatcherHistoryView:
+    """Read-only matcher evidence without submission or dispatch mutation."""
+
+    __slots__ = ("__matcher",)
+
+    def __init__(self, matcher: Phase1HistoricalMatcher, *, seal: object) -> None:
+        if seal is not _READ_VIEW_SEAL or type(matcher) is not Phase1HistoricalMatcher:
+            raise TypeError("matcher history views are created only by composition")
+        self.__matcher = matcher
+
+    @property
+    def run_id(self) -> RunId:
+        return self.__matcher.run_id
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self.__matcher.spec_set
+
+    @property
+    def source_namespace(self) -> SourceNamespace:
+        return self.__matcher.source_namespace
+
+    @property
+    def execution_policy(self) -> ExecutionPolicyRef:
+        return self.__matcher.execution_policy
+
+    @property
+    def provenance_id(self) -> FactProvenanceId:
+        return self.__matcher.provenance_id
+
+    @property
+    def state(self) -> HistoricalMatcherState:
+        return self.__matcher.state
+
+    def resolve_dispatch_batch(
+        self,
+        *,
+        dispatch_sequence: int,
+        trigger_root_sha256: Sha256Digest,
+    ) -> HistoricalMatcherDispatchBatch | None:
+        return self.__matcher.resolve_dispatch_batch(
+            dispatch_sequence=dispatch_sequence,
+            trigger_root_sha256=trigger_root_sha256,
+        )
+
+    def resolve_submission_receipt(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> HistoricalSubmissionReceipt | None:
+        return self.__matcher.resolve_submission_receipt(
+            order_id=order_id,
+            execution_request_sha256=execution_request_sha256,
+        )
+
+
+@final
+class ExecutionFactHistoryView:
+    """Read-only fact history and exact evidence resolvers."""
+
+    __slots__ = ("__authority",)
+
+    def __init__(self, authority: Phase1ExecutionFactAuthority, *, seal: object) -> None:
+        if seal is not _READ_VIEW_SEAL or type(authority) is not Phase1ExecutionFactAuthority:
+            raise TypeError("fact history views are created only by composition")
+        self.__authority = authority
+
+    @property
+    def run_id(self) -> RunId:
+        return self.__authority.run_id
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self.__authority.spec_set
+
+    @property
+    def ingresses(self) -> tuple[ExecutionFactIngress, ...]:
+        return self.__authority.ingresses
+
+    @property
+    def outcomes(self) -> tuple[ExecutionFactProcessingOutcome, ...]:
+        return self.__authority.outcomes
+
+    @property
+    def first_facts(self) -> tuple[ExecutionFact, ...]:
+        return self.__authority.first_facts
+
+    @property
+    def fills(self) -> tuple[Fill, ...]:
+        return self.__authority.fills
+
+    @property
+    def projections(self) -> tuple[OrderProjectionSnapshot, ...]:
+        return self.__authority.projections
+
+    def resolve_processing_outcome(
+        self,
+        *,
+        ingress_identity: IngressIdentity,
+        ingress_sha256: Sha256Digest,
+    ) -> ExecutionFactProcessingOutcome | None:
+        return self.__authority.resolve_processing_outcome(
+            ingress_identity=ingress_identity,
+            ingress_sha256=ingress_sha256,
+        )
+
+    def resolve_fill(
+        self,
+        *,
+        fill_id: EconomicId,
+        fill_sha256: Sha256Digest,
+    ) -> Fill | None:
+        return self.__authority.resolve_fill(fill_id=fill_id, fill_sha256=fill_sha256)
+
+    def resolve_projection_after(
+        self,
+        *,
+        order_id: EconomicId,
+        projection_sha256: Sha256Digest,
+    ) -> OrderProjectionSnapshot | None:
+        return self.__authority.resolve_projection_after(
+            order_id=order_id,
+            projection_sha256=projection_sha256,
+        )
+
+
+@final
+class HistoricalRuntimeHistoryView:
+    """Read-only runtime trace without pop or acknowledgement capability."""
+
+    __slots__ = ("__runtime",)
+
+    def __init__(self, runtime: Phase1HistoricalMarketRuntime, *, seal: object) -> None:
+        if seal is not _READ_VIEW_SEAL or type(runtime) is not Phase1HistoricalMarketRuntime:
+            raise TypeError("runtime history views are created only by composition")
+        self.__runtime = runtime
+
+    @property
+    def run_id(self) -> RunId:
+        return self.__runtime.run_id
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self.__runtime.spec_set
+
+    @property
+    def committed_event_count(self) -> int:
+        return self.__runtime.committed_event_count
+
+    @property
+    def next_dispatch_sequence(self) -> int | None:
+        return self.__runtime.next_dispatch_sequence
+
+    @property
+    def terminal_acknowledged(self) -> bool:
+        return self.__runtime.terminal_acknowledged
+
+    @property
+    def trace_records(self) -> tuple[bytes, ...]:
+        return self.__runtime.trace_records
+
+    @property
+    def trace_digest(self) -> Sha256Digest:
+        return self.__runtime.trace_digest
+
+
+@final
 @dataclass(frozen=True, slots=True)
 class Phase1HistoricalLifecycle:
     """Immutable public bundle published only after authorization activation."""
 
     _seal: object
     coordinator: Phase1HistoricalLifecycleCoordinator
-    matcher: Phase1HistoricalMatcher
-    fact_authority: Phase1ExecutionFactAuthority
-    runtime: Phase1HistoricalMarketRuntime
+    matcher: HistoricalMatcherHistoryView
+    fact_authority: ExecutionFactHistoryView
+    runtime: HistoricalRuntimeHistoryView
 
     def __post_init__(self) -> None:
         if self._seal is not _LIFECYCLE_SEAL:
@@ -233,9 +418,9 @@ def create_phase1_historical_lifecycle(
     return Phase1HistoricalLifecycle(
         _seal=_LIFECYCLE_SEAL,
         coordinator=coordinator,
-        matcher=matcher,
-        fact_authority=fact_authority,
-        runtime=runtime,
+        matcher=HistoricalMatcherHistoryView(matcher, seal=_READ_VIEW_SEAL),
+        fact_authority=ExecutionFactHistoryView(fact_authority, seal=_READ_VIEW_SEAL),
+        runtime=HistoricalRuntimeHistoryView(runtime, seal=_READ_VIEW_SEAL),
     )
 
 
@@ -320,9 +505,9 @@ def recover_phase1_historical_lifecycle(
     return Phase1HistoricalLifecycle(
         _seal=_LIFECYCLE_SEAL,
         coordinator=coordinator,
-        matcher=matcher,
-        fact_authority=fact_authority,
-        runtime=runtime,
+        matcher=HistoricalMatcherHistoryView(matcher, seal=_READ_VIEW_SEAL),
+        fact_authority=ExecutionFactHistoryView(fact_authority, seal=_READ_VIEW_SEAL),
+        runtime=HistoricalRuntimeHistoryView(runtime, seal=_READ_VIEW_SEAL),
     )
 
 

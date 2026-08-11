@@ -12,6 +12,8 @@ import pytest
 
 import ea.composition.run as run_composition
 from ea.composition.lifecycle import (
+    ExecutionFactHistoryView,
+    HistoricalMatcherHistoryView,
     Phase1HistoricalLifecycle,
     _require_recovery_history_frontier,
     create_phase1_historical_lifecycle,
@@ -375,9 +377,14 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     )
 
     assert lifecycle.coordinator.state.phase is CoordinatorPhase.ADMITTED
-    assert lifecycle.matcher is not matcher
-    assert lifecycle.fact_authority is not fact_history
+    assert type(lifecycle.matcher) is HistoricalMatcherHistoryView
+    assert type(lifecycle.fact_authority) is ExecutionFactHistoryView
     assert lifecycle.matcher.state == matcher.state
+    assert not hasattr(lifecycle.matcher, "submit")
+    assert not hasattr(lifecycle.matcher, "match_active_market_root")
+    assert not hasattr(lifecycle.fact_authority, "process_ingress")
+    assert not hasattr(lifecycle.runtime, "pop")
+    assert not hasattr(lifecycle.runtime, "acknowledge")
     assert admitted_journals[0].records == tuple(admitted.records)
     recovery_parameters = signature(recover_phase1_historical_lifecycle).parameters
     assert "authorization" not in recovery_parameters
@@ -397,7 +404,7 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
             coordinator=lifecycle.coordinator,
             matcher=lifecycle.matcher,
             fact_authority=lifecycle.fact_authority,
-            runtime=runtime,
+            runtime=lifecycle.runtime,
         )
     with pytest.raises(TypeError, match="prepared acknowledgement"):
         create_phase1_historical_lifecycle(
