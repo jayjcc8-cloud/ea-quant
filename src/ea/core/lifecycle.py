@@ -19,7 +19,12 @@ from ea.core.audit import (
     require_audit_acknowledgement,
 )
 from ea.core.execution import InstrumentExecutionSpecSet
-from ea.core.execution_identity import EconomicId, IngressIdentity, SourceNamespace
+from ea.core.execution_identity import (
+    EconomicId,
+    EconomicOwnerKind,
+    IngressIdentity,
+    SourceNamespace,
+)
 from ea.core.execution_messages import ExecutionFactIngress, Fill, Order
 from ea.core.execution_state import (
     ExecutionFactProcessingOutcome,
@@ -45,6 +50,7 @@ from ea.core.runtime import EndOfRunRoot, RuntimeRoot, RuntimeRootOrderKey
 ORDERED_INGRESS_DIGEST_DOMAIN = b"ea.audit-ordered-ingress-digests.v1\0"
 ORDERED_OUTCOME_ACK_DIGEST_DOMAIN = b"ea.audit-ordered-outcome-ack-digests.v1\0"
 ORDERED_HANDOFF_DIGEST_DOMAIN = b"ea.coordinator-ordered-handoff-digests.v1\0"
+ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN = b"ea.coordinator-ordered-submission-receipt-digests.v1\0"
 
 _STATE_DOMAIN = b"ea.coordinator-state.v1\0"
 _PRE_TERMINAL_STATE_DOMAIN = b"ea.coordinator-pre-terminal-state.v1\0"
@@ -52,6 +58,8 @@ _TERMINAL_STATE_DOMAIN = b"ea.coordinator-terminal-state.v1\0"
 _HANDOFF_DOMAIN = b"ea.coordinator-audited-fact-handoff.v1\0"
 _DISPATCH_OUTCOME_DOMAIN = b"ea.coordinator-dispatch-outcome.v1\0"
 _TERMINAL_OUTCOME_DOMAIN = b"ea.coordinator-terminal-outcome.v1\0"
+_ACTIVE_DISPATCH_WINDOW_DOMAIN = b"ea.coordinator-active-dispatch-window.v1\0"
+_AUTHORIZATION_ATTEMPT_OUTCOME_DOMAIN = b"ea.submission-authorization-attempt-outcome.v1\0"
 _MAX_UINT64 = (1 << 64) - 1
 _VALUE_SEAL = object()
 
@@ -116,6 +124,21 @@ class CoordinatorPhase(StrEnum):
 
 class CoordinatorTerminalKind(StrEnum):
     SUCCESS = "success"
+    FAILED = "failed"
+
+
+class ActiveDispatchWindowStage(StrEnum):
+    OPEN = "open"
+    COMPLETION_FROZEN = "completion_frozen"
+    COMPLETION_ACKNOWLEDGED = "completion_acknowledged"
+    COMPLETED = "completed"
+
+
+class SubmissionAuthorizationAttemptStatus(StrEnum):
+    DENIED = "denied"
+    UNRESOLVED = "unresolved"
+    AUTHORIZED = "authorized"
+    BURNED = "burned"
     FAILED = "failed"
 
 
@@ -188,6 +211,14 @@ class HistoricalMatcherPort(Protocol):
         order_id: EconomicId,
         execution_request_sha256: Sha256Digest,
     ) -> HistoricalSubmissionReceipt | None: ...
+
+    def submit(
+        self,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+    ) -> HistoricalSubmissionReceipt: ...
 
 
 class ExecutionFactAuthorityPort(Protocol):
@@ -296,6 +327,264 @@ class SubmissionAuthorizationPreparationPort(Protocol):
         dispatch_sequence: int,
         capability: object,
     ) -> AuditAppendAcknowledgement: ...
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ActiveDispatchWindow:
+    binding: RunBinding
+    coordinator_state_version: int
+    dispatch_kind: HistoricalDispatchKind
+    dispatch_sequence: int
+    trigger_root_key: RuntimeRootOrderKey
+    trigger_root_sha256: Sha256Digest
+    batch_sha256: Sha256Digest
+    batch_ack_sha256: Sha256Digest
+    handoff_count: int
+    ordered_handoff_sha256s_sha256: Sha256Digest
+    audited_handoff_chain_head_sha256: Sha256Digest
+    authorization_allowed: bool
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("active dispatch windows are created only by the coordinator")
+
+    def __copy__(self) -> ActiveDispatchWindow:
+        raise TypeError("active dispatch windows cannot be copied")
+
+    def __deepcopy__(self, memo: dict[int, object]) -> ActiveDispatchWindow:
+        del memo
+        raise TypeError("active dispatch windows cannot be copied")
+
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        raise TypeError("active dispatch windows cannot be serialized")
+
+
+def _create_active_dispatch_window(
+    *,
+    binding: RunBinding,
+    coordinator_state_version: int,
+    dispatch_kind: HistoricalDispatchKind,
+    dispatch_sequence: int,
+    trigger_root_key: RuntimeRootOrderKey,
+    trigger_root_sha256: Sha256Digest,
+    batch_sha256: Sha256Digest,
+    batch_ack_sha256: Sha256Digest,
+    handoff_sha256s: tuple[Sha256Digest, ...],
+    audited_handoff_chain_head_sha256: Sha256Digest,
+    authorization_allowed: bool,
+) -> ActiveDispatchWindow:
+    if (
+        type(binding) is not RunBinding
+        or type(coordinator_state_version) is not int
+        or type(dispatch_kind) is not HistoricalDispatchKind
+        or type(dispatch_sequence) is not int
+        or type(trigger_root_key) is not RuntimeRootOrderKey
+        or type(trigger_root_sha256) is not Sha256Digest
+        or type(batch_sha256) is not Sha256Digest
+        or type(batch_ack_sha256) is not Sha256Digest
+        or type(handoff_sha256s) is not tuple
+        or any(type(value) is not Sha256Digest for value in handoff_sha256s)
+        or type(audited_handoff_chain_head_sha256) is not Sha256Digest
+        or type(authorization_allowed) is not bool
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "active dispatch window carriers are invalid")
+    if not 1 <= coordinator_state_version <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "window state version is outside uint64")
+    if not 1 <= dispatch_sequence <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "window dispatch sequence is outside uint64")
+    if authorization_allowed and dispatch_kind is not HistoricalDispatchKind.MARKET:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "bounded-end window cannot authorize")
+    value = object.__new__(ActiveDispatchWindow)
+    for name, field in {
+        "binding": binding,
+        "coordinator_state_version": coordinator_state_version,
+        "dispatch_kind": dispatch_kind,
+        "dispatch_sequence": dispatch_sequence,
+        "trigger_root_key": trigger_root_key,
+        "trigger_root_sha256": trigger_root_sha256,
+        "batch_sha256": batch_sha256,
+        "batch_ack_sha256": batch_ack_sha256,
+        "handoff_count": len(handoff_sha256s),
+        "ordered_handoff_sha256s_sha256": ordered_digest_tuple(
+            ORDERED_HANDOFF_DIGEST_DOMAIN,
+            handoff_sha256s,
+        ),
+        "audited_handoff_chain_head_sha256": audited_handoff_chain_head_sha256,
+        "authorization_allowed": authorization_allowed,
+    }.items():
+        object.__setattr__(value, name, field)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    return value
+
+
+def canonical_active_dispatch_window_bytes(window: ActiveDispatchWindow) -> bytes:
+    if type(window) is not ActiveDispatchWindow or window._seal is not _VALUE_SEAL:
+        raise _fail(OutcomeCode.INVALID_TYPE, "active dispatch window must be coordinator-issued")
+    binding = window.binding
+    return _canonical_json(
+        {
+            "audited_handoff_chain_head_sha256": (window.audited_handoff_chain_head_sha256.value),
+            "authorization_allowed": window.authorization_allowed,
+            "batch_ack_sha256": window.batch_ack_sha256.value,
+            "batch_sha256": window.batch_sha256.value,
+            "canonicalization": "ea-canonical-json-v1",
+            "coordinator_state_version": window.coordinator_state_version,
+            "dispatch_kind": window.dispatch_kind.value,
+            "dispatch_sequence": window.dispatch_sequence,
+            "handoff_count": window.handoff_count,
+            "lineage_sha256": binding.reference.lineage_sha256.value,
+            "manifest_sha256": binding.manifest_sha256.value,
+            "ordered_handoff_sha256s_sha256": (window.ordered_handoff_sha256s_sha256.value),
+            "run_id": binding.reference.run_id.value,
+            "schema": "ea.coordinator-active-dispatch-window.v1",
+            "trigger_root_key": runtime_root_order_key_document(window.trigger_root_key),
+            "trigger_root_sha256": window.trigger_root_sha256.value,
+        }
+    )
+
+
+def active_dispatch_window_digest(window: ActiveDispatchWindow) -> Sha256Digest:
+    return _framed_digest(
+        _ACTIVE_DISPATCH_WINDOW_DOMAIN,
+        canonical_active_dispatch_window_bytes(window),
+    )
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class SubmissionAuthorizationAttemptOutcome:
+    binding: RunBinding
+    dispatch_sequence: int
+    trigger_root_sha256: Sha256Digest
+    order_id: EconomicId
+    execution_request_sha256: Sha256Digest
+    authorization_payload_sha256: Sha256Digest
+    status: SubmissionAuthorizationAttemptStatus
+    logical_key: AuditLogicalKey | None
+    acknowledgement_sha256: Sha256Digest | None
+    error_code: OutcomeCode | None
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("authorization attempt outcomes are created only by their factory")
+
+
+def create_submission_authorization_attempt_outcome(
+    *,
+    binding: RunBinding,
+    dispatch_sequence: int,
+    trigger_root_sha256: Sha256Digest,
+    order_id: EconomicId,
+    execution_request_sha256: Sha256Digest,
+    authorization_payload_sha256: Sha256Digest,
+    status: SubmissionAuthorizationAttemptStatus,
+    logical_key: AuditLogicalKey | None,
+    acknowledgement_sha256: Sha256Digest | None,
+    error_code: OutcomeCode | None,
+) -> SubmissionAuthorizationAttemptOutcome:
+    if (
+        type(binding) is not RunBinding
+        or type(dispatch_sequence) is not int
+        or type(trigger_root_sha256) is not Sha256Digest
+        or type(order_id) is not EconomicId
+        or type(execution_request_sha256) is not Sha256Digest
+        or type(authorization_payload_sha256) is not Sha256Digest
+        or type(status) is not SubmissionAuthorizationAttemptStatus
+        or (logical_key is not None and type(logical_key) is not AuditLogicalKey)
+        or (acknowledgement_sha256 is not None and type(acknowledgement_sha256) is not Sha256Digest)
+        or (error_code is not None and type(error_code) is not OutcomeCode)
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "authorization attempt carriers are invalid")
+    if not 1 <= dispatch_sequence <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "authorization dispatch sequence is outside uint64")
+    if (
+        order_id.run_id != binding.reference.run_id
+        or order_id.owner_kind is not EconomicOwnerKind.EXECUTION_ORDER
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization Order identity conflicts")
+    if logical_key is not None and (
+        logical_key.record_kind is not AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+        or logical_key.subject_kind is not AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization logical key conflicts")
+    expected_presence = {
+        SubmissionAuthorizationAttemptStatus.DENIED: (False, False, True),
+        SubmissionAuthorizationAttemptStatus.UNRESOLVED: (True, False, True),
+        SubmissionAuthorizationAttemptStatus.AUTHORIZED: (True, True, False),
+        SubmissionAuthorizationAttemptStatus.BURNED: (True, True, True),
+        SubmissionAuthorizationAttemptStatus.FAILED: (True, False, True),
+    }[status]
+    actual_presence = (
+        logical_key is not None,
+        acknowledgement_sha256 is not None,
+        error_code is not None,
+    )
+    if actual_presence != expected_presence:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization outcome status evidence conflicts")
+    value = object.__new__(SubmissionAuthorizationAttemptOutcome)
+    for name, field in {
+        "binding": binding,
+        "dispatch_sequence": dispatch_sequence,
+        "trigger_root_sha256": trigger_root_sha256,
+        "order_id": order_id,
+        "execution_request_sha256": execution_request_sha256,
+        "authorization_payload_sha256": authorization_payload_sha256,
+        "status": status,
+        "logical_key": logical_key,
+        "acknowledgement_sha256": acknowledgement_sha256,
+        "error_code": error_code,
+    }.items():
+        object.__setattr__(value, name, field)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    return value
+
+
+def canonical_submission_authorization_attempt_outcome_bytes(
+    outcome: SubmissionAuthorizationAttemptOutcome,
+) -> bytes:
+    if (
+        type(outcome) is not SubmissionAuthorizationAttemptOutcome
+        or outcome._seal is not _VALUE_SEAL
+    ):
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "authorization attempt outcome must be factory-issued",
+        )
+    binding = outcome.binding
+    return _canonical_json(
+        {
+            "acknowledgement_sha256": (
+                None
+                if outcome.acknowledgement_sha256 is None
+                else outcome.acknowledgement_sha256.value
+            ),
+            "authorization_payload_sha256": outcome.authorization_payload_sha256.value,
+            "canonicalization": "ea-canonical-json-v1",
+            "dispatch_sequence": outcome.dispatch_sequence,
+            "error_code": None if outcome.error_code is None else outcome.error_code.value,
+            "execution_request_sha256": outcome.execution_request_sha256.value,
+            "lineage_sha256": binding.reference.lineage_sha256.value,
+            "logical_key": (
+                None if outcome.logical_key is None else _logical_key_document(outcome.logical_key)
+            ),
+            "manifest_sha256": binding.manifest_sha256.value,
+            "order_id": _economic_id_document(outcome.order_id),
+            "run_id": binding.reference.run_id.value,
+            "schema": "ea.submission-authorization-attempt-outcome.v1",
+            "status": outcome.status.value,
+            "trigger_root_sha256": outcome.trigger_root_sha256.value,
+        }
+    )
+
+
+def submission_authorization_attempt_outcome_digest(
+    outcome: SubmissionAuthorizationAttemptOutcome,
+) -> Sha256Digest:
+    return _framed_digest(
+        _AUTHORIZATION_ATTEMPT_OUTCOME_DOMAIN,
+        canonical_submission_authorization_attempt_outcome_bytes(outcome),
+    )
 
 
 @final
