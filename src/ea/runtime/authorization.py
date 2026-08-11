@@ -118,6 +118,13 @@ class _Freshness:
     state_version: int
 
 
+@dataclass(frozen=True, slots=True)
+class _AuthorizationAppendContext:
+    freshness: _Freshness
+    payload: bytes
+    logical_key: AuditLogicalKey
+
+
 class _PreparationCapability:
     __slots__ = ()
 
@@ -581,6 +588,28 @@ class HistoricalSubmissionAuthorizationAuthority:
         capability: object,
     ) -> AuditAppendAcknowledgement:
         """Append at most one durable attempt for an Order/request key."""
+        context = self._capture_append_context(
+            order,
+            causal_market_root=causal_market_root,
+            dispatch_sequence=dispatch_sequence,
+            capability=capability,
+        )
+        return self._prepare_captured(
+            order,
+            causal_market_root=causal_market_root,
+            dispatch_sequence=dispatch_sequence,
+            capability=capability,
+            context=context,
+        )
+
+    def _capture_append_context(
+        self,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+        capability: object,
+    ) -> _AuthorizationAppendContext:
         if capability is not self._preparation_capability:
             raise _deny(
                 OutcomeCode.CONFLICTING_ID, "authorization preparation capability conflicts"
@@ -606,6 +635,35 @@ class HistoricalSubmissionAuthorizationAuthority:
             dispatch_sequence=dispatch_sequence,
             freshness=before,
         )
+        subject = audit_subject_digest(
+            AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+            payload,
+        )
+        return _AuthorizationAppendContext(
+            freshness=before,
+            payload=payload,
+            logical_key=AuditLogicalKey(
+                AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+                AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
+                subject,
+            ),
+        )
+
+    def _prepare_captured(
+        self,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+        capability: object,
+        context: _AuthorizationAppendContext,
+    ) -> AuditAppendAcknowledgement:
+        if capability is not self._preparation_capability:
+            raise _deny(
+                OutcomeCode.CONFLICTING_ID, "authorization preparation capability conflicts"
+            )
+        before = context.freshness
+        payload = context.payload
         key = (order.order_id, execution_request_digest(order))
         occupied_request = self._attempt_by_order.get(order.order_id)
         if occupied_request is not None and occupied_request != key[1]:
@@ -617,24 +675,16 @@ class HistoricalSubmissionAuthorizationAuthority:
             if existing.burned:
                 raise _deny(OutcomeCode.RISK_STALE_APPROVAL, "authorization attempt is burned")
             return existing.acknowledgement
-        subject = audit_subject_digest(
-            AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
-            payload,
-        )
         acknowledgement = self._audit.append(
-            record_kind=AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
-            subject_kind=AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
-            subject_sha256=subject,
+            record_kind=context.logical_key.record_kind,
+            subject_kind=context.logical_key.subject_kind,
+            subject_sha256=context.logical_key.subject_sha256,
             canonical_payload=payload,
         )
         require_audit_acknowledgement(
             acknowledgement,
             binding=self._binding,
-            logical_key=AuditLogicalKey(
-                AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
-                AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
-                subject,
-            ),
+            logical_key=context.logical_key,
             canonical_payload=payload,
         )
         burned = False
@@ -804,16 +854,11 @@ class HistoricalSubmissionAuthorizationAuthority:
             dispatch_sequence,
         )
         try:
-            before = self._freshness(
+            context = self._capture_append_context(
                 order,
                 causal_market_root=causal_market_root,
                 dispatch_sequence=dispatch_sequence,
-            )
-            payload = self._payload(
-                order,
-                causal_market_root=causal_market_root,
-                dispatch_sequence=dispatch_sequence,
-                freshness=before,
+                capability=capability,
             )
         except HistoricalPreEffectAuthorizationError as error:
             return self._attempt_outcome(
@@ -826,21 +871,13 @@ class HistoricalSubmissionAuthorizationAuthority:
                 error_code=error.code,
                 logical_key=None,
             )
-        subject = audit_subject_digest(
-            AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
-            payload,
-        )
-        logical_key = AuditLogicalKey(
-            AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
-            AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
-            subject,
-        )
         try:
-            acknowledgement = self.prepare(
+            acknowledgement = self._prepare_captured(
                 order,
                 causal_market_root=causal_market_root,
                 dispatch_sequence=dispatch_sequence,
                 capability=capability,
+                context=context,
             )
         except Exception as error:
             retained = self._attempts.get(key)
@@ -857,7 +894,7 @@ class HistoricalSubmissionAuthorizationAuthority:
                     ),
                     acknowledgement=retained.acknowledgement,
                     error_code=(OutcomeCode.RISK_STALE_APPROVAL if retained.burned else None),
-                    logical_key=logical_key,
+                    logical_key=context.logical_key,
                 )
             error_code = getattr(error, "code", OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED)
             if type(error_code) is not OutcomeCode:
@@ -867,9 +904,9 @@ class HistoricalSubmissionAuthorizationAuthority:
                 uncertain=_UnresolvedAuthorizationAttempt(
                     order=order,
                     causal_market_root=causal_market_root,
-                    payload=payload,
-                    freshness=before,
-                    logical_key=logical_key,
+                    payload=context.payload,
+                    freshness=context.freshness,
+                    logical_key=context.logical_key,
                     error_code=error_code,
                 ),
             )
@@ -881,7 +918,7 @@ class HistoricalSubmissionAuthorizationAuthority:
             status=SubmissionAuthorizationAttemptStatus.AUTHORIZED,
             acknowledgement=acknowledgement,
             error_code=None,
-            logical_key=logical_key,
+            logical_key=context.logical_key,
         )
 
     def resolve_attempt(

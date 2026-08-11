@@ -87,6 +87,20 @@ class _Port:
         return self.value
 
 
+class _ChangeAfterFirstGateRead(_Port):
+    def __init__(self, value: Any, next_value: Any) -> None:
+        super().__init__(value)
+        self.next_value = next_value
+
+    def current_for(self, instrument: Any) -> Any:
+        del instrument
+        value = self.value
+        if self.next_value is not None:
+            self.value = self.next_value
+            self.next_value = None
+        return value
+
+
 class _CommitThenRaiseAudit(_MemoryAudit):
     raised = False
 
@@ -328,6 +342,41 @@ def test_prepare_attempt_closes_append_failure_state(
         ) == 1
     else:
         assert outcome.acknowledgement_sha256 is None
+
+
+def test_prepare_attempt_settles_the_exact_captured_freshness_payload() -> None:
+    authority, capability, audit, gate, order, root = _attempt_system(_CommitThenRaiseAudit)
+    initial = gate.value
+    changing_gate = _ChangeAfterFirstGateRead(
+        initial,
+        InstrumentGateSnapshot(
+            initial.run_id,
+            initial.instrument,
+            initial.held_for_order_id,
+            initial.instrument_gate_id,
+            initial.instrument_gate_version + 1,
+            initial.halted,
+        ),
+    )
+    authority._instrument_gate = changing_gate
+
+    outcome = authority.prepare_attempt(
+        order,
+        causal_market_root=root,
+        dispatch_sequence=1,
+        capability=capability,
+    )
+
+    assert outcome.status is SubmissionAuthorizationAttemptStatus.BURNED
+    authorization_records = [
+        record
+        for record in audit.records
+        if record.record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ]
+    assert len(authorization_records) == 1
+    assert json.loads(authorization_records[0].canonical_payload)[
+        "instrument_gate_version"
+    ] == initial.instrument_gate_version
 
 
 def test_posix_uncertain_attempt_preserves_original_key_before_freshness_burn(
