@@ -683,7 +683,7 @@ def test_failed_authorization_completion_recovery_validates_exact_missing_key() 
     failing_window = lifecycle.coordinator.resume_active_dispatch()
     lifecycle.coordinator.complete_active_dispatch(failing_window)
     completion = json.loads(audit.records[-1].canonical_payload)
-    assert completion["authorization_attempt_outcome"]["status"] == "failed"
+    assert completion["authorization_attempt_outcome"] is None
     record_count = len(audit.records)
 
     recovered, matcher = _recover_staged_lifecycle(
@@ -698,6 +698,51 @@ def test_failed_authorization_completion_recovery_validates_exact_missing_key() 
     assert recovered.state.last_completed_dispatch_sequence == 1
     assert len(audit.records) == record_count
     assert len(matcher.state.receipt_sha256s) == 0
+
+
+def _definite_authorization_failure_completion(*, restart_before_completion: bool) -> Any:
+    lifecycle, order_authority, orders, runtime, audit, freshness = _staged_lifecycle(
+        _FailOnceAuthorizationAudit
+    )
+    order = orders[0]
+    window = lifecycle.coordinator.begin_next_dispatch()
+    lease = runtime.active_lease
+    assert lease is not None
+    assert type(lease.root) is MarketDataEnvelope
+    with pytest.raises(LifecycleError):
+        lifecycle.coordinator.prepare_submission_authorization(
+            window,
+            order,
+            causal_market_root=lease.root,
+            dispatch_sequence=lease.dispatch_sequence,
+        )
+    coordinator: Any = lifecycle.coordinator
+    if restart_before_completion:
+        coordinator, _matcher = _recover_staged_lifecycle(
+            lifecycle,
+            order_authority=order_authority,
+            runtime=runtime,
+            audit=audit,
+            freshness=freshness,
+        )
+    failing_window = coordinator.resume_active_dispatch()
+    coordinator.complete_active_dispatch(failing_window)
+    return audit.records[-1]
+
+
+def test_definite_authorization_failure_completion_is_restart_invariant() -> None:
+    uninterrupted = _definite_authorization_failure_completion(
+        restart_before_completion=False
+    )
+    restarted = _definite_authorization_failure_completion(restart_before_completion=True)
+
+    assert uninterrupted.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    assert restarted.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    assert uninterrupted.canonical_payload == restarted.canonical_payload
+    assert uninterrupted.subject_sha256 == restarted.subject_sha256
+    completion = json.loads(uninterrupted.canonical_payload)
+    assert completion["authorization_attempt_count"] == 0
+    assert completion["authorization_attempt_outcome"] is None
 
 
 def test_committed_completion_return_failure_is_resolved_without_failing_transition() -> None:

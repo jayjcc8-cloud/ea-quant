@@ -628,6 +628,10 @@ class Phase1HistoricalLifecycleCoordinator:
                     (() if attempt.logical_key is None else (attempt.logical_key,)),
                     code=error_code,
                 )
+                active.authorization_order = None
+                active.authorization_attempt = None
+                active.authorization_ack = None
+                active.submission_receipt = None
                 active.window = None
                 active.window_stage = None
             raise LifecycleError(error_code, "submission authorization attempt did not authorize")
