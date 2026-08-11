@@ -199,10 +199,23 @@ class PosixAuditRecoveryRecordSource:
 
     __slots__ = ("_journal", "_record_count", "_verified_eof", "binding")
 
-    def __init__(self, journal: PosixAuditJournal) -> None:
+    def __init__(
+        self,
+        journal: PosixAuditJournal,
+        *,
+        record_count: int | None = None,
+    ) -> None:
         self._journal = journal
-        self._record_count = len(journal._entries)
-        self._verified_eof = journal._verified_eof
+        available = len(journal._entries)
+        selected = available if record_count is None else record_count
+        if type(selected) is not int or not 1 <= selected <= available:
+            raise _audit_error(
+                OutcomeCode.OUT_OF_RANGE,
+                "audit recovery prefix count is outside the verified journal",
+            )
+        self._record_count = selected
+        entry = journal._entries[selected - 1]
+        self._verified_eof = entry.offset + entry.frame_length
         self.binding = journal.binding
 
     @property
@@ -210,6 +223,37 @@ class PosixAuditRecoveryRecordSource:
         return self._record_count
 
     def __iter__(self) -> Iterator[AuditRecord]:
+        self._require_readable_prefix()
+        journal = self._journal
+        for index in range(self._record_count):
+            yield journal._read_entry_record(journal._entries[index])
+
+    def prefix(self, record_count: int) -> PosixAuditRecoveryRecordSource:
+        if type(record_count) is not int or not 1 <= record_count <= self._record_count:
+            raise _audit_error(
+                OutcomeCode.OUT_OF_RANGE,
+                "audit recovery sub-prefix count is outside the verified prefix",
+            )
+        return PosixAuditRecoveryRecordSource(self._journal, record_count=record_count)
+
+    def record_at(self, index: int) -> AuditRecord:
+        if type(index) is not int:
+            raise _audit_error(OutcomeCode.INVALID_TYPE, "audit recovery index must be exact int")
+        if not 0 <= index < self._record_count:
+            raise _audit_error(OutcomeCode.OUT_OF_RANGE, "audit recovery index is out of range")
+        self._require_readable_prefix()
+        return self._journal._read_entry_record(self._journal._entries[index])
+
+    def resolve_record(self, logical_key: AuditLogicalKey) -> AuditRecord | None:
+        if type(logical_key) is not AuditLogicalKey:
+            raise _audit_error(OutcomeCode.INVALID_TYPE, "audit recovery key must be exact")
+        self._require_readable_prefix()
+        sequence = self._journal._index.get(_compact_logical_key(logical_key))
+        if sequence is None or sequence > self._record_count:
+            return None
+        return self._journal._read_entry_record(self._journal._entries[sequence - 1])
+
+    def _require_readable_prefix(self) -> None:
         journal = self._journal
         if journal._closed or journal._failed or journal._needs_rescan:
             raise _audit_error(
@@ -231,8 +275,6 @@ class PosixAuditRecoveryRecordSource:
                 OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
                 "audit recovery record prefix changed",
             )
-        for index in range(self._record_count):
-            yield journal._read_entry_record(journal._entries[index])
 
 
 @final

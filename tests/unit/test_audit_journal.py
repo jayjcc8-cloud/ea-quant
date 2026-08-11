@@ -241,7 +241,18 @@ def test_recovery_record_source_is_repeatable_and_snapshot_bound(tmp_path: Path)
 
     assert tuple(prefix) == initial
     assert prefix.record_count == 1
-    assert tuple(journal.recovery_records) == journal.records
+    complete = journal.recovery_records
+    complete_records = tuple(complete)
+    assert complete_records == journal.records
+    assert complete.record_at(0) == initial[0]
+    assert complete.record_at(1) == complete_records[1]
+    assert tuple(complete.prefix(1)) == initial
+    assert prefix.resolve_record(complete_records[1].logical_key) is None
+    assert complete.resolve_record(complete_records[1].logical_key) == complete_records[1]
+    with pytest.raises(AuditContractError, match="sub-prefix"):
+        complete.prefix(3)
+    with pytest.raises(AuditContractError, match="out of range"):
+        complete.record_at(2)
     journal.close()
     with pytest.raises(AuditContractError, match="no longer readable"):
         tuple(prefix)
