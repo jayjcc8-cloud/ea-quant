@@ -562,7 +562,7 @@ def test_denied_and_burned_attempts_complete_without_matcher_receipt() -> None:
 
 
 def test_definite_authorization_failure_closes_window_and_drains_failing_dispatch() -> None:
-    lifecycle, _authority, orders, runtime, audit, _freshness = _staged_lifecycle(
+    lifecycle, order_authority, orders, runtime, audit, freshness = _staged_lifecycle(
         _FailOnceAuthorizationAudit
     )
     order = orders[0]
@@ -583,14 +583,81 @@ def test_definite_authorization_failure_closes_window_and_drains_failing_dispatc
     with pytest.raises(LifecycleError, match="window conflicts"):
         lifecycle.coordinator.complete_active_dispatch(window)
 
-    failing_window = lifecycle.coordinator.resume_active_dispatch()
+    recovered, _matcher = _recover_staged_lifecycle(
+        lifecycle,
+        order_authority=order_authority,
+        runtime=runtime,
+        audit=audit,
+        freshness=freshness,
+    )
+    assert recovered.state.phase is CoordinatorPhase.FAILING
+    failing_window = recovered.resume_active_dispatch()
     assert failing_window.authorization_allowed is False
-    outcome = lifecycle.coordinator.complete_active_dispatch(failing_window)
+    outcome = recovered.complete_active_dispatch(failing_window)
     completion = json.loads(audit.records[-1].canonical_payload)
 
     assert outcome.runtime_acknowledged is True
-    assert completion["authorization_attempt_outcome"]["status"] == "failed"
+    assert completion["authorization_attempt_outcome"] is None
     assert completion["submission_count"] == 0
+    record_count = len(audit.records)
+
+    restarted, restarted_matcher = _recover_staged_lifecycle(
+        lifecycle,
+        order_authority=order_authority,
+        runtime=runtime,
+        audit=audit,
+        freshness=freshness,
+    )
+    assert restarted.state.phase is CoordinatorPhase.FAILING
+    assert restarted.state.last_completed_dispatch_sequence == 1
+    assert len(audit.records) == record_count
+    assert len(restarted_matcher.state.receipt_sha256s) == 0
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ) == 0
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
+    ) == 1
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    ) == 1
+
+
+def test_failed_authorization_completion_recovery_validates_exact_missing_key() -> None:
+    lifecycle, order_authority, orders, runtime, audit, freshness = _staged_lifecycle(
+        _FailOnceAuthorizationAudit
+    )
+    order = orders[0]
+    window = lifecycle.coordinator.begin_next_dispatch()
+    lease = runtime.active_lease
+    assert lease is not None
+    assert type(lease.root) is MarketDataEnvelope
+    with pytest.raises(LifecycleError):
+        lifecycle.coordinator.prepare_submission_authorization(
+            window,
+            order,
+            causal_market_root=lease.root,
+            dispatch_sequence=lease.dispatch_sequence,
+        )
+
+    failing_window = lifecycle.coordinator.resume_active_dispatch()
+    lifecycle.coordinator.complete_active_dispatch(failing_window)
+    completion = json.loads(audit.records[-1].canonical_payload)
+    assert completion["authorization_attempt_outcome"]["status"] == "failed"
+    record_count = len(audit.records)
+
+    recovered, matcher = _recover_staged_lifecycle(
+        lifecycle,
+        order_authority=order_authority,
+        runtime=runtime,
+        audit=audit,
+        freshness=freshness,
+    )
+
+    assert recovered.state.phase is CoordinatorPhase.FAILING
+    assert recovered.state.last_completed_dispatch_sequence == 1
+    assert len(audit.records) == record_count
+    assert len(matcher.state.receipt_sha256s) == 0
 
 
 def test_committed_completion_return_failure_is_resolved_without_failing_transition() -> None:

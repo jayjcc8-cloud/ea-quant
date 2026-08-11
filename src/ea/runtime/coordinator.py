@@ -2491,6 +2491,23 @@ def _recover_failing_transition(
         logical_positions.append((key, outcome_position))
         if outcome_entry is not None and outcome_entry[0] < position:
             acknowledgement_by_key[key] = outcome_entry[2]
+    if failed_key.record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
+        if failed_key.subject_kind is not AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "failed authorization key conflicts",
+            )
+        attempt = active.authorization_attempt
+        if attempt is not None and (
+            attempt.status is not SubmissionAuthorizationAttemptStatus.FAILED
+            or attempt.logical_key != failed_key
+            or attempt.acknowledgement_sha256 is not None
+        ):
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "failed authorization frontier conflicts",
+            )
+        logical_positions.append((failed_key, None))
     if failed_key.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
         if active.batch_ack is None or any(value is None for value in active.outcome_acks):
             raise LifecycleError(
