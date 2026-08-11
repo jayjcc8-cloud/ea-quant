@@ -45,6 +45,8 @@ AUDIT_JOURNAL_NAME = "audit-v1.journal"
 MAX_AUDIT_JOURNAL_BYTES = 6 * 1024 * 1024 * 1024
 MIN_AUDIT_FILESYSTEM_FREE_BYTES = MAX_AUDIT_JOURNAL_BYTES
 MAX_AUDIT_INDEX_RESIDENT_BYTES = 256 * 1024 * 1024
+MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES = MAX_AUDIT_INDEX_RESIDENT_BYTES
+_RECOVERY_RECORD_FIXED_RESIDENT_BYTES = 2_048
 
 
 class _AuditOps(Protocol):
@@ -180,6 +182,14 @@ def _require_index_resident_budget(resident_bytes: int) -> None:
         )
 
 
+def _require_recovery_record_resident_budget(resident_bytes: int) -> None:
+    if resident_bytes > MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES:
+        raise _audit_error(
+            OutcomeCode.OUT_OF_RANGE,
+            "audit recovery record representation exceeds the 256 MiB resident-memory bound",
+        )
+
+
 @final
 class PosixAuditJournal:
     """One serialized journal owner bound to an opaque prepared attempt."""
@@ -242,6 +252,11 @@ class PosixAuditJournal:
 
     @property
     def records(self) -> tuple[AuditRecord, ...]:
+        resident_bytes = tuple.__basicsize__ + len(self._entries) * tuple.__itemsize__
+        resident_bytes += sum(
+            entry.frame_length + _RECOVERY_RECORD_FIXED_RESIDENT_BYTES for entry in self._entries
+        )
+        _require_recovery_record_resident_budget(resident_bytes)
         return tuple(self._read_entry_record(entry) for entry in self._entries)
 
     @property
@@ -714,6 +729,9 @@ def reopen_posix_audit_journal(
     journal_fd: int | None = None
     try:
         audit_fd, _ = prepared._store._open_audit_directory(prepared)
+        filesystem = ops.fstatvfs(audit_fd)
+        if filesystem.f_bavail * filesystem.f_frsize < MIN_AUDIT_FILESYSTEM_FREE_BYTES:
+            raise StoreError("audit filesystem has less than the required 6 GiB free")
         journal_fd = ops.open_journal(audit_fd)
         value = ops.fstat(journal_fd)
         if (

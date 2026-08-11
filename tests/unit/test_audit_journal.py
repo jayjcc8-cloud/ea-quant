@@ -90,6 +90,16 @@ def test_fresh_journal_rejects_less_than_six_gib_free_before_creation(tmp_path: 
     assert not (root / str(RUN_UUID) / "audit" / "audit-v1.journal").exists()
 
 
+def test_reopen_rejects_less_than_six_gib_free_before_admission(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+
+    with pytest.raises(StoreError, match="6 GiB"):
+        reopen_posix_audit_journal(prepared.audit, _ops=_LowSpaceAuditOps())
+
+
 def test_fresh_journal_is_prepared_before_general_append_and_exact_retry(tmp_path: Path) -> None:
     root = _root(tmp_path)
     prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
@@ -189,6 +199,24 @@ def test_reopen_rejects_index_that_exceeds_resident_memory_budget(
         reopen_posix_audit_journal(prepared.audit)
 
     assert captured.value.code is OutcomeCode.OUT_OF_RANGE
+
+
+def test_records_reject_recovery_representation_before_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    reopened = reopen_posix_audit_journal(prepared.audit)
+    monkeypatch.setattr(audit_module, "MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES", 1)
+
+    with pytest.raises(AuditContractError, match="recovery record representation") as captured:
+        _ = reopened.records
+
+    assert captured.value.code is OutcomeCode.OUT_OF_RANGE
+    assert len(reopened._entries) == 1
 
 
 def test_append_rejects_projected_index_growth_before_writing(
