@@ -1,6 +1,6 @@
 # ADR 0021: Staged Active-Dispatch Authorization Window
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-11
 - Decision owners: Architecture, Runtime, Execution, Backtest, Durability
 - Related: ADR 0008, ADR 0014, ADR 0016, ADR 0018, ADR 0020, Issue #61,
