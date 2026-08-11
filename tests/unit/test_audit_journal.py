@@ -255,18 +255,18 @@ def test_recovery_record_source_is_repeatable_and_snapshot_bound(tmp_path: Path)
     complete_records = tuple(complete)
     assert complete_records == journal.records
     with pytest.raises(AuditContractError, match="prefix count"):
-        PosixAuditRecoveryRecordSource(journal, record_count=True)  # type: ignore[arg-type]
+        PosixAuditRecoveryRecordSource(journal, record_count=True)
     assert complete.record_at(0) == initial[0]
     assert complete.record_at(1) == complete_records[1]
     assert tuple(complete.prefix(1)) == initial
     assert prefix.resolve_record(complete_records[1].logical_key) is None
     assert complete.resolve_record(complete_records[1].logical_key) == complete_records[1]
     with pytest.raises(AuditContractError, match="sub-prefix"):
-        complete.prefix(True)  # type: ignore[arg-type]
+        complete.prefix(True)
     with pytest.raises(AuditContractError, match="sub-prefix"):
         complete.prefix(3)
     with pytest.raises(AuditContractError, match="exact int"):
-        complete.record_at(True)  # type: ignore[arg-type]
+        complete.record_at(True)
     with pytest.raises(AuditContractError, match="out of range"):
         complete.record_at(2)
     with pytest.raises(AuditContractError, match="key must be exact"):
