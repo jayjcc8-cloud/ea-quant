@@ -115,6 +115,7 @@ class _RecoveredDispatch:
     ] = field(default_factory=dict)
     failing_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
     completion_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
+    authorization_positions: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1341,8 +1342,6 @@ def _group_recovery_records(
     dispatches: dict[int, _RecoveredDispatch] = {}
     for position, (record, acknowledgement) in enumerate(records, start=2):
         kind = record.record_kind
-        if kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
-            continue
         document = _record_document(record)
         sequence_value = document.get(
             "runtime_dispatch_sequence"
@@ -1355,6 +1354,9 @@ def _group_recovery_records(
                 "recovery dispatch sequence is invalid",
             )
         group = dispatches.setdefault(sequence_value, _RecoveredDispatch(sequence_value))
+        if kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
+            group.authorization_positions.append(position)
+            continue
         trigger_value = document.get("trigger_root_sha256")
         if trigger_value is not None:
             try:
@@ -1389,7 +1391,52 @@ def _group_recovery_records(
             group.completion_record = retained
         else:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "unsupported recovery record kind")
+    _require_recovery_stage_order(dispatches)
     return dispatches
+
+
+def _require_recovery_stage_order(dispatches: dict[int, _RecoveredDispatch]) -> None:
+    previous_last_position = 1
+    previous_completed = True
+    for sequence in sorted(dispatches):
+        group = dispatches[sequence]
+        positions = [
+            position
+            for entry in (
+                group.batch_record,
+                group.failing_record,
+                group.completion_record,
+            )
+            if entry is not None
+            for position in (entry[0],)
+        ]
+        positions.extend(entry[0] for entry in group.outcome_records.values())
+        positions.extend(group.authorization_positions)
+        if not positions:
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery dispatch is empty")
+        if not previous_completed or min(positions) <= previous_last_position:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovery dispatches are physically interleaved",
+            )
+        completion = group.completion_record
+        if completion is not None:
+            completion_position = completion[0]
+            required_before_completion = [
+                entry[0]
+                for entry in (group.batch_record, *group.outcome_records.values())
+                if entry is not None
+            ]
+            required_before_completion.extend(group.authorization_positions)
+            if group.batch_record is None or any(
+                position >= completion_position for position in required_before_completion
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "recovery completion stage order conflicts",
+                )
+        previous_last_position = max(positions)
+        previous_completed = completion is not None
 
 
 def _require_runtime_trace(

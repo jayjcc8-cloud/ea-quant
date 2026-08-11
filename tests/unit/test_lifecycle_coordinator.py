@@ -519,6 +519,45 @@ def test_empty_market_dispatch_is_audited_before_runtime_acknowledgement() -> No
     ]
 
 
+def test_recovery_rejects_completion_physically_before_required_batch() -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    original = _MemoryAudit(binding)
+    runtime = _Runtime(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=original,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    coordinator.process_next_dispatch()
+    prepared, batch, completion = original.records
+    reordered = _MemoryAudit(binding)
+    for record in (prepared, completion, batch):
+        reordered.append(
+            record_kind=record.record_kind,
+            subject_kind=record.subject_kind,
+            subject_sha256=record.subject_sha256,
+            canonical_payload=record.canonical_payload,
+        )
+
+    with pytest.raises(LifecycleError, match="completion stage order"):
+        recover_phase1_lifecycle_coordinator(
+            binding=binding,
+            audit=reordered,
+            runtime=runtime,
+            matcher=_ResolverOnlyMatcher(matcher),
+            fact_authority=_NoFacts(matcher),
+            evidence_resolver=_NoEvidence(),
+            records=tuple(reordered.records),
+        )
+
+
 @pytest.mark.parametrize(
     "target",
     (
