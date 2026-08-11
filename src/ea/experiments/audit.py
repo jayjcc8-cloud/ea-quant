@@ -707,12 +707,12 @@ class PosixAuditJournal:
                     "audit frame reconstruction failed",
                 ) from error
             except OSError as error:
-                if fsync_started:
-                    self._failed = True
-                    code = OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH
-                else:
-                    self._needs_rescan = True
-                    code = OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+                self._needs_rescan = True
+                code = (
+                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH
+                    if fsync_started
+                    else OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+                )
                 raise _audit_error(
                     code, "audit append did not produce verified durability"
                 ) from error
@@ -723,6 +723,85 @@ class PosixAuditJournal:
             self._index_resident_bytes = projected_resident_bytes
             self._verified_eof += len(frame)
             self._terminal = record_kind is AuditRecordKind.RUN_TERMINAL
+            return acknowledgement
+        finally:
+            self._lock.release()
+
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        """Rescan and independently revalidate one uncertain exact append."""
+        if not self._lock.acquire(blocking=False):
+            raise _audit_error(
+                OutcomeCode.CONFLICTING_ID,
+                "audit settlement is concurrent or reentrant",
+            )
+        try:
+            if type(logical_key) is not AuditLogicalKey or type(canonical_payload) is not bytes:
+                raise _audit_error(
+                    OutcomeCode.INVALID_TYPE,
+                    "audit settlement inputs must be exact",
+                )
+            if self._closed:
+                raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit journal is closed")
+            if self._failed:
+                raise _audit_error(
+                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                    "audit journal is in a monotone failed state",
+                )
+            if self._needs_rescan:
+                self._rescan(permit_torn_tail=True)
+            compact_key = _compact_logical_key(logical_key)
+            sequence = self._index.get(compact_key)
+            if sequence is None:
+                try:
+                    self._ops.fsync(self._journal_fd)
+                    file_stat = self._require_file_identity()
+                except (AuditContractError, OSError) as error:
+                    self._needs_rescan = True
+                    raise _audit_error(
+                        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                        "audit absence could not be settled durably",
+                    ) from error
+                if file_stat.st_size != self._verified_eof:
+                    self._needs_rescan = True
+                    raise _audit_error(
+                        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                        "audit absence changed during settlement",
+                    )
+                return None
+            entry = self._entries[sequence - 1]
+            if (
+                entry.payload_length != len(canonical_payload)
+                or entry.payload_sha256 != sha256(canonical_payload).digest()
+            ):
+                self._failed = True
+                raise _audit_error(
+                    OutcomeCode.CONFLICTING_ID,
+                    "settled audit retry conflicts with original payload",
+                )
+            try:
+                self._ops.fsync(self._journal_fd)
+                record = self._read_entry_record(entry)
+            except (AuditContractError, OSError) as error:
+                self._needs_rescan = True
+                raise _audit_error(
+                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                    "settled audit frame did not revalidate",
+                ) from error
+            acknowledgement = create_audit_append_acknowledgement(record)
+            acknowledgement = require_audit_acknowledgement(
+                acknowledgement,
+                binding=self._binding,
+                logical_key=logical_key,
+                canonical_payload=canonical_payload,
+            )
+            if sequence <= len(self._recovered_sequences):
+                self._recovered_sequences[sequence - 1] = 0
+            self._ack_cache[sequence] = acknowledgement
             return acknowledgement
         finally:
             self._lock.release()

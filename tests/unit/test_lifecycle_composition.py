@@ -88,6 +88,7 @@ class _UncertainOnceAuthorizationAudit:
         self.binding = binding
         self._inner = _MemoryAudit(binding)
         self.failed = False
+        self.settlement_failed = False
 
     @property
     def records(self) -> list[Any]:
@@ -99,8 +100,15 @@ class _UncertainOnceAuthorizationAudit:
             and not self.failed
         ):
             self.failed = True
+            self._inner.append(**values)
             raise RuntimeError("injected uncertain authorization append failure")
         return self._inner.append(**values)
+
+    def settle_append(self, **values: Any) -> Any:
+        if not self.settlement_failed:
+            self.settlement_failed = True
+            raise RuntimeError("injected uncertain authorization settlement failure")
+        return self._inner.settle_append(**values)
 
 
 class _FailOnceAuthorizationAudit(_MemoryAudit):
@@ -139,6 +147,27 @@ class _CommitThenRaiseCompletionAudit(_MemoryAudit):
             self.raised = True
             raise RuntimeError("injected committed completion return failure")
         return acknowledgement
+
+
+class _RaiseAfterCommittedAuthorization:
+    def __init__(self, authority: Any) -> None:
+        self.authority = authority
+
+    def prepare_attempt(self, *args: Any, **values: Any) -> Any:
+        self.authority.prepare_attempt(*args, **values)
+        raise RuntimeError("injected committed attempt resolver conflict")
+
+    def resolve_attempt_order(self, **values: Any) -> None:
+        del values
+        return None
+
+    def resolve_attempt(self, **values: Any) -> None:
+        del values
+        return None
+
+    def resolve_attempt_acknowledgement(self, **values: Any) -> None:
+        del values
+        return None
 
 
 class _UnusedFreshness:
@@ -477,8 +506,8 @@ def test_composed_staged_window_authorizes_and_submits_before_completion() -> No
     assert completion_document["submission_count"] == 1
 
 
-def test_unresolved_authorization_exact_retry_settles_without_duplicate_append() -> None:
-    lifecycle, _authority, orders, runtime, audit, _freshness = _staged_lifecycle(
+def test_unresolved_authorization_retry_preserves_key_and_burns_on_freshness_change() -> None:
+    lifecycle, _authority, orders, runtime, audit, freshness = _staged_lifecycle(
         _UncertainOnceAuthorizationAudit
     )
     order = orders[0]
@@ -498,17 +527,28 @@ def test_unresolved_authorization_exact_retry_settles_without_duplicate_append()
     with pytest.raises(LifecycleError, match="unresolved authorization"):
         lifecycle.coordinator.complete_active_dispatch(window)
 
-    acknowledgement = lifecycle.coordinator.prepare_submission_authorization(
-        window,
-        order,
-        causal_market_root=lease.root,
-        dispatch_sequence=lease.dispatch_sequence,
+    freshness[3].value = InstrumentGateSnapshot(
+        order.run_id,
+        order.instrument,
+        order.order_id,
+        Sha256Digest("33" * 32),
+        1,
+        True,
     )
-    lifecycle.coordinator.submit_authorized_order(window, order)
+    with pytest.raises(LifecycleError) as burned:
+        lifecycle.coordinator.prepare_submission_authorization(
+            window,
+            order,
+            causal_market_root=lease.root,
+            dispatch_sequence=lease.dispatch_sequence,
+        )
+    assert burned.value.code is OutcomeCode.RISK_STALE_APPROVAL
     outcome = lifecycle.coordinator.complete_active_dispatch(window)
+    completion = json.loads(audit.records[-1].canonical_payload)
 
-    assert acknowledgement.record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
     assert outcome.runtime_acknowledged is True
+    assert completion["authorization_attempt_outcome"]["status"] == "burned"
+    assert completion["submission_count"] == 0
     assert [record.record_kind for record in audit.records].count(
         AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
     ) == 1
@@ -677,6 +717,64 @@ def test_committed_completion_return_failure_is_resolved_without_failing_transit
     assert AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION not in {
         record.record_kind for record in audit.records
     }
+
+
+def test_committed_authorization_resolver_conflict_fails_closed_and_recovers() -> None:
+    lifecycle, order_authority, orders, runtime, audit, freshness = _staged_lifecycle()
+    order = orders[0]
+    coordinator = cast(
+        Any,
+        lifecycle.coordinator,
+    )._Phase1HistoricalLifecycleCoordinatorFacade__coordinator
+    authority = coordinator._authorization
+    coordinator._authorization = _RaiseAfterCommittedAuthorization(authority)
+    window = lifecycle.coordinator.begin_next_dispatch()
+    lease = runtime.active_lease
+    assert lease is not None
+    assert type(lease.root) is MarketDataEnvelope
+
+    with pytest.raises(LifecycleError, match="could not be settled"):
+        lifecycle.coordinator.prepare_submission_authorization(
+            window,
+            order,
+            causal_market_root=lease.root,
+            dispatch_sequence=lease.dispatch_sequence,
+        )
+
+    assert lifecycle.coordinator.state.phase is CoordinatorPhase.FAILING
+    assert runtime.active_lease is lease
+    with pytest.raises(LifecycleError, match="window conflicts"):
+        lifecycle.coordinator.complete_active_dispatch(window)
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ) == 1
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
+    ) == 1
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    ) == 0
+
+    recovered, _matcher = _recover_staged_lifecycle(
+        lifecycle,
+        order_authority=order_authority,
+        runtime=runtime,
+        audit=audit,
+        freshness=freshness,
+    )
+    failing_window = recovered.resume_active_dispatch()
+    outcome = recovered.complete_active_dispatch(failing_window)
+    completion = json.loads(audit.records[-1].canonical_payload)
+
+    assert outcome.runtime_acknowledged is True
+    assert completion["authorization_attempt_count"] == 1
+    assert completion["authorization_attempt_outcome"]["status"] == "burned"
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ) == 1
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    ) == 1
 
 
 def test_recovery_discards_provisional_freeze_and_reissues_canonical_window() -> None:

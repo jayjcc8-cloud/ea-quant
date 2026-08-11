@@ -309,6 +309,15 @@ class AuditAppendPort(Protocol):
         canonical_payload: bytes,
     ) -> AuditAppendAcknowledgement: ...
 
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        """Authoritatively settle one uncertain exact append as present or absent."""
+        ...
+
 
 def _canonical_json(document: object) -> bytes:
     return json.dumps(

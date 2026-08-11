@@ -100,6 +100,16 @@ class _AuthorizationAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class _UnresolvedAuthorizationAttempt:
+    order: Order
+    causal_market_root: MarketDataEnvelope
+    payload: bytes
+    freshness: _Freshness
+    logical_key: AuditLogicalKey
+    error_code: OutcomeCode
+
+
+@dataclass(frozen=True, slots=True)
 class _Freshness:
     portfolio: PortfolioSnapshot
     risk: RiskStateSnapshot
@@ -253,6 +263,7 @@ class HistoricalSubmissionAuthorizationAuthority:
         "_runtime",
         "_spec_set",
         "_spec_sha256",
+        "_unresolved_attempts",
     )
     _active: bool
     _activation_seal: _ActivationSeal | None
@@ -271,6 +282,7 @@ class HistoricalSubmissionAuthorizationAuthority:
     _runtime: RuntimeLifecyclePort
     _spec_set: InstrumentExecutionSpecSet
     _spec_sha256: Sha256Digest
+    _unresolved_attempts: dict[tuple[EconomicId, Sha256Digest], _UnresolvedAuthorizationAttempt]
 
     def __init__(self) -> None:
         raise TypeError("authorization authorities are created only by their factory")
@@ -677,28 +689,85 @@ class HistoricalSubmissionAuthorizationAuthority:
             error_code=error_code,
         )
 
-    def _resolve_committed_acknowledgement(
+    def _settle_uncertain_attempt(
         self,
         *,
-        logical_key: AuditLogicalKey,
-        payload: bytes,
-    ) -> tuple[bool, AuditAppendAcknowledgement | None]:
-        resolver = getattr(self._audit, "resolve_record", None)
-        if not callable(resolver):
-            return False, None
-        record = resolver(logical_key)
-        if record is None:
-            return True, None
-        if type(record) is not AuditRecord or record.canonical_payload != payload:
-            raise _deny(OutcomeCode.CONFLICTING_ID, "resolved authorization record conflicts")
-        acknowledgement = create_audit_append_acknowledgement(record)
+        key: tuple[EconomicId, Sha256Digest],
+        uncertain: _UnresolvedAuthorizationAttempt,
+    ) -> SubmissionAuthorizationAttemptOutcome:
+        try:
+            acknowledgement = self._audit.settle_append(
+                logical_key=uncertain.logical_key,
+                canonical_payload=uncertain.payload,
+            )
+        except Exception as error:
+            error_code = getattr(error, "code", uncertain.error_code)
+            if type(error_code) is not OutcomeCode:
+                error_code = uncertain.error_code
+            self._unresolved_attempts[key] = uncertain
+            self._attempt_by_order[uncertain.order.order_id] = key[1]
+            return self._attempt_outcome(
+                order=uncertain.order,
+                causal_market_root=uncertain.causal_market_root,
+                dispatch_sequence=uncertain.order.dispatch_sequence,
+                payload_sha256=Sha256Digest(sha256(uncertain.payload).hexdigest()),
+                status=SubmissionAuthorizationAttemptStatus.UNRESOLVED,
+                acknowledgement=None,
+                error_code=error_code,
+                logical_key=uncertain.logical_key,
+            )
+        self._unresolved_attempts.pop(key, None)
+        self._attempt_by_order[uncertain.order.order_id] = key[1]
+        if acknowledgement is None:
+            return self._attempt_outcome(
+                order=uncertain.order,
+                causal_market_root=uncertain.causal_market_root,
+                dispatch_sequence=uncertain.order.dispatch_sequence,
+                payload_sha256=Sha256Digest(sha256(uncertain.payload).hexdigest()),
+                status=SubmissionAuthorizationAttemptStatus.FAILED,
+                acknowledgement=None,
+                error_code=uncertain.error_code,
+                logical_key=uncertain.logical_key,
+            )
         require_audit_acknowledgement(
             acknowledgement,
             binding=self._binding,
-            logical_key=logical_key,
-            canonical_payload=payload,
+            logical_key=uncertain.logical_key,
+            canonical_payload=uncertain.payload,
         )
-        return True, acknowledgement
+        burned = True
+        try:
+            burned = (
+                self._freshness(
+                    uncertain.order,
+                    causal_market_root=uncertain.causal_market_root,
+                    dispatch_sequence=uncertain.order.dispatch_sequence,
+                )
+                != uncertain.freshness
+            )
+        except Exception:
+            burned = True
+        self._attempts[key] = _AuthorizationAttempt(
+            uncertain.order,
+            uncertain.causal_market_root,
+            uncertain.payload,
+            acknowledgement,
+            burned,
+        )
+        return self._attempt_outcome(
+            order=uncertain.order,
+            causal_market_root=uncertain.causal_market_root,
+            dispatch_sequence=uncertain.order.dispatch_sequence,
+            payload_sha256=acknowledgement.payload_sha256,
+            status=(
+                SubmissionAuthorizationAttemptStatus.BURNED
+                if burned
+                else SubmissionAuthorizationAttemptStatus.AUTHORIZED
+            ),
+            acknowledgement=acknowledgement,
+            error_code=(OutcomeCode.RISK_STALE_APPROVAL if burned else None),
+            logical_key=uncertain.logical_key,
+        )
 
     def prepare_attempt(
         self,
@@ -716,6 +785,19 @@ class HistoricalSubmissionAuthorizationAuthority:
             )
         if type(order) is not Order or type(causal_market_root) is not MarketDataEnvelope:
             raise _deny(OutcomeCode.INVALID_TYPE, "authorization inputs must be exact")
+        key = (order.order_id, execution_request_digest(order))
+        unresolved = self._unresolved_attempts.get(key)
+        if unresolved is not None:
+            if (
+                order_digest(unresolved.order) != order_digest(order)
+                or unresolved.causal_market_root is not causal_market_root
+                or unresolved.order.dispatch_sequence != dispatch_sequence
+            ):
+                raise _deny(
+                    OutcomeCode.RISK_STALE_APPROVAL,
+                    "unresolved authorization retry conflicts",
+                )
+            return self._settle_uncertain_attempt(key=key, uncertain=unresolved)
         fallback_digest = _attempt_request_digest(
             order,
             causal_market_root,
@@ -753,7 +835,6 @@ class HistoricalSubmissionAuthorizationAuthority:
             AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
             subject,
         )
-        payload_sha256 = Sha256Digest(sha256(payload).hexdigest())
         try:
             acknowledgement = self.prepare(
                 order,
@@ -762,7 +843,6 @@ class HistoricalSubmissionAuthorizationAuthority:
                 capability=capability,
             )
         except Exception as error:
-            key = (order.order_id, execution_request_digest(order))
             retained = self._attempts.get(key)
             if retained is not None:
                 return self._attempt_outcome(
@@ -779,61 +859,19 @@ class HistoricalSubmissionAuthorizationAuthority:
                     error_code=(OutcomeCode.RISK_STALE_APPROVAL if retained.burned else None),
                     logical_key=logical_key,
                 )
-            resolved, resolved_acknowledgement = self._resolve_committed_acknowledgement(
-                logical_key=logical_key,
-                payload=payload,
-            )
-            if resolved_acknowledgement is not None:
-                burned = True
-                try:
-                    burned = (
-                        self._freshness(
-                            order,
-                            causal_market_root=causal_market_root,
-                            dispatch_sequence=dispatch_sequence,
-                        )
-                        != before
-                    )
-                except Exception:
-                    burned = True
-                self._attempts[key] = _AuthorizationAttempt(
-                    order,
-                    causal_market_root,
-                    payload,
-                    resolved_acknowledgement,
-                    burned,
-                )
-                self._attempt_by_order[order.order_id] = key[1]
-                return self._attempt_outcome(
-                    order=order,
-                    causal_market_root=causal_market_root,
-                    dispatch_sequence=dispatch_sequence,
-                    payload_sha256=resolved_acknowledgement.payload_sha256,
-                    status=(
-                        SubmissionAuthorizationAttemptStatus.BURNED
-                        if burned
-                        else SubmissionAuthorizationAttemptStatus.AUTHORIZED
-                    ),
-                    acknowledgement=resolved_acknowledgement,
-                    error_code=(OutcomeCode.RISK_STALE_APPROVAL if burned else None),
-                    logical_key=logical_key,
-                )
             error_code = getattr(error, "code", OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED)
             if type(error_code) is not OutcomeCode:
                 error_code = OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
-            return self._attempt_outcome(
-                order=order,
-                causal_market_root=causal_market_root,
-                dispatch_sequence=dispatch_sequence,
-                payload_sha256=payload_sha256,
-                status=(
-                    SubmissionAuthorizationAttemptStatus.FAILED
-                    if resolved
-                    else SubmissionAuthorizationAttemptStatus.UNRESOLVED
+            return self._settle_uncertain_attempt(
+                key=key,
+                uncertain=_UnresolvedAuthorizationAttempt(
+                    order=order,
+                    causal_market_root=causal_market_root,
+                    payload=payload,
+                    freshness=before,
+                    logical_key=logical_key,
+                    error_code=error_code,
                 ),
-                acknowledgement=None,
-                error_code=error_code,
-                logical_key=logical_key,
             )
         return self._attempt_outcome(
             order=order,
@@ -852,9 +890,22 @@ class HistoricalSubmissionAuthorizationAuthority:
         order_id: EconomicId,
         execution_request_sha256: Sha256Digest,
     ) -> SubmissionAuthorizationAttemptOutcome | None:
-        attempt = self._attempts.get((order_id, execution_request_sha256))
+        key = (order_id, execution_request_sha256)
+        attempt = self._attempts.get(key)
         if attempt is None or attempt.causal_market_root is None:
-            return None
+            unresolved = self._unresolved_attempts.get(key)
+            if unresolved is None:
+                return None
+            return self._attempt_outcome(
+                order=unresolved.order,
+                causal_market_root=unresolved.causal_market_root,
+                dispatch_sequence=unresolved.order.dispatch_sequence,
+                payload_sha256=Sha256Digest(sha256(unresolved.payload).hexdigest()),
+                status=SubmissionAuthorizationAttemptStatus.UNRESOLVED,
+                acknowledgement=None,
+                error_code=unresolved.error_code,
+                logical_key=unresolved.logical_key,
+            )
         return self._attempt_outcome(
             order=attempt.order,
             causal_market_root=attempt.causal_market_root,
@@ -892,8 +943,12 @@ class HistoricalSubmissionAuthorizationAuthority:
         order_id: EconomicId,
         execution_request_sha256: Sha256Digest,
     ) -> Order | None:
-        attempt = self._attempts.get((order_id, execution_request_sha256))
-        return None if attempt is None else attempt.order
+        key = (order_id, execution_request_sha256)
+        attempt = self._attempts.get(key)
+        if attempt is not None:
+            return attempt.order
+        unresolved = self._unresolved_attempts.get(key)
+        return None if unresolved is None else unresolved.order
 
     def verify_authorized_historical_submission(
         self,
@@ -1050,6 +1105,7 @@ def create_dormant_historical_submission_authorization_authority(
     value._instrument_gate = instrument_gate
     value._attempts = {}
     value._attempt_by_order = {}
+    value._unresolved_attempts = {}
     value._coordinator = None
     value._active = False
     value._recovery_loaded = False

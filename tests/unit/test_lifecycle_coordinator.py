@@ -101,6 +101,18 @@ class _MemoryAudit:
             None,
         )
 
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        existing = self.index.get(logical_key)
+        if existing is None:
+            return None
+        assert existing[0] == canonical_payload
+        return existing[1]
+
 
 def create_phase1_lifecycle_coordinator(
     *,

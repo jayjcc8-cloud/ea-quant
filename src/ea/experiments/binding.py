@@ -7,7 +7,6 @@ from typing import Protocol
 from ea.core.audit import (
     AuditAppendAcknowledgement,
     AuditLogicalKey,
-    AuditRecord,
     AuditRecordKind,
     AuditSubjectKind,
     require_audit_acknowledgement,
@@ -45,6 +44,15 @@ class RawAuditPort(Protocol):
         """Persist and acknowledge one typed record under the adapter's binding."""
         ...
 
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        """Settle one uncertain exact append without allocating another record."""
+        ...
+
 
 class RawOutputPort(Protocol):
     def write(
@@ -70,8 +78,10 @@ class BoundAuditPort:
     def __init__(self, prepared: AuditRunBinding, raw: RawAuditPort) -> None:
         if type(prepared) is not AuditRunBinding:
             raise BoundaryBindingError("audit port requires AuditRunBinding")
-        if not callable(getattr(raw, "append", None)):
-            raise BoundaryBindingError("raw audit port must provide append")
+        if not callable(getattr(raw, "append", None)) or not callable(
+            getattr(raw, "settle_append", None)
+        ):
+            raise BoundaryBindingError("raw audit port must provide append and settlement")
         try:
             raw_binding = raw.binding
         except AttributeError as exc:
@@ -116,19 +126,31 @@ class BoundAuditPort:
         except ValueError as exc:
             raise BoundaryBindingError("audit acknowledgement binding does not match") from exc
 
-    def resolve_record(self, logical_key: AuditLogicalKey) -> AuditRecord | None:
-        """Expose only exact read-only retry evidence from the bound raw journal."""
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        """Settle one exact uncertain append and revalidate any acknowledgement."""
         if type(logical_key) is not AuditLogicalKey:
-            raise BoundaryBindingError("audit resolution requires one exact logical key")
-        resolver = getattr(self._raw, "resolve_record", None)
-        if not callable(resolver):
-            raise BoundaryBindingError("raw audit port does not support exact resolution")
-        record = resolver(logical_key)
-        if record is not None and (
-            type(record) is not AuditRecord or record.binding != self._binding
-        ):
-            raise BoundaryBindingError("resolved audit record binding does not match")
-        return record
+            raise BoundaryBindingError("audit settlement requires one exact logical key")
+        _require_payload(canonical_payload)
+        acknowledgement = self._raw.settle_append(
+            logical_key=logical_key,
+            canonical_payload=canonical_payload,
+        )
+        if acknowledgement is None:
+            return None
+        try:
+            return require_audit_acknowledgement(
+                acknowledgement,
+                binding=self._binding,
+                logical_key=logical_key,
+                canonical_payload=canonical_payload,
+            )
+        except ValueError as exc:
+            raise BoundaryBindingError("settled audit acknowledgement does not match") from exc
 
 
 class BoundOutputPort:

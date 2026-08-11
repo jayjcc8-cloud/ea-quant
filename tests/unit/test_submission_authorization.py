@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from copy import copy
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
@@ -44,6 +46,8 @@ from ea.core.outcomes import OutcomeCode
 from ea.core.risk import _create_risk_state_snapshot, phase1_risk_policy_digest
 from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 from ea.core.runtime import runtime_root_order_key
+from ea.experiments.audit import _OsAuditOps, create_posix_audit_journal
+from ea.experiments.store import LocalResultStore
 from ea.runtime.authorization import (
     _authorization_payload_from_receipt,
     create_dormant_historical_submission_authorization_authority,
@@ -56,6 +60,7 @@ from unit.test_execution_fact_authority import (
     _snapshot,
 )
 from unit.test_lifecycle_coordinator import _MemoryAudit
+from unit.test_store import _root, _spec
 
 
 class _RepeatableRecordSource:
@@ -121,6 +126,23 @@ class _UnresolvableAuthorizationAudit:
                 "injected uncertain authorization append failure",
             )
         return self._inner.append(**values)
+
+    def settle_append(self, **values: Any) -> Any:
+        del values
+        raise AuditContractError(
+            OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+            "injected uncertain authorization settlement failure",
+        )
+
+
+class _TwoPostFsyncFailuresAuditOps(_OsAuditOps):
+    remaining_failures = 0
+
+    def fsync(self, descriptor: int) -> None:
+        super().fsync(descriptor)
+        if self.remaining_failures:
+            self.remaining_failures -= 1
+            raise OSError("injected post-fsync authorization failure")
 
 
 class _Runtime:
@@ -306,6 +328,97 @@ def test_prepare_attempt_closes_append_failure_state(
         ) == 1
     else:
         assert outcome.acknowledgement_sha256 is None
+
+
+def test_posix_uncertain_attempt_preserves_original_key_before_freshness_burn(
+    tmp_path: Path,
+) -> None:
+    spec_set, _order_authority, orders = _orders()
+    order = orders[0]
+    root = _market()
+    prepared = LocalResultStore(_root(tmp_path)).prepare(
+        _spec(),
+        lambda: UUID(order.run_id.value),
+    )
+    binding = prepared.audit.binding
+    ops = _TwoPostFsyncFailuresAuditOps()
+    audit = create_posix_audit_journal(prepared.audit, _ops=ops)
+    policy = _policy(spec_set)
+    risk = _create_risk_state_snapshot(
+        run_id=order.run_id,
+        policy_id=policy.policy_id,
+        policy_sha256=phase1_risk_policy_digest(policy),
+        risk_state_version=0,
+        halted=False,
+        halt_reason=None,
+        halt_causal_root_available_at=None,
+        halt_dispatch_sequence=None,
+        conflict_existing_intent_sha256=None,
+        conflict_submitted_intent_sha256=None,
+    )
+    gate = _Port(
+        InstrumentGateSnapshot(
+            order.run_id,
+            order.instrument,
+            order.order_id,
+            Sha256Digest("33" * 32),
+            1,
+            False,
+        )
+    )
+    runtime = _Runtime(order.run_id, spec_set, root)
+    authority, capability, activation_seal = (
+        create_dormant_historical_submission_authorization_authority(
+            binding=binding,
+            audit=audit,
+            runtime=cast(RuntimeLifecyclePort, runtime),
+            spec_set=spec_set,
+            execution_policy=EXECUTION_POLICY,
+            portfolio=_Port(_snapshot(spec_set)),
+            risk=_Port(risk),
+            global_halt=_Port(GlobalHaltSnapshot(order.run_id, False, 0)),
+            instrument_gate=gate,
+        )
+    )
+    authority.activate(
+        SimpleNamespace(
+            binding=binding,
+            state=SimpleNamespace(state_version=1, phase=CoordinatorPhase.RUNNING),
+        ),
+        seal=activation_seal,
+    )
+    ops.remaining_failures = 2
+
+    unresolved = authority.prepare_attempt(
+        order,
+        causal_market_root=root,
+        dispatch_sequence=1,
+        capability=capability,
+    )
+    assert unresolved.status is SubmissionAuthorizationAttemptStatus.UNRESOLVED
+    assert unresolved.logical_key is not None
+    gate.value = InstrumentGateSnapshot(
+        order.run_id,
+        order.instrument,
+        order.order_id,
+        Sha256Digest("33" * 32),
+        1,
+        True,
+    )
+
+    burned = authority.prepare_attempt(
+        order,
+        causal_market_root=root,
+        dispatch_sequence=1,
+        capability=capability,
+    )
+
+    assert burned.status is SubmissionAuthorizationAttemptStatus.BURNED
+    assert burned.logical_key == unresolved.logical_key
+    assert burned.acknowledgement_sha256 is not None
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ) == 1
 
 
 def test_prepare_attempt_returns_denied_without_append() -> None:

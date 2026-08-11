@@ -26,6 +26,7 @@ from ea.core import (
     EMPTY_RECORD_SHA256,
     Adjustment,
     AuditAppendAcknowledgement,
+    AuditLogicalKey,
     AuditRecordKind,
     AuditSubjectKind,
     Bar,
@@ -235,6 +236,15 @@ class RecordingAudit:
         acknowledgement = self.acknowledgement or _prepared_ack(self.binding)
         self.events.append("audit.ack")
         return acknowledgement
+
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        del logical_key, canonical_payload
+        return self.acknowledgement
 
 
 def _prepared_ack(binding: RunBinding) -> AuditAppendAcknowledgement:

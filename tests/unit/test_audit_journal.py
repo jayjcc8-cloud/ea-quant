@@ -15,6 +15,7 @@ from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.audit import (
     MAX_AUDIT_RECORDS,
     AuditContractError,
+    AuditLogicalKey,
     AuditRecordKind,
     AuditSubjectKind,
     audit_append_acknowledgement_digest,
@@ -85,6 +86,26 @@ class _LowSpaceAuditOps(_OsAuditOps):
         return SimpleNamespace(f_bavail=1, f_frsize=1)
 
 
+class _PostFsyncFailureAuditOps(_OsAuditOps):
+    armed = False
+
+    def fsync(self, descriptor: int) -> None:
+        super().fsync(descriptor)
+        if self.armed:
+            self.armed = False
+            raise OSError("injected post-fsync return failure")
+
+
+class _PostCommitReadFailureAuditOps(_OsAuditOps):
+    armed = False
+
+    def pread(self, journal_fd: int, size: int, offset: int) -> bytes:
+        if self.armed:
+            self.armed = False
+            raise OSError("injected post-commit readback failure")
+        return super().pread(journal_fd, size, offset)
+
+
 def test_fresh_journal_rejects_less_than_six_gib_free_before_creation(tmp_path: Path) -> None:
     root = _root(tmp_path)
     prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
@@ -136,6 +157,42 @@ def test_fresh_journal_is_prepared_before_general_append_and_exact_retry(tmp_pat
     assert audit_append_acknowledgement_digest(replay) == audit_append_acknowledgement_digest(
         acknowledgement
     )
+    assert len(journal.records) == 2
+
+
+@pytest.mark.parametrize("ops_type", [_PostFsyncFailureAuditOps, _PostCommitReadFailureAuditOps])
+def test_uncertain_physical_append_is_settled_by_rescan_fsync_and_readback(
+    tmp_path: Path,
+    ops_type: type[_OsAuditOps],
+) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    ops: Any = ops_type()
+    journal = create_posix_audit_journal(prepared.audit, _ops=ops)
+    payload = _batch_payload()
+    key = AuditLogicalKey(
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+        Sha256Digest("33" * 32),
+    )
+    ops.armed = True
+
+    with pytest.raises(AuditContractError, match="verified durability"):
+        journal.append(
+            record_kind=key.record_kind,
+            subject_kind=key.subject_kind,
+            subject_sha256=key.subject_sha256,
+            canonical_payload=payload,
+        )
+
+    acknowledgement = journal.settle_append(
+        logical_key=key,
+        canonical_payload=payload,
+    )
+
+    assert acknowledgement is not None
+    assert acknowledgement.record_id.owner_sequence == 2
+    assert journal.settle_append(logical_key=key, canonical_payload=payload) is not None
     assert len(journal.records) == 2
 
 

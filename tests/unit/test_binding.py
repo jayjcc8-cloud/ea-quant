@@ -10,6 +10,7 @@ from ea.core import (
     EMPTY_CHAIN_HEAD_SHA256,
     EMPTY_RECORD_SHA256,
     AuditAppendAcknowledgement,
+    AuditLogicalKey,
     AuditRecordKind,
     AuditSubjectKind,
     DataFingerprint,
@@ -96,6 +97,7 @@ class RecordingAudit:
         self.binding = binding
         self.acknowledgement = acknowledgement
         self.calls: list[tuple[AuditRecordKind, AuditSubjectKind, Sha256Digest, bytes]] = []
+        self.settlements: list[tuple[AuditLogicalKey, bytes]] = []
 
     def append(
         self,
@@ -107,6 +109,15 @@ class RecordingAudit:
     ) -> AuditAppendAcknowledgement:
         self.calls.append((record_kind, subject_kind, subject_sha256, canonical_payload))
         return self.acknowledgement or _prepared_ack(self.binding)
+
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        self.settlements.append((logical_key, canonical_payload))
+        return self.acknowledgement
 
 
 def _prepared_ack(binding: RunBinding) -> AuditAppendAcknowledgement:
@@ -169,6 +180,25 @@ def test_bound_audit_and_output_forward_only_store_binding_and_capability(
         )
     ]
     assert output_raw.calls == [(binding, output_capability, b"output")]
+
+
+def test_bound_audit_settlement_revalidates_exact_acknowledgement(tmp_path: Path) -> None:
+    prepared = _prepared(tmp_path)
+    binding = prepared.audit.binding
+    acknowledgement = _prepared_ack(binding)
+    raw = RecordingAudit(binding, acknowledgement)
+    audit = BoundAuditPort(prepared.audit, raw)
+    payload = canonical_run_prepared_audit_payload(binding)
+    key = AuditLogicalKey(
+        AuditRecordKind.RUN_PREPARED,
+        AuditSubjectKind.RUN_MANIFEST,
+        binding.manifest_sha256,
+    )
+
+    settled = audit.settle_append(logical_key=key, canonical_payload=payload)
+
+    assert settled is acknowledgement
+    assert raw.settlements == [(key, payload)]
 
 
 def test_attempt_or_lineage_mismatch_fails_before_raw_persistence(tmp_path: Path) -> None:

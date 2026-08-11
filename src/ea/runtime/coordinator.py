@@ -185,6 +185,29 @@ class _ReadOnlyRecoveryAudit:
             return create_audit_append_acknowledgement(retained)
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "terminal recovery record is missing")
 
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        retained = (
+            self.records.resolve_record(logical_key)
+            if not isinstance(self.records, tuple)
+            else next(
+                (record for record in self.records if record.logical_key == logical_key),
+                None,
+            )
+        )
+        if retained is None:
+            return None
+        if retained.canonical_payload != canonical_payload:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "read-only terminal settlement payload conflicts",
+            )
+        return create_audit_append_acknowledgement(retained)
+
 
 @final
 class Phase1HistoricalLifecycleCoordinator:
@@ -516,53 +539,87 @@ class Phase1HistoricalLifecycleCoordinator:
                         ),
                         "active authorization attempt did not authorize",
                     )
-            attempt = authorization.prepare_attempt(
-                order,
-                causal_market_root=causal_market_root,
-                dispatch_sequence=dispatch_sequence,
-                capability=self._authorization_capability,
-            )
-            if (
-                type(attempt) is not SubmissionAuthorizationAttemptOutcome
-                or attempt.binding != self._binding
-                or attempt.dispatch_sequence != dispatch_sequence
-                or attempt.trigger_root_sha256 != active.trigger_sha256
-                or attempt.order_id != order.order_id
-                or attempt.execution_request_sha256 != request_sha256
-            ):
-                raise LifecycleError(
-                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
-                    "authorization attempt outcome conflicts",
-                )
-            active.authorization_order = order
-            active.authorization_attempt = attempt
-            if attempt.acknowledgement_sha256 is not None:
-                acknowledgement = authorization.resolve_attempt_acknowledgement(
-                    order_id=order.order_id,
-                    execution_request_sha256=request_sha256,
-                )
+            try:
+                try:
+                    attempt = authorization.prepare_attempt(
+                        order,
+                        causal_market_root=causal_market_root,
+                        dispatch_sequence=dispatch_sequence,
+                        capability=self._authorization_capability,
+                    )
+                except Exception:
+                    resolved_order = authorization.resolve_attempt_order(
+                        order_id=order.order_id,
+                        execution_request_sha256=request_sha256,
+                    )
+                    resolved_attempt = authorization.resolve_attempt(
+                        order_id=order.order_id,
+                        execution_request_sha256=request_sha256,
+                    )
+                    if (
+                        type(resolved_order) is not Order
+                        or order_digest(resolved_order) != order_digest(order)
+                        or execution_request_digest(resolved_order) != request_sha256
+                        or type(resolved_attempt) is not SubmissionAuthorizationAttemptOutcome
+                    ):
+                        raise LifecycleError(
+                            OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                            "authorization exception could not be settled",
+                        ) from None
+                    attempt = resolved_attempt
                 if (
-                    type(acknowledgement) is not AuditAppendAcknowledgement
-                    or acknowledgement.binding != self._binding
-                    or acknowledgement.record_kind
-                    is not AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
-                    or acknowledgement.subject_kind
-                    is not AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
-                    or audit_append_acknowledgement_digest(acknowledgement)
-                    != attempt.acknowledgement_sha256
+                    type(attempt) is not SubmissionAuthorizationAttemptOutcome
+                    or attempt.binding != self._binding
+                    or attempt.dispatch_sequence != dispatch_sequence
+                    or attempt.trigger_root_sha256 != active.trigger_sha256
+                    or attempt.order_id != order.order_id
+                    or attempt.execution_request_sha256 != request_sha256
                 ):
                     raise LifecycleError(
                         OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
-                        "authorization acknowledgement conflicts",
+                        "authorization attempt outcome conflicts",
                     )
-                active.authorization_ack = acknowledgement
-            self._require_window(window)
-            if attempt.status is SubmissionAuthorizationAttemptStatus.AUTHORIZED:
-                if active.authorization_ack is None:
+                active.authorization_order = order
+                active.authorization_attempt = attempt
+                if attempt.acknowledgement_sha256 is not None:
+                    acknowledgement = authorization.resolve_attempt_acknowledgement(
+                        order_id=order.order_id,
+                        execution_request_sha256=request_sha256,
+                    )
+                    if (
+                        type(acknowledgement) is not AuditAppendAcknowledgement
+                        or acknowledgement.binding != self._binding
+                        or acknowledgement.record_kind
+                        is not AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+                        or acknowledgement.subject_kind
+                        is not AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
+                        or audit_append_acknowledgement_digest(acknowledgement)
+                        != attempt.acknowledgement_sha256
+                    ):
+                        raise LifecycleError(
+                            OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                            "authorization acknowledgement conflicts",
+                        )
+                    active.authorization_ack = acknowledgement
+                self._require_window(window)
+                if (
+                    attempt.status is SubmissionAuthorizationAttemptStatus.AUTHORIZED
+                    and active.authorization_ack is None
+                ):
                     raise LifecycleError(
                         OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
                         "authorized attempt acknowledgement is missing",
                     )
+            except Exception as error:
+                error_code = getattr(error, "code", OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED)
+                if type(error_code) is not OutcomeCode:
+                    error_code = OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+                self._enter_failing(active, self._missing_keys(active), code=error_code)
+                active.window = None
+                active.window_stage = None
+                raise
+            if attempt.status is SubmissionAuthorizationAttemptStatus.AUTHORIZED:
+                assert active.authorization_ack is not None
                 return active.authorization_ack
             error_code = attempt.error_code or OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
             if attempt.status is SubmissionAuthorizationAttemptStatus.FAILED:
@@ -1084,18 +1141,12 @@ class Phase1HistoricalLifecycleCoordinator:
         key: AuditLogicalKey,
         payload: bytes,
     ) -> AuditAppendAcknowledgement | None:
-        resolver = getattr(self._audit, "resolve_record", None)
-        if not callable(resolver):
+        acknowledgement = self._audit.settle_append(
+            logical_key=key,
+            canonical_payload=payload,
+        )
+        if acknowledgement is None:
             return None
-        record = resolver(key)
-        if record is None:
-            return None
-        if type(record) is not AuditRecord or record.canonical_payload != payload:
-            raise LifecycleError(
-                OutcomeCode.CONFLICTING_ID,
-                "resolved audit record conflicts",
-            )
-        acknowledgement = create_audit_append_acknowledgement(record)
         _require_exact_ack(
             acknowledgement,
             binding=self._binding,
