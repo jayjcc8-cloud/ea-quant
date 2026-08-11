@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from ea.core.audit import (
     AuditLogicalKey,
     AuditRecord,
     AuditRecordKind,
+    AuditRecoveryRecordSource,
     AuditSubjectKind,
     audit_append_acknowledgement_digest,
     audit_chain_head,
@@ -137,7 +139,7 @@ class RecoveredTerminalCoordinatorEvidence:
 @dataclass(frozen=True, slots=True)
 class _ReadOnlyRecoveryAudit:
     binding: RunBinding
-    records: tuple[AuditRecord, ...]
+    records: AuditRecoveryRecordSource | tuple[AuditRecord, ...]
 
     def append(
         self,
@@ -148,14 +150,18 @@ class _ReadOnlyRecoveryAudit:
         canonical_payload: bytes,
     ) -> AuditAppendAcknowledgement:
         key = AuditLogicalKey(record_kind, subject_kind, subject_sha256)
-        for record in self.records:
-            if record.logical_key == key:
-                if record.canonical_payload != canonical_payload:
-                    raise LifecycleError(
-                        OutcomeCode.CONFLICTING_ID,
-                        "read-only terminal recovery payload conflicts",
-                    )
-                return create_audit_append_acknowledgement(record)
+        retained = (
+            self.records.resolve_record(key)
+            if not isinstance(self.records, tuple)
+            else next((record for record in self.records if record.logical_key == key), None)
+        )
+        if retained is not None:
+            if retained.canonical_payload != canonical_payload:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "read-only terminal recovery payload conflicts",
+                )
+            return create_audit_append_acknowledgement(retained)
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "terminal recovery record is missing")
 
 
@@ -1022,7 +1028,7 @@ def recover_phase1_lifecycle_coordinator(
     matcher: HistoricalMatcherPort,
     fact_authority: ExecutionFactAuthorityPort,
     evidence_resolver: ExecutionEvidenceResolverPort,
-    records: tuple[AuditRecord, ...],
+    records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
     authorization: SubmissionAuthorizationPreparationPort | None = None,
     authorization_capability: object | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
@@ -1036,7 +1042,14 @@ def recover_phase1_lifecycle_coordinator(
         authorization=authorization,
         authorization_capability=authorization_capability,
     )
-    recovered = _require_recovery_records(binding, records, audit=audit)
+    recovered = iter(_require_recovery_records(binding, records, audit=audit))
+    try:
+        _prepared, prepared_acknowledgement = next(recovered)
+    except StopIteration as error:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovery preparation record is missing",
+        ) from error
     value = _allocate_coordinator(
         binding=binding,
         audit=audit,
@@ -1047,18 +1060,17 @@ def recover_phase1_lifecycle_coordinator(
         authorization=authorization,
         authorization_capability=authorization_capability,
     )
-    value._state = _admitted_state(binding, recovered[0][1].chain_head_sha256)
-    dispatches = _group_recovery_records(recovered[1:])
+    value._state = _admitted_state(binding, prepared_acknowledgement.chain_head_sha256)
     expected_sequence = 1
     trace_by_sequence = _require_runtime_trace(runtime, binding)
-    for sequence in sorted(dispatches):
-        if sequence != expected_sequence:
+    for dispatch in _group_recovery_records(recovered):
+        if dispatch.sequence != expected_sequence:
             raise LifecycleError(
                 OutcomeCode.CONFLICTING_ID,
                 "recovery dispatch sequence is not contiguous",
             )
         expected_sequence += 1
-        _recover_dispatch(value, dispatches[sequence], trace_by_sequence)
+        _recover_dispatch(value, dispatch, trace_by_sequence)
     if value._active is None and runtime.active_lease is not None:
         lease = runtime.active_lease
         if lease.dispatch_sequence != expected_sequence:
@@ -1096,22 +1108,22 @@ def recover_phase1_terminal_evidence(
     matcher: HistoricalMatcherPort,
     fact_authority: ExecutionFactAuthorityPort,
     evidence_resolver: ExecutionEvidenceResolverPort,
-    records: tuple[AuditRecord, ...],
+    records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
 ) -> RecoveredTerminalCoordinatorEvidence:
     """Reconstruct a closed run without issuing any mutation authority."""
-    if type(records) is not tuple or len(records) < 2:
+    record_count = _recovery_record_count(records)
+    if record_count < 2:
         raise LifecycleError(OutcomeCode.INVALID_TYPE, "terminal recovery records are incomplete")
-    terminal_record = records[-1]
+    terminal_record = _recovery_record_at(records, record_count - 1)
     if (
         type(terminal_record) is not AuditRecord
         or terminal_record.binding != binding
         or terminal_record.record_kind is not AuditRecordKind.RUN_TERMINAL
-        or terminal_record.record_id.owner_sequence != len(records)
+        or terminal_record.record_id.owner_sequence != record_count
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "terminal recovery record conflicts")
-    prefix = records[:-1]
-    _require_recovery_records(binding, prefix, audit=None)
-    prior = prefix[-1]
+    prefix = _recovery_record_prefix(records, record_count - 1)
+    prior = _recovery_record_at(prefix, record_count - 2)
     if terminal_record.previous_record_sha256 != audit_record_digest(
         prior
     ) or terminal_record.previous_chain_head_sha256 != audit_chain_head(prior):
@@ -1273,16 +1285,18 @@ def _admitted_state(
 
 def _require_recovery_records(
     binding: RunBinding,
-    records: tuple[AuditRecord, ...],
+    records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
     *,
     audit: AuditAppendPort | None,
-) -> tuple[tuple[AuditRecord, AuditAppendAcknowledgement], ...]:
-    if type(records) is not tuple or not records:
-        raise LifecycleError(OutcomeCode.INVALID_TYPE, "recovery records must be non-empty tuple")
-    checked: list[tuple[AuditRecord, AuditAppendAcknowledgement]] = []
+) -> Iterator[tuple[AuditRecord, AuditAppendAcknowledgement]]:
+    expected_count = _recovery_record_count(records)
+    if expected_count < 1:
+        raise LifecycleError(OutcomeCode.INVALID_TYPE, "recovery records must be non-empty")
     previous_record_sha256 = None
     previous_chain_head_sha256 = None
+    observed_count = 0
     for sequence, record in enumerate(records, start=1):
+        observed_count = sequence
         if type(record) is not AuditRecord or record.binding != binding:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery record binding conflicts")
         if record.record_id.owner_sequence != sequence:
@@ -1313,21 +1327,75 @@ def _require_recovery_records(
                     error.code,
                     "recovery audit acknowledgement could not be reconfirmed",
                 ) from error
-        checked.append((record, acknowledgement))
+        if sequence == 1 and (
+            record.record_kind is not AuditRecordKind.RUN_PREPARED
+            or record.canonical_payload != canonical_run_prepared_audit_payload(binding)
+        ):
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovery preparation record conflicts",
+            )
+        if record.record_kind is AuditRecordKind.RUN_TERMINAL:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "terminal journal must use read-only terminal recovery",
+            )
+        yield record, acknowledgement
         previous_record_sha256 = audit_record_digest(record)
         previous_chain_head_sha256 = audit_chain_head(record)
-    prepared, _prepared_ack = checked[0]
-    if (
-        prepared.record_kind is not AuditRecordKind.RUN_PREPARED
-        or prepared.canonical_payload != canonical_run_prepared_audit_payload(binding)
-    ):
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery preparation record conflicts")
-    if any(record.record_kind is AuditRecordKind.RUN_TERMINAL for record, _ack in checked):
+    if observed_count != expected_count:
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID,
-            "terminal journal must use read-only terminal recovery",
+            "recovery record source count changed",
         )
-    return tuple(checked)
+
+
+def _recovery_record_count(
+    records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
+) -> int:
+    if isinstance(records, tuple):
+        return len(records)
+    try:
+        count = records.record_count
+        binding = records.binding
+    except AttributeError as error:
+        raise LifecycleError(
+            OutcomeCode.INVALID_TYPE,
+            "recovery records require one repeatable source",
+        ) from error
+    if type(count) is not int or count < 1 or type(binding) is not RunBinding:
+        raise LifecycleError(OutcomeCode.INVALID_TYPE, "recovery record source is invalid")
+    return count
+
+
+def _recovery_record_at(
+    records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
+    index: int,
+) -> AuditRecord:
+    if isinstance(records, tuple):
+        return records[index]
+    try:
+        return records.record_at(index)
+    except (AttributeError, AuditContractError) as error:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovery record could not be resolved",
+        ) from error
+
+
+def _recovery_record_prefix(
+    records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
+    record_count: int,
+) -> AuditRecoveryRecordSource | tuple[AuditRecord, ...]:
+    if isinstance(records, tuple):
+        return records[:record_count]
+    try:
+        return records.prefix(record_count)
+    except (AttributeError, AuditContractError) as error:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovery record prefix could not be resolved",
+        ) from error
 
 
 def _record_document(record: AuditRecord) -> dict[str, object]:
@@ -1341,9 +1409,9 @@ def _record_document(record: AuditRecord) -> dict[str, object]:
 
 
 def _group_recovery_records(
-    records: tuple[tuple[AuditRecord, AuditAppendAcknowledgement], ...],
-) -> dict[int, _RecoveredDispatch]:
-    dispatches: dict[int, _RecoveredDispatch] = {}
+    records: Iterator[tuple[AuditRecord, AuditAppendAcknowledgement]],
+) -> Iterator[_RecoveredDispatch]:
+    current: _RecoveredDispatch | None = None
     for position, (record, acknowledgement) in enumerate(records, start=2):
         kind = record.record_kind
         document = _record_document(record)
@@ -1357,7 +1425,18 @@ def _group_recovery_records(
                 OutcomeCode.CONFLICTING_ID,
                 "recovery dispatch sequence is invalid",
             )
-        group = dispatches.setdefault(sequence_value, _RecoveredDispatch(sequence_value))
+        if current is None:
+            current = _RecoveredDispatch(sequence_value)
+        elif sequence_value != current.sequence:
+            if sequence_value != current.sequence + 1 or current.completion_record is None:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "recovery dispatches are physically interleaved",
+                )
+            _require_recovery_stage_order(current)
+            yield current
+            current = _RecoveredDispatch(sequence_value)
+        group = current
         if kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
             group.authorization_positions.append(position)
             continue
@@ -1395,52 +1474,42 @@ def _group_recovery_records(
             group.completion_record = retained
         else:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "unsupported recovery record kind")
-    _require_recovery_stage_order(dispatches)
-    return dispatches
+    if current is not None:
+        _require_recovery_stage_order(current)
+        yield current
 
 
-def _require_recovery_stage_order(dispatches: dict[int, _RecoveredDispatch]) -> None:
-    previous_last_position = 1
-    previous_completed = True
-    for sequence in sorted(dispatches):
-        group = dispatches[sequence]
-        positions = [
-            position
-            for entry in (
-                group.batch_record,
-                group.failing_record,
-                group.completion_record,
-            )
+def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
+    positions = [
+        position
+        for entry in (
+            group.batch_record,
+            group.failing_record,
+            group.completion_record,
+        )
+        if entry is not None
+        for position in (entry[0],)
+    ]
+    positions.extend(entry[0] for entry in group.outcome_records.values())
+    positions.extend(group.authorization_positions)
+    if not positions:
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery dispatch is empty")
+    completion = group.completion_record
+    if completion is not None:
+        completion_position = completion[0]
+        required_before_completion = [
+            entry[0]
+            for entry in (group.batch_record, *group.outcome_records.values())
             if entry is not None
-            for position in (entry[0],)
         ]
-        positions.extend(entry[0] for entry in group.outcome_records.values())
-        positions.extend(group.authorization_positions)
-        if not positions:
-            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery dispatch is empty")
-        if not previous_completed or min(positions) <= previous_last_position:
+        required_before_completion.extend(group.authorization_positions)
+        if group.batch_record is None or any(
+            position >= completion_position for position in required_before_completion
+        ):
             raise LifecycleError(
                 OutcomeCode.CONFLICTING_ID,
-                "recovery dispatches are physically interleaved",
+                "recovery completion stage order conflicts",
             )
-        completion = group.completion_record
-        if completion is not None:
-            completion_position = completion[0]
-            required_before_completion = [
-                entry[0]
-                for entry in (group.batch_record, *group.outcome_records.values())
-                if entry is not None
-            ]
-            required_before_completion.extend(group.authorization_positions)
-            if group.batch_record is None or any(
-                position >= completion_position for position in required_before_completion
-            ):
-                raise LifecycleError(
-                    OutcomeCode.CONFLICTING_ID,
-                    "recovery completion stage order conflicts",
-                )
-        previous_last_position = max(positions)
-        previous_completed = completion is not None
 
 
 def _require_runtime_trace(

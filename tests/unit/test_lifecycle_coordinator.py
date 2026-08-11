@@ -1247,24 +1247,26 @@ def test_recovery_validation_rejects_malformed_prefix_groups_and_runtime_traces(
     coordinator.process_next_dispatch()
     records = tuple(audit.records)
     prefix = records[:-1]
-    checked = coordinator_module._require_recovery_records(binding, prefix, audit=None)
+    checked = tuple(coordinator_module._require_recovery_records(binding, prefix, audit=None))
 
     invalid_prefixes: tuple[object, ...] = ([], (), (object(),))
     for invalid in invalid_prefixes:
         with pytest.raises(LifecycleError):
-            coordinator_module._require_recovery_records(
-                binding,
-                cast(Any, invalid),
-                audit=None,
+            tuple(
+                coordinator_module._require_recovery_records(
+                    binding,
+                    cast(Any, invalid),
+                    audit=None,
+                )
             )
     with pytest.raises(LifecycleError, match="terminal journal"):
-        coordinator_module._require_recovery_records(binding, records, audit=None)
+        tuple(coordinator_module._require_recovery_records(binding, records, audit=None))
 
     prepared = prefix[0]
     original_binding = prepared.binding
     object.__setattr__(prepared, "binding", RunBinding(binding.reference, Sha256Digest("aa" * 32)))
     with pytest.raises(LifecycleError, match="binding conflicts"):
-        coordinator_module._require_recovery_records(binding, prefix, audit=None)
+        tuple(coordinator_module._require_recovery_records(binding, prefix, audit=None))
     object.__setattr__(prepared, "binding", original_binding)
 
     original_record_id = prepared.record_id
@@ -1274,14 +1276,14 @@ def test_recovery_validation_rejects_malformed_prefix_groups_and_runtime_traces(
         EconomicId(binding.reference.run_id, EconomicOwnerKind.AUDIT_RECORD, 2),
     )
     with pytest.raises(LifecycleError, match="sequence conflicts"):
-        coordinator_module._require_recovery_records(binding, prefix, audit=None)
+        tuple(coordinator_module._require_recovery_records(binding, prefix, audit=None))
     object.__setattr__(prepared, "record_id", original_record_id)
 
     completion = prefix[-1]
     original_previous = completion.previous_record_sha256
     object.__setattr__(completion, "previous_record_sha256", Sha256Digest("bb" * 32))
     with pytest.raises(LifecycleError, match="chain conflicts"):
-        coordinator_module._require_recovery_records(binding, prefix, audit=None)
+        tuple(coordinator_module._require_recovery_records(binding, prefix, audit=None))
     object.__setattr__(completion, "previous_record_sha256", original_previous)
 
     batch_pair, completion_pair = checked[1:]
@@ -1308,44 +1310,43 @@ def test_recovery_validation_rejects_malformed_prefix_groups_and_runtime_traces(
     invalid_sequence["dispatch_sequence"] = 0
     object.__setattr__(batch, "canonical_payload", encoded(invalid_sequence))
     with pytest.raises(LifecycleError, match="sequence is invalid"):
-        coordinator_module._group_recovery_records((batch_pair,))
+        tuple(coordinator_module._group_recovery_records(iter((batch_pair,))))
 
     invalid_trigger = dict(batch_document)
     invalid_trigger["trigger_root_sha256"] = "invalid"
     object.__setattr__(batch, "canonical_payload", encoded(invalid_trigger))
     with pytest.raises(LifecycleError, match="trigger digest is invalid"):
-        coordinator_module._group_recovery_records((batch_pair,))
+        tuple(coordinator_module._group_recovery_records(iter((batch_pair,))))
     object.__setattr__(batch, "canonical_payload", original_batch_payload)
 
     with pytest.raises(LifecycleError, match="duplicate recovered batch"):
-        coordinator_module._group_recovery_records((batch_pair, batch_pair))
+        tuple(coordinator_module._group_recovery_records(iter((batch_pair, batch_pair))))
     with pytest.raises(LifecycleError, match="duplicate recovered completion"):
-        coordinator_module._group_recovery_records((batch_pair, completion_pair, completion_pair))
+        tuple(
+            coordinator_module._group_recovery_records(
+                iter((batch_pair, completion_pair, completion_pair))
+            )
+        )
 
     original_prepared_kind = prepared.record_kind
     original_prepared_payload = prepared.canonical_payload
     object.__setattr__(prepared, "canonical_payload", encoded({"dispatch_sequence": 1}))
     with pytest.raises(LifecycleError, match="unsupported recovery record kind"):
-        coordinator_module._group_recovery_records(((prepared, checked[0][1]),))
+        tuple(coordinator_module._group_recovery_records(iter(((prepared, checked[0][1]),))))
     object.__setattr__(prepared, "record_kind", AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION)
-    assert coordinator_module._group_recovery_records(((prepared, checked[0][1]),))[1]
+    assert tuple(coordinator_module._group_recovery_records(iter(((prepared, checked[0][1]),))))[
+        0
+    ].authorization_positions
     object.__setattr__(prepared, "record_kind", original_prepared_kind)
     object.__setattr__(prepared, "canonical_payload", original_prepared_payload)
 
     empty_group = coordinator_module._RecoveredDispatch(1)
     with pytest.raises(LifecycleError, match="dispatch is empty"):
-        coordinator_module._require_recovery_stage_order({1: empty_group})
-    incomplete = coordinator_module._RecoveredDispatch(1)
-    incomplete.batch_record = (2, *batch_pair)
-    later = coordinator_module._RecoveredDispatch(2)
-    later.batch_record = (3, *batch_pair)
-    later.completion_record = (4, *completion_pair)
-    with pytest.raises(LifecycleError, match="physically interleaved"):
-        coordinator_module._require_recovery_stage_order({1: incomplete, 2: later})
+        coordinator_module._require_recovery_stage_order(empty_group)
     completion_only = coordinator_module._RecoveredDispatch(1)
     completion_only.completion_record = (2, *completion_pair)
     with pytest.raises(LifecycleError, match="completion stage order"):
-        coordinator_module._require_recovery_stage_order({1: completion_only})
+        coordinator_module._require_recovery_stage_order(completion_only)
 
     with pytest.raises(LifecycleError, match="trace evidence is incomplete"):
         coordinator_module._require_runtime_trace(SimpleNamespace(), binding)
