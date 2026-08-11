@@ -32,6 +32,7 @@ from ea.experiments.store import (
     AuditRunBinding,
     LocalResultStore,
     PreparedRun,
+    RecoveredTerminalRun,
     StoreError,
     VerifiedIncompleteRecoveryBinding,
     VerifiedTerminalRecoveryBinding,
@@ -361,7 +362,21 @@ def test_terminal_recovery_returns_read_only_lost_ack_evidence(tmp_path: Path) -
 
     assert terminal.record_count == 2
     assert terminal.terminal_record.record_kind is AuditRecordKind.RUN_TERMINAL
+    assert not hasattr(terminal, "records")
     assert not hasattr(terminal, "audit")
     assert not hasattr(terminal, "output")
+    with pytest.raises(StoreError, match="store-issued"):
+        RecoveredTerminalRun(
+            object(),
+            binding=terminal.binding,
+            records=(terminal.terminal_record,),
+            terminal_record=terminal.terminal_record,
+            terminal_acknowledgement=terminal.terminal_acknowledgement,
+        )
+    terminal_binding, terminal_records = terminal._consume()
+    assert terminal_binding == terminal.binding
+    assert terminal_records[-1] == terminal.terminal_record
+    with pytest.raises(StoreError, match="already consumed"):
+        terminal._consume()
     with pytest.raises(StoreError, match="stale or foreign"):
         recovered_store.recover_terminal_attempt(verified)

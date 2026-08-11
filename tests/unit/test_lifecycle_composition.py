@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+from inspect import signature
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +13,7 @@ from ea.composition.lifecycle import (
     Phase1HistoricalLifecycle,
     create_phase1_historical_lifecycle,
     recover_phase1_historical_lifecycle,
+    recover_phase1_historical_terminal_evidence,
 )
 from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.lifecycle import CoordinatorPhase
@@ -30,14 +31,7 @@ from ea.experiments.store import (
     LocalResultStore,
     VerifiedIncompleteRecoveryBinding,
 )
-from ea.runtime.authorization import (
-    create_dormant_historical_submission_authorization_authority,
-)
 from ea.runtime.historical import create_phase1_historical_market_runtime
-from ea.runtime.matcher import (
-    create_historical_matcher_descendant_fact_dispatch_verifier,
-    create_historical_matcher_dispatch_verifier,
-)
 from unit.test_audit_journal import _release_simulated_process_writer
 from unit.test_historical_matcher import _system
 from unit.test_historical_runtime import _row, _source
@@ -71,6 +65,16 @@ class _RecoveryOrderVerifier:
             (order for order in self._orders if order.client_submission_key == key),
             None,
         )
+
+
+class _UnusedDispatch:
+    def __init__(self, matcher: Any) -> None:
+        self.run_id = matcher.run_id
+        self.spec_set = matcher.spec_set
+
+    def resolve_active_issued_fact_dispatch(self, **values: Any) -> None:
+        del values
+        return None
 
 
 def test_recovery_composition_consumes_store_prefix_and_injected_histories(
@@ -113,57 +117,49 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
         source=source,
     )
     freshness = _UnusedFreshness()
-    authorization, capability, activation_seal = (
-        create_dormant_historical_submission_authorization_authority(
-            binding=admitted.binding,
-            audit=admitted.audit,
-            runtime=runtime,
-            spec_set=matcher.spec_set,
-            execution_policy=matcher.execution_policy,
-            portfolio=freshness,
-            risk=freshness,
-            global_halt=freshness,
-            instrument_gate=freshness,
-        )
-    )
-    dispatch = create_historical_matcher_dispatch_verifier(runtime)
-    object.__setattr__(matcher, "_submission_authorization_verifier", authorization)
-    object.__setattr__(matcher, "_active_dispatch_verifier", dispatch)
-    object.__setattr__(matcher, "_active_dispatch_runtime_identity", dispatch.runtime_identity)
     order_verifier = _RecoveryOrderVerifier(matcher, orders)
-    object.__setattr__(matcher, "_order_issuance_verifier", order_verifier)
-    descendant = create_historical_matcher_descendant_fact_dispatch_verifier(
-        runtime=runtime,
-        matcher=matcher,
-    )
-    facts = create_phase1_execution_fact_authority(
+    fact_history = create_phase1_execution_fact_authority(
         run_id=matcher.run_id,
         spec_set=matcher.spec_set,
         order_verifier=order_verifier,
-        dispatch_verifier=descendant,
+        dispatch_verifier=_UnusedDispatch(matcher),
     )
 
     lifecycle = recover_phase1_historical_lifecycle(
         recovery=admitted,
         runtime=runtime,
-        matcher=matcher,
-        fact_authority=facts,
-        authorization=authorization,
-        authorization_capability=capability,
-        activation_seal=activation_seal,
+        matcher_history=matcher,
+        fact_history=fact_history,
         order_issuance_verifier=order_verifier,
+        portfolio=freshness,
+        risk=freshness,
+        global_halt=freshness,
+        instrument_gate=freshness,
     )
 
     assert lifecycle.coordinator.state.phase is CoordinatorPhase.ADMITTED
-    assert lifecycle.matcher is matcher
+    assert lifecycle.matcher is not matcher
+    assert lifecycle.fact_authority is not fact_history
+    assert lifecycle.matcher.state == matcher.state
     assert admitted_journals[0].records == recovered.records
+    recovery_parameters = signature(recover_phase1_historical_lifecycle).parameters
+    assert "authorization" not in recovery_parameters
+    assert "authorization_capability" not in recovery_parameters
+    assert "activation_seal" not in recovery_parameters
+    with pytest.raises(TypeError, match="terminal recovery requires exact"):
+        recover_phase1_historical_terminal_evidence(
+            recovery=object(),  # type: ignore[arg-type]
+            runtime=runtime,
+            matcher_history=matcher,
+            fact_history=fact_history,
+        )
 
     with pytest.raises(TypeError, match="created only by composition"):
         Phase1HistoricalLifecycle(
             _seal=object(),
             coordinator=lifecycle.coordinator,
-            matcher=matcher,
-            fact_authority=facts,
+            matcher=lifecycle.matcher,
+            fact_authority=lifecycle.fact_authority,
             runtime=runtime,
         )
     with pytest.raises(TypeError, match="prepared acknowledgement"):
@@ -186,41 +182,14 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
         recover_phase1_historical_lifecycle(
             recovery=object(),  # type: ignore[arg-type]
             runtime=runtime,
-            matcher=matcher,
-            fact_authority=facts,
-            authorization=authorization,
-            authorization_capability=capability,
-            activation_seal=activation_seal,
+            matcher_history=matcher,
+            fact_history=fact_history,
             order_issuance_verifier=order_verifier,
+            portfolio=freshness,
+            risk=freshness,
+            global_halt=freshness,
+            instrument_gate=freshness,
         )
-    original_order_verifier = matcher._order_issuance_verifier
-    object.__setattr__(matcher, "_order_issuance_verifier", object())
-    with pytest.raises(TypeError, match="authority identities conflict"):
-        recover_phase1_historical_lifecycle(
-            recovery=admitted,
-            runtime=runtime,
-            matcher=matcher,
-            fact_authority=facts,
-            authorization=authorization,
-            authorization_capability=capability,
-            activation_seal=activation_seal,
-            order_issuance_verifier=order_verifier,
-        )
-    object.__setattr__(matcher, "_order_issuance_verifier", original_order_verifier)
-    original_fact_dispatch = facts._dispatch_verifier
-    object.__setattr__(facts, "_dispatch_verifier", SimpleNamespace())
-    with pytest.raises(TypeError, match="bindings are incomplete"):
-        recover_phase1_historical_lifecycle(
-            recovery=admitted,
-            runtime=runtime,
-            matcher=matcher,
-            fact_authority=facts,
-            authorization=authorization,
-            authorization_capability=capability,
-            activation_seal=activation_seal,
-            order_issuance_verifier=order_verifier,
-        )
-    object.__setattr__(facts, "_dispatch_verifier", original_fact_dispatch)
 
     seal = run_composition._RECOVERED_ADMISSION_SEAL
     with pytest.raises(RunCompositionError, match="store-issued evidence"):

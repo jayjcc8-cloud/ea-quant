@@ -959,6 +959,28 @@ def create_phase1_execution_fact_authority(
     return authority
 
 
+def recover_phase1_execution_fact_authority_history(
+    history: Phase1ExecutionFactAuthority,
+    *,
+    order_verifier: OrderResolutionVerifier,
+    dispatch_verifier: RuntimeFactDispatchVerifier,
+) -> Phase1ExecutionFactAuthority:
+    """Clone one factory-issued canonical fact history onto fresh verifier bindings."""
+    if type(history) is not Phase1ExecutionFactAuthority:
+        raise ExecutionFactAuthorityError(
+            OutcomeCode.INVALID_TYPE,
+            "fact recovery history must be an exact factory-issued authority",
+        )
+    recovered = create_phase1_execution_fact_authority(
+        run_id=history.run_id,
+        spec_set=history.spec_set,
+        order_verifier=order_verifier,
+        dispatch_verifier=dispatch_verifier,
+    )
+    recovered._state = history._state
+    return recovered
+
+
 def _materialize_ingress(ingress: object) -> tuple[bytes, bytes]:
     if type(ingress) is not ExecutionFactIngress:
         raise ExecutionFactAuthorityError(

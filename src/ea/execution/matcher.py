@@ -2803,3 +2803,36 @@ def create_phase1_historical_matcher(
     value._issued_registry_identity = value._state.issued_by_identity
     value._require_live_bindings()
     return value
+
+
+def recover_phase1_historical_matcher_history(
+    history: Phase1HistoricalMatcher,
+    *,
+    order_issuance_verifier: HistoricalOrderIssuanceVerifier,
+    submission_authorization_verifier: HistoricalSubmissionAuthorizationVerifier,
+    active_dispatch_verifier: HistoricalMatcherDispatchVerifier,
+) -> Phase1HistoricalMatcher:
+    """Clone one factory-issued canonical history onto fresh verifier bindings."""
+    if type(history) is not Phase1HistoricalMatcher or history._mutation_active:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "matcher recovery history must be quiescent and exact",
+        )
+    authority = history._require_dispatch_authority()
+    recovered = create_phase1_historical_matcher(
+        run_id=history.run_id,
+        spec_set=history.spec_set,
+        execution_policy=history.execution_policy,
+        source_namespace=history.source_namespace,
+        provenance_id=history.provenance_id,
+        order_issuance_verifier=order_issuance_verifier,
+        submission_authorization_verifier=submission_authorization_verifier,
+        active_dispatch_verifier=active_dispatch_verifier,
+    )
+    recovered._state = history._state
+    recovered._conflict_bytes = history._conflict_bytes
+    recovered._conflict_sha256 = history._conflict_sha256
+    recovered._issued_history_identity = history._issued_history_identity
+    recovered._issued_registry_identity = history._issued_registry_identity
+    _MATCHER_DISPATCH_AUTHORITIES[recovered] = authority
+    return recovered

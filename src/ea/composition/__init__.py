@@ -5,6 +5,7 @@ from ea.composition.lifecycle import (
     Phase1HistoricalLifecycle,
     create_phase1_historical_lifecycle,
     recover_phase1_historical_lifecycle,
+    recover_phase1_historical_terminal_evidence,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "Phase1HistoricalLifecycle",
     "create_phase1_historical_lifecycle",
     "recover_phase1_historical_lifecycle",
+    "recover_phase1_historical_terminal_evidence",
 ]

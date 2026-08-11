@@ -33,6 +33,7 @@ _BINDING_SEAL = object()
 _PREPARED_SEAL = object()
 _RECOVERY_SEAL = object()
 _RECOVERED_SEAL = object()
+_RECOVERED_TERMINAL_SEAL = object()
 
 
 class StoreError(RuntimeError):
@@ -448,15 +449,50 @@ class RecoveredRun:
         object.__setattr__(self, "_admitted", True)
 
 
-@dataclass(frozen=True, slots=True)
 class RecoveredTerminalRun:
     """Read-only terminal recovery evidence; no mutation capability is present."""
 
+    __slots__ = (
+        "_consumed",
+        "_records",
+        "binding",
+        "record_count",
+        "terminal_acknowledgement",
+        "terminal_record",
+    )
     binding: RunBinding
+    _consumed: bool
+    _records: tuple[AuditRecord, ...]
     record_count: int
-    records: tuple[AuditRecord, ...]
     terminal_record: AuditRecord
     terminal_acknowledgement: AuditAppendAcknowledgement
+
+    def __init__(
+        self,
+        seal: object,
+        *,
+        binding: RunBinding,
+        records: tuple[AuditRecord, ...],
+        terminal_record: AuditRecord,
+        terminal_acknowledgement: AuditAppendAcknowledgement,
+    ) -> None:
+        if seal is not _RECOVERED_TERMINAL_SEAL or not records or records[-1] != terminal_record:
+            raise StoreError("terminal recovery evidence is store-issued")
+        object.__setattr__(self, "_consumed", False)
+        object.__setattr__(self, "_records", records)
+        object.__setattr__(self, "binding", binding)
+        object.__setattr__(self, "record_count", len(records))
+        object.__setattr__(self, "terminal_record", terminal_record)
+        object.__setattr__(self, "terminal_acknowledgement", terminal_acknowledgement)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("terminal recovery evidence is immutable")
+
+    def _consume(self) -> tuple[RunBinding, tuple[AuditRecord, ...]]:
+        if self._consumed:
+            raise StoreError("terminal recovery evidence was already consumed")
+        object.__setattr__(self, "_consumed", True)
+        return self.binding, self._records
 
 
 class LocalResultStore:
@@ -888,8 +924,8 @@ class LocalResultStore:
             self._attempts.pop(authority.attempt_token, None)
         os.close(record.writer_lock_fd)
         return RecoveredTerminalRun(
+            _RECOVERED_TERMINAL_SEAL,
             binding=authority.binding,
-            record_count=verified.record_count,
             records=records,
             terminal_record=verified.terminal_record,
             terminal_acknowledgement=acknowledgement,
