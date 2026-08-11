@@ -38,6 +38,8 @@ from ea.core.historical_matching import (
     HistoricalSubmissionAuthorizationProof,
     HistoricalSubmissionReceipt,
     _create_historical_submission_authorization_proof,
+    _require_historical_submission_receipt_causal_root,
+    canonical_historical_submission_receipt_bytes,
     runtime_root_key_document,
     runtime_root_order_key_document,
 )
@@ -143,33 +145,63 @@ def _economic_id_from_document(value: object, run_id: RunId) -> EconomicId:
     return EconomicId(run_id, EconomicOwnerKind.EXECUTION_ORDER, value["owner_sequence"])
 
 
-def _receipt_matches_authorization(
+def _authorization_payload_from_receipt(
     receipt: HistoricalSubmissionReceipt,
-    document: dict[str, object],
     acknowledgement: AuditAppendAcknowledgement,
     order: Order,
-) -> bool:
-    return (
-        type(receipt) is HistoricalSubmissionReceipt
-        and receipt.order_id == order.order_id
-        and receipt.order_sha256 == order_digest(order)
-        and receipt.execution_request_sha256 == execution_request_digest(order)
-        and receipt.causal_market_sha256.value == document.get("causal_market_sha256")
-        and runtime_root_order_key_document(receipt.causal_root_key)
-        == document.get("causal_root_key")
-        and receipt.dispatch_sequence == document.get("dispatch_sequence")
-        and receipt.audit_acknowledgement_id == audit_acknowledgement_id(acknowledgement)
-        and receipt.audit_acknowledgement_sha256
-        == audit_append_acknowledgement_digest(acknowledgement)
-        and receipt.global_halt_epoch == document.get("global_halt_epoch")
-        and receipt.risk_halt_epoch == document.get("risk_halt_epoch")
-        and receipt.instrument_gate_id == document.get("instrument_gate_id")
-        and receipt.instrument_gate_version == document.get("instrument_gate_version")
-        and receipt.authorization_state_version == document.get("authorization_state_version")
-        and receipt.instrument_spec_set_id.value == document.get("instrument_spec_set_id")
-        and receipt.instrument_spec_set_sha256.value == document.get("instrument_spec_set_sha256")
-        and receipt.execution_policy.identifier.value == document.get("execution_policy_id")
-        and receipt.execution_policy.sha256.value == document.get("execution_policy_sha256")
+) -> bytes | None:
+    if type(receipt) is not HistoricalSubmissionReceipt:
+        return None
+    try:
+        canonical_historical_submission_receipt_bytes(receipt)
+        causal_root = _require_historical_submission_receipt_causal_root(receipt)
+        root_key = runtime_root_order_key_document(receipt.causal_root_key)
+    except Exception:
+        return None
+    if (
+        receipt.run_id != order.run_id
+        or receipt.order_id != order.order_id
+        or receipt.order_sha256 != order_digest(order)
+        or receipt.execution_request_sha256 != execution_request_digest(order)
+        or receipt.client_submission_key != order.client_submission_key
+        or receipt.instrument != order.instrument
+        or receipt.side is not order.side
+        or receipt.quantity_text != order.quantity.text
+        or receipt.dispatch_sequence != order.dispatch_sequence
+        or receipt.eligible_after_available_at != order.eligible_after_available_at
+        or receipt.audit_acknowledgement_id != audit_acknowledgement_id(acknowledgement)
+        or receipt.audit_acknowledgement_sha256
+        != audit_append_acknowledgement_digest(acknowledgement)
+        or receipt.risk_halt_epoch != order.risk_state_version
+        or receipt.instrument_spec_set_id != order.instrument_spec_set_id
+        or receipt.instrument_spec_set_sha256 != order.instrument_spec_set_sha256
+        or receipt.execution_policy != order.execution_policy
+    ):
+        return None
+    return _canonical_json(
+        {
+            "authorization_state_version": receipt.authorization_state_version,
+            "canonicalization": "ea-canonical-json-v1",
+            "causal_market_sha256": causal_market_digest(causal_root).value,
+            "causal_root_key": root_key,
+            "dispatch_sequence": receipt.dispatch_sequence,
+            "execution_policy_id": receipt.execution_policy.identifier.value,
+            "execution_policy_sha256": receipt.execution_policy.sha256.value,
+            "execution_request_sha256": receipt.execution_request_sha256.value,
+            "global_halt_epoch": receipt.global_halt_epoch,
+            "held_for_order_id": _economic_id_document(receipt.order_id),
+            "instrument_gate_id": receipt.instrument_gate_id,
+            "instrument_gate_version": receipt.instrument_gate_version,
+            "instrument_spec_set_id": receipt.instrument_spec_set_id.value,
+            "instrument_spec_set_sha256": receipt.instrument_spec_set_sha256.value,
+            "order_id": _economic_id_document(receipt.order_id),
+            "order_sha256": receipt.order_sha256.value,
+            "portfolio_snapshot_version": order.portfolio_snapshot_version,
+            "risk_halt_epoch": receipt.risk_halt_epoch,
+            "risk_state_version": order.risk_state_version,
+            "run_id": receipt.run_id.value,
+            "schema": "ea.audit-submission-authorization.v1",
+        }
     )
 
 
@@ -351,12 +383,12 @@ class HistoricalSubmissionAuthorizationAuthority:
             )
             causal_root: MarketDataEnvelope | None = None
             if receipt is not None:
-                if not _receipt_matches_authorization(
+                recovered_payload = _authorization_payload_from_receipt(
                     receipt,
-                    document,
                     acknowledgement,
                     order,
-                ):
+                )
+                if recovered_payload != record.canonical_payload:
                     raise _deny(
                         OutcomeCode.CONFLICTING_ID,
                         "authorization receipt evidence conflicts",

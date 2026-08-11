@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,13 +10,24 @@ import pytest
 from ea.core.audit import (
     AuditRecordKind,
     AuditSubjectKind,
+    audit_acknowledgement_id,
+    audit_append_acknowledgement_digest,
+    audit_subject_digest,
     canonical_run_prepared_audit_payload,
 )
+from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import (
     canonical_execution_request_bytes,
     canonical_order_bytes,
+    execution_request_digest,
+    order_digest,
 )
-from ea.core.historical_matching import HistoricalPreEffectAuthorizationError
+from ea.core.historical_matching import (
+    HistoricalPreEffectAuthorizationError,
+    HistoricalSubmissionReceipt,
+    _create_historical_submission_receipt,
+    historical_market_root_digest,
+)
 from ea.core.lifecycle import (
     CoordinatorPhase,
     GlobalHaltSnapshot,
@@ -66,6 +78,50 @@ class _NoSubmissions:
     def resolve_submission_receipt(self, **values: Any) -> None:
         del values
         return None
+
+
+class _Submissions:
+    def __init__(self, receipt: HistoricalSubmissionReceipt) -> None:
+        self.receipt = receipt
+
+    def resolve_submission_receipt(self, **values: Any) -> HistoricalSubmissionReceipt:
+        del values
+        return self.receipt
+
+
+def _receipt(
+    order: Any,
+    root: MarketDataEnvelope,
+    acknowledgement: Any,
+    document: dict[str, Any],
+) -> HistoricalSubmissionReceipt:
+    return _create_historical_submission_receipt(
+        causal_market_root=root,
+        run_id=order.run_id,
+        source_namespace=SourceNamespace("phase1.historical-matcher.v1"),
+        submission_sequence=1,
+        order_id=order.order_id,
+        order_sha256=order_digest(order),
+        execution_request_sha256=execution_request_digest(order),
+        client_submission_key=order.client_submission_key,
+        instrument=order.instrument,
+        side=order.side,
+        quantity_text=order.quantity.text,
+        causal_market_sha256=historical_market_root_digest(root),
+        causal_root_key=runtime_root_order_key(root),
+        dispatch_sequence=order.dispatch_sequence,
+        eligible_after_available_at=order.eligible_after_available_at,
+        audit_acknowledgement_id=audit_acknowledgement_id(acknowledgement),
+        audit_acknowledgement_sha256=audit_append_acknowledgement_digest(acknowledgement),
+        global_halt_epoch=document["global_halt_epoch"],
+        risk_halt_epoch=document["risk_halt_epoch"],
+        instrument_gate_id=document["instrument_gate_id"],
+        instrument_gate_version=document["instrument_gate_version"],
+        authorization_state_version=document["authorization_state_version"],
+        instrument_spec_set_id=order.instrument_spec_set_id,
+        instrument_spec_set_sha256=order.instrument_spec_set_sha256,
+        execution_policy=order.execution_policy,
+    )
 
 
 def _market() -> MarketDataEnvelope:
@@ -257,10 +313,12 @@ def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
     portfolio_port = _Port(portfolio)
     risk_port = _Port(risk)
 
-    def create_authority() -> tuple[Any, object, object]:
+    def create_authority(
+        authority_audit: _MemoryAudit = audit,
+    ) -> tuple[Any, object, object]:
         return create_dormant_historical_submission_authorization_authority(
             binding=binding,
-            audit=audit,
+            audit=authority_audit,
             runtime=cast(RuntimeLifecyclePort, runtime),
             spec_set=spec_set,
             execution_policy=EXECUTION_POLICY,
@@ -282,6 +340,8 @@ def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
         dispatch_sequence=1,
         capability=capability,
     )
+    authorization_document = json.loads(audit.records[-1].canonical_payload)
+    original_receipt = _receipt(order, root, original_ack, authorization_document)
 
     recovered, recovered_capability, recovered_seal = create_authority()
     recovered.recover_attempts(
@@ -310,6 +370,49 @@ def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
     assert recovered_ack == original_ack
     assert proof.audit_acknowledgement_sha256.value
     assert len(audit.records) == 2
+
+    committed, _committed_capability, committed_seal = create_authority()
+    committed.recover_attempts(
+        tuple(audit.records),
+        orders=order_authority,
+        submissions=_Submissions(original_receipt),
+        seal=committed_seal,
+    )
+
+    tampered_document = dict(authorization_document)
+    tampered_document["portfolio_snapshot_version"] += 1
+    tampered_payload = json.dumps(
+        tampered_document,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    tampered_audit = _MemoryAudit(binding)
+    tampered_audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=binding.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(binding),
+    )
+    tampered_ack = tampered_audit.append(
+        record_kind=AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+        subject_kind=AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+            tampered_payload,
+        ),
+        canonical_payload=tampered_payload,
+    )
+    tampered_receipt = _receipt(order, root, tampered_ack, tampered_document)
+    conflicting, _conflicting_capability, conflicting_seal = create_authority(tampered_audit)
+    with pytest.raises(HistoricalPreEffectAuthorizationError, match="receipt evidence conflicts"):
+        conflicting.recover_attempts(
+            tuple(tampered_audit.records),
+            orders=order_authority,
+            submissions=_Submissions(tampered_receipt),
+            seal=conflicting_seal,
+        )
 
     global_halt.value = GlobalHaltSnapshot(order.run_id, False, 1)
     with pytest.raises(HistoricalPreEffectAuthorizationError, match="state changed"):
