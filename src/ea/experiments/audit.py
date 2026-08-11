@@ -553,6 +553,11 @@ class PosixAuditJournal:
         try:
             if self._closed:
                 raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit journal is closed")
+            if self._failed:
+                raise _audit_error(
+                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                    "audit journal is in a monotone failed state",
+                )
             logical_key = AuditLogicalKey(record_kind, subject_kind, subject_sha256)
             compact_key = _compact_logical_key(logical_key)
             existing_sequence = self._index.get(compact_key)
@@ -592,11 +597,6 @@ class PosixAuditJournal:
                     binding=self._binding,
                     logical_key=logical_key,
                     canonical_payload=canonical_payload,
-                )
-            if self._failed:
-                raise _audit_error(
-                    OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
-                    "audit journal is in a monotone failed state",
                 )
             if self._terminal:
                 raise _audit_error(OutcomeCode.CONFLICTING_ID, "terminal audit journal is closed")

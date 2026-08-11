@@ -282,6 +282,13 @@ def test_settlement_readback_mismatch_fails_monotonically(
         journal.settle_append(logical_key=key, canonical_payload=payload)
     with pytest.raises(AuditContractError, match="failed state"):
         journal.append(
+            record_kind=key.record_kind,
+            subject_kind=key.subject_kind,
+            subject_sha256=key.subject_sha256,
+            canonical_payload=payload,
+        )
+    with pytest.raises(AuditContractError, match="failed state"):
+        journal.append(
             record_kind=AuditRecordKind.MATCHER_DISPATCH_BATCH,
             subject_kind=AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
             subject_sha256=Sha256Digest("55" * 32),
