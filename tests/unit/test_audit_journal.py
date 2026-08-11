@@ -4,6 +4,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from sys import getsizeof
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,21 +13,21 @@ import pytest
 import ea.experiments.audit as audit_module
 from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.audit import (
-    MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES,
-    MAX_PHASE1_RECOVERABLE_MARKET_RECORDS,
+    MAX_AUDIT_RECORDS,
     AuditContractError,
     AuditRecordKind,
     AuditSubjectKind,
     audit_append_acknowledgement_digest,
     audit_chain_head,
     audit_subject_digest,
-    phase1_audit_recovery_resident_bytes,
 )
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import Sha256Digest
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
     PosixAuditJournal,
+    _entry_resident_bytes,
+    _JournalEntry,
     _OsAuditOps,
     create_posix_audit_journal,
     reopen_posix_audit_journal,
@@ -204,25 +205,33 @@ def test_reopen_rejects_index_that_exceeds_resident_memory_budget(
     assert captured.value.code is OutcomeCode.OUT_OF_RANGE
 
 
-def test_records_reject_recovery_representation_before_materialization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = _root(tmp_path)
-    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
-    journal = create_posix_audit_journal(prepared.audit)
-    journal.close()
-    reopened = reopen_posix_audit_journal(prepared.audit)
-    streamed = reopened.recovery_records
-    monkeypatch.setattr(audit_module, "MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES", 1)
+def test_maximum_compact_reopen_index_fits_the_256_mib_budget() -> None:
+    count = MAX_AUDIT_RECORDS
+    entry = _JournalEntry(
+        offset=0,
+        frame_length=20_528,
+        payload_length=16_384,
+        payload_sha256=b"0" * 32,
+        record_sha256=b"1" * 32,
+        chain_head_sha256=b"2" * 32,
+    )
+    max_key_length = (
+        max(len(kind.value) for kind in AuditRecordKind)
+        + 1
+        + max(len(kind.value) for kind in AuditSubjectKind)
+        + 1
+        + 32
+    )
+    container_bytes = (
+        getsizeof([None] * count)
+        + getsizeof(dict.fromkeys(range(count)))
+        + getsizeof(bytearray(count))
+    )
+    per_entry_bytes = (
+        _entry_resident_bytes(entry) + getsizeof(b"x" * max_key_length) + getsizeof(count) + 1
+    )
 
-    with pytest.raises(AuditContractError, match="recovery record representation") as captured:
-        _ = reopened.records
-
-    assert captured.value.code is OutcomeCode.OUT_OF_RANGE
-    assert len(reopened._entries) == 1
-    assert tuple(streamed) == tuple(streamed)
-    assert streamed.record_count == 1
+    assert container_bytes + count * per_entry_bytes <= audit_module.MAX_AUDIT_INDEX_RESIDENT_BYTES
 
 
 def test_recovery_record_source_is_repeatable_and_snapshot_bound(tmp_path: Path) -> None:
@@ -256,18 +265,6 @@ def test_recovery_record_source_is_repeatable_and_snapshot_bound(tmp_path: Path)
     journal.close()
     with pytest.raises(AuditContractError, match="no longer readable"):
         tuple(prefix)
-
-
-def test_phase1_runtime_admission_is_proven_by_recovery_resident_budget() -> None:
-    assert MAX_PHASE1_RECOVERABLE_MARKET_RECORDS == 4_081
-    assert (
-        phase1_audit_recovery_resident_bytes(MAX_PHASE1_RECOVERABLE_MARKET_RECORDS)
-        <= MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES
-    )
-    assert (
-        phase1_audit_recovery_resident_bytes(MAX_PHASE1_RECOVERABLE_MARKET_RECORDS + 1)
-        > MAX_AUDIT_RECOVERY_RECORD_RESIDENT_BYTES
-    )
 
 
 def test_append_rejects_projected_index_growth_before_writing(
@@ -346,7 +343,10 @@ def _release_simulated_process_writer(store: LocalResultStore, prepared: Prepare
     os.close(record.writer_lock_fd)
 
 
-def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(tmp_path: Path) -> None:
+def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = _root(tmp_path)
     original_store = LocalResultStore(root)
     prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
@@ -354,6 +354,11 @@ def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(tmp_pat
     journal = create_posix_audit_journal(prepared.audit)
     journal.close()
     _release_simulated_process_writer(original_store, prepared)
+
+    def reject_materialization(_journal: PosixAuditJournal) -> tuple[object, ...]:
+        raise AssertionError("production recovery must not materialize journal.records")
+
+    monkeypatch.setattr(PosixAuditJournal, "records", property(reject_materialization))
 
     recovered_store = LocalResultStore(root)
     verified = recovered_store.verify_recovery_attempt(manifest)
@@ -381,8 +386,8 @@ def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(tmp_pat
     binding, admitted_audit, admitted_records = admitted._consume()
     assert binding == recovered.audit.binding
     assert admitted_audit.binding == binding
-    assert tuple(admitted_records) == reopened.records
-    assert len(reopened.records) == 1
+    assert tuple(admitted_records) == tuple(reopened.recovery_records)
+    assert reopened.recovery_records.record_count == 1
     with pytest.raises(RunCompositionError, match="already consumed"):
         admitted._consume()
     with pytest.raises(StoreError, match="stale or foreign"):
@@ -402,7 +407,10 @@ def test_recovery_refuses_a_live_writer_before_journal_adoption(tmp_path: Path) 
         LocalResultStore(root).verify_recovery_attempt(manifest)
 
 
-def test_terminal_recovery_returns_read_only_lost_ack_evidence(tmp_path: Path) -> None:
+def test_terminal_recovery_returns_read_only_lost_ack_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = _root(tmp_path)
     original_store = LocalResultStore(root)
     prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
@@ -433,6 +441,11 @@ def test_terminal_recovery_returns_read_only_lost_ack_evidence(tmp_path: Path) -
     )
     journal.close()
     _release_simulated_process_writer(original_store, prepared)
+
+    def reject_materialization(_journal: PosixAuditJournal) -> tuple[object, ...]:
+        raise AssertionError("terminal recovery must not materialize journal.records")
+
+    monkeypatch.setattr(PosixAuditJournal, "records", property(reject_materialization))
 
     recovered_store = LocalResultStore(root)
     verified = recovered_store.verify_recovery_attempt(manifest)

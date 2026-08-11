@@ -36,7 +36,6 @@ from ea.core import (
     canonical_market_data_record_bytes,
     prepare_bounded_runtime_roots,
 )
-from ea.core.audit import MAX_PHASE1_RECOVERABLE_MARKET_RECORDS
 from ea.data import (
     HistoricalMarketDataError,
     HistoricalMarketDataFailureCode,
@@ -690,13 +689,13 @@ def _runtime_for_port(port: _ScriptedPort) -> Phase1HistoricalMarketRuntime:
     )
 
 
-def test_runtime_admits_only_sources_recoverable_within_resident_budget() -> None:
+def test_runtime_admits_one_hundred_thousand_and_rejects_the_next_record() -> None:
     admitted = _scripted_port(())
     admitted._binding = replace(
         admitted.binding,
         data_fingerprint=replace(
             admitted.binding.data_fingerprint,
-            record_count=MAX_PHASE1_RECOVERABLE_MARKET_RECORDS,
+            record_count=100_000,
         ),
     )
     assert type(_runtime_for_port(admitted)) is Phase1HistoricalMarketRuntime
@@ -706,7 +705,7 @@ def test_runtime_admits_only_sources_recoverable_within_resident_budget() -> Non
         port.binding,
         data_fingerprint=replace(
             port.binding.data_fingerprint,
-            record_count=MAX_PHASE1_RECOVERABLE_MARKET_RECORDS + 1,
+            record_count=100_001,
         ),
     )
 
@@ -714,7 +713,7 @@ def test_runtime_admits_only_sources_recoverable_within_resident_budget() -> Non
         _runtime_for_port(port)
 
     assert captured.value.code is OutcomeCode.OUT_OF_RANGE
-    assert "recoverable admission bound" in str(captured.value)
+    assert "100,000-record profile admission bound" in str(captured.value)
 
 
 @pytest.mark.parametrize("mutation", ("scheduled", "cursor", "both"))
