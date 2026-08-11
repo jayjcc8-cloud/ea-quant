@@ -1260,7 +1260,7 @@ def test_recovery_stops_before_runtime_retry_when_durable_ack_cannot_be_reconfir
     assert runtime.acknowledgement_calls == 1
 
 
-def test_recovery_accepts_committed_market_trace_without_second_acknowledgement() -> None:
+def test_committed_market_trace_completes_without_second_acknowledgement() -> None:
     _fixture, matcher, _orders, _causal, delayed, _end = _system()
     binding = RunBinding(
         RunReference(matcher.run_id, Sha256Digest("11" * 32)),
@@ -1276,8 +1276,7 @@ def test_recovery_accepts_committed_market_trace_without_second_acknowledgement(
         fact_authority=_NoFacts(matcher),
         evidence_resolver=_NoEvidence(),
     )
-    with pytest.raises(RuntimeError, match="committed market"):
-        coordinator.process_next_dispatch()
+    dispatch = coordinator.process_next_dispatch()
     resolver_only = _ResolverOnlyMatcher(matcher)
 
     recovered = recover_phase1_lifecycle_coordinator(
@@ -1290,8 +1289,11 @@ def test_recovery_accepts_committed_market_trace_without_second_acknowledgement(
         records=tuple(audit.records),
     )
 
+    assert dispatch.runtime_acknowledged is True
+    assert coordinator.state.last_completed_dispatch_sequence == 1
+    assert coordinator.state.phase is CoordinatorPhase.RUNNING
     assert recovered.state.last_completed_dispatch_sequence == 1
-    assert recovered.state.phase is CoordinatorPhase.FAILING
+    assert recovered.state.phase is CoordinatorPhase.RUNNING
     assert recovered.state.last_audit_chain_head_sha256 == audit_chain_head(audit.records[-1])
     assert runtime.acknowledgement_calls == 1
     assert resolver_only.mutation_calls == 0

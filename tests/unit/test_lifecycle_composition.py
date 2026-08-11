@@ -80,6 +80,53 @@ from unit.test_lifecycle_coordinator import _MemoryAudit
 from unit.test_store import _root, _spec
 
 
+class _UncertainOnceAuthorizationAudit:
+    def __init__(self, binding: RunBinding) -> None:
+        self.binding = binding
+        self._inner = _MemoryAudit(binding)
+        self.failed = False
+
+    @property
+    def records(self) -> list[Any]:
+        return self._inner.records
+
+    def append(self, **values: Any) -> Any:
+        if (
+            values["record_kind"] is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+            and not self.failed
+        ):
+            self.failed = True
+            raise RuntimeError("injected uncertain authorization append failure")
+        return self._inner.append(**values)
+
+
+class _FailOnceAuthorizationAudit(_MemoryAudit):
+    failed = False
+
+    def append(self, **values: Any) -> Any:
+        if (
+            values["record_kind"] is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+            and not self.failed
+        ):
+            self.failed = True
+            raise RuntimeError("injected definite authorization append failure")
+        return super().append(**values)
+
+
+class _AuthorizationAppendHookAudit(_MemoryAudit):
+    hook: Any = None
+
+    def append(self, **values: Any) -> Any:
+        acknowledgement = super().append(**values)
+        if (
+            values["record_kind"] is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+            and self.hook is not None
+        ):
+            hook, self.hook = self.hook, None
+            hook()
+        return acknowledgement
+
+
 class _UnusedFreshness:
     def current_snapshot(self) -> Any:
         return None
@@ -152,14 +199,16 @@ def _empty_runtime_for(matcher: Any) -> Any:
     )
 
 
-def _staged_lifecycle() -> tuple[Any, Any, tuple[Any, ...], Any, _MemoryAudit, tuple[Any, ...]]:
+def _staged_lifecycle(
+    audit_factory: Any = _MemoryAudit,
+) -> tuple[Any, Any, tuple[Any, ...], Any, Any, tuple[Any, ...]]:
     spec_set, order_authority, orders = _orders(count=2)
     order = orders[0]
     binding = RunBinding(
         RunReference(order.run_id, Sha256Digest("11" * 32)),
         Sha256Digest("22" * 32),
     )
-    audit = _MemoryAudit(binding)
+    audit = audit_factory(binding)
     prepared_acknowledgement = audit.append(
         record_kind=AuditRecordKind.RUN_PREPARED,
         subject_kind=AuditSubjectKind.RUN_MANIFEST,
@@ -412,6 +461,122 @@ def test_composed_staged_window_authorizes_and_submits_before_completion() -> No
     completion_document = json.loads(audit.records[-1].canonical_payload)
     assert completion_document["authorization_attempt_outcome"]["status"] == "authorized"
     assert completion_document["submission_count"] == 1
+
+
+def test_unresolved_authorization_exact_retry_settles_without_duplicate_append() -> None:
+    lifecycle, _authority, orders, runtime, audit, _freshness = _staged_lifecycle(
+        _UncertainOnceAuthorizationAudit
+    )
+    order = orders[0]
+    window = lifecycle.coordinator.begin_next_dispatch()
+    lease = runtime.active_lease
+    assert lease is not None
+    assert type(lease.root) is MarketDataEnvelope
+
+    with pytest.raises(LifecycleError) as unresolved:
+        lifecycle.coordinator.prepare_submission_authorization(
+            window,
+            order,
+            causal_market_root=lease.root,
+            dispatch_sequence=lease.dispatch_sequence,
+        )
+    assert unresolved.value.code is OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+    with pytest.raises(LifecycleError, match="unresolved authorization"):
+        lifecycle.coordinator.complete_active_dispatch(window)
+
+    acknowledgement = lifecycle.coordinator.prepare_submission_authorization(
+        window,
+        order,
+        causal_market_root=lease.root,
+        dispatch_sequence=lease.dispatch_sequence,
+    )
+    lifecycle.coordinator.submit_authorized_order(window, order)
+    outcome = lifecycle.coordinator.complete_active_dispatch(window)
+
+    assert acknowledgement.record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    assert outcome.runtime_acknowledged is True
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ) == 1
+
+
+def test_denied_and_burned_attempts_complete_without_matcher_receipt() -> None:
+    for audit_factory, burn_after_append in (
+        (_MemoryAudit, False),
+        (_AuthorizationAppendHookAudit, True),
+    ):
+        lifecycle, _authority, orders, runtime, audit, freshness = _staged_lifecycle(audit_factory)
+        order = orders[0]
+        gate = freshness[3]
+        halted = InstrumentGateSnapshot(
+            order.run_id,
+            order.instrument,
+            order.order_id,
+            Sha256Digest("33" * 32),
+            1,
+            True,
+        )
+        if burn_after_append:
+            audit.hook = lambda gate=gate, halted=halted: setattr(gate, "value", halted)
+        else:
+            gate.value = halted
+        window = lifecycle.coordinator.begin_next_dispatch()
+        lease = runtime.active_lease
+        assert lease is not None
+        assert type(lease.root) is MarketDataEnvelope
+
+        with pytest.raises(LifecycleError) as rejected:
+            lifecycle.coordinator.prepare_submission_authorization(
+                window,
+                order,
+                causal_market_root=lease.root,
+                dispatch_sequence=lease.dispatch_sequence,
+            )
+        assert (
+            rejected.value.code is OutcomeCode.SUBMISSION_BLOCKED_BY_HALT
+            if not burn_after_append
+            else OutcomeCode.RISK_STALE_APPROVAL
+        )
+
+        outcome = lifecycle.coordinator.complete_active_dispatch(window)
+        completion = json.loads(audit.records[-1].canonical_payload)
+        assert outcome.runtime_acknowledged is True
+        assert completion["authorization_attempt_outcome"]["status"] == (
+            "burned" if burn_after_append else "denied"
+        )
+        assert completion["submission_count"] == 0
+
+
+def test_definite_authorization_failure_closes_window_and_drains_failing_dispatch() -> None:
+    lifecycle, _authority, orders, runtime, audit, _freshness = _staged_lifecycle(
+        _FailOnceAuthorizationAudit
+    )
+    order = orders[0]
+    window = lifecycle.coordinator.begin_next_dispatch()
+    lease = runtime.active_lease
+    assert lease is not None
+    assert type(lease.root) is MarketDataEnvelope
+
+    with pytest.raises(LifecycleError) as failed:
+        lifecycle.coordinator.prepare_submission_authorization(
+            window,
+            order,
+            causal_market_root=lease.root,
+            dispatch_sequence=lease.dispatch_sequence,
+        )
+    assert failed.value.code is OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+    assert lifecycle.coordinator.state.phase is CoordinatorPhase.FAILING
+    with pytest.raises(LifecycleError, match="window conflicts"):
+        lifecycle.coordinator.complete_active_dispatch(window)
+
+    failing_window = lifecycle.coordinator.resume_active_dispatch()
+    assert failing_window.authorization_allowed is False
+    outcome = lifecycle.coordinator.complete_active_dispatch(failing_window)
+    completion = json.loads(audit.records[-1].canonical_payload)
+
+    assert outcome.runtime_acknowledged is True
+    assert completion["authorization_attempt_outcome"]["status"] == "failed"
+    assert completion["submission_count"] == 0
 
 
 def test_public_facade_forwards_only_staged_state_and_retry_operations() -> None:

@@ -49,7 +49,6 @@ from ea.core.historical_matching import (
     HistoricalDispatchKind,
     HistoricalMatcherDispatchBatch,
     HistoricalSubmissionReceipt,
-    canonical_end_of_run_root_bytes,
     historical_end_root_digest,
     historical_market_root_digest,
     historical_matcher_dispatch_batch_digest,
@@ -504,14 +503,19 @@ class Phase1HistoricalLifecycleCoordinator:
                     and active.authorization_ack is not None
                 ):
                     return active.authorization_ack
-                raise LifecycleError(
-                    (
-                        OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
-                        if retained_attempt is None or retained_attempt.error_code is None
-                        else retained_attempt.error_code
-                    ),
-                    "active authorization attempt did not authorize",
-                )
+                if (
+                    retained_attempt is None
+                    or retained_attempt.status
+                    is not SubmissionAuthorizationAttemptStatus.UNRESOLVED
+                ):
+                    raise LifecycleError(
+                        (
+                            OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+                            if retained_attempt is None or retained_attempt.error_code is None
+                            else retained_attempt.error_code
+                        ),
+                        "active authorization attempt did not authorize",
+                    )
             attempt = authorization.prepare_attempt(
                 order,
                 causal_market_root=causal_market_root,
@@ -947,7 +951,7 @@ class Phase1HistoricalLifecycleCoordinator:
             try:
                 self._runtime.acknowledge(active.lease)
             except Exception:
-                if type(root) is not EndOfRunRoot or not self._confirm_committed_terminal(active):
+                if not self._confirm_committed_runtime_acknowledgement(active):
                     raise
             if type(root) is EndOfRunRoot and not self._confirm_committed_terminal(active):
                 raise LifecycleError(
@@ -1029,40 +1033,39 @@ class Phase1HistoricalLifecycleCoordinator:
         )
 
     def _confirm_committed_terminal(self, active: _ActiveDispatch) -> bool:
+        return type(
+            active.lease.root
+        ) is EndOfRunRoot and self._confirm_committed_runtime_acknowledgement(active)
+
+    def _confirm_committed_runtime_acknowledgement(
+        self,
+        active: _ActiveDispatch,
+    ) -> bool:
         root = active.lease.root
+        batch = active.batch
         if (
-            type(root) is not EndOfRunRoot
+            batch is None
             or self._runtime.active_lease is not None
-            or self._runtime.terminal_acknowledged is not True
-        ):
-            return False
-        records = self._runtime.trace_records
-        if (
-            type(records) is not tuple
-            or not records
-            or any(type(record) is not bytes for record in records)
-            or self._runtime.trace_digest != historical_runtime_trace_digest(records)
+            or type(root) not in {MarketDataEnvelope, EndOfRunRoot}
         ):
             return False
         try:
-            document = json.loads(records[-1])
-            canonical = json.dumps(
-                document,
-                ensure_ascii=True,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            root_document = json.loads(canonical_end_of_run_root_bytes(root))
-        except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            trace = _require_runtime_trace(self._runtime, self._binding)
+        except LifecycleError:
             return False
+        if set(trace) != set(range(1, active.lease.dispatch_sequence + 1)):
+            return False
+        trace_entry = trace.get(active.lease.dispatch_sequence)
+        if trace_entry is None:
+            return False
+        document, root_sha256 = trace_entry
+        is_terminal = type(root) is EndOfRunRoot
         return (
-            type(document) is dict
-            and canonical == records[-1]
-            and document.get("run_id") == self._binding.reference.run_id.value
-            and document.get("dispatch_sequence") == active.lease.dispatch_sequence
-            and document.get("terminal_acknowledged") is True
-            and document.get("root") == root_document
+            root_sha256 == active.trigger_sha256
+            and document.get("root_order_key")
+            == _trace_root_order_key_document(batch.trigger_root_key)
+            and document.get("terminal_acknowledged") is is_terminal
+            and self._runtime.terminal_acknowledged is is_terminal
         )
 
     def _finish_terminalization(self) -> CoordinatorTerminalOutcome:
