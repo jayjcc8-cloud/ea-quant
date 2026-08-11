@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
+import ea.runtime.coordinator as coordinator_module
 from ea.core.audit import (
     EMPTY_CHAIN_HEAD_SHA256,
     EMPTY_RECORD_SHA256,
@@ -1198,3 +1200,178 @@ def test_terminal_recovery_reconstructs_read_only_terminal_evidence() -> None:
     assert original_terminal is not None
     assert recovered.terminal_outcome == original_terminal
     assert recovered.terminal_state.final_chain_head_sha256 == audit_chain_head(audit.records[-1])
+
+
+def test_recovery_validation_rejects_malformed_prefix_groups_and_runtime_traces() -> None:
+    _fixture, matcher, _orders, _causal, _delayed, end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _Runtime(matcher, end)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    coordinator.process_next_dispatch()
+    records = tuple(audit.records)
+    prefix = records[:-1]
+    checked = coordinator_module._require_recovery_records(binding, prefix, audit=None)
+
+    invalid_prefixes: tuple[object, ...] = ([], (), (object(),))
+    for invalid in invalid_prefixes:
+        with pytest.raises(LifecycleError):
+            coordinator_module._require_recovery_records(
+                binding,
+                cast(Any, invalid),
+                audit=None,
+            )
+    with pytest.raises(LifecycleError, match="terminal journal"):
+        coordinator_module._require_recovery_records(binding, records, audit=None)
+
+    prepared = prefix[0]
+    original_binding = prepared.binding
+    object.__setattr__(prepared, "binding", RunBinding(binding.reference, Sha256Digest("aa" * 32)))
+    with pytest.raises(LifecycleError, match="binding conflicts"):
+        coordinator_module._require_recovery_records(binding, prefix, audit=None)
+    object.__setattr__(prepared, "binding", original_binding)
+
+    original_record_id = prepared.record_id
+    object.__setattr__(
+        prepared,
+        "record_id",
+        EconomicId(binding.reference.run_id, EconomicOwnerKind.AUDIT_RECORD, 2),
+    )
+    with pytest.raises(LifecycleError, match="sequence conflicts"):
+        coordinator_module._require_recovery_records(binding, prefix, audit=None)
+    object.__setattr__(prepared, "record_id", original_record_id)
+
+    completion = prefix[-1]
+    original_previous = completion.previous_record_sha256
+    object.__setattr__(completion, "previous_record_sha256", Sha256Digest("bb" * 32))
+    with pytest.raises(LifecycleError, match="chain conflicts"):
+        coordinator_module._require_recovery_records(binding, prefix, audit=None)
+    object.__setattr__(completion, "previous_record_sha256", original_previous)
+
+    batch_pair, completion_pair = checked[1:]
+    batch = batch_pair[0]
+    original_batch_payload = batch.canonical_payload
+    for malformed, message in ((b"{", "not JSON"), (b"[]", "one object")):
+        object.__setattr__(batch, "canonical_payload", malformed)
+        with pytest.raises(LifecycleError, match=message):
+            coordinator_module._record_document(batch)
+    object.__setattr__(batch, "canonical_payload", original_batch_payload)
+
+    batch_document = json.loads(original_batch_payload)
+
+    def encoded(document: dict[str, object]) -> bytes:
+        return json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+    invalid_sequence = dict(batch_document)
+    invalid_sequence["dispatch_sequence"] = 0
+    object.__setattr__(batch, "canonical_payload", encoded(invalid_sequence))
+    with pytest.raises(LifecycleError, match="sequence is invalid"):
+        coordinator_module._group_recovery_records((batch_pair,))
+
+    invalid_trigger = dict(batch_document)
+    invalid_trigger["trigger_root_sha256"] = "invalid"
+    object.__setattr__(batch, "canonical_payload", encoded(invalid_trigger))
+    with pytest.raises(LifecycleError, match="trigger digest is invalid"):
+        coordinator_module._group_recovery_records((batch_pair,))
+    object.__setattr__(batch, "canonical_payload", original_batch_payload)
+
+    with pytest.raises(LifecycleError, match="duplicate recovered batch"):
+        coordinator_module._group_recovery_records((batch_pair, batch_pair))
+    with pytest.raises(LifecycleError, match="duplicate recovered completion"):
+        coordinator_module._group_recovery_records((batch_pair, completion_pair, completion_pair))
+
+    original_prepared_kind = prepared.record_kind
+    original_prepared_payload = prepared.canonical_payload
+    object.__setattr__(prepared, "canonical_payload", encoded({"dispatch_sequence": 1}))
+    with pytest.raises(LifecycleError, match="unsupported recovery record kind"):
+        coordinator_module._group_recovery_records(((prepared, checked[0][1]),))
+    object.__setattr__(prepared, "record_kind", AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION)
+    assert coordinator_module._group_recovery_records(((prepared, checked[0][1]),))[1]
+    object.__setattr__(prepared, "record_kind", original_prepared_kind)
+    object.__setattr__(prepared, "canonical_payload", original_prepared_payload)
+
+    empty_group = coordinator_module._RecoveredDispatch(1)
+    with pytest.raises(LifecycleError, match="dispatch is empty"):
+        coordinator_module._require_recovery_stage_order({1: empty_group})
+    incomplete = coordinator_module._RecoveredDispatch(1)
+    incomplete.batch_record = (2, *batch_pair)
+    later = coordinator_module._RecoveredDispatch(2)
+    later.batch_record = (3, *batch_pair)
+    later.completion_record = (4, *completion_pair)
+    with pytest.raises(LifecycleError, match="physically interleaved"):
+        coordinator_module._require_recovery_stage_order({1: incomplete, 2: later})
+    completion_only = coordinator_module._RecoveredDispatch(1)
+    completion_only.completion_record = (2, *completion_pair)
+    with pytest.raises(LifecycleError, match="completion stage order"):
+        coordinator_module._require_recovery_stage_order({1: completion_only})
+
+    with pytest.raises(LifecycleError, match="trace evidence is incomplete"):
+        coordinator_module._require_runtime_trace(SimpleNamespace(), binding)
+    with pytest.raises(LifecycleError, match="trace digest conflicts"):
+        coordinator_module._require_runtime_trace(
+            SimpleNamespace(trace_records=[], trace_digest=runtime.trace_digest),
+            binding,
+        )
+
+    valid_trace = runtime.trace_records[0]
+
+    def trace_runtime(trace_records: tuple[bytes, ...]) -> SimpleNamespace:
+        return SimpleNamespace(
+            trace_records=trace_records,
+            trace_digest=historical_runtime_trace_digest(trace_records),
+        )
+
+    with pytest.raises(LifecycleError, match="trace record is invalid"):
+        coordinator_module._require_runtime_trace(trace_runtime((b"{",)), binding)
+    with pytest.raises(LifecycleError, match="trace record conflicts"):
+        coordinator_module._require_runtime_trace(trace_runtime((b" " + valid_trace,)), binding)
+
+    trace_document = json.loads(valid_trace)
+    for field, value in (
+        ("schema", "invalid"),
+        ("run_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        ("dispatch_sequence", "1"),
+        ("root", []),
+    ):
+        changed = dict(trace_document)
+        changed[field] = value
+        with pytest.raises(LifecycleError, match="trace record conflicts"):
+            coordinator_module._require_runtime_trace(
+                trace_runtime((encoded(changed),)),
+                binding,
+            )
+    unsupported_root = dict(trace_document)
+    unsupported_root["root"] = {}
+    with pytest.raises(LifecycleError, match="root kind is invalid"):
+        coordinator_module._require_runtime_trace(
+            trace_runtime((encoded(unsupported_root),)),
+            binding,
+        )
+    sequence_two = dict(trace_document)
+    sequence_two["dispatch_sequence"] = 2
+    with pytest.raises(LifecycleError, match="sequence is not contiguous"):
+        coordinator_module._require_runtime_trace(
+            trace_runtime((encoded(sequence_two),)),
+            binding,
+        )
+    with pytest.raises(LifecycleError, match="trace record conflicts"):
+        coordinator_module._require_runtime_trace(
+            trace_runtime((valid_trace, valid_trace)),
+            binding,
+        )

@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
 import pytest
 
-from ea.composition.lifecycle import recover_phase1_historical_lifecycle
+import ea.composition.run as run_composition
+from ea.composition.lifecycle import (
+    Phase1HistoricalLifecycle,
+    create_phase1_historical_lifecycle,
+    recover_phase1_historical_lifecycle,
+)
 from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.lifecycle import CoordinatorPhase
+from ea.core.run import RunBinding, Sha256Digest
 from ea.data import create_phase1_historical_market_source_bridge
 from ea.execution.fact_authority import create_phase1_execution_fact_authority
 from ea.experiments.audit import (
@@ -17,6 +24,7 @@ from ea.experiments.audit import (
     create_posix_audit_journal,
     reopen_posix_audit_journal,
 )
+from ea.experiments.binding import BoundAuditPort
 from ea.experiments.store import (
     AuditRunBinding,
     LocalResultStore,
@@ -149,6 +157,132 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     assert lifecycle.coordinator.state.phase is CoordinatorPhase.ADMITTED
     assert lifecycle.matcher is matcher
     assert admitted_journals[0].records == recovered.records
+
+    with pytest.raises(TypeError, match="created only by composition"):
+        Phase1HistoricalLifecycle(
+            _seal=object(),
+            coordinator=lifecycle.coordinator,
+            matcher=matcher,
+            fact_authority=facts,
+            runtime=runtime,
+        )
+    with pytest.raises(TypeError, match="prepared acknowledgement"):
+        create_phase1_historical_lifecycle(
+            binding=admitted.binding,
+            prepared_acknowledgement=object(),  # type: ignore[arg-type]
+            audit=admitted.audit,
+            runtime=runtime,
+            spec_set=matcher.spec_set,
+            execution_policy=matcher.execution_policy,
+            source_namespace=matcher.source_namespace,
+            provenance_id=matcher.provenance_id,
+            order_issuance_verifier=order_verifier,
+            portfolio=freshness,
+            risk=freshness,
+            global_halt=freshness,
+            instrument_gate=freshness,
+        )
+    with pytest.raises(TypeError, match="exact authoritative carriers"):
+        recover_phase1_historical_lifecycle(
+            recovery=object(),  # type: ignore[arg-type]
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=facts,
+            authorization=authorization,
+            authorization_capability=capability,
+            activation_seal=activation_seal,
+            order_issuance_verifier=order_verifier,
+        )
+    original_order_verifier = matcher._order_issuance_verifier
+    object.__setattr__(matcher, "_order_issuance_verifier", object())
+    with pytest.raises(TypeError, match="authority identities conflict"):
+        recover_phase1_historical_lifecycle(
+            recovery=admitted,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=facts,
+            authorization=authorization,
+            authorization_capability=capability,
+            activation_seal=activation_seal,
+            order_issuance_verifier=order_verifier,
+        )
+    object.__setattr__(matcher, "_order_issuance_verifier", original_order_verifier)
+    original_fact_dispatch = facts._dispatch_verifier
+    object.__setattr__(facts, "_dispatch_verifier", SimpleNamespace())
+    with pytest.raises(TypeError, match="bindings are incomplete"):
+        recover_phase1_historical_lifecycle(
+            recovery=admitted,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=facts,
+            authorization=authorization,
+            authorization_capability=capability,
+            activation_seal=activation_seal,
+            order_issuance_verifier=order_verifier,
+        )
+    object.__setattr__(facts, "_dispatch_verifier", original_fact_dispatch)
+
+    seal = run_composition._RECOVERED_ADMISSION_SEAL
+    with pytest.raises(RunCompositionError, match="store-issued evidence"):
+        run_composition.AdmittedRecoveredRun(
+            object(),
+            recovered=recovered,
+            audit=admitted.audit,
+        )
+    with pytest.raises(RunCompositionError, match="one admitted audit port"):
+        run_composition.AdmittedRecoveredRun(
+            seal,
+            recovered=recovered,
+            audit=object(),  # type: ignore[arg-type]
+        )
+    foreign_binding = RunBinding(
+        admitted.binding.reference,
+        Sha256Digest("ff" * 32),
+    )
+    foreign_audit = object.__new__(BoundAuditPort)
+    object.__setattr__(foreign_audit, "_binding", foreign_binding)
+    object.__setattr__(foreign_audit, "_raw", admitted_journals[0])
+    with pytest.raises(RunCompositionError, match="one admitted audit port"):
+        run_composition.AdmittedRecoveredRun(
+            seal,
+            recovered=recovered,
+            audit=foreign_audit,
+        )
+    original_records = recovered.records
+    invalid_record_sets: tuple[object, ...] = ([], (), (object(),))
+    for invalid_records in invalid_record_sets:
+        object.__setattr__(recovered, "records", invalid_records)
+        with pytest.raises(RunCompositionError, match="one admitted audit port"):
+            run_composition.AdmittedRecoveredRun(
+                seal,
+                recovered=recovered,
+                audit=admitted.audit,
+            )
+    object.__setattr__(recovered, "records", original_records)
+    object.__setattr__(recovered, "record_count", len(original_records) + 1)
+    with pytest.raises(RunCompositionError, match="one admitted audit port"):
+        run_composition.AdmittedRecoveredRun(
+            seal,
+            recovered=recovered,
+            audit=admitted.audit,
+        )
+    object.__setattr__(recovered, "record_count", len(original_records))
+    original_record_binding = original_records[0].binding
+    object.__setattr__(original_records[0], "binding", foreign_binding)
+    with pytest.raises(RunCompositionError, match="one admitted audit port"):
+        run_composition.AdmittedRecoveredRun(
+            seal,
+            recovered=recovered,
+            audit=admitted.audit,
+        )
+    object.__setattr__(original_records[0], "binding", original_record_binding)
+    probe = run_composition.AdmittedRecoveredRun(
+        seal,
+        recovered=recovered,
+        audit=admitted.audit,
+    )
+    with pytest.raises(AttributeError, match="immutable"):
+        probe.records = ()
     with pytest.raises(RunCompositionError, match="already consumed"):
         admitted._consume()
     admitted_journals[0].close()

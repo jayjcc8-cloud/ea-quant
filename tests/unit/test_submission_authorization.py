@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import copy
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -37,10 +38,11 @@ from ea.core.lifecycle import (
 from ea.core.market_data import Adjustment, Bar, MarketDataEnvelope, SourceId
 from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.risk import _create_risk_state_snapshot, phase1_risk_policy_digest
-from ea.core.run import RunBinding, RunReference, Sha256Digest
+from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 from ea.core.runtime import runtime_root_order_key
 from ea.core.strategy import causal_market_digest
 from ea.runtime.authorization import (
+    _authorization_payload_from_receipt,
     create_dormant_historical_submission_authorization_authority,
 )
 from unit.test_execution_fact_authority import (
@@ -77,6 +79,12 @@ class _Runtime:
 class _NoSubmissions:
     def resolve_submission_receipt(self, **values: Any) -> None:
         del values
+        return None
+
+
+class _NoOrders:
+    def resolve_issued_order_by_id(self, order_id: Any) -> None:
+        del order_id
         return None
 
 
@@ -342,6 +350,14 @@ def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
     )
     authorization_document = json.loads(audit.records[-1].canonical_payload)
     original_receipt = _receipt(order, root, original_ack, authorization_document)
+    assert _authorization_payload_from_receipt(object(), original_ack, order) is None  # type: ignore[arg-type]
+    incomplete_receipt = object.__new__(HistoricalSubmissionReceipt)
+    assert _authorization_payload_from_receipt(incomplete_receipt, original_ack, order) is None
+    foreign_order = copy(order)
+    object.__setattr__(foreign_order, "run_id", RunId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+    assert (
+        _authorization_payload_from_receipt(original_receipt, original_ack, foreign_order) is None
+    )
 
     recovered, recovered_capability, recovered_seal = create_authority()
     recovered.recover_attempts(
@@ -378,6 +394,38 @@ def test_recovery_rebuilds_current_attempt_without_second_append() -> None:
         submissions=_Submissions(original_receipt),
         seal=committed_seal,
     )
+    invalid_records, _invalid_capability, invalid_records_seal = create_authority()
+    with pytest.raises(HistoricalPreEffectAuthorizationError, match="records are invalid"):
+        invalid_records.recover_attempts(
+            list(audit.records),
+            orders=order_authority,
+            submissions=_NoSubmissions(),
+            seal=invalid_records_seal,
+        )
+    invalid_seal, _invalid_seal_capability, _expected_seal = create_authority()
+    with pytest.raises(HistoricalPreEffectAuthorizationError, match="seal conflicts"):
+        invalid_seal.recover_attempts(
+            tuple(audit.records),
+            orders=order_authority,
+            submissions=_NoSubmissions(),
+            seal=object(),
+        )
+    duplicate, _duplicate_capability, duplicate_seal = create_authority()
+    with pytest.raises(HistoricalPreEffectAuthorizationError, match="key is duplicated"):
+        duplicate.recover_attempts(
+            (*audit.records, audit.records[-1]),
+            orders=order_authority,
+            submissions=_NoSubmissions(),
+            seal=duplicate_seal,
+        )
+    missing_order, _missing_capability, missing_order_seal = create_authority()
+    with pytest.raises(HistoricalPreEffectAuthorizationError, match="Order evidence conflicts"):
+        missing_order.recover_attempts(
+            tuple(audit.records),
+            orders=_NoOrders(),
+            submissions=_NoSubmissions(),
+            seal=missing_order_seal,
+        )
 
     tampered_document = dict(authorization_document)
     tampered_document["portfolio_snapshot_version"] += 1

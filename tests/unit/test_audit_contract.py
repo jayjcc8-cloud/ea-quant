@@ -8,6 +8,7 @@ from ea.core.audit import (
     EMPTY_CHAIN_HEAD_SHA256,
     EMPTY_RECORD_SHA256,
     AuditContractError,
+    AuditLogicalKey,
     AuditRecordKind,
     AuditSubjectKind,
     audit_append_acknowledgement_digest,
@@ -16,9 +17,12 @@ from ea.core.audit import (
     audit_record_digest,
     canonical_audit_append_acknowledgement_bytes,
     canonical_audit_record_header_bytes,
+    canonical_run_prepared_audit_payload,
     create_audit_append_acknowledgement,
     create_audit_record,
+    decode_audit_record,
     ordered_digest_tuple,
+    require_audit_acknowledgement,
     require_canonical_audit_payload,
 )
 from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
@@ -158,3 +162,246 @@ def test_canonical_payload_rejects_wrong_typed_or_unknown_committed_values(
 
     with pytest.raises(AuditContractError):
         require_canonical_audit_payload(record_kind, _canonical(invalid_document))
+
+
+def test_audit_recovery_contract_rejects_malformed_boundary_carriers() -> None:
+    binding = _binding()
+    prepared = _prepared_payload()
+
+    with pytest.raises(AuditContractError, match="exact RunBinding"):
+        canonical_run_prepared_audit_payload(object())  # type: ignore[arg-type]
+    with pytest.raises(AuditContractError, match="exact enum"):
+        AuditLogicalKey("run.prepared", AuditSubjectKind.RUN_MANIFEST, Sha256Digest("22" * 32))  # type: ignore[arg-type]
+    with pytest.raises(AuditContractError, match="conflict"):
+        AuditLogicalKey(
+            AuditRecordKind.RUN_PREPARED,
+            AuditSubjectKind.RUNTIME_DISPATCH,
+            Sha256Digest("22" * 32),
+        )
+    with pytest.raises(AuditContractError, match="exact Sha256Digest"):
+        AuditLogicalKey(
+            AuditRecordKind.RUN_PREPARED,
+            AuditSubjectKind.RUN_MANIFEST,
+            "22" * 32,  # type: ignore[arg-type]
+        )
+
+    malformed_payloads = (
+        b"",
+        b"\xff",
+        b"NaN",
+        b'{"schema":"duplicate","schema":"duplicate"}',
+        b"[]",
+        b'{ "canonicalization":"ea-canonical-json-v1" }',
+        _canonical({"canonicalization": "ea-canonical-json-v1"}),
+        _canonical(
+            {
+                "canonicalization": "wrong",
+                "lineage_sha256": "11" * 32,
+                "manifest_sha256": "22" * 32,
+                "run_id": "123e4567-e89b-42d3-a456-426614174000",
+                "schema": "ea.audit-run-prepared.v1",
+            }
+        ),
+        _canonical(
+            {
+                "canonicalization": "ea-canonical-json-v1",
+                "lineage_sha256": "not-a-digest",
+                "manifest_sha256": "22" * 32,
+                "run_id": True,
+                "schema": "ea.audit-run-prepared.v1",
+            }
+        ),
+    )
+    for payload in malformed_payloads:
+        with pytest.raises(AuditContractError):
+            require_canonical_audit_payload(AuditRecordKind.RUN_PREPARED, payload)
+    with pytest.raises(AuditContractError, match="bound"):
+        require_canonical_audit_payload(
+            AuditRecordKind.RUN_PREPARED,
+            b"x" * 4_097,
+        )
+
+    invalid_batch = {
+        "batch_sha256": "33" * 32,
+        "canonicalization": "ea-canonical-json-v1",
+        "dispatch_kind": "unknown",
+        "dispatch_sequence": 1,
+        "ingress_count": 0,
+        "ordered_ingress_sha256s_sha256": "44" * 32,
+        "run_id": "123e4567-e89b-42d3-a456-426614174000",
+        "schema": "ea.audit-matcher-dispatch-batch.v1",
+        "trigger_root_key": {},
+        "trigger_root_sha256": "55" * 32,
+    }
+    for update in (
+        {},
+        {"dispatch_kind": "market", "dispatch_sequence": 0},
+        {"dispatch_kind": "market", "dispatch_sequence": 1, "trigger_root_key": []},
+        {"dispatch_kind": "market", "dispatch_sequence": 1, "trigger_root_key": {}},
+    ):
+        with pytest.raises(AuditContractError):
+            require_canonical_audit_payload(
+                AuditRecordKind.MATCHER_DISPATCH_BATCH,
+                _canonical({**invalid_batch, **update}),
+            )
+
+    record = create_audit_record(
+        binding=binding,
+        owner_sequence=1,
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=Sha256Digest("22" * 32),
+        canonical_payload=prepared,
+        previous_record_sha256=EMPTY_RECORD_SHA256,
+        previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+    )
+    acknowledgement = create_audit_append_acknowledgement(record)
+    logical_key = record.logical_key
+    assert (
+        require_audit_acknowledgement(
+            acknowledgement,
+            binding=binding,
+            logical_key=logical_key,
+            canonical_payload=prepared,
+        )
+        is acknowledgement
+    )
+    for invalid_binding, invalid_key, invalid_payload in (
+        (object(), logical_key, prepared),
+        (binding, object(), prepared),
+        (binding, logical_key, "not-bytes"),
+        (binding, logical_key, b"{}"),
+    ):
+        with pytest.raises(AuditContractError):
+            require_audit_acknowledgement(
+                acknowledgement,
+                binding=invalid_binding,  # type: ignore[arg-type]
+                logical_key=invalid_key,  # type: ignore[arg-type]
+                canonical_payload=invalid_payload,  # type: ignore[arg-type]
+            )
+
+    for domain, digests in (
+        ("not-bytes", ()),
+        (b"domain", []),
+        (b"domain", (object(),)),
+    ):
+        with pytest.raises(AuditContractError):
+            ordered_digest_tuple(domain, digests)  # type: ignore[arg-type]
+
+
+def test_audit_record_recovery_rejects_forged_records_and_headers() -> None:
+    binding = _binding()
+    prepared = _prepared_payload()
+    valid_arguments = {
+        "binding": binding,
+        "owner_sequence": 1,
+        "record_kind": AuditRecordKind.RUN_PREPARED,
+        "subject_kind": AuditSubjectKind.RUN_MANIFEST,
+        "subject_sha256": Sha256Digest("22" * 32),
+        "canonical_payload": prepared,
+        "previous_record_sha256": EMPTY_RECORD_SHA256,
+        "previous_chain_head_sha256": EMPTY_CHAIN_HEAD_SHA256,
+    }
+    invalid_argument_updates: tuple[dict[str, object], ...] = (
+        {"binding": object()},
+        {"owner_sequence": True},
+        {"owner_sequence": 0},
+        {"subject_sha256": "22" * 32},
+        {"subject_sha256": Sha256Digest("33" * 32)},
+        {"previous_record_sha256": "44" * 32},
+        {"previous_record_sha256": Sha256Digest("44" * 32)},
+        {"owner_sequence": 2},
+    )
+    for update in invalid_argument_updates:
+        with pytest.raises(AuditContractError):
+            create_audit_record(**{**valid_arguments, **update})  # type: ignore[arg-type]
+
+    foreign_payload = _canonical(
+        {
+            "canonicalization": "ea-canonical-json-v1",
+            "lineage_sha256": "11" * 32,
+            "manifest_sha256": "22" * 32,
+            "run_id": "223e4567-e89b-42d3-a456-426614174000",
+            "schema": "ea.audit-run-prepared.v1",
+        }
+    )
+    with pytest.raises(AuditContractError, match="run binding"):
+        create_audit_record(
+            **{**valid_arguments, "canonical_payload": foreign_payload}  # type: ignore[arg-type]
+        )
+
+    record = create_audit_record(**valid_arguments)  # type: ignore[arg-type]
+    header = canonical_audit_record_header_bytes(record)
+    header_document = json.loads(header)
+    invalid_headers = (
+        b"[]",
+        b'{ "schema":"noncanonical" }',
+        _canonical({"schema": "wrong-keys"}),
+        _canonical({**header_document, "record_id": {}}),
+        _canonical({**header_document, "schema": "wrong-schema"}),
+        _canonical(
+            {
+                **header_document,
+                "record_id": {**header_document["record_id"], "owner_sequence": "one"},
+            }
+        ),
+    )
+    with pytest.raises(AuditContractError, match="carriers"):
+        decode_audit_record(
+            binding=object(),  # type: ignore[arg-type]
+            canonical_header=header,
+            canonical_payload=prepared,
+        )
+    with pytest.raises(AuditContractError, match="length"):
+        decode_audit_record(binding=binding, canonical_header=b"", canonical_payload=prepared)
+    for invalid_header in invalid_headers:
+        with pytest.raises(AuditContractError):
+            decode_audit_record(
+                binding=binding,
+                canonical_header=invalid_header,
+                canonical_payload=prepared,
+            )
+    with pytest.raises(AuditContractError, match="factory-issued"):
+        create_audit_append_acknowledgement(object())  # type: ignore[arg-type]
+
+
+def test_execution_outcome_audit_recovery_rejects_malformed_payloads() -> None:
+    outcome: dict[str, object] = {
+        "action": "ignored",
+        "anomalies": [],
+        "canonicalization": "ea-execution-fact-processing-outcome-v1",
+        "client_submission_key": None,
+        "fact_key": {},
+        "fact_sha256": "11" * 32,
+        "fill": None,
+        "halt_requested": False,
+        "ingress_identity": {},
+        "ingress_sha256": "22" * 32,
+        "message_type": "execution_fact_processing_outcome",
+        "order_resolutions": [],
+        "outcome_code": "fact.accepted",
+        "projection_after_sha256": None,
+        "projection_before_sha256": None,
+        "reported_order_id": None,
+        "reported_venue_order": None,
+        "requires_reconciliation": False,
+        "resolved_order_id": None,
+        "run_id": "123e4567-e89b-42d3-a456-426614174000",
+        "runtime_dispatch_sequence": 1,
+        "schema_version": 1,
+    }
+    malformed: tuple[dict[str, object], ...] = (
+        {},
+        {**outcome, "canonicalization": "wrong"},
+        {**outcome, "run_id": True},
+        {**outcome, "outcome_code": "unknown"},
+        {**outcome, "runtime_dispatch_sequence": 0},
+        {**outcome, "anomalies": {}},
+        {**outcome, "halt_requested": 0},
+    )
+    for document in malformed:
+        with pytest.raises(AuditContractError):
+            require_canonical_audit_payload(
+                AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME,
+                _canonical(document),
+            )
