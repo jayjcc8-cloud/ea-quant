@@ -23,11 +23,13 @@ from ea.core.outcomes import OutcomeCode
 from ea.core.run import Sha256Digest
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
+    PosixAuditJournal,
     _OsAuditOps,
     create_posix_audit_journal,
     reopen_posix_audit_journal,
 )
 from ea.experiments.store import (
+    AuditRunBinding,
     LocalResultStore,
     PreparedRun,
     StoreError,
@@ -277,10 +279,10 @@ def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(tmp_pat
     verified = recovered_store.verify_recovery_attempt(manifest)
     assert type(verified) is VerifiedIncompleteRecoveryBinding
     recovered = recovered_store.recover_incomplete_attempt(verified)
-    admitted_journals = []
+    admitted_journals: list[PosixAuditJournal] = []
 
-    def reopen_for_admission(binding: Any) -> Any:
-        journal = reopen_posix_audit_journal(binding)
+    def reopen_for_admission(prepared: AuditRunBinding) -> PosixAuditJournal:
+        journal = reopen_posix_audit_journal(prepared)
         admitted_journals.append(journal)
         return journal
 

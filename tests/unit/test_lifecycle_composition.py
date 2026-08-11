@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -11,8 +12,16 @@ from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.lifecycle import CoordinatorPhase
 from ea.data import create_phase1_historical_market_source_bridge
 from ea.execution.fact_authority import create_phase1_execution_fact_authority
-from ea.experiments.audit import create_posix_audit_journal, reopen_posix_audit_journal
-from ea.experiments.store import LocalResultStore
+from ea.experiments.audit import (
+    PosixAuditJournal,
+    create_posix_audit_journal,
+    reopen_posix_audit_journal,
+)
+from ea.experiments.store import (
+    AuditRunBinding,
+    LocalResultStore,
+    VerifiedIncompleteRecoveryBinding,
+)
 from ea.runtime.authorization import (
     create_dormant_historical_submission_authorization_authority,
 )
@@ -43,6 +52,7 @@ class _RecoveryOrderVerifier:
     def __init__(self, matcher: Any, orders: list[Any]) -> None:
         self.run_id = matcher.run_id
         self.spec_set = matcher.spec_set
+        self.execution_policy = matcher.execution_policy
         self._orders = tuple(orders)
 
     def resolve_issued_order_by_id(self, order_id: Any) -> Any:
@@ -55,7 +65,9 @@ class _RecoveryOrderVerifier:
         )
 
 
-def test_recovery_composition_consumes_store_prefix_and_injected_histories(tmp_path: Any) -> None:
+def test_recovery_composition_consumes_store_prefix_and_injected_histories(
+    tmp_path: Path,
+) -> None:
     _fixture, matcher, orders, _causal, _delayed, _end = _system()
     root = _root(tmp_path)
     original_store = LocalResultStore(root)
@@ -67,11 +79,12 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(tmp_p
 
     recovered_store = LocalResultStore(root)
     verified = recovered_store.verify_recovery_attempt(manifest)
+    assert isinstance(verified, VerifiedIncompleteRecoveryBinding)
     recovered = recovered_store.recover_incomplete_attempt(verified)
-    admitted_journals = []
+    admitted_journals: list[PosixAuditJournal] = []
 
-    def reopen(binding: Any) -> Any:
-        value = reopen_posix_audit_journal(binding)
+    def reopen(prepared: AuditRunBinding) -> PosixAuditJournal:
+        value = reopen_posix_audit_journal(prepared)
         admitted_journals.append(value)
         return value
 
