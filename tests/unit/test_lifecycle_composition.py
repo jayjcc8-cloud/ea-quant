@@ -32,10 +32,13 @@ from ea.core.audit import (
 from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import FactProvenanceId
 from ea.core.lifecycle import (
+    ActiveDispatchWindowStage,
     CoordinatorPhase,
     GlobalHaltSnapshot,
     InstrumentGateSnapshot,
     LifecycleError,
+    active_dispatch_window_digest,
+    canonical_active_dispatch_window_bytes,
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
@@ -124,6 +127,17 @@ class _AuthorizationAppendHookAudit(_MemoryAudit):
         ):
             hook, self.hook = self.hook, None
             hook()
+        return acknowledgement
+
+
+class _CommitThenRaiseCompletionAudit(_MemoryAudit):
+    raised = False
+
+    def append(self, **values: Any) -> Any:
+        acknowledgement = super().append(**values)
+        if values["record_kind"] is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED and not self.raised:
+            self.raised = True
+            raise RuntimeError("injected committed completion return failure")
         return acknowledgement
 
 
@@ -577,6 +591,50 @@ def test_definite_authorization_failure_closes_window_and_drains_failing_dispatc
     assert outcome.runtime_acknowledged is True
     assert completion["authorization_attempt_outcome"]["status"] == "failed"
     assert completion["submission_count"] == 0
+
+
+def test_committed_completion_return_failure_is_resolved_without_failing_transition() -> None:
+    lifecycle, _authority, _orders, runtime, audit, _freshness = _staged_lifecycle(
+        _CommitThenRaiseCompletionAudit
+    )
+    window = lifecycle.coordinator.begin_next_dispatch()
+
+    outcome = lifecycle.coordinator.complete_active_dispatch(window)
+
+    assert outcome.runtime_acknowledged is True
+    assert lifecycle.coordinator.state.phase is CoordinatorPhase.RUNNING
+    assert runtime.active_lease is None
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    ) == 1
+    assert AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION not in {
+        record.record_kind for record in audit.records
+    }
+
+
+def test_recovery_discards_provisional_freeze_and_reissues_canonical_window() -> None:
+    lifecycle, order_authority, _orders, runtime, audit, freshness = _staged_lifecycle()
+    window = lifecycle.coordinator.begin_next_dispatch()
+    raw = cast(Any, lifecycle.coordinator)._Phase1HistoricalLifecycleCoordinatorFacade__coordinator
+    assert raw._active is not None
+    raw._active.window_stage = ActiveDispatchWindowStage.COMPLETION_FROZEN
+
+    recovered, _matcher = _recover_staged_lifecycle(
+        lifecycle,
+        order_authority=order_authority,
+        runtime=runtime,
+        audit=audit,
+        freshness=freshness,
+    )
+    recovered_window = recovered.resume_active_dispatch()
+
+    assert recovered_window is not window
+    assert canonical_active_dispatch_window_bytes(recovered_window) == (
+        canonical_active_dispatch_window_bytes(window)
+    )
+    assert active_dispatch_window_digest(recovered_window) == active_dispatch_window_digest(window)
+    outcome = recovered.complete_active_dispatch(recovered_window)
+    assert outcome.runtime_acknowledged is True
 
 
 def test_public_facade_forwards_only_staged_state_and_retry_operations() -> None:

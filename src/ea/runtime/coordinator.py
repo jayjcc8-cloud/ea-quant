@@ -928,20 +928,30 @@ class Phase1HistoricalLifecycleCoordinator:
                     ),
                 )
                 active.completion_payload = completion_payload
-                completion_acknowledgement = self._audit.append(
-                    record_kind=AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
-                    subject_kind=AuditSubjectKind.RUNTIME_DISPATCH,
-                    subject_sha256=dispatch_completed_subject_digest(completion_payload),
-                    canonical_payload=completion_payload,
+                completion_key = AuditLogicalKey(
+                    AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
+                    AuditSubjectKind.RUNTIME_DISPATCH,
+                    dispatch_completed_subject_digest(completion_payload),
                 )
+                try:
+                    completion_acknowledgement = self._audit.append(
+                        record_kind=completion_key.record_kind,
+                        subject_kind=completion_key.subject_kind,
+                        subject_sha256=completion_key.subject_sha256,
+                        canonical_payload=completion_payload,
+                    )
+                except Exception:
+                    resolved_acknowledgement = self._resolve_committed_audit_acknowledgement(
+                        key=completion_key,
+                        payload=completion_payload,
+                    )
+                    if resolved_acknowledgement is None:
+                        raise
+                    completion_acknowledgement = resolved_acknowledgement
                 _require_exact_ack(
                     completion_acknowledgement,
                     binding=self._binding,
-                    key=AuditLogicalKey(
-                        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
-                        AuditSubjectKind.RUNTIME_DISPATCH,
-                        dispatch_completed_subject_digest(completion_payload),
-                    ),
+                    key=completion_key,
                     payload=completion_payload,
                 )
                 self._rebind_active_authorities(active)
@@ -1067,6 +1077,32 @@ class Phase1HistoricalLifecycleCoordinator:
             and document.get("terminal_acknowledged") is is_terminal
             and self._runtime.terminal_acknowledged is is_terminal
         )
+
+    def _resolve_committed_audit_acknowledgement(
+        self,
+        *,
+        key: AuditLogicalKey,
+        payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        resolver = getattr(self._audit, "resolve_record", None)
+        if not callable(resolver):
+            return None
+        record = resolver(key)
+        if record is None:
+            return None
+        if type(record) is not AuditRecord or record.canonical_payload != payload:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "resolved audit record conflicts",
+            )
+        acknowledgement = create_audit_append_acknowledgement(record)
+        _require_exact_ack(
+            acknowledgement,
+            binding=self._binding,
+            key=key,
+            payload=payload,
+        )
+        return acknowledgement
 
     def _finish_terminalization(self) -> CoordinatorTerminalOutcome:
         pre_terminal = self._pre_terminal_state
