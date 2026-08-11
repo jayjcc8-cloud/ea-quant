@@ -731,9 +731,7 @@ def _definite_authorization_failure_completion(*, restart_before_completion: boo
 
 
 def test_definite_authorization_failure_completion_is_restart_invariant() -> None:
-    uninterrupted = _definite_authorization_failure_completion(
-        restart_before_completion=False
-    )
+    uninterrupted = _definite_authorization_failure_completion(restart_before_completion=False)
     restarted = _definite_authorization_failure_completion(restart_before_completion=True)
 
     assert uninterrupted.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED

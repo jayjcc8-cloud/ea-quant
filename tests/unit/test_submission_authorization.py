@@ -374,9 +374,10 @@ def test_prepare_attempt_settles_the_exact_captured_freshness_payload() -> None:
         if record.record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
     ]
     assert len(authorization_records) == 1
-    assert json.loads(authorization_records[0].canonical_payload)[
-        "instrument_gate_version"
-    ] == initial.instrument_gate_version
+    assert (
+        json.loads(authorization_records[0].canonical_payload)["instrument_gate_version"]
+        == initial.instrument_gate_version
+    )
 
 
 def test_posix_uncertain_attempt_preserves_original_key_before_freshness_burn(
