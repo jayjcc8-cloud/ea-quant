@@ -1071,7 +1071,16 @@ def recover_phase1_lifecycle_coordinator(
                 OutcomeCode.CONFLICTING_ID,
                 "unrecorded active runtime sequence conflicts",
             )
-        value._active = value._capture_lease(lease)
+        active = value._capture_lease(lease)
+        retained_batch = matcher.resolve_dispatch_batch(
+            dispatch_sequence=lease.dispatch_sequence,
+            trigger_root_sha256=active.trigger_sha256,
+        )
+        if retained_batch is not None:
+            value._require_batch(active, retained_batch)
+            active.batch = retained_batch
+        _recover_pre_batch_failing_transition(value, active, None)
+        value._active = active
     trace_sequences = set(trace_by_sequence)
     completed_sequence = value._state.last_completed_dispatch_sequence
     expected_trace_sequences = (
@@ -1578,13 +1587,12 @@ def _recover_dispatch(
         lease = _RecoveredLease(cast(RuntimeRoot, object()), recovered.sequence)
     active = _ActiveDispatch(lease=lease, trigger_sha256=trigger_sha256, batch=batch)
     if batch is None:
-        if recovered.failing_record is not None:
-            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "failing record has no matcher batch")
         if runtime_lease is not lease:
             raise LifecycleError(
                 OutcomeCode.CONFLICTING_ID,
                 "unresolved matcher has no active lease",
             )
+        _recover_pre_batch_failing_transition(coordinator, active, recovered.failing_record)
         coordinator._active = active
         return
 
@@ -1872,6 +1880,84 @@ def _recover_failing_transition(
     coordinator._state = failing_state
     coordinator._failing_payload = expected_payload
     coordinator._failing_key = record.logical_key
+    coordinator._failing_ack = acknowledgement
+
+
+def _recover_pre_batch_failing_transition(
+    coordinator: Phase1HistoricalLifecycleCoordinator,
+    active: _ActiveDispatch,
+    entry: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None,
+) -> None:
+    previous_state = coordinator._state
+    failure_code = OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED
+    failed_key = AuditLogicalKey(
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+        active.trigger_sha256,
+    )
+    record: AuditRecord | None = None
+    acknowledgement: AuditAppendAcknowledgement | None = None
+    if entry is not None:
+        _position, record, acknowledgement = entry
+        document = _record_document(record)
+        try:
+            failure_code = OutcomeCode(cast(str, document["failure_code"]))
+            retained_key = AuditLogicalKey(
+                AuditRecordKind(cast(str, document["failed_record_kind"])),
+                AuditSubjectKind(cast(str, document["failed_subject_kind"])),
+                Sha256Digest(cast(str, document["failed_subject_sha256"])),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "pre-batch failing recovery key is invalid",
+            ) from error
+        if retained_key != failed_key:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "pre-batch failing recovery key conflicts",
+            )
+    failing_state = create_coordinator_run_state(
+        binding=coordinator._binding,
+        state_version=previous_state.state_version + 1,
+        phase=CoordinatorPhase.FAILING,
+        active_dispatch_sequence=active.lease.dispatch_sequence,
+        active_trigger_root_sha256=active.trigger_sha256,
+        matcher_batch_sha256=None,
+        ordered_ingress_sha256s_sha256=ordered_digest_tuple(
+            ORDERED_INGRESS_DIGEST_DOMAIN,
+            (),
+        ),
+        ordered_outcome_ack_sha256s_sha256=ordered_digest_tuple(
+            ORDERED_OUTCOME_ACK_DIGEST_DOMAIN,
+            (),
+        ),
+        missing_audit_logical_keys=(),
+        failure_code=previous_state.failure_code or failure_code,
+        last_completed_dispatch_sequence=previous_state.last_completed_dispatch_sequence,
+        last_audit_chain_head_sha256=previous_state.last_audit_chain_head_sha256,
+    )
+    payload = canonical_failing_safety_audit_payload(
+        binding=coordinator._binding,
+        previous_state_sha256=coordinator_run_state_digest(previous_state),
+        failing_state_sha256=coordinator_run_state_digest(failing_state),
+        failure_code=failing_state.failure_code or failure_code,
+        failed_logical_key=failed_key,
+        dispatch_sequence=active.lease.dispatch_sequence,
+        trigger_root_sha256=active.trigger_sha256,
+    )
+    if record is not None and record.canonical_payload != payload:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "pre-batch failing recovery payload conflicts",
+        )
+    coordinator._state = failing_state
+    coordinator._failing_payload = payload
+    coordinator._failing_key = AuditLogicalKey(
+        AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION,
+        AuditSubjectKind.COORDINATOR_STATE,
+        audit_subject_digest(AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION, payload),
+    )
     coordinator._failing_ack = acknowledgement
 
 

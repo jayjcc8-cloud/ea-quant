@@ -290,6 +290,17 @@ class _ResolverOnlyMatcher:
         )
 
 
+class _FailFirstMatcher(_ResolverOnlyMatcher):
+    def match_active_market_root(self, root: Any, *, dispatch_sequence: int) -> Any:
+        self.mutation_calls += 1
+        if self.mutation_calls == 1:
+            raise RuntimeError("injected matcher pre-publication failure")
+        return self._matcher.match_active_market_root(
+            root,
+            dispatch_sequence=dispatch_sequence,
+        )
+
+
 class _NoEvidence:
     def resolve_fill(self, *, fill_id: Any, fill_sha256: Any) -> None:
         return None
@@ -389,6 +400,31 @@ class _FailFirstBatchAudit(_MemoryAudit):
             raise AuditContractError(
                 OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
                 "injected batch append failure",
+            )
+        return super().append(
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
+
+
+class _FailFirstFailingAudit(_MemoryAudit):
+    failed = False
+
+    def append(
+        self,
+        *,
+        record_kind: AuditRecordKind,
+        subject_kind: AuditSubjectKind,
+        subject_sha256: Sha256Digest,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement:
+        if record_kind is AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION and not self.failed:
+            self.failed = True
+            raise AuditContractError(
+                OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected failing-safety append failure",
             )
         return super().append(
             record_kind=record_kind,
@@ -909,6 +945,54 @@ def test_recovery_reuses_resolved_batch_when_batch_audit_was_missing() -> None:
     assert resolver_only.mutation_calls == 0
     assert [record.record_kind for record in audit.records].count(
         AuditRecordKind.MATCHER_DISPATCH_BATCH
+    ) == 1
+
+
+@pytest.mark.parametrize("durable_failing_record", (False, True))
+def test_recovery_keeps_pre_batch_matcher_failure_monotone(
+    durable_failing_record: bool,
+) -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit: _MemoryAudit = (
+        _MemoryAudit(binding) if durable_failing_record else _FailFirstFailingAudit(binding)
+    )
+    runtime = _Runtime(matcher, delayed)
+    fail_first = _FailFirstMatcher(matcher)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=fail_first,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+    with pytest.raises(RuntimeError, match="pre-publication"):
+        coordinator.process_next_dispatch()
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
+    ) == int(durable_failing_record)
+
+    recovered = recover_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=fail_first,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+        records=tuple(audit.records),
+    )
+
+    assert recovered.state.phase is CoordinatorPhase.FAILING
+    dispatch = recovered.retry_active_dispatch()
+
+    assert dispatch.runtime_acknowledged is True
+    assert fail_first.mutation_calls == 2
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
     ) == 1
 
 
