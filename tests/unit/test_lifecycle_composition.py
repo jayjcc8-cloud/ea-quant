@@ -5,7 +5,7 @@ import os
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -150,7 +150,7 @@ def _empty_runtime_for(matcher: Any) -> Any:
     )
 
 
-def _staged_lifecycle() -> tuple[Any, Any, list[Any], Any, _MemoryAudit, tuple[Any, ...]]:
+def _staged_lifecycle() -> tuple[Any, Any, tuple[Any, ...], Any, _MemoryAudit, tuple[Any, ...]]:
     spec_set, order_authority, orders = _orders(count=2)
     order = orders[0]
     binding = RunBinding(
@@ -233,8 +233,8 @@ def _recover_staged_lifecycle(
     audit: _MemoryAudit,
     freshness: tuple[Any, ...],
 ) -> tuple[Any, Any]:
-    matcher_history = lifecycle.matcher._HistoricalMatcherHistoryView__matcher
-    fact_history = lifecycle.fact_authority._ExecutionFactHistoryView__authority
+    matcher_history = cast(Any, lifecycle.matcher)._HistoricalMatcherHistoryView__matcher
+    fact_history = cast(Any, lifecycle.fact_authority)._ExecutionFactHistoryView__authority
     authorization, capability, activation_seal = (
         create_dormant_historical_submission_authorization_authority(
             binding=audit.binding,
