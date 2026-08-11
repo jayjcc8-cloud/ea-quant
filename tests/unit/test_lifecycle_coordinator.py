@@ -21,7 +21,17 @@ from ea.core.audit import (
     create_audit_append_acknowledgement,
     create_audit_record,
 )
-from ea.core.execution_state import ExecutionFactProcessingOutcome
+from ea.core.execution_identity import EconomicId, EconomicOwnerKind
+from ea.core.execution_messages import Fill, create_fill
+from ea.core.execution_state import (
+    ExecutionFactAction,
+    ExecutionFactAnomaly,
+    ExecutionFactProcessingOutcome,
+    OrderProjectionSnapshot,
+    OrderResolutionKeyKind,
+    create_execution_fact_processing_outcome,
+    create_order_resolution_binding,
+)
 from ea.core.historical_matching import canonical_end_of_run_root_bytes
 from ea.core.lifecycle import CoordinatorPhase, LifecycleError
 from ea.core.market_data_codec import canonical_market_data_record_bytes
@@ -293,6 +303,76 @@ class _NoEvidence:
         return None
 
 
+class _RetainedOutcomeFacts:
+    def __init__(self, matcher: Any, outcome: ExecutionFactProcessingOutcome) -> None:
+        self.run_id = matcher.run_id
+        self.spec_set = matcher.spec_set
+        self.outcome = outcome
+
+    def process_ingress(self, ingress: Any) -> ExecutionFactProcessingOutcome:
+        assert ingress.identity == self.outcome.ingress_identity
+        return self.outcome
+
+    def resolve_processing_outcome(
+        self,
+        *,
+        ingress_identity: Any,
+        ingress_sha256: Any,
+    ) -> ExecutionFactProcessingOutcome | None:
+        if (
+            ingress_identity == self.outcome.ingress_identity
+            and ingress_sha256 == self.outcome.ingress_sha256
+        ):
+            return self.outcome
+        return None
+
+
+class _DriftingFillEvidence:
+    available = True
+
+    def __init__(self, fill: Fill) -> None:
+        self.fill = fill
+
+    def resolve_fill(self, *, fill_id: Any, fill_sha256: Any) -> Fill | None:
+        del fill_id, fill_sha256
+        return self.fill if self.available else None
+
+    def resolve_projection_after(
+        self,
+        *,
+        order_id: Any,
+        projection_sha256: Any,
+    ) -> OrderProjectionSnapshot | None:
+        del order_id, projection_sha256
+        return None
+
+
+class _DriftFillOnCompletionAudit(_MemoryAudit):
+    def __init__(self, binding: RunBinding, evidence: _DriftingFillEvidence) -> None:
+        super().__init__(binding)
+        self.evidence = evidence
+        self.drifted = False
+
+    def append(
+        self,
+        *,
+        record_kind: AuditRecordKind,
+        subject_kind: AuditSubjectKind,
+        subject_sha256: Sha256Digest,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement:
+        acknowledgement = super().append(
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
+        if record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED and not self.drifted:
+            self.drifted = True
+            self.evidence.available = False
+        return acknowledgement
+
+
 class _FailFirstBatchAudit(_MemoryAudit):
     failed = False
 
@@ -506,6 +586,74 @@ def test_wrong_failing_ack_is_not_retained_and_retry_reconfirms_it() -> None:
     assert [record.record_kind for record in audit.records].count(
         AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
     ) == 1
+
+
+def test_completion_callback_fill_drift_stops_before_runtime_acknowledgement() -> None:
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    ingress = batch.ingresses[0]
+    fact = ingress.fact
+    key_kinds = tuple(
+        kind
+        for present, kind in (
+            (fact.order_id is not None, OrderResolutionKeyKind.ORDER_ID),
+            (
+                fact.client_submission_key is not None,
+                OrderResolutionKeyKind.CLIENT_SUBMISSION_KEY,
+            ),
+            (fact.venue_order_id is not None, OrderResolutionKeyKind.VENUE_ORDER_ID),
+        )
+        if present
+    )
+    fill = create_fill(
+        fill_id=EconomicId(matcher.run_id, EconomicOwnerKind.EXECUTION_FILL, 1),
+        fact=fact,
+        spec_set=matcher.spec_set,
+    )
+    processing_outcome = create_execution_fact_processing_outcome(
+        run_id=matcher.run_id,
+        runtime_dispatch_sequence=8,
+        ingress=ingress,
+        action=ExecutionFactAction.UNRESOLVED,
+        anomalies=(ExecutionFactAnomaly.UNKNOWN_ORDER,),
+        order_resolutions=tuple(
+            create_order_resolution_binding(key_kind=kind, resolved_order=None)
+            for kind in key_kinds
+        ),
+        resolved_order=None,
+        fill=fill,
+        projection_before=None,
+        projection_after=None,
+    )
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    evidence = _DriftingFillEvidence(fill)
+    audit = _DriftFillOnCompletionAudit(binding, evidence)
+    runtime = _Runtime(matcher, delayed, dispatch_sequence=8)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_RetainedOutcomeFacts(matcher, processing_outcome),
+        evidence_resolver=evidence,
+    )
+
+    with pytest.raises(LifecycleError, match="Fill evidence is unresolved"):
+        coordinator.process_next_dispatch()
+    assert runtime.active_lease is not None
+    assert [record.record_kind for record in audit.records].count(
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    ) == 1
+
+    evidence.available = True
+    dispatch = coordinator.retry_active_dispatch()
+
+    assert dispatch.runtime_acknowledged is True
+    assert runtime.active_lease is None
 
 
 def test_bounded_end_closes_with_one_exact_terminal_record() -> None:

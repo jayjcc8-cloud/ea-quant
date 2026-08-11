@@ -741,6 +741,8 @@ class Phase1HistoricalLifecycleCoordinator:
             if outcome is not None:
                 self._require_authoritative_outcome(ingress, outcome)
                 self._require_same_active_lease(active)
+                self._require_evidence(outcome)
+                self._require_same_active_lease(active)
 
     def _missing_keys(self, active: _ActiveDispatch) -> tuple[AuditLogicalKey, ...]:
         missing: list[AuditLogicalKey] = []
