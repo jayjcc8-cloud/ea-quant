@@ -3,6 +3,7 @@
 from ea.composition.lifecycle import (
     HistoricalLifecycleOrderVerifier,
     Phase1HistoricalLifecycle,
+    Phase1HistoricalLifecycleCoordinatorFacade,
     create_phase1_historical_lifecycle,
     recover_phase1_historical_lifecycle,
     recover_phase1_historical_terminal_evidence,
@@ -11,6 +12,7 @@ from ea.composition.lifecycle import (
 __all__ = [
     "HistoricalLifecycleOrderVerifier",
     "Phase1HistoricalLifecycle",
+    "Phase1HistoricalLifecycleCoordinatorFacade",
     "create_phase1_historical_lifecycle",
     "recover_phase1_historical_lifecycle",
     "recover_phase1_historical_terminal_evidence",

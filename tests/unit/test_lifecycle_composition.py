@@ -15,6 +15,7 @@ from ea.composition.lifecycle import (
     ExecutionFactHistoryView,
     HistoricalMatcherHistoryView,
     Phase1HistoricalLifecycle,
+    Phase1HistoricalLifecycleCoordinatorFacade,
     _require_recovery_history_frontier,
     create_phase1_historical_lifecycle,
     recover_phase1_historical_lifecycle,
@@ -351,6 +352,13 @@ def test_composed_staged_window_authorizes_and_submits_before_completion() -> No
         ),
     )
 
+    assert type(lifecycle.coordinator) is Phase1HistoricalLifecycleCoordinatorFacade
+    assert not hasattr(lifecycle.coordinator, "process_next_dispatch")
+    assert not hasattr(lifecycle.coordinator, "retry_active_dispatch")
+    assert not hasattr(lifecycle.coordinator, "_authorization")
+    assert not hasattr(lifecycle.coordinator, "_matcher")
+    assert not hasattr(lifecycle.coordinator, "_runtime")
+
     window = lifecycle.coordinator.begin_next_dispatch()
     lease = runtime.active_lease
     assert lease is not None
@@ -628,6 +636,11 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
             matcher=lifecycle.matcher,
             fact_authority=lifecycle.fact_authority,
             runtime=lifecycle.runtime,
+        )
+    with pytest.raises(TypeError, match="created only by composition"):
+        Phase1HistoricalLifecycleCoordinatorFacade(
+            object(),  # type: ignore[arg-type]
+            seal=object(),
         )
     with pytest.raises(TypeError, match="prepared acknowledgement"):
         create_phase1_historical_lifecycle(

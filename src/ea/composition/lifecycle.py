@@ -24,6 +24,7 @@ from ea.core.execution_messages import (
     ExecutionPolicyRef,
     FactProvenanceId,
     Fill,
+    Order,
     fill_digest,
 )
 from ea.core.execution_state import (
@@ -37,12 +38,19 @@ from ea.core.historical_matching import (
     HistoricalSubmissionReceipt,
 )
 from ea.core.lifecycle import (
+    ActiveDispatchWindow,
+    CoordinatorDispatchOutcome,
+    CoordinatorRunState,
+    CoordinatorTerminalOutcome,
     GlobalHaltFreshnessPort,
     InstrumentGateFreshnessPort,
     LifecycleError,
     PortfolioFreshnessPort,
+    PreTerminalCoordinatorState,
     RiskFreshnessPort,
+    TerminalCoordinatorState,
 )
+from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.execution.fact_authority import (
@@ -76,6 +84,7 @@ from ea.runtime.matcher import (
 
 _LIFECYCLE_SEAL = object()
 _READ_VIEW_SEAL = object()
+_COORDINATOR_FACADE_SEAL = object()
 
 
 class HistoricalLifecycleOrderVerifier(
@@ -255,18 +264,104 @@ class HistoricalRuntimeHistoryView:
 
 
 @final
+class Phase1HistoricalLifecycleCoordinatorFacade:
+    """The staged public mutation surface frozen by Accepted ADR 0021."""
+
+    __slots__ = ("__coordinator",)
+
+    def __init__(
+        self,
+        coordinator: Phase1HistoricalLifecycleCoordinator,
+        *,
+        seal: object,
+    ) -> None:
+        if (
+            seal is not _COORDINATOR_FACADE_SEAL
+            or type(coordinator) is not Phase1HistoricalLifecycleCoordinator
+        ):
+            raise TypeError("coordinator facades are created only by composition")
+        self.__coordinator = coordinator
+
+    @property
+    def binding(self) -> RunBinding:
+        return self.__coordinator.binding
+
+    @property
+    def state(self) -> CoordinatorRunState:
+        return self.__coordinator.state
+
+    @property
+    def pre_terminal_state(self) -> PreTerminalCoordinatorState | None:
+        return self.__coordinator.pre_terminal_state
+
+    @property
+    def terminal_state(self) -> TerminalCoordinatorState | None:
+        return self.__coordinator.terminal_state
+
+    @property
+    def terminal_outcome(self) -> CoordinatorTerminalOutcome | None:
+        return self.__coordinator.terminal_outcome
+
+    def begin_next_dispatch(self) -> ActiveDispatchWindow:
+        return self.__coordinator.begin_next_dispatch()
+
+    def resume_active_dispatch(self) -> ActiveDispatchWindow:
+        return self.__coordinator.resume_active_dispatch()
+
+    def prepare_submission_authorization(
+        self,
+        window: ActiveDispatchWindow,
+        order: Order,
+        *,
+        causal_market_root: MarketDataEnvelope,
+        dispatch_sequence: int,
+    ) -> AuditAppendAcknowledgement:
+        return self.__coordinator.prepare_submission_authorization(
+            window,
+            order,
+            causal_market_root=causal_market_root,
+            dispatch_sequence=dispatch_sequence,
+        )
+
+    def submit_authorized_order(
+        self,
+        window: ActiveDispatchWindow,
+        order: Order,
+    ) -> HistoricalSubmissionReceipt:
+        return self.__coordinator.submit_authorized_order(window, order)
+
+    def complete_active_dispatch(
+        self,
+        window: ActiveDispatchWindow,
+    ) -> CoordinatorDispatchOutcome:
+        return self.__coordinator.complete_active_dispatch(window)
+
+    def retry_active_dispatch_completion(self) -> CoordinatorDispatchOutcome:
+        return self.__coordinator.retry_active_dispatch_completion()
+
+    def retry_terminalization(self) -> CoordinatorTerminalOutcome:
+        return self.__coordinator.retry_terminalization()
+
+
+@final
 @dataclass(frozen=True, slots=True)
 class Phase1HistoricalLifecycle:
     """Immutable public bundle published only after authorization activation."""
 
     _seal: object
-    coordinator: Phase1HistoricalLifecycleCoordinator
+    coordinator: Phase1HistoricalLifecycleCoordinatorFacade
     matcher: HistoricalMatcherHistoryView
     fact_authority: ExecutionFactHistoryView
     runtime: HistoricalRuntimeHistoryView
 
     def __post_init__(self) -> None:
-        if self._seal is not _LIFECYCLE_SEAL:
+        if (
+            self._seal is not _LIFECYCLE_SEAL
+            or type(self.coordinator) is not Phase1HistoricalLifecycleCoordinatorFacade
+            or type(self.matcher) is not HistoricalMatcherHistoryView
+            or type(self.fact_authority) is not ExecutionFactHistoryView
+            or type(self.runtime) is not HistoricalRuntimeHistoryView
+        ):
             raise TypeError("historical lifecycle bundles are created only by composition")
 
 
@@ -417,7 +512,10 @@ def create_phase1_historical_lifecycle(
         raise
     return Phase1HistoricalLifecycle(
         _seal=_LIFECYCLE_SEAL,
-        coordinator=coordinator,
+        coordinator=Phase1HistoricalLifecycleCoordinatorFacade(
+            coordinator,
+            seal=_COORDINATOR_FACADE_SEAL,
+        ),
         matcher=HistoricalMatcherHistoryView(matcher, seal=_READ_VIEW_SEAL),
         fact_authority=ExecutionFactHistoryView(fact_authority, seal=_READ_VIEW_SEAL),
         runtime=HistoricalRuntimeHistoryView(runtime, seal=_READ_VIEW_SEAL),
@@ -502,7 +600,10 @@ def recover_phase1_historical_lifecycle(
     coordinator._reconcile_recovered_authorization()
     return Phase1HistoricalLifecycle(
         _seal=_LIFECYCLE_SEAL,
-        coordinator=coordinator,
+        coordinator=Phase1HistoricalLifecycleCoordinatorFacade(
+            coordinator,
+            seal=_COORDINATOR_FACADE_SEAL,
+        ),
         matcher=HistoricalMatcherHistoryView(matcher, seal=_READ_VIEW_SEAL),
         fact_authority=ExecutionFactHistoryView(fact_authority, seal=_READ_VIEW_SEAL),
         runtime=HistoricalRuntimeHistoryView(runtime, seal=_READ_VIEW_SEAL),
