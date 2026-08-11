@@ -309,6 +309,20 @@ class _ResolverOnlyMatcher:
     def resolve_submission_receipt(self, **values: Any) -> Any:
         return self._matcher.resolve_submission_receipt(**values)
 
+    def submit(
+        self,
+        order: Any,
+        *,
+        causal_market_root: Any,
+        dispatch_sequence: int,
+    ) -> Any:
+        self.mutation_calls += 1
+        return self._matcher.submit(
+            order,
+            causal_market_root=causal_market_root,
+            dispatch_sequence=dispatch_sequence,
+        )
+
     def match_active_market_root(self, root: Any, *, dispatch_sequence: int) -> Any:
         self.mutation_calls += 1
         return self._matcher.match_active_market_root(
@@ -587,6 +601,48 @@ def test_empty_market_dispatch_is_audited_before_runtime_acknowledgement() -> No
         AuditRecordKind.MATCHER_DISPATCH_BATCH,
         AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
     ]
+
+
+def test_staged_market_dispatch_retains_one_window_before_completion() -> None:
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _Runtime(matcher, delayed)
+    coordinator = create_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_NoEvidence(),
+    )
+
+    window = coordinator.begin_next_dispatch()
+
+    assert coordinator.resume_active_dispatch() is window
+    assert window.authorization_allowed is True
+    assert runtime.active_lease is not None
+    assert [record.record_kind for record in audit.records] == [
+        AuditRecordKind.RUN_PREPARED,
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+    ]
+    with pytest.raises(LifecycleError, match="active dispatch"):
+        coordinator.begin_next_dispatch()
+
+    outcome = coordinator.complete_active_dispatch(window)
+
+    assert outcome.runtime_acknowledged is True
+    assert runtime.active_lease is None
+    assert [record.record_kind for record in audit.records] == [
+        AuditRecordKind.RUN_PREPARED,
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
+    ]
+    with pytest.raises(LifecycleError, match="window conflicts"):
+        coordinator.complete_active_dispatch(window)
 
 
 def test_fresh_construction_consumes_preverified_prepared_ack_without_append() -> None:

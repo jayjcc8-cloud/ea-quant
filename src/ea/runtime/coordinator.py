@@ -53,6 +53,8 @@ from ea.core.historical_matching import (
 from ea.core.lifecycle import (
     ORDERED_INGRESS_DIGEST_DOMAIN,
     ORDERED_OUTCOME_ACK_DIGEST_DOMAIN,
+    ActiveDispatchWindow,
+    ActiveDispatchWindowStage,
     AuditedExecutionFactHandoff,
     CoordinatorDispatchOutcome,
     CoordinatorPhase,
@@ -68,6 +70,9 @@ from ea.core.lifecycle import (
     RuntimeLifecyclePort,
     SubmissionAuthorizationPreparationPort,
     TerminalCoordinatorState,
+    _create_active_dispatch_window,
+    active_dispatch_window_digest,
+    audited_execution_fact_handoff_digest,
     canonical_dispatch_completed_audit_payload,
     canonical_failing_safety_audit_payload,
     canonical_matcher_batch_audit_payload,
@@ -104,6 +109,8 @@ class _ActiveDispatch:
     handoffs: list[AuditedExecutionFactHandoff | None] = field(default_factory=list)
     completion_payload: bytes | None = None
     completion_ack: AuditAppendAcknowledgement | None = None
+    window: ActiveDispatchWindow | None = None
+    window_stage: ActiveDispatchWindowStage | None = None
 
 
 @dataclass(slots=True)
@@ -231,6 +238,80 @@ class Phase1HistoricalLifecycleCoordinator:
     def terminal_outcome(self) -> CoordinatorTerminalOutcome | None:
         return self._terminal_outcome
 
+    def begin_next_dispatch(self) -> ActiveDispatchWindow:
+        """Drive one new runtime lease only through the audited handoff frontier."""
+        if not self._mutation_lock.acquire(blocking=False):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
+        try:
+            if self._pre_terminal_state is not None or self._terminal_state is not None:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "coordinator no longer admits roots",
+                )
+            if self._active is not None:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "an active dispatch must be resumed before another root is popped",
+                )
+            active = self._capture_lease(self._runtime.pop())
+            self._active = active
+            return self._drive_to_window(active)
+        finally:
+            self._mutation_lock.release()
+
+    def resume_active_dispatch(self) -> ActiveDispatchWindow:
+        """Replay missing pre-completion stages and return the retained window."""
+        if not self._mutation_lock.acquire(blocking=False):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
+        try:
+            active = self._active
+            if active is None or active.completion_ack is not None:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "coordinator has no resumable active window",
+                )
+            self._require_same_active_lease(active)
+            return self._drive_to_window(active)
+        finally:
+            self._mutation_lock.release()
+
+    def complete_active_dispatch(
+        self,
+        window: ActiveDispatchWindow,
+    ) -> CoordinatorDispatchOutcome:
+        """Freeze and durably complete only the exact retained open window."""
+        if not self._mutation_lock.acquire(blocking=False):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
+        try:
+            active = self._require_window(window)
+            if active.window_stage not in {
+                ActiveDispatchWindowStage.OPEN,
+                ActiveDispatchWindowStage.COMPLETION_FROZEN,
+            }:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "window requires completion-only retry",
+                )
+            return self._complete_active(active)
+        finally:
+            self._mutation_lock.release()
+
+    def retry_active_dispatch_completion(self) -> CoordinatorDispatchOutcome:
+        """Retry only a dispatch whose durable completion record already closed authorization."""
+        if not self._mutation_lock.acquire(blocking=False):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
+        try:
+            active = self._active
+            if active is None or active.completion_ack is None:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "coordinator has no completion-only retry",
+                )
+            active.window_stage = ActiveDispatchWindowStage.COMPLETION_ACKNOWLEDGED
+            return self._complete_active(active)
+        finally:
+            self._mutation_lock.release()
+
     def process_next_dispatch(self) -> CoordinatorDispatchOutcome:
         """Pop and process exactly one root; never loop over the complete run."""
         if not self._mutation_lock.acquire(blocking=False):
@@ -277,6 +358,8 @@ class Phase1HistoricalLifecycleCoordinator:
             active = self._active
             if active is None:
                 raise LifecycleError(OutcomeCode.CONFLICTING_ID, "no active dispatch is retained")
+            if active.completion_ack is not None:
+                return self._complete_active(active)
             self._require_same_active_lease(active)
             return self._drive_active(active)
         finally:
@@ -318,6 +401,27 @@ class Phase1HistoricalLifecycleCoordinator:
             )
         finally:
             self._mutation_lock.release()
+
+    def _require_window(self, window: ActiveDispatchWindow) -> _ActiveDispatch:
+        active = self._active
+        if (
+            type(window) is not ActiveDispatchWindow
+            or active is None
+            or active.window is not window
+            or window.binding != self._binding
+            or window.coordinator_state_version != self._state.state_version
+            or window.dispatch_sequence != active.lease.dispatch_sequence
+            or window.trigger_root_sha256 != active.trigger_sha256
+        ):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "active dispatch window conflicts")
+        active_dispatch_window_digest(window)
+        self._require_same_active_lease(active)
+        if active.batch is None or active.batch_ack is None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID, "window handoff frontier is incomplete"
+            )
+        self._rebind_active_authorities(active)
+        return active
 
     def _capture_lease(self, lease: RuntimeDispatchLeaseView) -> _ActiveDispatch:
         try:
@@ -375,6 +479,11 @@ class Phase1HistoricalLifecycleCoordinator:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "runtime active evidence changed")
 
     def _drive_active(self, active: _ActiveDispatch) -> CoordinatorDispatchOutcome:
+        """Temporary migration path for callers not yet moved to the staged API."""
+        self._drive_to_window(active)
+        return self._complete_active(active)
+
+    def _drive_to_window(self, active: _ActiveDispatch) -> ActiveDispatchWindow:
         self._require_same_active_lease(active)
         root = active.lease.root
         sequence = active.lease.dispatch_sequence
@@ -488,15 +597,83 @@ class Phase1HistoricalLifecycleCoordinator:
                 )
             outcome_acks = tuple(value for value in active.outcome_acks if value is not None)
             handoffs = tuple(value for value in active.handoffs if value is not None)
-            pre_ack_state = self._pre_ack_state(active, outcome_acks)
-            completion_payload = canonical_dispatch_completed_audit_payload(
-                binding=self._binding,
-                batch=batch,
-                outcome_acknowledgements=outcome_acks,
-                pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
-            )
-            active.completion_payload = completion_payload
+            batch_ack = active.batch_ack
+            if batch_ack is None:
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "batch acknowledgement is missing")
+            window = active.window
+            if window is None:
+                window = _create_active_dispatch_window(
+                    binding=self._binding,
+                    coordinator_state_version=self._state.state_version,
+                    dispatch_kind=batch.dispatch_kind,
+                    dispatch_sequence=batch.dispatch_sequence,
+                    trigger_root_key=batch.trigger_root_key,
+                    trigger_root_sha256=batch.trigger_root_sha256,
+                    batch_sha256=historical_matcher_dispatch_batch_digest(batch),
+                    batch_ack_sha256=audit_append_acknowledgement_digest(batch_ack),
+                    handoff_sha256s=tuple(
+                        audited_execution_fact_handoff_digest(value) for value in handoffs
+                    ),
+                    audited_handoff_chain_head_sha256=(
+                        batch_ack.chain_head_sha256
+                        if not outcome_acks
+                        else outcome_acks[-1].chain_head_sha256
+                    ),
+                    authorization_allowed=(
+                        type(root) is MarketDataEnvelope
+                        and self._state.phase is CoordinatorPhase.RUNNING
+                    ),
+                )
+                active.window = window
+                active.window_stage = ActiveDispatchWindowStage.OPEN
+            elif active.window_stage is not ActiveDispatchWindowStage.OPEN:
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "active window is not open")
+            if window.coordinator_state_version != self._state.state_version:
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "active window state drifted")
+            return window
+        except AuditContractError as error:
+            if self._pre_terminal_state is not None:
+                raise
+            self._enter_failing(active, self._missing_keys(active), code=error.code)
+            raise
+        except LifecycleError as error:
+            if self._pre_terminal_state is None:
+                self._enter_failing(active, self._missing_keys(active), code=error.code)
+            raise
+        except Exception:
+            if self._pre_terminal_state is not None:
+                raise
+            self._enter_failing(active, self._missing_keys(active))
+            raise
+
+    def _complete_active(self, active: _ActiveDispatch) -> CoordinatorDispatchOutcome:
+        root = active.lease.root
+        try:
             if active.completion_ack is None:
+                self._require_same_active_lease(active)
+            batch = active.batch
+            batch_ack = active.batch_ack
+            if batch is None or batch_ack is None:
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "dispatch frontier is incomplete")
+            if any(value is None for value in active.outcomes) or any(
+                value is None for value in active.outcome_acks
+            ):
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "outcome frontier is incomplete")
+            outcome_acks = tuple(value for value in active.outcome_acks if value is not None)
+            handoffs = tuple(value for value in active.handoffs if value is not None)
+            if len(handoffs) != len(batch.ingresses):
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "handoff frontier is incomplete")
+            self._rebind_active_authorities(active)
+            if active.completion_ack is None:
+                active.window_stage = ActiveDispatchWindowStage.COMPLETION_FROZEN
+                pre_ack_state = self._pre_ack_state(active, outcome_acks)
+                completion_payload = canonical_dispatch_completed_audit_payload(
+                    binding=self._binding,
+                    batch=batch,
+                    outcome_acknowledgements=outcome_acks,
+                    pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+                )
+                active.completion_payload = completion_payload
                 completion_acknowledgement = self._audit.append(
                     record_kind=AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
                     subject_kind=AuditSubjectKind.RUNTIME_DISPATCH,
@@ -515,6 +692,7 @@ class Phase1HistoricalLifecycleCoordinator:
                 )
                 self._rebind_active_authorities(active)
                 active.completion_ack = completion_acknowledgement
+                active.window_stage = ActiveDispatchWindowStage.COMPLETION_ACKNOWLEDGED
             self._rebind_active_authorities(active)
             try:
                 self._runtime.acknowledge(active.lease)
@@ -527,10 +705,9 @@ class Phase1HistoricalLifecycleCoordinator:
                     "runtime terminal acknowledgement evidence conflicts",
                 )
             resulting_state = self._completed_state(active, outcome_acks)
-            batch_ack = active.batch_ack
             completion_ack = active.completion_ack
-            if batch_ack is None or completion_ack is None:
-                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "dispatch evidence is incomplete")
+            if completion_ack is None:
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion evidence is missing")
             dispatch_outcome = create_coordinator_dispatch_outcome(
                 batch=batch,
                 batch_acknowledgement=batch_ack,
@@ -539,6 +716,7 @@ class Phase1HistoricalLifecycleCoordinator:
                 runtime_acknowledged=True,
                 resulting_state=resulting_state,
             )
+            active.window_stage = ActiveDispatchWindowStage.COMPLETED
             self._state = resulting_state
             self._active = None
             if type(root) is EndOfRunRoot:
@@ -549,15 +727,24 @@ class Phase1HistoricalLifecycleCoordinator:
             if self._pre_terminal_state is not None:
                 raise
             self._enter_failing(active, self._missing_keys(active), code=error.code)
+            if active.completion_ack is None:
+                active.window = None
+                active.window_stage = None
             raise
         except LifecycleError as error:
             if self._pre_terminal_state is None:
                 self._enter_failing(active, self._missing_keys(active), code=error.code)
+            if active.completion_ack is None:
+                active.window = None
+                active.window_stage = None
             raise
         except Exception:
             if self._pre_terminal_state is not None:
                 raise
             self._enter_failing(active, self._missing_keys(active))
+            if active.completion_ack is None:
+                active.window = None
+                active.window_stage = None
             raise
 
     def _begin_terminalization(
