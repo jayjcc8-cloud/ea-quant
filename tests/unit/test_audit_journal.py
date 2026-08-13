@@ -5,6 +5,7 @@ import os
 import stat
 from pathlib import Path
 from sys import getsizeof
+from threading import Event, Thread
 from types import SimpleNamespace
 from typing import Any
 
@@ -692,6 +693,81 @@ def test_recovery_retries_run_prepared_after_empty_or_torn_first_frame(
     journal.close()
 
 
+def test_incomplete_recovery_classification_rejects_concurrent_consumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root(tmp_path)
+    original_store = LocalResultStore(root)
+    prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = original_store.verify_manifest(prepared.manifest_verification)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    _release_simulated_process_writer(original_store, prepared)
+
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedIncompleteRecoveryBinding
+    original_reopen = audit_module.reopen_posix_audit_journal
+    entered = Event()
+    release = Event()
+    results: list[object] = []
+
+    def paused_reopen(binding: AuditRunBinding) -> PosixAuditJournal:
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_reopen(binding)
+
+    monkeypatch.setattr(audit_module, "reopen_posix_audit_journal", paused_reopen)
+    worker = Thread(
+        target=lambda: results.append(recovered_store.recover_incomplete_attempt(verified))
+    )
+    worker.start()
+    assert entered.wait(timeout=5)
+    with pytest.raises(StoreError, match="stale or foreign"):
+        recovered_store.recover_incomplete_attempt(verified)
+    release.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(results) == 1
+
+
+def test_incomplete_recovery_classification_retries_after_clean_open_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root(tmp_path)
+    original_store = LocalResultStore(root)
+    prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = original_store.verify_manifest(prepared.manifest_verification)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    _release_simulated_process_writer(original_store, prepared)
+
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedIncompleteRecoveryBinding
+    original_reopen = audit_module.reopen_posix_audit_journal
+    calls = 0
+
+    def fail_once(binding: AuditRunBinding) -> PosixAuditJournal:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("declared transient open failure")
+        return original_reopen(binding)
+
+    monkeypatch.setattr(audit_module, "reopen_posix_audit_journal", fail_once)
+    with pytest.raises(OSError, match="declared transient open failure"):
+        recovered_store.recover_incomplete_attempt(verified)
+
+    recovered = recovered_store.recover_incomplete_attempt(verified)
+
+    assert recovered.record_count == verified.record_count
+    assert calls == 2
+
+
 def test_recovery_refuses_a_live_writer_before_journal_adoption(tmp_path: Path) -> None:
     root = _root(tmp_path)
     active_store = LocalResultStore(root)
@@ -719,10 +795,9 @@ def test_audit_open_rejects_replaced_named_writer_lock(tmp_path: Path) -> None:
     assert not (audit_path / "audit-v1.journal").exists()
 
 
-def test_terminal_recovery_returns_read_only_lost_ack_evidence(
+def _terminal_recovery_classification(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> tuple[LocalResultStore, VerifiedTerminalRecoveryBinding]:
     root = _root(tmp_path)
     original_store = LocalResultStore(root)
     prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
@@ -754,14 +829,56 @@ def test_terminal_recovery_returns_read_only_lost_ack_evidence(
     journal.close()
     _release_simulated_process_writer(original_store, prepared)
 
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedTerminalRecoveryBinding
+    return recovered_store, verified
+
+
+def test_terminal_recovery_classification_rejects_concurrent_consumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovered_store, verified = _terminal_recovery_classification(tmp_path)
+    original_reopen = audit_module.reopen_posix_audit_journal
+    entered = Event()
+    release = Event()
+    results: list[object] = []
+
+    def paused_reopen(binding: AuditRunBinding) -> PosixAuditJournal:
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_reopen(binding)
+
+    monkeypatch.setattr(audit_module, "reopen_posix_audit_journal", paused_reopen)
+    worker = Thread(
+        target=lambda: results.append(recovered_store.recover_terminal_attempt(verified))
+    )
+    worker.start()
+    assert entered.wait(timeout=5)
+    with pytest.raises(StoreError, match="stale or foreign"):
+        recovered_store.recover_terminal_attempt(verified)
+    release.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(results) == 1
+    terminal = results[0]
+    assert type(terminal) is RecoveredTerminalRun
+    terminal._finish()
+
+
+def test_terminal_recovery_returns_read_only_lost_ack_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovered_store, verified = _terminal_recovery_classification(tmp_path)
+
     def reject_materialization(_journal: PosixAuditJournal) -> tuple[object, ...]:
         raise AssertionError("terminal recovery must not materialize journal.records")
 
     monkeypatch.setattr(PosixAuditJournal, "records", property(reject_materialization))
 
-    recovered_store = LocalResultStore(root)
-    verified = recovered_store.verify_recovery_attempt(manifest)
-    assert type(verified) is VerifiedTerminalRecoveryBinding
     terminal = recovered_store.recover_terminal_attempt(verified)
 
     assert terminal.record_count == 2

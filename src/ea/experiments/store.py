@@ -317,12 +317,54 @@ class PreparedRun:
         raise AttributeError("prepared run is immutable")
 
 
-class VerifiedIncompleteRecoveryBinding:
+class _RecoveryClassificationState:
+    __slots__ = ("_consumption_lock", "_consumption_state", "_consumption_token")
+    _consumption_lock: Lock
+    _consumption_state: str
+    _consumption_token: object | None
+
+    def _initialize_consumption(self) -> None:
+        object.__setattr__(self, "_consumption_lock", Lock())
+        object.__setattr__(self, "_consumption_state", "available")
+        object.__setattr__(self, "_consumption_token", None)
+
+    def _reserve_consumption(self) -> object:
+        token = object()
+        with self._consumption_lock:
+            if self._consumption_state != "available":
+                raise StoreError("recovery classification is stale or foreign")
+            object.__setattr__(self, "_consumption_state", "consuming")
+            object.__setattr__(self, "_consumption_token", token)
+        return token
+
+    def _commit_consumption(self, token: object) -> None:
+        with self._consumption_lock:
+            if self._consumption_state != "consuming" or self._consumption_token is not token:
+                object.__setattr__(self, "_consumption_state", "failed")
+                object.__setattr__(self, "_consumption_token", None)
+                raise StoreError("recovery classification reservation changed")
+            object.__setattr__(self, "_consumption_state", "consumed")
+            object.__setattr__(self, "_consumption_token", None)
+
+    def _abort_consumption(self, token: object, *, retryable: bool = True) -> None:
+        with self._consumption_lock:
+            if self._consumption_state != "consuming" or self._consumption_token is not token:
+                object.__setattr__(self, "_consumption_state", "failed")
+                object.__setattr__(self, "_consumption_token", None)
+                raise StoreError("recovery classification reservation changed")
+            object.__setattr__(
+                self,
+                "_consumption_state",
+                "available" if retryable else "failed",
+            )
+            object.__setattr__(self, "_consumption_token", None)
+
+
+class VerifiedIncompleteRecoveryBinding(_RecoveryClassificationState):
     """One-use store-local classification for an incomplete existing attempt."""
 
-    __slots__ = ("_authority", "_consumed", "_store", "binding", "record_count")
+    __slots__ = ("_authority", "_store", "binding", "record_count")
     _authority: _AttemptAuthority
-    _consumed: bool
     _store: LocalResultStore
     binding: RunBinding
     record_count: int
@@ -341,18 +383,17 @@ class VerifiedIncompleteRecoveryBinding:
         object.__setattr__(self, "_authority", authority)
         object.__setattr__(self, "binding", authority.binding)
         object.__setattr__(self, "record_count", record_count)
-        object.__setattr__(self, "_consumed", False)
+        self._initialize_consumption()
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("recovery classification is immutable")
 
 
-class VerifiedTerminalRecoveryBinding:
+class VerifiedTerminalRecoveryBinding(_RecoveryClassificationState):
     """One-use store-local classification retaining the exact terminal evidence."""
 
     __slots__ = (
         "_authority",
-        "_consumed",
         "_store",
         "_terminal_payload",
         "binding",
@@ -361,7 +402,6 @@ class VerifiedTerminalRecoveryBinding:
         "terminal_record",
     )
     _authority: _AttemptAuthority
-    _consumed: bool
     _store: LocalResultStore
     _terminal_payload: bytes
     binding: RunBinding
@@ -399,7 +439,7 @@ class VerifiedTerminalRecoveryBinding:
             create_audit_append_acknowledgement(terminal_record),
         )
         object.__setattr__(self, "_terminal_payload", terminal_record.canonical_payload)
-        object.__setattr__(self, "_consumed", False)
+        self._initialize_consumption()
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("recovery classification is immutable")
@@ -902,60 +942,85 @@ class LocalResultStore:
         verified: VerifiedIncompleteRecoveryBinding,
     ) -> RecoveredRun:
         """Consume one incomplete classification and reissue process-local capabilities."""
-        if (
-            type(verified) is not VerifiedIncompleteRecoveryBinding
-            or verified._store is not self
-            or verified._consumed
-        ):
+        if type(verified) is not VerifiedIncompleteRecoveryBinding or verified._store is not self:
             raise StoreError("incomplete recovery classification is stale or foreign")
-        record = self._record_for(verified._authority)
-        authority = record.authority
-        audit_capability = AuditCapability(_CAPABILITY_SEAL, authority)
-        output_capability = OutputCapability(_CAPABILITY_SEAL, authority)
-        manifest_capability = ManifestVerificationCapability(_CAPABILITY_SEAL, authority)
-        audit_binding = AuditRunBinding(
-            binding=authority.binding,
-            capability=audit_capability,
-            authority=authority,
-            seal=_BINDING_SEAL,
-            store=self,
-        )
-        from ea.experiments.audit import reopen_posix_audit_journal
-
-        journal = reopen_posix_audit_journal(audit_binding)
         try:
-            record_count = journal.recovery_records.record_count
-        finally:
-            journal.close()
-        if record_count != verified.record_count:
-            raise StoreError("incomplete recovery record prefix changed")
-        object.__setattr__(verified, "_consumed", True)
-        return RecoveredRun(
-            _RECOVERED_SEAL,
-            authority=authority,
-            manifest_verification=manifest_capability,
-            audit=audit_binding,
-            output=OutputRunBinding(
+            reservation = verified._reserve_consumption()
+        except StoreError as error:
+            raise StoreError("incomplete recovery classification is stale or foreign") from error
+        journal = None
+        cleanup_failed = False
+        try:
+            try:
+                record = self._record_for(verified._authority)
+            except BaseException:
+                verified._abort_consumption(reservation, retryable=False)
+                raise
+            authority = record.authority
+            audit_binding = AuditRunBinding(
                 binding=authority.binding,
-                capability=output_capability,
+                capability=AuditCapability(_CAPABILITY_SEAL, authority),
                 authority=authority,
                 seal=_BINDING_SEAL,
-            ),
-            record_count=record_count,
-        )
+                store=self,
+            )
+            from ea.experiments.audit import reopen_posix_audit_journal
+
+            journal = reopen_posix_audit_journal(audit_binding)
+            try:
+                record_count = journal.recovery_records.record_count
+            finally:
+                try:
+                    journal.close()
+                except BaseException:
+                    cleanup_failed = True
+                    raise
+                else:
+                    journal = None
+            if record_count != verified.record_count:
+                verified._abort_consumption(reservation, retryable=False)
+                raise StoreError("incomplete recovery record prefix changed")
+            recovered = RecoveredRun(
+                _RECOVERED_SEAL,
+                authority=authority,
+                manifest_verification=ManifestVerificationCapability(_CAPABILITY_SEAL, authority),
+                audit=audit_binding,
+                output=OutputRunBinding(
+                    binding=authority.binding,
+                    capability=OutputCapability(_CAPABILITY_SEAL, authority),
+                    authority=authority,
+                    seal=_BINDING_SEAL,
+                ),
+                record_count=record_count,
+            )
+            verified._commit_consumption(reservation)
+            return recovered
+        except BaseException:
+            if journal is not None:
+                try:
+                    journal.close()
+                except BaseException:
+                    cleanup_failed = True
+            if verified._consumption_state == "consuming":
+                verified._abort_consumption(reservation, retryable=not cleanup_failed)
+            raise
 
     def recover_terminal_attempt(
         self,
         verified: VerifiedTerminalRecoveryBinding,
     ) -> RecoveredTerminalRun:
         """Consume one terminal classification after a fresh fsync and exact read-back."""
-        if (
-            type(verified) is not VerifiedTerminalRecoveryBinding
-            or verified._store is not self
-            or verified._consumed
-        ):
+        if type(verified) is not VerifiedTerminalRecoveryBinding or verified._store is not self:
             raise StoreError("terminal recovery classification is stale or foreign")
-        record = self._record_for(verified._authority)
+        try:
+            reservation = verified._reserve_consumption()
+        except StoreError as error:
+            raise StoreError("terminal recovery classification is stale or foreign") from error
+        try:
+            record = self._record_for(verified._authority)
+        except BaseException:
+            verified._abort_consumption(reservation, retryable=False)
+            raise
         authority = record.authority
         capability = AuditCapability(_CAPABILITY_SEAL, authority)
         audit_binding = AuditRunBinding(
@@ -967,9 +1032,11 @@ class LocalResultStore:
         )
         from ea.experiments.audit import reopen_posix_audit_journal
 
-        journal = reopen_posix_audit_journal(audit_binding)
-        keep_journal = False
+        journal = None
+        cleanup_failed = False
+        retirement_started = False
         try:
+            journal = reopen_posix_audit_journal(audit_binding)
             terminal = verified.terminal_record
             acknowledgement = journal.append(
                 record_kind=terminal.record_kind,
@@ -985,22 +1052,35 @@ class LocalResultStore:
                 or records.record_at(records.record_count - 1) != terminal
             ):
                 raise StoreError("terminal recovery record prefix changed")
-            keep_journal = True
-        finally:
-            if not keep_journal:
-                journal.close()
-        object.__setattr__(verified, "_consumed", True)
-        with self._registry_lock:
-            self._attempts.pop(authority.attempt_token, None)
-        os.close(record.writer_lock_fd)
-        return RecoveredTerminalRun(
-            _RECOVERED_TERMINAL_SEAL,
-            binding=authority.binding,
-            records=records,
-            journal=journal,
-            terminal_record=verified.terminal_record,
-            terminal_acknowledgement=acknowledgement,
-        )
+            result = RecoveredTerminalRun(
+                _RECOVERED_TERMINAL_SEAL,
+                binding=authority.binding,
+                records=records,
+                journal=journal,
+                terminal_record=verified.terminal_record,
+                terminal_acknowledgement=acknowledgement,
+            )
+            with self._registry_lock:
+                if self._attempts.get(authority.attempt_token) is not record:
+                    verified._abort_consumption(reservation, retryable=False)
+                    raise StoreError("terminal recovery authority changed")
+                retirement_started = True
+                os.close(record.writer_lock_fd)
+                self._attempts.pop(authority.attempt_token)
+            verified._commit_consumption(reservation)
+            return result
+        except BaseException:
+            if journal is not None:
+                try:
+                    journal.close()
+                except BaseException:
+                    cleanup_failed = True
+            if verified._consumption_state == "consuming":
+                verified._abort_consumption(
+                    reservation,
+                    retryable=not retirement_started and not cleanup_failed,
+                )
+            raise
 
     def prepare(
         self,
