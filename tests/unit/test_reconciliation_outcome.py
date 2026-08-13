@@ -15,6 +15,7 @@ from ea.core import (
     AuditRecordKind,
     AuditSubjectKind,
     CanonicalDecimal,
+    CashReconciliationBalance,
     EconomicId,
     EconomicOwnerKind,
     OpenReconciliationRef,
@@ -453,6 +454,43 @@ def test_ancestry_command_binds_exact_open_reference_and_order() -> None:
     )
 
 
+def test_cash_command_uses_exact_observed_balance_and_round_trips() -> None:
+    observation = _observation(
+        kind=ReconciliationObservationKind.CASH_SNAPSHOT,
+        scope=ReconciliationScopeKind.CASH,
+        balances=(CashReconciliationBalance(USD, CanonicalDecimal("120")),),
+    )
+    discrepancy = create_cash_reconciliation_discrepancy(
+        spec_set=_spec_set(),
+        currency=USD,
+        local_amount=CanonicalDecimal("125.5"),
+        observed_amount=CanonicalDecimal("120"),
+    )
+    outcome = _outcome(
+        observation_sha256=reconciliation_observation_digest(observation),
+        discrepancies=(discrepancy,),
+        outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
+        requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+        halt_requested=True,
+    )
+    command = _create_reconciliation_adjustment_command(
+        binding=BINDING,
+        spec_set=_spec_set(),
+        observation=observation,
+        outcome=outcome,
+        outcome_acknowledgement=_outcome_acknowledgement(outcome),
+        adjustment_id=EconomicId(
+            RUN_ID,
+            EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
+            3,
+        ),
+    )
+    payload = canonical_reconciliation_adjustment_command_bytes(command)
+
+    assert json.loads(payload)["target"]["kind"] == "settlement_cash"
+    assert _decode_reconciliation_adjustment_command(payload, _spec_set(), outcome) == command
+
+
 @pytest.mark.parametrize("decision", tuple(ReconciliationAuthorizationDecision))
 def test_authorization_binds_command_outcome_ack_and_audit(
     decision: ReconciliationAuthorizationDecision,
@@ -545,11 +583,112 @@ def test_authorization_rejects_wrong_identity_ack_and_payload_drift() -> None:
         )
     with pytest.raises(ReconciliationContractError, match="acknowledgement"):
         create_audited_reconciliation_adjustment_authorization(authorization, None)
-    document = json.loads(canonical_reconciliation_adjustment_authorization_bytes(authorization))
-    with pytest.raises(AuditContractError):
-        require_canonical_audit_payload(
-            AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
-            _canonical({**document, "decision": "override"}),
+    with pytest.raises(ReconciliationContractError):
+        canonical_reconciliation_adjustment_authorization_bytes(None)  # type: ignore[arg-type]
+    with pytest.raises(ReconciliationContractError):
+        canonical_audited_reconciliation_adjustment_authorization_bytes(
+            None  # type: ignore[arg-type]
         )
+    document = json.loads(canonical_reconciliation_adjustment_authorization_bytes(authorization))
+    invalid_audit_payloads = (
+        _canonical({**document, "decision": "override"}),
+        _canonical({**document, "available_at": "2026-1-02T09:31:00.000000Z"}),
+    )
+    for invalid in invalid_audit_payloads:
+        with pytest.raises(AuditContractError):
+            require_canonical_audit_payload(
+                AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
+                invalid,
+            )
     assert "_create_reconciliation_adjustment_authorization" not in core.__all__
     assert "_decode_reconciliation_adjustment_authorization" not in core.__all__
+
+
+def test_authorization_decoder_rejects_every_binding_drift() -> None:
+    _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
+    authorization = _create_reconciliation_adjustment_authorization(
+        binding=BINDING,
+        spec_set=_spec_set(),
+        outcome=outcome,
+        outcome_acknowledgement=outcome_acknowledgement,
+        command=command,
+        authorization_id=EconomicId(
+            RUN_ID,
+            EconomicOwnerKind.RECONCILIATION_AUTHORIZATION,
+            1,
+        ),
+        policy_id=ReconciliationAuthorizationPolicyId("reconciliation.test-policy.v1"),
+        policy_version=1,
+        policy_sha256=Sha256Digest("77" * 32),
+        decision=ReconciliationAuthorizationDecision.ALLOWED,
+        available_at=TIME,
+    )
+    payload = canonical_reconciliation_adjustment_authorization_bytes(authorization)
+    document = json.loads(payload)
+    invalid_payloads = (
+        _canonical({**document, "unexpected": None}),
+        _canonical({**document, "schema": "ea.reconciliation-adjustment-authorization.v0"}),
+        _canonical({**document, "canonicalization": "unknown"}),
+        _canonical(
+            {
+                **document,
+                "authorization_id": {
+                    "owner_kind": EconomicOwnerKind.RECONCILIATION_ADJUSTMENT.value,
+                    "owner_sequence": 1,
+                    "run_id": RUN_ID.value,
+                },
+            }
+        ),
+        _canonical(
+            {
+                **document,
+                "adjustment_id": {
+                    "owner_kind": EconomicOwnerKind.RECONCILIATION_ADJUSTMENT.value,
+                    "owner_sequence": 99,
+                    "run_id": RUN_ID.value,
+                },
+            }
+        ),
+        _canonical({**document, "instrument_spec_set_id": "different.v1"}),
+        _canonical({**document, "instrument_spec_set_sha256": "10" * 32}),
+        _canonical({**document, "dispatch_sequence": 8}),
+        _canonical({**document, "ledger_sequence": 99}),
+        _canonical({**document, "local_snapshot_sha256": "20" * 32}),
+        _canonical({**document, "observation_sha256": "30" * 32}),
+        _canonical({**document, "reconciliation_outcome_sha256": "40" * 32}),
+        _canonical({**document, "command_sha256": "50" * 32}),
+        _canonical({**document, "outcome_acknowledgement_sha256": "60" * 32}),
+        _canonical({**document, "policy_id": "INVALID POLICY"}),
+        _canonical({**document, "policy_version": 0}),
+        _canonical({**document, "policy_sha256": "invalid"}),
+        _canonical({**document, "decision": "override"}),
+        _canonical({**document, "available_at": "2026-01-02T09:31:00Z"}),
+        _canonical({**document, "run_id": "87654321-4321-4321-8321-cba987654321"}),
+        payload + b" ",
+    )
+
+    for invalid in invalid_payloads:
+        with pytest.raises(ReconciliationContractError):
+            _decode_reconciliation_adjustment_authorization(
+                invalid,
+                binding=BINDING,
+                spec_set=_spec_set(),
+                outcome=outcome,
+                outcome_acknowledgement=outcome_acknowledgement,
+                command=command,
+            )
+
+    with pytest.raises(ReconciliationContractError):
+        _create_reconciliation_adjustment_authorization(
+            binding=BINDING,
+            spec_set=_spec_set(),
+            outcome=outcome,
+            outcome_acknowledgement=outcome_acknowledgement,
+            command=command,
+            authorization_id=authorization.authorization_id,
+            policy_id="reconciliation.test-policy.v1",  # type: ignore[arg-type]
+            policy_version=1,
+            policy_sha256=Sha256Digest("77" * 32),
+            decision=ReconciliationAuthorizationDecision.ALLOWED,
+            available_at=TIME,
+        )
