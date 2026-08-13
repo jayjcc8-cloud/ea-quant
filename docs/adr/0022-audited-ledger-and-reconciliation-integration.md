@@ -214,8 +214,12 @@ binding, adjustment ID, observation and reconciliation-outcome digests, acknowle
 sequence and snapshot digest, variant, target, local/observed/delta amounts or exact open-reference
 and newly proven ancestry fields, and dispatch sequence. Its factory derives every field except the
 already canonical observation/outcome evidence. The authorization document adds authorization ID,
-policy ID/version/digest, decision, command digest, and pre-effect audit binding. The adjustment
-outcome document adds result, failure/conflict kind, original transaction ID/digest or null, and
+policy ID/version/digest, decision, command digest, and the prior reconciliation-outcome
+acknowledgement digest. It does not contain its own record ID, payload digest, acknowledgement, or
+chain head. After that payload is appended and exactly acknowledged, an
+`AuditedReconciliationAdjustmentAuthorization` binds authorization digest, authorization record ID,
+acknowledgement digest, and chain head; only this wrapper reaches the ledger. The adjustment outcome
+document adds result, failure/conflict kind, original transaction ID/digest or null, and
 before/after snapshot digests. Closed failure kinds are `invalid_command`, `stale_frontier`,
 `arithmetic_failure`, and `unbalanced`; closed conflicts are `authorization_id_collision`,
 `adjustment_id_collision`, `observation_already_consumed`, and `index_inconsistent`.
@@ -227,7 +231,8 @@ pretends that the current `0|1` halt version is a portfolio version nor mutates 
 
 The exposure digest is exactly SHA-256 of
 `b"ea.portfolio-risk-exposure.v1\0" + len(snapshot_bytes)_u64 + snapshot_bytes`, where
-`snapshot_bytes` are the strict canonical bytes of the acknowledged portfolio snapshot. Refresh
+`snapshot_bytes` are the strict canonical bytes of the candidate portfolio snapshot already bound
+by the exact ledger-outcome acknowledgement. Refresh
 sequence starts at one and advances once per completed dispatch frontier, including a no-Fill
 frontier. Its replay key is `(run_id, dispatch_sequence, ordered_ledger_ack_frontier_sha256)`.
 Exact replay returns the original refresh bytes; the same key with different bytes is a conflict.
@@ -236,9 +241,15 @@ acknowledgement-frontier digest, risk-state digest, exposure digest, submission-
 previous-refresh digest or null.
 
 `submission_permitted` is derived, never caller supplied. It is true exactly when the final bound
-risk state is not halted, the coordinator is running, the internal and published portfolio/risk
-frontiers are equal, there is no open reconciliation reference, and no ledger, refresh,
-reconciliation, correction, or audit operation is pending. Otherwise it is false.
+risk state is not halted, the coordinator is running, the proposed joint publication values equal
+the final internal portfolio/risk values, there will be no open reconciliation reference after
+that candidate publication, and no ledger, refresh, reconciliation, correction, or audit operation
+other than the current refresh acknowledgement/publication remains pending. It is evaluated
+against that exact post-publication candidate, not the previous currently published frontier.
+After the acknowledgement, the facade must publish exactly that candidate or fail closed;
+publication cannot recompute or change the immutable refresh. Otherwise the flag is false.
+The flag is evidence, not submission authority. Every later strategy or authorization callback
+must re-read and bind the newly published joint frontier after the swap before it may act.
 
 The audit vocabulary adds exact logical kinds and subjects for
 `portfolio.ledger_handoff_outcome`, `risk.portfolio_refresh`,
@@ -256,6 +267,7 @@ The new canonical contracts and digest domains are closed:
 | audited ledger handoff | `ea.audited-ledger-handoff.v1` | `b"ea.audited-ledger-handoff.v1\0"` |
 | reconciliation observation/outcome | `ea.reconciliation-observation.v1` / `ea.reconciliation-outcome.v1` | the matching schema text plus `b"\0"` |
 | adjustment command/authorization | `ea.reconciliation-adjustment-command.v1` / `ea.reconciliation-adjustment-authorization.v1` | the matching schema text plus `b"\0"` |
+| audited adjustment authorization | `ea.audited-reconciliation-adjustment-authorization.v1` | `b"ea.audited-reconciliation-adjustment-authorization.v1\0"` |
 | reconciliation transaction/outcome | `ea.reconciliation-transaction.v1` / `ea.reconciliation-adjustment-outcome.v1` | the matching schema text plus `b"\0"` |
 | portfolio risk refresh | `ea.portfolio-risk-refresh.v1` | `b"ea.portfolio-risk-refresh.v1\0"` |
 
@@ -281,10 +293,11 @@ The reconciliation-root order is separately closed:
 1. admit and validate the exact rank-20 observation root;
 2. compare it with the frozen local ledger watermark and snapshot without mutation;
 3. append/verify `reconciliation.observation_outcome`;
-4. for match, stale, remote-ahead, invalid, or quarantined results, publish no correction and move
-   to risk refresh and completion;
-5. for a correctable same-watermark mismatch, obtain and append/verify one exact
-   `reconciliation.adjustment_authorization` before any economic effect;
+4. for requested actions `none`, `request_missing_trade_facts`, `retain_and_halt`, or
+   `manual_evidence_decomposition`, publish no correction and move to risk refresh and completion;
+5. for a correctable same-watermark mismatch or one order-detail ancestry-resolution row, obtain
+   and append/verify one exact `reconciliation.adjustment_authorization`, then construct its
+   audited authorization wrapper before any economic effect;
 6. rebind observation, local frontier, authorization policy, and active lease, then apply the
    factory-issued adjustment once;
 7. append/verify `reconciliation.adjustment_outcome`, resolve/engage and rebind the monotone halt,
@@ -508,8 +521,9 @@ The extension preserves the accepted Phase 1 admission bound. Let:
 - `B` be adjustment authorization decisions, including denials; and
 - `A` be allowed adjustment outcomes, with `A <= B`.
 
-Only position/cash snapshot roots can request adjustment authorization; trade-detail and order-detail
-roots cannot. At most one decision exists per eligible root. Therefore `T + B <= R`.
+Only position/cash snapshot roots with one correctable discrepancy and order-detail roots with one
+exact ancestry-resolution row can request adjustment authorization; trade-detail roots cannot. At
+most one decision exists per non-trade root. Therefore `T + B <= R`.
 
 The record families are: preparation/failing/terminal `3`, submission authorization at most `M`,
 batch/completion/risk-refresh `3D`, fact outcomes plus ledger outcomes `2H`, reconciliation
