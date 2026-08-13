@@ -1366,6 +1366,18 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     )
     with pytest.raises(AttributeError, match="immutable"):
         probe.records = ()  # type: ignore[assignment]
+    probe._reserve_consumption()
+    with pytest.raises(RunCompositionError, match="reservation changed"):
+        probe._commit_consumption(object())
+    abort_probe = run_composition.AdmittedRecoveredRun(
+        seal,
+        recovered=recovered,
+        audit=admitted.audit,
+        records=admitted.records,
+    )
+    abort_probe._reserve_consumption()
+    with pytest.raises(RunCompositionError, match="reservation changed"):
+        abort_probe._abort_consumption(object())
     with pytest.raises(RunCompositionError, match="already consumed"):
         admitted._consume()
     admitted_journals[0].close()

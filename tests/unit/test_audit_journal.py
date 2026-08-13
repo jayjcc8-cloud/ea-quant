@@ -768,6 +768,36 @@ def test_incomplete_recovery_classification_retries_after_clean_open_failure(
     assert calls == 2
 
 
+@pytest.mark.parametrize("operation", ["commit", "abort"])
+def test_recovery_classification_token_mismatch_fails_closed(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    root = _root(tmp_path)
+    original_store = LocalResultStore(root)
+    prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = original_store.verify_manifest(prepared.manifest_verification)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    _release_simulated_process_writer(original_store, prepared)
+
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedIncompleteRecoveryBinding
+    verified._reserve_consumption()
+
+    with pytest.raises(StoreError, match="reservation changed"):
+        if operation == "commit":
+            verified._commit_consumption(object())
+        else:
+            verified._abort_consumption(object())
+    with pytest.raises(StoreError, match="stale or foreign"):
+        recovered_store.recover_incomplete_attempt(verified)
+
+    record = recovered_store._record_for(verified._authority)
+    os.close(record.writer_lock_fd)
+
+
 def test_recovery_refuses_a_live_writer_before_journal_adoption(tmp_path: Path) -> None:
     root = _root(tmp_path)
     active_store = LocalResultStore(root)
