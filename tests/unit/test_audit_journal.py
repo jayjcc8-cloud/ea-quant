@@ -628,6 +628,22 @@ def test_recovery_refuses_a_live_writer_before_journal_adoption(tmp_path: Path) 
         LocalResultStore(root).verify_recovery_attempt(manifest)
 
 
+def test_audit_open_rejects_replaced_named_writer_lock(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    store = LocalResultStore(root)
+    prepared = store.prepare(_spec(), lambda: RUN_UUID)
+    audit_path = root / str(RUN_UUID) / "audit"
+    lock_path = audit_path / "writer-v1.lock"
+    displaced_path = audit_path / "writer-v1.displaced"
+    lock_path.rename(displaced_path)
+    lock_path.touch(mode=0o600)
+
+    with pytest.raises(StoreError, match="writer-lock identity changed"):
+        create_posix_audit_journal(prepared.audit)
+
+    assert not (audit_path / "audit-v1.journal").exists()
+
+
 def test_terminal_recovery_returns_read_only_lost_ack_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

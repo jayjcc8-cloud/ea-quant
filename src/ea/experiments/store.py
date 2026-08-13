@@ -601,6 +601,7 @@ class LocalResultStore:
         root_fd: int | None = None
         run_fd: int | None = None
         audit_fd: int | None = None
+        named_lock_fd: int | None = None
         try:
             root_fd = self._ops.open_root(self._root)
             root_stat = self._ops.fstat(root_fd)
@@ -620,6 +621,12 @@ class LocalResultStore:
             audit_fd = self._ops.open_dir_at(run_fd, "audit")
             audit_stat = self._ops.fstat(audit_fd)
             lock_stat = os.fstat(record.writer_lock_fd)
+            named_lock_fd = os.open(
+                "writer-v1.lock",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=audit_fd,
+            )
+            named_lock_stat = os.fstat(named_lock_fd)
             if (
                 not stat.S_ISDIR(audit_stat.st_mode)
                 or stat.S_IMODE(audit_stat.st_mode) != 0o700
@@ -628,6 +635,10 @@ class LocalResultStore:
                 or stat.S_IMODE(lock_stat.st_mode) != 0o600
                 or lock_stat.st_nlink != 1
                 or self._identity(lock_stat) != record.writer_lock_identity
+                or not stat.S_ISREG(named_lock_stat.st_mode)
+                or stat.S_IMODE(named_lock_stat.st_mode) != 0o600
+                or named_lock_stat.st_nlink != 1
+                or self._identity(named_lock_stat) != self._identity(lock_stat)
             ):
                 raise StoreError("audit directory or writer-lock identity changed")
             returned = audit_fd
@@ -638,7 +649,7 @@ class LocalResultStore:
         except OSError as exc:
             raise StoreError("audit directory could not be opened without following links") from exc
         finally:
-            for descriptor in (audit_fd, run_fd, root_fd):
+            for descriptor in (named_lock_fd, audit_fd, run_fd, root_fd):
                 if descriptor is not None:
                     with suppress(OSError):
                         self._ops.close(descriptor)
