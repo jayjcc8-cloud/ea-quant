@@ -7,17 +7,24 @@ from pathlib import Path
 
 _SCRIPT = """
 import json
+from datetime import UTC, datetime
 from ea.core import (
-    EconomicId, EconomicOwnerKind, IngressIdentity, InstrumentSpecSetId,
-    LedgerHandoffAction, PortfolioSnapshot, RiskPolicyId, RunId, Sha256Digest,
-    SourceNamespace,
+    CanonicalDecimal, EconomicId, EconomicOwnerKind, FactProvenanceId,
+    IngressIdentity, Instrument, InstrumentExecutionSpec, InstrumentSpecId,
+    InstrumentSpecSetId, LedgerHandoffAction, PortfolioSnapshot, PriceDomain,
+    ReconciliationObservationKind, ReconciliationScopeKind, RiskPolicyId,
+    RunId, RuntimeIdentifier, SettlementCurrency, Sha256Digest, SourceNamespace,
+    VenueId, PositionReconciliationBalance, build_instrument_spec_set,
     canonical_ledger_application_command_bytes,
     canonical_ledger_handoff_outcome_bytes,
     canonical_portfolio_risk_refresh_bytes,
+    canonical_reconciliation_observation_bytes,
+    create_reconciliation_observation,
     create_ledger_handoff_outcome,
     ledger_application_command_digest,
     ledger_handoff_outcome_digest,
     portfolio_risk_refresh_digest,
+    reconciliation_observation_digest,
 )
 from ea.core.ledger_integration import (
     _create_ledger_application_command, _create_portfolio_risk_refresh,
@@ -80,6 +87,37 @@ refresh = _create_portfolio_risk_refresh(
     submission_permitted=True,
     previous_refresh_sha256=None,
 )
+instrument = Instrument(VenueId("XNAS"), "AAPL")
+spec_set = build_instrument_spec_set(
+    InstrumentSpecSetId("phase1.test.v1"),
+    (InstrumentExecutionSpec(
+        instrument=instrument,
+        specification_id=InstrumentSpecId("xnas.aapl.v1"),
+        price_quantum=CanonicalDecimal("0.01"),
+        quantity_quantum=CanonicalDecimal("1"),
+        settlement_currency=SettlementCurrency("USD"),
+        currency_quantum=CanonicalDecimal("0.01"),
+        contract_multiplier=CanonicalDecimal("1"),
+        price_domain=PriceDomain.SIGNED,
+    ),),
+)
+observation = create_reconciliation_observation(
+    run_id=run_id,
+    spec_set=spec_set,
+    observation_id=EconomicId(run_id, EconomicOwnerKind.RECONCILIATION_OBSERVATION, 1),
+    kind=ReconciliationObservationKind.POSITION_SNAPSHOT,
+    source_namespace=SourceNamespace("reconciliation.sim"),
+    source_sequence=7,
+    occurred_at=datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+    available_at=datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+    watermark_namespace=SourceNamespace("ledger.portfolio"),
+    watermark_sequence=3,
+    declared_scope_kind=ReconciliationScopeKind.POSITION,
+    declared_scope_id=RuntimeIdentifier("portfolio.default"),
+    provenance_id=FactProvenanceId("reconciliation.fixture.v1"),
+    provenance_payload_sha256=Sha256Digest("99" * 32),
+    balances=(PositionReconciliationBalance(instrument, CanonicalDecimal("10")),),
+)
 print(json.dumps({
     "command": canonical_ledger_application_command_bytes(command).hex(),
     "command_sha256": ledger_application_command_digest(command).value,
@@ -87,6 +125,8 @@ print(json.dumps({
     "outcome_sha256": ledger_handoff_outcome_digest(outcome).value,
     "refresh": canonical_portfolio_risk_refresh_bytes(refresh).hex(),
     "refresh_sha256": portfolio_risk_refresh_digest(refresh).value,
+    "observation": canonical_reconciliation_observation_bytes(observation).hex(),
+    "observation_sha256": reconciliation_observation_digest(observation).value,
 }, sort_keys=True, separators=(",", ":")))
 """
 
