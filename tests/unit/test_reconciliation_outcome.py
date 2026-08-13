@@ -5,29 +5,56 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+import ea.core as core
 from ea.core import (
+    EMPTY_CHAIN_HEAD_SHA256,
+    EMPTY_RECORD_SHA256,
+    AuditAppendAcknowledgement,
     AuditContractError,
     AuditRecordKind,
+    AuditSubjectKind,
     CanonicalDecimal,
+    EconomicId,
+    EconomicOwnerKind,
+    OpenReconciliationRef,
     OutcomeCode,
+    PositionReconciliationBalance,
+    ReconciliationAdjustmentCommand,
     ReconciliationContractError,
+    ReconciliationObservationKind,
     ReconciliationOutcome,
     ReconciliationRequestedAction,
+    ReconciliationScopeKind,
     ReconciliationWatermarkComparison,
+    RunBinding,
+    RunReference,
     Sha256Digest,
     audit_subject_digest,
+    canonical_reconciliation_adjustment_command_bytes,
     canonical_reconciliation_outcome_bytes,
+    create_audit_append_acknowledgement,
+    create_audit_record,
     create_cash_reconciliation_discrepancy,
     create_position_reconciliation_discrepancy,
+    create_reconciliation_observation,
     create_reconciliation_outcome,
     decode_reconciliation_outcome,
+    reconciliation_adjustment_command_digest,
+    reconciliation_observation_digest,
     reconciliation_outcome_digest,
 )
 from ea.core.audit import require_canonical_audit_payload
+from ea.core.reconciliation import (
+    _create_reconciliation_adjustment_command,
+    _decode_reconciliation_adjustment_command,
+)
+from unit.test_execution_messages import SPEC_SET, _order
 from unit.test_portfolio_ledger import INSTRUMENT, RUN_ID, USD, _spec_set
+from unit.test_reconciliation_observation import _observation
 
 OBSERVATION_SHA256 = Sha256Digest("11" * 32)
 SNAPSHOT_SHA256 = Sha256Digest("22" * 32)
+BINDING = RunBinding(RunReference(RUN_ID, Sha256Digest("33" * 32)), Sha256Digest("44" * 32))
 
 
 def _canonical(document: object) -> bytes:
@@ -56,6 +83,26 @@ def _outcome(**changes: object) -> ReconciliationOutcome:
     }
     arguments.update(changes)
     return create_reconciliation_outcome(**arguments)  # type: ignore[arg-type]
+
+
+def _outcome_acknowledgement(
+    outcome: ReconciliationOutcome,
+) -> AuditAppendAcknowledgement:
+    payload = canonical_reconciliation_outcome_bytes(outcome)
+    record = create_audit_record(
+        binding=BINDING,
+        owner_sequence=2,
+        record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        subject_kind=AuditSubjectKind.RECONCILIATION_OUTCOME,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            payload,
+        ),
+        canonical_payload=payload,
+        previous_record_sha256=EMPTY_RECORD_SHA256,
+        previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+    )
+    return create_audit_append_acknowledgement(record)
 
 
 def test_outcome_v2_round_trips_without_command_digest_field() -> None:
@@ -201,3 +248,136 @@ def test_outcome_audit_rejects_tampered_discrepancy_delta() -> None:
             AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
             _canonical(document),
         )
+
+
+def test_balance_command_requires_exact_outcome_ack_and_is_rederived() -> None:
+    observation = _observation(
+        balances=(PositionReconciliationBalance(INSTRUMENT, CanonicalDecimal("12")),),
+    )
+    discrepancy = create_position_reconciliation_discrepancy(
+        spec_set=_spec_set(),
+        instrument=INSTRUMENT,
+        local_amount=CanonicalDecimal("10"),
+        observed_amount=CanonicalDecimal("12"),
+    )
+    outcome = _outcome(
+        observation_sha256=reconciliation_observation_digest(observation),
+        discrepancies=(discrepancy,),
+        outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
+        requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+        halt_requested=True,
+    )
+    acknowledgement = _outcome_acknowledgement(outcome)
+    adjustment_id = EconomicId(
+        RUN_ID,
+        EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
+        1,
+    )
+
+    command = _create_reconciliation_adjustment_command(
+        binding=BINDING,
+        spec_set=_spec_set(),
+        observation=observation,
+        outcome=outcome,
+        outcome_acknowledgement=acknowledgement,
+        adjustment_id=adjustment_id,
+    )
+    encoded = canonical_reconciliation_adjustment_command_bytes(command)
+
+    assert _decode_reconciliation_adjustment_command(encoded, _spec_set(), outcome) == command
+    assert len(reconciliation_adjustment_command_digest(command).value) == 64
+    assert (
+        canonical_reconciliation_adjustment_command_bytes(
+            _create_reconciliation_adjustment_command(
+                binding=BINDING,
+                spec_set=_spec_set(),
+                observation=observation,
+                outcome=outcome,
+                outcome_acknowledgement=acknowledgement,
+                adjustment_id=adjustment_id,
+            )
+        )
+        == encoded
+    )
+    with pytest.raises(TypeError, match="factory"):
+        ReconciliationAdjustmentCommand()
+    assert "_create_reconciliation_adjustment_command" not in core.__all__
+    assert "_decode_reconciliation_adjustment_command" not in core.__all__
+    with pytest.raises(ReconciliationContractError, match="acknowledgement"):
+        _create_reconciliation_adjustment_command(
+            binding=BINDING,
+            spec_set=_spec_set(),
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=None,
+            adjustment_id=adjustment_id,
+        )
+    document = json.loads(encoded)
+    with pytest.raises(ReconciliationContractError):
+        _decode_reconciliation_adjustment_command(
+            _canonical({**document, "local_snapshot_sha256": "ff" * 32}),
+            _spec_set(),
+            outcome,
+        )
+
+
+def test_ancestry_command_binds_exact_open_reference_and_order() -> None:
+    base_observation = _observation(
+        kind=ReconciliationObservationKind.ORDER_DETAIL,
+        scope=ReconciliationScopeKind.ORDER,
+        balances=(),
+    )
+    observation = create_reconciliation_observation(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        observation_id=base_observation.observation_id,
+        kind=base_observation.kind,
+        source_namespace=base_observation.source_namespace,
+        source_sequence=base_observation.source_sequence,
+        occurred_at=base_observation.occurred_at,
+        available_at=base_observation.available_at,
+        watermark_namespace=base_observation.watermark_namespace,
+        watermark_sequence=base_observation.watermark_sequence,
+        declared_scope_kind=base_observation.declared_scope_kind,
+        declared_scope_id=base_observation.declared_scope_id,
+        provenance_id=base_observation.provenance_id,
+        provenance_payload_sha256=base_observation.provenance_payload_sha256,
+        balances=(),
+    )
+    outcome = _outcome(
+        observation_sha256=reconciliation_observation_digest(observation),
+        requested_action=ReconciliationRequestedAction.PROPOSE_ANCESTRY_RESOLUTION,
+        halt_requested=True,
+    )
+    reference = OpenReconciliationRef(
+        EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 9),
+        Sha256Digest("55" * 32),
+        Sha256Digest("66" * 32),
+    )
+
+    command = _create_reconciliation_adjustment_command(
+        binding=BINDING,
+        spec_set=SPEC_SET,
+        observation=observation,
+        outcome=outcome,
+        outcome_acknowledgement=_outcome_acknowledgement(outcome),
+        adjustment_id=EconomicId(
+            RUN_ID,
+            EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
+            2,
+        ),
+        open_reconciliation_ref=reference,
+        ancestry_order=_order(),
+    )
+
+    document = json.loads(canonical_reconciliation_adjustment_command_bytes(command))
+    assert document["variant"] == "ancestry_resolution"
+    assert document["target"]["kind"] == "open_reconciliation_ref"
+    assert (
+        _decode_reconciliation_adjustment_command(
+            canonical_reconciliation_adjustment_command_bytes(command),
+            SPEC_SET,
+            outcome,
+        )
+        == command
+    )

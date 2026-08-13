@@ -17,10 +17,11 @@ from ea.core.execution import (
     instrument_spec_set_digest,
 )
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind, SourceNamespace
-from ea.core.execution_messages import FactProvenanceId
+from ea.core.execution_messages import FactProvenanceId, Order, order_digest
 from ea.core.identity import Instrument, VenueId
 from ea.core.outcomes import OutcomeCode
-from ea.core.run import RunId, Sha256Digest
+from ea.core.portfolio import OpenReconciliationRef
+from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.core.runtime import ReconciliationObservationKind, RuntimeIdentifier
 from ea.core.time import TimeValidationError, require_utc
 
@@ -28,6 +29,8 @@ RECONCILIATION_OBSERVATION_SCHEMA = "ea.reconciliation-observation.v1"
 RECONCILIATION_OBSERVATION_DIGEST_DOMAIN = b"ea.reconciliation-observation.v1\0"
 RECONCILIATION_OUTCOME_SCHEMA = "ea.reconciliation-outcome.v2"
 RECONCILIATION_OUTCOME_DIGEST_DOMAIN = b"ea.reconciliation-outcome.v2\0"
+RECONCILIATION_ADJUSTMENT_COMMAND_SCHEMA = "ea.reconciliation-adjustment-command.v1"
+RECONCILIATION_ADJUSTMENT_COMMAND_DIGEST_DOMAIN = b"ea.reconciliation-adjustment-command.v1\0"
 RECONCILIATION_CANONICALIZATION = "ea-canonical-json-v1"
 MAX_RECONCILIATION_PAYLOAD_BYTES = 16_384
 MAX_RECONCILIATION_BALANCES = 32
@@ -91,6 +94,17 @@ class ReconciliationRequestedAction(StrEnum):
 class ReconciliationDiscrepancyKind(StrEnum):
     INSTRUMENT_POSITION = "instrument_position"
     SETTLEMENT_CASH = "settlement_cash"
+
+
+class ReconciliationAdjustmentVariant(StrEnum):
+    BALANCE_CORRECTION = "balance_correction"
+    ANCESTRY_RESOLUTION = "ancestry_resolution"
+
+
+class ReconciliationAdjustmentTargetKind(StrEnum):
+    INSTRUMENT_POSITION = "instrument_position"
+    SETTLEMENT_CASH = "settlement_cash"
+    OPEN_RECONCILIATION_REF = "open_reconciliation_ref"
 
 
 @final
@@ -169,6 +183,34 @@ class ReconciliationOutcome:
 
     def __init__(self) -> None:
         raise TypeError("reconciliation outcomes are created only by their factory")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ReconciliationAdjustmentCommand:
+    run_id: RunId
+    instrument_spec_set_id: InstrumentSpecSetId
+    instrument_spec_set_sha256: Sha256Digest
+    adjustment_id: EconomicId
+    observation_sha256: Sha256Digest
+    reconciliation_outcome_sha256: Sha256Digest
+    ledger_sequence: int
+    local_snapshot_sha256: Sha256Digest
+    variant: ReconciliationAdjustmentVariant
+    target_kind: ReconciliationAdjustmentTargetKind
+    instrument: Instrument | None
+    currency: SettlementCurrency | None
+    local_amount: CanonicalDecimal | None
+    observed_amount: CanonicalDecimal | None
+    delta: CanonicalDecimal | None
+    open_reconciliation_ref: OpenReconciliationRef | None
+    ancestry_order_id: EconomicId | None
+    ancestry_order_sha256: Sha256Digest | None
+    dispatch_sequence: int
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("reconciliation adjustment commands are created only by their factory")
 
 
 @final
@@ -498,6 +540,395 @@ def decode_reconciliation_outcome(
     return outcome
 
 
+def _create_reconciliation_adjustment_command(
+    *,
+    binding: RunBinding,
+    spec_set: InstrumentExecutionSpecSet,
+    observation: ReconciliationObservation,
+    outcome: ReconciliationOutcome,
+    outcome_acknowledgement: object,
+    adjustment_id: EconomicId,
+    open_reconciliation_ref: OpenReconciliationRef | None = None,
+    ancestry_order: Order | None = None,
+) -> ReconciliationAdjustmentCommand:
+    """Derive one command only after the exact v2 outcome is durably acknowledged."""
+    from ea.core.audit import (
+        AuditLogicalKey,
+        AuditRecordKind,
+        AuditSubjectKind,
+        audit_subject_digest,
+        require_audit_acknowledgement,
+    )
+
+    if (
+        type(binding) is not RunBinding
+        or type(spec_set) is not InstrumentExecutionSpecSet
+        or type(observation) is not ReconciliationObservation
+        or observation._seal is not _VALUE_SEAL
+        or type(outcome) is not ReconciliationOutcome
+        or outcome._seal is not _VALUE_SEAL
+        or type(adjustment_id) is not EconomicId
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment command evidence must be exact")
+    run_id = binding.reference.run_id
+    if (
+        observation.run_id != run_id
+        or outcome.run_id != run_id
+        or adjustment_id.run_id != run_id
+        or adjustment_id.owner_kind is not EconomicOwnerKind.RECONCILIATION_ADJUSTMENT
+        or observation.instrument_spec_set_id != spec_set.identifier
+        or observation.instrument_spec_set_sha256 != instrument_spec_set_digest(spec_set)
+        or outcome.observation_sha256 != reconciliation_observation_digest(observation)
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment command evidence bindings conflict")
+    outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
+    subject_sha256 = audit_subject_digest(
+        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        outcome_payload,
+    )
+    try:
+        require_audit_acknowledgement(
+            outcome_acknowledgement,
+            binding=binding,
+            logical_key=AuditLogicalKey(
+                AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+                AuditSubjectKind.RECONCILIATION_OUTCOME,
+                subject_sha256,
+            ),
+            canonical_payload=outcome_payload,
+        )
+    except ValueError as error:
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "adjustment command requires the exact outcome acknowledgement",
+        ) from error
+    if outcome.requested_action is ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT:
+        if (
+            len(outcome.discrepancies) != 1
+            or open_reconciliation_ref is not None
+            or ancestry_order is not None
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "balance command evidence conflicts")
+        discrepancy = outcome.discrepancies[0]
+        if type(discrepancy) is PositionReconciliationDiscrepancy:
+            if (
+                observation.kind is not ReconciliationObservationKind.POSITION_SNAPSHOT
+                or PositionReconciliationBalance(
+                    discrepancy.instrument,
+                    discrepancy.observed_amount,
+                )
+                not in observation.balances
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "position proposal evidence conflicts")
+            return _build_adjustment_command(
+                spec_set=spec_set,
+                outcome=outcome,
+                adjustment_id=adjustment_id,
+                variant=ReconciliationAdjustmentVariant.BALANCE_CORRECTION,
+                target_kind=ReconciliationAdjustmentTargetKind.INSTRUMENT_POSITION,
+                instrument=discrepancy.instrument,
+                currency=None,
+                local_amount=discrepancy.local_amount,
+                observed_amount=discrepancy.observed_amount,
+                delta=discrepancy.delta,
+                open_reconciliation_ref=None,
+                ancestry_order_id=None,
+                ancestry_order_sha256=None,
+            )
+        assert type(discrepancy) is CashReconciliationDiscrepancy
+        if (
+            observation.kind is not ReconciliationObservationKind.CASH_SNAPSHOT
+            or CashReconciliationBalance(discrepancy.currency, discrepancy.observed_amount)
+            not in observation.balances
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "cash proposal evidence conflicts")
+        return _build_adjustment_command(
+            spec_set=spec_set,
+            outcome=outcome,
+            adjustment_id=adjustment_id,
+            variant=ReconciliationAdjustmentVariant.BALANCE_CORRECTION,
+            target_kind=ReconciliationAdjustmentTargetKind.SETTLEMENT_CASH,
+            instrument=None,
+            currency=discrepancy.currency,
+            local_amount=discrepancy.local_amount,
+            observed_amount=discrepancy.observed_amount,
+            delta=discrepancy.delta,
+            open_reconciliation_ref=None,
+            ancestry_order_id=None,
+            ancestry_order_sha256=None,
+        )
+    if outcome.requested_action is not ReconciliationRequestedAction.PROPOSE_ANCESTRY_RESOLUTION:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "outcome does not authorize command derivation")
+    if (
+        type(open_reconciliation_ref) is not OpenReconciliationRef
+        or type(ancestry_order) is not Order
+        or open_reconciliation_ref.fill_id.run_id != run_id
+        or ancestry_order.run_id != run_id
+        or ancestry_order.instrument_spec_set_id != spec_set.identifier
+        or ancestry_order.instrument_spec_set_sha256 != instrument_spec_set_digest(spec_set)
+        or observation.kind is not ReconciliationObservationKind.ORDER_DETAIL
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "ancestry command evidence conflicts")
+    return _build_adjustment_command(
+        spec_set=spec_set,
+        outcome=outcome,
+        adjustment_id=adjustment_id,
+        variant=ReconciliationAdjustmentVariant.ANCESTRY_RESOLUTION,
+        target_kind=ReconciliationAdjustmentTargetKind.OPEN_RECONCILIATION_REF,
+        instrument=None,
+        currency=None,
+        local_amount=None,
+        observed_amount=None,
+        delta=None,
+        open_reconciliation_ref=open_reconciliation_ref,
+        ancestry_order_id=ancestry_order.order_id,
+        ancestry_order_sha256=order_digest(ancestry_order),
+    )
+
+
+def _build_adjustment_command(
+    *,
+    spec_set: InstrumentExecutionSpecSet,
+    outcome: ReconciliationOutcome,
+    adjustment_id: EconomicId,
+    variant: ReconciliationAdjustmentVariant,
+    target_kind: ReconciliationAdjustmentTargetKind,
+    instrument: Instrument | None,
+    currency: SettlementCurrency | None,
+    local_amount: CanonicalDecimal | None,
+    observed_amount: CanonicalDecimal | None,
+    delta: CanonicalDecimal | None,
+    open_reconciliation_ref: OpenReconciliationRef | None,
+    ancestry_order_id: EconomicId | None,
+    ancestry_order_sha256: Sha256Digest | None,
+) -> ReconciliationAdjustmentCommand:
+    value = object.__new__(ReconciliationAdjustmentCommand)
+    for field, candidate in (
+        ("run_id", outcome.run_id),
+        ("instrument_spec_set_id", spec_set.identifier),
+        ("instrument_spec_set_sha256", instrument_spec_set_digest(spec_set)),
+        ("adjustment_id", adjustment_id),
+        ("observation_sha256", outcome.observation_sha256),
+        ("reconciliation_outcome_sha256", reconciliation_outcome_digest(outcome)),
+        ("ledger_sequence", outcome.ledger_sequence),
+        ("local_snapshot_sha256", outcome.local_snapshot_sha256),
+        ("variant", variant),
+        ("target_kind", target_kind),
+        ("instrument", instrument),
+        ("currency", currency),
+        ("local_amount", local_amount),
+        ("observed_amount", observed_amount),
+        ("delta", delta),
+        ("open_reconciliation_ref", open_reconciliation_ref),
+        ("ancestry_order_id", ancestry_order_id),
+        ("ancestry_order_sha256", ancestry_order_sha256),
+        ("dispatch_sequence", outcome.dispatch_sequence),
+    ):
+        object.__setattr__(value, field, candidate)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    canonical_reconciliation_adjustment_command_bytes(value)
+    return value
+
+
+def canonical_reconciliation_adjustment_command_bytes(
+    command: ReconciliationAdjustmentCommand,
+) -> bytes:
+    if type(command) is not ReconciliationAdjustmentCommand or command._seal is not _VALUE_SEAL:
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment command must be factory-issued")
+    payload = _canonical_json(_adjustment_command_document(command))
+    if len(payload) > MAX_RECONCILIATION_PAYLOAD_BYTES:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "adjustment command exceeds byte bound")
+    return payload
+
+
+def reconciliation_adjustment_command_digest(
+    command: ReconciliationAdjustmentCommand,
+) -> Sha256Digest:
+    return _framed_digest(
+        RECONCILIATION_ADJUSTMENT_COMMAND_DIGEST_DOMAIN,
+        canonical_reconciliation_adjustment_command_bytes(command),
+    )
+
+
+def _decode_reconciliation_adjustment_command(
+    canonical_payload: bytes,
+    spec_set: InstrumentExecutionSpecSet,
+    outcome: ReconciliationOutcome,
+) -> ReconciliationAdjustmentCommand:
+    document = _decode_canonical_json(canonical_payload, "reconciliation adjustment command")
+    common_fields = {
+        "adjustment_id",
+        "canonicalization",
+        "dispatch_sequence",
+        "instrument_spec_set_id",
+        "instrument_spec_set_sha256",
+        "ledger_sequence",
+        "local_snapshot_sha256",
+        "observation_sha256",
+        "reconciliation_outcome_sha256",
+        "run_id",
+        "schema",
+        "variant",
+    }
+    if type(document) is not dict or not common_fields <= set(document):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment command fields conflict")
+    if (
+        _require_text(document, "schema") != RECONCILIATION_ADJUSTMENT_COMMAND_SCHEMA
+        or _require_text(document, "canonicalization") != RECONCILIATION_CANONICALIZATION
+        or type(spec_set) is not InstrumentExecutionSpecSet
+        or type(outcome) is not ReconciliationOutcome
+        or outcome._seal is not _VALUE_SEAL
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment command schema conflicts")
+    try:
+        run_id = RunId(_require_text(document, "run_id"))
+        variant = ReconciliationAdjustmentVariant(_require_text(document, "variant"))
+        adjustment_id = _decode_economic_id(document["adjustment_id"], run_id)
+        common_checks = (
+            run_id == outcome.run_id,
+            adjustment_id.owner_kind is EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
+            _require_text(document, "instrument_spec_set_id") == spec_set.identifier.value,
+            _decode_digest(document, "instrument_spec_set_sha256")
+            == instrument_spec_set_digest(spec_set),
+            _require_json_int(document, "dispatch_sequence") == outcome.dispatch_sequence,
+            _require_json_int(document, "ledger_sequence") == outcome.ledger_sequence,
+            _decode_digest(document, "local_snapshot_sha256") == outcome.local_snapshot_sha256,
+            _decode_digest(document, "observation_sha256") == outcome.observation_sha256,
+            _decode_digest(document, "reconciliation_outcome_sha256")
+            == reconciliation_outcome_digest(outcome),
+        )
+        if not all(common_checks):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment command binding conflicts")
+        target = document["target"]
+        if type(target) is not dict or type(target.get("kind")) is not str:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment command target conflicts")
+        target_kind = ReconciliationAdjustmentTargetKind(target["kind"])
+        if variant is ReconciliationAdjustmentVariant.BALANCE_CORRECTION:
+            if outcome.requested_action is not (
+                ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "balance command proposal conflicts")
+            if set(document) != common_fields | {
+                "delta",
+                "local_amount",
+                "observed_amount",
+                "target",
+            }:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "balance command fields conflict")
+            local_amount = CanonicalDecimal(_require_text(document, "local_amount"))
+            observed_amount = CanonicalDecimal(_require_text(document, "observed_amount"))
+            delta = _subtract_decimal(observed_amount, local_amount)
+            if delta.text != _require_text(document, "delta"):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "balance command delta conflicts")
+            if target_kind is ReconciliationAdjustmentTargetKind.INSTRUMENT_POSITION:
+                if set(target) != {"instrument", "kind"}:
+                    raise _fail(OutcomeCode.CONFLICTING_ID, "position target fields conflict")
+                instrument_document = target["instrument"]
+                if type(instrument_document) is not dict or set(instrument_document) != {
+                    "symbol",
+                    "venue",
+                }:
+                    raise _fail(OutcomeCode.CONFLICTING_ID, "position target conflicts")
+                discrepancy: ReconciliationDiscrepancy = create_position_reconciliation_discrepancy(
+                    spec_set=spec_set,
+                    instrument=Instrument(
+                        VenueId(_require_text(instrument_document, "venue")),
+                        _require_text(instrument_document, "symbol"),
+                    ),
+                    local_amount=local_amount,
+                    observed_amount=observed_amount,
+                )
+            elif target_kind is ReconciliationAdjustmentTargetKind.SETTLEMENT_CASH:
+                if set(target) != {"currency", "kind"}:
+                    raise _fail(OutcomeCode.CONFLICTING_ID, "cash target fields conflict")
+                discrepancy = create_cash_reconciliation_discrepancy(
+                    spec_set=spec_set,
+                    currency=SettlementCurrency(_require_text(target, "currency")),
+                    local_amount=local_amount,
+                    observed_amount=observed_amount,
+                )
+            else:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "balance command target conflicts")
+            if outcome.discrepancies != (discrepancy,):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "balance command proposal conflicts")
+            command = _build_adjustment_command(
+                spec_set=spec_set,
+                outcome=outcome,
+                adjustment_id=adjustment_id,
+                variant=variant,
+                target_kind=target_kind,
+                instrument=(
+                    discrepancy.instrument
+                    if type(discrepancy) is PositionReconciliationDiscrepancy
+                    else None
+                ),
+                currency=(
+                    discrepancy.currency
+                    if type(discrepancy) is CashReconciliationDiscrepancy
+                    else None
+                ),
+                local_amount=discrepancy.local_amount,
+                observed_amount=discrepancy.observed_amount,
+                delta=discrepancy.delta,
+                open_reconciliation_ref=None,
+                ancestry_order_id=None,
+                ancestry_order_sha256=None,
+            )
+        else:
+            if outcome.requested_action is not (
+                ReconciliationRequestedAction.PROPOSE_ANCESTRY_RESOLUTION
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "ancestry command proposal conflicts")
+            if (
+                set(document)
+                != common_fields
+                | {
+                    "ancestry_order_id",
+                    "ancestry_order_sha256",
+                    "target",
+                }
+                or target_kind is not ReconciliationAdjustmentTargetKind.OPEN_RECONCILIATION_REF
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "ancestry command fields conflict")
+            if set(target) != {
+                "fill_id",
+                "fill_sha256",
+                "kind",
+                "processing_outcome_sha256",
+            }:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "ancestry target fields conflict")
+            open_reference = OpenReconciliationRef(
+                _decode_economic_id(target["fill_id"], run_id),
+                Sha256Digest(_require_text(target, "fill_sha256")),
+                Sha256Digest(_require_text(target, "processing_outcome_sha256")),
+            )
+            ancestry_order_id = _decode_economic_id(document["ancestry_order_id"], run_id)
+            if ancestry_order_id.owner_kind is not EconomicOwnerKind.EXECUTION_ORDER:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "ancestry Order identity conflicts")
+            command = _build_adjustment_command(
+                spec_set=spec_set,
+                outcome=outcome,
+                adjustment_id=adjustment_id,
+                variant=variant,
+                target_kind=target_kind,
+                instrument=None,
+                currency=None,
+                local_amount=None,
+                observed_amount=None,
+                delta=None,
+                open_reconciliation_ref=open_reference,
+                ancestry_order_id=ancestry_order_id,
+                ancestry_order_sha256=_decode_digest(document, "ancestry_order_sha256"),
+            )
+    except (ValueError, TypeError) as error:
+        if type(error) is ReconciliationContractError:
+            raise
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment command values conflict") from error
+    if canonical_reconciliation_adjustment_command_bytes(command) != canonical_payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment command round-trip conflicts")
+    return command
+
+
 def decode_reconciliation_observation(
     canonical_payload: bytes,
     spec_set: InstrumentExecutionSpecSet,
@@ -718,6 +1149,72 @@ def _outcome_document(outcome: ReconciliationOutcome) -> dict[str, object]:
         "schema": RECONCILIATION_OUTCOME_SCHEMA,
         "watermark_comparison": outcome.watermark_comparison.value,
     }
+
+
+def _adjustment_command_document(
+    command: ReconciliationAdjustmentCommand,
+) -> dict[str, object]:
+    document: dict[str, object] = {
+        "adjustment_id": _economic_id_document(command.adjustment_id),
+        "canonicalization": RECONCILIATION_CANONICALIZATION,
+        "dispatch_sequence": command.dispatch_sequence,
+        "instrument_spec_set_id": command.instrument_spec_set_id.value,
+        "instrument_spec_set_sha256": command.instrument_spec_set_sha256.value,
+        "ledger_sequence": command.ledger_sequence,
+        "local_snapshot_sha256": command.local_snapshot_sha256.value,
+        "observation_sha256": command.observation_sha256.value,
+        "reconciliation_outcome_sha256": command.reconciliation_outcome_sha256.value,
+        "run_id": command.run_id.value,
+        "schema": RECONCILIATION_ADJUSTMENT_COMMAND_SCHEMA,
+        "variant": command.variant.value,
+    }
+    if command.variant is ReconciliationAdjustmentVariant.BALANCE_CORRECTION:
+        assert (
+            command.local_amount is not None
+            and command.observed_amount is not None
+            and command.delta is not None
+        )
+        if command.target_kind is ReconciliationAdjustmentTargetKind.INSTRUMENT_POSITION:
+            assert command.instrument is not None
+            target: dict[str, object] = {
+                "instrument": {
+                    "symbol": command.instrument.symbol,
+                    "venue": command.instrument.venue.code,
+                },
+                "kind": command.target_kind.value,
+            }
+        else:
+            assert command.currency is not None
+            target = {"currency": command.currency.code, "kind": command.target_kind.value}
+        document.update(
+            {
+                "delta": command.delta.text,
+                "local_amount": command.local_amount.text,
+                "observed_amount": command.observed_amount.text,
+                "target": target,
+            }
+        )
+        return document
+    assert (
+        command.open_reconciliation_ref is not None
+        and command.ancestry_order_id is not None
+        and command.ancestry_order_sha256 is not None
+    )
+    document.update(
+        {
+            "ancestry_order_id": _economic_id_document(command.ancestry_order_id),
+            "ancestry_order_sha256": command.ancestry_order_sha256.value,
+            "target": {
+                "fill_id": _economic_id_document(command.open_reconciliation_ref.fill_id),
+                "fill_sha256": command.open_reconciliation_ref.fill_sha256.value,
+                "kind": command.target_kind.value,
+                "processing_outcome_sha256": (
+                    command.open_reconciliation_ref.processing_outcome_sha256.value
+                ),
+            },
+        }
+    )
+    return document
 
 
 def _discrepancy_document(discrepancy: ReconciliationDiscrepancy) -> dict[str, object]:
