@@ -27,9 +27,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   契约不变。当前开发已在该历史基线上继续推进；Accepted ADR 0014 的 trusted fact
   ingress/dispatch、canonical Fill allocation 与 observation-derived Order projection 已实现
   当前切片；Accepted ADR 0015 的严格本地 OHLCV 解码、稳定文件捕获、canonical selection /
-  fingerprint 和 bounded no-look-ahead historical source 已实现当前切片。尚未实现 historical
-  runtime 的完整 lifecycle/stage coordinator、venue submission、ledger/runtime integration、
-  reconciliation correction、concrete strategy 或完整 backtest；Accepted
+  fingerprint 和 bounded no-look-ahead historical source 已实现当前切片。Accepted ADR 0020
+  与 ADR 0021 的 durable audit journal、完整 historical lifecycle/stage coordinator、恢复与
+  staged submission authorization 已在 Issue #61 / PR #62 合并；尚未实现 ledger/runtime
+  integration、reconciliation correction、concrete strategy 或完整 backtest；Accepted
   ADR 0017 的 factory-only StrategySignal、PortfolioTarget、planning outcome、target-current
   intent authority 与 retained-snapshot Risk handoff 已实现当前切片；Accepted ADR 0016
   的 virtual clock、incremental historical frontier、run-wide arbitration/dispatch sequence、
@@ -54,9 +55,9 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   实现 runtime-active root proof、factory-only `StrategySignal`、absolute signed
   `PortfolioTarget`、显式 no-op/unresolved-Fill outcome、latest snapshot target-current
   conversion、最多一个 canonical `OrderIntent`、exact replay/conflict 与 monotone halt。
-  `PortfolioPlanningResult` 保留并规范化完整 immutable planning snapshot，供未来 coordinator
-  在每次 Risk 调用前执行 object/bytes/digest substitution gate；本切片不包含 concrete
-  strategy、matcher、完整 coordinator、venue、result adapter 或 CLI。
+  `PortfolioPlanningResult` 保留并规范化完整 immutable planning snapshot，供 lifecycle
+  coordinator 在每次 Risk 调用前执行 object/bytes/digest substitution gate；本切片不包含
+  concrete strategy、ledger/reconciliation integration、result adapter 或 CLI。
 - `ea.core.risk` 与 `ea.risk.authority` 已按
   [Accepted ADR 0011](docs/adr/0011-deterministic-pre-trade-risk-authority.md) 和
   [Accepted ADR 0012](docs/adr/0012-risk-conflict-dispatch-sequence-compatibility.md) 实现
@@ -80,8 +81,8 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   submission receipt；按首个 later eligible raw initial Bar 的 exact binary64 close 做
   adverse half-tick 量化并发布 full trade，bounded end 则发布精确 no-data expiry。matcher
   不持有 source/cursor/clock/store；factory-only batch/state/conflict codec、replay/monotone halt、
-  causal-descendant fact dispatch 和 ADR 0018 规范夹具均由测试覆盖。完整 lifecycle coordinator、
-  audit store 实现、ledger 串接、result adapter 与 backtest CLI 仍属后续切片。
+  causal-descendant fact dispatch 和 ADR 0018 规范夹具均由测试覆盖。ledger/reconciliation
+  authority 串接、concrete strategy、result adapter 与 backtest CLI 仍属后续切片。
 - `ea.core.runtime` 与 `ea.runtime` 已按
   [Accepted ADR 0009](docs/adr/0009-runtime-root-ordering-clarifications.md) 建立 safety、execution
   fact、market、timer、end-of-run 的全局 root key、完整有界计划验证和不可插入的单消费者顺序
@@ -94,8 +95,10 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   ADR 0017 另增加只读 active-market-dispatch verifier/proof，策略只能为 exact live market
   lease 签发 Signal；ADR 0018 另增加 active end proof、historical matcher dispatch verifier
   与 causal-descendant fact adapter。reconciliation rank 仅保留词汇，不存在 opaque
-  placeholder；这些切片尚不是完整 lifecycle coordinator，也不包含 concrete audit store、
-  stage callback 或 concrete strategy orchestration。
+  placeholder。`ea.core.lifecycle`、`ea.runtime.coordinator`、`ea.experiments.audit` 与
+  `ea.composition.lifecycle` 已按 Accepted ADR 0020/0021 提供 durable audit、完整 historical
+  lifecycle/stage coordination、recovery 与 sealed composition capability；尚未包含 concrete
+  strategy orchestration 或 ledger/reconciliation authority 串接。
 - `ea.core.execution_state` 与 `ea.execution.fact_authority` 已按 Accepted ADR 0014 实现 exact
   fact replay/conflict、authority-backed Order correlation、staged venue binding、deterministic
   Fill allocation、coherent observed quantity、bounded immutable Order projection、closed
@@ -107,8 +110,8 @@ EA 是一个长期迭代的量化交易系统工程。第一阶段不追求“�
   capture、ADR 0004 canonical order、ADR 0006 semantic fingerprint，以及只公开
   `next_available_at` 和 clock-gated `admit` 的 immutable bounded source。它不提供未来 payload
   iterator，也不推进 clock；outer `ea.data` bridge 私有持有 concrete cursor，并按 ADR 0016
-  只在 exact runtime acknowledgement 后提交。完整 coordinator、matcher 与结果报告仍由后续
-  切片实现。
+  只在 exact runtime acknowledgement 后提交。historical coordinator 与 matcher 已实现；
+  concrete strategy、ledger/reconciliation integration 与结果报告仍由后续切片实现。
 - 每次迭代使用专家只读审查、单写入者实现、独立验证和 Pull Request 交付。
 
 协作规则见 [AGENTS.md](AGENTS.md)，Git 与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。

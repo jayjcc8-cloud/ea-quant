@@ -173,6 +173,26 @@ def test_decoder_rejects_duplicate_noncanonical_unknown_and_bool_integer() -> No
         _canonical({**document, "provenance_payload_sha256": "not-a-digest"}),
         _canonical({**document, "run_id": "not-a-run"}),
         _canonical({**document, "declared_scope_kind": "unknown"}),
+        _canonical({**document, "balances": [{"kind": "instrument_position"}]}),
+        _canonical(
+            {
+                **document,
+                "balances": [
+                    {
+                        "instrument": [],
+                        "kind": "instrument_position",
+                        "quantity": "10",
+                    }
+                ],
+            }
+        ),
+        _canonical(
+            {
+                **document,
+                "balances": [{"amount": "125.5", "kind": "settlement_cash"}],
+            }
+        ),
+        _canonical({**document, "balances": [{"kind": "unknown"}]}),
     )
     for payload in invalid_payloads:
         with pytest.raises(ReconciliationContractError):
