@@ -26,6 +26,8 @@ from ea.core.time import TimeValidationError, require_utc
 
 RECONCILIATION_OBSERVATION_SCHEMA = "ea.reconciliation-observation.v1"
 RECONCILIATION_OBSERVATION_DIGEST_DOMAIN = b"ea.reconciliation-observation.v1\0"
+RECONCILIATION_OUTCOME_SCHEMA = "ea.reconciliation-outcome.v2"
+RECONCILIATION_OUTCOME_DIGEST_DOMAIN = b"ea.reconciliation-outcome.v2\0"
 RECONCILIATION_CANONICALIZATION = "ea-canonical-json-v1"
 MAX_RECONCILIATION_PAYLOAD_BYTES = 16_384
 MAX_RECONCILIATION_BALANCES = 32
@@ -70,6 +72,27 @@ class ReconciliationBalanceKind(StrEnum):
     SETTLEMENT_CASH = "settlement_cash"
 
 
+class ReconciliationWatermarkComparison(StrEnum):
+    EQUAL = "equal"
+    REMOTE_LOWER = "remote_lower"
+    REMOTE_HIGHER = "remote_higher"
+    INCOMPARABLE = "incomparable"
+
+
+class ReconciliationRequestedAction(StrEnum):
+    NONE = "none"
+    REQUEST_MISSING_TRADE_FACTS = "request_missing_trade_facts"
+    RETAIN_AND_HALT = "retain_and_halt"
+    MANUAL_EVIDENCE_DECOMPOSITION = "manual_evidence_decomposition"
+    PROPOSE_SINGLE_TARGET_ADJUSTMENT = "propose_single_target_adjustment"
+    PROPOSE_ANCESTRY_RESOLUTION = "propose_ancestry_resolution"
+
+
+class ReconciliationDiscrepancyKind(StrEnum):
+    INSTRUMENT_POSITION = "instrument_position"
+    SETTLEMENT_CASH = "settlement_cash"
+
+
 @final
 @dataclass(frozen=True, slots=True)
 class PositionReconciliationBalance:
@@ -97,6 +120,55 @@ class CashReconciliationBalance:
 
 
 ReconciliationBalance = PositionReconciliationBalance | CashReconciliationBalance
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class PositionReconciliationDiscrepancy:
+    instrument: Instrument
+    local_amount: CanonicalDecimal
+    observed_amount: CanonicalDecimal
+    delta: CanonicalDecimal
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("position discrepancies are created only by their factory")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class CashReconciliationDiscrepancy:
+    currency: SettlementCurrency
+    local_amount: CanonicalDecimal
+    observed_amount: CanonicalDecimal
+    delta: CanonicalDecimal
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("cash discrepancies are created only by their factory")
+
+
+ReconciliationDiscrepancy = PositionReconciliationDiscrepancy | CashReconciliationDiscrepancy
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ReconciliationOutcome:
+    run_id: RunId
+    dispatch_sequence: int
+    observation_sha256: Sha256Digest
+    local_snapshot_version: int
+    local_snapshot_sha256: Sha256Digest
+    ledger_sequence: int
+    watermark_comparison: ReconciliationWatermarkComparison
+    discrepancies: tuple[ReconciliationDiscrepancy, ...]
+    outcome_code: OutcomeCode
+    requested_action: ReconciliationRequestedAction
+    halt_requested: bool
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("reconciliation outcomes are created only by their factory")
 
 
 @final
@@ -202,6 +274,228 @@ def canonical_reconciliation_observation_bytes(observation: ReconciliationObserv
 def reconciliation_observation_digest(observation: ReconciliationObservation) -> Sha256Digest:
     payload = canonical_reconciliation_observation_bytes(observation)
     return _framed_digest(RECONCILIATION_OBSERVATION_DIGEST_DOMAIN, payload)
+
+
+def create_position_reconciliation_discrepancy(
+    *,
+    spec_set: InstrumentExecutionSpecSet,
+    instrument: Instrument,
+    local_amount: CanonicalDecimal,
+    observed_amount: CanonicalDecimal,
+) -> PositionReconciliationDiscrepancy:
+    if type(spec_set) is not InstrumentExecutionSpecSet or type(instrument) is not Instrument:
+        raise _fail(OutcomeCode.INVALID_TYPE, "position discrepancy identity must be exact")
+    for field, amount in (("local_amount", local_amount), ("observed_amount", observed_amount)):
+        if type(amount) is not CanonicalDecimal:
+            raise _fail(OutcomeCode.INVALID_TYPE, f"{field} must be exact")
+        try:
+            require_quantized(
+                amount,
+                spec_set.require(instrument).quantity_quantum,
+                field_name=f"position_discrepancy_{field}",
+            )
+        except EconomicValidationError as error:
+            raise _fail(error.code, f"position discrepancy {field} is invalid") from error
+    delta = _subtract_decimal(observed_amount, local_amount)
+    if delta == CanonicalDecimal("0"):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "position discrepancy delta cannot be zero")
+    value = object.__new__(PositionReconciliationDiscrepancy)
+    object.__setattr__(value, "instrument", instrument)
+    object.__setattr__(value, "local_amount", local_amount)
+    object.__setattr__(value, "observed_amount", observed_amount)
+    object.__setattr__(value, "delta", delta)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    return value
+
+
+def create_cash_reconciliation_discrepancy(
+    *,
+    spec_set: InstrumentExecutionSpecSet,
+    currency: SettlementCurrency,
+    local_amount: CanonicalDecimal,
+    observed_amount: CanonicalDecimal,
+) -> CashReconciliationDiscrepancy:
+    if type(spec_set) is not InstrumentExecutionSpecSet or type(currency) is not SettlementCurrency:
+        raise _fail(OutcomeCode.INVALID_TYPE, "cash discrepancy identity must be exact")
+    quantums = {
+        specification.currency_quantum
+        for specification in spec_set.specifications
+        if specification.settlement_currency == currency
+    }
+    if len(quantums) != 1:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "cash discrepancy currency binding conflicts")
+    quantum = next(iter(quantums))
+    for field, amount in (("local_amount", local_amount), ("observed_amount", observed_amount)):
+        if type(amount) is not CanonicalDecimal:
+            raise _fail(OutcomeCode.INVALID_TYPE, f"{field} must be exact")
+        try:
+            require_quantized(
+                amount,
+                quantum,
+                field_name=f"cash_discrepancy_{field}",
+            )
+        except EconomicValidationError as error:
+            raise _fail(error.code, f"cash discrepancy {field} is invalid") from error
+    delta = _subtract_decimal(observed_amount, local_amount)
+    if delta == CanonicalDecimal("0"):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "cash discrepancy delta cannot be zero")
+    value = object.__new__(CashReconciliationDiscrepancy)
+    object.__setattr__(value, "currency", currency)
+    object.__setattr__(value, "local_amount", local_amount)
+    object.__setattr__(value, "observed_amount", observed_amount)
+    object.__setattr__(value, "delta", delta)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    return value
+
+
+def create_reconciliation_outcome(
+    *,
+    run_id: RunId,
+    dispatch_sequence: int,
+    observation_sha256: Sha256Digest,
+    local_snapshot_version: int,
+    local_snapshot_sha256: Sha256Digest,
+    ledger_sequence: int,
+    watermark_comparison: ReconciliationWatermarkComparison,
+    discrepancies: tuple[ReconciliationDiscrepancy, ...],
+    outcome_code: OutcomeCode,
+    requested_action: ReconciliationRequestedAction,
+    halt_requested: bool,
+) -> ReconciliationOutcome:
+    if type(run_id) is not RunId:
+        raise _fail(OutcomeCode.INVALID_TYPE, "run_id must be exact")
+    _require_uint64(dispatch_sequence, "dispatch_sequence")
+    _require_uint64(local_snapshot_version, "local_snapshot_version")
+    _require_uint64(ledger_sequence, "ledger_sequence")
+    if dispatch_sequence == 0:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch_sequence must be positive")
+    for field, digest in (
+        ("observation_sha256", observation_sha256),
+        ("local_snapshot_sha256", local_snapshot_sha256),
+    ):
+        if type(digest) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, f"{field} must be exact")
+    if (
+        type(watermark_comparison) is not ReconciliationWatermarkComparison
+        or type(discrepancies) is not tuple
+        or any(
+            type(item) not in (PositionReconciliationDiscrepancy, CashReconciliationDiscrepancy)
+            or item._seal is not _VALUE_SEAL
+            for item in discrepancies
+        )
+        or type(outcome_code) is not OutcomeCode
+        or type(requested_action) is not ReconciliationRequestedAction
+        or type(halt_requested) is not bool
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation outcome values must be exact")
+    if len(discrepancies) > MAX_RECONCILIATION_BALANCES:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "reconciliation discrepancy tuple exceeds 32")
+    if tuple(_discrepancy_sort_key(item) for item in discrepancies) != tuple(
+        sorted({_discrepancy_sort_key(item) for item in discrepancies})
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation discrepancies are not canonical")
+    _require_outcome_matrix(
+        watermark_comparison,
+        discrepancies,
+        outcome_code,
+        requested_action,
+        halt_requested,
+    )
+    value = object.__new__(ReconciliationOutcome)
+    for field, candidate in (
+        ("run_id", run_id),
+        ("dispatch_sequence", dispatch_sequence),
+        ("observation_sha256", observation_sha256),
+        ("local_snapshot_version", local_snapshot_version),
+        ("local_snapshot_sha256", local_snapshot_sha256),
+        ("ledger_sequence", ledger_sequence),
+        ("watermark_comparison", watermark_comparison),
+        ("discrepancies", discrepancies),
+        ("outcome_code", outcome_code),
+        ("requested_action", requested_action),
+        ("halt_requested", halt_requested),
+    ):
+        object.__setattr__(value, field, candidate)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    canonical_reconciliation_outcome_bytes(value)
+    return value
+
+
+def canonical_reconciliation_outcome_bytes(outcome: ReconciliationOutcome) -> bytes:
+    if type(outcome) is not ReconciliationOutcome or outcome._seal is not _VALUE_SEAL:
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation outcome must be factory-issued")
+    payload = _canonical_json(_outcome_document(outcome))
+    if len(payload) > MAX_RECONCILIATION_PAYLOAD_BYTES:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "reconciliation outcome exceeds byte bound")
+    return payload
+
+
+def reconciliation_outcome_digest(outcome: ReconciliationOutcome) -> Sha256Digest:
+    return _framed_digest(
+        RECONCILIATION_OUTCOME_DIGEST_DOMAIN,
+        canonical_reconciliation_outcome_bytes(outcome),
+    )
+
+
+def decode_reconciliation_outcome(
+    canonical_payload: bytes,
+    spec_set: InstrumentExecutionSpecSet,
+) -> ReconciliationOutcome:
+    document = _decode_canonical_json(canonical_payload, "reconciliation outcome")
+    expected_fields = {
+        "canonicalization",
+        "discrepancies",
+        "dispatch_sequence",
+        "halt_requested",
+        "ledger_sequence",
+        "local_snapshot_sha256",
+        "local_snapshot_version",
+        "observation_sha256",
+        "outcome_code",
+        "requested_action",
+        "run_id",
+        "schema",
+        "watermark_comparison",
+    }
+    if type(document) is not dict or set(document) != expected_fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation outcome fields conflict")
+    if (
+        _require_text(document, "schema") != RECONCILIATION_OUTCOME_SCHEMA
+        or _require_text(document, "canonicalization") != RECONCILIATION_CANONICALIZATION
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation outcome schema conflicts")
+    if type(spec_set) is not InstrumentExecutionSpecSet:
+        raise _fail(OutcomeCode.INVALID_TYPE, "spec_set must be exact")
+    discrepancy_documents = document["discrepancies"]
+    if type(discrepancy_documents) is not list:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation discrepancies must be an array")
+    try:
+        outcome = create_reconciliation_outcome(
+            run_id=RunId(_require_text(document, "run_id")),
+            dispatch_sequence=_require_json_int(document, "dispatch_sequence"),
+            observation_sha256=_decode_digest(document, "observation_sha256"),
+            local_snapshot_version=_require_json_int(document, "local_snapshot_version"),
+            local_snapshot_sha256=_decode_digest(document, "local_snapshot_sha256"),
+            ledger_sequence=_require_json_int(document, "ledger_sequence"),
+            watermark_comparison=ReconciliationWatermarkComparison(
+                _require_text(document, "watermark_comparison")
+            ),
+            discrepancies=tuple(
+                _decode_discrepancy(item, spec_set) for item in discrepancy_documents
+            ),
+            outcome_code=OutcomeCode(_require_text(document, "outcome_code")),
+            requested_action=ReconciliationRequestedAction(
+                _require_text(document, "requested_action")
+            ),
+            halt_requested=_require_json_bool(document, "halt_requested"),
+        )
+    except (ValueError, TypeError) as error:
+        if type(error) is ReconciliationContractError:
+            raise
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation outcome values conflict") from error
+    if canonical_reconciliation_outcome_bytes(outcome) != canonical_payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation outcome round-trip conflicts")
+    return outcome
 
 
 def decode_reconciliation_observation(
@@ -408,6 +702,197 @@ def _observation_document(observation: ReconciliationObservation) -> dict[str, o
     }
 
 
+def _outcome_document(outcome: ReconciliationOutcome) -> dict[str, object]:
+    return {
+        "canonicalization": RECONCILIATION_CANONICALIZATION,
+        "discrepancies": [_discrepancy_document(item) for item in outcome.discrepancies],
+        "dispatch_sequence": outcome.dispatch_sequence,
+        "halt_requested": outcome.halt_requested,
+        "ledger_sequence": outcome.ledger_sequence,
+        "local_snapshot_sha256": outcome.local_snapshot_sha256.value,
+        "local_snapshot_version": outcome.local_snapshot_version,
+        "observation_sha256": outcome.observation_sha256.value,
+        "outcome_code": outcome.outcome_code.value,
+        "requested_action": outcome.requested_action.value,
+        "run_id": outcome.run_id.value,
+        "schema": RECONCILIATION_OUTCOME_SCHEMA,
+        "watermark_comparison": outcome.watermark_comparison.value,
+    }
+
+
+def _discrepancy_document(discrepancy: ReconciliationDiscrepancy) -> dict[str, object]:
+    common = {
+        "delta": discrepancy.delta.text,
+        "local_amount": discrepancy.local_amount.text,
+        "observed_amount": discrepancy.observed_amount.text,
+    }
+    if type(discrepancy) is PositionReconciliationDiscrepancy:
+        return {
+            **common,
+            "instrument": {
+                "symbol": discrepancy.instrument.symbol,
+                "venue": discrepancy.instrument.venue.code,
+            },
+            "kind": ReconciliationDiscrepancyKind.INSTRUMENT_POSITION.value,
+        }
+    if type(discrepancy) is CashReconciliationDiscrepancy:
+        return {
+            **common,
+            "currency": discrepancy.currency.code,
+            "kind": ReconciliationDiscrepancyKind.SETTLEMENT_CASH.value,
+        }
+    raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation discrepancy must be exact")
+
+
+def _decode_discrepancy(
+    document: object,
+    spec_set: InstrumentExecutionSpecSet,
+) -> ReconciliationDiscrepancy:
+    if type(document) is not dict or type(document.get("kind")) is not str:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation discrepancy document conflicts")
+    try:
+        kind = ReconciliationDiscrepancyKind(document["kind"])
+        if kind is ReconciliationDiscrepancyKind.INSTRUMENT_POSITION:
+            if set(document) != {
+                "delta",
+                "instrument",
+                "kind",
+                "local_amount",
+                "observed_amount",
+            }:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "position discrepancy fields conflict")
+            instrument_document = document["instrument"]
+            if type(instrument_document) is not dict or set(instrument_document) != {
+                "symbol",
+                "venue",
+            }:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "position discrepancy target conflicts")
+            discrepancy: ReconciliationDiscrepancy = create_position_reconciliation_discrepancy(
+                spec_set=spec_set,
+                instrument=Instrument(
+                    VenueId(_require_text(instrument_document, "venue")),
+                    _require_text(instrument_document, "symbol"),
+                ),
+                local_amount=CanonicalDecimal(_require_text(document, "local_amount")),
+                observed_amount=CanonicalDecimal(_require_text(document, "observed_amount")),
+            )
+        else:
+            if set(document) != {
+                "currency",
+                "delta",
+                "kind",
+                "local_amount",
+                "observed_amount",
+            }:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "cash discrepancy fields conflict")
+            discrepancy = create_cash_reconciliation_discrepancy(
+                spec_set=spec_set,
+                currency=SettlementCurrency(_require_text(document, "currency")),
+                local_amount=CanonicalDecimal(_require_text(document, "local_amount")),
+                observed_amount=CanonicalDecimal(_require_text(document, "observed_amount")),
+            )
+        if discrepancy.delta.text != _require_text(document, "delta"):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation discrepancy delta conflicts")
+        return discrepancy
+    except (ValueError, TypeError) as error:
+        if type(error) is ReconciliationContractError:
+            raise
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "reconciliation discrepancy values conflict",
+        ) from error
+
+
+def _discrepancy_sort_key(discrepancy: ReconciliationDiscrepancy) -> tuple[str, str, str]:
+    if type(discrepancy) is PositionReconciliationDiscrepancy:
+        return (
+            ReconciliationDiscrepancyKind.INSTRUMENT_POSITION.value,
+            discrepancy.instrument.venue.code,
+            discrepancy.instrument.symbol,
+        )
+    if type(discrepancy) is CashReconciliationDiscrepancy:
+        return (ReconciliationDiscrepancyKind.SETTLEMENT_CASH.value, discrepancy.currency.code, "")
+    raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation discrepancy must be exact")
+
+
+def _require_outcome_matrix(
+    comparison: ReconciliationWatermarkComparison,
+    discrepancies: tuple[ReconciliationDiscrepancy, ...],
+    outcome_code: OutcomeCode,
+    action: ReconciliationRequestedAction,
+    halt_requested: bool,
+) -> None:
+    exact = (
+        comparison,
+        outcome_code,
+        action,
+        halt_requested,
+        len(discrepancies),
+    )
+    allowed_exact = {
+        (
+            ReconciliationWatermarkComparison.EQUAL,
+            OutcomeCode.RECONCILIATION_MATCH,
+            ReconciliationRequestedAction.NONE,
+            False,
+            0,
+        ),
+        (
+            ReconciliationWatermarkComparison.EQUAL,
+            OutcomeCode.RECONCILIATION_MATCH,
+            ReconciliationRequestedAction.PROPOSE_ANCESTRY_RESOLUTION,
+            True,
+            0,
+        ),
+        (
+            ReconciliationWatermarkComparison.REMOTE_LOWER,
+            OutcomeCode.RECONCILIATION_LOCAL_AHEAD_STALE,
+            ReconciliationRequestedAction.RETAIN_AND_HALT,
+            True,
+            0,
+        ),
+        (
+            ReconciliationWatermarkComparison.REMOTE_HIGHER,
+            OutcomeCode.RECONCILIATION_REMOTE_AHEAD,
+            ReconciliationRequestedAction.REQUEST_MISSING_TRADE_FACTS,
+            True,
+            0,
+        ),
+        (
+            ReconciliationWatermarkComparison.EQUAL,
+            OutcomeCode.RECONCILIATION_MISMATCH,
+            ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+            True,
+            1,
+        ),
+        (
+            ReconciliationWatermarkComparison.INCOMPARABLE,
+            OutcomeCode.RECONCILIATION_INVALID,
+            ReconciliationRequestedAction.RETAIN_AND_HALT,
+            True,
+            0,
+        ),
+        (
+            ReconciliationWatermarkComparison.EQUAL,
+            OutcomeCode.RECONCILIATION_UNRESOLVED_CORRELATION,
+            ReconciliationRequestedAction.RETAIN_AND_HALT,
+            True,
+            0,
+        ),
+    }
+    if exact in allowed_exact:
+        return
+    if (
+        comparison is ReconciliationWatermarkComparison.EQUAL
+        and outcome_code is OutcomeCode.RECONCILIATION_QUARANTINED
+        and action is ReconciliationRequestedAction.MANUAL_EVIDENCE_DECOMPOSITION
+        and halt_requested
+        and 2 <= len(discrepancies) <= MAX_RECONCILIATION_BALANCES
+    ):
+        return
+    raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation outcome action matrix conflicts")
+
+
 def _balance_document(balance: ReconciliationBalance) -> dict[str, object]:
     if type(balance) is PositionReconciliationBalance:
         return {
@@ -532,6 +1017,32 @@ def _require_json_int(document: dict[str, Any], field: str) -> int:
     if type(value) is not int:
         raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} must be exact JSON integer")
     return value
+
+
+def _require_json_bool(document: dict[str, Any], field: str) -> bool:
+    value = document[field]
+    if type(value) is not bool:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} must be exact JSON boolean")
+    return value
+
+
+def _subtract_decimal(left: CanonicalDecimal, right: CanonicalDecimal) -> CanonicalDecimal:
+    scale = max(left.scale, right.scale)
+    coefficient = left.coefficient * (10 ** (scale - left.scale))
+    coefficient -= right.coefficient * (10 ** (scale - right.scale))
+    return CanonicalDecimal(_scaled_decimal_text(coefficient, scale))
+
+
+def _scaled_decimal_text(coefficient: int, scale: int) -> str:
+    if coefficient == 0:
+        return "0"
+    negative = coefficient < 0
+    digits = str(abs(coefficient)).rjust(scale + 1, "0")
+    if scale:
+        digits = f"{digits[:-scale]}.{digits[-scale:]}".rstrip("0").rstrip(".")
+    if digits == "0":
+        return "0"
+    return ("-" if negative else "") + digits
 
 
 def _decode_canonical_json(payload: bytes, field: str) -> object:
