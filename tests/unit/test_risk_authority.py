@@ -812,6 +812,21 @@ def test_public_halt_validates_command_and_never_rewrites_first_cause() -> None:
     assert repeated.halt_reason is RiskHaltReason.KILL_SWITCH
 
 
+def test_reconciliation_required_is_a_public_monotone_halt_reason() -> None:
+    spec_set = _spec_set()
+    authority = _authority(spec_set, _policy(spec_set, _limit()))
+
+    state = authority.engage_halt(
+        RiskHaltReason.RECONCILIATION_REQUIRED,
+        TIME,
+        11,
+    )
+
+    assert state.halted is True
+    assert state.halt_reason is RiskHaltReason.RECONCILIATION_REQUIRED
+    assert state.halt_dispatch_sequence == 11
+
+
 class _IntSubclass(int):
     pass
 

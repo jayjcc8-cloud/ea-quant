@@ -231,7 +231,7 @@ def test_strategy_planning_evidence_is_cross_process_deterministic(tmp_path: Pat
         "51795ed8be83e31d054619815accd1c3567dc101faa74f87c83a26eb8803c1a4"
     )
     assert document["result_sha256"] == (
-        "9795735b1f17ee347b3ba2e945b1809a4224e07f63f39cdc8fdeaf92898919ea"
+        "53a969640dd0ad215be4bf983c757f4b714d7ea2bdf984155a47fe974ca18bec"
     )
     assert document["signal_state_sha256"] == (
         "8e46407287f1ace3ebd56c6309f5acb188bc602da5debff78873c161d73d403b"

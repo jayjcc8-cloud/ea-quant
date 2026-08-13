@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+from array import array
 from pathlib import Path
-from sys import getsizeof
 from threading import Event, Thread
 from types import SimpleNamespace
 from typing import Any
@@ -30,8 +30,9 @@ from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
     PosixAuditJournal,
     PosixAuditRecoveryRecordSource,
-    _entry_resident_bytes,
-    _JournalEntry,
+    _compact_index_resident_bytes,
+    _JournalEntryIndex,
+    _LogicalKeyIndex,
     _OsAuditOps,
     create_posix_audit_journal,
     reopen_posix_audit_journal,
@@ -154,23 +155,27 @@ class _FirstFrameFailureAuditOps(_OsAuditOps):
         raise OSError("injected first audit frame write failure")
 
 
-def test_fresh_journal_rejects_less_than_six_gib_free_before_creation(tmp_path: Path) -> None:
+def test_fresh_journal_rejects_less_than_thirteen_gib_free_before_creation(
+    tmp_path: Path,
+) -> None:
     root = _root(tmp_path)
     prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
 
-    with pytest.raises(StoreError, match="6 GiB"):
+    with pytest.raises(StoreError, match="13 GiB"):
         create_posix_audit_journal(prepared.audit, _ops=_LowSpaceAuditOps())
 
     assert not (root / str(RUN_UUID) / "audit" / "audit-v1.journal").exists()
 
 
-def test_reopen_rejects_less_than_six_gib_free_before_admission(tmp_path: Path) -> None:
+def test_reopen_rejects_less_than_thirteen_gib_free_before_admission(
+    tmp_path: Path,
+) -> None:
     root = _root(tmp_path)
     prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
     journal = create_posix_audit_journal(prepared.audit)
     journal.close()
 
-    with pytest.raises(StoreError, match="6 GiB"):
+    with pytest.raises(StoreError, match="13 GiB"):
         reopen_posix_audit_journal(prepared.audit, _ops=_LowSpaceAuditOps())
 
 
@@ -384,31 +389,53 @@ def test_reopen_rejects_index_that_exceeds_resident_memory_budget(
 
 def test_maximum_compact_reopen_index_fits_the_256_mib_budget() -> None:
     count = MAX_AUDIT_RECORDS
-    entry = _JournalEntry(
-        offset=0,
-        frame_length=20_528,
-        payload_length=16_384,
-        payload_sha256=b"0" * 32,
-        record_sha256=b"1" * 32,
-        chain_head_sha256=b"2" * 32,
-    )
-    max_key_length = (
-        max(len(kind.value) for kind in AuditRecordKind)
-        + 1
-        + max(len(kind.value) for kind in AuditSubjectKind)
-        + 1
-        + 32
-    )
-    container_bytes = (
-        getsizeof([None] * count)
-        + getsizeof(dict.fromkeys(range(count)))
-        + getsizeof(bytearray(count))
-    )
-    per_entry_bytes = (
-        _entry_resident_bytes(entry) + getsizeof(b"x" * max_key_length) + getsizeof(count) + 1
+    entries = _JournalEntryIndex()
+    entries._offsets = array("Q", [0]) * count
+    entries._frame_lengths = array("I", [0]) * count
+    entries._payload_lengths = array("I", [0]) * count
+    entries._payload_sha256s = bytearray(32 * count)
+    entries._record_sha256s = bytearray(32 * count)
+    entries._chain_head_sha256s = bytearray(32 * count)
+    capacity = 8
+    while count * 4 > capacity * 3:
+        capacity *= 2
+    index = _LogicalKeyIndex(capacity)
+    resident_bytes = _compact_index_resident_bytes(entries, index, bytearray(count))
+
+    assert resident_bytes <= 384 * count + 16 * 1024 * 1024
+    assert resident_bytes <= audit_module.MAX_AUDIT_INDEX_RESIDENT_BYTES
+
+
+def test_compact_logical_key_index_resizes_without_per_record_objects() -> None:
+    index = _LogicalKeyIndex()
+    keys = tuple(
+        AuditLogicalKey(
+            AuditRecordKind.MATCHER_DISPATCH_BATCH,
+            AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+            Sha256Digest(f"{value:064x}"),
+        )
+        for value in range(1, 8)
     )
 
-    assert container_bytes + count * per_entry_bytes <= audit_module.MAX_AUDIT_INDEX_RESIDENT_BYTES
+    for sequence, key in enumerate(keys, start=1):
+        index.insert(key, sequence)
+
+    assert index.capacity == 16
+    assert tuple(index.get(key) for key in keys) == tuple(range(1, 8))
+    assert (
+        index.get(
+            AuditLogicalKey(
+                AuditRecordKind.MATCHER_DISPATCH_BATCH,
+                AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+                Sha256Digest("ff" * 32),
+            )
+        )
+        is None
+    )
+    assert type(index._sequences) is array
+    assert type(index._digests) is bytearray
+    with pytest.raises(ValueError, match="already exists"):
+        index.insert(keys[0], 8)
 
 
 def test_recovery_record_source_is_repeatable_and_snapshot_bound(tmp_path: Path) -> None:

@@ -37,9 +37,9 @@ LEDGER_TRANSACTION_SCHEMA_VERSION = 1
 LEDGER_TRANSACTION_CANONICALIZATION = "ea-ledger-transaction-v1"
 LEDGER_TRANSACTION_DIGEST_DOMAIN = b"ea.ledger-transaction.v1\0"
 
-PORTFOLIO_SNAPSHOT_SCHEMA_VERSION = 1
-PORTFOLIO_SNAPSHOT_CANONICALIZATION = "ea-portfolio-snapshot-v1"
-PORTFOLIO_SNAPSHOT_DIGEST_DOMAIN = b"ea.portfolio-snapshot.v1\0"
+PORTFOLIO_SNAPSHOT_SCHEMA_VERSION = 2
+PORTFOLIO_SNAPSHOT_CANONICALIZATION = "ea-portfolio-snapshot-v2"
+PORTFOLIO_SNAPSHOT_DIGEST_DOMAIN = b"ea.portfolio-snapshot.v2\0"
 
 LEDGER_APPLY_OUTCOME_SCHEMA_VERSION = 1
 LEDGER_APPLY_OUTCOME_CANONICALIZATION = "ea-ledger-apply-outcome-v1"
@@ -250,6 +250,31 @@ class UnresolvedFillRef:
 
 @final
 @dataclass(frozen=True, slots=True)
+class OpenReconciliationRef:
+    """Outcome-bound reconciliation evidence retained for one applied Fill."""
+
+    fill_id: EconomicId
+    fill_sha256: Sha256Digest
+    processing_outcome_sha256: Sha256Digest
+
+    def __post_init__(self) -> None:
+        _require_economic_id(
+            self.fill_id,
+            owner=EconomicOwnerKind.EXECUTION_FILL,
+            field_name="fill_id",
+        )
+        if (
+            type(self.fill_sha256) is not Sha256Digest
+            or type(self.processing_outcome_sha256) is not Sha256Digest
+        ):
+            raise _fail(
+                OutcomeCode.INVALID_TYPE,
+                "open reconciliation reference digests must be exact",
+            )
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class ExistingLedgerBinding:
     entry_id: EconomicId
     fill_id: EconomicId
@@ -384,6 +409,8 @@ class PortfolioSnapshot:
     position_balances: tuple[PositionBalance, ...]
     rounding_balances: tuple[RoundingBalance, ...]
     unresolved_fills: tuple[UnresolvedFillRef, ...]
+    open_reconciliation_bindings: tuple[ExistingLedgerBinding, ...] = ()
+    open_reconciliation_refs: tuple[OpenReconciliationRef, ...] = ()
 
     def __post_init__(self) -> None:
         _require_run(self.run_id)
@@ -405,6 +432,8 @@ class PortfolioSnapshot:
                     self.position_balances,
                     self.rounding_balances,
                     self.unresolved_fills,
+                    self.open_reconciliation_bindings,
+                    self.open_reconciliation_refs,
                 )
             ):
                 raise _fail(OutcomeCode.CONFLICTING_ID, "version zero balances must be empty")
@@ -679,6 +708,16 @@ def _require_snapshot_tuples(snapshot: PortfolioSnapshot) -> None:
         (snapshot.position_balances, PositionBalance, "position_balances"),
         (snapshot.rounding_balances, RoundingBalance, "rounding_balances"),
         (snapshot.unresolved_fills, UnresolvedFillRef, "unresolved_fills"),
+        (
+            snapshot.open_reconciliation_bindings,
+            ExistingLedgerBinding,
+            "open_reconciliation_bindings",
+        ),
+        (
+            snapshot.open_reconciliation_refs,
+            OpenReconciliationRef,
+            "open_reconciliation_refs",
+        ),
     )
     for values, expected, field_name in tuples_and_types:
         if type(values) is not tuple or any(type(value) is not expected for value in values):
@@ -687,11 +726,19 @@ def _require_snapshot_tuples(snapshot: PortfolioSnapshot) -> None:
     position_keys = tuple(value.instrument.key for value in snapshot.position_balances)
     rounding_keys = tuple(value.currency.code for value in snapshot.rounding_balances)
     unresolved_keys = tuple(_economic_id_key(value.fill_id) for value in snapshot.unresolved_fills)
+    reconciliation_binding_keys = tuple(
+        _economic_id_key(value.fill_id) for value in snapshot.open_reconciliation_bindings
+    )
+    reconciliation_keys = tuple(
+        _economic_id_key(value.fill_id) for value in snapshot.open_reconciliation_refs
+    )
     for keys, field_name in (
         (cash_keys, "cash_balances"),
         (position_keys, "position_balances"),
         (rounding_keys, "rounding_balances"),
         (unresolved_keys, "unresolved_fills"),
+        (reconciliation_binding_keys, "open_reconciliation_bindings"),
+        (reconciliation_keys, "open_reconciliation_refs"),
     ):
         if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
             raise _fail(OutcomeCode.CONFLICTING_ID, f"{field_name} keys are not canonical")
@@ -702,6 +749,76 @@ def _require_snapshot_tuples(snapshot: PortfolioSnapshot) -> None:
             run_id=snapshot.run_id,
             field_name="unresolved fill_id",
         )
+    open_bindings: dict[EconomicId, ExistingLedgerBinding] = {}
+    open_entry_ids: set[EconomicId] = set()
+    for binding in snapshot.open_reconciliation_bindings:
+        _require_economic_id(
+            binding.entry_id,
+            owner=EconomicOwnerKind.LEDGER_ENTRY,
+            run_id=snapshot.run_id,
+            field_name="open reconciliation entry_id",
+        )
+        _require_economic_id(
+            binding.fill_id,
+            owner=EconomicOwnerKind.EXECUTION_FILL,
+            run_id=snapshot.run_id,
+            field_name="open reconciliation binding fill_id",
+        )
+        if binding.entry_id.owner_sequence == 0:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "open reconciliation binding does not identify an applied transaction",
+            )
+        if binding.entry_id.owner_sequence > snapshot.ledger_sequence:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "open reconciliation binding is ahead of the snapshot frontier",
+            )
+        if (
+            binding.entry_id.owner_sequence == snapshot.ledger_sequence
+            and binding.transaction_sha256 != snapshot.last_transaction_sha256
+        ):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "open reconciliation binding conflicts with the last transaction",
+            )
+        if binding.entry_id in open_entry_ids:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "open reconciliation bindings reuse a ledger entry",
+            )
+        open_entry_ids.add(binding.entry_id)
+        open_bindings[binding.fill_id] = binding
+    open_references: dict[EconomicId, OpenReconciliationRef] = {}
+    for reference in snapshot.open_reconciliation_refs:
+        _require_economic_id(
+            reference.fill_id,
+            owner=EconomicOwnerKind.EXECUTION_FILL,
+            run_id=snapshot.run_id,
+            field_name="open reconciliation fill_id",
+        )
+        matched_binding = open_bindings.get(reference.fill_id)
+        if matched_binding is None or matched_binding.fill_sha256 != reference.fill_sha256:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "open reconciliation reference lacks its exact ledger binding",
+            )
+        open_references[reference.fill_id] = reference
+    if set(open_bindings) != set(open_references):
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "open reconciliation binding lacks its exact reference",
+        )
+    unresolved_by_fill = {
+        reference.fill_id: reference.fill_sha256 for reference in snapshot.unresolved_fills
+    }
+    for fill_id, reference in open_references.items():
+        unresolved_sha256 = unresolved_by_fill.get(fill_id)
+        if unresolved_sha256 is not None and unresolved_sha256 != reference.fill_sha256:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "open and unresolved Fill digests conflict",
+            )
 
 
 def _economic_id_key(identity: EconomicId) -> tuple[str, str, int]:
@@ -861,6 +978,17 @@ def _snapshot_document(snapshot: PortfolioSnapshot) -> dict[str, object]:
         ),
         "ledger_sequence": snapshot.ledger_sequence,
         "message_type": "portfolio_snapshot",
+        "open_reconciliation_bindings": [
+            _binding_document(binding) for binding in snapshot.open_reconciliation_bindings
+        ],
+        "open_reconciliation_refs": [
+            {
+                "fill_id": _economic_id_document(reference.fill_id),
+                "fill_sha256": reference.fill_sha256.value,
+                "processing_outcome_sha256": reference.processing_outcome_sha256.value,
+            }
+            for reference in snapshot.open_reconciliation_refs
+        ],
         "position_balances": [
             {
                 "instrument": _instrument_document(balance.instrument),

@@ -168,6 +168,11 @@ def test_factory_creates_exact_immutable_version_zero_snapshot() -> None:
     assert ledger.snapshot.position_balances == ()
     assert ledger.snapshot.rounding_balances == ()
     assert ledger.snapshot.unresolved_fills == ()
+    assert ledger.snapshot.open_reconciliation_bindings == ()
+    assert ledger.snapshot.open_reconciliation_refs == ()
+    assert b'"open_reconciliation_bindings":[]' in canonical_portfolio_snapshot_bytes(
+        ledger.snapshot
+    )
     assert b'"snapshot_version":0' in canonical_portfolio_snapshot_bytes(ledger.snapshot)
     assert len(portfolio_snapshot_digest(ledger.snapshot).value) == 64
     with pytest.raises(FrozenInstanceError):
@@ -778,7 +783,7 @@ def test_canonical_documents_and_digests_are_exact_and_domain_separated() -> Non
     snapshot_bytes = canonical_portfolio_snapshot_bytes(ledger.snapshot)
     outcome_bytes = canonical_ledger_apply_outcome_bytes(outcome)
     assert b'"canonicalization":"ea-ledger-transaction-v1"' in transaction_bytes
-    assert b'"canonicalization":"ea-portfolio-snapshot-v1"' in snapshot_bytes
+    assert b'"canonicalization":"ea-portfolio-snapshot-v2"' in snapshot_bytes
     assert b'"canonicalization":"ea-ledger-apply-outcome-v1"' in outcome_bytes
     assert b'"requires_reconciliation":false' in transaction_bytes
     assert b'"conflict_kind":null' in outcome_bytes
@@ -788,7 +793,7 @@ def test_canonical_documents_and_digests_are_exact_and_domain_separated() -> Non
     )
     assert (
         portfolio_snapshot_digest(ledger.snapshot).value
-        == hashlib.sha256(b"ea.portfolio-snapshot.v1\0" + snapshot_bytes).hexdigest()
+        == hashlib.sha256(b"ea.portfolio-snapshot.v2\0" + snapshot_bytes).hexdigest()
     )
     assert (
         ledger_apply_outcome_digest(outcome).value
@@ -800,11 +805,11 @@ def test_canonical_documents_and_digests_are_exact_and_domain_separated() -> Non
     )
     assert (
         portfolio_snapshot_digest(ledger.snapshot).value
-        == "99a47987eb13eb027ed47a345b5446effb46d8a41a753f39bc60bb195ce158f4"
+        == "1fc7923f8ddf520a041b3a5deebc83e73b66f91e3e33c24490357e1326623437"
     )
     assert (
         ledger_apply_outcome_digest(outcome).value
-        == "87e1d9a7fbc6b0b7ac4b7d01c846b60c0eb711adeef225e68a9e627e0a829513"
+        == "a4d7e485efd4218ea61b53e3ade4d92facab90840e2aa9b5030ece124e427b6f"
     )
     assert outcome.snapshot_sha256 == portfolio_snapshot_digest(outcome.snapshot)
     assert outcome.transaction_sha256 == ledger_transaction_digest(transaction)

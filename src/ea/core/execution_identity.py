@@ -128,6 +128,8 @@ class EconomicOwnerKind(StrEnum):
     AUDIT_RECORD = "audit.record"
     LEDGER_ENTRY = "ledger.entry"
     RECONCILIATION_OBSERVATION = "reconciliation.observation"
+    RECONCILIATION_AUTHORIZATION = "reconciliation.authorization"
+    RECONCILIATION_ADJUSTMENT = "reconciliation.adjustment"
 
 
 @final

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
 from typing import Protocol, final
@@ -27,7 +28,7 @@ EMPTY_RECORD_SHA256 = Sha256Digest(
 EMPTY_CHAIN_HEAD_SHA256 = Sha256Digest(
     "daf430a5dce8e5d21acb79e2c4aa92b0da9f42108d96847e3da260cdbf271b75"
 )
-MAX_AUDIT_RECORDS = 400_005
+MAX_AUDIT_RECORDS = 600_006
 MAX_AUDIT_HEADER_BYTES = 4_096
 MAX_SMALL_AUDIT_PAYLOAD_BYTES = 4_096
 MAX_LARGE_AUDIT_PAYLOAD_BYTES = 16_384
@@ -68,6 +69,10 @@ class AuditRecordKind(StrEnum):
     RUN_PREPARED = "run.prepared"
     MATCHER_DISPATCH_BATCH = "matcher.dispatch_batch"
     EXECUTION_FACT_PROCESSING_OUTCOME = "execution.fact_processing_outcome"
+    PORTFOLIO_LEDGER_HANDOFF_OUTCOME = "portfolio.ledger_handoff_outcome"
+    RISK_PORTFOLIO_REFRESH = "risk.portfolio_refresh"
+    RECONCILIATION_OBSERVATION_OUTCOME = "reconciliation.observation_outcome"
+    RECONCILIATION_ADJUSTMENT_AUTHORIZATION = "reconciliation.adjustment_authorization"
     SUBMISSION_PRE_EFFECT_AUTHORIZATION = "submission.pre_effect_authorization"
     RUNTIME_FAILING_SAFETY_TRANSITION = "runtime.failing_safety_transition"
     RUNTIME_DISPATCH_COMPLETED = "runtime.dispatch_completed"
@@ -80,6 +85,10 @@ class AuditSubjectKind(StrEnum):
     RUN_MANIFEST = "run_manifest"
     HISTORICAL_MATCHER_DISPATCH_BATCH = "historical_matcher_dispatch_batch"
     EXECUTION_FACT_PROCESSING_OUTCOME = "execution_fact_processing_outcome"
+    PORTFOLIO_LEDGER_HANDOFF_OUTCOME = "portfolio_ledger_handoff_outcome"
+    PORTFOLIO_RISK_REFRESH = "portfolio_risk_refresh"
+    RECONCILIATION_OUTCOME = "reconciliation_outcome"
+    RECONCILIATION_ADJUSTMENT_AUTHORIZATION = "reconciliation_adjustment_authorization"
     HISTORICAL_EXECUTION_REQUEST = "historical_execution_request"
     COORDINATOR_STATE = "coordinator_state"
     RUNTIME_DISPATCH = "runtime_dispatch"
@@ -92,6 +101,14 @@ AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
     AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME: (
         AuditSubjectKind.EXECUTION_FACT_PROCESSING_OUTCOME
     ),
+    AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: (
+        AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+    ),
+    AuditRecordKind.RISK_PORTFOLIO_REFRESH: AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
+    AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME: AuditSubjectKind.RECONCILIATION_OUTCOME,
+    AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION: (
+        AuditSubjectKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION
+    ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: (
         AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
     ),
@@ -103,6 +120,10 @@ AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
 _LARGE_PAYLOAD_KINDS = frozenset(
     {
         AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME,
+        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
         AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
     }
 )
@@ -110,6 +131,12 @@ _LARGE_PAYLOAD_KINDS = frozenset(
 _AUDIT_PAYLOAD_SCHEMA_BY_KIND: dict[AuditRecordKind, str] = {
     AuditRecordKind.RUN_PREPARED: "ea.audit-run-prepared.v1",
     AuditRecordKind.MATCHER_DISPATCH_BATCH: "ea.audit-matcher-dispatch-batch.v1",
+    AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: "ea.ledger-handoff-outcome.v1",
+    AuditRecordKind.RISK_PORTFOLIO_REFRESH: "ea.portfolio-risk-refresh.v1",
+    AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME: "ea.reconciliation-outcome.v2",
+    AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION: (
+        "ea.reconciliation-adjustment-authorization.v1"
+    ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: ("ea.audit-submission-authorization.v1"),
     AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION: "ea.audit-failing-safety.v1",
     AuditRecordKind.RUNTIME_DISPATCH_COMPLETED: "ea.audit-dispatch-completed.v2",
@@ -131,6 +158,89 @@ _AUDIT_PAYLOAD_FIELDS_BY_KIND: dict[AuditRecordKind, frozenset[str]] = {
             "batch_sha256",
             "ingress_count",
             "ordered_ingress_sha256s_sha256",
+        }
+    ),
+    AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: frozenset(
+        {
+            "action",
+            "after_snapshot_sha256",
+            "after_snapshot_version",
+            "audited_handoff_sha256",
+            "before_snapshot_sha256",
+            "before_snapshot_version",
+            "canonicalization",
+            "dispatch_sequence",
+            "failure",
+            "fill_id",
+            "fill_sha256",
+            "halt_requested",
+            "ingress_identity",
+            "original_ledger_apply_outcome",
+            "original_ledger_apply_outcome_sha256",
+            "processing_outcome_ack_sha256",
+            "processing_outcome_sha256",
+            "requires_reconciliation",
+            "run_id",
+            "schema",
+        }
+    ),
+    AuditRecordKind.RISK_PORTFOLIO_REFRESH: frozenset(
+        {
+            "canonicalization",
+            "dispatch_sequence",
+            "exposure_sha256",
+            "ordered_ledger_ack_frontier_sha256",
+            "policy_id",
+            "policy_sha256",
+            "portfolio_snapshot_sha256",
+            "portfolio_snapshot_version",
+            "previous_refresh_sha256",
+            "refresh_sequence",
+            "risk_state_sha256",
+            "risk_state_version",
+            "run_id",
+            "schema",
+            "submission_permitted",
+        }
+    ),
+    AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME: frozenset(
+        {
+            "canonicalization",
+            "discrepancies",
+            "dispatch_sequence",
+            "halt_requested",
+            "ledger_sequence",
+            "local_snapshot_sha256",
+            "local_snapshot_version",
+            "observation_sha256",
+            "outcome_code",
+            "requested_action",
+            "run_id",
+            "schema",
+            "watermark_comparison",
+        }
+    ),
+    AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION: frozenset(
+        {
+            "adjustment_id",
+            "authorization_id",
+            "available_at",
+            "canonicalization",
+            "command_sha256",
+            "decision",
+            "dispatch_sequence",
+            "instrument_spec_set_id",
+            "instrument_spec_set_sha256",
+            "ledger_sequence",
+            "local_snapshot_sha256",
+            "observation_sha256",
+            "outcome_acknowledgement_sha256",
+            "policy_id",
+            "policy_sha256",
+            "policy_version",
+            "reconciliation_outcome_sha256",
+            "run_id",
+            "schema",
         }
     ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: frozenset(
@@ -207,6 +317,16 @@ _AUDIT_PAYLOAD_FIELDS_BY_KIND: dict[AuditRecordKind, frozenset[str]] = {
     ),
 }
 _SUBJECT_DOMAIN_BY_KIND: dict[AuditRecordKind, bytes] = {
+    AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: (
+        b"ea.audit-subject.portfolio.ledger_handoff_outcome.v1\0"
+    ),
+    AuditRecordKind.RISK_PORTFOLIO_REFRESH: (b"ea.audit-subject.risk.portfolio_refresh.v1\0"),
+    AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME: (
+        b"ea.audit-subject.reconciliation.observation_outcome.v1\0"
+    ),
+    AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION: (
+        b"ea.audit-subject.reconciliation.adjustment_authorization.v1\0"
+    ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: (
         b"ea.audit-subject.submission-authorization.v1\0"
     ),
@@ -462,6 +582,147 @@ def _require_audit_owned_payload_values(
         for field in ("trigger_root_sha256", "batch_sha256", "ordered_ingress_sha256s_sha256"):
             _require_json_digest(document, field)
         _require_json_uint64(document, "ingress_count", positive=False)
+    elif record_kind is AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME:
+        from ea.core.reconciliation import (
+            ReconciliationRequestedAction,
+            ReconciliationWatermarkComparison,
+        )
+
+        for field in (
+            "observation_sha256",
+            "local_snapshot_sha256",
+        ):
+            _require_json_digest(document, field)
+        _require_json_uint64(document, "dispatch_sequence", positive=True)
+        _require_json_uint64(document, "local_snapshot_version", positive=False)
+        _require_json_uint64(document, "ledger_sequence", positive=False)
+        _require_json_bool(document, "halt_requested")
+        try:
+            OutcomeCode(_require_json_text(document, "outcome_code"))
+            ReconciliationRequestedAction(_require_json_text(document, "requested_action"))
+            ReconciliationWatermarkComparison(_require_json_text(document, "watermark_comparison"))
+        except ValueError as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation outcome enum conflicts",
+            ) from error
+        discrepancies = document["discrepancies"]
+        if type(discrepancies) is not list or len(discrepancies) > 32:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation discrepancies exceed their closed array contract",
+            )
+        discrepancy_keys = tuple(
+            _require_reconciliation_discrepancy_document(discrepancy)
+            for discrepancy in discrepancies
+        )
+        if discrepancy_keys != tuple(sorted(set(discrepancy_keys))):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation discrepancies are not canonical",
+            )
+        matrix = (
+            document["watermark_comparison"],
+            document["outcome_code"],
+            document["requested_action"],
+            document["halt_requested"],
+            len(discrepancies),
+        )
+        allowed = {
+            ("equal", "reconciliation.match", "none", False, 0),
+            ("equal", "reconciliation.match", "propose_ancestry_resolution", True, 0),
+            (
+                "remote_lower",
+                "reconciliation.local_ahead_stale",
+                "retain_and_halt",
+                True,
+                0,
+            ),
+            (
+                "remote_higher",
+                "reconciliation.remote_ahead",
+                "request_missing_trade_facts",
+                True,
+                0,
+            ),
+            (
+                "equal",
+                "reconciliation.mismatch",
+                "propose_single_target_adjustment",
+                True,
+                1,
+            ),
+            ("incomparable", "reconciliation.invalid", "retain_and_halt", True, 0),
+            (
+                "equal",
+                "reconciliation.unresolved_correlation",
+                "retain_and_halt",
+                True,
+                0,
+            ),
+        }
+        quarantined = (
+            matrix[:4]
+            == (
+                "equal",
+                "reconciliation.quarantined",
+                "manual_evidence_decomposition",
+                True,
+            )
+            and 2 <= len(discrepancies) <= 32
+        )
+        if matrix not in allowed and not quarantined:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation outcome matrix conflicts")
+    elif record_kind is AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION:
+        from ea.core.reconciliation import (
+            ReconciliationAuthorizationDecision,
+            ReconciliationAuthorizationPolicyId,
+        )
+
+        _require_json_id(
+            document,
+            "authorization_id",
+            expected_owner=EconomicOwnerKind.RECONCILIATION_AUTHORIZATION,
+            positive=True,
+        )
+        _require_json_id(
+            document,
+            "adjustment_id",
+            expected_owner=EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
+            positive=True,
+        )
+        for field in (
+            "command_sha256",
+            "instrument_spec_set_sha256",
+            "local_snapshot_sha256",
+            "observation_sha256",
+            "outcome_acknowledgement_sha256",
+            "policy_sha256",
+            "reconciliation_outcome_sha256",
+        ):
+            _require_json_digest(document, field)
+        _require_json_uint64(document, "dispatch_sequence", positive=True)
+        _require_json_uint64(document, "ledger_sequence", positive=False)
+        _require_json_uint64(document, "policy_version", positive=True)
+        _require_json_text(document, "instrument_spec_set_id")
+        try:
+            ReconciliationAuthorizationPolicyId(_require_json_text(document, "policy_id"))
+            ReconciliationAuthorizationDecision(_require_json_text(document, "decision"))
+            available_text = _require_json_text(document, "available_at")
+            available_at = datetime.strptime(
+                available_text,
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+            ).replace(tzinfo=UTC)
+        except (TypeError, ValueError) as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation authorization values conflict",
+            ) from error
+        if available_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != available_text:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation authorization time conflicts",
+            )
     elif record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
         for field in ("order_id", "held_for_order_id"):
             _require_json_id(
@@ -615,6 +876,69 @@ def _require_audit_owned_payload_values(
             _require_json_digest(document, field)
 
 
+def _require_reconciliation_discrepancy_document(document: object) -> tuple[str, str, str]:
+    from ea.core.economics import CanonicalDecimal, EconomicValidationError
+    from ea.core.execution import SettlementCurrency
+    from ea.core.identity import Instrument, VenueId
+
+    if type(document) is not dict or document.get("kind") not in {
+        "instrument_position",
+        "settlement_cash",
+    }:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation discrepancy kind conflicts")
+    expected = {
+        "delta",
+        "kind",
+        "local_amount",
+        "observed_amount",
+        "instrument" if document["kind"] == "instrument_position" else "currency",
+    }
+    if set(document) != expected:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation discrepancy fields conflict")
+    if document["kind"] == "instrument_position":
+        instrument = document["instrument"]
+        if (
+            type(instrument) is not dict
+            or set(instrument) != {"symbol", "venue"}
+            or type(instrument["symbol"]) is not str
+            or type(instrument["venue"]) is not str
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation instrument conflicts")
+        try:
+            instrument_value = Instrument(
+                VenueId(instrument["venue"]),
+                instrument["symbol"],
+            )
+        except ValueError as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID, "reconciliation instrument conflicts"
+            ) from error
+        key = ("instrument_position", instrument_value.venue.code, instrument_value.symbol)
+    else:
+        try:
+            currency = SettlementCurrency(document["currency"])
+        except (TypeError, ValueError) as error:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation currency conflicts") from error
+        key = ("settlement_cash", currency.code, "")
+    try:
+        local = CanonicalDecimal(_require_json_text(document, "local_amount"))
+        observed = CanonicalDecimal(_require_json_text(document, "observed_amount"))
+        delta = CanonicalDecimal(_require_json_text(document, "delta"))
+    except EconomicValidationError as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation amount conflicts") from error
+    scale = max(local.scale, observed.scale)
+    expected_coefficient = observed.coefficient * (10 ** (scale - observed.scale))
+    expected_coefficient -= local.coefficient * (10 ** (scale - local.scale))
+    actual_coefficient = delta.coefficient * (10 ** (scale - delta.scale))
+    if delta.scale > scale:
+        expected_coefficient *= 10 ** (delta.scale - scale)
+        scale = delta.scale
+        actual_coefficient = delta.coefficient
+    if expected_coefficient != actual_coefficient or delta.coefficient == 0:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation delta conflicts")
+    return key
+
+
 def _require_execution_outcome_payload_values(document: dict[str, object]) -> None:
     expected_fields = {
         "action",
@@ -706,7 +1030,34 @@ def require_canonical_audit_payload(
         ) from error
     if type(document) is not dict or _canonical_json(document) != canonical_payload:
         raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload is not canonical JSON")
-    if record_kind is not AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
+    if record_kind in {
+        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+    }:
+        from ea.core.ledger_integration import (
+            canonical_ledger_handoff_outcome_bytes,
+            canonical_portfolio_risk_refresh_bytes,
+            decode_ledger_handoff_outcome,
+            decode_portfolio_risk_refresh,
+        )
+
+        try:
+            if record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME:
+                decoded_payload = canonical_ledger_handoff_outcome_bytes(
+                    decode_ledger_handoff_outcome(canonical_payload)
+                )
+            else:
+                decoded_payload = canonical_portfolio_risk_refresh_bytes(
+                    decode_portfolio_risk_refresh(canonical_payload)
+                )
+        except ValueError as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "audit payload semantic codec rejected its value",
+            ) from error
+        if decoded_payload != canonical_payload:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload semantic round-trip conflicts")
+    elif record_kind is not AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
         expected_fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[record_kind]
         if set(document) != expected_fields:
             raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload fields conflict with its kind")

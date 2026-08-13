@@ -98,6 +98,7 @@ class RiskHaltReason(StrEnum):
     INTENT_IDENTITY_CONFLICT = "intent_identity_conflict"
     RISK_EVALUATION_FAILURE = "risk_evaluation_failure"
     EXTERNAL_SAFETY_HALT = "external_safety_halt"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
 
 
 @final
