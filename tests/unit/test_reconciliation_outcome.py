@@ -15,11 +15,16 @@ from ea.core import (
     AuditRecordKind,
     AuditSubjectKind,
     CanonicalDecimal,
+    CashBalance,
     CashReconciliationBalance,
     EconomicId,
     EconomicOwnerKind,
+    InstrumentExecutionSpecSet,
     OpenReconciliationRef,
     OutcomeCode,
+    PortfolioLedgerError,
+    PortfolioSnapshot,
+    PositionBalance,
     PositionReconciliationBalance,
     ReconciliationAdjustmentAuthorization,
     ReconciliationAdjustmentCommand,
@@ -35,9 +40,11 @@ from ea.core import (
     RunBinding,
     RunReference,
     Sha256Digest,
+    UnresolvedFillRef,
     audit_subject_digest,
     audited_reconciliation_adjustment_authorization_digest,
     canonical_audited_reconciliation_adjustment_authorization_bytes,
+    canonical_portfolio_snapshot_bytes,
     canonical_reconciliation_adjustment_authorization_bytes,
     canonical_reconciliation_adjustment_command_bytes,
     canonical_reconciliation_outcome_bytes,
@@ -45,10 +52,15 @@ from ea.core import (
     create_audit_record,
     create_audited_reconciliation_adjustment_authorization,
     create_cash_reconciliation_discrepancy,
+    create_fill,
+    create_order,
     create_position_reconciliation_discrepancy,
     create_reconciliation_observation,
     create_reconciliation_outcome,
     decode_reconciliation_outcome,
+    fill_digest,
+    instrument_spec_set_digest,
+    portfolio_snapshot_digest,
     reconciliation_adjustment_authorization_digest,
     reconciliation_adjustment_command_digest,
     reconciliation_observation_digest,
@@ -56,13 +68,15 @@ from ea.core import (
 )
 from ea.core.audit import require_canonical_audit_payload
 from ea.core.reconciliation import (
+    _ancestry_evidence_digest,
+    _ancestry_order_scope_id,
     _authorization_binding,
     _create_reconciliation_adjustment_authorization,
     _create_reconciliation_adjustment_command,
     _decode_reconciliation_adjustment_authorization,
     _decode_reconciliation_adjustment_command,
 )
-from unit.test_execution_messages import SPEC_SET, _order
+from unit.test_execution_messages import SPEC_SET, _allow, _intent, _order, _trade_fact
 from unit.test_portfolio_ledger import INSTRUMENT, RUN_ID, USD, _spec_set
 from unit.test_reconciliation_observation import TIME, _observation
 
@@ -81,6 +95,47 @@ def _canonical(document: object) -> bytes:
     ).encode()
 
 
+def _snapshot(
+    *,
+    spec_set: InstrumentExecutionSpecSet | None = None,
+    position_amount: str | None = "10",
+    cash_amount: str | None = None,
+    open_reconciliation_refs: tuple[OpenReconciliationRef, ...] = (),
+) -> PortfolioSnapshot:
+    selected = _spec_set() if spec_set is None else spec_set
+    return PortfolioSnapshot(
+        run_id=RUN_ID,
+        instrument_spec_set_id=selected.identifier,
+        instrument_spec_set_sha256=instrument_spec_set_digest(selected),
+        snapshot_version=3,
+        ledger_sequence=3,
+        last_entry_id=EconomicId(RUN_ID, EconomicOwnerKind.LEDGER_ENTRY, 3),
+        last_transaction_sha256=Sha256Digest("88" * 32),
+        cash_balances=(
+            ()
+            if cash_amount is None
+            else (CashBalance(USD, CanonicalDecimal("0.01"), CanonicalDecimal(cash_amount)),)
+        ),
+        position_balances=(
+            ()
+            if position_amount is None
+            else (
+                PositionBalance(
+                    INSTRUMENT,
+                    CanonicalDecimal("1"),
+                    CanonicalDecimal(position_amount),
+                ),
+            )
+        ),
+        rounding_balances=(),
+        unresolved_fills=tuple(
+            UnresolvedFillRef(reference.fill_id, reference.fill_sha256)
+            for reference in open_reconciliation_refs
+        ),
+        open_reconciliation_refs=open_reconciliation_refs,
+    )
+
+
 def _outcome(**changes: object) -> ReconciliationOutcome:
     arguments: dict[str, object] = {
         "run_id": RUN_ID,
@@ -97,6 +152,43 @@ def _outcome(**changes: object) -> ReconciliationOutcome:
     }
     arguments.update(changes)
     return create_reconciliation_outcome(**arguments)  # type: ignore[arg-type]
+
+
+def test_portfolio_snapshot_digest_binds_exact_open_reconciliation_refs() -> None:
+    reference = OpenReconciliationRef(
+        EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 9),
+        Sha256Digest("55" * 32),
+        Sha256Digest("66" * 32),
+    )
+    snapshot = _snapshot(open_reconciliation_refs=(reference,))
+    document = json.loads(canonical_portfolio_snapshot_bytes(snapshot))
+
+    assert document["open_reconciliation_refs"] == [
+        {
+            "fill_id": {
+                "owner_kind": "execution.fill",
+                "owner_sequence": 9,
+                "run_id": RUN_ID.value,
+            },
+            "fill_sha256": "55" * 32,
+            "processing_outcome_sha256": "66" * 32,
+        }
+    ]
+    with pytest.raises(PortfolioLedgerError, match="unresolved Fill"):
+        PortfolioSnapshot(
+            run_id=snapshot.run_id,
+            instrument_spec_set_id=snapshot.instrument_spec_set_id,
+            instrument_spec_set_sha256=snapshot.instrument_spec_set_sha256,
+            snapshot_version=snapshot.snapshot_version,
+            ledger_sequence=snapshot.ledger_sequence,
+            last_entry_id=snapshot.last_entry_id,
+            last_transaction_sha256=snapshot.last_transaction_sha256,
+            cash_balances=snapshot.cash_balances,
+            position_balances=snapshot.position_balances,
+            rounding_balances=snapshot.rounding_balances,
+            unresolved_fills=(),
+            open_reconciliation_refs=(reference,),
+        )
 
 
 def _outcome_acknowledgement(
@@ -120,11 +212,13 @@ def _outcome_acknowledgement(
 
 
 def _balance_command_bundle() -> tuple[
+    PortfolioSnapshot,
     ReconciliationObservation,
     ReconciliationOutcome,
     AuditAppendAcknowledgement,
     ReconciliationAdjustmentCommand,
 ]:
+    snapshot = _snapshot()
     observation = _observation(
         balances=(PositionReconciliationBalance(INSTRUMENT, CanonicalDecimal("12")),),
     )
@@ -136,6 +230,9 @@ def _balance_command_bundle() -> tuple[
     )
     outcome = _outcome(
         observation_sha256=reconciliation_observation_digest(observation),
+        local_snapshot_version=snapshot.snapshot_version,
+        local_snapshot_sha256=portfolio_snapshot_digest(snapshot),
+        ledger_sequence=snapshot.ledger_sequence,
         discrepancies=(discrepancy,),
         outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
         requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
@@ -148,13 +245,14 @@ def _balance_command_bundle() -> tuple[
         observation=observation,
         outcome=outcome,
         outcome_acknowledgement=acknowledgement,
+        local_snapshot=snapshot,
         adjustment_id=EconomicId(
             RUN_ID,
             EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
             1,
         ),
     )
-    return observation, outcome, acknowledgement, command
+    return snapshot, observation, outcome, acknowledgement, command
 
 
 def _authorization_acknowledgement(
@@ -323,6 +421,7 @@ def test_outcome_audit_rejects_tampered_discrepancy_delta() -> None:
 
 
 def test_balance_command_requires_exact_outcome_ack_and_is_rederived() -> None:
+    snapshot = _snapshot()
     observation = _observation(
         balances=(PositionReconciliationBalance(INSTRUMENT, CanonicalDecimal("12")),),
     )
@@ -334,6 +433,9 @@ def test_balance_command_requires_exact_outcome_ack_and_is_rederived() -> None:
     )
     outcome = _outcome(
         observation_sha256=reconciliation_observation_digest(observation),
+        local_snapshot_version=snapshot.snapshot_version,
+        local_snapshot_sha256=portfolio_snapshot_digest(snapshot),
+        ledger_sequence=snapshot.ledger_sequence,
         discrepancies=(discrepancy,),
         outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
         requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
@@ -352,11 +454,23 @@ def test_balance_command_requires_exact_outcome_ack_and_is_rederived() -> None:
         observation=observation,
         outcome=outcome,
         outcome_acknowledgement=acknowledgement,
+        local_snapshot=snapshot,
         adjustment_id=adjustment_id,
     )
     encoded = canonical_reconciliation_adjustment_command_bytes(command)
 
-    assert _decode_reconciliation_adjustment_command(encoded, _spec_set(), outcome) == command
+    assert (
+        _decode_reconciliation_adjustment_command(
+            encoded,
+            binding=BINDING,
+            spec_set=_spec_set(),
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=acknowledgement,
+            local_snapshot=snapshot,
+        )
+        == command
+    )
     assert len(reconciliation_adjustment_command_digest(command).value) == 64
     assert (
         canonical_reconciliation_adjustment_command_bytes(
@@ -366,6 +480,7 @@ def test_balance_command_requires_exact_outcome_ack_and_is_rederived() -> None:
                 observation=observation,
                 outcome=outcome,
                 outcome_acknowledgement=acknowledgement,
+                local_snapshot=snapshot,
                 adjustment_id=adjustment_id,
             )
         )
@@ -382,18 +497,70 @@ def test_balance_command_requires_exact_outcome_ack_and_is_rederived() -> None:
             observation=observation,
             outcome=outcome,
             outcome_acknowledgement=None,
+            local_snapshot=snapshot,
             adjustment_id=adjustment_id,
         )
     document = json.loads(encoded)
     with pytest.raises(ReconciliationContractError):
         _decode_reconciliation_adjustment_command(
             _canonical({**document, "local_snapshot_sha256": "ff" * 32}),
-            _spec_set(),
-            outcome,
+            binding=BINDING,
+            spec_set=_spec_set(),
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=acknowledgement,
+            local_snapshot=snapshot,
+        )
+    with pytest.raises(ReconciliationContractError, match="evidence"):
+        _create_reconciliation_adjustment_command(
+            binding=BINDING,
+            spec_set=_spec_set(),
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=acknowledgement,
+            local_snapshot=_snapshot(position_amount="9"),
+            adjustment_id=adjustment_id,
+        )
+    drifted_snapshot = _snapshot(position_amount="9")
+    drifted_outcome = _outcome(
+        observation_sha256=reconciliation_observation_digest(observation),
+        local_snapshot_version=drifted_snapshot.snapshot_version,
+        local_snapshot_sha256=portfolio_snapshot_digest(drifted_snapshot),
+        ledger_sequence=drifted_snapshot.ledger_sequence,
+        discrepancies=(discrepancy,),
+        outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
+        requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+        halt_requested=True,
+    )
+    with pytest.raises(ReconciliationContractError, match="proposal evidence"):
+        _create_reconciliation_adjustment_command(
+            binding=BINDING,
+            spec_set=_spec_set(),
+            observation=observation,
+            outcome=drifted_outcome,
+            outcome_acknowledgement=_outcome_acknowledgement(drifted_outcome),
+            local_snapshot=drifted_snapshot,
+            adjustment_id=adjustment_id,
         )
 
 
 def test_ancestry_command_binds_exact_open_reference_and_order() -> None:
+    order = _order()
+    fill = create_fill(
+        fill_id=EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 9),
+        fact=_trade_fact(resolved=False),
+        spec_set=SPEC_SET,
+    )
+    reference = OpenReconciliationRef(
+        fill.fill_id,
+        fill_digest(fill),
+        Sha256Digest("66" * 32),
+    )
+    snapshot = _snapshot(
+        spec_set=SPEC_SET,
+        position_amount=None,
+        open_reconciliation_refs=(reference,),
+    )
     base_observation = _observation(
         kind=ReconciliationObservationKind.ORDER_DETAIL,
         scope=ReconciliationScopeKind.ORDER,
@@ -409,37 +576,38 @@ def test_ancestry_command_binds_exact_open_reference_and_order() -> None:
         occurred_at=base_observation.occurred_at,
         available_at=base_observation.available_at,
         watermark_namespace=base_observation.watermark_namespace,
-        watermark_sequence=base_observation.watermark_sequence,
+        watermark_sequence=snapshot.ledger_sequence,
         declared_scope_kind=base_observation.declared_scope_kind,
-        declared_scope_id=base_observation.declared_scope_id,
+        declared_scope_id=_ancestry_order_scope_id(order),
         provenance_id=base_observation.provenance_id,
-        provenance_payload_sha256=base_observation.provenance_payload_sha256,
+        provenance_payload_sha256=_ancestry_evidence_digest(fill, reference, order),
         balances=(),
     )
     outcome = _outcome(
         observation_sha256=reconciliation_observation_digest(observation),
+        local_snapshot_version=snapshot.snapshot_version,
+        local_snapshot_sha256=portfolio_snapshot_digest(snapshot),
+        ledger_sequence=snapshot.ledger_sequence,
         requested_action=ReconciliationRequestedAction.PROPOSE_ANCESTRY_RESOLUTION,
         halt_requested=True,
     )
-    reference = OpenReconciliationRef(
-        EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 9),
-        Sha256Digest("55" * 32),
-        Sha256Digest("66" * 32),
-    )
+    acknowledgement = _outcome_acknowledgement(outcome)
 
     command = _create_reconciliation_adjustment_command(
         binding=BINDING,
         spec_set=SPEC_SET,
         observation=observation,
         outcome=outcome,
-        outcome_acknowledgement=_outcome_acknowledgement(outcome),
+        outcome_acknowledgement=acknowledgement,
+        local_snapshot=snapshot,
         adjustment_id=EconomicId(
             RUN_ID,
             EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
             2,
         ),
         open_reconciliation_ref=reference,
-        ancestry_order=_order(),
+        ancestry_fill=fill,
+        ancestry_order=order,
     )
 
     document = json.loads(canonical_reconciliation_adjustment_command_bytes(command))
@@ -448,14 +616,84 @@ def test_ancestry_command_binds_exact_open_reference_and_order() -> None:
     assert (
         _decode_reconciliation_adjustment_command(
             canonical_reconciliation_adjustment_command_bytes(command),
-            SPEC_SET,
-            outcome,
+            binding=BINDING,
+            spec_set=SPEC_SET,
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=acknowledgement,
+            local_snapshot=snapshot,
+            ancestry_fill=fill,
+            ancestry_order=order,
         )
         == command
     )
+    foreign_fill = create_fill(
+        fill_id=EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 10),
+        fact=_trade_fact(resolved=False),
+        spec_set=SPEC_SET,
+    )
+    with pytest.raises(ReconciliationContractError, match="evidence"):
+        _create_reconciliation_adjustment_command(
+            binding=BINDING,
+            spec_set=SPEC_SET,
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=acknowledgement,
+            local_snapshot=snapshot,
+            adjustment_id=command.adjustment_id,
+            open_reconciliation_ref=reference,
+            ancestry_fill=foreign_fill,
+            ancestry_order=order,
+        )
+    foreign_intent = _intent()
+    foreign_order = create_order(
+        order_id=EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_ORDER, 7),
+        intent=foreign_intent,
+        decision=_allow(foreign_intent),
+        spec_set=SPEC_SET,
+    )
+    with pytest.raises(ReconciliationContractError, match="evidence"):
+        _create_reconciliation_adjustment_command(
+            binding=BINDING,
+            spec_set=SPEC_SET,
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=acknowledgement,
+            local_snapshot=snapshot,
+            adjustment_id=command.adjustment_id,
+            open_reconciliation_ref=reference,
+            ancestry_fill=fill,
+            ancestry_order=foreign_order,
+        )
+    with pytest.raises(ReconciliationContractError, match="acknowledgement"):
+        _decode_reconciliation_adjustment_command(
+            canonical_reconciliation_adjustment_command_bytes(command),
+            binding=BINDING,
+            spec_set=SPEC_SET,
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=None,
+            local_snapshot=snapshot,
+            ancestry_fill=fill,
+            ancestry_order=order,
+        )
+    with pytest.raises(ReconciliationContractError, match="evidence"):
+        _create_reconciliation_adjustment_command(
+            binding=BINDING,
+            spec_set=SPEC_SET,
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=acknowledgement,
+            local_snapshot=_snapshot(spec_set=SPEC_SET, position_amount=None),
+            adjustment_id=command.adjustment_id,
+            open_reconciliation_ref=reference,
+            ancestry_fill=fill,
+            ancestry_order=order,
+        )
 
 
 def test_cash_command_uses_exact_observed_balance_and_round_trips() -> None:
+    snapshot = _snapshot(position_amount=None, cash_amount="125.5")
     observation = _observation(
         kind=ReconciliationObservationKind.CASH_SNAPSHOT,
         scope=ReconciliationScopeKind.CASH,
@@ -469,6 +707,9 @@ def test_cash_command_uses_exact_observed_balance_and_round_trips() -> None:
     )
     outcome = _outcome(
         observation_sha256=reconciliation_observation_digest(observation),
+        local_snapshot_version=snapshot.snapshot_version,
+        local_snapshot_sha256=portfolio_snapshot_digest(snapshot),
+        ledger_sequence=snapshot.ledger_sequence,
         discrepancies=(discrepancy,),
         outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
         requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
@@ -480,6 +721,7 @@ def test_cash_command_uses_exact_observed_balance_and_round_trips() -> None:
         observation=observation,
         outcome=outcome,
         outcome_acknowledgement=_outcome_acknowledgement(outcome),
+        local_snapshot=snapshot,
         adjustment_id=EconomicId(
             RUN_ID,
             EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
@@ -489,7 +731,19 @@ def test_cash_command_uses_exact_observed_balance_and_round_trips() -> None:
     payload = canonical_reconciliation_adjustment_command_bytes(command)
 
     assert json.loads(payload)["target"]["kind"] == "settlement_cash"
-    assert _decode_reconciliation_adjustment_command(payload, _spec_set(), outcome) == command
+    acknowledgement = _outcome_acknowledgement(outcome)
+    assert (
+        _decode_reconciliation_adjustment_command(
+            payload,
+            binding=BINDING,
+            spec_set=_spec_set(),
+            observation=observation,
+            outcome=outcome,
+            outcome_acknowledgement=acknowledgement,
+            local_snapshot=snapshot,
+        )
+        == command
+    )
     document = json.loads(payload)
     invalid_payloads = (
         _canonical({key: value for key, value in document.items() if key != "schema"}),
@@ -513,14 +767,22 @@ def test_cash_command_uses_exact_observed_balance_and_round_trips() -> None:
     )
     for invalid in invalid_payloads:
         with pytest.raises(ReconciliationContractError):
-            _decode_reconciliation_adjustment_command(invalid, _spec_set(), outcome)
+            _decode_reconciliation_adjustment_command(
+                invalid,
+                binding=BINDING,
+                spec_set=_spec_set(),
+                observation=observation,
+                outcome=outcome,
+                outcome_acknowledgement=acknowledgement,
+                local_snapshot=snapshot,
+            )
 
 
 @pytest.mark.parametrize("decision", tuple(ReconciliationAuthorizationDecision))
 def test_authorization_binds_command_outcome_ack_and_audit(
     decision: ReconciliationAuthorizationDecision,
 ) -> None:
-    _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
+    _, _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
     authorization = _create_reconciliation_adjustment_authorization(
         binding=BINDING,
         spec_set=_spec_set(),
@@ -570,7 +832,7 @@ def test_authorization_binds_command_outcome_ack_and_audit(
 
 
 def test_authorization_rejects_wrong_identity_ack_and_payload_drift() -> None:
-    _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
+    _, _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
     authorization = _create_reconciliation_adjustment_authorization(
         binding=BINDING,
         spec_set=_spec_set(),
@@ -637,7 +899,7 @@ def test_authorization_rejects_wrong_identity_ack_and_payload_drift() -> None:
 
 
 def test_authorization_decoder_rejects_every_binding_drift() -> None:
-    _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
+    _, _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
     authorization = _create_reconciliation_adjustment_authorization(
         binding=BINDING,
         spec_set=_spec_set(),

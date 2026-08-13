@@ -37,9 +37,9 @@ LEDGER_TRANSACTION_SCHEMA_VERSION = 1
 LEDGER_TRANSACTION_CANONICALIZATION = "ea-ledger-transaction-v1"
 LEDGER_TRANSACTION_DIGEST_DOMAIN = b"ea.ledger-transaction.v1\0"
 
-PORTFOLIO_SNAPSHOT_SCHEMA_VERSION = 1
-PORTFOLIO_SNAPSHOT_CANONICALIZATION = "ea-portfolio-snapshot-v1"
-PORTFOLIO_SNAPSHOT_DIGEST_DOMAIN = b"ea.portfolio-snapshot.v1\0"
+PORTFOLIO_SNAPSHOT_SCHEMA_VERSION = 2
+PORTFOLIO_SNAPSHOT_CANONICALIZATION = "ea-portfolio-snapshot-v2"
+PORTFOLIO_SNAPSHOT_DIGEST_DOMAIN = b"ea.portfolio-snapshot.v2\0"
 
 LEDGER_APPLY_OUTCOME_SCHEMA_VERSION = 1
 LEDGER_APPLY_OUTCOME_CANONICALIZATION = "ea-ledger-apply-outcome-v1"
@@ -409,6 +409,7 @@ class PortfolioSnapshot:
     position_balances: tuple[PositionBalance, ...]
     rounding_balances: tuple[RoundingBalance, ...]
     unresolved_fills: tuple[UnresolvedFillRef, ...]
+    open_reconciliation_refs: tuple[OpenReconciliationRef, ...] = ()
 
     def __post_init__(self) -> None:
         _require_run(self.run_id)
@@ -430,6 +431,7 @@ class PortfolioSnapshot:
                     self.position_balances,
                     self.rounding_balances,
                     self.unresolved_fills,
+                    self.open_reconciliation_refs,
                 )
             ):
                 raise _fail(OutcomeCode.CONFLICTING_ID, "version zero balances must be empty")
@@ -704,6 +706,11 @@ def _require_snapshot_tuples(snapshot: PortfolioSnapshot) -> None:
         (snapshot.position_balances, PositionBalance, "position_balances"),
         (snapshot.rounding_balances, RoundingBalance, "rounding_balances"),
         (snapshot.unresolved_fills, UnresolvedFillRef, "unresolved_fills"),
+        (
+            snapshot.open_reconciliation_refs,
+            OpenReconciliationRef,
+            "open_reconciliation_refs",
+        ),
     )
     for values, expected, field_name in tuples_and_types:
         if type(values) is not tuple or any(type(value) is not expected for value in values):
@@ -712,11 +719,15 @@ def _require_snapshot_tuples(snapshot: PortfolioSnapshot) -> None:
     position_keys = tuple(value.instrument.key for value in snapshot.position_balances)
     rounding_keys = tuple(value.currency.code for value in snapshot.rounding_balances)
     unresolved_keys = tuple(_economic_id_key(value.fill_id) for value in snapshot.unresolved_fills)
+    reconciliation_keys = tuple(
+        _economic_id_key(value.fill_id) for value in snapshot.open_reconciliation_refs
+    )
     for keys, field_name in (
         (cash_keys, "cash_balances"),
         (position_keys, "position_balances"),
         (rounding_keys, "rounding_balances"),
         (unresolved_keys, "unresolved_fills"),
+        (reconciliation_keys, "open_reconciliation_refs"),
     ):
         if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
             raise _fail(OutcomeCode.CONFLICTING_ID, f"{field_name} keys are not canonical")
@@ -727,6 +738,21 @@ def _require_snapshot_tuples(snapshot: PortfolioSnapshot) -> None:
             run_id=snapshot.run_id,
             field_name="unresolved fill_id",
         )
+    unresolved_bindings = {
+        (reference.fill_id, reference.fill_sha256) for reference in snapshot.unresolved_fills
+    }
+    for reference in snapshot.open_reconciliation_refs:
+        _require_economic_id(
+            reference.fill_id,
+            owner=EconomicOwnerKind.EXECUTION_FILL,
+            run_id=snapshot.run_id,
+            field_name="open reconciliation fill_id",
+        )
+        if (reference.fill_id, reference.fill_sha256) not in unresolved_bindings:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "open reconciliation reference lacks its unresolved Fill binding",
+            )
 
 
 def _economic_id_key(identity: EconomicId) -> tuple[str, str, int]:
@@ -886,6 +912,14 @@ def _snapshot_document(snapshot: PortfolioSnapshot) -> dict[str, object]:
         ),
         "ledger_sequence": snapshot.ledger_sequence,
         "message_type": "portfolio_snapshot",
+        "open_reconciliation_refs": [
+            {
+                "fill_id": _economic_id_document(reference.fill_id),
+                "fill_sha256": reference.fill_sha256.value,
+                "processing_outcome_sha256": reference.processing_outcome_sha256.value,
+            }
+            for reference in snapshot.open_reconciliation_refs
+        ],
         "position_balances": [
             {
                 "instrument": _instrument_document(balance.instrument),
