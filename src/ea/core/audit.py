@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
 from typing import Protocol, final
@@ -71,6 +72,7 @@ class AuditRecordKind(StrEnum):
     PORTFOLIO_LEDGER_HANDOFF_OUTCOME = "portfolio.ledger_handoff_outcome"
     RISK_PORTFOLIO_REFRESH = "risk.portfolio_refresh"
     RECONCILIATION_OBSERVATION_OUTCOME = "reconciliation.observation_outcome"
+    RECONCILIATION_ADJUSTMENT_AUTHORIZATION = "reconciliation.adjustment_authorization"
     SUBMISSION_PRE_EFFECT_AUTHORIZATION = "submission.pre_effect_authorization"
     RUNTIME_FAILING_SAFETY_TRANSITION = "runtime.failing_safety_transition"
     RUNTIME_DISPATCH_COMPLETED = "runtime.dispatch_completed"
@@ -86,6 +88,7 @@ class AuditSubjectKind(StrEnum):
     PORTFOLIO_LEDGER_HANDOFF_OUTCOME = "portfolio_ledger_handoff_outcome"
     PORTFOLIO_RISK_REFRESH = "portfolio_risk_refresh"
     RECONCILIATION_OUTCOME = "reconciliation_outcome"
+    RECONCILIATION_ADJUSTMENT_AUTHORIZATION = "reconciliation_adjustment_authorization"
     HISTORICAL_EXECUTION_REQUEST = "historical_execution_request"
     COORDINATOR_STATE = "coordinator_state"
     RUNTIME_DISPATCH = "runtime_dispatch"
@@ -103,6 +106,9 @@ AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
     ),
     AuditRecordKind.RISK_PORTFOLIO_REFRESH: AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
     AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME: AuditSubjectKind.RECONCILIATION_OUTCOME,
+    AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION: (
+        AuditSubjectKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION
+    ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: (
         AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
     ),
@@ -117,6 +123,7 @@ _LARGE_PAYLOAD_KINDS = frozenset(
         AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
         AuditRecordKind.RISK_PORTFOLIO_REFRESH,
         AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
         AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
     }
 )
@@ -127,6 +134,9 @@ _AUDIT_PAYLOAD_SCHEMA_BY_KIND: dict[AuditRecordKind, str] = {
     AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: "ea.ledger-handoff-outcome.v1",
     AuditRecordKind.RISK_PORTFOLIO_REFRESH: "ea.portfolio-risk-refresh.v1",
     AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME: "ea.reconciliation-outcome.v2",
+    AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION: (
+        "ea.reconciliation-adjustment-authorization.v1"
+    ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: ("ea.audit-submission-authorization.v1"),
     AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION: "ea.audit-failing-safety.v1",
     AuditRecordKind.RUNTIME_DISPATCH_COMPLETED: "ea.audit-dispatch-completed.v2",
@@ -210,6 +220,29 @@ _AUDIT_PAYLOAD_FIELDS_BY_KIND: dict[AuditRecordKind, frozenset[str]] = {
             "watermark_comparison",
         }
     ),
+    AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION: frozenset(
+        {
+            "adjustment_id",
+            "authorization_id",
+            "available_at",
+            "canonicalization",
+            "command_sha256",
+            "decision",
+            "dispatch_sequence",
+            "instrument_spec_set_id",
+            "instrument_spec_set_sha256",
+            "ledger_sequence",
+            "local_snapshot_sha256",
+            "observation_sha256",
+            "outcome_acknowledgement_sha256",
+            "policy_id",
+            "policy_sha256",
+            "policy_version",
+            "reconciliation_outcome_sha256",
+            "run_id",
+            "schema",
+        }
+    ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: frozenset(
         {
             "schema",
@@ -290,6 +323,9 @@ _SUBJECT_DOMAIN_BY_KIND: dict[AuditRecordKind, bytes] = {
     AuditRecordKind.RISK_PORTFOLIO_REFRESH: (b"ea.audit-subject.risk.portfolio_refresh.v1\0"),
     AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME: (
         b"ea.audit-subject.reconciliation.observation_outcome.v1\0"
+    ),
+    AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION: (
+        b"ea.audit-subject.reconciliation.adjustment_authorization.v1\0"
     ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: (
         b"ea.audit-subject.submission-authorization.v1\0"
@@ -637,6 +673,56 @@ def _require_audit_owned_payload_values(
         )
         if matrix not in allowed and not quarantined:
             raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation outcome matrix conflicts")
+    elif record_kind is AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION:
+        from ea.core.reconciliation import (
+            ReconciliationAuthorizationDecision,
+            ReconciliationAuthorizationPolicyId,
+        )
+
+        _require_json_id(
+            document,
+            "authorization_id",
+            expected_owner=EconomicOwnerKind.RECONCILIATION_AUTHORIZATION,
+            positive=True,
+        )
+        _require_json_id(
+            document,
+            "adjustment_id",
+            expected_owner=EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
+            positive=True,
+        )
+        for field in (
+            "command_sha256",
+            "instrument_spec_set_sha256",
+            "local_snapshot_sha256",
+            "observation_sha256",
+            "outcome_acknowledgement_sha256",
+            "policy_sha256",
+            "reconciliation_outcome_sha256",
+        ):
+            _require_json_digest(document, field)
+        _require_json_uint64(document, "dispatch_sequence", positive=True)
+        _require_json_uint64(document, "ledger_sequence", positive=False)
+        _require_json_uint64(document, "policy_version", positive=True)
+        _require_json_text(document, "instrument_spec_set_id")
+        try:
+            ReconciliationAuthorizationPolicyId(_require_json_text(document, "policy_id"))
+            ReconciliationAuthorizationDecision(_require_json_text(document, "decision"))
+            available_text = _require_json_text(document, "available_at")
+            available_at = datetime.strptime(
+                available_text,
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+            ).replace(tzinfo=UTC)
+        except (TypeError, ValueError) as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation authorization values conflict",
+            ) from error
+        if available_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != available_text:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation authorization time conflicts",
+            )
     elif record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION:
         for field in ("order_id", "held_for_order_id"):
             _require_json_id(

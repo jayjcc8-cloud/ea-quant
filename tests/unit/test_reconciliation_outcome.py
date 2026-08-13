@@ -11,6 +11,7 @@ from ea.core import (
     EMPTY_RECORD_SHA256,
     AuditAppendAcknowledgement,
     AuditContractError,
+    AuditedReconciliationAdjustmentAuthorization,
     AuditRecordKind,
     AuditSubjectKind,
     CanonicalDecimal,
@@ -19,8 +20,12 @@ from ea.core import (
     OpenReconciliationRef,
     OutcomeCode,
     PositionReconciliationBalance,
+    ReconciliationAdjustmentAuthorization,
     ReconciliationAdjustmentCommand,
+    ReconciliationAuthorizationDecision,
+    ReconciliationAuthorizationPolicyId,
     ReconciliationContractError,
+    ReconciliationObservation,
     ReconciliationObservationKind,
     ReconciliationOutcome,
     ReconciliationRequestedAction,
@@ -30,27 +35,34 @@ from ea.core import (
     RunReference,
     Sha256Digest,
     audit_subject_digest,
+    audited_reconciliation_adjustment_authorization_digest,
+    canonical_audited_reconciliation_adjustment_authorization_bytes,
+    canonical_reconciliation_adjustment_authorization_bytes,
     canonical_reconciliation_adjustment_command_bytes,
     canonical_reconciliation_outcome_bytes,
     create_audit_append_acknowledgement,
     create_audit_record,
+    create_audited_reconciliation_adjustment_authorization,
     create_cash_reconciliation_discrepancy,
     create_position_reconciliation_discrepancy,
     create_reconciliation_observation,
     create_reconciliation_outcome,
     decode_reconciliation_outcome,
+    reconciliation_adjustment_authorization_digest,
     reconciliation_adjustment_command_digest,
     reconciliation_observation_digest,
     reconciliation_outcome_digest,
 )
 from ea.core.audit import require_canonical_audit_payload
 from ea.core.reconciliation import (
+    _create_reconciliation_adjustment_authorization,
     _create_reconciliation_adjustment_command,
+    _decode_reconciliation_adjustment_authorization,
     _decode_reconciliation_adjustment_command,
 )
 from unit.test_execution_messages import SPEC_SET, _order
 from unit.test_portfolio_ledger import INSTRUMENT, RUN_ID, USD, _spec_set
-from unit.test_reconciliation_observation import _observation
+from unit.test_reconciliation_observation import TIME, _observation
 
 OBSERVATION_SHA256 = Sha256Digest("11" * 32)
 SNAPSHOT_SHA256 = Sha256Digest("22" * 32)
@@ -96,6 +108,64 @@ def _outcome_acknowledgement(
         subject_kind=AuditSubjectKind.RECONCILIATION_OUTCOME,
         subject_sha256=audit_subject_digest(
             AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            payload,
+        ),
+        canonical_payload=payload,
+        previous_record_sha256=EMPTY_RECORD_SHA256,
+        previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+    )
+    return create_audit_append_acknowledgement(record)
+
+
+def _balance_command_bundle() -> tuple[
+    ReconciliationObservation,
+    ReconciliationOutcome,
+    AuditAppendAcknowledgement,
+    ReconciliationAdjustmentCommand,
+]:
+    observation = _observation(
+        balances=(PositionReconciliationBalance(INSTRUMENT, CanonicalDecimal("12")),),
+    )
+    discrepancy = create_position_reconciliation_discrepancy(
+        spec_set=_spec_set(),
+        instrument=INSTRUMENT,
+        local_amount=CanonicalDecimal("10"),
+        observed_amount=CanonicalDecimal("12"),
+    )
+    outcome = _outcome(
+        observation_sha256=reconciliation_observation_digest(observation),
+        discrepancies=(discrepancy,),
+        outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
+        requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+        halt_requested=True,
+    )
+    acknowledgement = _outcome_acknowledgement(outcome)
+    command = _create_reconciliation_adjustment_command(
+        binding=BINDING,
+        spec_set=_spec_set(),
+        observation=observation,
+        outcome=outcome,
+        outcome_acknowledgement=acknowledgement,
+        adjustment_id=EconomicId(
+            RUN_ID,
+            EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
+            1,
+        ),
+    )
+    return observation, outcome, acknowledgement, command
+
+
+def _authorization_acknowledgement(
+    authorization: ReconciliationAdjustmentAuthorization,
+) -> AuditAppendAcknowledgement:
+    payload = canonical_reconciliation_adjustment_authorization_bytes(authorization)
+    record = create_audit_record(
+        binding=BINDING,
+        owner_sequence=3,
+        record_kind=AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
+        subject_kind=AuditSubjectKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
             payload,
         ),
         canonical_payload=payload,
@@ -381,3 +451,105 @@ def test_ancestry_command_binds_exact_open_reference_and_order() -> None:
         )
         == command
     )
+
+
+@pytest.mark.parametrize("decision", tuple(ReconciliationAuthorizationDecision))
+def test_authorization_binds_command_outcome_ack_and_audit(
+    decision: ReconciliationAuthorizationDecision,
+) -> None:
+    _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
+    authorization = _create_reconciliation_adjustment_authorization(
+        binding=BINDING,
+        spec_set=_spec_set(),
+        outcome=outcome,
+        outcome_acknowledgement=outcome_acknowledgement,
+        command=command,
+        authorization_id=EconomicId(
+            RUN_ID,
+            EconomicOwnerKind.RECONCILIATION_AUTHORIZATION,
+            1,
+        ),
+        policy_id=ReconciliationAuthorizationPolicyId("reconciliation.test-policy.v1"),
+        policy_version=1,
+        policy_sha256=Sha256Digest("77" * 32),
+        decision=decision,
+        available_at=TIME,
+    )
+    payload = canonical_reconciliation_adjustment_authorization_bytes(authorization)
+
+    assert (
+        _decode_reconciliation_adjustment_authorization(
+            payload,
+            binding=BINDING,
+            spec_set=_spec_set(),
+            outcome=outcome,
+            outcome_acknowledgement=outcome_acknowledgement,
+            command=command,
+        )
+        == authorization
+    )
+    assert len(reconciliation_adjustment_authorization_digest(authorization).value) == 64
+    assert (
+        require_canonical_audit_payload(
+            AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
+            payload,
+        )
+        is payload
+    )
+    acknowledgement = _authorization_acknowledgement(authorization)
+    audited = create_audited_reconciliation_adjustment_authorization(
+        authorization,
+        acknowledgement,
+    )
+    assert type(audited) is AuditedReconciliationAdjustmentAuthorization
+    assert len(canonical_audited_reconciliation_adjustment_authorization_bytes(audited)) < 4_096
+    assert len(audited_reconciliation_adjustment_authorization_digest(audited).value) == 64
+
+
+def test_authorization_rejects_wrong_identity_ack_and_payload_drift() -> None:
+    _, outcome, outcome_acknowledgement, command = _balance_command_bundle()
+    authorization = _create_reconciliation_adjustment_authorization(
+        binding=BINDING,
+        spec_set=_spec_set(),
+        outcome=outcome,
+        outcome_acknowledgement=outcome_acknowledgement,
+        command=command,
+        authorization_id=EconomicId(
+            RUN_ID,
+            EconomicOwnerKind.RECONCILIATION_AUTHORIZATION,
+            1,
+        ),
+        policy_id=ReconciliationAuthorizationPolicyId("reconciliation.test-policy.v1"),
+        policy_version=1,
+        policy_sha256=Sha256Digest("77" * 32),
+        decision=ReconciliationAuthorizationDecision.ALLOWED,
+        available_at=TIME,
+    )
+    with pytest.raises(TypeError, match="authority"):
+        ReconciliationAdjustmentAuthorization()
+    with pytest.raises(TypeError, match="audit"):
+        AuditedReconciliationAdjustmentAuthorization()
+    with pytest.raises(ReconciliationContractError):
+        _create_reconciliation_adjustment_authorization(
+            binding=BINDING,
+            spec_set=_spec_set(),
+            outcome=outcome,
+            outcome_acknowledgement=outcome_acknowledgement,
+            command=command,
+            authorization_id=command.adjustment_id,
+            policy_id=ReconciliationAuthorizationPolicyId("reconciliation.test-policy.v1"),
+            policy_version=1,
+            policy_sha256=Sha256Digest("77" * 32),
+            decision=ReconciliationAuthorizationDecision.ALLOWED,
+            available_at=TIME,
+        )
+    with pytest.raises(ReconciliationContractError, match="acknowledgement"):
+        create_audited_reconciliation_adjustment_authorization(authorization, None)
+    document = json.loads(canonical_reconciliation_adjustment_authorization_bytes(authorization))
+    with pytest.raises(AuditContractError):
+        require_canonical_audit_payload(
+            AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
+            _canonical({**document, "decision": "override"}),
+        )
+    assert "_create_reconciliation_adjustment_authorization" not in core.__all__
+    assert "_decode_reconciliation_adjustment_authorization" not in core.__all__

@@ -31,6 +31,16 @@ RECONCILIATION_OUTCOME_SCHEMA = "ea.reconciliation-outcome.v2"
 RECONCILIATION_OUTCOME_DIGEST_DOMAIN = b"ea.reconciliation-outcome.v2\0"
 RECONCILIATION_ADJUSTMENT_COMMAND_SCHEMA = "ea.reconciliation-adjustment-command.v1"
 RECONCILIATION_ADJUSTMENT_COMMAND_DIGEST_DOMAIN = b"ea.reconciliation-adjustment-command.v1\0"
+RECONCILIATION_ADJUSTMENT_AUTHORIZATION_SCHEMA = "ea.reconciliation-adjustment-authorization.v1"
+RECONCILIATION_ADJUSTMENT_AUTHORIZATION_DIGEST_DOMAIN = (
+    b"ea.reconciliation-adjustment-authorization.v1\0"
+)
+AUDITED_RECONCILIATION_ADJUSTMENT_AUTHORIZATION_SCHEMA = (
+    "ea.audited-reconciliation-adjustment-authorization.v1"
+)
+AUDITED_RECONCILIATION_ADJUSTMENT_AUTHORIZATION_DIGEST_DOMAIN = (
+    b"ea.audited-reconciliation-adjustment-authorization.v1\0"
+)
 RECONCILIATION_CANONICALIZATION = "ea-canonical-json-v1"
 MAX_RECONCILIATION_PAYLOAD_BYTES = 16_384
 MAX_RECONCILIATION_BALANCES = 32
@@ -105,6 +115,26 @@ class ReconciliationAdjustmentTargetKind(StrEnum):
     INSTRUMENT_POSITION = "instrument_position"
     SETTLEMENT_CASH = "settlement_cash"
     OPEN_RECONCILIATION_REF = "open_reconciliation_ref"
+
+
+class ReconciliationAuthorizationDecision(StrEnum):
+    ALLOWED = "allowed"
+    DENIED = "denied"
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class ReconciliationAuthorizationPolicyId:
+    value: str
+
+    def __post_init__(self) -> None:
+        try:
+            RuntimeIdentifier(self.value)
+        except (TypeError, ValueError) as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation authorization policy ID is invalid",
+            ) from error
 
 
 @final
@@ -211,6 +241,47 @@ class ReconciliationAdjustmentCommand:
 
     def __init__(self) -> None:
         raise TypeError("reconciliation adjustment commands are created only by their factory")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ReconciliationAdjustmentAuthorization:
+    _binding: RunBinding
+    run_id: RunId
+    instrument_spec_set_id: InstrumentSpecSetId
+    instrument_spec_set_sha256: Sha256Digest
+    authorization_id: EconomicId
+    adjustment_id: EconomicId
+    observation_sha256: Sha256Digest
+    reconciliation_outcome_sha256: Sha256Digest
+    outcome_acknowledgement_sha256: Sha256Digest
+    ledger_sequence: int
+    local_snapshot_sha256: Sha256Digest
+    command_sha256: Sha256Digest
+    policy_id: ReconciliationAuthorizationPolicyId
+    policy_version: int
+    policy_sha256: Sha256Digest
+    decision: ReconciliationAuthorizationDecision
+    available_at: datetime
+    dispatch_sequence: int
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("reconciliation authorizations are created only by their authority")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class AuditedReconciliationAdjustmentAuthorization:
+    authorization: ReconciliationAdjustmentAuthorization
+    authorization_sha256: Sha256Digest
+    authorization_record_id: EconomicId
+    acknowledgement_sha256: Sha256Digest
+    chain_head_sha256: Sha256Digest
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("audited reconciliation authorizations require exact audit evidence")
 
 
 @final
@@ -750,6 +821,310 @@ def reconciliation_adjustment_command_digest(
     )
 
 
+def _create_reconciliation_adjustment_authorization(
+    *,
+    binding: RunBinding,
+    spec_set: InstrumentExecutionSpecSet,
+    outcome: ReconciliationOutcome,
+    outcome_acknowledgement: object,
+    command: ReconciliationAdjustmentCommand,
+    authorization_id: EconomicId,
+    policy_id: ReconciliationAuthorizationPolicyId,
+    policy_version: int,
+    policy_sha256: Sha256Digest,
+    decision: ReconciliationAuthorizationDecision,
+    available_at: datetime,
+) -> ReconciliationAdjustmentAuthorization:
+    from ea.core.audit import (
+        AuditLogicalKey,
+        AuditRecordKind,
+        AuditSubjectKind,
+        audit_append_acknowledgement_digest,
+        audit_subject_digest,
+        require_audit_acknowledgement,
+    )
+
+    if (
+        type(binding) is not RunBinding
+        or type(spec_set) is not InstrumentExecutionSpecSet
+        or type(outcome) is not ReconciliationOutcome
+        or outcome._seal is not _VALUE_SEAL
+        or type(command) is not ReconciliationAdjustmentCommand
+        or command._seal is not _VALUE_SEAL
+        or type(authorization_id) is not EconomicId
+        or type(policy_id) is not ReconciliationAuthorizationPolicyId
+        or type(policy_sha256) is not Sha256Digest
+        or type(decision) is not ReconciliationAuthorizationDecision
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "authorization evidence must be exact")
+    _require_uint64(policy_version, "policy_version")
+    if policy_version == 0:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "policy_version must be positive")
+    checked_available_at = _require_time(available_at, "available_at")
+    run_id = binding.reference.run_id
+    if (
+        command.run_id != run_id
+        or outcome.run_id != run_id
+        or authorization_id.run_id != run_id
+        or authorization_id.owner_kind is not EconomicOwnerKind.RECONCILIATION_AUTHORIZATION
+        or command.instrument_spec_set_id != spec_set.identifier
+        or command.instrument_spec_set_sha256 != instrument_spec_set_digest(spec_set)
+        or command.reconciliation_outcome_sha256 != reconciliation_outcome_digest(outcome)
+        or command.observation_sha256 != outcome.observation_sha256
+        or command.ledger_sequence != outcome.ledger_sequence
+        or command.local_snapshot_sha256 != outcome.local_snapshot_sha256
+        or command.dispatch_sequence != outcome.dispatch_sequence
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization evidence bindings conflict")
+    outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
+    outcome_subject_sha256 = audit_subject_digest(
+        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        outcome_payload,
+    )
+    try:
+        checked_acknowledgement = require_audit_acknowledgement(
+            outcome_acknowledgement,
+            binding=binding,
+            logical_key=AuditLogicalKey(
+                AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+                AuditSubjectKind.RECONCILIATION_OUTCOME,
+                outcome_subject_sha256,
+            ),
+            canonical_payload=outcome_payload,
+        )
+    except ValueError as error:
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "authorization requires the exact outcome acknowledgement",
+        ) from error
+    value = object.__new__(ReconciliationAdjustmentAuthorization)
+    for field, candidate in (
+        ("_binding", binding),
+        ("run_id", run_id),
+        ("instrument_spec_set_id", spec_set.identifier),
+        ("instrument_spec_set_sha256", instrument_spec_set_digest(spec_set)),
+        ("authorization_id", authorization_id),
+        ("adjustment_id", command.adjustment_id),
+        ("observation_sha256", command.observation_sha256),
+        ("reconciliation_outcome_sha256", command.reconciliation_outcome_sha256),
+        (
+            "outcome_acknowledgement_sha256",
+            audit_append_acknowledgement_digest(checked_acknowledgement),
+        ),
+        ("ledger_sequence", command.ledger_sequence),
+        ("local_snapshot_sha256", command.local_snapshot_sha256),
+        ("command_sha256", reconciliation_adjustment_command_digest(command)),
+        ("policy_id", policy_id),
+        ("policy_version", policy_version),
+        ("policy_sha256", policy_sha256),
+        ("decision", decision),
+        ("available_at", checked_available_at),
+        ("dispatch_sequence", command.dispatch_sequence),
+    ):
+        object.__setattr__(value, field, candidate)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    canonical_reconciliation_adjustment_authorization_bytes(value)
+    return value
+
+
+def canonical_reconciliation_adjustment_authorization_bytes(
+    authorization: ReconciliationAdjustmentAuthorization,
+) -> bytes:
+    if (
+        type(authorization) is not ReconciliationAdjustmentAuthorization
+        or authorization._seal is not _VALUE_SEAL
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "authorization must be authority-issued")
+    payload = _canonical_json(_adjustment_authorization_document(authorization))
+    if len(payload) > MAX_RECONCILIATION_PAYLOAD_BYTES:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "authorization exceeds byte bound")
+    return payload
+
+
+def reconciliation_adjustment_authorization_digest(
+    authorization: ReconciliationAdjustmentAuthorization,
+) -> Sha256Digest:
+    return _framed_digest(
+        RECONCILIATION_ADJUSTMENT_AUTHORIZATION_DIGEST_DOMAIN,
+        canonical_reconciliation_adjustment_authorization_bytes(authorization),
+    )
+
+
+def _decode_reconciliation_adjustment_authorization(
+    canonical_payload: bytes,
+    *,
+    binding: RunBinding,
+    spec_set: InstrumentExecutionSpecSet,
+    outcome: ReconciliationOutcome,
+    outcome_acknowledgement: object,
+    command: ReconciliationAdjustmentCommand,
+) -> ReconciliationAdjustmentAuthorization:
+    document = _decode_canonical_json(canonical_payload, "reconciliation authorization")
+    expected_fields = {
+        "adjustment_id",
+        "authorization_id",
+        "available_at",
+        "canonicalization",
+        "command_sha256",
+        "decision",
+        "dispatch_sequence",
+        "instrument_spec_set_id",
+        "instrument_spec_set_sha256",
+        "ledger_sequence",
+        "local_snapshot_sha256",
+        "observation_sha256",
+        "outcome_acknowledgement_sha256",
+        "policy_id",
+        "policy_sha256",
+        "policy_version",
+        "reconciliation_outcome_sha256",
+        "run_id",
+        "schema",
+    }
+    if type(document) is not dict or set(document) != expected_fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization fields conflict")
+    if (
+        _require_text(document, "schema") != RECONCILIATION_ADJUSTMENT_AUTHORIZATION_SCHEMA
+        or _require_text(document, "canonicalization") != RECONCILIATION_CANONICALIZATION
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization schema conflicts")
+    try:
+        run_id = RunId(_require_text(document, "run_id"))
+        authorization = _create_reconciliation_adjustment_authorization(
+            binding=binding,
+            spec_set=spec_set,
+            outcome=outcome,
+            outcome_acknowledgement=outcome_acknowledgement,
+            command=command,
+            authorization_id=_decode_economic_id(document["authorization_id"], run_id),
+            policy_id=ReconciliationAuthorizationPolicyId(_require_text(document, "policy_id")),
+            policy_version=_require_json_int(document, "policy_version"),
+            policy_sha256=_decode_digest(document, "policy_sha256"),
+            decision=ReconciliationAuthorizationDecision(_require_text(document, "decision")),
+            available_at=_decode_time(_require_text(document, "available_at"), "available_at"),
+        )
+        if (
+            run_id != binding.reference.run_id
+            or _decode_economic_id(document["adjustment_id"], run_id) != command.adjustment_id
+            or _require_text(document, "instrument_spec_set_id") != spec_set.identifier.value
+            or _decode_digest(document, "instrument_spec_set_sha256")
+            != instrument_spec_set_digest(spec_set)
+            or _require_json_int(document, "dispatch_sequence") != command.dispatch_sequence
+            or _require_json_int(document, "ledger_sequence") != command.ledger_sequence
+            or _decode_digest(document, "local_snapshot_sha256") != command.local_snapshot_sha256
+            or _decode_digest(document, "observation_sha256") != command.observation_sha256
+            or _decode_digest(document, "reconciliation_outcome_sha256")
+            != command.reconciliation_outcome_sha256
+            or _decode_digest(document, "command_sha256")
+            != reconciliation_adjustment_command_digest(command)
+            or _decode_digest(document, "outcome_acknowledgement_sha256")
+            != authorization.outcome_acknowledgement_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "authorization bindings conflict")
+    except (ValueError, TypeError) as error:
+        if type(error) is ReconciliationContractError:
+            raise
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization values conflict") from error
+    if canonical_reconciliation_adjustment_authorization_bytes(authorization) != canonical_payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization round-trip conflicts")
+    return authorization
+
+
+def create_audited_reconciliation_adjustment_authorization(
+    authorization: ReconciliationAdjustmentAuthorization,
+    acknowledgement: object,
+) -> AuditedReconciliationAdjustmentAuthorization:
+    from ea.core.audit import (
+        AuditLogicalKey,
+        AuditRecordKind,
+        AuditSubjectKind,
+        audit_append_acknowledgement_digest,
+        audit_subject_digest,
+        require_audit_acknowledgement,
+    )
+
+    payload = canonical_reconciliation_adjustment_authorization_bytes(authorization)
+    subject_sha256 = audit_subject_digest(
+        AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
+        payload,
+    )
+    try:
+        checked = require_audit_acknowledgement(
+            acknowledgement,
+            binding=_authorization_binding(authorization),
+            logical_key=AuditLogicalKey(
+                AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
+                AuditSubjectKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
+                subject_sha256,
+            ),
+            canonical_payload=payload,
+        )
+    except ValueError as error:
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "audited authorization requires the exact acknowledgement",
+        ) from error
+    value = object.__new__(AuditedReconciliationAdjustmentAuthorization)
+    object.__setattr__(value, "authorization", authorization)
+    object.__setattr__(
+        value,
+        "authorization_sha256",
+        reconciliation_adjustment_authorization_digest(authorization),
+    )
+    object.__setattr__(value, "authorization_record_id", checked.record_id)
+    object.__setattr__(
+        value,
+        "acknowledgement_sha256",
+        audit_append_acknowledgement_digest(checked),
+    )
+    object.__setattr__(value, "chain_head_sha256", checked.chain_head_sha256)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    return value
+
+
+def canonical_audited_reconciliation_adjustment_authorization_bytes(
+    audited: AuditedReconciliationAdjustmentAuthorization,
+) -> bytes:
+    if (
+        type(audited) is not AuditedReconciliationAdjustmentAuthorization
+        or audited._seal is not _VALUE_SEAL
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "audited authorization must be factory-issued")
+    return _canonical_json(
+        {
+            "acknowledgement_sha256": audited.acknowledgement_sha256.value,
+            "authorization_record_id": _economic_id_document(audited.authorization_record_id),
+            "authorization_sha256": audited.authorization_sha256.value,
+            "canonicalization": RECONCILIATION_CANONICALIZATION,
+            "chain_head_sha256": audited.chain_head_sha256.value,
+            "run_id": audited.authorization.run_id.value,
+            "schema": AUDITED_RECONCILIATION_ADJUSTMENT_AUTHORIZATION_SCHEMA,
+        }
+    )
+
+
+def audited_reconciliation_adjustment_authorization_digest(
+    audited: AuditedReconciliationAdjustmentAuthorization,
+) -> Sha256Digest:
+    return _framed_digest(
+        AUDITED_RECONCILIATION_ADJUSTMENT_AUTHORIZATION_DIGEST_DOMAIN,
+        canonical_audited_reconciliation_adjustment_authorization_bytes(audited),
+    )
+
+
+def _authorization_binding(authorization: ReconciliationAdjustmentAuthorization) -> RunBinding:
+    """Return the audit binding only for an exact issued authorization."""
+    if (
+        type(authorization) is not ReconciliationAdjustmentAuthorization
+        or authorization._seal is not _VALUE_SEAL
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "authorization must be authority-issued")
+    binding = authorization._binding
+    if type(binding) is not RunBinding:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "authorization audit binding is unavailable")
+    return binding
+
+
 def _decode_reconciliation_adjustment_command(
     canonical_payload: bytes,
     spec_set: InstrumentExecutionSpecSet,
@@ -1215,6 +1590,32 @@ def _adjustment_command_document(
         }
     )
     return document
+
+
+def _adjustment_authorization_document(
+    authorization: ReconciliationAdjustmentAuthorization,
+) -> dict[str, object]:
+    return {
+        "adjustment_id": _economic_id_document(authorization.adjustment_id),
+        "authorization_id": _economic_id_document(authorization.authorization_id),
+        "available_at": _time_text(authorization.available_at),
+        "canonicalization": RECONCILIATION_CANONICALIZATION,
+        "command_sha256": authorization.command_sha256.value,
+        "decision": authorization.decision.value,
+        "dispatch_sequence": authorization.dispatch_sequence,
+        "instrument_spec_set_id": authorization.instrument_spec_set_id.value,
+        "instrument_spec_set_sha256": authorization.instrument_spec_set_sha256.value,
+        "ledger_sequence": authorization.ledger_sequence,
+        "local_snapshot_sha256": authorization.local_snapshot_sha256.value,
+        "observation_sha256": authorization.observation_sha256.value,
+        "outcome_acknowledgement_sha256": authorization.outcome_acknowledgement_sha256.value,
+        "policy_id": authorization.policy_id.value,
+        "policy_sha256": authorization.policy_sha256.value,
+        "policy_version": authorization.policy_version,
+        "reconciliation_outcome_sha256": authorization.reconciliation_outcome_sha256.value,
+        "run_id": authorization.run_id.value,
+        "schema": RECONCILIATION_ADJUSTMENT_AUTHORIZATION_SCHEMA,
+    }
 
 
 def _discrepancy_document(discrepancy: ReconciliationDiscrepancy) -> dict[str, object]:
