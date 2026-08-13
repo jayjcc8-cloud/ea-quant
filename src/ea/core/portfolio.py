@@ -250,6 +250,31 @@ class UnresolvedFillRef:
 
 @final
 @dataclass(frozen=True, slots=True)
+class OpenReconciliationRef:
+    """Outcome-bound reconciliation evidence retained for one applied Fill."""
+
+    fill_id: EconomicId
+    fill_sha256: Sha256Digest
+    processing_outcome_sha256: Sha256Digest
+
+    def __post_init__(self) -> None:
+        _require_economic_id(
+            self.fill_id,
+            owner=EconomicOwnerKind.EXECUTION_FILL,
+            field_name="fill_id",
+        )
+        if (
+            type(self.fill_sha256) is not Sha256Digest
+            or type(self.processing_outcome_sha256) is not Sha256Digest
+        ):
+            raise _fail(
+                OutcomeCode.INVALID_TYPE,
+                "open reconciliation reference digests must be exact",
+            )
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class ExistingLedgerBinding:
     entry_id: EconomicId
     fill_id: EconomicId
