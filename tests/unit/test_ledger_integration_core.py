@@ -10,6 +10,11 @@ import pytest
 
 import ea.core as core
 from ea.core import (
+    EMPTY_CHAIN_HEAD_SHA256,
+    EMPTY_RECORD_SHA256,
+    AuditContractError,
+    AuditRecordKind,
+    AuditSubjectKind,
     EconomicId,
     EconomicOwnerKind,
     IngressIdentity,
@@ -22,13 +27,21 @@ from ea.core import (
     PortfolioRiskRefresh,
     RiskHaltReason,
     RiskPolicyId,
+    RunBinding,
     RunId,
+    RunReference,
     Sha256Digest,
     SourceNamespace,
+    audit_subject_digest,
+    audited_ledger_handoff_digest,
+    canonical_audited_ledger_handoff_bytes,
     canonical_ledger_application_command_bytes,
     canonical_ledger_apply_outcome_bytes,
     canonical_ledger_handoff_outcome_bytes,
     canonical_portfolio_risk_refresh_bytes,
+    create_audit_append_acknowledgement,
+    create_audit_record,
+    create_audited_ledger_handoff,
     create_ledger_handoff_outcome,
     decode_ledger_handoff_outcome,
     decode_portfolio_risk_refresh,
@@ -39,6 +52,7 @@ from ea.core import (
     portfolio_risk_refresh_digest,
     portfolio_snapshot_digest,
 )
+from ea.core.audit import require_canonical_audit_payload
 from ea.core.ledger_integration import (
     _create_ledger_application_command,
     _create_portfolio_risk_refresh,
@@ -407,3 +421,81 @@ def test_portfolio_risk_refresh_rejects_halted_permission_and_decoder_drift() ->
     ):
         with pytest.raises(LedgerIntegrationError):
             decode_portfolio_risk_refresh(payload)
+
+
+def test_new_audit_kinds_delegate_strict_semantic_codecs_and_subject_domains() -> None:
+    outcome = _not_applicable()
+    outcome_payload = canonical_ledger_handoff_outcome_bytes(outcome)
+    refresh_payload = canonical_portfolio_risk_refresh_bytes(_risk_refresh())
+
+    assert (
+        require_canonical_audit_payload(
+            AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+            outcome_payload,
+        )
+        is outcome_payload
+    )
+    assert (
+        require_canonical_audit_payload(
+            AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+            refresh_payload,
+        )
+        is refresh_payload
+    )
+    assert audit_subject_digest(
+        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        outcome_payload,
+    ) != ledger_handoff_outcome_digest(outcome)
+    with pytest.raises(AuditContractError):
+        require_canonical_audit_payload(
+            AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+            outcome_payload,
+        )
+
+
+def test_audited_ledger_handoff_requires_exact_outcome_acknowledgement() -> None:
+    outcome = _not_applicable()
+    payload = canonical_ledger_handoff_outcome_bytes(outcome)
+    binding = RunBinding(RunReference(RUN_ID, DIGESTS[8]), DIGESTS[9])
+    record = create_audit_record(
+        binding=binding,
+        owner_sequence=2,
+        record_kind=AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        subject_kind=AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+            payload,
+        ),
+        canonical_payload=payload,
+        previous_record_sha256=EMPTY_RECORD_SHA256,
+        previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+    )
+    acknowledgement = create_audit_append_acknowledgement(record)
+
+    handoff = create_audited_ledger_handoff(outcome, acknowledgement)
+
+    assert handoff.outcome_sha256 == ledger_handoff_outcome_digest(outcome)
+    assert len(canonical_audited_ledger_handoff_bytes(handoff)) < 4_096
+    assert len(audited_ledger_handoff_digest(handoff).value) == 64
+    with pytest.raises(FrozenInstanceError):
+        handoff.outcome_sha256 = DIGESTS[10]  # type: ignore[misc]
+
+    refresh_payload = canonical_portfolio_risk_refresh_bytes(_risk_refresh())
+    wrong_record = create_audit_record(
+        binding=binding,
+        owner_sequence=2,
+        record_kind=AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+        subject_kind=AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+            refresh_payload,
+        ),
+        canonical_payload=refresh_payload,
+        previous_record_sha256=EMPTY_RECORD_SHA256,
+        previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+    )
+    with pytest.raises(AuditContractError):
+        create_audited_ledger_handoff(
+            outcome,
+            create_audit_append_acknowledgement(wrong_record),
+        )

@@ -68,6 +68,8 @@ class AuditRecordKind(StrEnum):
     RUN_PREPARED = "run.prepared"
     MATCHER_DISPATCH_BATCH = "matcher.dispatch_batch"
     EXECUTION_FACT_PROCESSING_OUTCOME = "execution.fact_processing_outcome"
+    PORTFOLIO_LEDGER_HANDOFF_OUTCOME = "portfolio.ledger_handoff_outcome"
+    RISK_PORTFOLIO_REFRESH = "risk.portfolio_refresh"
     SUBMISSION_PRE_EFFECT_AUTHORIZATION = "submission.pre_effect_authorization"
     RUNTIME_FAILING_SAFETY_TRANSITION = "runtime.failing_safety_transition"
     RUNTIME_DISPATCH_COMPLETED = "runtime.dispatch_completed"
@@ -80,6 +82,8 @@ class AuditSubjectKind(StrEnum):
     RUN_MANIFEST = "run_manifest"
     HISTORICAL_MATCHER_DISPATCH_BATCH = "historical_matcher_dispatch_batch"
     EXECUTION_FACT_PROCESSING_OUTCOME = "execution_fact_processing_outcome"
+    PORTFOLIO_LEDGER_HANDOFF_OUTCOME = "portfolio_ledger_handoff_outcome"
+    PORTFOLIO_RISK_REFRESH = "portfolio_risk_refresh"
     HISTORICAL_EXECUTION_REQUEST = "historical_execution_request"
     COORDINATOR_STATE = "coordinator_state"
     RUNTIME_DISPATCH = "runtime_dispatch"
@@ -92,6 +96,10 @@ AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
     AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME: (
         AuditSubjectKind.EXECUTION_FACT_PROCESSING_OUTCOME
     ),
+    AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: (
+        AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+    ),
+    AuditRecordKind.RISK_PORTFOLIO_REFRESH: AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: (
         AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST
     ),
@@ -103,6 +111,8 @@ AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
 _LARGE_PAYLOAD_KINDS = frozenset(
     {
         AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME,
+        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        AuditRecordKind.RISK_PORTFOLIO_REFRESH,
         AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
     }
 )
@@ -110,6 +120,8 @@ _LARGE_PAYLOAD_KINDS = frozenset(
 _AUDIT_PAYLOAD_SCHEMA_BY_KIND: dict[AuditRecordKind, str] = {
     AuditRecordKind.RUN_PREPARED: "ea.audit-run-prepared.v1",
     AuditRecordKind.MATCHER_DISPATCH_BATCH: "ea.audit-matcher-dispatch-batch.v1",
+    AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: "ea.ledger-handoff-outcome.v1",
+    AuditRecordKind.RISK_PORTFOLIO_REFRESH: "ea.portfolio-risk-refresh.v1",
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: ("ea.audit-submission-authorization.v1"),
     AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION: "ea.audit-failing-safety.v1",
     AuditRecordKind.RUNTIME_DISPATCH_COMPLETED: "ea.audit-dispatch-completed.v2",
@@ -131,6 +143,49 @@ _AUDIT_PAYLOAD_FIELDS_BY_KIND: dict[AuditRecordKind, frozenset[str]] = {
             "batch_sha256",
             "ingress_count",
             "ordered_ingress_sha256s_sha256",
+        }
+    ),
+    AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: frozenset(
+        {
+            "action",
+            "after_snapshot_sha256",
+            "after_snapshot_version",
+            "audited_handoff_sha256",
+            "before_snapshot_sha256",
+            "before_snapshot_version",
+            "canonicalization",
+            "dispatch_sequence",
+            "failure",
+            "fill_id",
+            "fill_sha256",
+            "halt_requested",
+            "ingress_identity",
+            "original_ledger_apply_outcome",
+            "original_ledger_apply_outcome_sha256",
+            "processing_outcome_ack_sha256",
+            "processing_outcome_sha256",
+            "requires_reconciliation",
+            "run_id",
+            "schema",
+        }
+    ),
+    AuditRecordKind.RISK_PORTFOLIO_REFRESH: frozenset(
+        {
+            "canonicalization",
+            "dispatch_sequence",
+            "exposure_sha256",
+            "ordered_ledger_ack_frontier_sha256",
+            "policy_id",
+            "policy_sha256",
+            "portfolio_snapshot_sha256",
+            "portfolio_snapshot_version",
+            "previous_refresh_sha256",
+            "refresh_sequence",
+            "risk_state_sha256",
+            "risk_state_version",
+            "run_id",
+            "schema",
+            "submission_permitted",
         }
     ),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: frozenset(
@@ -207,6 +262,10 @@ _AUDIT_PAYLOAD_FIELDS_BY_KIND: dict[AuditRecordKind, frozenset[str]] = {
     ),
 }
 _SUBJECT_DOMAIN_BY_KIND: dict[AuditRecordKind, bytes] = {
+    AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: (
+        b"ea.audit-subject.portfolio.ledger_handoff_outcome.v1\0"
+    ),
+    AuditRecordKind.RISK_PORTFOLIO_REFRESH: (b"ea.audit-subject.risk.portfolio_refresh.v1\0"),
     AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION: (
         b"ea.audit-subject.submission-authorization.v1\0"
     ),
@@ -706,7 +765,34 @@ def require_canonical_audit_payload(
         ) from error
     if type(document) is not dict or _canonical_json(document) != canonical_payload:
         raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload is not canonical JSON")
-    if record_kind is not AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
+    if record_kind in {
+        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+    }:
+        from ea.core.ledger_integration import (
+            canonical_ledger_handoff_outcome_bytes,
+            canonical_portfolio_risk_refresh_bytes,
+            decode_ledger_handoff_outcome,
+            decode_portfolio_risk_refresh,
+        )
+
+        try:
+            if record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME:
+                decoded_payload = canonical_ledger_handoff_outcome_bytes(
+                    decode_ledger_handoff_outcome(canonical_payload)
+                )
+            else:
+                decoded_payload = canonical_portfolio_risk_refresh_bytes(
+                    decode_portfolio_risk_refresh(canonical_payload)
+                )
+        except ValueError as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "audit payload semantic codec rejected its value",
+            ) from error
+        if decoded_payload != canonical_payload:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload semantic round-trip conflicts")
+    elif record_kind is not AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
         expected_fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[record_kind]
         if set(document) != expected_fields:
             raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload fields conflict with its kind")

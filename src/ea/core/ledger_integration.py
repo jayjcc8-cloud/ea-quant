@@ -28,6 +28,8 @@ LEDGER_APPLICATION_COMMAND_SCHEMA = "ea.ledger-application-command.v1"
 LEDGER_APPLICATION_COMMAND_DIGEST_DOMAIN = b"ea.ledger-application-command.v1\0"
 LEDGER_HANDOFF_OUTCOME_SCHEMA = "ea.ledger-handoff-outcome.v1"
 LEDGER_HANDOFF_OUTCOME_DIGEST_DOMAIN = b"ea.ledger-handoff-outcome.v1\0"
+AUDITED_LEDGER_HANDOFF_SCHEMA = "ea.audited-ledger-handoff.v1"
+AUDITED_LEDGER_HANDOFF_DIGEST_DOMAIN = b"ea.audited-ledger-handoff.v1\0"
 LEDGER_INTEGRATION_CANONICALIZATION = "ea-canonical-json-v1"
 MAX_LEDGER_INTEGRATION_PAYLOAD_BYTES = 16_384
 PORTFOLIO_RISK_REFRESH_SCHEMA = "ea.portfolio-risk-refresh.v1"
@@ -140,6 +142,69 @@ class PortfolioRiskRefresh:
 
     def __init__(self) -> None:
         raise TypeError("portfolio risk refreshes are created only by the lifecycle factory")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class AuditedLedgerHandoff:
+    outcome_sha256: Sha256Digest
+    outcome_record_id: EconomicId
+    outcome_ack_sha256: Sha256Digest
+    chain_head_sha256: Sha256Digest
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("audited ledger handoffs require an exact audit acknowledgement")
+
+
+def create_audited_ledger_handoff(
+    outcome: LedgerHandoffOutcome,
+    acknowledgement: object,
+) -> AuditedLedgerHandoff:
+    """Bind one ledger outcome to its exact durable audit acknowledgement."""
+    from ea.core.audit import (
+        AuditAppendAcknowledgement,
+        AuditLogicalKey,
+        AuditRecordKind,
+        AuditSubjectKind,
+        audit_append_acknowledgement_digest,
+        audit_subject_digest,
+        require_audit_acknowledgement,
+    )
+
+    if type(outcome) is not LedgerHandoffOutcome or outcome._seal is not _VALUE_SEAL:
+        raise _fail(OutcomeCode.INVALID_TYPE, "ledger outcome must be factory-issued")
+    if type(acknowledgement) is not AuditAppendAcknowledgement:
+        raise _fail(OutcomeCode.INVALID_TYPE, "ledger outcome acknowledgement must be exact")
+    payload = canonical_ledger_handoff_outcome_bytes(outcome)
+    outcome_sha256 = ledger_handoff_outcome_digest(outcome)
+    subject_sha256 = audit_subject_digest(
+        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        payload,
+    )
+    require_audit_acknowledgement(
+        acknowledgement,
+        binding=acknowledgement.binding,
+        logical_key=AuditLogicalKey(
+            AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+            AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+            subject_sha256,
+        ),
+        canonical_payload=payload,
+    )
+    if acknowledgement.binding.reference.run_id != outcome.run_id:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "audited ledger handoff run conflicts")
+    value = object.__new__(AuditedLedgerHandoff)
+    object.__setattr__(value, "outcome_sha256", outcome_sha256)
+    object.__setattr__(value, "outcome_record_id", acknowledgement.record_id)
+    object.__setattr__(
+        value,
+        "outcome_ack_sha256",
+        audit_append_acknowledgement_digest(acknowledgement),
+    )
+    object.__setattr__(value, "chain_head_sha256", acknowledgement.chain_head_sha256)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    return value
 
 
 def _create_portfolio_risk_refresh(
@@ -501,6 +566,28 @@ def portfolio_risk_refresh_digest(refresh: PortfolioRiskRefresh) -> Sha256Digest
     return _framed_digest(
         PORTFOLIO_RISK_REFRESH_DIGEST_DOMAIN,
         canonical_portfolio_risk_refresh_bytes(refresh),
+    )
+
+
+def canonical_audited_ledger_handoff_bytes(handoff: AuditedLedgerHandoff) -> bytes:
+    if type(handoff) is not AuditedLedgerHandoff or handoff._seal is not _VALUE_SEAL:
+        raise _fail(OutcomeCode.INVALID_TYPE, "audited ledger handoff must be factory-issued")
+    return _canonical_json(
+        {
+            "canonicalization": LEDGER_INTEGRATION_CANONICALIZATION,
+            "chain_head_sha256": handoff.chain_head_sha256.value,
+            "outcome_ack_sha256": handoff.outcome_ack_sha256.value,
+            "outcome_record_id": _economic_id_document(handoff.outcome_record_id),
+            "outcome_sha256": handoff.outcome_sha256.value,
+            "schema": AUDITED_LEDGER_HANDOFF_SCHEMA,
+        }
+    )
+
+
+def audited_ledger_handoff_digest(handoff: AuditedLedgerHandoff) -> Sha256Digest:
+    return _framed_digest(
+        AUDITED_LEDGER_HANDOFF_DIGEST_DOMAIN,
+        canonical_audited_ledger_handoff_bytes(handoff),
     )
 
 
