@@ -542,72 +542,78 @@ def recover_phase1_historical_lifecycle(
         or type(fact_history) is not Phase1ExecutionFactAuthority
     ):
         raise TypeError("historical lifecycle recovery requires exact authoritative carriers")
-    binding, audit, records = recovery._consume()
-    authorization, authorization_capability, activation_seal = (
-        create_dormant_historical_submission_authorization_authority(
+    reservation, binding, audit, records = recovery._reserve_consumption()
+    try:
+        authorization, authorization_capability, activation_seal = (
+            create_dormant_historical_submission_authorization_authority(
+                binding=binding,
+                audit=audit,
+                runtime=runtime,
+                spec_set=matcher_history.spec_set,
+                execution_policy=matcher_history.execution_policy,
+                portfolio=portfolio,
+                risk=risk,
+                global_halt=global_halt,
+                instrument_gate=instrument_gate,
+            )
+        )
+        dispatch = create_historical_matcher_dispatch_verifier(runtime)
+        matcher = recover_phase1_historical_matcher_history(
+            matcher_history,
+            order_issuance_verifier=order_issuance_verifier,
+            submission_authorization_verifier=authorization,
+            active_dispatch_verifier=dispatch,
+        )
+        descendant = create_historical_matcher_descendant_fact_dispatch_verifier(
+            runtime=runtime,
+            matcher=matcher,
+        )
+        fact_authority = recover_phase1_execution_fact_authority_history(
+            fact_history,
+            order_verifier=order_issuance_verifier,
+            dispatch_verifier=descendant,
+        )
+        authorization.recover_attempts(
+            records,
+            orders=order_issuance_verifier,
+            submissions=matcher,
+            seal=activation_seal,
+        )
+        coordinator = recover_phase1_lifecycle_coordinator(
             binding=binding,
             audit=audit,
             runtime=runtime,
-            spec_set=matcher_history.spec_set,
-            execution_policy=matcher_history.execution_policy,
-            portfolio=portfolio,
-            risk=risk,
-            global_halt=global_halt,
-            instrument_gate=instrument_gate,
+            matcher=matcher,
+            fact_authority=fact_authority,
+            evidence_resolver=fact_authority,
+            records=records,
+            authorization=authorization,
+            authorization_capability=authorization_capability,
         )
-    )
-    dispatch = create_historical_matcher_dispatch_verifier(runtime)
-    matcher = recover_phase1_historical_matcher_history(
-        matcher_history,
-        order_issuance_verifier=order_issuance_verifier,
-        submission_authorization_verifier=authorization,
-        active_dispatch_verifier=dispatch,
-    )
-    descendant = create_historical_matcher_descendant_fact_dispatch_verifier(
-        runtime=runtime,
-        matcher=matcher,
-    )
-    fact_authority = recover_phase1_execution_fact_authority_history(
-        fact_history,
-        order_verifier=order_issuance_verifier,
-        dispatch_verifier=descendant,
-    )
-    authorization.recover_attempts(
-        records,
-        orders=order_issuance_verifier,
-        submissions=matcher,
-        seal=activation_seal,
-    )
-    coordinator = recover_phase1_lifecycle_coordinator(
-        binding=binding,
-        audit=audit,
-        runtime=runtime,
-        matcher=matcher,
-        fact_authority=fact_authority,
-        evidence_resolver=fact_authority,
-        records=records,
-        authorization=authorization,
-        authorization_capability=authorization_capability,
-    )
-    _require_recovery_history_frontier(
-        records=records,
-        runtime=runtime,
-        matcher=matcher,
-        fact_authority=fact_authority,
-        coordinator=coordinator,
-    )
-    authorization.activate(coordinator, seal=activation_seal)
-    coordinator._reconcile_recovered_authorization()
-    return Phase1HistoricalLifecycle(
-        _seal=_LIFECYCLE_SEAL,
-        coordinator=Phase1HistoricalLifecycleCoordinatorFacade(
-            coordinator,
-            seal=_COORDINATOR_FACADE_SEAL,
-        ),
-        matcher=HistoricalMatcherHistoryView(matcher, seal=_READ_VIEW_SEAL),
-        fact_authority=ExecutionFactHistoryView(fact_authority, seal=_READ_VIEW_SEAL),
-        runtime=HistoricalRuntimeHistoryView(runtime, seal=_READ_VIEW_SEAL),
-    )
+        _require_recovery_history_frontier(
+            records=records,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=fact_authority,
+            coordinator=coordinator,
+        )
+        authorization.activate(coordinator, seal=activation_seal)
+        coordinator._reconcile_recovered_authorization()
+        lifecycle = Phase1HistoricalLifecycle(
+            _seal=_LIFECYCLE_SEAL,
+            coordinator=Phase1HistoricalLifecycleCoordinatorFacade(
+                coordinator,
+                seal=_COORDINATOR_FACADE_SEAL,
+            ),
+            matcher=HistoricalMatcherHistoryView(matcher, seal=_READ_VIEW_SEAL),
+            fact_authority=ExecutionFactHistoryView(fact_authority, seal=_READ_VIEW_SEAL),
+            runtime=HistoricalRuntimeHistoryView(runtime, seal=_READ_VIEW_SEAL),
+        )
+        recovery._commit_consumption(reservation)
+        return lifecycle
+    except BaseException:
+        recovery._abort_consumption(reservation)
+        raise
 
 
 def recover_phase1_historical_terminal_evidence(

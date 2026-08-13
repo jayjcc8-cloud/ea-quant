@@ -4,6 +4,7 @@ import json
 import os
 from inspect import signature
 from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -1077,6 +1078,7 @@ def test_recovery_frontier_rejects_fact_history_without_matcher_ingress() -> Non
 
 def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _fixture, matcher, orders, _causal, _delayed, _end = _system()
     root = _root(tmp_path)
@@ -1123,17 +1125,125 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
         dispatch_verifier=_UnusedDispatch(matcher),
     )
 
-    lifecycle = recover_phase1_historical_lifecycle(
-        recovery=admitted,
-        runtime=runtime,
-        matcher_history=matcher,
-        fact_history=fact_history,
-        order_issuance_verifier=order_verifier,
-        portfolio=freshness,
-        risk=freshness,
-        global_halt=freshness,
-        instrument_gate=freshness,
+    original_factory = create_dormant_historical_submission_authorization_authority
+    original_coordinator_factory = recover_phase1_lifecycle_coordinator
+    factory_calls = 0
+    coordinator_calls = 0
+    concurrent_entered = Event()
+    concurrent_release = Event()
+
+    def fail_first_factory(**kwargs: Any) -> Any:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            raise OSError("declared transient reconstruction failure")
+        if factory_calls == 3:
+            concurrent_entered.set()
+            assert concurrent_release.wait(timeout=5)
+        return original_factory(**kwargs)
+
+    def fail_first_coordinator(**kwargs: Any) -> Any:
+        nonlocal coordinator_calls
+        coordinator_calls += 1
+        value = original_coordinator_factory(**kwargs)
+        if coordinator_calls == 1:
+            raise OSError("declared late reconstruction failure")
+        return value
+
+    monkeypatch.setattr(
+        lifecycle_composition,
+        "create_dormant_historical_submission_authorization_authority",
+        fail_first_factory,
     )
+    monkeypatch.setattr(
+        lifecycle_composition,
+        "recover_phase1_lifecycle_coordinator",
+        fail_first_coordinator,
+    )
+    with pytest.raises(OSError, match="declared transient reconstruction failure"):
+        recover_phase1_historical_lifecycle(
+            recovery=admitted,
+            runtime=runtime,
+            matcher_history=matcher,
+            fact_history=fact_history,
+            order_issuance_verifier=order_verifier,
+            portfolio=freshness,
+            risk=freshness,
+            global_halt=freshness,
+            instrument_gate=freshness,
+        )
+
+    journal_path = root / str(UUID(matcher.run_id.value)) / "audit" / "audit-v1.journal"
+    journal_bytes = journal_path.read_bytes()
+    matcher_state = matcher.state
+    fact_outcomes = fact_history.outcomes
+    runtime_trace = runtime.trace_records
+    with pytest.raises(OSError, match="declared late reconstruction failure"):
+        recover_phase1_historical_lifecycle(
+            recovery=admitted,
+            runtime=runtime,
+            matcher_history=matcher,
+            fact_history=fact_history,
+            order_issuance_verifier=order_verifier,
+            portfolio=freshness,
+            risk=freshness,
+            global_halt=freshness,
+            instrument_gate=freshness,
+        )
+
+    assert journal_path.read_bytes() == journal_bytes
+    assert matcher.state == matcher_state
+    assert fact_history.outcomes == fact_outcomes
+    assert runtime.trace_records == runtime_trace
+
+    results: list[Phase1HistoricalLifecycle] = []
+    errors: list[BaseException] = []
+
+    def recover() -> None:
+        try:
+            results.append(
+                recover_phase1_historical_lifecycle(
+                    recovery=admitted,
+                    runtime=runtime,
+                    matcher_history=matcher,
+                    fact_history=fact_history,
+                    order_issuance_verifier=order_verifier,
+                    portfolio=freshness,
+                    risk=freshness,
+                    global_halt=freshness,
+                    instrument_gate=freshness,
+                )
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    worker = Thread(target=recover)
+    worker.start()
+    assert concurrent_entered.wait(timeout=5)
+    try:
+        with pytest.raises(RunCompositionError, match="already consumed"):
+            recover_phase1_historical_lifecycle(
+                recovery=admitted,
+                runtime=runtime,
+                matcher_history=matcher,
+                fact_history=fact_history,
+                order_issuance_verifier=order_verifier,
+                portfolio=freshness,
+                risk=freshness,
+                global_halt=freshness,
+                instrument_gate=freshness,
+            )
+    finally:
+        concurrent_release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert len(results) == 1
+    lifecycle = results[0]
+
+    assert factory_calls == 3
+    assert coordinator_calls == 2
 
     assert lifecycle.coordinator.state.phase is CoordinatorPhase.ADMITTED
     assert type(lifecycle.matcher) is HistoricalMatcherHistoryView

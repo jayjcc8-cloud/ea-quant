@@ -311,8 +311,14 @@ class AdmittedRun:
 class AdmittedRecoveredRun:
     """One-use store-issued recovery prefix bound to its reopened audit port."""
 
-    __slots__ = ("_consumed", "audit", "binding", "records")
-    _consumed: bool
+    __slots__ = (
+        "_consumption_lock",
+        "_consumption_state",
+        "_consumption_token",
+        "audit",
+        "binding",
+        "records",
+    )
     audit: BoundAuditPort
     binding: RunBinding
     records: AuditRecoveryRecordSource
@@ -335,7 +341,9 @@ class AdmittedRecoveredRun:
             or records.record_count != recovered.record_count
         ):
             raise RunCompositionError("recovered prefix is not bound to one admitted audit port")
-        self._consumed = False
+        self._consumption_lock = Lock()
+        self._consumption_state = "available"
+        self._consumption_token: object | None = None
         self.audit = audit
         self.binding = binding
         self.records = records
@@ -346,10 +354,38 @@ class AdmittedRecoveredRun:
         object.__setattr__(self, name, value)
 
     def _consume(self) -> tuple[RunBinding, BoundAuditPort, AuditRecoveryRecordSource]:
-        if self._consumed:
-            raise RunCompositionError("recovery admission was already consumed")
-        object.__setattr__(self, "_consumed", True)
-        return self.binding, self.audit, self.records
+        token, binding, audit, records = self._reserve_consumption()
+        self._commit_consumption(token)
+        return binding, audit, records
+
+    def _reserve_consumption(
+        self,
+    ) -> tuple[object, RunBinding, BoundAuditPort, AuditRecoveryRecordSource]:
+        token = object()
+        with self._consumption_lock:
+            if self._consumption_state != "available":
+                raise RunCompositionError("recovery admission was already consumed")
+            object.__setattr__(self, "_consumption_state", "assembling")
+            object.__setattr__(self, "_consumption_token", token)
+        return token, self.binding, self.audit, self.records
+
+    def _commit_consumption(self, token: object) -> None:
+        with self._consumption_lock:
+            if self._consumption_state != "assembling" or self._consumption_token is not token:
+                object.__setattr__(self, "_consumption_state", "failed")
+                object.__setattr__(self, "_consumption_token", None)
+                raise RunCompositionError("recovery admission reservation changed")
+            object.__setattr__(self, "_consumption_state", "committed")
+            object.__setattr__(self, "_consumption_token", None)
+
+    def _abort_consumption(self, token: object) -> None:
+        with self._consumption_lock:
+            if self._consumption_state != "assembling" or self._consumption_token is not token:
+                object.__setattr__(self, "_consumption_state", "failed")
+                object.__setattr__(self, "_consumption_token", None)
+                raise RunCompositionError("recovery admission reservation changed")
+            object.__setattr__(self, "_consumption_state", "available")
+            object.__setattr__(self, "_consumption_token", None)
 
 
 def prepare_reproducible_run(
