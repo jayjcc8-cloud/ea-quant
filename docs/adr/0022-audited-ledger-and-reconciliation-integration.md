@@ -123,6 +123,14 @@ binding already exists. If the Fill indexes exist but the integration binding do
 a Fill previously applied through legacy `apply_fill`, integration fails closed as
 `unbound_existing_fill`; it never retroactively invents audited provenance.
 
+For a genuinely new command the integration method precomputes the Fill/fact/entry indexes,
+transaction, balances, snapshot, open reconciliation references, original apply outcome, and
+handoff-command binding in one complete immutable candidate state. One state-pointer swap commits
+all of them indivisibly. Any validation, encoding, allocation, or callback failure before that swap
+leaves every index and observable byte unchanged; no fallible work occurs after the swap before the
+original result is retained. Exact retry therefore observes either no mutation or the complete
+binding. It can never observe economic mutation without provenance-index mutation.
+
 `AuditedLedgerHandoff` binds one `LedgerHandoffOutcome` to its exact audit acknowledgement. It is
 the only portfolio-update evidence exposed beyond the coordinator.
 
@@ -140,7 +148,8 @@ position/cash snapshots. Each entry is exactly one instrument plus quantized qua
 settlement currency plus quantized amount. The declared scope is complete: omission means the
 payload is invalid, not zero. Observation identity is
 `(source_namespace, source_sequence)`; identical identity/bytes is replay and different bytes is
-conflict.
+conflict. Canonical encoding must also fit the 16,384-byte audit payload cap; an oversized complete
+scope is rejected before root admission and cannot be split implicitly.
 
 `ReconciliationOutcome` binds the observation and current ledger frontier and has exactly one
 existing ADR 0008 outcome code. It includes comparison evidence and a closed requested action, but
@@ -363,13 +372,13 @@ The comparison/action table is normative:
 
 | Comparison | Outcome | Requested action | Adjustment eligible |
 |---|---|---|---|
-| exact equal watermark and balances | `match` | none | no |
-| remote watermark lower | `local_ahead_stale` | retain evidence | no |
-| remote watermark higher | `remote_ahead` | request missing trade facts | no |
-| equal watermark, exactly one complete quantized target differs | `mismatch` | propose derived single-target command | yes, subject to authorization |
-| equal watermark, more than one target differs | `quarantined` | manual evidence decomposition | no |
-| watermark absent/incomparable or payload incomplete | `invalid` | retain and halt | no |
-| unresolved Fill correlation without new exact ancestry | `unresolved_correlation` | retain and halt | no |
+| exact equal watermark and balances | `reconciliation.match` | `none` | no |
+| remote watermark lower | `reconciliation.local_ahead_stale` | `retain_and_halt` | no |
+| remote watermark higher | `reconciliation.remote_ahead` | `request_missing_trade_facts` | no |
+| equal watermark, exactly one complete quantized target differs | `reconciliation.mismatch` | `propose_single_target_adjustment` | yes, subject to authorization |
+| equal watermark, more than one target differs | `reconciliation.quarantined` | `manual_evidence_decomposition` | no |
+| watermark absent/incomparable or payload incomplete | `reconciliation.invalid` | `retain_and_halt` | no |
+| unresolved Fill correlation without new exact ancestry | `reconciliation.unresolved_correlation` | `retain_and_halt` | no |
 
 Comparison canonicalizes the complete declared observation scope and the acknowledged local
 snapshot before inspecting values. Identity, watermark, scope, and canonical validation precede
@@ -455,19 +464,27 @@ The extension preserves the accepted Phase 1 admission bound. Let:
 - `M` be admitted market roots;
 - `R` be admitted reconciliation roots, with `M + R <= 100,000`;
 - `D = M + R + 1` be all dispatches including bounded end;
-- `H` be all audited execution-fact handoffs, including bounded-end expiry handoffs; ADR 0017 and
-  ADR 0018 give `H <= M` because at most one Order chain is created per market dispatch and each
-  Order emits at most one trade or expiry ingress; and
-- `A` be allowed adjustment attempts, with `A <= R` and at most one per reconciliation root.
+- `T` be trade-detail reconciliation roots that normalize to one execution-fact handoff each;
+- `H` be all audited execution-fact handoffs, including those trade details and bounded-end expiry
+  handoffs; ADR 0017 and ADR 0018 give `H <= M + T` because at most one Order chain is created per
+  market dispatch, each Order emits at most one trade or expiry ingress, and each trade-detail root
+  emits at most one fact ingress;
+- `B` be adjustment authorization decisions, including denials; and
+- `A` be allowed adjustment outcomes, with `A <= B`.
+
+Only position/cash snapshot roots can request adjustment authorization; trade-detail and order-detail
+roots cannot. At most one decision exists per eligible root. Therefore `T + B <= R`.
 
 The record families are: preparation/failing/terminal `3`, submission authorization at most `M`,
 batch/completion/risk-refresh `3D`, fact outcomes plus ledger outcomes `2H`, reconciliation
-observation outcomes `R`, and adjustment authorization plus outcome `2A`. The exact conservative
-bound is:
+observation outcomes `R`, adjustment authorization decisions `B`, and allowed adjustment outcomes
+`A`. The exact conservative bound is:
 
 ```text
-3 + M + 3D + 2H + R + 2A
-= 4*M + 4*R + 2H + 2A + 6
+3 + M + 3D + 2H + R + B + A
+= 4*M + 4*R + 2H + B + A + 6
+<= 6*M + 4*R + 2*T + B + A + 6
+<= 6*M + 4*R + 2*(T + B) + 6
 <= 6*(M + R) + 6
 <= 600,006 records
 ```
