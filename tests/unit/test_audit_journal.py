@@ -579,6 +579,79 @@ def test_new_store_recovers_incomplete_attempt_with_one_use_capabilities(
     admitted_journals[0].close()
 
 
+def test_recovery_admission_retries_after_audit_factory_failure(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    original_store = LocalResultStore(root)
+    prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = original_store.verify_manifest(prepared.manifest_verification)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    _release_simulated_process_writer(original_store, prepared)
+
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedIncompleteRecoveryBinding
+    recovered = recovered_store.recover_incomplete_attempt(verified)
+    calls = 0
+    admitted_journals: list[PosixAuditJournal] = []
+
+    def reopen_after_one_failure(binding: AuditRunBinding) -> PosixAuditJournal:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("declared transient reopen failure")
+        reopened = reopen_posix_audit_journal(binding)
+        admitted_journals.append(reopened)
+        return reopened
+
+    with pytest.raises(OSError, match="declared transient reopen failure"):
+        admit_recovered_run(recovered, audit_factory=reopen_after_one_failure)
+
+    admitted = admit_recovered_run(recovered, audit_factory=reopen_after_one_failure)
+    with pytest.raises(RunCompositionError, match="already admitted"):
+        admit_recovered_run(recovered, audit_factory=reopen_after_one_failure)
+
+    assert calls == 2
+    assert admitted.binding == recovered.audit.binding
+    assert admitted.records.record_count == recovered.record_count
+    admitted_journals[0].close()
+
+
+def test_recovery_admission_rejects_reentry_before_factory(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    original_store = LocalResultStore(root)
+    prepared = original_store.prepare(_spec(), lambda: RUN_UUID)
+    manifest = original_store.verify_manifest(prepared.manifest_verification)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    _release_simulated_process_writer(original_store, prepared)
+
+    recovered_store = LocalResultStore(root)
+    verified = recovered_store.verify_recovery_attempt(manifest)
+    assert type(verified) is VerifiedIncompleteRecoveryBinding
+    recovered = recovered_store.recover_incomplete_attempt(verified)
+    nested_factory_calls = 0
+    admitted_journals: list[PosixAuditJournal] = []
+
+    def outer_factory(binding: AuditRunBinding) -> PosixAuditJournal:
+        def nested_factory(_binding: AuditRunBinding) -> PosixAuditJournal:
+            nonlocal nested_factory_calls
+            nested_factory_calls += 1
+            raise AssertionError("nested factory must not be called")
+
+        with pytest.raises(RunCompositionError, match="already admitted"):
+            admit_recovered_run(recovered, audit_factory=nested_factory)
+        reopened = reopen_posix_audit_journal(binding)
+        admitted_journals.append(reopened)
+        return reopened
+
+    admitted = admit_recovered_run(recovered, audit_factory=outer_factory)
+
+    assert nested_factory_calls == 0
+    assert admitted.binding == recovered.audit.binding
+    admitted_journals[0].close()
+
+
 @pytest.mark.parametrize("partial_frame", [False, True])
 def test_recovery_retries_run_prepared_after_empty_or_torn_first_frame(
     tmp_path: Path,

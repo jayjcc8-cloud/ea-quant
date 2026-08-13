@@ -409,7 +409,9 @@ class RecoveredRun:
     """Reissued process-local capabilities for the same incomplete durable attempt."""
 
     __slots__ = (
-        "_admitted",
+        "_admission_lock",
+        "_admission_state",
+        "_admission_token",
         "_authority",
         "audit",
         "manifest_sha256",
@@ -418,7 +420,9 @@ class RecoveredRun:
         "record_count",
         "reference",
     )
-    _admitted: bool
+    _admission_lock: Lock
+    _admission_state: str
+    _admission_token: object | None
     _authority: _AttemptAuthority
     audit: AuditRunBinding
     manifest_sha256: Sha256Digest
@@ -439,7 +443,9 @@ class RecoveredRun:
     ) -> None:
         if seal is not _RECOVERED_SEAL or type(record_count) is not int or record_count < 1:
             raise StoreError("recovered runs are store-issued")
-        object.__setattr__(self, "_admitted", False)
+        object.__setattr__(self, "_admission_lock", Lock())
+        object.__setattr__(self, "_admission_state", "available")
+        object.__setattr__(self, "_admission_token", None)
         object.__setattr__(self, "_authority", authority)
         object.__setattr__(self, "reference", authority.binding.reference)
         object.__setattr__(self, "manifest_sha256", authority.binding.manifest_sha256)
@@ -451,10 +457,32 @@ class RecoveredRun:
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("recovered run is immutable")
 
-    def _consume_for_admission(self) -> None:
-        if self._admitted:
-            raise StoreError("recovered run was already admitted")
-        object.__setattr__(self, "_admitted", True)
+    def _reserve_for_admission(self) -> object:
+        token = object()
+        with self._admission_lock:
+            if self._admission_state != "available":
+                raise StoreError("recovered run was already admitted")
+            object.__setattr__(self, "_admission_state", "admitting")
+            object.__setattr__(self, "_admission_token", token)
+        return token
+
+    def _commit_admission(self, token: object) -> None:
+        with self._admission_lock:
+            if self._admission_state != "admitting" or self._admission_token is not token:
+                raise StoreError("recovered run admission reservation changed")
+            object.__setattr__(self, "_admission_state", "admitted")
+            object.__setattr__(self, "_admission_token", None)
+
+    def _abort_admission(self, token: object, *, retryable: bool) -> None:
+        with self._admission_lock:
+            if self._admission_state != "admitting" or self._admission_token is not token:
+                raise StoreError("recovered run admission reservation changed")
+            object.__setattr__(
+                self,
+                "_admission_state",
+                "available" if retryable else "failed",
+            )
+            object.__setattr__(self, "_admission_token", None)
 
 
 class RecoveredTerminalRun:

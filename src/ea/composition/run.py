@@ -560,18 +560,37 @@ def admit_recovered_run(
     if not callable(audit_factory):
         raise RunCompositionError("recovery audit factory must be callable")
     try:
-        recovered._consume_for_admission()
+        reservation = recovered._reserve_for_admission()
     except StoreError as error:
         raise RunCompositionError("recovered run was already admitted") from error
-    raw_audit = audit_factory(recovered.audit)
-    if type(raw_audit) is not PosixAuditJournal or raw_audit._authority is not recovered._authority:
+    raw_audit: object | None = None
+    try:
+        raw_audit = audit_factory(recovered.audit)
+        if (
+            type(raw_audit) is not PosixAuditJournal
+            or raw_audit._authority is not recovered._authority
+        ):
+            raise RunCompositionError("recovery audit is not the store-bound reopened journal")
+        audit = BoundAuditPort(recovered.audit, raw_audit)
+        admitted = AdmittedRecoveredRun(
+            _RECOVERED_ADMISSION_SEAL,
+            recovered=recovered,
+            audit=audit,
+            records=raw_audit.recovery_records,
+        )
+        recovered._commit_admission(reservation)
+        return admitted
+    except BaseException:
+        cleanup_error: BaseException | None = None
         if type(raw_audit) is PosixAuditJournal:
-            raw_audit.close()
-        raise RunCompositionError("recovery audit is not the store-bound reopened journal")
-    audit = BoundAuditPort(recovered.audit, raw_audit)
-    return AdmittedRecoveredRun(
-        _RECOVERED_ADMISSION_SEAL,
-        recovered=recovered,
-        audit=audit,
-        records=raw_audit.recovery_records,
-    )
+            try:
+                raw_audit.close()
+            except BaseException as caught:
+                cleanup_error = caught
+        try:
+            recovered._abort_admission(reservation, retryable=cleanup_error is None)
+        except StoreError as caught:
+            raise RunCompositionError("recovery admission state changed during cleanup") from caught
+        if cleanup_error is not None:
+            raise RunCompositionError("recovery audit cleanup failed") from cleanup_error
+        raise
