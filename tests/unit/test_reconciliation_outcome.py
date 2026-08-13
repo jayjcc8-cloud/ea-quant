@@ -41,6 +41,7 @@ from ea.core import (
     RunBinding,
     RunReference,
     Sha256Digest,
+    SourceNamespace,
     UnresolvedFillRef,
     audit_subject_digest,
     audited_reconciliation_adjustment_authorization_digest,
@@ -703,6 +704,44 @@ def test_balance_command_requires_exact_outcome_ack_and_is_rederived() -> None:
             adjustment_id=adjustment_id,
         )
 
+    foreign_watermark_observation = create_reconciliation_observation(
+        run_id=observation.run_id,
+        spec_set=_spec_set(),
+        observation_id=observation.observation_id,
+        kind=observation.kind,
+        source_namespace=observation.source_namespace,
+        source_sequence=observation.source_sequence,
+        occurred_at=observation.occurred_at,
+        available_at=observation.available_at,
+        watermark_namespace=SourceNamespace("ledger.foreign"),
+        watermark_sequence=observation.watermark_sequence,
+        declared_scope_kind=observation.declared_scope_kind,
+        declared_scope_id=observation.declared_scope_id,
+        provenance_id=observation.provenance_id,
+        provenance_payload_sha256=observation.provenance_payload_sha256,
+        balances=observation.balances,
+    )
+    foreign_watermark_outcome = _outcome(
+        observation_sha256=reconciliation_observation_digest(foreign_watermark_observation),
+        local_snapshot_version=snapshot.snapshot_version,
+        local_snapshot_sha256=portfolio_snapshot_digest(snapshot),
+        ledger_sequence=snapshot.ledger_sequence,
+        discrepancies=(discrepancy,),
+        outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
+        requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+        halt_requested=True,
+    )
+    with pytest.raises(ReconciliationContractError, match="evidence bindings"):
+        _create_reconciliation_adjustment_command(
+            binding=BINDING,
+            spec_set=_spec_set(),
+            observation=foreign_watermark_observation,
+            outcome=foreign_watermark_outcome,
+            outcome_acknowledgement=_outcome_acknowledgement(foreign_watermark_outcome),
+            local_snapshot=snapshot,
+            adjustment_id=adjustment_id,
+        )
+
 
 def test_ancestry_evidence_has_exact_adr_0024_payload_and_digest() -> None:
     order = _order()
@@ -1050,6 +1089,24 @@ def test_authorization_rejects_wrong_identity_ack_and_payload_drift() -> None:
             outcome_acknowledgement=outcome_acknowledgement,
             command=command,
             authorization_id=command.adjustment_id,
+            policy_id=ReconciliationAuthorizationPolicyId("reconciliation.test-policy.v1"),
+            policy_version=1,
+            policy_sha256=Sha256Digest("77" * 32),
+            decision=ReconciliationAuthorizationDecision.ALLOWED,
+            available_at=TIME,
+        )
+    with pytest.raises(ReconciliationContractError, match="identity sequence must be positive"):
+        _create_reconciliation_adjustment_authorization(
+            binding=BINDING,
+            spec_set=_spec_set(),
+            outcome=outcome,
+            outcome_acknowledgement=outcome_acknowledgement,
+            command=command,
+            authorization_id=EconomicId(
+                RUN_ID,
+                EconomicOwnerKind.RECONCILIATION_AUTHORIZATION,
+                0,
+            ),
             policy_id=ReconciliationAuthorizationPolicyId("reconciliation.test-policy.v1"),
             policy_version=1,
             policy_sha256=Sha256Digest("77" * 32),

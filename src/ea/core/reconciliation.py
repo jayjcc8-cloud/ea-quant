@@ -51,6 +51,7 @@ MAX_RECONCILIATION_BALANCES = 32
 
 _ANCESTRY_EVIDENCE_DIGEST_DOMAIN = b"ea.reconciliation-ancestry-evidence.v1\0"
 _ANCESTRY_EVIDENCE_CANONICALIZATION = "ea-reconciliation-v1"
+_PORTFOLIO_LEDGER_WATERMARK_NAMESPACE = SourceNamespace("ledger.portfolio")
 
 _MAX_UINT64 = (1 << 64) - 1
 _VALUE_SEAL = object()
@@ -666,6 +667,7 @@ def _create_reconciliation_adjustment_command(
         or local_snapshot.snapshot_version != outcome.local_snapshot_version
         or local_snapshot.ledger_sequence != outcome.ledger_sequence
         or portfolio_snapshot_digest(local_snapshot) != outcome.local_snapshot_sha256
+        or observation.watermark_namespace != _PORTFOLIO_LEDGER_WATERMARK_NAMESPACE
         or observation.watermark_sequence != local_snapshot.ledger_sequence
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment command evidence bindings conflict")
@@ -977,6 +979,8 @@ def _create_reconciliation_adjustment_authorization(
     _require_uint64(policy_version, "policy_version")
     if policy_version == 0:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "policy_version must be positive")
+    if authorization_id.owner_sequence == 0:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "authorization identity sequence must be positive")
     checked_available_at = _require_time(available_at, "available_at")
     run_id = binding.reference.run_id
     if (
