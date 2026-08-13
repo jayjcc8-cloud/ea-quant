@@ -10,6 +10,7 @@ from ea.core.audit import (
     MAX_AUDIT_RECORDS,
     AuditContractError,
     AuditLogicalKey,
+    AuditRecord,
     AuditRecordKind,
     AuditSubjectKind,
     audit_append_acknowledgement_digest,
@@ -122,21 +123,25 @@ def test_accepted_adr_0022_record_sequence_bound_is_exact() -> None:
         }
     )
     kind = AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
-    arguments = {
-        "binding": _binding(),
-        "record_kind": kind,
-        "subject_kind": AuditSubjectKind.COORDINATOR_STATE,
-        "subject_sha256": audit_subject_digest(kind, payload),
-        "canonical_payload": payload,
-        "previous_record_sha256": Sha256Digest("77" * 32),
-        "previous_chain_head_sha256": Sha256Digest("88" * 32),
-    }
+    subject_sha256 = audit_subject_digest(kind, payload)
 
-    record = create_audit_record(owner_sequence=MAX_AUDIT_RECORDS, **arguments)
+    def create_at(owner_sequence: int) -> AuditRecord:
+        return create_audit_record(
+            binding=_binding(),
+            owner_sequence=owner_sequence,
+            record_kind=kind,
+            subject_kind=AuditSubjectKind.COORDINATOR_STATE,
+            subject_sha256=subject_sha256,
+            canonical_payload=payload,
+            previous_record_sha256=Sha256Digest("77" * 32),
+            previous_chain_head_sha256=Sha256Digest("88" * 32),
+        )
+
+    record = create_at(MAX_AUDIT_RECORDS)
 
     assert record.record_id.owner_sequence == 600_006
     with pytest.raises(AuditContractError, match="outside the v1 bound"):
-        create_audit_record(owner_sequence=MAX_AUDIT_RECORDS + 1, **arguments)
+        create_at(MAX_AUDIT_RECORDS + 1)
 
 
 @pytest.mark.parametrize(
