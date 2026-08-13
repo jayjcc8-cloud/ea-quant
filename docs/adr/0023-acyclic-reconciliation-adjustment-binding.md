@@ -51,8 +51,10 @@ portfolio frontier, exact outcome, and the evidence required by the selected act
 continues to bind the complete reconciliation-outcome digest. The later authorization continues to
 bind both the command digest and the prior outcome-acknowledgement digest.
 
-This order has one direction of causality and one audit gate. There is no placeholder, partial
-document, fixed-point search, mutable backfill, or retry-dependent digest.
+This order has one direction of causality and two ordered pre-effect audit gates: outcome
+acknowledgement before command issuance, then authorization acknowledgement before ledger effect.
+There is no placeholder, partial document, fixed-point search, mutable backfill, or retry-dependent
+digest.
 
 ### Reconciliation outcome v2
 
