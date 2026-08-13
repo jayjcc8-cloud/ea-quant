@@ -182,6 +182,16 @@ digest chain, and snapshot-version increment:
   Fill and outcome digests, and newly proven correlation evidence. It has zero economic postings,
   removes only that exact reference, and changes no cash, position, or rounding balance.
 
+For `balance_correction`, `delta = observed_amount - local_amount` under the existing exact
+canonical-decimal arithmetic. An instrument target requires the delta to be an exact multiple of
+its quantity quantum and derives, in this order,
+`portfolio.position += delta` and `external.inventory -= delta`. A cash target requires the delta
+to be an exact multiple of that currency's quantum and derives, in this order,
+`portfolio.cash += delta` and `external.settlement -= delta`. Both commodity sums are exactly zero.
+Overflow, zero delta, wrong grid/currency/specification, or an unrepresentable opposite amount
+returns a closed failed outcome before mutation. Rounding and arbitrary residual postings are
+forbidden for corrections.
+
 No command may combine variants or targets. A comparison with zero delta is `match`, not an
 adjustment. A snapshot with zero or more than one discrepant target is not automatically
 correctable and returns `quarantined`. This Phase 1 limit keeps every economic correction at
@@ -199,6 +209,17 @@ neither variant fabricates fields belonging to the other.
 `ReconciliationAdjustmentOutcome` binds the authorization, resulting reconciliation transaction
 and snapshot, and one closed result: `applied`, `duplicate`, `conflict`, or `failed`.
 
+The adjustment command document contains exactly: schema/canonicalization, run/specification
+binding, adjustment ID, observation and reconciliation-outcome digests, acknowledged ledger
+sequence and snapshot digest, variant, target, local/observed/delta amounts or exact open-reference
+and newly proven ancestry fields, and dispatch sequence. Its factory derives every field except the
+already canonical observation/outcome evidence. The authorization document adds authorization ID,
+policy ID/version/digest, decision, command digest, and pre-effect audit binding. The adjustment
+outcome document adds result, failure/conflict kind, original transaction ID/digest or null, and
+before/after snapshot digests. Closed failure kinds are `invalid_command`, `stale_frontier`,
+`arithmetic_failure`, and `unbalanced`; closed conflicts are `authorization_id_collision`,
+`adjustment_id_collision`, `observation_already_consumed`, and `index_inconsistent`.
+
 `PortfolioRiskRefresh` is separate from `RiskStateSnapshot`. It binds the run, policy identity and
 digest, exact portfolio snapshot version/digest, current monotone risk-state version/digest,
 derived exposure digest, dispatch sequence, and whether submission remains permitted. It neither
@@ -213,6 +234,11 @@ Exact replay returns the original refresh bytes; the same key with different byt
 Its canonical document contains exactly those bindings plus refresh sequence, ordered ledger
 acknowledgement-frontier digest, risk-state digest, exposure digest, submission-permitted flag, and
 previous-refresh digest or null.
+
+`submission_permitted` is derived, never caller supplied. It is true exactly when the final bound
+risk state is not halted, the coordinator is running, the internal and published portfolio/risk
+frontiers are equal, there is no open reconciliation reference, and no ledger, refresh,
+reconciliation, correction, or audit operation is pending. Otherwise it is false.
 
 The audit vocabulary adds exact logical kinds and subjects for
 `portfolio.ledger_handoff_outcome`, `risk.portfolio_refresh`,
@@ -237,7 +263,10 @@ Every digest uses `SHA-256(domain + payload_length_u64 + canonical_payload)`. De
 unknown/missing fields, non-canonical JSON, bool-as-int, subclasses, floats, unbounded arrays, and
 invalid enum or digest text. Adjustment authorization decisions are exactly `allowed` or `denied`;
 command variants are exactly `balance_correction` or `ancestry_resolution`; targets are exactly
-`instrument_position` or `settlement_cash`. A denial has no transaction or snapshot fields.
+`instrument_position`, `settlement_cash`, or `open_reconciliation_ref`. Requested actions are
+exactly `none`, `request_missing_trade_facts`, `retain_and_halt`,
+`manual_evidence_decomposition`, `propose_single_target_adjustment`, or
+`propose_ancestry_resolution`. A denial has no transaction or snapshot fields.
 
 `EconomicOwnerKind` gains `reconciliation.authorization` and `reconciliation.adjustment`.
 Authorization sequence belongs only to the private authorization authority. Adjustment identity
@@ -313,15 +342,17 @@ No callback return is trusted without re-reading every mutable authority it coul
 The coordinator rebinds active lease, fact outcome, Fill, ledger result/snapshot, and risk state
 after each external callback and immediately before completion append and runtime acknowledgement.
 
-`AcknowledgedPortfolioFrontier` is a composition-owned facade with separate internal and
-published states. The mutable ledger may advance the internal state at step 3, but every public
-snapshot/history view, `PortfolioFreshnessPort`, strategy, authorization, completion encoder, and
-terminal evidence reads only the published state. While a ledger result or refresh acknowledgement
-is pending, the published state remains the previous acknowledged frontier and the coordinator is
-the only holder of the pending internal result. The facade advances once only after exact ledger
-and refresh acknowledgements; an exception resolves to exact old or exact new publication bytes,
-otherwise conflict. The concrete ledger and its immediate `snapshot` property never escape
-composition.
+`AcknowledgedLifecycleFrontier` is a composition-owned facade with separate internal and published
+portfolio and risk states. The mutable ledger may advance its internal snapshot at step 3 and the
+risk authority may engage its internal halt at step 6, but every public portfolio/risk history
+view, `PortfolioFreshnessPort`, `RiskFreshnessPort`, strategy, authorization, completion encoder,
+and terminal evidence reads only the jointly published state. While a ledger result or refresh
+acknowledgement is pending, both published states remain the previous acknowledged frontier and the
+coordinator is the only holder of the pending internal values. The facade advances the portfolio
+snapshot, risk state, and refresh bytes in one state-pointer swap only after exact ledger and
+refresh acknowledgements; an exception resolves to exact old or exact new joint publication bytes,
+otherwise conflict. The concrete ledger, risk authority, and their immediate state properties never
+escape composition.
 
 The completion record moves to a new schema version. An old completion record cannot be interpreted
 as proving a ledger frontier. Within one audit journal the order is physical and normative:
@@ -379,11 +410,14 @@ The comparison/action table is normative:
 | equal watermark, more than one target differs | `reconciliation.quarantined` | `manual_evidence_decomposition` | no |
 | watermark absent/incomparable or payload incomplete | `reconciliation.invalid` | `retain_and_halt` | no |
 | unresolved Fill correlation without new exact ancestry | `reconciliation.unresolved_correlation` | `retain_and_halt` | no |
+| exact order-detail evidence proves complete ancestry for one named open reference | `reconciliation.match` | `propose_ancestry_resolution` | yes, subject to authorization |
 
 Comparison canonicalizes the complete declared observation scope and the acknowledged local
 snapshot before inspecting values. Identity, watermark, scope, and canonical validation precede
-economic comparison. The proposed command is a pure function of observation bytes, local snapshot
-bytes, and the one differing target; the authorizer cannot edit it.
+economic comparison. A balance command is a pure function of observation bytes, local snapshot
+bytes, and the one differing target. An ancestry command is a pure function of exact order-detail
+bytes, the named open reference, and independently resolved canonical Order evidence. The
+authorizer cannot edit either command.
 
 The authorization policy is factory-bound by exact ID, version, and canonical digest. It may only
 return `allowed` or `denied` for the exact proposed command and frontier. `allowed` requires an
@@ -422,10 +456,11 @@ injection is a conflict.
 
 Recovery also rebuilds the non-evicting handoff-command integration index before classifying any
 duplicate Fill. It reconstructs the internal ledger frontier first and advances the separate
-published frontier only at each verified ledger-plus-refresh acknowledgement boundary. A crash
-between internal mutation and publication therefore recovers the previous public snapshot plus one
-pending exact command; it cannot expose the internal snapshot early or misclassify a legacy Fill as
-integrated.
+joint published portfolio/risk frontier only at each verified ledger-plus-refresh acknowledgement
+boundary. It replays an internal halt without exposing it through `RiskFreshnessPort` until the
+matching refresh acknowledgement is verified. A crash between internal mutation and publication
+therefore recovers the previous public portfolio/risk states plus one pending exact command; it
+cannot expose internal state early or misclassify a legacy Fill as integrated.
 
 For an incomplete dispatch, recovery groups by dispatch sequence and batch order but also enforces
 the physical audit order. A fact outcome with no ledger record is eligible for the same exact
@@ -449,8 +484,9 @@ with `available` rollback only when failure is provably clean and no mutable aut
 published or retired. Any uncertain cleanup or partial authority retirement becomes permanent
 `failed`. A recovered economic history can be consumed by exactly one lifecycle.
 
-Terminalization is permitted only when the runtime has no active lease and the internal ledger
-frontier equals the acknowledged published frontier; every admitted handoff has an acknowledged
+Terminalization is permitted only when the runtime has no active lease, the internal ledger
+frontier equals the acknowledged published portfolio frontier, and the internal risk state equals
+the acknowledged published risk frontier; every admitted handoff has an acknowledged
 ledger outcome; the final risk refresh is acknowledged; every reconciliation observation has an
 acknowledged outcome; and no allowed adjustment, pending audit, unpublished mutation, or recovery
 reservation remains. Terminal evidence binds the final published snapshot, risk refresh, open
