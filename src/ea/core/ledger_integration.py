@@ -15,7 +15,13 @@ from ea.core.execution_identity import (
     SourceNamespace,
 )
 from ea.core.outcomes import OutcomeCode
-from ea.core.portfolio import LEDGER_APPLY_OUTCOME_DIGEST_DOMAIN
+from ea.core.portfolio import (
+    LEDGER_APPLY_OUTCOME_DIGEST_DOMAIN,
+    PortfolioSnapshot,
+    canonical_portfolio_snapshot_bytes,
+    portfolio_snapshot_digest,
+)
+from ea.core.risk import RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
 from ea.core.run import RunId, Sha256Digest
 
 LEDGER_APPLICATION_COMMAND_SCHEMA = "ea.ledger-application-command.v1"
@@ -24,6 +30,9 @@ LEDGER_HANDOFF_OUTCOME_SCHEMA = "ea.ledger-handoff-outcome.v1"
 LEDGER_HANDOFF_OUTCOME_DIGEST_DOMAIN = b"ea.ledger-handoff-outcome.v1\0"
 LEDGER_INTEGRATION_CANONICALIZATION = "ea-canonical-json-v1"
 MAX_LEDGER_INTEGRATION_PAYLOAD_BYTES = 16_384
+PORTFOLIO_RISK_REFRESH_SCHEMA = "ea.portfolio-risk-refresh.v1"
+PORTFOLIO_RISK_REFRESH_DIGEST_DOMAIN = b"ea.portfolio-risk-refresh.v1\0"
+PORTFOLIO_RISK_EXPOSURE_DIGEST_DOMAIN = b"ea.portfolio-risk-exposure.v1\0"
 
 _MAX_UINT64 = (1 << 64) - 1
 _VALUE_SEAL = object()
@@ -109,6 +118,140 @@ class LedgerHandoffOutcome:
 
     def __init__(self) -> None:
         raise TypeError("ledger handoff outcomes are created only by their factory")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class PortfolioRiskRefresh:
+    run_id: RunId
+    policy_id: RiskPolicyId
+    policy_sha256: Sha256Digest
+    portfolio_snapshot_version: int
+    portfolio_snapshot_sha256: Sha256Digest
+    risk_state_version: int
+    risk_state_sha256: Sha256Digest
+    exposure_sha256: Sha256Digest
+    dispatch_sequence: int
+    refresh_sequence: int
+    ordered_ledger_ack_frontier_sha256: Sha256Digest
+    submission_permitted: bool
+    previous_refresh_sha256: Sha256Digest | None
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("portfolio risk refreshes are created only by the lifecycle factory")
+
+
+def _create_portfolio_risk_refresh(
+    *,
+    portfolio_snapshot: PortfolioSnapshot,
+    risk_state: RiskStateSnapshot,
+    dispatch_sequence: int,
+    refresh_sequence: int,
+    ordered_ledger_ack_frontier_sha256: Sha256Digest,
+    submission_permitted: bool,
+    previous_refresh_sha256: Sha256Digest | None,
+) -> PortfolioRiskRefresh:
+    if type(portfolio_snapshot) is not PortfolioSnapshot:
+        raise _fail(OutcomeCode.INVALID_TYPE, "portfolio snapshot must be exact")
+    if type(risk_state) is not RiskStateSnapshot:
+        raise _fail(OutcomeCode.INVALID_TYPE, "risk state must be exact")
+    if portfolio_snapshot.run_id != risk_state.run_id:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "refresh portfolio and risk runs conflict")
+    if (
+        risk_state.halt_dispatch_sequence is not None
+        and risk_state.halt_dispatch_sequence > dispatch_sequence
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "refresh precedes its bound risk halt")
+    snapshot_bytes = canonical_portfolio_snapshot_bytes(portfolio_snapshot)
+    return _create_portfolio_risk_refresh_fields(
+        run_id=portfolio_snapshot.run_id,
+        policy_id=risk_state.policy_id,
+        policy_sha256=risk_state.policy_sha256,
+        portfolio_snapshot_version=portfolio_snapshot.snapshot_version,
+        portfolio_snapshot_sha256=portfolio_snapshot_digest(portfolio_snapshot),
+        risk_state_version=risk_state.risk_state_version,
+        risk_state_sha256=risk_state_snapshot_digest(risk_state),
+        exposure_sha256=_framed_digest(
+            PORTFOLIO_RISK_EXPOSURE_DIGEST_DOMAIN,
+            snapshot_bytes,
+        ),
+        dispatch_sequence=dispatch_sequence,
+        refresh_sequence=refresh_sequence,
+        ordered_ledger_ack_frontier_sha256=ordered_ledger_ack_frontier_sha256,
+        submission_permitted=submission_permitted,
+        previous_refresh_sha256=previous_refresh_sha256,
+        risk_halted=risk_state.halted,
+    )
+
+
+def _create_portfolio_risk_refresh_fields(
+    *,
+    run_id: RunId,
+    policy_id: RiskPolicyId,
+    policy_sha256: Sha256Digest,
+    portfolio_snapshot_version: int,
+    portfolio_snapshot_sha256: Sha256Digest,
+    risk_state_version: int,
+    risk_state_sha256: Sha256Digest,
+    exposure_sha256: Sha256Digest,
+    dispatch_sequence: int,
+    refresh_sequence: int,
+    ordered_ledger_ack_frontier_sha256: Sha256Digest,
+    submission_permitted: bool,
+    previous_refresh_sha256: Sha256Digest | None,
+    risk_halted: bool | None,
+) -> PortfolioRiskRefresh:
+    _require_run_id(run_id)
+    if type(policy_id) is not RiskPolicyId:
+        raise _fail(OutcomeCode.INVALID_TYPE, "risk policy ID must be exact")
+    for name, digest in (
+        ("policy_sha256", policy_sha256),
+        ("portfolio_snapshot_sha256", portfolio_snapshot_sha256),
+        ("risk_state_sha256", risk_state_sha256),
+        ("exposure_sha256", exposure_sha256),
+        ("ordered_ledger_ack_frontier_sha256", ordered_ledger_ack_frontier_sha256),
+    ):
+        _require_digest(digest, name)
+    if previous_refresh_sha256 is not None:
+        _require_digest(previous_refresh_sha256, "previous_refresh_sha256")
+    _require_uint64(portfolio_snapshot_version, "portfolio_snapshot_version")
+    _require_uint64(risk_state_version, "risk_state_version")
+    _require_positive_uint64(dispatch_sequence, "dispatch_sequence")
+    _require_positive_uint64(refresh_sequence, "refresh_sequence")
+    if refresh_sequence != dispatch_sequence:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "refresh and dispatch sequences conflict")
+    if type(submission_permitted) is not bool:
+        raise _fail(OutcomeCode.INVALID_TYPE, "submission_permitted must be exact bool")
+    if risk_halted is not None and type(risk_halted) is not bool:
+        raise _fail(OutcomeCode.INVALID_TYPE, "risk_halted must be exact bool or None")
+    if risk_halted and submission_permitted:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "halted risk state cannot permit submission")
+    if refresh_sequence == 1:
+        if previous_refresh_sha256 is not None:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "first refresh cannot name a predecessor")
+    elif previous_refresh_sha256 is None:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "later refresh requires a predecessor")
+    value = object.__new__(PortfolioRiskRefresh)
+    for name, field in (
+        ("run_id", run_id),
+        ("policy_id", policy_id),
+        ("policy_sha256", policy_sha256),
+        ("portfolio_snapshot_version", portfolio_snapshot_version),
+        ("portfolio_snapshot_sha256", portfolio_snapshot_sha256),
+        ("risk_state_version", risk_state_version),
+        ("risk_state_sha256", risk_state_sha256),
+        ("exposure_sha256", exposure_sha256),
+        ("dispatch_sequence", dispatch_sequence),
+        ("refresh_sequence", refresh_sequence),
+        ("ordered_ledger_ack_frontier_sha256", ordered_ledger_ack_frontier_sha256),
+        ("submission_permitted", submission_permitted),
+        ("previous_refresh_sha256", previous_refresh_sha256),
+    ):
+        object.__setattr__(value, name, field)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    canonical_portfolio_risk_refresh_bytes(value)
+    return value
 
 
 def _create_ledger_application_command(
@@ -319,6 +462,102 @@ def ledger_handoff_outcome_digest(outcome: LedgerHandoffOutcome) -> Sha256Digest
         LEDGER_HANDOFF_OUTCOME_DIGEST_DOMAIN,
         canonical_ledger_handoff_outcome_bytes(outcome),
     )
+
+
+def canonical_portfolio_risk_refresh_bytes(refresh: PortfolioRiskRefresh) -> bytes:
+    if type(refresh) is not PortfolioRiskRefresh or refresh._seal is not _VALUE_SEAL:
+        raise _fail(OutcomeCode.INVALID_TYPE, "portfolio risk refresh must be factory-issued")
+    payload = _canonical_json(
+        {
+            "canonicalization": LEDGER_INTEGRATION_CANONICALIZATION,
+            "dispatch_sequence": refresh.dispatch_sequence,
+            "exposure_sha256": refresh.exposure_sha256.value,
+            "ordered_ledger_ack_frontier_sha256": (
+                refresh.ordered_ledger_ack_frontier_sha256.value
+            ),
+            "policy_id": refresh.policy_id.value,
+            "policy_sha256": refresh.policy_sha256.value,
+            "portfolio_snapshot_sha256": refresh.portfolio_snapshot_sha256.value,
+            "portfolio_snapshot_version": refresh.portfolio_snapshot_version,
+            "previous_refresh_sha256": (
+                None
+                if refresh.previous_refresh_sha256 is None
+                else refresh.previous_refresh_sha256.value
+            ),
+            "refresh_sequence": refresh.refresh_sequence,
+            "risk_state_sha256": refresh.risk_state_sha256.value,
+            "risk_state_version": refresh.risk_state_version,
+            "run_id": refresh.run_id.value,
+            "schema": PORTFOLIO_RISK_REFRESH_SCHEMA,
+            "submission_permitted": refresh.submission_permitted,
+        }
+    )
+    if len(payload) > MAX_LEDGER_INTEGRATION_PAYLOAD_BYTES:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "portfolio risk refresh exceeds its byte bound")
+    return payload
+
+
+def portfolio_risk_refresh_digest(refresh: PortfolioRiskRefresh) -> Sha256Digest:
+    return _framed_digest(
+        PORTFOLIO_RISK_REFRESH_DIGEST_DOMAIN,
+        canonical_portfolio_risk_refresh_bytes(refresh),
+    )
+
+
+def decode_portfolio_risk_refresh(canonical_payload: bytes) -> PortfolioRiskRefresh:
+    document = _decode_canonical_json(canonical_payload, "portfolio risk refresh")
+    fields = {
+        "canonicalization",
+        "dispatch_sequence",
+        "exposure_sha256",
+        "ordered_ledger_ack_frontier_sha256",
+        "policy_id",
+        "policy_sha256",
+        "portfolio_snapshot_sha256",
+        "portfolio_snapshot_version",
+        "previous_refresh_sha256",
+        "refresh_sequence",
+        "risk_state_sha256",
+        "risk_state_version",
+        "run_id",
+        "schema",
+        "submission_permitted",
+    }
+    if type(document) is not dict or set(document) != fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "portfolio risk refresh fields conflict")
+    if (
+        document["schema"] != PORTFOLIO_RISK_REFRESH_SCHEMA
+        or document["canonicalization"] != LEDGER_INTEGRATION_CANONICALIZATION
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "portfolio risk refresh schema conflicts")
+    try:
+        refresh = _create_portfolio_risk_refresh_fields(
+            run_id=RunId(_require_text(document, "run_id")),
+            policy_id=RiskPolicyId(_require_text(document, "policy_id")),
+            policy_sha256=Sha256Digest(_require_text(document, "policy_sha256")),
+            portfolio_snapshot_version=_require_json_int(document, "portfolio_snapshot_version"),
+            portfolio_snapshot_sha256=Sha256Digest(
+                _require_text(document, "portfolio_snapshot_sha256")
+            ),
+            risk_state_version=_require_json_int(document, "risk_state_version"),
+            risk_state_sha256=Sha256Digest(_require_text(document, "risk_state_sha256")),
+            exposure_sha256=Sha256Digest(_require_text(document, "exposure_sha256")),
+            dispatch_sequence=_require_json_int(document, "dispatch_sequence"),
+            refresh_sequence=_require_json_int(document, "refresh_sequence"),
+            ordered_ledger_ack_frontier_sha256=Sha256Digest(
+                _require_text(document, "ordered_ledger_ack_frontier_sha256")
+            ),
+            submission_permitted=_require_json_bool(document, "submission_permitted"),
+            previous_refresh_sha256=_decode_optional_digest(document["previous_refresh_sha256"]),
+            risk_halted=None,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        if isinstance(error, LedgerIntegrationError):
+            raise
+        raise _fail(OutcomeCode.CONFLICTING_ID, "portfolio risk refresh values conflict") from error
+    if canonical_portfolio_risk_refresh_bytes(refresh) != canonical_payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "portfolio risk refresh round-trip conflicts")
+    return refresh
 
 
 def decode_ledger_handoff_outcome(canonical_payload: bytes) -> LedgerHandoffOutcome:

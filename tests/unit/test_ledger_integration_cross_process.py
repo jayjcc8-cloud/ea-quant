@@ -8,15 +8,21 @@ from pathlib import Path
 _SCRIPT = """
 import json
 from ea.core import (
-    EconomicId, EconomicOwnerKind, IngressIdentity, LedgerHandoffAction,
-    RunId, Sha256Digest, SourceNamespace,
+    EconomicId, EconomicOwnerKind, IngressIdentity, InstrumentSpecSetId,
+    LedgerHandoffAction, PortfolioSnapshot, RiskPolicyId, RunId, Sha256Digest,
+    SourceNamespace,
     canonical_ledger_application_command_bytes,
     canonical_ledger_handoff_outcome_bytes,
+    canonical_portfolio_risk_refresh_bytes,
     create_ledger_handoff_outcome,
     ledger_application_command_digest,
     ledger_handoff_outcome_digest,
+    portfolio_risk_refresh_digest,
 )
-from ea.core.ledger_integration import _create_ledger_application_command
+from ea.core.ledger_integration import (
+    _create_ledger_application_command, _create_portfolio_risk_refresh,
+)
+from ea.core.risk import _create_risk_state_snapshot
 
 run_id = RunId("12345678-1234-4234-8234-123456789abc")
 fill_id = EconomicId(run_id, EconomicOwnerKind.EXECUTION_FILL, 7)
@@ -49,11 +55,38 @@ outcome = create_ledger_handoff_outcome(
     halt_requested=False,
     failure=None,
 )
+snapshot = PortfolioSnapshot(
+    run_id, InstrumentSpecSetId("phase1.test.v1"), Sha256Digest("66" * 32),
+    0, 0, None, None, (), (), (), (),
+)
+risk_state = _create_risk_state_snapshot(
+    run_id=run_id,
+    policy_id=RiskPolicyId("phase1.test-risk.v1"),
+    policy_sha256=Sha256Digest("77" * 32),
+    risk_state_version=0,
+    halted=False,
+    halt_reason=None,
+    halt_causal_root_available_at=None,
+    halt_dispatch_sequence=None,
+    conflict_existing_intent_sha256=None,
+    conflict_submitted_intent_sha256=None,
+)
+refresh = _create_portfolio_risk_refresh(
+    portfolio_snapshot=snapshot,
+    risk_state=risk_state,
+    dispatch_sequence=1,
+    refresh_sequence=1,
+    ordered_ledger_ack_frontier_sha256=Sha256Digest("88" * 32),
+    submission_permitted=True,
+    previous_refresh_sha256=None,
+)
 print(json.dumps({
     "command": canonical_ledger_application_command_bytes(command).hex(),
     "command_sha256": ledger_application_command_digest(command).value,
     "outcome": canonical_ledger_handoff_outcome_bytes(outcome).hex(),
     "outcome_sha256": ledger_handoff_outcome_digest(outcome).value,
+    "refresh": canonical_portfolio_risk_refresh_bytes(refresh).hex(),
+    "refresh_sha256": portfolio_risk_refresh_digest(refresh).value,
 }, sort_keys=True, separators=(",", ":")))
 """
 
