@@ -689,6 +689,33 @@ def _runtime_for_port(port: _ScriptedPort) -> Phase1HistoricalMarketRuntime:
     )
 
 
+def test_runtime_admits_one_hundred_thousand_and_rejects_the_next_record() -> None:
+    admitted = _scripted_port(())
+    admitted._binding = replace(
+        admitted.binding,
+        data_fingerprint=replace(
+            admitted.binding.data_fingerprint,
+            record_count=100_000,
+        ),
+    )
+    assert type(_runtime_for_port(admitted)) is Phase1HistoricalMarketRuntime
+
+    port = _scripted_port(())
+    port._binding = replace(
+        port.binding,
+        data_fingerprint=replace(
+            port.binding.data_fingerprint,
+            record_count=100_001,
+        ),
+    )
+
+    with pytest.raises(RuntimeOrderingError) as captured:
+        _runtime_for_port(port)
+
+    assert captured.value.code is OutcomeCode.OUT_OF_RANGE
+    assert "100,000-record profile admission bound" in str(captured.value)
+
+
 @pytest.mark.parametrize("mutation", ("scheduled", "cursor", "both"))
 def test_acknowledgement_revalidates_mutable_candidate_time_evidence(
     mutation: str,

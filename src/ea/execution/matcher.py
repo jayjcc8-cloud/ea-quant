@@ -643,6 +643,40 @@ class Phase1HistoricalMatcher:
     def source_namespace(self) -> SourceNamespace:
         return SourceNamespace(self._source_namespace.value)
 
+    def resolve_dispatch_batch(
+        self,
+        *,
+        dispatch_sequence: int,
+        trigger_root_sha256: Sha256Digest,
+    ) -> HistoricalMatcherDispatchBatch | None:
+        """Resolve one exact retained dispatch batch without replaying mutation."""
+        sequence = _require_dispatch_sequence(dispatch_sequence)
+        if type(trigger_root_sha256) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "trigger_root_sha256 must be exact")
+        self._require_retained_state()
+        token = self._state.dispatch_by_sequence.get(sequence)
+        if token is None:
+            return None
+        record = self._require_dispatch_record(token)
+        if record.root_sha256 != trigger_root_sha256:
+            return None
+        return _SEALED_DISPATCH_RECORDS[token].replay_batch
+
+    def resolve_submission_receipt(
+        self,
+        *,
+        order_id: EconomicId,
+        execution_request_sha256: Sha256Digest,
+    ) -> HistoricalSubmissionReceipt | None:
+        """Resolve one retained submission receipt without replaying submission mutation."""
+        if type(order_id) is not EconomicId or type(execution_request_sha256) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "submission recovery key must be exact")
+        self._require_retained_state()
+        record = self._state.submission_by_order.get(order_id)
+        if record is None or record.request_sha256 != execution_request_sha256:
+            return None
+        return record.receipt
+
     @property
     def execution_policy(self) -> ExecutionPolicyRef:
         return _clone_policy(self._execution_policy)
@@ -2769,3 +2803,36 @@ def create_phase1_historical_matcher(
     value._issued_registry_identity = value._state.issued_by_identity
     value._require_live_bindings()
     return value
+
+
+def recover_phase1_historical_matcher_history(
+    history: Phase1HistoricalMatcher,
+    *,
+    order_issuance_verifier: HistoricalOrderIssuanceVerifier,
+    submission_authorization_verifier: HistoricalSubmissionAuthorizationVerifier,
+    active_dispatch_verifier: HistoricalMatcherDispatchVerifier,
+) -> Phase1HistoricalMatcher:
+    """Clone one factory-issued canonical history onto fresh verifier bindings."""
+    if type(history) is not Phase1HistoricalMatcher or history._mutation_active:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "matcher recovery history must be quiescent and exact",
+        )
+    authority = history._require_dispatch_authority()
+    recovered = create_phase1_historical_matcher(
+        run_id=history.run_id,
+        spec_set=history.spec_set,
+        execution_policy=history.execution_policy,
+        source_namespace=history.source_namespace,
+        provenance_id=history.provenance_id,
+        order_issuance_verifier=order_issuance_verifier,
+        submission_authorization_verifier=submission_authorization_verifier,
+        active_dispatch_verifier=active_dispatch_verifier,
+    )
+    recovered._state = history._state
+    recovered._conflict_bytes = history._conflict_bytes
+    recovered._conflict_sha256 = history._conflict_sha256
+    recovered._issued_history_identity = history._issued_history_identity
+    recovered._issued_registry_identity = history._issued_registry_identity
+    _MATCHER_DISPATCH_AUTHORITIES[recovered] = authority
+    return recovered

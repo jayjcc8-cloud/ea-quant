@@ -22,7 +22,13 @@ from ea.composition.run import (
 )
 from ea.config.settings import Settings
 from ea.core import (
+    EMPTY_CHAIN_HEAD_SHA256,
+    EMPTY_RECORD_SHA256,
     Adjustment,
+    AuditAppendAcknowledgement,
+    AuditLogicalKey,
+    AuditRecordKind,
+    AuditSubjectKind,
     Bar,
     Instrument,
     MarketDataEnvelope,
@@ -32,6 +38,9 @@ from ea.core import (
     Sha256Digest,
     SourceId,
     VenueId,
+    canonical_run_prepared_audit_payload,
+    create_audit_append_acknowledgement,
+    create_audit_record,
 )
 from ea.data import MarketDataSelection, select_and_fingerprint_market_data
 from ea.experiments.binding import BoundaryBindingError
@@ -43,7 +52,7 @@ from ea.experiments.manifest import (
 )
 from ea.experiments.provenance import ProvenanceEvidence
 from ea.experiments.store import (
-    AuditCapability,
+    AuditRunBinding,
     LocalResultStore,
     OutputCapability,
     StoreError,
@@ -204,23 +213,53 @@ class RecordingAudit:
     def __init__(
         self,
         events: list[str],
-        acknowledgement: RunBinding | None = None,
+        binding: RunBinding,
+        acknowledgement: AuditAppendAcknowledgement | None = None,
     ) -> None:
         self.events = events
+        self.binding = binding
         self.acknowledgement = acknowledgement
 
     def append(
         self,
-        binding: RunBinding,
-        capability: AuditCapability,
-        payload: bytes,
-    ) -> RunBinding:
-        assert type(capability) is AuditCapability
-        assert payload == b"run.prepared"
+        *,
+        record_kind: AuditRecordKind,
+        subject_kind: AuditSubjectKind,
+        subject_sha256: Sha256Digest,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement:
+        assert record_kind is AuditRecordKind.RUN_PREPARED
+        assert subject_kind is AuditSubjectKind.RUN_MANIFEST
+        assert subject_sha256 == self.binding.manifest_sha256
+        assert canonical_payload == canonical_run_prepared_audit_payload(self.binding)
         self.events.append("audit.append")
-        acknowledgement = self.acknowledgement or binding
+        acknowledgement = self.acknowledgement or _prepared_ack(self.binding)
         self.events.append("audit.ack")
         return acknowledgement
+
+    def settle_append(
+        self,
+        *,
+        logical_key: AuditLogicalKey,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement | None:
+        del logical_key, canonical_payload
+        return self.acknowledgement
+
+
+def _prepared_ack(binding: RunBinding) -> AuditAppendAcknowledgement:
+    return create_audit_append_acknowledgement(
+        create_audit_record(
+            binding=binding,
+            owner_sequence=1,
+            record_kind=AuditRecordKind.RUN_PREPARED,
+            subject_kind=AuditSubjectKind.RUN_MANIFEST,
+            subject_sha256=binding.manifest_sha256,
+            canonical_payload=canonical_run_prepared_audit_payload(binding),
+            previous_record_sha256=EMPTY_RECORD_SHA256,
+            previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+        )
+    )
 
 
 class RecordingOutput:
@@ -307,9 +346,9 @@ def test_ordered_gate_is_manifest_then_adapters_then_audit_ack_then_runtime(
     events: list[str] = []
     prepared = _prepare(tmp_path, monkeypatch, events=events)
 
-    def audit_factory() -> RecordingAudit:
+    def audit_factory(prepared: AuditRunBinding) -> RecordingAudit:
         events.append("audit.start")
-        return RecordingAudit(events)
+        return RecordingAudit(events, prepared.binding)
 
     def output_factory() -> RecordingOutput:
         events.append("output.start")
@@ -327,7 +366,6 @@ def test_ordered_gate_is_manifest_then_adapters_then_audit_ack_then_runtime(
         prepared,
         audit_factory=audit_factory,
         output_factory=output_factory,
-        first_audit_payload=b"run.prepared",
         start=start,
     )
 
@@ -356,9 +394,12 @@ def test_bad_first_audit_ack_prevents_feed_and_runtime_start(
     with pytest.raises(BoundaryBindingError, match="acknowledgement"):
         admit_reproducible_run(
             prepared,
-            audit_factory=lambda: RecordingAudit(events, wrong),
+            audit_factory=lambda binding: RecordingAudit(
+                events,
+                binding.binding,
+                _prepared_ack(wrong),
+            ),
             output_factory=lambda: RecordingOutput(events),
-            first_audit_payload=b"run.prepared",
             start=lambda admitted: events.append("runtime.start"),
         )
 
@@ -372,18 +413,14 @@ def test_invalid_lifecycle_inputs_fail_before_adapter_factories(
     prepared = _prepare(tmp_path, monkeypatch)
     events: list[str] = []
 
-    with pytest.raises(RunCompositionError, match="exact bytes"):
+    with pytest.raises(RunCompositionError, match="callable"):
         admit_reproducible_run(
             prepared,
-            audit_factory=lambda: cast(
-                RecordingAudit,
-                events.append("audit.start"),
-            ),
+            audit_factory=cast(run_composition.AuditPortFactory, object()),
             output_factory=lambda: cast(
                 RecordingOutput,
                 events.append("output.start"),
             ),
-            first_audit_payload=bytearray(b"invalid"),  # type: ignore[arg-type]
             start=lambda admitted: None,
         )
 

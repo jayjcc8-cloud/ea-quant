@@ -249,6 +249,143 @@ def create_historical_matcher_dispatch_verifier(
 
 
 @final
+class HistoricalMatcherDescendantFactDispatchVerifier:
+    """Historical-only descendant verifier without an artificial direct-root queue."""
+
+    __slots__ = ("_matcher", "_run_id", "_runtime", "_spec_set", "_spec_sha256")
+    _matcher: HistoricalMatcherIssuanceCapability
+    _run_id: RunId
+    _runtime: Phase1HistoricalMarketRuntime
+    _spec_set: InstrumentExecutionSpecSet
+    _spec_sha256: Sha256Digest
+
+    def __init__(self) -> None:
+        raise TypeError("historical descendant verifiers are created only by their factory")
+
+    @property
+    def run_id(self) -> RunId:
+        self._require_bindings()
+        return self._run_id
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        self._require_bindings()
+        return self._spec_set
+
+    def _require_bindings(self) -> None:
+        try:
+            run_ids = (self._runtime.run_id, self._matcher.run_id, self._run_id)
+            specs = (self._runtime.spec_set, self._matcher.spec_set, self._spec_set)
+            matcher_source = self._matcher.source_namespace
+        except (AttributeError, TypeError) as error:
+            raise _fail(
+                OutcomeCode.INVALID_TYPE, "historical descendant bindings are invalid"
+            ) from error
+        if (
+            any(type(value) is not RunId for value in run_ids)
+            or any(type(value) is not InstrumentExecutionSpecSet for value in specs)
+            or type(matcher_source) is not SourceNamespace
+            or any(value != self._run_id for value in run_ids)
+            or any(instrument_spec_set_digest(value) != self._spec_sha256 for value in specs)
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "historical descendant binding changed")
+
+    def resolve_active_issued_fact_dispatch(
+        self,
+        *,
+        ingress_identity: IngressIdentity,
+        canonical_ingress_bytes: bytes,
+        canonical_fact_bytes: bytes,
+    ) -> int | None:
+        if (
+            type(ingress_identity) is not IngressIdentity
+            or type(canonical_ingress_bytes) is not bytes
+            or type(canonical_fact_bytes) is not bytes
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "fact dispatch lookup inputs must be exact")
+        self._require_bindings()
+        binding = self._matcher.resolve_descendant_binding(
+            ingress_identity=ingress_identity,
+            canonical_ingress_bytes=canonical_ingress_bytes,
+            canonical_fact_bytes=canonical_fact_bytes,
+        )
+        self._require_bindings()
+        if binding is None:
+            return None
+        if not self._matcher.has_issued_ingress(
+            ingress_identity=ingress_identity,
+            canonical_ingress_bytes=canonical_ingress_bytes,
+            canonical_fact_bytes=canonical_fact_bytes,
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "matcher issuance proof conflicts")
+        active = self._runtime.active_lease
+        if active is None or active.dispatch_sequence != binding.parent_dispatch_sequence:
+            return None
+        root = active.root
+        if binding.parent_kind is HistoricalDispatchKind.MARKET:
+            if (
+                type(root) is not MarketDataEnvelope
+                or historical_market_root_digest(root) != binding.parent_root_sha256
+                or runtime_root_order_key(root) != binding.parent_root_key
+            ):
+                return None
+            self._runtime._require_active_market_dispatch_bytes(
+                root,
+                dispatch_sequence=binding.parent_dispatch_sequence,
+            )
+        elif binding.parent_kind is HistoricalDispatchKind.END_OF_RUN:
+            if (
+                type(root) is not EndOfRunRoot
+                or historical_end_root_digest(root) != binding.parent_root_sha256
+                or runtime_root_order_key(root) != binding.parent_root_key
+            ):
+                return None
+            self._runtime._require_active_end_of_run_dispatch_bytes(
+                root,
+                dispatch_sequence=binding.parent_dispatch_sequence,
+            )
+        else:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "descendant parent kind conflicts")
+        self._require_bindings()
+        return binding.parent_dispatch_sequence
+
+
+def create_historical_matcher_descendant_fact_dispatch_verifier(
+    *,
+    runtime: Phase1HistoricalMarketRuntime,
+    matcher: HistoricalMatcherIssuanceCapability,
+) -> HistoricalMatcherDescendantFactDispatchVerifier:
+    """Bind exact matcher descendants directly to one historical runtime."""
+    if type(runtime) is not Phase1HistoricalMarketRuntime:
+        raise _fail(OutcomeCode.INVALID_TYPE, "runtime must be exact")
+    try:
+        matcher_run_id = matcher.run_id
+        matcher_specs = matcher.spec_set
+        matcher_source = matcher.source_namespace
+    except (AttributeError, TypeError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "matcher issuance surface is incomplete") from error
+    spec_sha256 = instrument_spec_set_digest(runtime.spec_set)
+    if (
+        type(matcher_run_id) is not RunId
+        or type(matcher_specs) is not InstrumentExecutionSpecSet
+        or type(matcher_source) is not SourceNamespace
+        or runtime.run_id != matcher_run_id
+        or instrument_spec_set_digest(matcher_specs) != spec_sha256
+        or not callable(getattr(matcher, "resolve_descendant_binding", None))
+        or not callable(getattr(matcher, "has_issued_ingress", None))
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "historical descendant bindings conflict")
+    value = object.__new__(HistoricalMatcherDescendantFactDispatchVerifier)
+    value._runtime = runtime
+    value._matcher = matcher
+    value._run_id = runtime.run_id
+    value._spec_set = runtime.spec_set
+    value._spec_sha256 = spec_sha256
+    value._require_bindings()
+    return value
+
+
+@final
 class CausalDescendantFactDispatchVerifier:
     __slots__ = (
         "__weakref__",

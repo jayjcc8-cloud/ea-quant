@@ -12,10 +12,17 @@ from types import FunctionType
 from typing import Protocol, cast
 
 from ea.config.settings import Settings
+from ea.core.audit import (
+    AuditRecordKind,
+    AuditRecoveryRecordSource,
+    AuditSubjectKind,
+    canonical_run_prepared_audit_payload,
+)
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.numeric import OrderedFloat64Policy
-from ea.core.run import RunContractError, RunReference
+from ea.core.run import RunBinding, RunContractError, RunId, RunReference
 from ea.data.fingerprint import MarketDataSelection
+from ea.experiments.audit import PosixAuditJournal
 from ea.experiments.binding import (
     BoundAuditPort,
     BoundOutputPort,
@@ -40,9 +47,19 @@ from ea.experiments.provenance import (
     verify_provenance,
 )
 from ea.experiments.randomness import Pcg64StreamFactory
-from ea.experiments.store import LocalResultStore, PreparedRun, RunIdProvider
+from ea.experiments.store import (
+    AuditRunBinding,
+    LocalResultStore,
+    PreparedRun,
+    RecoveredRun,
+    RunIdProvider,
+    StoreError,
+    VerifiedIncompleteRecoveryBinding,
+    VerifiedTerminalRecoveryBinding,
+)
 
 _PREPARED_SEAL = object()
+_RECOVERED_ADMISSION_SEAL = object()
 _PREFLIGHT_SLOT = "_ea_reproducible_preflight_grant_v1"
 _MISSING = object()
 _is_preflight_seal: Callable[[object], bool]
@@ -200,7 +217,7 @@ def _accept_launcher_preflight(grant: object) -> PreflightSession:
 class AuditPortFactory(Protocol):
     """Construct/start the mandatory audit adapter after manifest durability."""
 
-    def __call__(self) -> RawAuditPort: ...
+    def __call__(self, prepared: AuditRunBinding) -> RawAuditPort: ...
 
 
 class OutputPortFactory(Protocol):
@@ -291,6 +308,86 @@ class AdmittedRun:
             raise RunCompositionError("admitted numeric policy is not lineage-bound")
 
 
+class AdmittedRecoveredRun:
+    """One-use store-issued recovery prefix bound to its reopened audit port."""
+
+    __slots__ = (
+        "_consumption_lock",
+        "_consumption_state",
+        "_consumption_token",
+        "audit",
+        "binding",
+        "records",
+    )
+    audit: BoundAuditPort
+    binding: RunBinding
+    records: AuditRecoveryRecordSource
+
+    def __init__(
+        self,
+        seal: object,
+        *,
+        recovered: RecoveredRun,
+        audit: BoundAuditPort,
+        records: AuditRecoveryRecordSource,
+    ) -> None:
+        if seal is not _RECOVERED_ADMISSION_SEAL or type(recovered) is not RecoveredRun:
+            raise RunCompositionError("recovery admission must consume store-issued evidence")
+        binding = RunBinding(recovered.reference, recovered.manifest_sha256)
+        if (
+            type(audit) is not BoundAuditPort
+            or audit.binding != binding
+            or records.binding != binding
+            or records.record_count != recovered.record_count
+        ):
+            raise RunCompositionError("recovered prefix is not bound to one admitted audit port")
+        self._consumption_lock = Lock()
+        self._consumption_state = "available"
+        self._consumption_token: object | None = None
+        self.audit = audit
+        self.binding = binding
+        self.records = records
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if hasattr(self, name):
+            raise AttributeError("admitted recovery evidence is immutable")
+        object.__setattr__(self, name, value)
+
+    def _consume(self) -> tuple[RunBinding, BoundAuditPort, AuditRecoveryRecordSource]:
+        token, binding, audit, records = self._reserve_consumption()
+        self._commit_consumption(token)
+        return binding, audit, records
+
+    def _reserve_consumption(
+        self,
+    ) -> tuple[object, RunBinding, BoundAuditPort, AuditRecoveryRecordSource]:
+        token = object()
+        with self._consumption_lock:
+            if self._consumption_state != "available":
+                raise RunCompositionError("recovery admission was already consumed")
+            object.__setattr__(self, "_consumption_state", "assembling")
+            object.__setattr__(self, "_consumption_token", token)
+        return token, self.binding, self.audit, self.records
+
+    def _commit_consumption(self, token: object) -> None:
+        with self._consumption_lock:
+            if self._consumption_state != "assembling" or self._consumption_token is not token:
+                object.__setattr__(self, "_consumption_state", "failed")
+                object.__setattr__(self, "_consumption_token", None)
+                raise RunCompositionError("recovery admission reservation changed")
+            object.__setattr__(self, "_consumption_state", "committed")
+            object.__setattr__(self, "_consumption_token", None)
+
+    def _abort_consumption(self, token: object) -> None:
+        with self._consumption_lock:
+            if self._consumption_state != "assembling" or self._consumption_token is not token:
+                object.__setattr__(self, "_consumption_state", "failed")
+                object.__setattr__(self, "_consumption_token", None)
+                raise RunCompositionError("recovery admission reservation changed")
+            object.__setattr__(self, "_consumption_state", "available")
+            object.__setattr__(self, "_consumption_token", None)
+
+
 def prepare_reproducible_run(
     *,
     preflight: PreflightSession,
@@ -360,6 +457,69 @@ def prepare_reproducible_run(
     )
 
 
+def verify_run_recovery(
+    *,
+    preflight: PreflightSession,
+    settings: Settings,
+    market_data: MarketDataSelection,
+    parameters: tuple[EffectiveParameter, ...],
+    master_seed: int,
+    stream_labels: tuple[str, ...],
+    store: LocalResultStore,
+    run_id: RunId,
+) -> VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding:
+    """Rebuild current lineage, acquire the writer lease, and classify one attempt."""
+    if (
+        type(preflight) is not PreflightSession
+        or type(settings) is not Settings
+        or type(market_data) is not MarketDataSelection
+        or type(store) is not LocalResultStore
+        or type(run_id) is not RunId
+    ):
+        raise RunCompositionError("recovery inputs require exact trusted carriers")
+    if type(parameters) is not tuple or any(
+        type(parameter) is not EffectiveParameter for parameter in parameters
+    ):
+        raise RunCompositionError("recovery parameters must be one exact tuple")
+    if len({parameter.name for parameter in parameters}) != len(parameters):
+        raise RunCompositionError("recovery parameter names must be unique")
+    if type(stream_labels) is not tuple:
+        raise RunCompositionError("recovery stream labels must be one exact tuple")
+    RandomnessSpec(master_seed=master_seed, stream_labels=tuple(sorted(stream_labels)))
+    normalized_configuration = NormalizedConfiguration(
+        schema_version=settings.schema_version,
+        environment=settings.environment.value,
+        mode=settings.run.mode.value,
+    )
+    repository, preflight_commit = _consume_preflight_session(preflight)
+    provenance = collect_provenance(repository, repository / "uv.lock")
+    if provenance.code.commit != preflight_commit:
+        raise RunCompositionError("collector observed a different commit than recovery preflight")
+    spec = build_lineage_spec(
+        LineageInputs(
+            code=provenance.code,
+            configuration=normalized_configuration,
+            data=market_data.fingerprint,
+            replay_window=market_data.window,
+            parameters=parameters,
+            runtime=provenance.runtime,
+            master_seed=master_seed,
+            stream_labels=stream_labels,
+        )
+    )
+    manifest = build_manifest(spec, run_id)
+    verify_manifest_evidence(
+        manifest,
+        code=provenance.code,
+        runtime=provenance.runtime,
+        data=market_data.fingerprint,
+    )
+    try:
+        return store.verify_recovery_attempt(manifest)
+    except Exception as error:
+        raise RunCompositionError("existing attempt failed locked recovery verification") from error
+
+
 def verify_reproducible_run(
     prepared: PreparedReproducibleRun,
 ) -> None:
@@ -392,22 +552,27 @@ def admit_reproducible_run[StartResult](
     *,
     audit_factory: AuditPortFactory,
     output_factory: OutputPortFactory,
-    first_audit_payload: bytes,
     start: Callable[[AdmittedRun], StartResult],
 ) -> StartResult:
     """Enforce durable manifest < adapters/audit ack < feed/runtime startup."""
     if type(prepared) is not PreparedReproducibleRun:
         raise RunCompositionError("prepared must be a PreparedReproducibleRun")
-    if type(first_audit_payload) is not bytes:
-        raise RunCompositionError("first audit payload must be exact bytes")
     if not callable(audit_factory) or not callable(output_factory) or not callable(start):
         raise RunCompositionError("adapter factories and start callback must be callable")
 
     # The store returned before this function can construct or start any adapter.
-    audit = BoundAuditPort(prepared._prepared.audit, audit_factory())
+    audit = BoundAuditPort(
+        prepared._prepared.audit,
+        audit_factory(prepared._prepared.audit),
+    )
     output = BoundOutputPort(prepared._prepared.output, output_factory())
     # Runtime/feed admission is impossible until the mandatory first append acknowledges.
-    audit.append(prepared.reference, first_audit_payload)
+    audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=prepared._prepared.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(prepared._prepared.audit.binding),
+    )
 
     admitted = AdmittedRun(
         reference=prepared.reference,
@@ -418,3 +583,50 @@ def admit_reproducible_run[StartResult](
         numeric=OrderedFloat64Policy(prepared.spec.runtime.numeric_policy),
     )
     return start(admitted)
+
+
+def admit_recovered_run(
+    recovered: RecoveredRun,
+    *,
+    audit_factory: AuditPortFactory,
+) -> AdmittedRecoveredRun:
+    """Bind one store-issued incomplete recovery prefix to its reopened journal."""
+    if type(recovered) is not RecoveredRun:
+        raise RunCompositionError("recovery admission requires an exact RecoveredRun")
+    if not callable(audit_factory):
+        raise RunCompositionError("recovery audit factory must be callable")
+    try:
+        reservation = recovered._reserve_for_admission()
+    except StoreError as error:
+        raise RunCompositionError("recovered run was already admitted") from error
+    raw_audit: object | None = None
+    try:
+        raw_audit = audit_factory(recovered.audit)
+        if (
+            type(raw_audit) is not PosixAuditJournal
+            or raw_audit._authority is not recovered._authority
+        ):
+            raise RunCompositionError("recovery audit is not the store-bound reopened journal")
+        audit = BoundAuditPort(recovered.audit, raw_audit)
+        admitted = AdmittedRecoveredRun(
+            _RECOVERED_ADMISSION_SEAL,
+            recovered=recovered,
+            audit=audit,
+            records=raw_audit.recovery_records,
+        )
+        recovered._commit_admission(reservation)
+        return admitted
+    except BaseException:
+        cleanup_error: BaseException | None = None
+        if type(raw_audit) is PosixAuditJournal:
+            try:
+                raw_audit.close()
+            except BaseException as caught:
+                cleanup_error = caught
+        try:
+            recovered._abort_admission(reservation, retryable=cleanup_error is None)
+        except StoreError as caught:
+            raise RunCompositionError("recovery admission state changed during cleanup") from caught
+        if cleanup_error is not None:
+            raise RunCompositionError("recovery audit cleanup failed") from cleanup_error
+        raise

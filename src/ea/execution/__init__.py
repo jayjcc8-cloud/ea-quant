@@ -12,6 +12,7 @@ from ea.execution.fact_authority import (
     Phase1ExecutionFactAuthority,
     RuntimeFactDispatchVerifier,
     create_phase1_execution_fact_authority,
+    recover_phase1_execution_fact_authority_history,
 )
 from ea.execution.matcher import (
     HistoricalMatcherDispatchVerifier,
@@ -19,6 +20,7 @@ from ea.execution.matcher import (
     HistoricalSubmissionAuthorizationVerifier,
     Phase1HistoricalMatcher,
     create_phase1_historical_matcher,
+    recover_phase1_historical_matcher_history,
 )
 
 __all__ = [
@@ -36,4 +38,6 @@ __all__ = [
     "create_phase1_execution_fact_authority",
     "create_phase1_historical_matcher",
     "create_phase1_order_authority",
+    "recover_phase1_execution_fact_authority_history",
+    "recover_phase1_historical_matcher_history",
 ]
