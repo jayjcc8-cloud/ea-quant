@@ -757,6 +757,11 @@ def _create_reconciliation_adjustment_command(
         or type(ancestry_order) is not Order
         or open_reconciliation_ref.fill_id.run_id != run_id
         or open_reconciliation_ref not in local_snapshot.open_reconciliation_refs
+        or not any(
+            binding.fill_id == open_reconciliation_ref.fill_id
+            and binding.fill_sha256 == open_reconciliation_ref.fill_sha256
+            for binding in local_snapshot.open_reconciliation_bindings
+        )
         or ancestry_fill.fill_id != open_reconciliation_ref.fill_id
         or fill_digest(ancestry_fill) != open_reconciliation_ref.fill_sha256
         or ancestry_fill.run_id != run_id

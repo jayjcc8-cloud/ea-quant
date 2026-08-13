@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -19,6 +19,7 @@ from ea.core import (
     CashReconciliationBalance,
     EconomicId,
     EconomicOwnerKind,
+    ExistingLedgerBinding,
     InstrumentExecutionSpecSet,
     OpenReconciliationRef,
     OutcomeCode,
@@ -128,9 +129,15 @@ def _snapshot(
             )
         ),
         rounding_balances=(),
-        unresolved_fills=tuple(
-            UnresolvedFillRef(reference.fill_id, reference.fill_sha256)
-            for reference in open_reconciliation_refs
+        unresolved_fills=(),
+        open_reconciliation_bindings=tuple(
+            ExistingLedgerBinding(
+                EconomicId(RUN_ID, EconomicOwnerKind.LEDGER_ENTRY, index),
+                reference.fill_id,
+                reference.fill_sha256,
+                Sha256Digest(f"{index:064x}"),
+            )
+            for index, reference in enumerate(open_reconciliation_refs, start=1)
         ),
         open_reconciliation_refs=open_reconciliation_refs,
     )
@@ -154,7 +161,7 @@ def _outcome(**changes: object) -> ReconciliationOutcome:
     return create_reconciliation_outcome(**arguments)  # type: ignore[arg-type]
 
 
-def test_portfolio_snapshot_digest_binds_exact_open_reconciliation_refs() -> None:
+def test_portfolio_snapshot_digest_binds_complete_ancestry_open_reference() -> None:
     reference = OpenReconciliationRef(
         EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 9),
         Sha256Digest("55" * 32),
@@ -163,6 +170,23 @@ def test_portfolio_snapshot_digest_binds_exact_open_reconciliation_refs() -> Non
     snapshot = _snapshot(open_reconciliation_refs=(reference,))
     document = json.loads(canonical_portfolio_snapshot_bytes(snapshot))
 
+    assert snapshot.unresolved_fills == ()
+    assert document["open_reconciliation_bindings"] == [
+        {
+            "entry_id": {
+                "owner_kind": "ledger.entry",
+                "owner_sequence": 1,
+                "run_id": RUN_ID.value,
+            },
+            "fill_id": {
+                "owner_kind": "execution.fill",
+                "owner_sequence": 9,
+                "run_id": RUN_ID.value,
+            },
+            "fill_sha256": "55" * 32,
+            "transaction_sha256": f"{1:064x}",
+        }
+    ]
     assert document["open_reconciliation_refs"] == [
         {
             "fill_id": {
@@ -174,7 +198,7 @@ def test_portfolio_snapshot_digest_binds_exact_open_reconciliation_refs() -> Non
             "processing_outcome_sha256": "66" * 32,
         }
     ]
-    with pytest.raises(PortfolioLedgerError, match="unresolved Fill"):
+    with pytest.raises(PortfolioLedgerError, match="exact ledger binding"):
         PortfolioSnapshot(
             run_id=snapshot.run_id,
             instrument_spec_set_id=snapshot.instrument_spec_set_id,
@@ -187,7 +211,129 @@ def test_portfolio_snapshot_digest_binds_exact_open_reconciliation_refs() -> Non
             position_balances=snapshot.position_balances,
             rounding_balances=snapshot.rounding_balances,
             unresolved_fills=(),
+            open_reconciliation_bindings=(),
             open_reconciliation_refs=(reference,),
+        )
+
+
+def test_portfolio_snapshot_rejects_open_and_unresolved_fill_digest_conflict() -> None:
+    reference = OpenReconciliationRef(
+        EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 9),
+        Sha256Digest("55" * 32),
+        Sha256Digest("66" * 32),
+    )
+    snapshot = _snapshot(open_reconciliation_refs=(reference,))
+
+    with pytest.raises(PortfolioLedgerError, match="open and unresolved Fill digests"):
+        PortfolioSnapshot(
+            run_id=snapshot.run_id,
+            instrument_spec_set_id=snapshot.instrument_spec_set_id,
+            instrument_spec_set_sha256=snapshot.instrument_spec_set_sha256,
+            snapshot_version=snapshot.snapshot_version,
+            ledger_sequence=snapshot.ledger_sequence,
+            last_entry_id=snapshot.last_entry_id,
+            last_transaction_sha256=snapshot.last_transaction_sha256,
+            cash_balances=snapshot.cash_balances,
+            position_balances=snapshot.position_balances,
+            rounding_balances=snapshot.rounding_balances,
+            unresolved_fills=(UnresolvedFillRef(reference.fill_id, Sha256Digest("77" * 32)),),
+            open_reconciliation_bindings=snapshot.open_reconciliation_bindings,
+            open_reconciliation_refs=(reference,),
+        )
+
+    matching = replace(
+        snapshot,
+        unresolved_fills=(UnresolvedFillRef(reference.fill_id, reference.fill_sha256),),
+    )
+    assert matching.unresolved_fills[0].fill_sha256 == reference.fill_sha256
+
+
+def test_portfolio_snapshot_rejects_inconsistent_open_frontier_bindings() -> None:
+    first = OpenReconciliationRef(
+        EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 9),
+        Sha256Digest("55" * 32),
+        Sha256Digest("66" * 32),
+    )
+    second = OpenReconciliationRef(
+        EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 10),
+        Sha256Digest("77" * 32),
+        Sha256Digest("88" * 32),
+    )
+    snapshot = _snapshot(open_reconciliation_refs=(first, second))
+    first_binding, second_binding = snapshot.open_reconciliation_bindings
+
+    with pytest.raises(PortfolioLedgerError, match="lacks its exact reference"):
+        replace(snapshot, open_reconciliation_refs=(first,))
+    with pytest.raises(PortfolioLedgerError, match="keys are not canonical"):
+        replace(
+            snapshot,
+            open_reconciliation_bindings=(second_binding, first_binding),
+        )
+    with pytest.raises(PortfolioLedgerError, match="reuse a ledger entry"):
+        replace(
+            snapshot,
+            open_reconciliation_bindings=(
+                first_binding,
+                ExistingLedgerBinding(
+                    first_binding.entry_id,
+                    second.fill_id,
+                    second.fill_sha256,
+                    second_binding.transaction_sha256,
+                ),
+            ),
+        )
+    with pytest.raises(PortfolioLedgerError, match="exact ledger binding"):
+        replace(
+            snapshot,
+            open_reconciliation_bindings=(
+                ExistingLedgerBinding(
+                    first_binding.entry_id,
+                    first.fill_id,
+                    Sha256Digest("99" * 32),
+                    first_binding.transaction_sha256,
+                ),
+                second_binding,
+            ),
+        )
+    with pytest.raises(PortfolioLedgerError, match="ahead of the snapshot frontier"):
+        replace(
+            snapshot,
+            open_reconciliation_bindings=(
+                ExistingLedgerBinding(
+                    EconomicId(RUN_ID, EconomicOwnerKind.LEDGER_ENTRY, 4),
+                    first.fill_id,
+                    first.fill_sha256,
+                    first_binding.transaction_sha256,
+                ),
+                second_binding,
+            ),
+        )
+    assert snapshot.last_transaction_sha256 is not None
+    last_transaction_binding = ExistingLedgerBinding(
+        EconomicId(RUN_ID, EconomicOwnerKind.LEDGER_ENTRY, 3),
+        first.fill_id,
+        first.fill_sha256,
+        snapshot.last_transaction_sha256,
+    )
+    assert (
+        replace(
+            snapshot,
+            open_reconciliation_bindings=(last_transaction_binding, second_binding),
+        ).open_reconciliation_bindings[0]
+        == last_transaction_binding
+    )
+    with pytest.raises(PortfolioLedgerError, match="last transaction"):
+        replace(
+            snapshot,
+            open_reconciliation_bindings=(
+                ExistingLedgerBinding(
+                    EconomicId(RUN_ID, EconomicOwnerKind.LEDGER_ENTRY, 3),
+                    first.fill_id,
+                    first.fill_sha256,
+                    first_binding.transaction_sha256,
+                ),
+                second_binding,
+            ),
         )
 
 
