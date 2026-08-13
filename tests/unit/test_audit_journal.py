@@ -35,6 +35,7 @@ from ea.experiments.audit import (
     create_posix_audit_journal,
     reopen_posix_audit_journal,
 )
+from ea.experiments.binding import RawAuditPort
 from ea.experiments.store import (
     AuditRunBinding,
     LocalResultStore,
@@ -595,12 +596,12 @@ def test_recovery_admission_retries_after_audit_factory_failure(tmp_path: Path) 
     calls = 0
     admitted_journals: list[PosixAuditJournal] = []
 
-    def reopen_after_one_failure(binding: AuditRunBinding) -> PosixAuditJournal:
+    def reopen_after_one_failure(prepared: AuditRunBinding) -> RawAuditPort:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise OSError("declared transient reopen failure")
-        reopened = reopen_posix_audit_journal(binding)
+        reopened = reopen_posix_audit_journal(prepared)
         admitted_journals.append(reopened)
         return reopened
 
@@ -633,15 +634,16 @@ def test_recovery_admission_rejects_reentry_before_factory(tmp_path: Path) -> No
     nested_factory_calls = 0
     admitted_journals: list[PosixAuditJournal] = []
 
-    def outer_factory(binding: AuditRunBinding) -> PosixAuditJournal:
-        def nested_factory(_binding: AuditRunBinding) -> PosixAuditJournal:
+    def outer_factory(prepared: AuditRunBinding) -> RawAuditPort:
+        def nested_factory(prepared: AuditRunBinding) -> RawAuditPort:
             nonlocal nested_factory_calls
+            del prepared
             nested_factory_calls += 1
             raise AssertionError("nested factory must not be called")
 
         with pytest.raises(RunCompositionError, match="already admitted"):
             admit_recovered_run(recovered, audit_factory=nested_factory)
-        reopened = reopen_posix_audit_journal(binding)
+        reopened = reopen_posix_audit_journal(prepared)
         admitted_journals.append(reopened)
         return reopened
 
