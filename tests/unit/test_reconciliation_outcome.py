@@ -72,6 +72,7 @@ from ea.core.reconciliation import (
     _ancestry_evidence_digest,
     _ancestry_order_scope_id,
     _authorization_binding,
+    _canonical_ancestry_evidence_bytes,
     _create_reconciliation_adjustment_authorization,
     _create_reconciliation_adjustment_command,
     _decode_reconciliation_adjustment_authorization,
@@ -301,6 +302,19 @@ def test_portfolio_snapshot_rejects_inconsistent_open_frontier_bindings() -> Non
             open_reconciliation_bindings=(
                 ExistingLedgerBinding(
                     EconomicId(RUN_ID, EconomicOwnerKind.LEDGER_ENTRY, 4),
+                    first.fill_id,
+                    first.fill_sha256,
+                    first_binding.transaction_sha256,
+                ),
+                second_binding,
+            ),
+        )
+    with pytest.raises(PortfolioLedgerError, match="applied transaction"):
+        replace(
+            snapshot,
+            open_reconciliation_bindings=(
+                ExistingLedgerBinding(
+                    EconomicId(RUN_ID, EconomicOwnerKind.LEDGER_ENTRY, 0),
                     first.fill_id,
                     first.fill_sha256,
                     first_binding.transaction_sha256,
@@ -688,6 +702,34 @@ def test_balance_command_requires_exact_outcome_ack_and_is_rederived() -> None:
             local_snapshot=drifted_snapshot,
             adjustment_id=adjustment_id,
         )
+
+
+def test_ancestry_evidence_has_exact_adr_0024_payload_and_digest() -> None:
+    order = _order()
+    fill = create_fill(
+        fill_id=EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 9),
+        fact=_trade_fact(resolved=False),
+        spec_set=SPEC_SET,
+    )
+    reference = OpenReconciliationRef(
+        fill.fill_id,
+        fill_digest(fill),
+        Sha256Digest("66" * 32),
+    )
+    assert _canonical_ancestry_evidence_bytes(fill, reference, order) == (
+        b'{"canonicalization":"ea-reconciliation-v1","fill_id":{"owner_kind":'
+        b'"execution.fill","owner_sequence":9,"run_id":"12345678-1234-4234-8234-'
+        b'123456789abc"},"fill_sha256":"a61886047d302da13edb78a9b174640be95e9706651be'
+        b'5699e54671299835a30","order_id":{"owner_kind":"execution.order","owner_sequence":'
+        b'6,"run_id":"12345678-1234-4234-8234-123456789abc"},"order_sha256":"d041fee3'
+        b'fea81d69ead4db20bdbea7c52db1ed59b05c50e265536aee7ea08d70","processing_outcome_'
+        b'sha256":"6666666666666666666666666666666666666666666666666666666666666666",'
+        b'"run_id":"12345678-1234-4234-8234-123456789abc","schema":"ea.reconciliation-'
+        b'ancestry-evidence.v1"}'
+    )
+    assert _ancestry_evidence_digest(fill, reference, order).value == (
+        "0eb4cb5c6a9c3e1e694777335b78773799664a540a57f734af6f0adaf3484b4c"
+    )
 
 
 def test_ancestry_command_binds_exact_open_reference_and_order() -> None:

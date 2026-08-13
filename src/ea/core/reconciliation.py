@@ -50,6 +50,7 @@ MAX_RECONCILIATION_PAYLOAD_BYTES = 16_384
 MAX_RECONCILIATION_BALANCES = 32
 
 _ANCESTRY_EVIDENCE_DIGEST_DOMAIN = b"ea.reconciliation-ancestry-evidence.v1\0"
+_ANCESTRY_EVIDENCE_CANONICALIZATION = "ea-reconciliation-v1"
 
 _MAX_UINT64 = (1 << 64) - 1
 _VALUE_SEAL = object()
@@ -829,9 +830,20 @@ def _ancestry_evidence_digest(
     reference: OpenReconciliationRef,
     order: Order,
 ) -> Sha256Digest:
-    payload = _canonical_json(
+    return _framed_digest(
+        _ANCESTRY_EVIDENCE_DIGEST_DOMAIN,
+        _canonical_ancestry_evidence_bytes(fill, reference, order),
+    )
+
+
+def _canonical_ancestry_evidence_bytes(
+    fill: Fill,
+    reference: OpenReconciliationRef,
+    order: Order,
+) -> bytes:
+    return _canonical_json(
         {
-            "canonicalization": RECONCILIATION_CANONICALIZATION,
+            "canonicalization": _ANCESTRY_EVIDENCE_CANONICALIZATION,
             "fill_id": _economic_id_document(fill.fill_id),
             "fill_sha256": fill_digest(fill).value,
             "order_id": _economic_id_document(order.order_id),
@@ -841,7 +853,6 @@ def _ancestry_evidence_digest(
             "schema": "ea.reconciliation-ancestry-evidence.v1",
         }
     )
-    return _framed_digest(_ANCESTRY_EVIDENCE_DIGEST_DOMAIN, payload)
 
 
 def _fill_ancestry_is_compatible(fill: Fill, order: Order) -> bool:

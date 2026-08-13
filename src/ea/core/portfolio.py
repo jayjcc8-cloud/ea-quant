@@ -764,6 +764,11 @@ def _require_snapshot_tuples(snapshot: PortfolioSnapshot) -> None:
             run_id=snapshot.run_id,
             field_name="open reconciliation binding fill_id",
         )
+        if binding.entry_id.owner_sequence == 0:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "open reconciliation binding does not identify an applied transaction",
+            )
         if binding.entry_id.owner_sequence > snapshot.ledger_sequence:
             raise _fail(
                 OutcomeCode.CONFLICTING_ID,
