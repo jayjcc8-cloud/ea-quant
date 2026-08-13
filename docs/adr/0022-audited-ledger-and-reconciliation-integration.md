@@ -159,8 +159,9 @@ Its document contains exactly: observation digest, acknowledged local snapshot v
 ledger sequence, watermark comparison, ordered discrepancy tuple, outcome code, requested action,
 proposed adjustment-command digest or null, halt requested, and dispatch sequence. Requested action
 is exactly `none`, `request_missing_trade_facts`, `retain_and_halt`,
-`manual_evidence_decomposition`, or `propose_single_target_adjustment`. The discrepancy tuple is
-empty except for mismatch/quarantine and is capped at 32 entries.
+`manual_evidence_decomposition`, `propose_single_target_adjustment`, or
+`propose_ancestry_resolution`. The discrepancy tuple is empty except for mismatch/quarantine and
+is capped at 32 entries.
 
 `ReconciliationAdjustmentAuthorization` is an immutable one-use authorization for one exact
 correction. It binds run/specification, observation and reconciliation-outcome digests, current
