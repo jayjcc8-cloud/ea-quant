@@ -89,6 +89,22 @@ def test_economic_id_bytes_and_digest_are_frozen() -> None:
     )
 
 
+def test_reconciliation_owner_kinds_are_closed_run_scoped_identities() -> None:
+    authorization = EconomicId(
+        RUN_ID,
+        EconomicOwnerKind.RECONCILIATION_AUTHORIZATION,
+        1,
+    )
+    adjustment = EconomicId(
+        RUN_ID,
+        EconomicOwnerKind.RECONCILIATION_ADJUSTMENT,
+        2,
+    )
+
+    assert authorization.owner_kind.value == "reconciliation.authorization"
+    assert adjustment.owner_kind.value == "reconciliation.adjustment"
+
+
 def test_economic_id_digest_changes_for_every_identity_component() -> None:
     baseline = EconomicId(RUN_ID, EconomicOwnerKind.PORTFOLIO_INTENT, 1)
     changed = (
