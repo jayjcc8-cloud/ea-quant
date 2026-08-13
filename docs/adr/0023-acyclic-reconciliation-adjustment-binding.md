@@ -1,6 +1,6 @@
 # ADR 0023: Acyclic Reconciliation Adjustment Binding
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - Decision owners: Architecture, Ledger/Reconciliation, Runtime, Durability
 - Related: ADR 0008, ADR 0010, ADR 0020, ADR 0022, Issue #64, Draft PR #65
