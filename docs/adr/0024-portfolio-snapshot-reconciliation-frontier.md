@@ -1,6 +1,6 @@
 # ADR 0024: Portfolio Snapshot Reconciliation Frontier
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - Decision owners: Architecture, Ledger/Reconciliation, Runtime, Durability
 - Related: ADR 0010, ADR 0022, ADR 0023, Issue #64, Draft PR #65
