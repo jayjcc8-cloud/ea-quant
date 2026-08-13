@@ -1,0 +1,412 @@
+# ADR 0022: Audited Ledger and Reconciliation Integration
+
+Date: 2026-08-13
+
+## Status
+
+Proposed
+
+## Context
+
+Accepted ADRs 0008, 0010, 0014, 0020, and 0021 define the deterministic root order, the
+Fill-derived append-only ledger, trusted execution-fact outcomes, durable audited handoffs, and
+the staged active-dispatch window. Issue #61 deliberately stops at an
+`AuditedExecutionFactHandoff`: it proves that an authoritative processing outcome and any named
+Fill are durable, but it does not apply that Fill to the canonical ledger.
+
+The remaining boundary is safety-critical. Applying a raw Fill would bypass the inbound audit
+gate. Applying before an outcome is durable would make crash recovery ambiguous. Publishing a
+portfolio snapshot before the ledger result is durable would permit look-ahead after restart.
+Treating a venue position or cash snapshot as authoritative would overwrite transaction evidence.
+Finally, a Fill carrying incomplete or contradictory ancestry must still retain its complete
+economics exactly once while forcing reconciliation and blocking new submissions.
+
+This decision freezes the Phase 1 contract before executable implementation. It does not authorize
+live trading, broker writes, automatic balance correction, or arbitrary ledger postings.
+
+## Scope
+
+This decision defines:
+
+- the only eligible audited-handoff-to-ledger path;
+- one result for every handoff, including handoffs with no Fill;
+- audit-before-publication ordering for ledger results and portfolio snapshots;
+- monotone reconciliation and risk-halt behavior;
+- explicit, separately authorized reconciliation adjustments;
+- dispatch-completion frontiers, exact retry, and restart recovery; and
+- the composition boundary that keeps mutable ledger, reconciliation, and risk capabilities
+  private to the lifecycle owner.
+
+## Non-goals
+
+- strategy evaluation, order planning, result/report adapters, or the backtest CLI;
+- venue submission, credentials, network I/O, or a live reconciliation poller;
+- automatic correction from aggregate position or cash snapshots;
+- changing Fill economics, fact classification, matcher eligibility, or root ranks;
+- importing a general accounting, event-sourcing, or broker SDK dependency; and
+- initial funding. Initial funding remains a later manifest-bound, separately authorized economic
+  transition and cannot use the Fill or correction APIs defined here.
+
+## Reuse decision
+
+The implementation reuses `ea.portfolio.ledger.PortfolioLedger`, the canonical portfolio values,
+the existing execution-fact authority resolvers, the POSIX audit journal, and the lifecycle
+coordinator. A narrow adapter is smaller and safer than a second ledger.
+
+The standard-library `sqlite3` module is rejected as a competing persistence and transaction
+authority. General accounting and event-sourcing packages are rejected because none of the locked
+project dependencies preserves the exact Fill, run, specification, audit-acknowledgement, root,
+and replay identities required here; adding one would introduce a second schema and a larger
+supply-chain and recovery surface. No dependency is added.
+
+## Decision
+
+### Ownership and dependency direction
+
+`ea.core` owns immutable dependency-neutral ledger-integration and reconciliation messages,
+strict canonical codecs, and domain-separated digests.
+
+`ea.portfolio.ledger` remains the sole mutable economic authority. Its existing `apply_fill`
+semantics remain unchanged. A later narrow method may apply a factory-issued reconciliation
+adjustment, but it accepts neither caller-supplied postings nor mutable balances.
+
+`ea.runtime` owns orchestration, audit gates, failure state, and recovery. It may call portfolio
+and risk ports but cannot construct a Fill, transaction, snapshot, or adjustment.
+
+`ea.composition` constructs the concrete ledger and risk adapters and gives their mutable
+capabilities only to the lifecycle coordinator. Public lifecycle bundles expose read-only history
+and snapshot views. Inner portfolio and risk modules do not import runtime, audit, composition, or
+each other.
+
+### Closed immutable values
+
+The following factory-only values use strict canonical JSON, exact runtime types, closed enums,
+unsigned 64-bit sequences, canonical UTC, and domain-separated SHA-256 digests.
+
+`LedgerHandoffOutcome` binds:
+
+- run ID, dispatch sequence, ingress identity, and audited-handoff digest;
+- processing-outcome digest and outcome-record acknowledgement digest;
+- optional exact Fill ID and Fill digest;
+- one closed action: `not_applicable`, `effect_committed`, or `failed`;
+- the optional original canonical `LedgerApplyOutcome` bytes and digest retained for the first
+  application, never a retry-dependent replacement;
+- before and after portfolio snapshot versions and digests;
+- exact `requires_reconciliation` and `halt_requested` flags; and
+- an optional closed failure reason.
+
+Every audited handoff has exactly one outcome. A no-Fill handoff is `not_applicable` and binds one
+unchanged snapshot. A Fill handoff is never `not_applicable`. `effect_committed` normalizes an
+initial `ledger.applied` and every exact retry to the same original transaction, outcome, and
+after-snapshot bytes. A retry-returned `ledger.duplicate` is resolver evidence, not a different
+durable handoff result. A ledger conflict, arithmetic failure, unbalanced result, structural error,
+or evidence mismatch is `failed`; it never substitutes an existing transaction or advances the
+published portfolio frontier.
+
+`LedgerApplicationCommand` binds the exact audited handoff, processing outcome, Fill, and
+`requires_reconciliation` decision. It is factory-issued only after all three evidence values are
+rebound. The ledger's integration method accepts this command and the exact Fill; the legacy
+Fill-only method is not an integration authority.
+
+For an outcome-bound application, transaction `requires_reconciliation` is exactly the logical OR
+of ADR 0010's missing-ancestry predicate and the processing outcome's flag. The snapshot retains an
+`OpenReconciliationRef` binding the Fill and processing-outcome digests for every true result, so
+overfill, late-terminal, projection, and binding anomalies cannot disappear merely because the
+Fill has complete local ancestry. This narrowly supersedes ADR 0010's Fill-only derivation when the
+new command is used; existing Fill-only semantics remain unchanged.
+
+`AuditedLedgerHandoff` binds one `LedgerHandoffOutcome` to its exact audit acknowledgement. It is
+the only portfolio-update evidence exposed beyond the coordinator.
+
+`ReconciliationObservation` is an independently admitted rank-20 root. It binds the accepted ADR
+0008 root fields, one closed observation kind, source provenance, comparable watermark, and strict
+kind-specific payload. Trade detail is normalized through the execution-fact path. Order detail is
+projection/query evidence only. Position and cash snapshots contain complete ordered exact
+balances for their declared scope and never carry a ledger transaction.
+
+`ReconciliationOutcome` binds the observation and current ledger frontier and has exactly one
+existing ADR 0008 outcome code. It includes comparison evidence and a closed requested action, but
+does not itself mutate the ledger.
+
+`ReconciliationAdjustmentAuthorization` is an immutable one-use authorization for one exact
+correction. It binds run/specification, observation and reconciliation-outcome digests, current
+ledger sequence and snapshot digest, exact ordered balanced correction entries, authorizer policy
+identity/version/digest, available time, dispatch sequence, and a unique adjustment ID. Only a
+trusted composition-owned authorization port can issue it.
+
+`ReconciliationAdjustmentOutcome` binds the authorization, resulting ledger transaction and
+snapshot, and one closed result: `applied`, `duplicate`, `conflict`, or `failed`.
+
+`PortfolioRiskRefresh` is separate from `RiskStateSnapshot`. It binds the run, policy identity and
+digest, exact portfolio snapshot version/digest, current monotone risk-state version/digest,
+derived exposure digest, dispatch sequence, and whether submission remains permitted. It neither
+pretends that the current `0|1` halt version is a portfolio version nor mutates the ledger.
+
+The audit vocabulary adds exact logical kinds and subjects for
+`portfolio.ledger_handoff_outcome`, `risk.portfolio_refresh`,
+`reconciliation.observation_outcome`, `reconciliation.adjustment_authorization`, and
+`reconciliation.adjustment_outcome`. Each subject is the domain-separated digest of its complete
+canonical payload. No pre-ledger authorization record is added: the audited fact handoff is the
+only Fill-application gate.
+
+The reconciliation-root order is separately closed:
+
+1. admit and validate the exact rank-20 observation root;
+2. compare it with the frozen local ledger watermark and snapshot without mutation;
+3. append/verify `reconciliation.observation_outcome`;
+4. for match, stale, remote-ahead, invalid, or quarantined results, publish no correction and move
+   to risk refresh and completion;
+5. for a correctable same-watermark mismatch, obtain and append/verify one exact
+   `reconciliation.adjustment_authorization` before any economic effect;
+6. rebind observation, local frontier, authorization policy, and active lease, then apply the
+   factory-issued adjustment once;
+7. append/verify `reconciliation.adjustment_outcome`, publish the resulting snapshot, and refresh
+   risk from that exact snapshot; and
+8. bind all ordered evidence in dispatch completion before runtime acknowledgement.
+
+An absent or denied authorization retains the mismatch and halt and performs no adjustment.
+
+### Exact handoff eligibility
+
+For each handoff, the coordinator resolves the exact processing outcome by ingress identity and
+digest, re-encodes it, and requires its digest to equal the handoff. If the handoff names a Fill,
+the coordinator resolves that exact Fill by ID and digest and re-encodes it. Missing, extra,
+conflicting, or non-canonical evidence is fatal.
+
+Eligibility is literal:
+
+| Processing evidence | Ledger action |
+|---|---|
+| no Fill ID and no Fill digest | emit `not_applicable`; no mutation |
+| both Fill ID and digest, exact Fill resolves, action is `accepted` or `unresolved` | issue the exact command and apply once or resolve its retained original result |
+| only one Fill field, unresolved Fill, or digest mismatch | fail closed; no new mutation |
+
+An accepted or unresolved anomalous fact may carry a real Fill and that Fill must apply once.
+Duplicate, conflicting, and invalid fact outcomes cannot carry a Fill under ADR 0014 and therefore
+produce a no-mutation result. `requires_reconciliation` is true when either the processing outcome
+requests it or the applied/duplicate transaction carries the ADR 0010 unresolved-ancestry flag.
+
+### Per-dispatch order and publication gate
+
+For one active dispatch, the order is:
+
+1. complete the ADR 0020 matcher and execution-fact audit gates;
+2. for each audited handoff in batch order, rebind the active lease, outcome, Fill, ledger frontier,
+   and risk state;
+3. apply or resolve the Fill through the sole ledger authority;
+4. append and verify `portfolio.ledger_handoff_outcome` for that exact result;
+5. only after that acknowledgement, construct the `AuditedLedgerHandoff` and publish the new
+   immutable snapshot frontier;
+6. derive and append/verify the exact `PortfolioRiskRefresh`; if reconciliation or halt is
+   required, engage the first monotone risk halt and bind its exact transition in that refresh
+   before any strategy or authorization stage;
+7. after every handoff has one ledger acknowledgement, freeze the ledger frontier;
+8. run later strategy/portfolio/risk stages only against that frozen snapshot; and
+9. append `runtime.dispatch_completed`, binding the ordered fact and ledger acknowledgement
+   frontiers, final portfolio snapshot digest, final risk-state digest, and any later-stage
+   evidence, before acknowledging the runtime lease.
+
+No callback return is trusted without re-reading every mutable authority it could have changed.
+The coordinator rebinds active lease, fact outcome, Fill, ledger result/snapshot, and risk state
+after each external callback and immediately before completion append and runtime acknowledgement.
+
+The completion record moves to a new schema version. An old completion record cannot be interpreted
+as proving a ledger frontier. Within one audit journal the order is physical and normative:
+fact-outcome acknowledgement precedes ledger-outcome acknowledgement, which precedes dispatch
+completion. Recovery rejects a different order even when the logical payloads are otherwise valid.
+
+### Ledger failure and mandatory drain
+
+Ledger, ledger-audit, or risk-refresh failure enters the coordinator's monotone `failing` state
+and blocks new submission authorization. The coordinator still drains every already issued
+execution ingress in batch order and attempts its fact and ledger audit records. It does not
+acknowledge the runtime lease until all required records and dispatch completion are durable.
+
+If `apply_fill` returns `ledger.applied` or `ledger.duplicate`, that authoritative result is
+retained. If the subsequent audit append fails, retry resolves the exact ledger result and retries
+only the same logical audit key; it never applies different economics. A returned conflict or
+failure is itself audited as evidence, leaves the portfolio frontier unchanged, and keeps the run
+failing. An exception is resolved against authoritative ledger history before any retry. Three
+states are accepted: exact result retained, provably no mutation with unchanged frontier, or
+conflict. An ambiguous or advanced frontier is a conflict, never permission to call again.
+
+Accounting is never rolled back when a risk refresh fails after the ledger result is durable. The
+same snapshot remains authoritative, downstream strategy/submission stays blocked, and exact retry
+re-derives and audits only the same refresh.
+
+No audited ledger handoff, snapshot publication, risk refresh, strategy call, or submission is
+permitted for an unacknowledged ledger result.
+
+### Risk and reconciliation behavior
+
+Any fact outcome with `halt_requested`, any ledger transaction with
+`requires_reconciliation`, any ledger conflict/failure, or any reconciliation mismatch engages a
+monotone public halt. A new closed risk halt reason `reconciliation_required` identifies the first
+such transition. The first halt cause remains authoritative; later causes are retained in ledger
+and reconciliation outcomes without rewriting risk history.
+
+An aggregate position or cash observation is compared only at a comparable watermark:
+
+- equal state produces `reconciliation.match`;
+- a lower remote watermark produces `reconciliation.local_ahead_stale` and cannot clear a halt;
+- a higher remote watermark produces `reconciliation.remote_ahead` and requests missing
+  transaction facts;
+- the same watermark with different economics produces `reconciliation.mismatch` and fails closed;
+- missing, malformed, or incomparable evidence produces `invalid` or `quarantined`.
+
+Observations never overwrite balances, fabricate a Fill, remove an unresolved-Fill reference, or
+clear a halt. A discovered complete trade returns through the execution-fact path.
+
+Only an exact acknowledged `ReconciliationAdjustmentAuthorization` may reach the adjustment
+method. The adjustment is balanced, idempotent, linked to its observation and authorization, and
+assigned the next ledger-owned sequence. It may resolve only the explicitly named unresolved Fill
+or exact discrepancy. It cannot modify or delete prior transactions. Exact replay returns the
+original outcome; identity or frontier reuse with different bytes is a conflict. Phase 1 has no
+automatic authorizer and therefore cannot silently correct a snapshot.
+
+### Recovery and exact retry
+
+Durable recovery scans the journal in physical sequence and reconstructs, before exposing a
+lifecycle:
+
+- fact handoffs and their authoritative fact/Fill histories;
+- ledger handoff outcomes, transactions, indexes, snapshots, and unresolved-Fill references;
+- reconciliation observations, outcomes, authorizations, adjustments, and one-use indexes;
+- the first risk halt and exact risk-state snapshot; and
+- the incomplete or completed coordinator frontier.
+
+Recovery replays ledger operations into a fresh empty run/specification-bound ledger and requires
+the resulting canonical transaction, outcome, and snapshot bytes to equal the journal evidence at
+each sequence. It does not copy private mutable state. Fact, ledger, risk-refresh, and
+reconciliation histories must end exactly at the recovered coordinator frontier; a future history
+injection is a conflict.
+
+For an incomplete dispatch, recovery groups by dispatch sequence and batch order but also enforces
+the physical audit order. A fact outcome with no ledger record is eligible for the same exact
+ledger operation. A retained ledger result with no acknowledgement may only retry its audit
+append. An acknowledged ledger result is never applied again except as exact replay verification.
+Completion without the complete ordered ledger frontier is invalid.
+
+Reopened acknowledgements are accepted only after the journal's exact-retry path performs a fresh
+durability barrier and independent readback. Synthetic acknowledgements from decoded record fields
+are insufficient.
+
+### Concurrency and capability confinement
+
+The lifecycle coordinator serializes all economic mutation. Public methods use a non-reentrant
+mutation guard. Reentrant or concurrent processing fails before any effect. Ledger, adjustment
+authorization, risk mutation, and recovery-consumption capabilities are private, unforgeable,
+one-use where applicable, and never present in public bundle fields or `__all__` exports.
+
+Fresh and recovered composition use reservation states `available -> assembling -> committed`,
+with `available` rollback only when failure is provably clean and no mutable authority was
+published or retired. Any uncertain cleanup or partial authority retirement becomes permanent
+`failed`. A recovered economic history can be consumed by exactly one lifecycle.
+
+### Resource bounds
+
+The extension preserves the accepted Phase 1 admission bound. Let `M` be admitted market roots and
+`R` admitted reconciliation roots, with `M + R <= 100,000`. ADR 0017 still permits at most one new
+Order chain and the historical matcher at most one outcome chain per market dispatch. In addition
+to ADR 0020's records, this decision permits at most one ledger result and one risk refresh per
+market root, and at most one observation outcome, one adjustment authorization, one adjustment
+outcome, one risk refresh, and one completion contribution per reconciliation root. The
+conservative frame bound is therefore:
+
+```text
+6*M + 5*R + 5 <= 600,005 records
+```
+
+Every new payload is capped at 16,384 bytes and does not embed a complete snapshot; it binds strict
+digests and bounded identity tuples. Using the existing 4,096-byte header and 48-byte framing, the
+conservative all-large-frame upper bound is below 13 GiB. Composition requires 13 GiB free on the
+verified result filesystem, enforces a hard 13 GiB journal cap and a 600,005-record cap, and rejects
+admission before mutation when either cannot be met.
+
+Recovery indexes retain only compact identities, digests, record offsets, and current snapshots;
+canonical payloads are streamed from journal offsets. The reopen index remains capped at 256 MiB
+measured resident memory, so an implementation must prove its compact entry layout at the
+600,005-record seam. Scanning is linear in verified bytes plus records. These limits cannot be
+implemented by silently reducing the accepted 100,000-root bound.
+
+## Atomic implementation sequence
+
+Each focused-green slice creates and pushes a checkpoint SHA before the next slice starts:
+
+1. core values, codecs, audit kinds/schemas, strict decoders, and boundary tests;
+2. ledger handoff authority and authoritative result resolver;
+3. coordinator ledger gate, completion schema, mandatory drain, and callback rebinding;
+4. ledger/risk recovery replay and composition confinement;
+5. reconciliation observations and comparison outcomes;
+6. separately authorized reconciliation adjustments and recovery; and
+7. full property, failure-injection, cross-process, resource-bound, and golden-trace evidence.
+
+A slice is atomic only when its focused tests and the repository quality profile pass. A failed
+slice is repaired or reverted before unrelated work begins. Final review still binds the exact
+candidate SHA and does not inherit approval from an earlier checkpoint.
+
+## Required evidence
+
+- every handoff yields exactly one ordered ledger result;
+- a real anomalous Fill applies exactly once and engages reconciliation halt;
+- no-Fill, duplicate, conflict, invalid, unresolved, and corrected paths are exhaustive;
+- audit failure after ledger mutation retries only the same result record;
+- ledger failure drains remaining issued ingresses and exposes no unaudited snapshot;
+- callback drift, reentry, concurrency, committed-then-raised, and torn-tail injection fail closed;
+- completion cannot precede or omit any fact or ledger acknowledgement;
+- restart at every mutation/audit boundary produces byte-identical history and final snapshots;
+- injected future fact, ledger, risk, or reconciliation history is rejected;
+- aggregate observations never overwrite the ledger and stale/incomparable evidence cannot clear
+  a halt;
+- adjustment authorization is one-use, exact-frontier-bound, balanced, and never publicly
+  constructible;
+- import-boundary and public-surface tests prove capability confinement;
+- cross-process canonical vectors and reproducible golden traces match; and
+- full quality, typing, coverage, build, isolated install, and exact-head CI profiles pass.
+
+## Consequences
+
+Positive:
+
+- audited execution evidence reaches canonical economics exactly once;
+- portfolio and risk consumers cannot observe unaudited or future state;
+- crash recovery proves the same ledger, snapshot, halt, and correction frontier; and
+- reconciliation remains evidence-driven and cannot silently replace the ledger.
+
+Negative:
+
+- dispatch completion and recovery schemas grow;
+- the coordinator gains another mandatory durable stage and failure matrix; and
+- a usable funded backtest still needs an explicit initial-funding contract.
+
+## Rejected alternatives
+
+### Apply raw Fills directly from the fact authority
+
+Rejected because it bypasses the ADR 0020 audit gate and permits unaudited economic publication.
+
+### Audit intent before applying and assume success
+
+Rejected because a ledger conflict or arithmetic failure would make the journal claim economics
+that never became authoritative.
+
+### Apply the Fill and publish before auditing the result
+
+Rejected because a crash can expose a snapshot that recovery cannot prove. The mutation may be
+retained internally, but publication waits for its exact result acknowledgement.
+
+### Make broker snapshots authoritative
+
+Rejected because snapshots are observations, not transaction evidence, and would create silent
+balancing entries or erase provenance.
+
+### Expose an arbitrary posting or restore API
+
+Rejected because it creates a second mutation authority and defeats Fill and adjustment
+authorization identities.
+
+### Implement the complete slice in one final checkpoint
+
+Rejected because it couples independent failure domains and makes a late context or tool failure
+strand a large dirty worktree. Focused-green atomic checkpoint SHAs are part of this iteration's
+execution contract.
