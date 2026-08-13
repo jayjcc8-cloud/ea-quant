@@ -7,6 +7,7 @@ import pytest
 from ea.core.audit import (
     EMPTY_CHAIN_HEAD_SHA256,
     EMPTY_RECORD_SHA256,
+    MAX_AUDIT_RECORDS,
     AuditContractError,
     AuditLogicalKey,
     AuditRecordKind,
@@ -15,6 +16,7 @@ from ea.core.audit import (
     audit_chain_head,
     audit_frame_checksum,
     audit_record_digest,
+    audit_subject_digest,
     canonical_audit_append_acknowledgement_bytes,
     canonical_audit_record_header_bytes,
     canonical_run_prepared_audit_payload,
@@ -101,6 +103,40 @@ def _canonical(document: dict[str, object]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
+
+
+def test_accepted_adr_0022_record_sequence_bound_is_exact() -> None:
+    payload = _canonical(
+        {
+            "canonicalization": "ea-canonical-json-v1",
+            "dispatch_sequence": 1,
+            "failed_record_kind": "matcher.dispatch_batch",
+            "failed_subject_kind": "historical_matcher_dispatch_batch",
+            "failed_subject_sha256": "33" * 32,
+            "failing_state_sha256": "44" * 32,
+            "failure_code": "validation.conflicting_id",
+            "previous_state_sha256": "55" * 32,
+            "run_id": "123e4567-e89b-42d3-a456-426614174000",
+            "schema": "ea.audit-failing-safety.v1",
+            "trigger_root_sha256": "66" * 32,
+        }
+    )
+    kind = AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
+    arguments = {
+        "binding": _binding(),
+        "record_kind": kind,
+        "subject_kind": AuditSubjectKind.COORDINATOR_STATE,
+        "subject_sha256": audit_subject_digest(kind, payload),
+        "canonical_payload": payload,
+        "previous_record_sha256": Sha256Digest("77" * 32),
+        "previous_chain_head_sha256": Sha256Digest("88" * 32),
+    }
+
+    record = create_audit_record(owner_sequence=MAX_AUDIT_RECORDS, **arguments)
+
+    assert record.record_id.owner_sequence == 600_006
+    with pytest.raises(AuditContractError, match="outside the v1 bound"):
+        create_audit_record(owner_sequence=MAX_AUDIT_RECORDS + 1, **arguments)
 
 
 @pytest.mark.parametrize(

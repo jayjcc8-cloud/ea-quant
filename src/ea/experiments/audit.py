@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from array import array
 from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass
@@ -43,7 +44,7 @@ from ea.experiments.store import AuditRunBinding, StoreError
 
 AUDIT_JOURNAL_PREAMBLE = b"EA-AUDIT-V1\n"
 AUDIT_JOURNAL_NAME = "audit-v1.journal"
-MAX_AUDIT_JOURNAL_BYTES = 6 * 1024 * 1024 * 1024
+MAX_AUDIT_JOURNAL_BYTES = 13 * 1024 * 1024 * 1024
 MIN_AUDIT_FILESYSTEM_FREE_BYTES = MAX_AUDIT_JOURNAL_BYTES
 MAX_AUDIT_INDEX_RESIDENT_BYTES = 256 * 1024 * 1024
 
@@ -155,26 +156,222 @@ class _JournalEntry:
     chain_head_sha256: bytes
 
 
-def _compact_logical_key(value: AuditLogicalKey) -> bytes:
-    return (
-        value.record_kind.value.encode("ascii")
-        + b"\0"
-        + value.subject_kind.value.encode("ascii")
-        + b"\0"
-        + bytes.fromhex(value.subject_sha256.value)
+class _JournalEntryIndex:
+    """Fixed-width per-record offsets and digests without retained Python entries."""
+
+    __slots__ = (
+        "_chain_head_sha256s",
+        "_frame_lengths",
+        "_offsets",
+        "_payload_lengths",
+        "_payload_sha256s",
+        "_record_sha256s",
     )
 
+    def __init__(self) -> None:
+        self._offsets = array("Q")
+        self._frame_lengths = array("I")
+        self._payload_lengths = array("I")
+        if self._offsets.itemsize != 8 or self._frame_lengths.itemsize != 4:
+            raise RuntimeError("audit compact index requires 64-bit Q and 32-bit I arrays")
+        self._payload_sha256s = bytearray()
+        self._record_sha256s = bytearray()
+        self._chain_head_sha256s = bytearray()
 
-def _entry_resident_bytes(entry: _JournalEntry) -> int:
-    return (
-        getsizeof(entry)
-        + getsizeof(entry.offset)
-        + getsizeof(entry.frame_length)
-        + getsizeof(entry.payload_length)
-        + getsizeof(entry.payload_sha256)
-        + getsizeof(entry.record_sha256)
-        + getsizeof(entry.chain_head_sha256)
+    def __len__(self) -> int:
+        return len(self._offsets)
+
+    def __iter__(self) -> Iterator[_JournalEntry]:
+        for index in range(len(self)):
+            yield self[index]
+
+    def __getitem__(self, index: int) -> _JournalEntry:
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        digest_offset = index * 32
+        digest_end = digest_offset + 32
+        return _JournalEntry(
+            offset=self._offsets[index],
+            frame_length=self._frame_lengths[index],
+            payload_length=self._payload_lengths[index],
+            payload_sha256=bytes(self._payload_sha256s[digest_offset:digest_end]),
+            record_sha256=bytes(self._record_sha256s[digest_offset:digest_end]),
+            chain_head_sha256=bytes(self._chain_head_sha256s[digest_offset:digest_end]),
+        )
+
+    def append(self, entry: _JournalEntry) -> None:
+        if (
+            type(entry) is not _JournalEntry
+            or not 0 <= entry.offset <= (1 << 64) - 1
+            or not 0 <= entry.frame_length <= (1 << 32) - 1
+            or not 0 <= entry.payload_length <= (1 << 32) - 1
+            or len(entry.payload_sha256) != 32
+            or len(entry.record_sha256) != 32
+            or len(entry.chain_head_sha256) != 32
+        ):
+            raise ValueError("audit compact entry is invalid")
+        self._offsets.append(entry.offset)
+        self._frame_lengths.append(entry.frame_length)
+        self._payload_lengths.append(entry.payload_length)
+        self._payload_sha256s.extend(entry.payload_sha256)
+        self._record_sha256s.extend(entry.record_sha256)
+        self._chain_head_sha256s.extend(entry.chain_head_sha256)
+
+    def pop(self) -> _JournalEntry:
+        entry = self[-1]
+        self._offsets.pop()
+        self._frame_lengths.pop()
+        self._payload_lengths.pop()
+        del self._payload_sha256s[-32:]
+        del self._record_sha256s[-32:]
+        del self._chain_head_sha256s[-32:]
+        return entry
+
+    def resident_bytes(self) -> int:
+        return getsizeof(self) + sum(
+            getsizeof(value)
+            for value in (
+                self._offsets,
+                self._frame_lengths,
+                self._payload_lengths,
+                self._payload_sha256s,
+                self._record_sha256s,
+                self._chain_head_sha256s,
+            )
+        )
+
+
+_AUDIT_RECORD_KIND_RANK = {kind: rank + 1 for rank, kind in enumerate(AuditRecordKind)}
+_AUDIT_SUBJECT_KIND_RANK = {kind: rank + 1 for rank, kind in enumerate(AuditSubjectKind)}
+
+
+class _LogicalKeyIndex:
+    """Fixed-width open-addressed logical-key index with deterministic probing."""
+
+    __slots__ = (
+        "_count",
+        "_digests",
+        "_record_kinds",
+        "_sequences",
+        "_subject_kinds",
     )
+
+    def __init__(self, capacity: int = 8) -> None:
+        if capacity < 8 or capacity & (capacity - 1):
+            raise ValueError("audit logical-key capacity must be a power of two")
+        self._count = 0
+        self._record_kinds = bytearray(capacity)
+        self._subject_kinds = bytearray(capacity)
+        self._digests = bytearray(capacity * 32)
+        self._sequences = array("I", [0]) * capacity
+        if self._sequences.itemsize != 4:
+            raise RuntimeError("audit compact index requires a 32-bit I array")
+
+    def __len__(self) -> int:
+        return self._count
+
+    @property
+    def capacity(self) -> int:
+        return len(self._sequences)
+
+    @staticmethod
+    def _parts(logical_key: AuditLogicalKey) -> tuple[int, int, bytes]:
+        return (
+            _AUDIT_RECORD_KIND_RANK[logical_key.record_kind],
+            _AUDIT_SUBJECT_KIND_RANK[logical_key.subject_kind],
+            bytes.fromhex(logical_key.subject_sha256.value),
+        )
+
+    @staticmethod
+    def _initial_slot(record_rank: int, subject_rank: int, digest: bytes, mask: int) -> int:
+        return (
+            int.from_bytes(sha256(bytes((record_rank, subject_rank)) + digest).digest()[:8], "big")
+            & mask
+        )
+
+    def _find_slot(self, record_rank: int, subject_rank: int, digest: bytes) -> tuple[int, bool]:
+        mask = self.capacity - 1
+        slot = self._initial_slot(record_rank, subject_rank, digest, mask)
+        while self._sequences[slot] != 0:
+            digest_offset = slot * 32
+            if (
+                self._record_kinds[slot] == record_rank
+                and self._subject_kinds[slot] == subject_rank
+                and self._digests[digest_offset : digest_offset + 32] == digest
+            ):
+                return slot, True
+            slot = (slot + 1) & mask
+        return slot, False
+
+    def get(self, logical_key: AuditLogicalKey) -> int | None:
+        record_rank, subject_rank, digest = self._parts(logical_key)
+        slot, found = self._find_slot(record_rank, subject_rank, digest)
+        return self._sequences[slot] if found else None
+
+    def reserve_for_insert(self) -> None:
+        if (self._count + 1) * 4 > self.capacity * 3:
+            self._resize(self.capacity * 2)
+
+    def insert(self, logical_key: AuditLogicalKey, sequence: int) -> None:
+        if type(sequence) is not int or not 1 <= sequence <= MAX_AUDIT_RECORDS:
+            raise ValueError("audit logical-key sequence is invalid")
+        self.reserve_for_insert()
+        record_rank, subject_rank, digest = self._parts(logical_key)
+        slot, found = self._find_slot(record_rank, subject_rank, digest)
+        if found:
+            raise ValueError("audit logical key already exists")
+        self._record_kinds[slot] = record_rank
+        self._subject_kinds[slot] = subject_rank
+        digest_offset = slot * 32
+        self._digests[digest_offset : digest_offset + 32] = digest
+        self._sequences[slot] = sequence
+        self._count += 1
+
+    def _resize(self, capacity: int) -> None:
+        replacement = _LogicalKeyIndex(capacity)
+        for slot, sequence in enumerate(self._sequences):
+            if sequence == 0:
+                continue
+            digest_offset = slot * 32
+            digest = bytes(self._digests[digest_offset : digest_offset + 32])
+            record_rank = self._record_kinds[slot]
+            subject_rank = self._subject_kinds[slot]
+            replacement_slot, found = replacement._find_slot(record_rank, subject_rank, digest)
+            if found:
+                raise RuntimeError("audit logical-key rehash produced a duplicate")
+            replacement._record_kinds[replacement_slot] = record_rank
+            replacement._subject_kinds[replacement_slot] = subject_rank
+            replacement_digest_offset = replacement_slot * 32
+            replacement._digests[replacement_digest_offset : replacement_digest_offset + 32] = (
+                digest
+            )
+            replacement._sequences[replacement_slot] = sequence
+            replacement._count += 1
+        self._record_kinds = replacement._record_kinds
+        self._subject_kinds = replacement._subject_kinds
+        self._digests = replacement._digests
+        self._sequences = replacement._sequences
+
+    def resident_bytes(self) -> int:
+        return getsizeof(self) + sum(
+            getsizeof(value)
+            for value in (
+                self._record_kinds,
+                self._subject_kinds,
+                self._digests,
+                self._sequences,
+            )
+        )
+
+
+def _compact_index_resident_bytes(
+    entries: _JournalEntryIndex,
+    index: _LogicalKeyIndex,
+    recovered_sequences: bytearray,
+) -> int:
+    return entries.resident_bytes() + index.resident_bytes() + getsizeof(recovered_sequences)
 
 
 def _require_index_resident_budget(resident_bytes: int) -> None:
@@ -240,7 +437,7 @@ class PosixAuditRecoveryRecordSource:
         if type(logical_key) is not AuditLogicalKey:
             raise _audit_error(OutcomeCode.INVALID_TYPE, "audit recovery key must be exact")
         self._require_readable_prefix()
-        sequence = self._journal._index.get(_compact_logical_key(logical_key))
+        sequence = self._journal._index.get(logical_key)
         if sequence is None or sequence > self._record_count:
             return None
         return self._journal._read_entry_record(self._journal._entries[sequence - 1])
@@ -313,11 +510,11 @@ class PosixAuditJournal:
         self._journal_identity = journal_identity
         self._ops = ops
         self._lock = Lock()
-        self._entries: list[_JournalEntry] = []
-        self._index: dict[bytes, int] = {}
+        self._entries = _JournalEntryIndex()
+        self._index = _LogicalKeyIndex()
         self._recovered_sequences = bytearray()
-        self._index_resident_bytes = (
-            getsizeof(self._entries) + getsizeof(self._index) + getsizeof(self._recovered_sequences)
+        self._index_resident_bytes = _compact_index_resident_bytes(
+            self._entries, self._index, self._recovered_sequences
         )
         self._verified_eof = len(AUDIT_JOURNAL_PREAMBLE)
         self._needs_rescan = False
@@ -416,9 +613,10 @@ class PosixAuditJournal:
         preamble = _pread_exact(self._ops, self._journal_fd, len(AUDIT_JOURNAL_PREAMBLE), 0)
         if preamble != AUDIT_JOURNAL_PREAMBLE:
             raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit journal preamble is invalid")
-        entries: list[_JournalEntry] = []
-        index: dict[bytes, int] = {}
-        resident_bytes = getsizeof(entries) + getsizeof(index) + getsizeof(bytearray())
+        entries = _JournalEntryIndex()
+        index = _LogicalKeyIndex()
+        recovered_sequences = bytearray()
+        resident_bytes = _compact_index_resident_bytes(entries, index, recovered_sequences)
         terminal = False
         offset = len(AUDIT_JOURNAL_PREAMBLE)
         torn_offset: int | None = None
@@ -473,13 +671,14 @@ class PosixAuditJournal:
             except AuditContractError as error:
                 raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit frame is invalid") from error
             expected_sequence = len(entries) + 1
-            compact_key = _compact_logical_key(record.logical_key)
+            if expected_sequence > MAX_AUDIT_RECORDS:
+                raise _audit_error(OutcomeCode.OUT_OF_RANGE, "audit record count exceeds v1 bound")
             if (
                 record.record_id.owner_sequence != expected_sequence
                 or record.previous_record_sha256 != previous_record
                 or record.previous_chain_head_sha256 != previous_chain
                 or terminal
-                or compact_key in index
+                or index.get(record.logical_key) is not None
             ):
                 raise _audit_error(
                     OutcomeCode.CONFLICTING_ID, "audit record sequence or chain conflicts"
@@ -494,24 +693,14 @@ class PosixAuditJournal:
                 record_sha256=bytes.fromhex(record_sha256.value),
                 chain_head_sha256=bytes.fromhex(chain_head_sha256.value),
             )
-            previous_container_bytes = getsizeof(entries) + getsizeof(index)
             entries.append(entry)
-            index[compact_key] = expected_sequence
-            resident_bytes += (
-                getsizeof(entries)
-                + getsizeof(index)
-                - previous_container_bytes
-                + _entry_resident_bytes(entry)
-                + getsizeof(compact_key)
-                + getsizeof(expected_sequence)
-                + 1
-            )
+            index.insert(record.logical_key, expected_sequence)
+            recovered_sequences.append(1)
+            resident_bytes = _compact_index_resident_bytes(entries, index, recovered_sequences)
             _require_index_resident_budget(resident_bytes)
             previous_record = record_sha256
             previous_chain = chain_head_sha256
             terminal = record.record_kind is AuditRecordKind.RUN_TERMINAL
-            if len(entries) > MAX_AUDIT_RECORDS:
-                raise _audit_error(OutcomeCode.OUT_OF_RANGE, "audit record count exceeds v1 bound")
         if torn_offset is not None:
             if not permit_torn_tail:
                 raise _audit_error(
@@ -530,7 +719,6 @@ class PosixAuditJournal:
             offset = torn_offset
         self._entries = entries
         self._index = index
-        recovered_sequences = bytearray(b"\x01") * len(entries)
         self._recovered_sequences = recovered_sequences
         self._index_resident_bytes = resident_bytes
         self._terminal = terminal
@@ -559,8 +747,7 @@ class PosixAuditJournal:
                     "audit journal is in a monotone failed state",
                 )
             logical_key = AuditLogicalKey(record_kind, subject_kind, subject_sha256)
-            compact_key = _compact_logical_key(logical_key)
-            existing_sequence = self._index.get(compact_key)
+            existing_sequence = self._index.get(logical_key)
             if existing_sequence is not None:
                 entry = self._entries[existing_sequence - 1]
                 if (
@@ -602,7 +789,7 @@ class PosixAuditJournal:
                 raise _audit_error(OutcomeCode.CONFLICTING_ID, "terminal audit journal is closed")
             if self._needs_rescan:
                 self._rescan(permit_torn_tail=True)
-                existing_sequence = self._index.get(compact_key)
+                existing_sequence = self._index.get(logical_key)
                 if existing_sequence is not None:
                     entry = self._entries[existing_sequence - 1]
                     if (
@@ -671,22 +858,12 @@ class PosixAuditJournal:
                 record_sha256=bytes.fromhex(audit_record_digest(record).value),
                 chain_head_sha256=bytes.fromhex(audit_chain_head(record).value),
             )
-            previous_container_bytes = getsizeof(self._entries) + getsizeof(self._index)
+            self._index.reserve_for_insert()
             self._entries.append(entry)
-            self._index[compact_key] = record.record_id.owner_sequence
-            expanded_container_bytes = getsizeof(self._entries) + getsizeof(self._index)
-            self._entries.pop()
-            del self._index[compact_key]
-            retained_container_bytes = getsizeof(self._entries) + getsizeof(self._index)
-            self._index_resident_bytes += retained_container_bytes - previous_container_bytes
-            projected_resident_bytes = (
-                self._index_resident_bytes
-                + expanded_container_bytes
-                - retained_container_bytes
-                + _entry_resident_bytes(entry)
-                + getsizeof(compact_key)
-                + getsizeof(record.record_id.owner_sequence)
+            projected_resident_bytes = _compact_index_resident_bytes(
+                self._entries, self._index, self._recovered_sequences
             )
+            self._entries.pop()
             _require_index_resident_budget(projected_resident_bytes)
             try:
                 _write_all(self._ops, self._journal_fd, frame, start)
@@ -729,8 +906,10 @@ class PosixAuditJournal:
             acknowledgement = create_audit_append_acknowledgement(record)
             self._ack_cache[record.record_id.owner_sequence] = acknowledgement
             self._entries.append(entry)
-            self._index[compact_key] = record.record_id.owner_sequence
-            self._index_resident_bytes = projected_resident_bytes
+            self._index.insert(logical_key, record.record_id.owner_sequence)
+            self._index_resident_bytes = _compact_index_resident_bytes(
+                self._entries, self._index, self._recovered_sequences
+            )
             self._verified_eof += len(frame)
             self._terminal = record_kind is AuditRecordKind.RUN_TERMINAL
             return acknowledgement
@@ -777,8 +956,7 @@ class PosixAuditJournal:
                         OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
                         "audit settlement rescan could not complete",
                     ) from error
-            compact_key = _compact_logical_key(logical_key)
-            sequence = self._index.get(compact_key)
+            sequence = self._index.get(logical_key)
             if sequence is None:
                 try:
                     self._ops.fsync(self._journal_fd)
@@ -882,7 +1060,7 @@ def create_posix_audit_journal(
         audit_fd, _ = prepared._store._open_audit_directory(prepared)
         filesystem = ops.fstatvfs(audit_fd)
         if filesystem.f_bavail * filesystem.f_frsize < MIN_AUDIT_FILESYSTEM_FREE_BYTES:
-            raise StoreError("audit filesystem has less than the required 6 GiB free")
+            raise StoreError("audit filesystem has less than the required 13 GiB free")
         journal_fd = ops.create_journal(audit_fd)
         value = ops.fstat(journal_fd)
         if (
@@ -937,7 +1115,7 @@ def reopen_posix_audit_journal(
         audit_fd, _ = prepared._store._open_audit_directory(prepared)
         filesystem = ops.fstatvfs(audit_fd)
         if filesystem.f_bavail * filesystem.f_frsize < MIN_AUDIT_FILESYSTEM_FREE_BYTES:
-            raise StoreError("audit filesystem has less than the required 6 GiB free")
+            raise StoreError("audit filesystem has less than the required 13 GiB free")
         journal_fd = ops.open_journal(audit_fd)
         value = ops.fstat(journal_fd)
         if (
