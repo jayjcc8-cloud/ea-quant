@@ -56,6 +56,7 @@ from ea.core import (
 )
 from ea.core.audit import require_canonical_audit_payload
 from ea.core.reconciliation import (
+    _authorization_binding,
     _create_reconciliation_adjustment_authorization,
     _create_reconciliation_adjustment_command,
     _decode_reconciliation_adjustment_authorization,
@@ -489,6 +490,30 @@ def test_cash_command_uses_exact_observed_balance_and_round_trips() -> None:
 
     assert json.loads(payload)["target"]["kind"] == "settlement_cash"
     assert _decode_reconciliation_adjustment_command(payload, _spec_set(), outcome) == command
+    document = json.loads(payload)
+    invalid_payloads = (
+        _canonical({key: value for key, value in document.items() if key != "schema"}),
+        _canonical({**document, "schema": "ea.reconciliation-adjustment-command.v0"}),
+        _canonical({**document, "canonicalization": "unknown"}),
+        _canonical({**document, "target": None}),
+        _canonical({**document, "unexpected": None}),
+        _canonical({**document, "delta": "0"}),
+        _canonical({**document, "target": {**document["target"], "unexpected": None}}),
+        _canonical(
+            {
+                **document,
+                "target": {
+                    **document["target"],
+                    "kind": "open_reconciliation_ref",
+                },
+            }
+        ),
+        _canonical({**document, "observed_amount": "121", "delta": "-4.5"}),
+        _canonical({**document, "target": {**document["target"], "kind": "unknown"}}),
+    )
+    for invalid in invalid_payloads:
+        with pytest.raises(ReconciliationContractError):
+            _decode_reconciliation_adjustment_command(invalid, _spec_set(), outcome)
 
 
 @pytest.mark.parametrize("decision", tuple(ReconciliationAuthorizationDecision))
@@ -602,6 +627,13 @@ def test_authorization_rejects_wrong_identity_ack_and_payload_drift() -> None:
             )
     assert "_create_reconciliation_adjustment_authorization" not in core.__all__
     assert "_decode_reconciliation_adjustment_authorization" not in core.__all__
+    with pytest.raises(ReconciliationContractError):
+        _authorization_binding(None)  # type: ignore[arg-type]
+    forged = object.__new__(ReconciliationAdjustmentAuthorization)
+    object.__setattr__(forged, "_seal", authorization._seal)
+    object.__setattr__(forged, "_binding", None)
+    with pytest.raises(ReconciliationContractError):
+        _authorization_binding(forged)
 
 
 def test_authorization_decoder_rejects_every_binding_drift() -> None:
