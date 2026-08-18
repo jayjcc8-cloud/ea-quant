@@ -13,6 +13,7 @@ from ea.core import (
     EconomicOwnerKind,
     FactProvenanceId,
     Instrument,
+    InstrumentExecutionSpecSet,
     PositionReconciliationBalance,
     ReconciliationObservationKind,
     ReconciliationScopeKind,
@@ -52,7 +53,7 @@ def _instruments() -> tuple[Instrument, ...]:
     return _INSTRUMENTS
 
 
-def _spec_set_for(selected: tuple[Instrument, ...]) -> object:
+def _spec_set_for(selected: tuple[Instrument, ...]) -> InstrumentExecutionSpecSet:
     return _spec_set(
         *(
             _spec(instrument=instrument, specification_id=f"xnas.{instrument.symbol.lower()}.v1")
