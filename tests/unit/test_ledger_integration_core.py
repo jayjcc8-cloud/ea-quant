@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ from ea.core import (
     canonical_ledger_apply_outcome_bytes,
     canonical_ledger_handoff_outcome_bytes,
     canonical_portfolio_risk_refresh_bytes,
+    canonical_portfolio_snapshot_bytes,
     create_audit_append_acknowledgement,
     create_audit_record,
     create_audited_ledger_handoff,
@@ -368,7 +370,14 @@ def test_ledger_integration_module_is_dependency_neutral_and_capability_confined
     } & set(core.__all__)
 
 
-def _risk_refresh(*, halted: bool = False, permitted: bool = True) -> PortfolioRiskRefresh:
+def _risk_refresh(
+    *,
+    halted: bool = False,
+    permitted: bool = True,
+    dispatch: int = 1,
+    refresh: int = 1,
+    halt_dispatch_sequence: int | None = None,
+) -> PortfolioRiskRefresh:
     spec_set = _spec_set()
     snapshot = create_portfolio_ledger(RUN_ID, spec_set).snapshot
     risk_state = _create_risk_state_snapshot(
@@ -379,15 +388,19 @@ def _risk_refresh(*, halted: bool = False, permitted: bool = True) -> PortfolioR
         halted=halted,
         halt_reason=RiskHaltReason.RECONCILIATION_REQUIRED if halted else None,
         halt_causal_root_available_at=(datetime(2026, 1, 2, 9, 31, tzinfo=UTC) if halted else None),
-        halt_dispatch_sequence=1 if halted else None,
+        halt_dispatch_sequence=(
+            halt_dispatch_sequence
+            if halt_dispatch_sequence is not None
+            else (1 if halted else None)
+        ),
         conflict_existing_intent_sha256=None,
         conflict_submitted_intent_sha256=None,
     )
     return _create_portfolio_risk_refresh(
         portfolio_snapshot=snapshot,
         risk_state=risk_state,
-        dispatch_sequence=1,
-        refresh_sequence=1,
+        dispatch_sequence=dispatch,
+        refresh_sequence=refresh,
         ordered_ledger_ack_frontier_sha256=DIGESTS[7],
         submission_permitted=permitted,
         previous_refresh_sha256=None,
@@ -499,3 +512,71 @@ def test_audited_ledger_handoff_requires_exact_outcome_acknowledgement() -> None
             outcome,
             create_audit_append_acknowledgement(wrong_record),
         )
+
+
+# --- SHA-bound review fixes for 68f59627 (Issue #70) -----------------------
+
+
+def test_portfolio_risk_exposure_digest_matches_hand_computed_golden() -> None:
+    # VERIFY-003: pin the exposure digest formula with an independent
+    # hashlib computation: domain + u64be(payload length) + payload.
+    spec_set = _spec_set()
+    snapshot = create_portfolio_ledger(RUN_ID, spec_set).snapshot
+    snapshot_bytes = canonical_portfolio_snapshot_bytes(snapshot)
+    refresh = _risk_refresh()
+
+    expected = Sha256Digest(
+        hashlib.sha256(
+            b"ea.portfolio-risk-exposure.v1\0"
+            + len(snapshot_bytes).to_bytes(8, "big")
+            + snapshot_bytes
+        ).hexdigest()
+    )
+
+    assert refresh.exposure_sha256 == expected
+    assert expected.value == "e85214f024127d6bf0d394b1f1c13467914994a8cc0b78e5ec501cb34f0ad530"
+
+
+def test_handoff_failure_schema_is_closed_and_round_trips() -> None:
+    # VERIFY-004: the ledger-handoff failure enum had no positive or negative
+    # schema test in the strict decoder.
+    failed = create_ledger_handoff_outcome(
+        run_id=RUN_ID,
+        dispatch_sequence=2,
+        ingress_identity=INGRESS,
+        audited_handoff_sha256=DIGESTS[0],
+        processing_outcome_sha256=DIGESTS[1],
+        processing_outcome_ack_sha256=DIGESTS[2],
+        fill_id=None,
+        fill_sha256=None,
+        action=LedgerHandoffAction.FAILED,
+        original_ledger_apply_outcome=None,
+        original_ledger_apply_outcome_sha256=None,
+        before_snapshot_version=4,
+        before_snapshot_sha256=DIGESTS[3],
+        after_snapshot_version=4,
+        after_snapshot_sha256=DIGESTS[3],
+        requires_reconciliation=False,
+        halt_requested=True,
+        failure=LedgerHandoffFailure.EVIDENCE_MISMATCH,
+    )
+    payload = canonical_ledger_handoff_outcome_bytes(failed)
+
+    assert decode_ledger_handoff_outcome(payload) == failed
+    document = json.loads(payload)
+    for tampered in ("unknown_failure", "evidence mismatch", 1, True):
+        with pytest.raises(LedgerIntegrationError):
+            decode_ledger_handoff_outcome(_canonical({**document, "failure": tampered}))
+
+
+def test_risk_refresh_rejects_dispatch_and_refresh_sequence_mismatch() -> None:
+    # VERIFY-005: refresh==dispatch equality was enforced but never tested.
+    with pytest.raises(LedgerIntegrationError, match="refresh and dispatch sequences"):
+        _risk_refresh(dispatch=2, refresh=1)
+
+
+def test_risk_refresh_rejects_refresh_before_bound_risk_halt() -> None:
+    # VERIFY-005: a refresh emitted before the bound risk halt dispatch was
+    # rejected by the factory but had no test.
+    with pytest.raises(LedgerIntegrationError, match="precedes its bound risk halt"):
+        _risk_refresh(halted=True, dispatch=1, halt_dispatch_sequence=2)

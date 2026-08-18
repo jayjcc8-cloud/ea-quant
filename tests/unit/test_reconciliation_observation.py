@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -215,3 +216,19 @@ def test_decoder_rejects_subclass_float_and_payload_above_bound() -> None:
         )
     with pytest.raises(ReconciliationContractError):
         decode_reconciliation_observation(b"x" * 16_385, spec_set)
+
+
+def test_observation_digest_matches_hand_computed_golden() -> None:
+    # VERIFY-004: pin the observation digest formula with an independent
+    # hashlib computation: domain + u64be(payload length) + payload.
+    observation = _observation()
+    payload = canonical_reconciliation_observation_bytes(observation)
+
+    expected = Sha256Digest(
+        hashlib.sha256(
+            b"ea.reconciliation-observation.v1\0" + len(payload).to_bytes(8, "big") + payload
+        ).hexdigest()
+    )
+
+    assert reconciliation_observation_digest(observation) == expected
+    assert expected.value == "1d2002d5615c3321e47a4c6c65de7d7f5d6248f455efc99b66de4902e875f563"

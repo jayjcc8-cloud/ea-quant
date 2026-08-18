@@ -26,6 +26,7 @@ from ea.core import (
     LedgerAccountKind,
     LedgerConflictKind,
     LedgerFailureStage,
+    OpenReconciliationRef,
     OrderSide,
     OutcomeCode,
     PortfolioLedgerError,
@@ -44,6 +45,7 @@ from ea.core import (
     create_fill,
     create_trade_execution_fact,
     fill_digest,
+    instrument_spec_set_digest,
     ledger_apply_outcome_digest,
     ledger_transaction_digest,
     portfolio_snapshot_digest,
@@ -848,3 +850,38 @@ def test_public_validation_uses_closed_structural_codes(
     with pytest.raises(PortfolioLedgerError) as error:
         factory()
     assert error.value.code is code
+
+
+def test_snapshot_rejects_cross_run_open_reconciliation_binding() -> None:
+    # VERIFY-005: an open reconciliation binding whose Fill belongs to another
+    # run must be rejected at the snapshot factory, not only at the binding.
+    reference = OpenReconciliationRef(
+        _id(EconomicOwnerKind.EXECUTION_FILL, 9, run_id=OTHER_RUN_ID),
+        Sha256Digest("5" * 64),
+        Sha256Digest("6" * 64),
+    )
+    spec_set = _spec_set()
+
+    with pytest.raises(PortfolioLedgerError, match="run conflicts"):
+        PortfolioSnapshot(
+            run_id=RUN_ID,
+            instrument_spec_set_id=spec_set.identifier,
+            instrument_spec_set_sha256=instrument_spec_set_digest(spec_set),
+            snapshot_version=3,
+            ledger_sequence=3,
+            last_entry_id=_id(EconomicOwnerKind.LEDGER_ENTRY, 3),
+            last_transaction_sha256=Sha256Digest("8" * 64),
+            cash_balances=(),
+            position_balances=(),
+            rounding_balances=(),
+            unresolved_fills=(),
+            open_reconciliation_bindings=(
+                ExistingLedgerBinding(
+                    _id(EconomicOwnerKind.LEDGER_ENTRY, 2, run_id=OTHER_RUN_ID),
+                    reference.fill_id,
+                    reference.fill_sha256,
+                    Sha256Digest("9" * 64),
+                ),
+            ),
+            open_reconciliation_refs=(reference,),
+        )

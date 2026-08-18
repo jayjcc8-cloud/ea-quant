@@ -10,6 +10,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Protocol, final
 
+from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind
 from ea.core.execution_state import EXECUTION_FACT_PROCESSING_OUTCOME_DIGEST_DOMAIN
 from ea.core.outcomes import OutcomeCode
@@ -1006,8 +1007,19 @@ def _require_execution_outcome_payload_values(document: dict[str, object]) -> No
 def require_canonical_audit_payload(
     record_kind: AuditRecordKind,
     canonical_payload: bytes,
+    *,
+    spec_set: InstrumentExecutionSpecSet | None = None,
 ) -> bytes:
-    """Validate the exact bytes carrier, size and canonical-JSON representation."""
+    """Validate the exact bytes carrier, size and canonical-JSON representation.
+
+    Reconciliation observation outcomes are additionally checked against the
+    strict ``decode_reconciliation_outcome`` codec when the caller supplies the
+    bound instrument spec-set, so quantization, the closed action matrix, and
+    delta re-derivation are re-validated at admission instead of only
+    structurally (SEC-001 / DET-002). Without a spec-set the gate keeps its
+    dependency-neutral structural validation; recovery and replay remain
+    fail-closed through subject-digest bindings.
+    """
     if type(record_kind) is not AuditRecordKind or type(canonical_payload) is not bytes:
         raise _fail(OutcomeCode.INVALID_TYPE, "audit payload requires exact kind and bytes")
     limit = (
@@ -1057,6 +1069,24 @@ def require_canonical_audit_payload(
             ) from error
         if decoded_payload != canonical_payload:
             raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload semantic round-trip conflicts")
+    elif record_kind is AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME and spec_set is not None:
+        from ea.core.reconciliation import decode_reconciliation_outcome
+
+        if type(spec_set) is not InstrumentExecutionSpecSet:
+            raise _fail(
+                OutcomeCode.INVALID_TYPE,
+                "audit reconciliation spec_set must be an exact bound spec-set",
+            )
+        try:
+            # The strict codec re-validates exact fields, the closed action
+            # matrix, decimal quantization, and delta re-derivation, and
+            # already enforces the canonical byte round-trip internally.
+            decode_reconciliation_outcome(canonical_payload, spec_set)
+        except ValueError as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "audit payload semantic codec rejected its value",
+            ) from error
     elif record_kind is not AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
         expected_fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[record_kind]
         if set(document) != expected_fields:
@@ -1112,8 +1142,14 @@ def create_audit_record(
     canonical_payload: bytes,
     previous_record_sha256: Sha256Digest,
     previous_chain_head_sha256: Sha256Digest,
+    spec_set: InstrumentExecutionSpecSet | None = None,
 ) -> AuditRecord:
-    """Create one record after validating every exact identity and byte bound."""
+    """Create one record after validating every exact identity and byte bound.
+
+    ``spec_set`` is forwarded to the reconciliation observation-outcome
+    admission gate so a writer that holds the bound spec-set gets the strict
+    semantic codec instead of only structural validation (SEC-001 / DET-002).
+    """
     if type(binding) is not RunBinding:
         raise _fail(OutcomeCode.INVALID_TYPE, "binding must be an exact RunBinding")
     _require_kind_subject(record_kind, subject_kind)
@@ -1128,7 +1164,7 @@ def create_audit_record(
     ):
         if type(candidate_digest) is not Sha256Digest:
             raise _fail(OutcomeCode.INVALID_TYPE, f"{name} must be an exact Sha256Digest")
-    require_canonical_audit_payload(record_kind, canonical_payload)
+    require_canonical_audit_payload(record_kind, canonical_payload, spec_set=spec_set)
     if audit_subject_digest(record_kind, canonical_payload) != subject_sha256:
         raise _fail(OutcomeCode.CONFLICTING_ID, "subject digest conflicts with canonical payload")
     try:

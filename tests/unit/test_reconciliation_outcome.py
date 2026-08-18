@@ -20,6 +20,7 @@ from ea.core import (
     EconomicId,
     EconomicOwnerKind,
     ExistingLedgerBinding,
+    Instrument,
     InstrumentExecutionSpecSet,
     OpenReconciliationRef,
     OutcomeCode,
@@ -43,6 +44,7 @@ from ea.core import (
     Sha256Digest,
     SourceNamespace,
     UnresolvedFillRef,
+    VenueId,
     audit_subject_digest,
     audited_reconciliation_adjustment_authorization_digest,
     canonical_audited_reconciliation_adjustment_authorization_bytes,
@@ -80,7 +82,7 @@ from ea.core.reconciliation import (
     _decode_reconciliation_adjustment_command,
 )
 from unit.test_execution_messages import SPEC_SET, _allow, _intent, _order, _trade_fact
-from unit.test_portfolio_ledger import INSTRUMENT, RUN_ID, USD, _spec_set
+from unit.test_portfolio_ledger import INSTRUMENT, RUN_ID, USD, _spec, _spec_set
 from unit.test_reconciliation_observation import TIME, _observation
 
 OBSERVATION_SHA256 = Sha256Digest("11" * 32)
@@ -1231,3 +1233,269 @@ def test_authorization_decoder_rejects_every_binding_drift() -> None:
             decision=ReconciliationAuthorizationDecision.ALLOWED,
             available_at=TIME,
         )
+
+
+# --- SHA-bound review fixes for 68f59627 (Issue #70) -----------------------
+
+
+def _wide_spec_set(count: int) -> InstrumentExecutionSpecSet:
+    specifications = tuple(
+        _spec(
+            instrument=Instrument(VenueId("XNAS"), f"S{index:03d}"),
+            specification_id=f"xnas.s{index:03d}.v1",
+        )
+        for index in range(count)
+    )
+    return _spec_set(*specifications)
+
+
+def _wide_discrepancies(
+    spec_set: InstrumentExecutionSpecSet,
+) -> tuple[object, ...]:
+    return tuple(
+        create_position_reconciliation_discrepancy(
+            spec_set=spec_set,
+            instrument=specification.instrument,
+            local_amount=CanonicalDecimal("10"),
+            observed_amount=CanonicalDecimal("12"),
+        )
+        for specification in spec_set.specifications
+    )
+
+
+def test_discrepancy_delta_overflow_fails_closed_with_module_error() -> None:
+    # LEDGER-001: 20-digit integer operands whose difference needs 21 integer
+    # digits previously leaked the economics-domain EconomicValidationError
+    # out of the sealed discrepancy factories.
+    local = CanonicalDecimal("-99999999999999999999")
+    observed = CanonicalDecimal("1")
+
+    with pytest.raises(ReconciliationContractError) as position_error:
+        create_position_reconciliation_discrepancy(
+            spec_set=_spec_set(),
+            instrument=INSTRUMENT,
+            local_amount=local,
+            observed_amount=observed,
+        )
+    assert position_error.value.code is OutcomeCode.OUT_OF_RANGE
+    assert type(position_error.value) is ReconciliationContractError
+
+    with pytest.raises(ReconciliationContractError) as cash_error:
+        create_cash_reconciliation_discrepancy(
+            spec_set=_spec_set(),
+            currency=USD,
+            local_amount=local,
+            observed_amount=observed,
+        )
+    assert cash_error.value.code is OutcomeCode.OUT_OF_RANGE
+    assert type(cash_error.value) is ReconciliationContractError
+
+
+@pytest.mark.parametrize("count", [2, 3, 16, 32])
+def test_quarantined_matrix_rows_construct_and_round_trip(count: int) -> None:
+    # VERIFY-001: the 2..32 discrepancy quarantined row had no constructive
+    # test; exercise the full closed interval at both boundaries and middle.
+    spec_set = _wide_spec_set(count)
+    outcome = _outcome(
+        discrepancies=_wide_discrepancies(spec_set),
+        outcome_code=OutcomeCode.RECONCILIATION_QUARANTINED,
+        requested_action=ReconciliationRequestedAction.MANUAL_EVIDENCE_DECOMPOSITION,
+        halt_requested=True,
+    )
+    payload = canonical_reconciliation_outcome_bytes(outcome)
+
+    assert decode_reconciliation_outcome(payload, spec_set) == outcome
+    assert (
+        require_canonical_audit_payload(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            payload,
+        )
+        is payload
+    )
+
+
+def test_quarantined_matrix_rejects_more_than_thirty_two_discrepancies() -> None:
+    spec_set = _wide_spec_set(33)
+    discrepancies = _wide_discrepancies(spec_set)
+
+    with pytest.raises(ReconciliationContractError, match="exceeds 32"):
+        _outcome(
+            discrepancies=discrepancies,
+            outcome_code=OutcomeCode.RECONCILIATION_QUARANTINED,
+            requested_action=ReconciliationRequestedAction.MANUAL_EVIDENCE_DECOMPOSITION,
+            halt_requested=True,
+        )
+
+    document = json.loads(
+        canonical_reconciliation_outcome_bytes(
+            _outcome(
+                discrepancies=_wide_discrepancies(_wide_spec_set(2)),
+                outcome_code=OutcomeCode.RECONCILIATION_QUARANTINED,
+                requested_action=ReconciliationRequestedAction.MANUAL_EVIDENCE_DECOMPOSITION,
+                halt_requested=True,
+            )
+        )
+    )
+    document["discrepancies"] = [
+        {
+            "delta": "2",
+            "instrument": {"symbol": f"S{index:03d}", "venue": "XNAS"},
+            "kind": "instrument_position",
+            "local_amount": "10",
+            "observed_amount": "12",
+        }
+        for index in range(33)
+    ]
+    with pytest.raises(AuditContractError):
+        require_canonical_audit_payload(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            _canonical(document),
+        )
+
+
+@pytest.mark.parametrize(
+    ("comparison", "outcome_code", "action"),
+    [
+        (
+            ReconciliationWatermarkComparison.REMOTE_LOWER,
+            OutcomeCode.RECONCILIATION_LOCAL_AHEAD_STALE,
+            ReconciliationRequestedAction.RETAIN_AND_HALT,
+        ),
+        (
+            ReconciliationWatermarkComparison.REMOTE_HIGHER,
+            OutcomeCode.RECONCILIATION_REMOTE_AHEAD,
+            ReconciliationRequestedAction.REQUEST_MISSING_TRADE_FACTS,
+        ),
+        (
+            ReconciliationWatermarkComparison.INCOMPARABLE,
+            OutcomeCode.RECONCILIATION_INVALID,
+            ReconciliationRequestedAction.RETAIN_AND_HALT,
+        ),
+        (
+            ReconciliationWatermarkComparison.EQUAL,
+            OutcomeCode.RECONCILIATION_UNRESOLVED_CORRELATION,
+            ReconciliationRequestedAction.RETAIN_AND_HALT,
+        ),
+    ],
+)
+def test_positive_outcome_matrix_rows_construct_and_round_trip(
+    comparison: ReconciliationWatermarkComparison,
+    outcome_code: OutcomeCode,
+    action: ReconciliationRequestedAction,
+) -> None:
+    # VERIFY-002: these four matrix rows were only ever exercised through
+    # rejection tests; construct each row and prove factory, strict decoder,
+    # and the audit gate agree on it (DET-002 cross-consistency).
+    outcome = _outcome(
+        watermark_comparison=comparison,
+        outcome_code=outcome_code,
+        requested_action=action,
+        halt_requested=True,
+    )
+    payload = canonical_reconciliation_outcome_bytes(outcome)
+
+    assert decode_reconciliation_outcome(payload, _spec_set()) == outcome
+    assert (
+        require_canonical_audit_payload(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            payload,
+        )
+        is payload
+    )
+
+
+def test_audit_gate_with_spec_set_reuses_strict_reconciliation_codec() -> None:
+    # SEC-001: admission with a bound spec-set must run the strict codec.
+    outcome = _outcome()
+    payload = canonical_reconciliation_outcome_bytes(outcome)
+
+    assert (
+        require_canonical_audit_payload(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            payload,
+            spec_set=_spec_set(),
+        )
+        is payload
+    )
+    with pytest.raises(AuditContractError):
+        require_canonical_audit_payload(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            payload,
+            spec_set=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_audit_gate_with_spec_set_rejects_unquantized_discrepancy_payload() -> None:
+    # SEC-001 repro: quantity quantum is 1, so observed "12.5" with delta
+    # "2.5" re-derives correctly under the structural check but is rejected
+    # by the strict codec that carries the spec-set quantization.
+    discrepancy = create_position_reconciliation_discrepancy(
+        spec_set=_spec_set(),
+        instrument=INSTRUMENT,
+        local_amount=CanonicalDecimal("10"),
+        observed_amount=CanonicalDecimal("12"),
+    )
+    outcome = _outcome(
+        discrepancies=(discrepancy,),
+        outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
+        requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+        halt_requested=True,
+    )
+    document = json.loads(canonical_reconciliation_outcome_bytes(outcome))
+    document["discrepancies"][0]["observed_amount"] = "12.5"
+    document["discrepancies"][0]["delta"] = "2.5"
+    tampered = _canonical(document)
+
+    require_canonical_audit_payload(
+        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        tampered,
+    )
+    with pytest.raises(AuditContractError):
+        require_canonical_audit_payload(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            tampered,
+            spec_set=_spec_set(),
+        )
+
+
+def test_audit_record_admission_forwards_spec_set_semantic_check() -> None:
+    outcome = _outcome()
+    payload = canonical_reconciliation_outcome_bytes(outcome)
+    record = create_audit_record(
+        binding=BINDING,
+        owner_sequence=2,
+        record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        subject_kind=AuditSubjectKind.RECONCILIATION_OUTCOME,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            payload,
+        ),
+        canonical_payload=payload,
+        previous_record_sha256=EMPTY_RECORD_SHA256,
+        previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+        spec_set=_spec_set(),
+    )
+    assert record.canonical_payload == payload
+
+    document = json.loads(payload)
+    document["schema"] = "ea.reconciliation-outcome.v1"
+    with pytest.raises(AuditContractError):
+        create_audit_record(
+            binding=BINDING,
+            owner_sequence=2,
+            record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            subject_kind=AuditSubjectKind.RECONCILIATION_OUTCOME,
+            subject_sha256=Sha256Digest("00" * 32),
+            canonical_payload=_canonical(document),
+            previous_record_sha256=EMPTY_RECORD_SHA256,
+            previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+            spec_set=_spec_set(),
+        )
+
+
+def test_outcome_decoder_rejects_payloads_over_sixteen_kibibyte_bound() -> None:
+    # VERIFY-004: the 16 KiB reconciliation payload bound was never tested.
+    oversized = b'{"padding":"' + (b"a" * 16_384) + b'"}'
+    with pytest.raises(ReconciliationContractError) as error:
+        decode_reconciliation_outcome(oversized, _spec_set())
+    assert error.value.code is OutcomeCode.OUT_OF_RANGE
