@@ -25,7 +25,7 @@ from ea.core.audit import (
     canonical_run_prepared_audit_payload,
 )
 from ea.core.outcomes import OutcomeCode
-from ea.core.run import Sha256Digest
+from ea.core.run import RunId, Sha256Digest
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
     PosixAuditJournal,
@@ -960,3 +960,82 @@ def test_terminal_recovery_returns_read_only_lost_ack_evidence(
     with pytest.raises(StoreError, match="stale or foreign"):
         recovered_store.recover_terminal_attempt(verified)
     terminal._finish()
+
+
+def test_reconciliation_append_forwards_spec_set_semantic_admission(
+    tmp_path: Path,
+) -> None:
+    # SEC-001 seam: the durable authority forwards the bound spec-set into
+    # record admission so an unquantized discrepancy delta (which the
+    # structural gate alone would admit) is rejected before any frame is
+    # written, without poisoning the journal.
+    from ea.core.economics import CanonicalDecimal
+    from ea.core.reconciliation import (
+        ReconciliationRequestedAction,
+        ReconciliationWatermarkComparison,
+        canonical_reconciliation_outcome_bytes,
+        create_position_reconciliation_discrepancy,
+        create_reconciliation_outcome,
+    )
+    from unit.test_portfolio_ledger import INSTRUMENT, _spec_set
+
+    run_id = RunId(str(RUN_UUID))
+    spec_set = _spec_set()
+    discrepancy = create_position_reconciliation_discrepancy(
+        spec_set=spec_set,
+        instrument=INSTRUMENT,
+        local_amount=CanonicalDecimal("10"),
+        observed_amount=CanonicalDecimal("12"),
+    )
+    outcome = create_reconciliation_outcome(
+        run_id=run_id,
+        dispatch_sequence=7,
+        observation_sha256=Sha256Digest("11" * 32),
+        local_snapshot_version=4,
+        local_snapshot_sha256=Sha256Digest("22" * 32),
+        ledger_sequence=4,
+        watermark_comparison=ReconciliationWatermarkComparison.EQUAL,
+        discrepancies=(discrepancy,),
+        outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
+        requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+        halt_requested=True,
+    )
+    payload = canonical_reconciliation_outcome_bytes(outcome)
+    subject_sha256 = audit_subject_digest(
+        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        payload,
+    )
+    tampered = json.loads(payload)
+    tampered["discrepancies"][0]["observed_amount"] = "12.5"
+    tampered["discrepancies"][0]["delta"] = "2.5"
+    tampered_payload = json.dumps(
+        tampered,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+
+    with pytest.raises(AuditContractError):
+        journal.append(
+            record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+            subject_kind=AuditSubjectKind.RECONCILIATION_OUTCOME,
+            subject_sha256=audit_subject_digest(
+                AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+                tampered_payload,
+            ),
+            canonical_payload=tampered_payload,
+            spec_set=spec_set,
+        )
+
+    acknowledgement = journal.append(
+        record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        subject_kind=AuditSubjectKind.RECONCILIATION_OUTCOME,
+        subject_sha256=subject_sha256,
+        canonical_payload=payload,
+        spec_set=spec_set,
+    )
+    assert acknowledgement.record_id.owner_sequence == 2
