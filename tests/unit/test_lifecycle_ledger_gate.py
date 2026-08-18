@@ -590,16 +590,6 @@ def test_no_fill_frontier_does_not_halt_and_permits_submission() -> None:
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
     ingress = batch.ingresses[0]
-    fact = ingress.fact
-    key_kinds = tuple(
-        kind
-        for present, kind in (
-            (fact.order_id is not None, OrderResolutionKeyKind.ORDER_ID),
-            (fact.client_submission_key is not None, OrderResolutionKeyKind.CLIENT_SUBMISSION_KEY),
-            (fact.venue_order_id is not None, OrderResolutionKeyKind.VENUE_ORDER_ID),
-        )
-        if present
-    )
     outcome = create_execution_fact_processing_outcome(
         run_id=matcher.run_id,
         runtime_dispatch_sequence=8,
