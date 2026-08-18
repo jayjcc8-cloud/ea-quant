@@ -201,6 +201,10 @@ class _RecoveredDispatch:
     authorization_records: list[tuple[int, AuditRecord, AuditAppendAcknowledgement]] = field(
         default_factory=list
     )
+    ledger_records: list[tuple[int, AuditRecord, AuditAppendAcknowledgement]] = field(
+        default_factory=list
+    )
+    refresh_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1901,6 +1905,9 @@ def recover_phase1_lifecycle_coordinator(
     records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
     authorization: SubmissionAuthorizationPreparationPort | None = None,
     authorization_capability: object | None = None,
+    ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
+    risk_authority: _RiskGatePort | None = None,
+    risk_refresh_authority: _RiskRefreshGatePort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     """Reconcile one reopened non-terminal journal with injected authority histories."""
     _require_static_bindings(
@@ -1912,6 +1919,25 @@ def recover_phase1_lifecycle_coordinator(
         authorization=authorization,
         authorization_capability=authorization_capability,
     )
+    ledger_bound = (
+        ledger_handoff_authority is not None,
+        risk_authority is not None,
+        risk_refresh_authority is not None,
+    )
+    if any(ledger_bound) and not all(ledger_bound):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "ledger, risk, and refresh authorities must be bound together",
+        )
+    if ledger_handoff_authority is not None:
+        assert risk_authority is not None and risk_refresh_authority is not None
+        _require_ledger_authority_bindings(
+            binding=binding,
+            matcher=matcher,
+            ledger_handoff_authority=ledger_handoff_authority,
+            risk_authority=risk_authority,
+            risk_refresh_authority=risk_refresh_authority,
+        )
     recovered = iter(_require_recovery_records(binding, records, audit=audit))
     try:
         _prepared, prepared_acknowledgement = next(recovered)
@@ -1929,6 +1955,9 @@ def recover_phase1_lifecycle_coordinator(
         evidence_resolver=evidence_resolver,
         authorization=authorization,
         authorization_capability=authorization_capability,
+        ledger_handoff_authority=ledger_handoff_authority,
+        risk_authority=risk_authority,
+        risk_refresh_authority=risk_refresh_authority,
     )
     value._state = _admitted_state(binding, prepared_acknowledgement.chain_head_sha256)
     expected_sequence = 1
@@ -2353,11 +2382,99 @@ def _group_recovery_records(
             if group.completion_record is not None:
                 raise LifecycleError(OutcomeCode.CONFLICTING_ID, "duplicate recovered completion")
             group.completion_record = retained
+        elif kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME:
+            subjects = {entry[1].subject_sha256 for entry in group.ledger_records}
+            if record.subject_sha256 in subjects:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "duplicate recovered ledger outcome",
+                )
+            group.ledger_records.append(retained)
+        elif kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH:
+            if group.refresh_record is not None:
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "duplicate recovered refresh")
+            group.refresh_record = retained
         else:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "unsupported recovery record kind")
     if current is not None:
         _require_recovery_stage_order(current)
         yield current
+
+
+def _recover_ledger_frontier(
+    coordinator: Phase1HistoricalLifecycleCoordinator,
+    active: _ActiveDispatch,
+    recovered: _RecoveredDispatch,
+) -> None:
+    """ADR 0022 L465-477: replay ledger operations and require byte equality."""
+    assert coordinator._ledger_handoff_authority is not None
+    assert coordinator._risk_authority is not None
+    assert coordinator._risk_refresh_authority is not None
+    if len(recovered.ledger_records) != len(active.handoffs):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovered ledger frontier does not bind every handoff",
+        )
+    active.ledger_outcomes = [None] * len(active.handoffs)
+    active.ledger_acks = [None] * len(active.handoffs)
+    for index, entry in enumerate(recovered.ledger_records):
+        position, ledger_record, ledger_ack = entry
+        handoff = active.handoffs[index]
+        outcome = active.outcomes[index]
+        if handoff is None or outcome is None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovered ledger outcome lacks its handoff",
+            )
+        fill = None
+        if handoff.fill_id is not None:
+            assert handoff.fill_sha256 is not None
+            fill = coordinator._resolver.resolve_fill(
+                fill_id=handoff.fill_id,
+                fill_sha256=handoff.fill_sha256,
+            )
+        result = coordinator._ledger_handoff_authority.apply_handoff(
+            handoff=handoff,
+            outcome=outcome,
+            fill=fill,
+        )
+        if canonical_ledger_handoff_outcome_bytes(result) != ledger_record.canonical_payload:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovered ledger outcome payload conflicts",
+            )
+        if ledger_ack.record_id != ledger_record.record_id:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovered ledger acknowledgement conflicts",
+            )
+        active.ledger_outcomes[index] = result
+        active.ledger_acks[index] = ledger_ack
+    if recovered.refresh_record is not None:
+        position, refresh_record, refresh_ack = recovered.refresh_record
+        ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
+        refresh = coordinator._risk_refresh_authority.create_refresh(
+            snapshot=coordinator._ledger_handoff_authority.snapshot,
+            risk_state=coordinator._risk_authority.risk_state,
+            dispatch_sequence=recovered.sequence,
+            ordered_ledger_ack_frontier_sha256=ordered_digest_tuple(
+                ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
+                tuple(audit_append_acknowledgement_digest(value) for value in ledger_acks),
+            ),
+        )
+        if canonical_portfolio_risk_refresh_bytes(refresh) != refresh_record.canonical_payload:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovered refresh payload conflicts",
+            )
+        active.refresh_ack = refresh_ack
+        active.refresh_sha256 = refresh_record.subject_sha256
+        active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
+            coordinator._ledger_handoff_authority.snapshot
+        )
+        active.final_risk_state_sha256 = risk_state_snapshot_digest(
+            coordinator._risk_authority.risk_state
+        )
 
 
 def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
@@ -2389,6 +2506,31 @@ def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
                 OutcomeCode.CONFLICTING_ID,
                 "recovery authorization stage order conflicts",
             )
+    if group.ledger_records or group.refresh_record is not None:
+        # ADR 0022 L371-374: fact-outcome acknowledgements precede ledger-outcome
+        # acknowledgements, which precede the refresh, which precedes completion.
+        outcome_positions = [entry[0] for entry in group.outcome_records.values()]
+        ledger_positions = [entry[0] for entry in group.ledger_records]
+        if group.batch_record is None or ledger_positions != sorted(ledger_positions):
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovery ledger stage order conflicts",
+            )
+        if any(position <= group.batch_record[0] for position in ledger_positions) or any(
+            outcome_position >= ledger_position
+            for outcome_position in outcome_positions
+            for ledger_position in ledger_positions
+            if outcome_position is not None
+        ):
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovery ledger stage order conflicts",
+            )
+        if group.refresh_record is not None and group.refresh_record[0] <= ledger_positions[-1]:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "recovery refresh stage order conflicts",
+            )
     completion = group.completion_record
     if completion is not None:
         completion_position = completion[0]
@@ -2398,6 +2540,9 @@ def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
             if entry is not None
         ]
         required_before_completion.extend(entry[0] for entry in group.authorization_records)
+        required_before_completion.extend(entry[0] for entry in group.ledger_records)
+        if group.refresh_record is not None:
+            required_before_completion.append(group.refresh_record[0])
         if group.batch_record is None or any(
             position >= completion_position for position in required_before_completion
         ):
@@ -2610,6 +2755,8 @@ def _recover_dispatch(
                 batch_acknowledgement=active.batch_ack,
                 outcome_acknowledgement=acknowledgement,
             )
+    if coordinator._ledger_handoff_authority is not None:
+        _recover_ledger_frontier(coordinator, active, recovered)
     completion_entry = recovered.completion_record
     if completion_entry is None:
         if runtime_lease is not lease:
@@ -2629,16 +2776,42 @@ def _recover_dispatch(
     expected_completion_payload = active.completion_payload
     if expected_completion_payload is None:
         pre_ack_state = coordinator._pre_ack_state(active, outcome_acks)
-        expected_completion_payload = canonical_dispatch_completed_audit_payload(
-            binding=coordinator._binding,
-            batch=batch,
-            outcome_acknowledgements=outcome_acks,
-            pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
-            authorization_attempt_outcome=active.authorization_attempt,
-            submission_receipts=(
-                () if active.submission_receipt is None else (active.submission_receipt,)
-            ),
-        )
+        if coordinator._ledger_handoff_authority is None:
+            expected_completion_payload = canonical_dispatch_completed_audit_payload(
+                binding=coordinator._binding,
+                batch=batch,
+                outcome_acknowledgements=outcome_acks,
+                pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+                authorization_attempt_outcome=active.authorization_attempt,
+                submission_receipts=(
+                    () if active.submission_receipt is None else (active.submission_receipt,)
+                ),
+            )
+        else:
+            ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
+            if (
+                len(ledger_acks) != len(active.handoffs)
+                or active.refresh_ack is None
+                or active.final_portfolio_snapshot_sha256 is None
+                or active.final_risk_state_sha256 is None
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "completion lacks the ordered ledger frontier",
+                )
+            expected_completion_payload = canonical_dispatch_completed_v3_audit_payload(
+                binding=coordinator._binding,
+                batch=batch,
+                outcome_acknowledgements=outcome_acks,
+                pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+                ledger_outcome_acknowledgements=ledger_acks,
+                final_portfolio_snapshot_sha256=active.final_portfolio_snapshot_sha256,
+                final_risk_state_sha256=active.final_risk_state_sha256,
+                authorization_attempt_outcome=active.authorization_attempt,
+                submission_receipts=(
+                    () if active.submission_receipt is None else (active.submission_receipt,)
+                ),
+            )
         active.completion_payload = expected_completion_payload
     _completion_position, completion_record, completion_ack = completion_entry
     if completion_record.canonical_payload != expected_completion_payload:
