@@ -284,6 +284,12 @@ def _create_portfolio_risk_refresh_fields(
     _require_uint64(risk_state_version, "risk_state_version")
     _require_positive_uint64(dispatch_sequence, "dispatch_sequence")
     _require_positive_uint64(refresh_sequence, "refresh_sequence")
+    # RISK-001 (recorded per the 68f59627 review): ADR 0022 only requires one
+    # refresh per completed dispatch frontier. Equality here additionally
+    # assumes the Phase 1 resource model keeps dispatch sequences contiguous
+    # (D = M + R + 1) so a refresh can always name its own dispatch. Issue #67
+    # coordinator recovery must confirm (or deliberately relax) that
+    # continuity assumption before relying on this equality beyond Phase 1.
     if refresh_sequence != dispatch_sequence:
         raise _fail(OutcomeCode.CONFLICTING_ID, "refresh and dispatch sequences conflict")
     if type(submission_permitted) is not bool:
@@ -831,6 +837,12 @@ def _require_optional_apply_outcome(
         raise _fail(
             OutcomeCode.CONFLICTING_ID, "original ledger outcome values conflict"
         ) from error
+    # DET-001 exception (recorded per the 68f59627 review): this digest
+    # intentionally keeps the ADR 0010 prefix-less form
+    # sha256(domain + payload) to match portfolio.ledger_apply_outcome_digest,
+    # while the ADR 0022 domains in this module use the framed form
+    # domain + u64be(len) + payload. The distinct domains keep both families
+    # separated; do not "unify" the forms without a superseding ADR.
     expected = Sha256Digest(sha256(LEDGER_APPLY_OUTCOME_DIGEST_DOMAIN + payload).hexdigest())
     if expected != digest:
         raise _fail(OutcomeCode.CONFLICTING_ID, "original ledger outcome digest conflicts")

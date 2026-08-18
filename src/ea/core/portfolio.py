@@ -869,6 +869,13 @@ def _encode_json(value: object) -> bytes:
 
 
 def _digest(domain: bytes, payload: bytes) -> Sha256Digest:
+    # DET-001 exception (recorded per the 68f59627 review): ADR 0010 domains
+    # in this module use the prefix-less form sha256(domain + payload), while
+    # ADR 0022 domains (reconciliation.py / ledger_integration.py
+    # _framed_digest) use domain + u64be(len) + payload. Distinct domain
+    # prefixes keep the families separated; callers such as
+    # ledger_integration._require_optional_apply_outcome deliberately match
+    # this legacy form and must not be "unified" without a superseding ADR.
     return Sha256Digest(sha256(domain + payload).hexdigest())
 
 
