@@ -105,3 +105,19 @@ def test_portfolio_planning_imports_only_core_and_same_package_ledger() -> None:
         "ea.core.strategy",
         "ea.portfolio.ledger",
     }
+
+
+def test_ledger_handoff_authority_imports_only_core_and_ledger() -> None:
+    tree = ast.parse(Path("src/ea/portfolio/ledger_authority.py").read_text(encoding="utf-8"))
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            imports.add(node.module)
+    assert all(
+        name in {"__future__", "dataclasses", "typing"}
+        or name.startswith("ea.core.")
+        or name == "ea.portfolio.ledger"
+        for name in imports
+    )

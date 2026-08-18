@@ -123,8 +123,8 @@ class Phase1LedgerHandoffAuthority:
                 before_snapshot_sha256=unchanged_sha256,
                 after_snapshot_version=unchanged_version,
                 after_snapshot_sha256=unchanged_sha256,
-                requires_reconciliation=False,
-                halt_requested=False,
+                requires_reconciliation=outcome.requires_reconciliation,
+                halt_requested=outcome.halt_requested,
                 failure=None,
             )
         if outcome.action not in {

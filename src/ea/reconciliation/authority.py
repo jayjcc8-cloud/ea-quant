@@ -608,6 +608,18 @@ def _compare_observation(
             requested_action=ReconciliationRequestedAction.REQUEST_MISSING_TRADE_FACTS,
             halt_requested=True,
         )
+    if not _observation_scope_is_complete(observation, snapshot):
+        return _comparison_outcome(
+            observation_sha256=observation_sha256,
+            snapshot=snapshot,
+            run_id=run_id,
+            dispatch_sequence=dispatch_sequence,
+            comparison=ReconciliationWatermarkComparison.INCOMPARABLE,
+            discrepancies=(),
+            outcome_code=OutcomeCode.RECONCILIATION_INVALID,
+            requested_action=ReconciliationRequestedAction.RETAIN_AND_HALT,
+            halt_requested=True,
+        )
     discrepancies = _compare_balances(observation, snapshot, spec_set)
     if not discrepancies:
         return _comparison_outcome(
@@ -738,6 +750,28 @@ def _compare_cash_balances(
             )
         )
     return tuple(discrepancies)
+
+
+def _observation_scope_is_complete(
+    observation: ReconciliationObservation,
+    snapshot: PortfolioSnapshot,
+) -> bool:
+    """ADR 0022 L148-149: omission means invalid evidence, not a zero balance."""
+    if observation.kind is ReconciliationObservationKind.POSITION_SNAPSHOT:
+        observed = {
+            balance.instrument
+            for balance in observation.balances
+            if type(balance) is PositionReconciliationBalance
+        }
+        local = {balance.instrument for balance in snapshot.position_balances}
+        return local <= observed
+    cash_observed = {
+        balance.currency
+        for balance in observation.balances
+        if type(balance) is CashReconciliationBalance
+    }
+    cash_local = {balance.currency for balance in snapshot.cash_balances}
+    return cash_local <= cash_observed
 
 
 def _require_uint64(value: object, field: str) -> int:

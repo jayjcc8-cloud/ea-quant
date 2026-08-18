@@ -535,6 +535,8 @@ class PortfolioLedger:
         next_open_refs.pop(reference.fill_id, None)
         next_open_bindings = dict(self._state.open_reconciliation_bindings)
         next_open_bindings.pop(reference.fill_id, None)
+        next_unresolved = dict(self._state.unresolved)
+        next_unresolved.pop(reference.fill_id, None)
         transaction = self._build_adjustment_transaction(
             authorization=authorization,
             command=command,
@@ -549,6 +551,7 @@ class PortfolioLedger:
             entry_id=entry_id,
             next_cash=dict(self._state.cash),
             next_positions=dict(self._state.positions),
+            next_unresolved=next_unresolved,
             next_open_bindings=next_open_bindings,
             next_open_refs=next_open_refs,
         )
@@ -600,6 +603,7 @@ class PortfolioLedger:
         entry_id: EconomicId,
         next_cash: dict[SettlementCurrency, CanonicalDecimal],
         next_positions: dict[Instrument, CanonicalDecimal],
+        next_unresolved: Mapping[EconomicId, UnresolvedFillRef] | None = None,
         next_open_bindings: dict[EconomicId, ExistingLedgerBinding],
         next_open_refs: dict[EconomicId, OpenReconciliationRef],
     ) -> _AdjustmentDerivation:
@@ -615,7 +619,7 @@ class PortfolioLedger:
             cash=next_cash,
             positions=next_positions,
             rounding=self._state.rounding,
-            unresolved=self._state.unresolved,
+            unresolved=(self._state.unresolved if next_unresolved is None else next_unresolved),
             open_reconciliation_bindings=next_open_bindings,
             open_reconciliation_refs=next_open_refs,
         )
@@ -857,7 +861,11 @@ class PortfolioLedger:
         )
         transaction_sha256 = ledger_transaction_digest(transaction)
         next_unresolved = dict(self._state.unresolved)
-        if requires_reconciliation and audited_handoff_sha256 is None:
+        if derived_reconciliation:
+            # ADR 0024 L41-42: a missing-ancestry Fill carries BOTH the
+            # UnresolvedFillRef and (for the audited command path) the
+            # OpenReconciliationRef; the outcome-flag-only case adds the open
+            # reference without a legacy unresolved reference.
             next_unresolved[fill.fill_id] = UnresolvedFillRef(
                 fill_id=fill.fill_id,
                 fill_sha256=submitted_digest,

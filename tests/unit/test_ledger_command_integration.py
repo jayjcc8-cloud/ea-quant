@@ -65,7 +65,8 @@ def test_command_with_requires_reconciliation_populates_open_reference_tuples() 
     outcome = ledger.apply_ledger_application_command(command, fill)
 
     assert outcome.code is OutcomeCode.LEDGER_APPLIED
-    assert ledger.snapshot.unresolved_fills == ()
+    # ADR 0024 L41-42: missing-ancestry fills carry both reference kinds.
+    assert ledger.snapshot.unresolved_fills != ()
     assert ledger.snapshot.open_reconciliation_refs == (
         OpenReconciliationRef(
             fill_id=fill.fill_id,

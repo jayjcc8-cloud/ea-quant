@@ -604,3 +604,32 @@ def test_non_ledger_watermark_namespace_is_incomparable_invalid_retain_and_halt(
     assert outcome.watermark_comparison is ReconciliationWatermarkComparison.INCOMPARABLE
     assert outcome.halt_requested is True
     assert outcome.discrepancies == ()
+
+
+def test_incomplete_observation_scope_is_invalid_not_implicit_zero() -> None:
+    # ADR 0022 L148-149 / LEDGER-002: a locally-held balance omitted from the
+    # declared observation scope is invalid evidence, never an implicit zero.
+    second = Instrument(VenueId("XNAS"), "TSLA")
+    spec_set = _spec_set(
+        _spec(),
+        _spec(instrument=second, specification_id="xnas.tsla.v1"),
+    )
+    snapshot = _snapshot(
+        spec_set=spec_set,
+        position_balances=(
+            PositionBalance(INSTRUMENT, CanonicalDecimal("1"), CanonicalDecimal("10")),
+            PositionBalance(second, CanonicalDecimal("1"), CanonicalDecimal("5")),
+        ),
+    )
+    authority = _authority(snapshot, spec_set=spec_set)
+    observation = _observation(
+        spec_set=spec_set,
+        balances=(PositionReconciliationBalance(INSTRUMENT, CanonicalDecimal("12")),),
+    )
+
+    outcome = authority.admit_observation(observation, dispatch_sequence=7)
+
+    assert outcome.outcome_code is OutcomeCode.RECONCILIATION_INVALID
+    assert outcome.requested_action is ReconciliationRequestedAction.RETAIN_AND_HALT
+    assert outcome.halt_requested is True
+    assert outcome.discrepancies == ()
