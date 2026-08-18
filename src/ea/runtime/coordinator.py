@@ -56,6 +56,7 @@ from ea.core.historical_matching import (
     historical_submission_receipt_digest,
 )
 from ea.core.ledger_integration import (
+    LedgerHandoffAction,
     LedgerHandoffOutcome,
     PortfolioRiskRefresh,
     canonical_ledger_handoff_outcome_bytes,
@@ -148,6 +149,20 @@ class _RiskGatePort(Protocol):
         causal_root_available_at: datetime,
         dispatch_sequence: int,
     ) -> RiskStateSnapshot: ...
+
+
+class _FrontierGatePort(Protocol):
+    def advance(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        risk_state: RiskStateSnapshot,
+        refresh: PortfolioRiskRefresh,
+    ) -> None: ...
+
+    def current_snapshot(self) -> PortfolioSnapshot: ...
+
+    def current_state(self) -> RiskStateSnapshot: ...
 
 
 class _RiskRefreshGatePort(Protocol):
@@ -298,6 +313,7 @@ class Phase1HistoricalLifecycleCoordinator:
         "_failing_key",
         "_failing_payload",
         "_final_refresh_value_sha256",
+        "_frontier",
         "_ledger_handoff_authority",
         "_matcher",
         "_mutation_lock",
@@ -321,6 +337,7 @@ class Phase1HistoricalLifecycleCoordinator:
     _failing_key: AuditLogicalKey | None
     _failing_payload: bytes | None
     _final_refresh_value_sha256: Sha256Digest | None
+    _frontier: _FrontierGatePort | None
     _ledger_handoff_authority: _LedgerHandoffGatePort | None
     _matcher: HistoricalMatcherPort
     _mutation_lock: Lock
@@ -1104,7 +1121,7 @@ class Phase1HistoricalLifecycleCoordinator:
             if (
                 processing_outcome.halt_requested
                 or ledger_outcome.requires_reconciliation
-                or ledger_outcome.action.value != "effect_committed"
+                or ledger_outcome.action is LedgerHandoffAction.FAILED
             ):
                 halt_required = True
         if halt_required:
@@ -1410,7 +1427,7 @@ class Phase1HistoricalLifecycleCoordinator:
             or self._runtime.terminal_acknowledged is not True
         ):
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "runtime terminal evidence changed")
-        payload = canonical_run_terminal_audit_payload(pre_terminal)
+        payload = _terminal_payload(self, pre_terminal)
         if self._terminal_ack is None:
             terminal_acknowledgement = self._audit.append(
                 record_kind=AuditRecordKind.RUN_TERMINAL,
@@ -1822,6 +1839,7 @@ def create_phase1_lifecycle_coordinator(
     ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
+    frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     """Bind dependency-neutral owners after the journal preparation record is durable.
 
@@ -1840,11 +1858,12 @@ def create_phase1_lifecycle_coordinator(
         ledger_handoff_authority is not None,
         risk_authority is not None,
         risk_refresh_authority is not None,
+        frontier is not None,
     )
     if any(ledger_bound) and not all(ledger_bound):
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID,
-            "ledger, risk, and refresh authorities must be bound together",
+            "ledger, risk, refresh, and frontier must be bound together",
         )
     try:
         audit_binding = audit.binding
@@ -1894,6 +1913,7 @@ def create_phase1_lifecycle_coordinator(
         ledger_handoff_authority=ledger_handoff_authority,
         risk_authority=risk_authority,
         risk_refresh_authority=risk_refresh_authority,
+        frontier=frontier,
     )
     value._state = _admitted_state(binding, prepared_acknowledgement.chain_head_sha256)
     return value
@@ -1949,6 +1969,7 @@ def recover_phase1_lifecycle_coordinator(
     ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
+    frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     """Reconcile one reopened non-terminal journal with injected authority histories."""
     _require_static_bindings(
@@ -1964,11 +1985,12 @@ def recover_phase1_lifecycle_coordinator(
         ledger_handoff_authority is not None,
         risk_authority is not None,
         risk_refresh_authority is not None,
+        frontier is not None,
     )
     if any(ledger_bound) and not all(ledger_bound):
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID,
-            "ledger, risk, and refresh authorities must be bound together",
+            "ledger, risk, refresh, and frontier must be bound together",
         )
     if ledger_handoff_authority is not None:
         assert risk_authority is not None and risk_refresh_authority is not None
@@ -1999,6 +2021,7 @@ def recover_phase1_lifecycle_coordinator(
         ledger_handoff_authority=ledger_handoff_authority,
         risk_authority=risk_authority,
         risk_refresh_authority=risk_refresh_authority,
+        frontier=frontier,
     )
     value._state = _admitted_state(binding, prepared_acknowledgement.chain_head_sha256)
     expected_sequence = 1
@@ -2178,6 +2201,7 @@ def _allocate_coordinator(
     ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
+    frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     value = object.__new__(Phase1HistoricalLifecycleCoordinator)
     value._binding = binding
@@ -2189,6 +2213,7 @@ def _allocate_coordinator(
     value._failing_key = None
     value._failing_payload = None
     value._final_refresh_value_sha256 = None
+    value._frontier = frontier
     value._ledger_handoff_authority = ledger_handoff_authority
     value._risk_authority = risk_authority
     value._risk_refresh_authority = risk_refresh_authority

@@ -85,20 +85,23 @@ def _risk_policy(spec_set: InstrumentExecutionSpecSet) -> Phase1RiskPolicy:
 
 
 def _ledger_ports(matcher: Phase1HistoricalMatcher) -> dict[str, Any]:
+    from ea.composition import create_acknowledged_lifecycle_frontier
+
     run_id = matcher.run_id
     spec_set = matcher.spec_set
     ledger = create_portfolio_ledger(run_id, spec_set)
     policy = _risk_policy(spec_set)
+    risk_authority = create_phase1_risk_authority(
+        run_id=run_id,
+        spec_set=spec_set,
+        execution_policy=EXECUTION_POLICY,
+        policy=policy,
+    )
     return {
         "ledger_handoff_authority": create_phase1_ledger_handoff_authority(
             run_id, spec_set, ledger
         ),
-        "risk_authority": create_phase1_risk_authority(
-            run_id=run_id,
-            spec_set=spec_set,
-            execution_policy=EXECUTION_POLICY,
-            policy=policy,
-        ),
+        "risk_authority": risk_authority,
         "risk_refresh_authority": create_phase1_portfolio_risk_refresh_authority(
             run_id=run_id,
             spec_set=spec_set,
@@ -106,6 +109,10 @@ def _ledger_ports(matcher: Phase1HistoricalMatcher) -> dict[str, Any]:
             policy_sha256=phase1_risk_policy_digest(policy),
             first_sequence=8,
             first_previous_refresh_sha256=Sha256Digest("aa" * 32),
+        ),
+        "frontier": create_acknowledged_lifecycle_frontier(
+            initial_snapshot=ledger.snapshot,
+            initial_risk_state=risk_authority.risk_state,
         ),
     }
 
@@ -572,4 +579,81 @@ def test_gate_binding_rejects_run_and_specification_conflicts() -> None:
             fact_authority=_RetainedOutcomeFacts(matcher, None),  # type: ignore[arg-type]
             evidence_resolver=_FixedFillEvidence(None),
             **ports,
+        )
+
+
+def test_no_fill_frontier_does_not_halt_and_permits_submission() -> None:
+    # RUNTIME-002 regression: a not_applicable handoff is not a failure.
+    from ea.core import ExecutionFactAction
+
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    ingress = batch.ingresses[0]
+    fact = ingress.fact
+    key_kinds = tuple(
+        kind
+        for present, kind in (
+            (fact.order_id is not None, OrderResolutionKeyKind.ORDER_ID),
+            (fact.client_submission_key is not None, OrderResolutionKeyKind.CLIENT_SUBMISSION_KEY),
+            (fact.venue_order_id is not None, OrderResolutionKeyKind.VENUE_ORDER_ID),
+        )
+        if present
+    )
+    outcome = create_execution_fact_processing_outcome(
+        run_id=matcher.run_id,
+        runtime_dispatch_sequence=8,
+        ingress=ingress,
+        action=ExecutionFactAction.DUPLICATE,
+        anomalies=(),
+        order_resolutions=(),
+        resolved_order=None,
+        fill=None,
+        projection_before=None,
+        projection_after=None,
+    )
+    coordinator, audit = _coordinator_with_gate(matcher, delayed, fill=None, outcome=outcome)
+
+    window = coordinator.begin_next_dispatch()
+    assert window is not None
+    result = coordinator.complete_active_dispatch(window)
+    assert result.runtime_acknowledged is True
+
+    refresh_record = next(
+        record
+        for record in audit.records
+        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
+    )
+    refresh_document = json.loads(refresh_record.canonical_payload)
+    assert refresh_document["submission_permitted"] is True
+    ledger_record = next(
+        record
+        for record in audit.records
+        if record.record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+    )
+    ledger_document = json.loads(ledger_record.canonical_payload)
+    assert ledger_document["action"] == "not_applicable"
+
+
+def test_refresh_seeding_rejects_invalid_predecessor_combinations() -> None:
+    from ea.portfolio.risk_refresh_authority import PortfolioRiskRefreshAuthorityError
+
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    spec_set = matcher.spec_set
+    with pytest.raises(PortfolioRiskRefreshAuthorityError, match="predecessor"):
+        create_phase1_portfolio_risk_refresh_authority(
+            run_id=matcher.run_id,
+            spec_set=spec_set,
+            policy_id=RISK_POLICY_ID,
+            policy_sha256=Sha256Digest("1" * 64),
+            first_sequence=1,
+            first_previous_refresh_sha256=Sha256Digest("aa" * 32),
+        )
+    with pytest.raises(PortfolioRiskRefreshAuthorityError, match="predecessor"):
+        create_phase1_portfolio_risk_refresh_authority(
+            run_id=matcher.run_id,
+            spec_set=spec_set,
+            policy_id=RISK_POLICY_ID,
+            policy_sha256=Sha256Digest("1" * 64),
+            first_sequence=8,
         )
