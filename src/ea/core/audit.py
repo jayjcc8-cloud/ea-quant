@@ -905,6 +905,14 @@ def _require_audit_owned_payload_values(
     elif record_kind is AuditRecordKind.RUN_TERMINAL:
         if _require_json_text(document, "terminal_kind") not in {"success", "failed"}:
             raise _fail(OutcomeCode.CONFLICTING_ID, "terminal_kind is outside its closed enum")
+        if document.get("schema") == "ea.audit-run-terminal.v2":
+            for field in (
+                "final_published_snapshot_sha256",
+                "final_risk_refresh_sha256",
+                "open_reconciliation_ref_aggregate_sha256",
+                "ordered_reconciliation_frontier_sha256s_sha256",
+            ):
+                _require_json_digest(document, field)
         _require_json_uint64(document, "last_dispatch_sequence", positive=True)
         for field in (
             "last_trigger_root_sha256",
@@ -1051,6 +1059,34 @@ _DISPATCH_COMPLETED_V3_EXTRA_FIELDS = frozenset(
 )
 
 
+_RUN_TERMINAL_V2_EXTRA_FIELDS = frozenset(
+    {
+        "final_published_snapshot_sha256",
+        "final_risk_refresh_sha256",
+        "open_reconciliation_ref_aggregate_sha256",
+        "ordered_reconciliation_frontier_sha256s_sha256",
+    }
+)
+
+
+def _require_run_terminal_payload(document: dict[str, object]) -> None:
+    """Admit terminal v1 (pre-ledger history) and v2 (publication-frontier-bound)."""
+    schema = document.get("schema")
+    if schema == "ea.audit-run-terminal.v1":
+        fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[AuditRecordKind.RUN_TERMINAL]
+    elif schema == "ea.audit-run-terminal.v2":
+        fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[AuditRecordKind.RUN_TERMINAL] | (
+            _RUN_TERMINAL_V2_EXTRA_FIELDS
+        )
+    else:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "run terminal schema is invalid")
+    if set(document) != fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload fields conflict with its kind")
+    if document.get("canonicalization") != AUDIT_CANONICALIZATION:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload schema is invalid")
+    _require_audit_owned_payload_values(AuditRecordKind.RUN_TERMINAL, document)
+
+
 def _require_dispatch_completed_payload(document: dict[str, object]) -> None:
     """Admit completion v2 (pre-ledger history) and v3 (ledger-frontier-bound).
 
@@ -1115,6 +1151,8 @@ def require_canonical_audit_payload(
         raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload is not canonical JSON")
     if record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
         _require_dispatch_completed_payload(document)
+    elif record_kind is AuditRecordKind.RUN_TERMINAL:
+        _require_run_terminal_payload(document)
     elif record_kind in {
         AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
         AuditRecordKind.RISK_PORTFOLIO_REFRESH,

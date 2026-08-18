@@ -1491,6 +1491,39 @@ def canonical_dispatch_completed_v3_audit_payload(
     return _canonical_json(document)
 
 
+def canonical_run_terminal_v2_audit_payload(
+    state: PreTerminalCoordinatorState,
+    *,
+    final_published_snapshot_sha256: Sha256Digest,
+    final_risk_refresh_sha256: Sha256Digest,
+    open_reconciliation_ref_aggregate_sha256: Sha256Digest,
+    ordered_reconciliation_frontier_sha256s_sha256: Sha256Digest,
+) -> bytes:
+    """Build the ADR 0022 terminal-v2 record binding the final publication frontier."""
+    for digest in (
+        final_published_snapshot_sha256,
+        final_risk_refresh_sha256,
+        open_reconciliation_ref_aggregate_sha256,
+        ordered_reconciliation_frontier_sha256s_sha256,
+    ):
+        if type(digest) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "terminal frontier digests must be exact")
+    base_document = json.loads(canonical_run_terminal_audit_payload(state))
+    document = {
+        **base_document,
+        "final_published_snapshot_sha256": final_published_snapshot_sha256.value,
+        "final_risk_refresh_sha256": final_risk_refresh_sha256.value,
+        "open_reconciliation_ref_aggregate_sha256": (
+            open_reconciliation_ref_aggregate_sha256.value
+        ),
+        "ordered_reconciliation_frontier_sha256s_sha256": (
+            ordered_reconciliation_frontier_sha256s_sha256.value
+        ),
+        "schema": "ea.audit-run-terminal.v2",
+    }
+    return _canonical_json(document)
+
+
 def dispatch_completed_subject_digest(canonical_payload: bytes) -> Sha256Digest:
     return audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, canonical_payload)
 

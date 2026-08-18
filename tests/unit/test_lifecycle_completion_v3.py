@@ -10,6 +10,8 @@ from ea.core import (
     AuditAppendAcknowledgement,
     AuditRecordKind,
     AuditSubjectKind,
+    OpenReconciliationRef,
+    PortfolioSnapshot,
     RunBinding,
     RunReference,
     Sha256Digest,
@@ -178,3 +180,118 @@ def test_completion_v2_and_v3_disagree_so_old_records_never_prove_frontiers() ->
     assert v3["schema"] == "ea.audit-dispatch-completed.v3"
     assert "ledger_outcome_count" not in v2
     assert v3["ledger_outcome_count"] == 0
+
+
+def test_terminal_v2_binds_the_final_publication_frontier() -> None:
+    from ea.core import CoordinatorTerminalKind, RunBinding, RunId, RunReference
+    from ea.core.lifecycle import (
+        canonical_run_terminal_v2_audit_payload,
+        create_pre_terminal_coordinator_state,
+    )
+
+    state = create_pre_terminal_coordinator_state(
+        binding=RunBinding(
+            RunReference(RunId("12345678-1234-4234-8234-123456789abc"), Sha256Digest("11" * 32)),
+            Sha256Digest("22" * 32),
+        ),
+        state_version=4,
+        terminal_kind=CoordinatorTerminalKind.SUCCESS,
+        last_dispatch_sequence=3,
+        last_trigger_root_sha256=Sha256Digest("33" * 32),
+        dispatch_completion_ack_sha256=Sha256Digest("44" * 32),
+        previous_chain_head_sha256=Sha256Digest("44" * 32),
+        failure_code=None,
+    )
+    payload = canonical_run_terminal_v2_audit_payload(
+        state,
+        final_published_snapshot_sha256=Sha256Digest("77" * 32),
+        final_risk_refresh_sha256=Sha256Digest("88" * 32),
+        open_reconciliation_ref_aggregate_sha256=Sha256Digest("99" * 32),
+        ordered_reconciliation_frontier_sha256s_sha256=Sha256Digest("aa" * 32),
+    )
+    from ea.core.audit import require_canonical_audit_payload as gate
+
+    assert gate(AuditRecordKind.RUN_TERMINAL, payload) is payload
+    document = json.loads(payload)
+    assert document["schema"] == "ea.audit-run-terminal.v2"
+    assert document["final_risk_refresh_sha256"] == "88" * 32
+
+
+def test_open_reconciliation_aggregate_is_ordered_and_deterministic() -> None:
+    from ea.core import (
+        EconomicId,
+        EconomicOwnerKind,
+        OpenReconciliationRef,
+        RunId,
+        open_reconciliation_aggregate_digest,
+    )
+
+    run_id = RunId("12345678-1234-4234-8234-123456789abc")
+    first = OpenReconciliationRef(
+        EconomicId(run_id, EconomicOwnerKind.EXECUTION_FILL, 1),
+        Sha256Digest("11" * 32),
+        Sha256Digest("22" * 32),
+    )
+    second = OpenReconciliationRef(
+        EconomicId(run_id, EconomicOwnerKind.EXECUTION_FILL, 2),
+        Sha256Digest("33" * 32),
+        Sha256Digest("44" * 32),
+    )
+    snapshot_one = _snapshot_with_refs((first, second))
+    snapshot_same = _snapshot_with_refs((first, second))
+    snapshot_single = _snapshot_with_refs((first,))
+
+    assert len(open_reconciliation_aggregate_digest(snapshot_one).value) == 64
+    assert open_reconciliation_aggregate_digest(snapshot_one) == (
+        open_reconciliation_aggregate_digest(snapshot_same)
+    )
+    assert open_reconciliation_aggregate_digest(snapshot_one) != (
+        open_reconciliation_aggregate_digest(snapshot_single)
+    )
+    empty = _snapshot_with_refs(())
+    assert len(open_reconciliation_aggregate_digest(empty).value) == 64
+
+
+def _snapshot_with_refs(
+    refs: tuple[OpenReconciliationRef, ...],
+) -> PortfolioSnapshot:
+    from ea.core import (
+        EconomicId,
+        EconomicOwnerKind,
+        ExistingLedgerBinding,
+        PortfolioSnapshot,
+    )
+    from unit.test_portfolio_ledger import RUN_ID as FIXTURE_RUN
+    from unit.test_portfolio_ledger import _spec_set
+
+    spec_set = _spec_set()
+    bindings = tuple(
+        ExistingLedgerBinding(
+            EconomicId(FIXTURE_RUN, EconomicOwnerKind.LEDGER_ENTRY, index + 1),
+            reference.fill_id,
+            reference.fill_sha256,
+            Sha256Digest(f"{index + 1:064x}"),
+        )
+        for index, reference in enumerate(refs)
+    )
+    return PortfolioSnapshot(
+        run_id=FIXTURE_RUN,
+        instrument_spec_set_id=spec_set.identifier,
+        instrument_spec_set_sha256=__import__(
+            "ea.core", fromlist=["instrument_spec_set_digest"]
+        ).instrument_spec_set_digest(spec_set),
+        snapshot_version=len(refs),
+        ledger_sequence=len(refs),
+        last_entry_id=(
+            None
+            if not bindings
+            else EconomicId(FIXTURE_RUN, EconomicOwnerKind.LEDGER_ENTRY, len(bindings))
+        ),
+        last_transaction_sha256=(None if not bindings else bindings[-1].transaction_sha256),
+        cash_balances=(),
+        position_balances=(),
+        rounding_balances=(),
+        unresolved_fills=(),
+        open_reconciliation_bindings=bindings,
+        open_reconciliation_refs=refs,
+    )
