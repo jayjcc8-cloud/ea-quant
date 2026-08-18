@@ -52,6 +52,7 @@ ORDERED_INGRESS_DIGEST_DOMAIN = b"ea.audit-ordered-ingress-digests.v1\0"
 ORDERED_OUTCOME_ACK_DIGEST_DOMAIN = b"ea.audit-ordered-outcome-ack-digests.v1\0"
 ORDERED_HANDOFF_DIGEST_DOMAIN = b"ea.coordinator-ordered-handoff-digests.v1\0"
 ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN = b"ea.coordinator-ordered-submission-receipt-digests.v1\0"
+ORDERED_LEDGER_ACK_DIGEST_DOMAIN = b"ea.audit-ordered-ledger-ack-digests.v1\0"
 
 _STATE_DOMAIN = b"ea.coordinator-state.v1\0"
 _PRE_TERMINAL_STATE_DOMAIN = b"ea.coordinator-pre-terminal-state.v1\0"
@@ -1435,6 +1436,59 @@ def canonical_dispatch_completed_audit_payload(
             "trigger_root_sha256": batch.trigger_root_sha256.value,
         }
     )
+
+
+def canonical_dispatch_completed_v3_audit_payload(
+    *,
+    binding: RunBinding,
+    batch: HistoricalMatcherDispatchBatch,
+    outcome_acknowledgements: tuple[AuditAppendAcknowledgement, ...],
+    pre_ack_state_sha256: Sha256Digest,
+    ledger_outcome_acknowledgements: tuple[AuditAppendAcknowledgement, ...],
+    final_portfolio_snapshot_sha256: Sha256Digest,
+    final_risk_state_sha256: Sha256Digest,
+    authorization_attempt_outcome: SubmissionAuthorizationAttemptOutcome | None = None,
+    submission_receipts: tuple[HistoricalSubmissionReceipt, ...] = (),
+) -> bytes:
+    """Build the ADR 0022 completion-v3 record that additionally binds the ordered
+    ledger-acknowledgement frontier, the final published portfolio snapshot, and
+    the final risk state. All v2 evidence re-validates through the v2 builder;
+    an old v2 record can never be interpreted as proving a ledger frontier.
+    """
+    if type(ledger_outcome_acknowledgements) is not tuple or any(
+        type(value) is not AuditAppendAcknowledgement for value in ledger_outcome_acknowledgements
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "completion ledger acknowledgements are invalid")
+    if (
+        type(final_portfolio_snapshot_sha256) is not Sha256Digest
+        or type(final_risk_state_sha256) is not Sha256Digest
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "completion final frontier digests must be exact")
+    base_document = json.loads(
+        canonical_dispatch_completed_audit_payload(
+            binding=binding,
+            batch=batch,
+            outcome_acknowledgements=outcome_acknowledgements,
+            pre_ack_state_sha256=pre_ack_state_sha256,
+            authorization_attempt_outcome=authorization_attempt_outcome,
+            submission_receipts=submission_receipts,
+        )
+    )
+    ledger_digests = tuple(
+        audit_append_acknowledgement_digest(value) for value in ledger_outcome_acknowledgements
+    )
+    document = {
+        **base_document,
+        "final_portfolio_snapshot_sha256": final_portfolio_snapshot_sha256.value,
+        "final_risk_state_sha256": final_risk_state_sha256.value,
+        "ledger_outcome_count": len(ledger_digests),
+        "ordered_ledger_ack_sha256s_sha256": ordered_digest_tuple(
+            ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
+            ledger_digests,
+        ).value,
+        "schema": "ea.audit-dispatch-completed.v3",
+    }
+    return _canonical_json(document)
 
 
 def dispatch_completed_subject_digest(canonical_payload: bytes) -> Sha256Digest:
