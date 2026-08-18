@@ -38,6 +38,7 @@ from ea.core.audit import (
     decode_audit_record,
     require_audit_acknowledgement,
 )
+from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunBinding, Sha256Digest
 from ea.experiments.store import AuditRunBinding, StoreError
@@ -732,7 +733,10 @@ class PosixAuditJournal:
         subject_kind: AuditSubjectKind,
         subject_sha256: Sha256Digest,
         canonical_payload: bytes,
+        spec_set: InstrumentExecutionSpecSet | None = None,
     ) -> AuditAppendAcknowledgement:
+        """Append one record; reconciliation outcomes get strict codec
+        admission when the writer supplies the bound spec-set (SEC-001)."""
         if not self._lock.acquire(blocking=False):
             raise _audit_error(
                 OutcomeCode.CONFLICTING_ID, "audit append is concurrent or reentrant"
@@ -843,6 +847,7 @@ class PosixAuditJournal:
                 canonical_payload=canonical_payload,
                 previous_record_sha256=previous_record,
                 previous_chain_head_sha256=previous_chain,
+                spec_set=spec_set,
             )
             frame = _frame_bytes(record)
             if self._verified_eof + len(frame) > MAX_AUDIT_JOURNAL_BYTES:
