@@ -1823,7 +1823,11 @@ def _terminal_payload(
             OutcomeCode.CONFLICTING_ID,
             "terminal evidence requires the final risk refresh",
         )
-    snapshot = coordinator._ledger_handoff_authority.snapshot
+    snapshot = (
+        coordinator._frontier.current_snapshot()
+        if coordinator._frontier is not None
+        else coordinator._ledger_handoff_authority.snapshot
+    )
     return canonical_run_terminal_v2_audit_payload(
         pre_terminal,
         final_published_snapshot_sha256=portfolio_snapshot_digest(snapshot),
