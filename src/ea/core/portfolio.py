@@ -108,6 +108,7 @@ class LedgerConflictKind(StrEnum):
     CROSS_INDEX_COLLISION = "cross_index_collision"
     INDEX_INCONSISTENT = "index_inconsistent"
     ENTRY_ID_OCCUPIED = "entry_id_occupied"
+    UNBOUND_EXISTING_FILL = "unbound_existing_fill"
 
 
 class LedgerFailureStage(StrEnum):
@@ -388,10 +389,14 @@ class LedgerTransaction:
         expected_reconciliation = (
             self.order_id is None or self.correlation_id is None or self.causation_id is None
         )
-        if self.requires_reconciliation is not expected_reconciliation:
+        # ADR 0022 (L111-116) narrowly supersedes ADR 0010's Fill-only derivation
+        # for the audited-command path: the integration method may OR in the
+        # processing-outcome flag, so a complete-ancestry Fill may still carry
+        # requires_reconciliation=True. Missing ancestry must always be covered.
+        if expected_reconciliation and not self.requires_reconciliation:
             raise _fail(
                 OutcomeCode.CONFLICTING_ID,
-                "requires_reconciliation conflicts with Fill ancestry",
+                "requires_reconciliation must cover missing Fill ancestry",
             )
 
 

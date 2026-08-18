@@ -16,6 +16,7 @@ from ea.core import (
     InstrumentExecutionSpec,
     InstrumentSpecId,
     InstrumentSpecSetId,
+    LedgerTransaction,
     OrderSide,
     OutcomeCode,
     PriceDomain,
@@ -31,6 +32,7 @@ from ea.core import (
     create_trade_execution_fact,
 )
 from ea.core.execution_messages import Fill
+from ea.core.reconciliation import ReconciliationTransaction
 from ea.portfolio import create_portfolio_ledger
 
 RUN_ID = RunId("12345678-1234-4234-8234-123456789abc")
@@ -189,10 +191,15 @@ def test_replay_after_any_bounded_later_history_never_mutates(
             )
         )
     before = canonical_portfolio_snapshot_bytes(ledger.snapshot)
-    transactions = tuple(canonical_ledger_transaction_bytes(item) for item in ledger.transactions)
+    transactions = tuple(_ledger_transaction_bytes(item) for item in ledger.transactions)
     duplicate = ledger.apply_fill(original)
     assert duplicate.code is OutcomeCode.LEDGER_DUPLICATE
     assert canonical_portfolio_snapshot_bytes(ledger.snapshot) == before
-    assert tuple(canonical_ledger_transaction_bytes(item) for item in ledger.transactions) == (
-        transactions
-    )
+    assert tuple(_ledger_transaction_bytes(item) for item in ledger.transactions) == transactions
+
+
+def _ledger_transaction_bytes(
+    item: LedgerTransaction | ReconciliationTransaction,
+) -> bytes:
+    assert type(item) is LedgerTransaction
+    return canonical_ledger_transaction_bytes(item)

@@ -12,13 +12,23 @@ LEDGER_PATH = PROJECT_ROOT / "src" / "ea" / "portfolio" / "ledger.py"
 
 def test_portfolio_public_api_has_no_arbitrary_mutation_surface() -> None:
     assert ea.portfolio.__all__ == [
+        "Phase1LedgerHandoffAuthority",
+        "Phase1PortfolioRiskRefreshAuthority",
         "PortfolioLedger",
         "PortfolioPlanningAuthority",
+        "create_phase1_ledger_handoff_authority",
+        "create_phase1_portfolio_risk_refresh_authority",
         "create_portfolio_ledger",
         "create_portfolio_planning_authority",
     ]
     public = {name for name in dir(PortfolioLedger) if not name.startswith("_")}
-    assert public == {"apply_fill", "snapshot", "transactions"}
+    assert public == {
+        "apply_fill",
+        "apply_ledger_application_command",
+        "apply_reconciliation_adjustment",
+        "snapshot",
+        "transactions",
+    }
     planner_public = {name for name in dir(PortfolioPlanningAuthority) if not name.startswith("_")}
     assert planner_public == {"lookup_by_signal_id", "plan", "state"}
     assert (
@@ -95,3 +105,19 @@ def test_portfolio_planning_imports_only_core_and_same_package_ledger() -> None:
         "ea.core.strategy",
         "ea.portfolio.ledger",
     }
+
+
+def test_ledger_handoff_authority_imports_only_core_and_ledger() -> None:
+    tree = ast.parse(Path("src/ea/portfolio/ledger_authority.py").read_text(encoding="utf-8"))
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            imports.add(node.module)
+    assert all(
+        name in {"__future__", "dataclasses", "typing"}
+        or name.startswith("ea.core.")
+        or name == "ea.portfolio.ledger"
+        for name in imports
+    )

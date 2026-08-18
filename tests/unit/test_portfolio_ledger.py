@@ -26,6 +26,7 @@ from ea.core import (
     LedgerAccountKind,
     LedgerConflictKind,
     LedgerFailureStage,
+    LedgerTransaction,
     OpenReconciliationRef,
     OrderSide,
     OutcomeCode,
@@ -53,6 +54,10 @@ from ea.core import (
 from ea.core.economics import EconomicValidationError
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_messages import Fill
+from ea.core.reconciliation import (
+    ReconciliationTransaction,
+    canonical_reconciliation_transaction_bytes,
+)
 from ea.portfolio import create_portfolio_ledger
 from ea.portfolio.ledger import PortfolioLedger
 
@@ -143,7 +148,14 @@ def _fill(
 def _state_bytes(ledger: PortfolioLedger) -> tuple[bytes, tuple[bytes, ...]]:
     return (
         canonical_portfolio_snapshot_bytes(ledger.snapshot),
-        tuple(canonical_ledger_transaction_bytes(item) for item in ledger.transactions),
+        tuple(
+            (
+                canonical_reconciliation_transaction_bytes(item)
+                if type(item) is ReconciliationTransaction
+                else canonical_ledger_transaction_bytes(item)
+            )
+            for item in ledger.transactions
+        ),
     )
 
 
@@ -235,9 +247,9 @@ def test_buy_and_sell_post_balanced_entries_and_round_trip_balances() -> None:
     assert ledger.transactions[1].previous_transaction_sha256 == ledger_transaction_digest(
         ledger.transactions[0]
     )
-    assert ledger.snapshot.last_transaction_sha256 == ledger_transaction_digest(
-        ledger.transactions[1]
-    )
+    last_transaction = ledger.transactions[1]
+    assert type(last_transaction) is LedgerTransaction
+    assert ledger.snapshot.last_transaction_sha256 == ledger_transaction_digest(last_transaction)
 
 
 def test_zero_price_and_subquantum_vectors_never_construct_zero_postings() -> None:
@@ -288,7 +300,9 @@ def test_unresolved_fill_applies_once_and_reference_survives_later_replay() -> N
     )
     applied = ledger.apply_fill(unresolved)
     assert applied.code is OutcomeCode.LEDGER_APPLIED
-    assert ledger.transactions[0].requires_reconciliation is True
+    first_transaction = ledger.transactions[0]
+    assert type(first_transaction) is LedgerTransaction
+    assert first_transaction.requires_reconciliation is True
     assert ledger.snapshot.unresolved_fills[0].fill_id == unresolved.fill_id
 
     later = _fill(
@@ -780,6 +794,7 @@ def test_canonical_documents_and_digests_are_exact_and_domain_separated() -> Non
     fill = _fill(spec_set, fill_sequence=10, dedup="golden", price="1.25")
     outcome = ledger.apply_fill(fill)
     transaction = ledger.transactions[0]
+    assert type(transaction) is LedgerTransaction
 
     transaction_bytes = canonical_ledger_transaction_bytes(transaction)
     snapshot_bytes = canonical_portfolio_snapshot_bytes(ledger.snapshot)
