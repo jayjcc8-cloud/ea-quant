@@ -122,6 +122,12 @@ class PortfolioLedger:
     def transactions(self) -> tuple[LedgerTransaction, ...]:
         return self._state.transactions
 
+    def _resolve_handoff_binding(
+        self, audited_handoff_sha256: Sha256Digest
+    ) -> _HandoffBinding | None:
+        """Return the retained original integration binding or None."""
+        return self._state.handoff_index.get(audited_handoff_sha256)
+
     def apply_fill(self, fill: Fill) -> LedgerApplyOutcome:
         """Apply one canonical Fill once or return exact immutable replay evidence."""
         if type(fill) is not Fill:
@@ -210,13 +216,12 @@ class PortfolioLedger:
         audited_handoff_sha256: Sha256Digest | None = None,
         command_sha256: Sha256Digest | None = None,
     ) -> LedgerApplyOutcome:
-        if audited_handoff_sha256 is not None:
-            if (
-                processing_outcome_sha256 is None
-                or command_sha256 is None
-                or requires_reconciliation is None
-            ):
-                raise AssertionError("command integration evidence must be complete")
+        if audited_handoff_sha256 is not None and (
+            processing_outcome_sha256 is None
+            or command_sha256 is None
+            or requires_reconciliation is None
+        ):
+            raise AssertionError("command integration evidence must be complete")
         self._require_specification(fill)
         before_version = self._state.snapshot.snapshot_version
         if before_version == _MAX_UINT64:

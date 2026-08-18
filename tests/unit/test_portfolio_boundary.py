@@ -12,8 +12,10 @@ LEDGER_PATH = PROJECT_ROOT / "src" / "ea" / "portfolio" / "ledger.py"
 
 def test_portfolio_public_api_has_no_arbitrary_mutation_surface() -> None:
     assert ea.portfolio.__all__ == [
+        "Phase1LedgerHandoffAuthority",
         "PortfolioLedger",
         "PortfolioPlanningAuthority",
+        "create_phase1_ledger_handoff_authority",
         "create_portfolio_ledger",
         "create_portfolio_planning_authority",
     ]
