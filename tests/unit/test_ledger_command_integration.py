@@ -17,6 +17,7 @@ from ea.core.ledger_integration import (
     LedgerApplicationCommand,
     _create_ledger_application_command,
 )
+from ea.core.portfolio import LedgerTransaction
 from ea.portfolio import create_portfolio_ledger
 from unit.test_portfolio_ledger import RUN_ID, _fill, _spec_set
 
@@ -76,6 +77,7 @@ def test_command_with_requires_reconciliation_populates_open_reference_tuples() 
     assert binding.fill_id == fill.fill_id
     assert binding.entry_id.owner_sequence == 1
     transaction = ledger.transactions[0]
+    assert type(transaction) is LedgerTransaction
     assert transaction.requires_reconciliation is True
     assert outcome.transaction_sha256 == binding.transaction_sha256
 
@@ -91,7 +93,9 @@ def test_complete_ancestry_fill_can_carry_outcome_driven_reconciliation_flag() -
     outcome = ledger.apply_ledger_application_command(command, fill)
 
     assert outcome.code is OutcomeCode.LEDGER_APPLIED
-    assert ledger.transactions[0].requires_reconciliation is True
+    committed_transaction = ledger.transactions[0]
+    assert type(committed_transaction) is LedgerTransaction
+    assert committed_transaction.requires_reconciliation is True
     assert ledger.snapshot.open_reconciliation_refs != ()
 
 
@@ -153,4 +157,6 @@ def test_legacy_apply_fill_keeps_adr_0010_unresolved_semantics() -> None:
     assert outcome.code is OutcomeCode.LEDGER_APPLIED
     assert ledger.snapshot.open_reconciliation_refs == ()
     assert ledger.snapshot.unresolved_fills != ()
-    assert ledger.transactions[0].requires_reconciliation is True
+    legacy_transaction = ledger.transactions[0]
+    assert type(legacy_transaction) is LedgerTransaction
+    assert legacy_transaction.requires_reconciliation is True

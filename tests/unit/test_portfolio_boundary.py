@@ -20,7 +20,13 @@ def test_portfolio_public_api_has_no_arbitrary_mutation_surface() -> None:
         "create_portfolio_planning_authority",
     ]
     public = {name for name in dir(PortfolioLedger) if not name.startswith("_")}
-    assert public == {"apply_fill", "apply_ledger_application_command", "snapshot", "transactions"}
+    assert public == {
+        "apply_fill",
+        "apply_ledger_application_command",
+        "apply_reconciliation_adjustment",
+        "snapshot",
+        "transactions",
+    }
     planner_public = {name for name in dir(PortfolioPlanningAuthority) if not name.startswith("_")}
     assert planner_public == {"lookup_by_signal_id", "plan", "state"}
     assert (
