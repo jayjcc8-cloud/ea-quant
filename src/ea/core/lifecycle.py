@@ -53,6 +53,9 @@ ORDERED_OUTCOME_ACK_DIGEST_DOMAIN = b"ea.audit-ordered-outcome-ack-digests.v1\0"
 ORDERED_HANDOFF_DIGEST_DOMAIN = b"ea.coordinator-ordered-handoff-digests.v1\0"
 ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN = b"ea.coordinator-ordered-submission-receipt-digests.v1\0"
 ORDERED_LEDGER_ACK_DIGEST_DOMAIN = b"ea.audit-ordered-ledger-ack-digests.v1\0"
+ORDERED_RECONCILIATION_FRONTIER_DIGEST_DOMAIN = (
+    b"ea.audit-ordered-reconciliation-frontier-digests.v1\0"
+)
 
 _STATE_DOMAIN = b"ea.coordinator-state.v1\0"
 _PRE_TERMINAL_STATE_DOMAIN = b"ea.coordinator-pre-terminal-state.v1\0"

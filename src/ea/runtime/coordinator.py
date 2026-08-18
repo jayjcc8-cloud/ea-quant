@@ -61,6 +61,7 @@ from ea.core.ledger_integration import (
     canonical_ledger_handoff_outcome_bytes,
     canonical_portfolio_risk_refresh_bytes,
     ledger_handoff_outcome_digest,
+    portfolio_risk_refresh_digest,
 )
 from ea.core.lifecycle import (
     ORDERED_INGRESS_DIGEST_DOMAIN,
@@ -106,7 +107,10 @@ from ea.core.lifecycle import (
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
-from ea.core.portfolio import PortfolioSnapshot, portfolio_snapshot_digest
+from ea.core.portfolio import (
+    PortfolioSnapshot,
+    portfolio_snapshot_digest,
+)
 from ea.core.risk import RiskHaltReason, RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
 from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.core.runtime import EndOfRunRoot, RuntimeRoot, RuntimeRootOrderKey
@@ -183,6 +187,7 @@ class _ActiveDispatch:
     ledger_acks: list[AuditAppendAcknowledgement | None] = field(default_factory=list)
     refresh_ack: AuditAppendAcknowledgement | None = None
     refresh_sha256: Sha256Digest | None = None
+    refresh_value_sha256: Sha256Digest | None = None
     final_portfolio_snapshot_sha256: Sha256Digest | None = None
     final_risk_state_sha256: Sha256Digest | None = None
 
@@ -289,6 +294,7 @@ class Phase1HistoricalLifecycleCoordinator:
         "_failing_ack",
         "_failing_key",
         "_failing_payload",
+        "_final_refresh_value_sha256",
         "_ledger_handoff_authority",
         "_matcher",
         "_mutation_lock",
@@ -311,6 +317,7 @@ class Phase1HistoricalLifecycleCoordinator:
     _failing_ack: AuditAppendAcknowledgement | None
     _failing_key: AuditLogicalKey | None
     _failing_payload: bytes | None
+    _final_refresh_value_sha256: Sha256Digest | None
     _ledger_handoff_authority: _LedgerHandoffGatePort | None
     _matcher: HistoricalMatcherPort
     _mutation_lock: Lock
@@ -1145,6 +1152,7 @@ class Phase1HistoricalLifecycleCoordinator:
                 AuditRecordKind.RISK_PORTFOLIO_REFRESH,
                 refresh_payload,
             )
+            active.refresh_value_sha256 = portfolio_risk_refresh_digest(refresh)
         active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
             self._ledger_handoff_authority.snapshot
         )
@@ -1268,6 +1276,11 @@ class Phase1HistoricalLifecycleCoordinator:
                 resulting_state=resulting_state,
             )
             active.window_stage = ActiveDispatchWindowStage.COMPLETED
+            if (
+                self._ledger_handoff_authority is not None
+                and active.refresh_value_sha256 is not None
+            ):
+                self._final_refresh_value_sha256 = active.refresh_value_sha256
             self._state = resulting_state
             self._active = None
             if type(root) is EndOfRunRoot:
@@ -2147,6 +2160,7 @@ def _allocate_coordinator(
     value._failing_ack = None
     value._failing_key = None
     value._failing_payload = None
+    value._final_refresh_value_sha256 = None
     value._ledger_handoff_authority = ledger_handoff_authority
     value._risk_authority = risk_authority
     value._risk_refresh_authority = risk_refresh_authority
