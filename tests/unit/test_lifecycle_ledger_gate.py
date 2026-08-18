@@ -275,3 +275,127 @@ def test_gate_factory_rejects_mismatched_authority_bindings() -> None:
             evidence_resolver=_FixedFillEvidence(None),
             **ports,
         )
+
+
+class _FailOnceRefreshAudit(_MemoryAudit):
+    def __init__(self, binding: RunBinding) -> None:
+        super().__init__(binding)
+        self.refresh_failed = False
+
+    def append(
+        self, *, record_kind: Any, subject_kind: Any, subject_sha256: Any, canonical_payload: Any
+    ) -> Any:
+        if record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH and not self.refresh_failed:
+            self.refresh_failed = True
+            raise __import__("ea.core.audit", fromlist=["AuditContractError"]).AuditContractError(
+                __import__(
+                    "ea.core", fromlist=["OutcomeCode"]
+                ).OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected refresh append failure",
+            )
+        return super().append(
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
+
+
+def test_gate_retry_after_refresh_append_failure_resolves_the_same_frontier() -> None:
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(matcher, delayed)
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _FailOnceRefreshAudit(binding)
+    coordinator = _build_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=_Runtime(matcher, delayed, dispatch_sequence=8),
+        matcher=matcher,
+        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+        evidence_resolver=_FixedFillEvidence(fill),
+        **_ledger_ports(matcher),
+    )
+    with pytest.raises(Exception, match="injected refresh"):
+        coordinator.process_next_dispatch()
+
+    from ea.core.lifecycle import CoordinatorPhase
+
+    assert coordinator.state.phase is CoordinatorPhase.FAILING
+    retry = coordinator.retry_active_dispatch()
+    assert retry.runtime_acknowledged is True
+    kinds = [record.record_kind for record in audit.records]
+    assert kinds.count(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME) == 1
+    assert kinds.count(AuditRecordKind.RISK_PORTFOLIO_REFRESH) == 1
+    completion_record = next(
+        record
+        for record in audit.records
+        if record.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+    )
+    document = json.loads(completion_record.canonical_payload)
+    assert document["schema"] == "ea.audit-dispatch-completed.v3"
+
+
+class _FailOnceLedgerOutcomeAudit(_MemoryAudit):
+    def __init__(self, binding: RunBinding) -> None:
+        super().__init__(binding)
+        self.ledger_failed = False
+
+    def append(
+        self, *, record_kind: Any, subject_kind: Any, subject_sha256: Any, canonical_payload: Any
+    ) -> Any:
+        if (
+            record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+            and not self.ledger_failed
+        ):
+            self.ledger_failed = True
+            raise __import__("ea.core.audit", fromlist=["AuditContractError"]).AuditContractError(
+                __import__(
+                    "ea.core", fromlist=["OutcomeCode"]
+                ).OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected ledger outcome append failure",
+            )
+        return super().append(
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
+
+
+def test_ledger_failure_after_mutation_retries_only_the_same_record() -> None:
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(matcher, delayed)
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _FailOnceLedgerOutcomeAudit(binding)
+    ports = _ledger_ports(matcher)
+    ledger = ports["ledger_handoff_authority"]._state.ledger
+    coordinator = _build_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=_Runtime(matcher, delayed, dispatch_sequence=8),
+        matcher=matcher,
+        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+        evidence_resolver=_FixedFillEvidence(fill),
+        **ports,
+    )
+    with pytest.raises(Exception, match="injected ledger"):
+        coordinator.process_next_dispatch()
+
+    from ea.core.lifecycle import CoordinatorPhase
+
+    assert coordinator.state.phase is CoordinatorPhase.FAILING
+    assert ledger.snapshot.snapshot_version == 1
+    retry = coordinator.retry_active_dispatch()
+    assert retry.runtime_acknowledged is True
+    # The economic mutation was never duplicated: exactly one transaction.
+    assert len(ledger.transactions) == 1
+    kinds = [record.record_kind for record in audit.records]
+    assert kinds.count(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME) == 1
