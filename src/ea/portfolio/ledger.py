@@ -405,7 +405,7 @@ class PortfolioLedger:
             cash=derived.next_cash,
             positions=derived.next_positions,
             rounding=self._state.rounding,
-            unresolved=self._state.unresolved,
+            unresolved=derived.next_unresolved,
             fill_index=self._state.fill_index,
             fact_index=self._state.fact_index,
             entry_index=derived.next_entry_index,
@@ -516,6 +516,7 @@ class PortfolioLedger:
             entry_id=entry_id,
             next_cash=next_cash,
             next_positions=next_positions,
+            next_unresolved=dict(self._state.unresolved),
             next_open_bindings=dict(self._state.open_reconciliation_bindings),
             next_open_refs=dict(self._state.open_reconciliation_refs),
         )
@@ -627,6 +628,9 @@ class PortfolioLedger:
             transaction=transaction,
             next_cash=next_cash,
             next_positions=next_positions,
+            next_unresolved=(
+                self._state.unresolved if next_unresolved is None else next_unresolved
+            ),
             next_open_bindings=next_open_bindings,
             next_open_refs=next_open_refs,
             next_entry_index=next_entry_index,
@@ -1497,6 +1501,7 @@ class _AdjustmentDerivation:
     transaction: ReconciliationTransaction
     next_cash: Mapping[SettlementCurrency, CanonicalDecimal]
     next_positions: Mapping[Instrument, CanonicalDecimal]
+    next_unresolved: Mapping[EconomicId, UnresolvedFillRef]
     next_open_bindings: Mapping[EconomicId, ExistingLedgerBinding]
     next_open_refs: Mapping[EconomicId, OpenReconciliationRef]
     next_entry_index: Mapping[EconomicId, CanonicalPortfolioTransaction]
