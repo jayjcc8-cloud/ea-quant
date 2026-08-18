@@ -21,6 +21,11 @@ from ea.core.execution_messages import FactProvenanceId, Fill, Order, fill_diges
 from ea.core.identity import Instrument, VenueId
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import (
+    CurrencyCommodity,
+    InstrumentCommodity,
+    LedgerAccountKind,
+    LedgerPosting,
+    LedgerTransaction,
     OpenReconciliationRef,
     PortfolioSnapshot,
     portfolio_snapshot_digest,
@@ -2120,3 +2125,661 @@ def _canonical_json(document: object) -> bytes:
 
 def _framed_digest(domain: bytes, payload: bytes) -> Sha256Digest:
     return Sha256Digest(sha256(domain + len(payload).to_bytes(8, "big") + payload).hexdigest())
+
+
+RECONCILIATION_TRANSACTION_SCHEMA = "ea.reconciliation-transaction.v1"
+RECONCILIATION_TRANSACTION_DIGEST_DOMAIN = b"ea.reconciliation-transaction.v1\0"
+RECONCILIATION_ADJUSTMENT_OUTCOME_SCHEMA = "ea.reconciliation-adjustment-outcome.v1"
+RECONCILIATION_ADJUSTMENT_OUTCOME_DIGEST_DOMAIN = b"ea.reconciliation-adjustment-outcome.v1\0"
+
+
+class ReconciliationAdjustmentResult(StrEnum):
+    APPLIED = "applied"
+    DUPLICATE = "duplicate"
+    CONFLICT = "conflict"
+    FAILED = "failed"
+
+
+class ReconciliationAdjustmentFailureKind(StrEnum):
+    INVALID_COMMAND = "invalid_command"
+    STALE_FRONTIER = "stale_frontier"
+    ARITHMETIC_FAILURE = "arithmetic_failure"
+    UNBALANCED = "unbalanced"
+
+
+class ReconciliationAdjustmentConflictKind(StrEnum):
+    AUTHORIZATION_ID_COLLISION = "authorization_id_collision"
+    ADJUSTMENT_ID_COLLISION = "adjustment_id_collision"
+    OBSERVATION_ALREADY_CONSUMED = "observation_already_consumed"
+    INDEX_INCONSISTENT = "index_inconsistent"
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ReconciliationTransaction:
+    """One cause-discriminated ledger transaction from an exact adjustment."""
+
+    run_id: RunId
+    entry_id: EconomicId
+    ledger_sequence: int
+    adjustment_id: EconomicId
+    authorization_sha256: Sha256Digest
+    observation_sha256: Sha256Digest
+    reconciliation_outcome_sha256: Sha256Digest
+    adjustment_command_sha256: Sha256Digest
+    variant: ReconciliationAdjustmentVariant
+    target_kind: ReconciliationAdjustmentTargetKind
+    instrument: Instrument | None
+    currency: SettlementCurrency | None
+    local_amount: CanonicalDecimal | None
+    observed_amount: CanonicalDecimal | None
+    delta: CanonicalDecimal | None
+    open_reconciliation_ref: OpenReconciliationRef | None
+    previous_transaction_sha256: Sha256Digest | None
+    instrument_spec_set_id: InstrumentSpecSetId
+    instrument_spec_set_sha256: Sha256Digest
+    postings: tuple[LedgerPosting, ...]
+    occurred_at: datetime
+    available_at: datetime
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("reconciliation transactions are issued only by the ledger factory")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ReconciliationAdjustmentOutcome:
+    """One closed result for an exact separately authorized adjustment."""
+
+    run_id: RunId
+    adjustment_id: EconomicId
+    authorization_sha256: Sha256Digest
+    observation_sha256: Sha256Digest
+    reconciliation_outcome_sha256: Sha256Digest
+    adjustment_command_sha256: Sha256Digest
+    result: ReconciliationAdjustmentResult
+    failure_kind: ReconciliationAdjustmentFailureKind | None
+    conflict_kind: ReconciliationAdjustmentConflictKind | None
+    original_transaction_id: EconomicId | None
+    original_transaction_sha256: Sha256Digest | None
+    before_snapshot_sha256: Sha256Digest
+    after_snapshot_sha256: Sha256Digest
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("reconciliation adjustment outcomes are issued only by the ledger")
+
+
+type CanonicalPortfolioTransaction = LedgerTransaction | ReconciliationTransaction
+
+
+def _create_reconciliation_transaction(
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    entry_id: EconomicId,
+    ledger_sequence: int,
+    adjustment_id: EconomicId,
+    authorization_sha256: Sha256Digest,
+    observation_sha256: Sha256Digest,
+    reconciliation_outcome_sha256: Sha256Digest,
+    adjustment_command_sha256: Sha256Digest,
+    variant: ReconciliationAdjustmentVariant,
+    target_kind: ReconciliationAdjustmentTargetKind,
+    instrument: Instrument | None,
+    currency: SettlementCurrency | None,
+    local_amount: CanonicalDecimal | None,
+    observed_amount: CanonicalDecimal | None,
+    delta: CanonicalDecimal | None,
+    open_reconciliation_ref: OpenReconciliationRef | None,
+    previous_transaction_sha256: Sha256Digest | None,
+    postings: tuple[LedgerPosting, ...],
+    occurred_at: datetime,
+    available_at: datetime,
+) -> ReconciliationTransaction:
+    if type(run_id) is not RunId or type(spec_set) is not InstrumentExecutionSpecSet:
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment transaction identity must be exact")
+    if (
+        type(entry_id) is not EconomicId
+        or entry_id.owner_kind is not EconomicOwnerKind.LEDGER_ENTRY
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment entry identity must be exact")
+    if (
+        entry_id.run_id != run_id
+        or entry_id.owner_sequence != ledger_sequence
+        or type(ledger_sequence) is not int
+        or ledger_sequence < 1
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment entry and sequence conflict")
+    if (
+        type(adjustment_id) is not EconomicId
+        or adjustment_id.owner_kind is not EconomicOwnerKind.RECONCILIATION_ADJUSTMENT
+        or adjustment_id.run_id != run_id
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment identity conflicts")
+    for name, digest in (
+        ("authorization_sha256", authorization_sha256),
+        ("observation_sha256", observation_sha256),
+        ("reconciliation_outcome_sha256", reconciliation_outcome_sha256),
+        ("adjustment_command_sha256", adjustment_command_sha256),
+    ):
+        if type(digest) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, f"{name} must be exact")
+    if type(variant) is not ReconciliationAdjustmentVariant or (
+        type(target_kind) is not ReconciliationAdjustmentTargetKind
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment variant and target must be exact")
+    if type(previous_transaction_sha256) is not Sha256Digest and (
+        previous_transaction_sha256 is not None
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "previous transaction digest must be exact or None")
+    if (previous_transaction_sha256 is None) != (ledger_sequence == 1):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "first adjustment must be the chain start")
+    checked_occurred_at = _require_time(occurred_at, "occurred_at")
+    checked_available_at = _require_time(available_at, "available_at")
+    if checked_available_at < checked_occurred_at:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment available time precedes its occurrence")
+    if variant is ReconciliationAdjustmentVariant.BALANCE_CORRECTION:
+        _require_balance_correction_fields(
+            spec_set=spec_set,
+            run_id=run_id,
+            target_kind=target_kind,
+            instrument=instrument,
+            currency=currency,
+            local_amount=local_amount,
+            observed_amount=observed_amount,
+            delta=delta,
+            open_reconciliation_ref=open_reconciliation_ref,
+            postings=postings,
+        )
+    elif variant is ReconciliationAdjustmentVariant.ANCESTRY_RESOLUTION:
+        if (
+            target_kind is not ReconciliationAdjustmentTargetKind.OPEN_RECONCILIATION_REF
+            or type(open_reconciliation_ref) is not OpenReconciliationRef
+            or open_reconciliation_ref.fill_id.run_id != run_id
+            or instrument is not None
+            or currency is not None
+            or local_amount is not None
+            or observed_amount is not None
+            or delta is not None
+            or postings != ()
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "ancestry resolution fields conflict")
+    else:  # pragma: no cover - closed enum
+        raise AssertionError("adjustment variant is outside the closed enum")
+    value = object.__new__(ReconciliationTransaction)
+    for field, candidate in (
+        ("run_id", run_id),
+        ("entry_id", entry_id),
+        ("ledger_sequence", ledger_sequence),
+        ("adjustment_id", adjustment_id),
+        ("authorization_sha256", authorization_sha256),
+        ("observation_sha256", observation_sha256),
+        ("reconciliation_outcome_sha256", reconciliation_outcome_sha256),
+        ("adjustment_command_sha256", adjustment_command_sha256),
+        ("variant", variant),
+        ("target_kind", target_kind),
+        ("instrument", instrument),
+        ("currency", currency),
+        ("local_amount", local_amount),
+        ("observed_amount", observed_amount),
+        ("delta", delta),
+        ("open_reconciliation_ref", open_reconciliation_ref),
+        ("previous_transaction_sha256", previous_transaction_sha256),
+        ("instrument_spec_set_id", spec_set.identifier),
+        ("instrument_spec_set_sha256", instrument_spec_set_digest(spec_set)),
+        ("postings", postings),
+        ("occurred_at", checked_occurred_at),
+        ("available_at", checked_available_at),
+    ):
+        object.__setattr__(value, field, candidate)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    canonical_reconciliation_transaction_bytes(value)
+    return value
+
+
+def _require_balance_correction_fields(
+    *,
+    spec_set: InstrumentExecutionSpecSet,
+    run_id: RunId,
+    target_kind: ReconciliationAdjustmentTargetKind,
+    instrument: Instrument | None,
+    currency: SettlementCurrency | None,
+    local_amount: CanonicalDecimal | None,
+    observed_amount: CanonicalDecimal | None,
+    delta: CanonicalDecimal | None,
+    open_reconciliation_ref: OpenReconciliationRef | None,
+    postings: tuple[LedgerPosting, ...],
+) -> None:
+    if open_reconciliation_ref is not None or target_kind not in {
+        ReconciliationAdjustmentTargetKind.INSTRUMENT_POSITION,
+        ReconciliationAdjustmentTargetKind.SETTLEMENT_CASH,
+    }:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "balance correction target conflicts")
+    is_position = target_kind is ReconciliationAdjustmentTargetKind.INSTRUMENT_POSITION
+    if is_position:
+        if type(instrument) is not Instrument or currency is not None:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "position correction target conflicts")
+        try:
+            quantum = spec_set.require(instrument).quantity_quantum
+        except EconomicValidationError as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID, "position correction instrument is unbound"
+            ) from error
+        commodity: object = InstrumentCommodity(instrument)
+        accounts = (LedgerAccountKind.PORTFOLIO_POSITION, LedgerAccountKind.EXTERNAL_INVENTORY)
+    else:
+        if instrument is not None or type(currency) is not SettlementCurrency:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "cash correction target conflicts")
+        quantums = {
+            specification.currency_quantum
+            for specification in spec_set.specifications
+            if specification.settlement_currency == currency
+        }
+        if len(quantums) != 1:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "cash correction currency binding conflicts")
+        quantum = next(iter(quantums))
+        commodity = CurrencyCommodity(currency)
+        accounts = (LedgerAccountKind.PORTFOLIO_CASH, LedgerAccountKind.EXTERNAL_SETTLEMENT)
+    for field, amount in (("local_amount", local_amount), ("observed_amount", observed_amount)):
+        if type(amount) is not CanonicalDecimal:
+            raise _fail(OutcomeCode.INVALID_TYPE, f"balance correction {field} must be exact")
+        try:
+            require_quantized(amount, quantum, field_name=f"correction_{field}")
+        except EconomicValidationError as error:
+            raise _fail(error.code, f"balance correction {field} is invalid") from error
+    if type(delta) is not CanonicalDecimal or delta == CanonicalDecimal("0"):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "balance correction delta must be exact non-zero")
+    assert local_amount is not None and observed_amount is not None
+    try:
+        require_quantized(delta, quantum, field_name="correction_delta")
+    except EconomicValidationError as error:
+        raise _fail(error.code, "balance correction delta is invalid") from error
+    if delta != _subtract_decimal(observed_amount, local_amount):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "balance correction delta derivation conflicts")
+    if len(postings) != 2 or tuple(posting.account for posting in postings) != accounts:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "balance correction postings conflict")
+    if any(posting.commodity != commodity for posting in postings):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "balance correction commodities conflict")
+    if postings[0].amount != delta or postings[1].amount != _negated_decimal(delta):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "balance correction amounts conflict")
+    if _postings_sum_to_zero(postings) is not True:
+        raise _fail(OutcomeCode.LEDGER_UNBALANCED, "balance correction postings are unbalanced")
+
+
+def _negated_decimal(value: CanonicalDecimal) -> CanonicalDecimal:
+    if value.coefficient == 0:
+        return CanonicalDecimal("0")
+    if value.text.startswith("-"):
+        return CanonicalDecimal(value.text[1:])
+    return CanonicalDecimal(f"-{value.text}")
+
+
+def _postings_sum_to_zero(postings: tuple[LedgerPosting, ...]) -> bool:
+    sums: dict[object, tuple[int, int]] = {}
+    for posting in postings:
+        existing = sums.get(posting.commodity)
+        if existing is None:
+            sums[posting.commodity] = (posting.amount.coefficient, posting.amount.scale)
+        else:
+            left_coefficient, left_scale = existing
+            scale = max(left_scale, posting.amount.scale)
+            coefficient = left_coefficient * (10 ** (scale - left_scale))
+            coefficient += posting.amount.coefficient * (10 ** (scale - posting.amount.scale))
+            sums[posting.commodity] = (coefficient, scale)
+    return all(coefficient == 0 for coefficient, _ in sums.values())
+
+
+def canonical_reconciliation_transaction_bytes(transaction: ReconciliationTransaction) -> bytes:
+    if type(transaction) is not ReconciliationTransaction or transaction._seal is not _VALUE_SEAL:
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation transaction must be factory-issued")
+    payload = _canonical_json(
+        {
+            "adjustment_command_sha256": transaction.adjustment_command_sha256.value,
+            "adjustment_id": _economic_id_document(transaction.adjustment_id),
+            "authorization_sha256": transaction.authorization_sha256.value,
+            "available_at": _time_text(transaction.available_at),
+            "canonicalization": RECONCILIATION_CANONICALIZATION,
+            "currency": None if transaction.currency is None else transaction.currency.code,
+            "delta": None if transaction.delta is None else transaction.delta.text,
+            "entry_id": _economic_id_document(transaction.entry_id),
+            "instrument": (
+                None
+                if transaction.instrument is None
+                else {
+                    "symbol": transaction.instrument.symbol,
+                    "venue": transaction.instrument.venue.code,
+                }
+            ),
+            "instrument_spec_set_id": transaction.instrument_spec_set_id.value,
+            "instrument_spec_set_sha256": transaction.instrument_spec_set_sha256.value,
+            "ledger_sequence": transaction.ledger_sequence,
+            "local_amount": (
+                None if transaction.local_amount is None else transaction.local_amount.text
+            ),
+            "observed_amount": (
+                None if transaction.observed_amount is None else transaction.observed_amount.text
+            ),
+            "occurred_at": _time_text(transaction.occurred_at),
+            "open_reconciliation_ref": (
+                None
+                if transaction.open_reconciliation_ref is None
+                else {
+                    "fill_id": _economic_id_document(transaction.open_reconciliation_ref.fill_id),
+                    "fill_sha256": transaction.open_reconciliation_ref.fill_sha256.value,
+                    "processing_outcome_sha256": (
+                        transaction.open_reconciliation_ref.processing_outcome_sha256.value
+                    ),
+                }
+            ),
+            "postings": [_ledger_posting_document(posting) for posting in transaction.postings],
+            "previous_transaction_sha256": (
+                None
+                if transaction.previous_transaction_sha256 is None
+                else transaction.previous_transaction_sha256.value
+            ),
+            "reconciliation_outcome_sha256": transaction.reconciliation_outcome_sha256.value,
+            "run_id": transaction.run_id.value,
+            "schema": RECONCILIATION_TRANSACTION_SCHEMA,
+            "target_kind": transaction.target_kind.value,
+            "variant": transaction.variant.value,
+        }
+    )
+    if len(payload) > MAX_RECONCILIATION_PAYLOAD_BYTES:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "reconciliation transaction exceeds byte bound")
+    return payload
+
+
+def _ledger_posting_document(posting: LedgerPosting) -> dict[str, object]:
+    if type(posting.commodity) is InstrumentCommodity:
+        commodity: dict[str, object] = {
+            "instrument": {
+                "symbol": posting.commodity.instrument.symbol,
+                "venue": posting.commodity.instrument.venue.code,
+            },
+            "kind": "instrument",
+        }
+    elif type(posting.commodity) is CurrencyCommodity:
+        commodity = {"currency": posting.commodity.currency.code, "kind": "currency"}
+    else:  # pragma: no cover - closed union
+        raise AssertionError("ledger commodity is outside the closed union")
+    return {
+        "account": posting.account.value,
+        "amount": posting.amount.text,
+        "commodity": commodity,
+    }
+
+
+def reconciliation_transaction_digest(transaction: ReconciliationTransaction) -> Sha256Digest:
+    return _framed_digest(
+        RECONCILIATION_TRANSACTION_DIGEST_DOMAIN,
+        canonical_reconciliation_transaction_bytes(transaction),
+    )
+
+
+def _create_reconciliation_adjustment_outcome(
+    *,
+    run_id: RunId,
+    adjustment_id: EconomicId,
+    authorization_sha256: Sha256Digest,
+    observation_sha256: Sha256Digest,
+    reconciliation_outcome_sha256: Sha256Digest,
+    adjustment_command_sha256: Sha256Digest,
+    result: ReconciliationAdjustmentResult,
+    transaction: ReconciliationTransaction | None,
+    failure_kind: ReconciliationAdjustmentFailureKind | None,
+    conflict_kind: ReconciliationAdjustmentConflictKind | None,
+    before_snapshot_sha256: Sha256Digest,
+    after_snapshot_sha256: Sha256Digest,
+    original_transaction_id: EconomicId | None = None,
+    original_transaction_sha256: Sha256Digest | None = None,
+) -> ReconciliationAdjustmentOutcome:
+    if type(run_id) is not RunId:
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment outcome run must be exact")
+    if (
+        type(adjustment_id) is not EconomicId
+        or adjustment_id.owner_kind is not EconomicOwnerKind.RECONCILIATION_ADJUSTMENT
+        or adjustment_id.run_id != run_id
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment outcome identity conflicts")
+    for name, digest in (
+        ("authorization_sha256", authorization_sha256),
+        ("observation_sha256", observation_sha256),
+        ("reconciliation_outcome_sha256", reconciliation_outcome_sha256),
+        ("adjustment_command_sha256", adjustment_command_sha256),
+        ("before_snapshot_sha256", before_snapshot_sha256),
+        ("after_snapshot_sha256", after_snapshot_sha256),
+    ):
+        if type(digest) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, f"adjustment outcome {name} must be exact")
+    if type(result) is not ReconciliationAdjustmentResult:
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment outcome result must be exact")
+    if failure_kind is not None and type(failure_kind) is not ReconciliationAdjustmentFailureKind:
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment failure kind must be exact or None")
+    if (
+        conflict_kind is not None
+        and type(conflict_kind) is not ReconciliationAdjustmentConflictKind
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment conflict kind must be exact or None")
+    if transaction is not None and (
+        type(transaction) is not ReconciliationTransaction or transaction._seal is not _VALUE_SEAL
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment transaction must be factory-issued")
+    if original_transaction_id is not None and (
+        type(original_transaction_id) is not EconomicId
+        or original_transaction_id.owner_kind is not EconomicOwnerKind.LEDGER_ENTRY
+        or original_transaction_id.run_id != run_id
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment original entry identity conflicts")
+    if original_transaction_sha256 is not None and (
+        type(original_transaction_sha256) is not Sha256Digest
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment original digest must be exact or None")
+    if (original_transaction_id is None) != (original_transaction_sha256 is None):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment original evidence must be paired")
+    if transaction is not None:
+        derived_id = transaction.entry_id
+        derived_sha256 = reconciliation_transaction_digest(transaction)
+        if original_transaction_id is not None and (
+            original_transaction_id != derived_id or original_transaction_sha256 != derived_sha256
+        ):
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "adjustment original evidence conflicts with its transaction",
+            )
+        original_transaction_id = derived_id
+        original_transaction_sha256 = derived_sha256
+    if result is ReconciliationAdjustmentResult.APPLIED:
+        if original_transaction_id is None or failure_kind is not None or conflict_kind is not None:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "applied adjustment outcome fields conflict")
+        if transaction is not None and (
+            transaction.adjustment_id != adjustment_id
+            or transaction.authorization_sha256 != authorization_sha256
+            or transaction.observation_sha256 != observation_sha256
+            or transaction.reconciliation_outcome_sha256 != reconciliation_outcome_sha256
+            or transaction.adjustment_command_sha256 != adjustment_command_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "applied adjustment outcome fields conflict")
+    elif result is ReconciliationAdjustmentResult.DUPLICATE:
+        if (
+            original_transaction_id is None
+            or failure_kind is not None
+            or conflict_kind is not None
+            or before_snapshot_sha256 != after_snapshot_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "duplicate adjustment outcome fields conflict")
+        if transaction is not None and transaction.adjustment_id != adjustment_id:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "duplicate adjustment outcome fields conflict")
+    elif result is ReconciliationAdjustmentResult.CONFLICT:
+        if (
+            transaction is not None
+            or original_transaction_id is not None
+            or failure_kind is not None
+            or conflict_kind is None
+            or before_snapshot_sha256 != after_snapshot_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "conflict adjustment outcome fields conflict")
+    elif result is ReconciliationAdjustmentResult.FAILED:
+        if (
+            transaction is not None
+            or original_transaction_id is not None
+            or failure_kind is None
+            or conflict_kind is not None
+            or before_snapshot_sha256 != after_snapshot_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "failed adjustment outcome fields conflict")
+    else:  # pragma: no cover - closed enum
+        raise AssertionError("adjustment result is outside the closed enum")
+    value = object.__new__(ReconciliationAdjustmentOutcome)
+    for field, candidate in (
+        ("run_id", run_id),
+        ("adjustment_id", adjustment_id),
+        ("authorization_sha256", authorization_sha256),
+        ("observation_sha256", observation_sha256),
+        ("reconciliation_outcome_sha256", reconciliation_outcome_sha256),
+        ("adjustment_command_sha256", adjustment_command_sha256),
+        ("result", result),
+        ("failure_kind", failure_kind),
+        ("conflict_kind", conflict_kind),
+        ("original_transaction_id", original_transaction_id),
+        ("original_transaction_sha256", original_transaction_sha256),
+        ("before_snapshot_sha256", before_snapshot_sha256),
+        ("after_snapshot_sha256", after_snapshot_sha256),
+    ):
+        object.__setattr__(value, field, candidate)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    canonical_reconciliation_adjustment_outcome_bytes(value)
+    return value
+
+
+def canonical_reconciliation_adjustment_outcome_bytes(
+    outcome: ReconciliationAdjustmentOutcome,
+) -> bytes:
+    if type(outcome) is not ReconciliationAdjustmentOutcome or outcome._seal is not _VALUE_SEAL:
+        raise _fail(OutcomeCode.INVALID_TYPE, "adjustment outcome must be factory-issued")
+    payload = _canonical_json(
+        {
+            "adjustment_command_sha256": outcome.adjustment_command_sha256.value,
+            "adjustment_id": _economic_id_document(outcome.adjustment_id),
+            "after_snapshot_sha256": outcome.after_snapshot_sha256.value,
+            "authorization_sha256": outcome.authorization_sha256.value,
+            "before_snapshot_sha256": outcome.before_snapshot_sha256.value,
+            "canonicalization": RECONCILIATION_CANONICALIZATION,
+            "conflict_kind": None if outcome.conflict_kind is None else outcome.conflict_kind.value,
+            "failure_kind": None if outcome.failure_kind is None else outcome.failure_kind.value,
+            "observation_sha256": outcome.observation_sha256.value,
+            "original_transaction_id": (
+                None
+                if outcome.original_transaction_id is None
+                else _economic_id_document(outcome.original_transaction_id)
+            ),
+            "original_transaction_sha256": (
+                None
+                if outcome.original_transaction_sha256 is None
+                else outcome.original_transaction_sha256.value
+            ),
+            "reconciliation_outcome_sha256": outcome.reconciliation_outcome_sha256.value,
+            "result": outcome.result.value,
+            "run_id": outcome.run_id.value,
+            "schema": RECONCILIATION_ADJUSTMENT_OUTCOME_SCHEMA,
+        }
+    )
+    if len(payload) > MAX_RECONCILIATION_PAYLOAD_BYTES:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "adjustment outcome exceeds byte bound")
+    return payload
+
+
+def reconciliation_adjustment_outcome_digest(
+    outcome: ReconciliationAdjustmentOutcome,
+) -> Sha256Digest:
+    return _framed_digest(
+        RECONCILIATION_ADJUSTMENT_OUTCOME_DIGEST_DOMAIN,
+        canonical_reconciliation_adjustment_outcome_bytes(outcome),
+    )
+
+
+def decode_reconciliation_adjustment_outcome(
+    canonical_payload: bytes,
+) -> ReconciliationAdjustmentOutcome:
+    document = _decode_canonical_json(canonical_payload, "reconciliation adjustment outcome")
+    expected_fields = {
+        "adjustment_command_sha256",
+        "adjustment_id",
+        "after_snapshot_sha256",
+        "authorization_sha256",
+        "before_snapshot_sha256",
+        "canonicalization",
+        "conflict_kind",
+        "failure_kind",
+        "observation_sha256",
+        "original_transaction_id",
+        "original_transaction_sha256",
+        "reconciliation_outcome_sha256",
+        "result",
+        "run_id",
+        "schema",
+    }
+    if type(document) is not dict or set(document) != expected_fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment outcome fields conflict")
+    if (
+        _require_text(document, "schema") != RECONCILIATION_ADJUSTMENT_OUTCOME_SCHEMA
+        or _require_text(document, "canonicalization") != RECONCILIATION_CANONICALIZATION
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment outcome schema conflicts")
+    try:
+        run_id = RunId(_require_text(document, "run_id"))
+        original_transaction_id = (
+            None
+            if document["original_transaction_id"] is None
+            else _decode_economic_id(document["original_transaction_id"], run_id)
+        )
+        if original_transaction_id is not None and (
+            original_transaction_id.owner_kind is not EconomicOwnerKind.LEDGER_ENTRY
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment original entry kind conflicts")
+        outcome = _create_reconciliation_adjustment_outcome(
+            run_id=run_id,
+            adjustment_id=_decode_economic_id(document["adjustment_id"], run_id),
+            authorization_sha256=_decode_digest(document, "authorization_sha256"),
+            observation_sha256=_decode_digest(document, "observation_sha256"),
+            reconciliation_outcome_sha256=_decode_digest(document, "reconciliation_outcome_sha256"),
+            adjustment_command_sha256=_decode_digest(document, "adjustment_command_sha256"),
+            result=ReconciliationAdjustmentResult(_require_text(document, "result")),
+            transaction=None,
+            failure_kind=(
+                None
+                if document["failure_kind"] is None
+                else ReconciliationAdjustmentFailureKind(_require_text(document, "failure_kind"))
+            ),
+            conflict_kind=(
+                None
+                if document["conflict_kind"] is None
+                else ReconciliationAdjustmentConflictKind(_require_text(document, "conflict_kind"))
+            ),
+            before_snapshot_sha256=_decode_digest(document, "before_snapshot_sha256"),
+            after_snapshot_sha256=_decode_digest(document, "after_snapshot_sha256"),
+            original_transaction_id=original_transaction_id,
+            original_transaction_sha256=_decode_optional_digest_text(
+                document, "original_transaction_sha256"
+            ),
+        )
+    except (ValueError, TypeError) as error:
+        if type(error) is ReconciliationContractError:
+            raise
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment outcome values conflict") from error
+    if canonical_reconciliation_adjustment_outcome_bytes(outcome) != canonical_payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "adjustment outcome round-trip conflicts")
+    return outcome
+
+
+def _decode_optional_digest_text(
+    document: dict[str, Any],
+    field: str,
+) -> Sha256Digest | None:
+    value = document[field]
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} must be text or null")
+    return Sha256Digest(value)
