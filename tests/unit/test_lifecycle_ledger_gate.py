@@ -442,7 +442,6 @@ def test_recover_ledger_frontier_replays_with_byte_equality() -> None:
         refresh_record=refresh_entry,
     )
 
-    fresh = _ledger_ports(matcher)
     fresh_coordinator, _fresh_audit = _coordinator_with_gate(
         matcher, delayed, fill=fill, outcome=outcome
     )
