@@ -2039,7 +2039,18 @@ def _subtract_decimal(left: CanonicalDecimal, right: CanonicalDecimal) -> Canoni
     scale = max(left.scale, right.scale)
     coefficient = left.coefficient * (10 ** (scale - left.scale))
     coefficient -= right.coefficient * (10 ** (scale - right.scale))
-    return CanonicalDecimal(_scaled_decimal_text(coefficient, scale))
+    try:
+        return CanonicalDecimal(_scaled_decimal_text(coefficient, scale))
+    except EconomicValidationError as error:
+        # LEDGER-001: the delta can exceed the canonical 38/20/18 digit bounds
+        # even when both operands are individually valid. Fail with this
+        # module's closed error instead of leaking the economics-domain
+        # exception type out of the discrepancy factories; the decode path
+        # keeps its own fail-closed re-wrapping.
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE,
+            "reconciliation discrepancy delta exceeds canonical decimal bounds",
+        ) from error
 
 
 def _scaled_decimal_text(coefficient: int, scale: int) -> str:
