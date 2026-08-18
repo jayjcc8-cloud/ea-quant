@@ -67,6 +67,7 @@ from ea.core.lifecycle import (
     ORDERED_INGRESS_DIGEST_DOMAIN,
     ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
     ORDERED_OUTCOME_ACK_DIGEST_DOMAIN,
+    ORDERED_RECONCILIATION_FRONTIER_DIGEST_DOMAIN,
     ActiveDispatchWindow,
     ActiveDispatchWindowStage,
     AuditedExecutionFactHandoff,
@@ -94,6 +95,7 @@ from ea.core.lifecycle import (
     canonical_failing_safety_audit_payload,
     canonical_matcher_batch_audit_payload,
     canonical_run_terminal_audit_payload,
+    canonical_run_terminal_v2_audit_payload,
     coordinator_run_state_digest,
     create_audited_execution_fact_handoff,
     create_coordinator_dispatch_outcome,
@@ -109,6 +111,7 @@ from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import (
     PortfolioSnapshot,
+    open_reconciliation_aggregate_digest,
     portfolio_snapshot_digest,
 )
 from ea.core.risk import RiskHaltReason, RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
@@ -1770,6 +1773,31 @@ def _latest_ledger_ack_chain_head(active: _ActiveDispatch) -> Sha256Digest | Non
         if acknowledgement is not None:
             return acknowledgement.chain_head_sha256
     return None
+
+
+def _terminal_payload(
+    coordinator: Phase1HistoricalLifecycleCoordinator,
+    pre_terminal: PreTerminalCoordinatorState,
+) -> bytes:
+    """Emit terminal v2 (publication-frontier-bound) when the ledger gate is bound."""
+    if coordinator._ledger_handoff_authority is None:
+        return canonical_run_terminal_audit_payload(pre_terminal)
+    if coordinator._final_refresh_value_sha256 is None:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "terminal evidence requires the final risk refresh",
+        )
+    snapshot = coordinator._ledger_handoff_authority.snapshot
+    return canonical_run_terminal_v2_audit_payload(
+        pre_terminal,
+        final_published_snapshot_sha256=portfolio_snapshot_digest(snapshot),
+        final_risk_refresh_sha256=coordinator._final_refresh_value_sha256,
+        open_reconciliation_ref_aggregate_sha256=open_reconciliation_aggregate_digest(snapshot),
+        ordered_reconciliation_frontier_sha256s_sha256=ordered_digest_tuple(
+            ORDERED_RECONCILIATION_FRONTIER_DIGEST_DOMAIN,
+            (),
+        ),
+    )
 
 
 def _root_available_at(root: RuntimeRoot) -> datetime:

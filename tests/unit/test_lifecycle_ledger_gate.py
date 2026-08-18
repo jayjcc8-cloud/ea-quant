@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
 from ea.core import (
+    AuditRecord,
     AuditRecordKind,
     EconomicId,
     EconomicOwnerKind,
@@ -399,3 +401,176 @@ def test_ledger_failure_after_mutation_retries_only_the_same_record() -> None:
     assert len(ledger.transactions) == 1
     kinds = [record.record_kind for record in audit.records]
     assert kinds.count(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME) == 1
+
+
+def _record_entry(
+    records: Sequence[AuditRecord], kind: AuditRecordKind
+) -> tuple[int, AuditRecord, Any]:
+    for position, record in enumerate(records, start=2):
+        if record.record_kind is kind:
+            return (
+                position,
+                record,
+                __import__(
+                    "ea.core", fromlist=["create_audit_append_acknowledgement"]
+                ).create_audit_append_acknowledgement(record),
+            )
+    raise AssertionError("record kind not found")
+
+
+def test_recover_ledger_frontier_replays_with_byte_equality() -> None:
+    from ea.runtime.coordinator import _recover_ledger_frontier, _RecoveredDispatch
+
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(matcher, delayed)
+    coordinator, audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
+    window = coordinator.begin_next_dispatch()
+    assert window is not None
+    active = coordinator._active
+    assert active is not None
+    assert all(value is not None for value in active.ledger_acks)
+
+    ledger_entries: list[Any] = [
+        _record_entry(audit.records, AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME)
+    ]
+    refresh_entry = _record_entry(audit.records, AuditRecordKind.RISK_PORTFOLIO_REFRESH)
+    recovered = _RecoveredDispatch(
+        sequence=8,
+        trigger_sha256=active.trigger_sha256,
+        ledger_records=ledger_entries,
+        refresh_record=refresh_entry,
+    )
+
+    fresh = _ledger_ports(matcher)
+    fresh_coordinator, _fresh_audit = _coordinator_with_gate(
+        matcher, delayed, fill=fill, outcome=outcome
+    )
+    _recover_ledger_frontier(fresh_coordinator, active, recovered)
+    assert all(value is not None for value in active.ledger_acks)
+    assert active.refresh_ack is not None
+    assert active.final_portfolio_snapshot_sha256 is not None
+    assert active.final_risk_state_sha256 is not None
+
+
+def test_recover_ledger_frontier_rejects_corrupted_payload() -> None:
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import _recover_ledger_frontier, _RecoveredDispatch
+
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(matcher, delayed)
+    coordinator, audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
+    window = coordinator.begin_next_dispatch()
+    assert window is not None
+    active = coordinator._active
+    assert active is not None
+
+    position, record, acknowledgement = _record_entry(
+        audit.records, AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+    )
+    corrupted = object.__new__(type(record))
+    for field in (
+        "binding",
+        "record_id",
+        "record_kind",
+        "subject_kind",
+        "subject_sha256",
+        "canonical_payload",
+        "payload_sha256",
+        "previous_record_sha256",
+        "previous_chain_head_sha256",
+        "_seal",
+    ):
+        object.__setattr__(corrupted, field, getattr(record, field))
+    object.__setattr__(corrupted, "canonical_payload", record.canonical_payload + b" ")
+    recovered = _RecoveredDispatch(
+        sequence=8,
+        trigger_sha256=active.trigger_sha256,
+        ledger_records=[(position, corrupted, acknowledgement)],
+        refresh_record=None,
+    )
+    fresh_coordinator, _fresh_audit = _coordinator_with_gate(
+        matcher, delayed, fill=fill, outcome=outcome
+    )
+    with pytest.raises(LifecycleError, match="ledger outcome payload conflicts"):
+        _recover_ledger_frontier(fresh_coordinator, active, recovered)
+
+
+def test_terminal_payload_emits_v2_when_gate_bound() -> None:
+    from ea.core import CoordinatorTerminalKind
+    from ea.core.lifecycle import create_pre_terminal_coordinator_state
+    from ea.runtime.coordinator import _terminal_payload
+
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(matcher, delayed)
+    coordinator, _audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
+    coordinator._final_refresh_value_sha256 = Sha256Digest("ee" * 32)
+    state = create_pre_terminal_coordinator_state(
+        binding=coordinator._binding,
+        state_version=4,
+        terminal_kind=CoordinatorTerminalKind.SUCCESS,
+        last_dispatch_sequence=8,
+        last_trigger_root_sha256=Sha256Digest("33" * 32),
+        dispatch_completion_ack_sha256=Sha256Digest("44" * 32),
+        previous_chain_head_sha256=Sha256Digest("44" * 32),
+        failure_code=None,
+    )
+    payload = _terminal_payload(coordinator, state)
+    document = json.loads(payload)
+    assert document["schema"] == "ea.audit-run-terminal.v2"
+    assert document["final_risk_refresh_sha256"] == "ee" * 32
+    assert document["open_reconciliation_ref_aggregate_sha256"]
+
+
+def test_terminal_payload_requires_final_refresh_when_gate_bound() -> None:
+    from ea.core import CoordinatorTerminalKind
+    from ea.core.lifecycle import LifecycleError, create_pre_terminal_coordinator_state
+    from ea.runtime.coordinator import _terminal_payload
+
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(matcher, delayed)
+    coordinator, _audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
+    state = create_pre_terminal_coordinator_state(
+        binding=coordinator._binding,
+        state_version=4,
+        terminal_kind=CoordinatorTerminalKind.SUCCESS,
+        last_dispatch_sequence=8,
+        last_trigger_root_sha256=Sha256Digest("33" * 32),
+        dispatch_completion_ack_sha256=Sha256Digest("44" * 32),
+        previous_chain_head_sha256=Sha256Digest("44" * 32),
+        failure_code=None,
+    )
+    with pytest.raises(LifecycleError, match="final risk refresh"):
+        _terminal_payload(coordinator, state)
+
+
+def test_gate_binding_rejects_run_and_specification_conflicts() -> None:
+    from ea.core.lifecycle import LifecycleError
+
+    _fixture, matcher, _orders, _causal, delayed, _end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    ports = _ledger_ports(matcher)
+    from ea.core import RunId
+
+    other_run = RunId("87654321-4321-4321-8321-cba987654321")
+    foreign_ledger = create_portfolio_ledger(other_run, matcher.spec_set)
+    ports["ledger_handoff_authority"] = create_phase1_ledger_handoff_authority(
+        other_run, matcher.spec_set, foreign_ledger
+    )
+    with pytest.raises(LifecycleError, match="runs conflict"):
+        _build_coordinator(
+            binding=binding,
+            audit=audit,
+            runtime=_Runtime(matcher, delayed),
+            matcher=matcher,
+            fact_authority=_RetainedOutcomeFacts(matcher, None),  # type: ignore[arg-type]
+            evidence_resolver=_FixedFillEvidence(None),
+            **ports,
+        )
