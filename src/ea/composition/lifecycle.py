@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol, final
 
 from ea.composition.run import AdmittedRecoveredRun
@@ -37,8 +38,13 @@ from ea.core.historical_matching import (
     HistoricalMatcherState,
     HistoricalSubmissionReceipt,
 )
+from ea.core.ledger_integration import (
+    LedgerHandoffOutcome,
+    PortfolioRiskRefresh,
+)
 from ea.core.lifecycle import (
     ActiveDispatchWindow,
+    AuditedExecutionFactHandoff,
     CoordinatorDispatchOutcome,
     CoordinatorRunState,
     CoordinatorTerminalOutcome,
@@ -52,6 +58,12 @@ from ea.core.lifecycle import (
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
+from ea.core.portfolio import PortfolioSnapshot
+from ea.core.risk import (
+    RiskHaltReason,
+    RiskPolicyId,
+    RiskStateSnapshot,
+)
 from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.execution.fact_authority import (
     OrderResolutionVerifier,
@@ -81,6 +93,50 @@ from ea.runtime.matcher import (
     create_historical_matcher_descendant_fact_dispatch_verifier,
     create_historical_matcher_dispatch_verifier,
 )
+
+
+class _LedgerGatePort(Protocol):
+    run_id: RunId
+    spec_set: InstrumentExecutionSpecSet
+    snapshot: PortfolioSnapshot
+
+    def apply_handoff(
+        self,
+        *,
+        handoff: AuditedExecutionFactHandoff,
+        outcome: ExecutionFactProcessingOutcome,
+        fill: Fill | None,
+    ) -> LedgerHandoffOutcome: ...
+
+
+class _RiskGatePort(Protocol):
+    run_id: RunId
+    spec_set: InstrumentExecutionSpecSet
+    risk_state: RiskStateSnapshot
+
+    def engage_halt(
+        self,
+        reason: RiskHaltReason,
+        causal_root_available_at: datetime,
+        dispatch_sequence: int,
+    ) -> RiskStateSnapshot: ...
+
+
+class _RiskRefreshGatePort(Protocol):
+    run_id: RunId
+    spec_set: InstrumentExecutionSpecSet
+    policy_id: RiskPolicyId
+    policy_sha256: Sha256Digest
+
+    def create_refresh(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        risk_state: RiskStateSnapshot,
+        dispatch_sequence: int,
+        ordered_ledger_ack_frontier_sha256: Sha256Digest,
+    ) -> PortfolioRiskRefresh: ...
+
 
 _LIFECYCLE_SEAL = object()
 _READ_VIEW_SEAL = object()
@@ -456,8 +512,16 @@ def create_phase1_historical_lifecycle(
     risk: RiskFreshnessPort,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
+    ledger_handoff_authority: _LedgerGatePort | None = None,
+    risk_authority: _RiskGatePort | None = None,
+    risk_refresh_authority: _RiskRefreshGatePort | None = None,
 ) -> Phase1HistoricalLifecycle:
-    """Construct dormant authority, matcher, facts, coordinator, then activate once."""
+    """Construct dormant authority, matcher, facts, coordinator, then activate once.
+
+    The optional ledger/risk/refresh triad (ADR 0022) is forwarded to the
+    coordinator so the ledger gate and completion-v3 engage; the frontier
+    facade is supplied by the caller through the portfolio/risk freshness ports.
+    """
     if type(prepared_acknowledgement) is not AuditAppendAcknowledgement:
         raise TypeError("fresh lifecycle construction requires one prepared acknowledgement")
     authorization, preparation_capability, activation_seal = (
@@ -504,6 +568,9 @@ def create_phase1_historical_lifecycle(
         evidence_resolver=fact_authority,
         authorization=authorization,
         authorization_capability=preparation_capability,
+        ledger_handoff_authority=ledger_handoff_authority,
+        risk_authority=risk_authority,
+        risk_refresh_authority=risk_refresh_authority,
     )
     try:
         authorization.activate(coordinator, seal=activation_seal)
@@ -533,6 +600,9 @@ def recover_phase1_historical_lifecycle(
     risk: RiskFreshnessPort,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
+    ledger_handoff_authority: _LedgerGatePort | None = None,
+    risk_authority: _RiskGatePort | None = None,
+    risk_refresh_authority: _RiskRefreshGatePort | None = None,
 ) -> Phase1HistoricalLifecycle:
     """Rebind sealed canonical histories without exposing authorization capability."""
     if (
@@ -580,6 +650,9 @@ def recover_phase1_historical_lifecycle(
             seal=activation_seal,
         )
         coordinator = recover_phase1_lifecycle_coordinator(
+            ledger_handoff_authority=ledger_handoff_authority,
+            risk_authority=risk_authority,
+            risk_refresh_authority=risk_refresh_authority,
             binding=binding,
             audit=audit,
             runtime=runtime,
