@@ -23,6 +23,13 @@ from ea.core.execution import (
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind, FactDedupKey
 from ea.core.execution_messages import FeeCode, FeeEntry, Fill, fill_digest
 from ea.core.identity import Instrument
+from ea.core.ledger_integration import (
+    _VALUE_SEAL as _LEDGER_INTEGRATION_SEAL,
+)
+from ea.core.ledger_integration import (
+    LedgerApplicationCommand,
+    ledger_application_command_digest,
+)
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import (
     CashBalance,
@@ -35,6 +42,7 @@ from ea.core.portfolio import (
     LedgerFailureStage,
     LedgerPosting,
     LedgerTransaction,
+    OpenReconciliationRef,
     PortfolioLedgerError,
     PortfolioSnapshot,
     PositionBalance,
@@ -54,6 +62,20 @@ _MAX_UINT64 = (1 << 64) - 1
 
 
 @dataclass(frozen=True, slots=True)
+class _HandoffBinding:
+    """One non-evicting audited-handoff integration binding (ADR 0022 L118-124)."""
+
+    command_sha256: Sha256Digest
+    processing_outcome_sha256: Sha256Digest
+    fill_sha256: Sha256Digest
+    original_outcome: LedgerApplyOutcome
+    original_outcome_bytes: bytes
+    transaction_sha256: Sha256Digest
+    before_snapshot_sha256: Sha256Digest
+    after_snapshot_sha256: Sha256Digest
+
+
+@dataclass(frozen=True, slots=True)
 class _LedgerState:
     cash: Mapping[SettlementCurrency, CanonicalDecimal]
     positions: Mapping[Instrument, CanonicalDecimal]
@@ -63,6 +85,9 @@ class _LedgerState:
     fact_index: Mapping[FactDedupKey, ExistingLedgerBinding]
     entry_index: Mapping[EconomicId, LedgerTransaction]
     transactions: tuple[LedgerTransaction, ...]
+    open_reconciliation_bindings: Mapping[EconomicId, ExistingLedgerBinding]
+    open_reconciliation_refs: Mapping[EconomicId, OpenReconciliationRef]
+    handoff_index: Mapping[Sha256Digest, _HandoffBinding]
     snapshot: PortfolioSnapshot
 
 
@@ -120,7 +145,78 @@ class PortfolioLedger:
         )
         if replay is not None:
             return replay
+        return self._apply_new_fill(fill=fill, submitted_digest=submitted_digest)
 
+    def apply_ledger_application_command(
+        self,
+        command: LedgerApplicationCommand,
+        fill: Fill,
+    ) -> LedgerApplyOutcome:
+        """Apply one audited command exactly once through the sole integration path."""
+        if (
+            type(command) is not LedgerApplicationCommand
+            or command._seal is not _LEDGER_INTEGRATION_SEAL
+            or type(fill) is not Fill
+        ):
+            raise PortfolioLedgerError(
+                OutcomeCode.INVALID_TYPE,
+                "command integration requires exact factory-issued evidence",
+            )
+        if command.run_id != self._run_id or fill.run_id != self._run_id:
+            raise PortfolioLedgerError(
+                OutcomeCode.CONFLICTING_ID,
+                "command or fill run conflicts with ledger run",
+            )
+        submitted_digest = fill_digest(fill)
+        if command.fill_id != fill.fill_id or command.fill_sha256 != submitted_digest:
+            raise PortfolioLedgerError(
+                OutcomeCode.CONFLICTING_ID,
+                "command fill evidence conflicts",
+            )
+        existing = self._state.handoff_index.get(command.audited_handoff_sha256)
+        if existing is not None:
+            if existing.command_sha256 != ledger_application_command_digest(command):
+                raise PortfolioLedgerError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "handoff command replay conflicts with its original binding",
+                )
+            return existing.original_outcome
+        fill_binding = self._state.fill_index.get(fill.fill_id)
+        fact_binding = self._state.fact_index.get(fill.fact_key)
+        if fill_binding is not None or fact_binding is not None:
+            return self._conflict(
+                fill=fill,
+                fill_sha256=submitted_digest,
+                kind=LedgerConflictKind.UNBOUND_EXISTING_FILL,
+                fill_binding=fill_binding,
+                fact_binding=fact_binding,
+            )
+        return self._apply_new_fill(
+            fill=fill,
+            submitted_digest=submitted_digest,
+            requires_reconciliation=command.requires_reconciliation,
+            processing_outcome_sha256=command.processing_outcome_sha256,
+            audited_handoff_sha256=command.audited_handoff_sha256,
+            command_sha256=ledger_application_command_digest(command),
+        )
+
+    def _apply_new_fill(
+        self,
+        *,
+        fill: Fill,
+        submitted_digest: Sha256Digest,
+        requires_reconciliation: bool | None = None,
+        processing_outcome_sha256: Sha256Digest | None = None,
+        audited_handoff_sha256: Sha256Digest | None = None,
+        command_sha256: Sha256Digest | None = None,
+    ) -> LedgerApplyOutcome:
+        if audited_handoff_sha256 is not None:
+            if (
+                processing_outcome_sha256 is None
+                or command_sha256 is None
+                or requires_reconciliation is None
+            ):
+                raise AssertionError("command integration evidence must be complete")
         self._require_specification(fill)
         before_version = self._state.snapshot.snapshot_version
         if before_version == _MAX_UINT64:
@@ -244,15 +340,13 @@ class PortfolioLedger:
         next_rounding_map = dict(self._state.rounding)
         _assign_nonzero(next_rounding_map, settlement.settlement_currency, next_rounding)
 
-        requires_reconciliation = (
+        derived_reconciliation = (
             fill.order_id is None or fill.correlation_id is None or fill.causation_id is None
         )
-        next_unresolved = dict(self._state.unresolved)
-        if requires_reconciliation:
-            next_unresolved[fill.fill_id] = UnresolvedFillRef(
-                fill_id=fill.fill_id,
-                fill_sha256=submitted_digest,
-            )
+        if requires_reconciliation is None:
+            requires_reconciliation = derived_reconciliation
+        elif derived_reconciliation and not requires_reconciliation:
+            raise AssertionError("missing Fill ancestry cannot clear reconciliation")
 
         previous_digest = (
             None
@@ -281,6 +375,28 @@ class PortfolioLedger:
             requires_reconciliation=requires_reconciliation,
         )
         transaction_sha256 = ledger_transaction_digest(transaction)
+        next_unresolved = dict(self._state.unresolved)
+        if requires_reconciliation and audited_handoff_sha256 is None:
+            next_unresolved[fill.fill_id] = UnresolvedFillRef(
+                fill_id=fill.fill_id,
+                fill_sha256=submitted_digest,
+            )
+        next_open_bindings = dict(self._state.open_reconciliation_bindings)
+        next_open_refs = dict(self._state.open_reconciliation_refs)
+        if requires_reconciliation and audited_handoff_sha256 is not None:
+            assert processing_outcome_sha256 is not None
+            next_open_bindings[fill.fill_id] = ExistingLedgerBinding(
+                entry_id=entry_id,
+                fill_id=fill.fill_id,
+                fill_sha256=submitted_digest,
+                transaction_sha256=transaction_sha256,
+            )
+            next_open_refs[fill.fill_id] = OpenReconciliationRef(
+                fill_id=fill.fill_id,
+                fill_sha256=submitted_digest,
+                processing_outcome_sha256=processing_outcome_sha256,
+            )
+
         next_snapshot = _snapshot(
             ledger=self,
             sequence=next_sequence,
@@ -290,6 +406,8 @@ class PortfolioLedger:
             positions=next_position_map,
             rounding=next_rounding_map,
             unresolved=next_unresolved,
+            open_reconciliation_bindings=next_open_bindings,
+            open_reconciliation_refs=next_open_refs,
         )
         binding = ExistingLedgerBinding(
             entry_id=entry_id,
@@ -304,6 +422,7 @@ class PortfolioLedger:
         next_entry_index = dict(self._state.entry_index)
         next_entry_index[entry_id] = transaction
         next_transactions = (*self._state.transactions, transaction)
+        next_handoff_index = dict(self._state.handoff_index)
         outcome = _create_ledger_apply_outcome(
             run_id=self._run_id,
             code=OutcomeCode.LEDGER_APPLIED,
@@ -314,6 +433,18 @@ class PortfolioLedger:
             submitted_fill_id=fill.fill_id,
             submitted_fill_sha256=submitted_digest,
         )
+        if audited_handoff_sha256 is not None:
+            assert command_sha256 is not None and processing_outcome_sha256 is not None
+            next_handoff_index[audited_handoff_sha256] = _HandoffBinding(
+                command_sha256=command_sha256,
+                processing_outcome_sha256=processing_outcome_sha256,
+                fill_sha256=submitted_digest,
+                original_outcome=outcome,
+                original_outcome_bytes=canonical_ledger_apply_outcome_bytes(outcome),
+                transaction_sha256=transaction_sha256,
+                before_snapshot_sha256=portfolio_snapshot_digest(self._state.snapshot),
+                after_snapshot_sha256=portfolio_snapshot_digest(next_snapshot),
+            )
         next_state = _freeze_state(
             cash=next_cash_map,
             positions=next_position_map,
@@ -323,6 +454,9 @@ class PortfolioLedger:
             fact_index=next_fact_index,
             entry_index=next_entry_index,
             transactions=next_transactions,
+            open_reconciliation_bindings=next_open_bindings,
+            open_reconciliation_refs=next_open_refs,
+            handoff_index=next_handoff_index,
             snapshot=next_snapshot,
         )
         _preflight_canonical_evidence(
@@ -565,6 +699,9 @@ def create_portfolio_ledger(
         fact_index={},
         entry_index={},
         transactions=(),
+        open_reconciliation_bindings={},
+        open_reconciliation_refs={},
+        handoff_index={},
         snapshot=initial,
     )
     return ledger
@@ -580,6 +717,9 @@ def _freeze_state(
     fact_index: Mapping[FactDedupKey, ExistingLedgerBinding],
     entry_index: Mapping[EconomicId, LedgerTransaction],
     transactions: tuple[LedgerTransaction, ...],
+    open_reconciliation_bindings: Mapping[EconomicId, ExistingLedgerBinding],
+    open_reconciliation_refs: Mapping[EconomicId, OpenReconciliationRef],
+    handoff_index: Mapping[Sha256Digest, _HandoffBinding],
     snapshot: PortfolioSnapshot,
 ) -> _LedgerState:
     return _LedgerState(
@@ -591,6 +731,9 @@ def _freeze_state(
         fact_index=MappingProxyType(dict(fact_index)),
         entry_index=MappingProxyType(dict(entry_index)),
         transactions=transactions,
+        open_reconciliation_bindings=MappingProxyType(dict(open_reconciliation_bindings)),
+        open_reconciliation_refs=MappingProxyType(dict(open_reconciliation_refs)),
+        handoff_index=MappingProxyType(dict(handoff_index)),
         snapshot=snapshot,
     )
 
@@ -619,6 +762,8 @@ def _snapshot(
     positions: Mapping[Instrument, CanonicalDecimal],
     rounding: Mapping[SettlementCurrency, CanonicalDecimal],
     unresolved: Mapping[EconomicId, UnresolvedFillRef],
+    open_reconciliation_bindings: Mapping[EconomicId, ExistingLedgerBinding],
+    open_reconciliation_refs: Mapping[EconomicId, OpenReconciliationRef],
 ) -> PortfolioSnapshot:
     cash_balances = tuple(
         CashBalance(
@@ -654,6 +799,28 @@ def _snapshot(
             ),
         )
     )
+    reconciliation_bindings = tuple(
+        open_reconciliation_bindings[key]
+        for key in sorted(
+            open_reconciliation_bindings,
+            key=lambda identity: (
+                identity.run_id.value,
+                identity.owner_kind.value,
+                identity.owner_sequence,
+            ),
+        )
+    )
+    reconciliation_refs = tuple(
+        open_reconciliation_refs[key]
+        for key in sorted(
+            open_reconciliation_refs,
+            key=lambda identity: (
+                identity.run_id.value,
+                identity.owner_kind.value,
+                identity.owner_sequence,
+            ),
+        )
+    )
     return PortfolioSnapshot(
         run_id=ledger._run_id,
         instrument_spec_set_id=ledger._spec_set.identifier,
@@ -666,6 +833,8 @@ def _snapshot(
         position_balances=position_balances,
         rounding_balances=rounding_balances,
         unresolved_fills=unresolved_fills,
+        open_reconciliation_bindings=reconciliation_bindings,
+        open_reconciliation_refs=reconciliation_refs,
     )
 
 
