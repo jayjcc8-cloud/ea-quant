@@ -78,6 +78,18 @@ class Phase1PortfolioRiskRefreshAuthority:
     def next_sequence(self) -> int:
         return self._state.next_sequence
 
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self._state.spec_set
+
+    @property
+    def policy_id(self) -> RiskPolicyId:
+        return self._state.policy_id
+
+    @property
+    def policy_sha256(self) -> Sha256Digest:
+        return self._state.policy_sha256
+
     def create_refresh(
         self,
         *,
@@ -174,12 +186,34 @@ def create_phase1_portfolio_risk_refresh_authority(
     spec_set: InstrumentExecutionSpecSet,
     policy_id: RiskPolicyId,
     policy_sha256: Sha256Digest,
+    first_sequence: int = 1,
+    first_previous_refresh_sha256: Sha256Digest | None = None,
 ) -> Phase1PortfolioRiskRefreshAuthority:
-    """Create one run/specification/policy-bound refresh authority."""
+    """Create one run/specification/policy-bound refresh authority.
+
+    ``first_sequence`` binds the contiguous frontier start and
+    ``first_previous_refresh_sha256`` the retained predecessor; composition
+    supplies both for recovered runs whose journal already advanced the
+    refresh frontier.
+    """
     if type(run_id) is not RunId or type(spec_set) is not InstrumentExecutionSpecSet:
         raise _fail(OutcomeCode.INVALID_TYPE, "refresh authority binding must be exact")
     if type(policy_id) is not RiskPolicyId or type(policy_sha256) is not Sha256Digest:
         raise _fail(OutcomeCode.INVALID_TYPE, "refresh policy binding must be exact")
+    if type(first_sequence) is not int or not 1 <= first_sequence <= (1 << 64) - 1:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "refresh first sequence must be positive")
+    if first_previous_refresh_sha256 is not None and (
+        type(first_previous_refresh_sha256) is not Sha256Digest or first_sequence == 1
+    ):
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "refresh predecessor requires a later first sequence",
+        )
+    if first_sequence > 1 and first_previous_refresh_sha256 is None:
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "recovered refresh frontier requires its predecessor",
+        )
     value = object.__new__(Phase1PortfolioRiskRefreshAuthority)
     object.__setattr__(
         value,
@@ -189,8 +223,8 @@ def create_phase1_portfolio_risk_refresh_authority(
             spec_set=spec_set,
             policy_id=policy_id,
             policy_sha256=policy_sha256,
-            next_sequence=1,
-            previous_refresh_sha256=None,
+            next_sequence=first_sequence,
+            previous_refresh_sha256=first_previous_refresh_sha256,
             replay_index=MappingProxyType({}),
         ),
     )

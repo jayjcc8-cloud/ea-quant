@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
 from threading import Lock
-from typing import cast, final
+from typing import Protocol, cast, final
 
 from ea.core.audit import (
     AuditAppendAcknowledgement,
@@ -29,10 +29,11 @@ from ea.core.audit import (
     ordered_digest_tuple,
     require_audit_acknowledgement,
 )
-from ea.core.execution import instrument_spec_set_digest
+from ea.core.execution import InstrumentExecutionSpecSet, instrument_spec_set_digest
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind
 from ea.core.execution_messages import (
     ExecutionFactIngress,
+    Fill,
     Order,
     execution_fact_ingress_digest,
     execution_request_digest,
@@ -54,8 +55,16 @@ from ea.core.historical_matching import (
     historical_matcher_dispatch_batch_digest,
     historical_submission_receipt_digest,
 )
+from ea.core.ledger_integration import (
+    LedgerHandoffOutcome,
+    PortfolioRiskRefresh,
+    canonical_ledger_handoff_outcome_bytes,
+    canonical_portfolio_risk_refresh_bytes,
+    ledger_handoff_outcome_digest,
+)
 from ea.core.lifecycle import (
     ORDERED_INGRESS_DIGEST_DOMAIN,
+    ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
     ORDERED_OUTCOME_ACK_DIGEST_DOMAIN,
     ActiveDispatchWindow,
     ActiveDispatchWindowStage,
@@ -80,6 +89,7 @@ from ea.core.lifecycle import (
     active_dispatch_window_digest,
     audited_execution_fact_handoff_digest,
     canonical_dispatch_completed_audit_payload,
+    canonical_dispatch_completed_v3_audit_payload,
     canonical_failing_safety_audit_payload,
     canonical_matcher_batch_audit_payload,
     canonical_run_terminal_audit_payload,
@@ -96,12 +106,58 @@ from ea.core.lifecycle import (
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
-from ea.core.run import RunBinding, Sha256Digest
+from ea.core.portfolio import PortfolioSnapshot, portfolio_snapshot_digest
+from ea.core.risk import RiskHaltReason, RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
+from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.core.runtime import EndOfRunRoot, RuntimeRoot, RuntimeRootOrderKey
 from ea.runtime.historical import (
     HISTORICAL_RUNTIME_TRACE_SCHEMA,
     historical_runtime_trace_digest,
 )
+
+
+class _LedgerHandoffGatePort(Protocol):
+    run_id: RunId
+    spec_set: InstrumentExecutionSpecSet
+    snapshot: PortfolioSnapshot
+
+    def apply_handoff(
+        self,
+        *,
+        handoff: AuditedExecutionFactHandoff,
+        outcome: ExecutionFactProcessingOutcome,
+        fill: Fill | None,
+    ) -> LedgerHandoffOutcome: ...
+
+
+class _RiskGatePort(Protocol):
+    run_id: RunId
+    spec_set: InstrumentExecutionSpecSet
+    risk_state: RiskStateSnapshot
+
+    def engage_halt(
+        self,
+        reason: RiskHaltReason,
+        causal_root_available_at: datetime,
+        dispatch_sequence: int,
+    ) -> RiskStateSnapshot: ...
+
+
+class _RiskRefreshGatePort(Protocol):
+    run_id: RunId
+    spec_set: InstrumentExecutionSpecSet
+    policy_id: RiskPolicyId
+    policy_sha256: Sha256Digest
+
+    def create_refresh(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        risk_state: RiskStateSnapshot,
+        dispatch_sequence: int,
+        ordered_ledger_ack_frontier_sha256: Sha256Digest,
+    ) -> PortfolioRiskRefresh: ...
+
 
 _MAX_UINT64 = (1 << 64) - 1
 
@@ -123,6 +179,12 @@ class _ActiveDispatch:
     authorization_ack: AuditAppendAcknowledgement | None = None
     authorization_attempt: SubmissionAuthorizationAttemptOutcome | None = None
     submission_receipt: HistoricalSubmissionReceipt | None = None
+    ledger_outcomes: list[LedgerHandoffOutcome | None] = field(default_factory=list)
+    ledger_acks: list[AuditAppendAcknowledgement | None] = field(default_factory=list)
+    refresh_ack: AuditAppendAcknowledgement | None = None
+    refresh_sha256: Sha256Digest | None = None
+    final_portfolio_snapshot_sha256: Sha256Digest | None = None
+    final_risk_state_sha256: Sha256Digest | None = None
 
 
 @dataclass(slots=True)
@@ -223,9 +285,12 @@ class Phase1HistoricalLifecycleCoordinator:
         "_failing_ack",
         "_failing_key",
         "_failing_payload",
+        "_ledger_handoff_authority",
         "_matcher",
         "_mutation_lock",
         "_resolver",
+        "_risk_authority",
+        "_risk_refresh_authority",
         "_runtime",
         "_state",
         "_pre_terminal_state",
@@ -242,9 +307,12 @@ class Phase1HistoricalLifecycleCoordinator:
     _failing_ack: AuditAppendAcknowledgement | None
     _failing_key: AuditLogicalKey | None
     _failing_payload: bytes | None
+    _ledger_handoff_authority: _LedgerHandoffGatePort | None
     _matcher: HistoricalMatcherPort
     _mutation_lock: Lock
     _resolver: ExecutionEvidenceResolverPort
+    _risk_authority: _RiskGatePort | None
+    _risk_refresh_authority: _RiskRefreshGatePort | None
     _runtime: RuntimeLifecyclePort
     _state: CoordinatorRunState
     _pre_terminal_state: PreTerminalCoordinatorState | None
@@ -893,6 +961,11 @@ class Phase1HistoricalLifecycleCoordinator:
                         )
                 except Exception as error:
                     first_error = first_error or error
+            if self._ledger_handoff_authority is not None:
+                try:
+                    self._apply_ledger_gate(active)
+                except Exception as error:
+                    first_error = first_error or error
             missing = tuple(
                 key
                 for key in self._missing_keys(active)
@@ -957,6 +1030,122 @@ class Phase1HistoricalLifecycleCoordinator:
             self._enter_failing(active, self._missing_keys(active))
             raise
 
+    def _apply_ledger_gate(self, active: _ActiveDispatch) -> None:
+        """ADR 0022 per-dispatch steps 2-8: ledger outcomes, halt, refresh, acks."""
+        assert self._ledger_handoff_authority is not None
+        assert self._risk_authority is not None
+        assert self._risk_refresh_authority is not None
+        root = active.lease.root
+        sequence = active.lease.dispatch_sequence
+        if not active.ledger_outcomes:
+            active.ledger_outcomes = [None] * len(active.handoffs)
+            active.ledger_acks = [None] * len(active.handoffs)
+        halt_required = False
+        for index, handoff in enumerate(active.handoffs):
+            assert handoff is not None
+            processing_outcome = active.outcomes[index]
+            assert processing_outcome is not None
+            ledger_outcome = active.ledger_outcomes[index]
+            if ledger_outcome is None:
+                fill = None
+                if handoff.fill_id is not None:
+                    assert handoff.fill_sha256 is not None
+                    fill = self._resolver.resolve_fill(
+                        fill_id=handoff.fill_id,
+                        fill_sha256=handoff.fill_sha256,
+                    )
+                ledger_outcome = self._ledger_handoff_authority.apply_handoff(
+                    handoff=handoff,
+                    outcome=processing_outcome,
+                    fill=fill,
+                )
+                self._require_same_active_lease(active)
+                active.ledger_outcomes[index] = ledger_outcome
+            if active.ledger_acks[index] is None:
+                payload = canonical_ledger_handoff_outcome_bytes(ledger_outcome)
+                acknowledgement = self._audit.append(
+                    record_kind=AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+                    subject_kind=AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+                    subject_sha256=audit_subject_digest(
+                        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+                        payload,
+                    ),
+                    canonical_payload=payload,
+                )
+                _require_exact_ack(
+                    acknowledgement,
+                    binding=self._binding,
+                    key=AuditLogicalKey(
+                        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+                        AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+                        audit_subject_digest(
+                            AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+                            payload,
+                        ),
+                    ),
+                    payload=payload,
+                )
+                self._rebind_active_authorities(active)
+                active.ledger_acks[index] = acknowledgement
+            if (
+                processing_outcome.halt_requested
+                or ledger_outcome.requires_reconciliation
+                or ledger_outcome.action.value != "effect_committed"
+            ):
+                halt_required = True
+        if halt_required:
+            self._risk_authority.engage_halt(
+                RiskHaltReason.RECONCILIATION_REQUIRED,
+                causal_root_available_at=_root_available_at(root),
+                dispatch_sequence=sequence,
+            )
+            self._rebind_active_authorities(active)
+        if active.refresh_ack is None:
+            ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
+            risk_state = self._risk_authority.risk_state
+            refresh = self._risk_refresh_authority.create_refresh(
+                snapshot=self._ledger_handoff_authority.snapshot,
+                risk_state=risk_state,
+                dispatch_sequence=sequence,
+                ordered_ledger_ack_frontier_sha256=ordered_digest_tuple(
+                    ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
+                    tuple(audit_append_acknowledgement_digest(value) for value in ledger_acks),
+                ),
+            )
+            refresh_payload = canonical_portfolio_risk_refresh_bytes(refresh)
+            refresh_acknowledgement = self._audit.append(
+                record_kind=AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+                subject_kind=AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
+                subject_sha256=audit_subject_digest(
+                    AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+                    refresh_payload,
+                ),
+                canonical_payload=refresh_payload,
+            )
+            _require_exact_ack(
+                refresh_acknowledgement,
+                binding=self._binding,
+                key=AuditLogicalKey(
+                    AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+                    AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
+                    audit_subject_digest(
+                        AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+                        refresh_payload,
+                    ),
+                ),
+                payload=refresh_payload,
+            )
+            self._rebind_active_authorities(active)
+            active.refresh_ack = refresh_acknowledgement
+            active.refresh_sha256 = audit_subject_digest(
+                AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+                refresh_payload,
+            )
+        active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
+            self._ledger_handoff_authority.snapshot
+        )
+        active.final_risk_state_sha256 = risk_state_snapshot_digest(self._risk_authority.risk_state)
+
     def _complete_active(self, active: _ActiveDispatch) -> CoordinatorDispatchOutcome:
         root = active.lease.root
         try:
@@ -978,16 +1167,49 @@ class Phase1HistoricalLifecycleCoordinator:
             if active.completion_ack is None:
                 active.window_stage = ActiveDispatchWindowStage.COMPLETION_FROZEN
                 pre_ack_state = self._pre_ack_state(active, outcome_acks)
-                completion_payload = canonical_dispatch_completed_audit_payload(
-                    binding=self._binding,
-                    batch=batch,
-                    outcome_acknowledgements=outcome_acks,
-                    pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
-                    authorization_attempt_outcome=active.authorization_attempt,
-                    submission_receipts=(
-                        () if active.submission_receipt is None else (active.submission_receipt,)
-                    ),
-                )
+                if self._ledger_handoff_authority is None:
+                    completion_payload = canonical_dispatch_completed_audit_payload(
+                        binding=self._binding,
+                        batch=batch,
+                        outcome_acknowledgements=outcome_acks,
+                        pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+                        authorization_attempt_outcome=active.authorization_attempt,
+                        submission_receipts=(
+                            ()
+                            if active.submission_receipt is None
+                            else (active.submission_receipt,)
+                        ),
+                    )
+                else:
+                    ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
+                    if len(ledger_acks) != len(handoffs) or active.refresh_ack is None:
+                        raise LifecycleError(
+                            OutcomeCode.CONFLICTING_ID,
+                            "ledger and refresh frontier is incomplete",
+                        )
+                    if (
+                        active.final_portfolio_snapshot_sha256 is None
+                        or active.final_risk_state_sha256 is None
+                    ):
+                        raise LifecycleError(
+                            OutcomeCode.CONFLICTING_ID,
+                            "ledger final frontier digests are incomplete",
+                        )
+                    completion_payload = canonical_dispatch_completed_v3_audit_payload(
+                        binding=self._binding,
+                        batch=batch,
+                        outcome_acknowledgements=outcome_acks,
+                        pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+                        ledger_outcome_acknowledgements=ledger_acks,
+                        final_portfolio_snapshot_sha256=(active.final_portfolio_snapshot_sha256),
+                        final_risk_state_sha256=active.final_risk_state_sha256,
+                        authorization_attempt_outcome=active.authorization_attempt,
+                        submission_receipts=(
+                            ()
+                            if active.submission_receipt is None
+                            else (active.submission_receipt,)
+                        ),
+                    )
                 active.completion_payload = completion_payload
                 completion_key = AuditLogicalKey(
                     AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
@@ -1302,6 +1524,30 @@ class Phase1HistoricalLifecycleCoordinator:
                         execution_fact_processing_outcome_digest(outcome),
                     )
                 )
+        for ledger_outcome, acknowledgement in zip(
+            active.ledger_outcomes, active.ledger_acks, strict=True
+        ):
+            if ledger_outcome is not None and acknowledgement is None:
+                missing.append(
+                    AuditLogicalKey(
+                        AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+                        AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+                        ledger_handoff_outcome_digest(ledger_outcome),
+                    )
+                )
+        if (
+            self._ledger_handoff_authority is not None
+            and active.ledger_acks
+            and active.refresh_ack is None
+            and active.refresh_sha256 is not None
+        ):
+            missing.append(
+                AuditLogicalKey(
+                    AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+                    AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
+                    active.refresh_sha256,
+                )
+            )
         if active.completion_payload is not None and active.completion_ack is None:
             missing.append(
                 AuditLogicalKey(
@@ -1444,15 +1690,7 @@ class Phase1HistoricalLifecycleCoordinator:
             missing_audit_logical_keys=(),
             failure_code=state.failure_code,
             last_completed_dispatch_sequence=state.last_completed_dispatch_sequence,
-            last_audit_chain_head_sha256=(
-                active.authorization_ack.chain_head_sha256
-                if active.authorization_ack is not None
-                else (
-                    active.batch_ack.chain_head_sha256
-                    if not outcome_acks and active.batch_ack is not None
-                    else outcome_acks[-1].chain_head_sha256
-                )
-            ),
+            last_audit_chain_head_sha256=_pre_ack_chain_head(active, outcome_acks),
         )
 
     def _completed_state(
@@ -1494,6 +1732,37 @@ class Phase1HistoricalLifecycleCoordinator:
         )
 
 
+def _pre_ack_chain_head(
+    active: _ActiveDispatch,
+    outcome_acks: tuple[AuditAppendAcknowledgement, ...],
+) -> Sha256Digest:
+    if active.refresh_ack is not None:
+        return active.refresh_ack.chain_head_sha256
+    for acknowledgement in reversed(active.ledger_acks):
+        if acknowledgement is not None:
+            return acknowledgement.chain_head_sha256
+    if active.authorization_ack is not None:
+        return active.authorization_ack.chain_head_sha256
+    if not outcome_acks and active.batch_ack is not None:
+        return active.batch_ack.chain_head_sha256
+    return outcome_acks[-1].chain_head_sha256
+
+
+def _latest_ledger_ack_chain_head(active: _ActiveDispatch) -> Sha256Digest | None:
+    for acknowledgement in reversed(active.ledger_acks):
+        if acknowledgement is not None:
+            return acknowledgement.chain_head_sha256
+    return None
+
+
+def _root_available_at(root: RuntimeRoot) -> datetime:
+    if type(root) is MarketDataEnvelope:
+        return root.available_at
+    if type(root) is EndOfRunRoot:
+        return root.available_at
+    raise LifecycleError(OutcomeCode.INVALID_TYPE, "unsupported runtime root")
+
+
 def create_phase1_lifecycle_coordinator(
     *,
     binding: RunBinding,
@@ -1505,14 +1774,32 @@ def create_phase1_lifecycle_coordinator(
     evidence_resolver: ExecutionEvidenceResolverPort,
     authorization: SubmissionAuthorizationPreparationPort | None = None,
     authorization_capability: object | None = None,
+    ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
+    risk_authority: _RiskGatePort | None = None,
+    risk_refresh_authority: _RiskRefreshGatePort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
-    """Bind dependency-neutral owners after the journal preparation record is durable."""
+    """Bind dependency-neutral owners after the journal preparation record is durable.
+
+    The three ledger/risk authorities are an optional ADR 0022 composition
+    injection; they must be bound together or not at all, and the ledger gate
+    plus completion-v3 emission only engage when all three are present.
+    """
     if type(binding) is not RunBinding:
         raise LifecycleError(OutcomeCode.INVALID_TYPE, "binding must be exact")
     if (authorization is None) != (authorization_capability is None):
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID,
             "authorization port and capability must be bound together",
+        )
+    ledger_bound = (
+        ledger_handoff_authority is not None,
+        risk_authority is not None,
+        risk_refresh_authority is not None,
+    )
+    if any(ledger_bound) and not all(ledger_bound):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "ledger, risk, and refresh authorities must be bound together",
         )
     try:
         audit_binding = audit.binding
@@ -1541,6 +1828,15 @@ def create_phase1_lifecycle_coordinator(
         ),
         payload=canonical_run_prepared_audit_payload(binding),
     )
+    if ledger_handoff_authority is not None:
+        assert risk_authority is not None and risk_refresh_authority is not None
+        _require_ledger_authority_bindings(
+            binding=binding,
+            matcher=matcher,
+            ledger_handoff_authority=ledger_handoff_authority,
+            risk_authority=risk_authority,
+            risk_refresh_authority=risk_refresh_authority,
+        )
     value = _allocate_coordinator(
         binding=binding,
         audit=audit,
@@ -1550,9 +1846,48 @@ def create_phase1_lifecycle_coordinator(
         evidence_resolver=evidence_resolver,
         authorization=authorization,
         authorization_capability=authorization_capability,
+        ledger_handoff_authority=ledger_handoff_authority,
+        risk_authority=risk_authority,
+        risk_refresh_authority=risk_refresh_authority,
     )
     value._state = _admitted_state(binding, prepared_acknowledgement.chain_head_sha256)
     return value
+
+
+def _require_ledger_authority_bindings(
+    *,
+    binding: RunBinding,
+    matcher: HistoricalMatcherPort,
+    ledger_handoff_authority: _LedgerHandoffGatePort,
+    risk_authority: _RiskGatePort,
+    risk_refresh_authority: _RiskRefreshGatePort,
+) -> None:
+    run_id = binding.reference.run_id
+    if (
+        ledger_handoff_authority.run_id != run_id
+        or risk_authority.run_id != run_id
+        or risk_refresh_authority.run_id != run_id
+    ):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "ledger authority runs conflict")
+    spec_digest = instrument_spec_set_digest(matcher.spec_set)
+    if (
+        instrument_spec_set_digest(ledger_handoff_authority.spec_set) != spec_digest
+        or instrument_spec_set_digest(risk_authority.spec_set) != spec_digest
+        or instrument_spec_set_digest(risk_refresh_authority.spec_set) != spec_digest
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "ledger authority specification bindings conflict",
+        )
+    risk_state = risk_authority.risk_state
+    if (
+        risk_state.policy_id != risk_refresh_authority.policy_id
+        or risk_state.policy_sha256 != risk_refresh_authority.policy_sha256
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "risk refresh policy binding conflicts",
+        )
 
 
 def recover_phase1_lifecycle_coordinator(
@@ -1770,6 +2105,9 @@ def _allocate_coordinator(
     evidence_resolver: ExecutionEvidenceResolverPort,
     authorization: SubmissionAuthorizationPreparationPort | None,
     authorization_capability: object | None,
+    ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
+    risk_authority: _RiskGatePort | None = None,
+    risk_refresh_authority: _RiskRefreshGatePort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     value = object.__new__(Phase1HistoricalLifecycleCoordinator)
     value._binding = binding
@@ -1780,6 +2118,9 @@ def _allocate_coordinator(
     value._failing_ack = None
     value._failing_key = None
     value._failing_payload = None
+    value._ledger_handoff_authority = ledger_handoff_authority
+    value._risk_authority = risk_authority
+    value._risk_refresh_authority = risk_refresh_authority
     value._resolver = evidence_resolver
     value._authorization = authorization
     value._authorization_capability = authorization_capability

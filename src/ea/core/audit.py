@@ -815,6 +815,14 @@ def _require_audit_owned_payload_values(
             raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch_kind is outside its closed enum")
         _require_json_uint64(document, "dispatch_sequence", positive=True)
         _require_json_uint64(document, "outcome_count", positive=False)
+        if document.get("schema") == "ea.audit-dispatch-completed.v3":
+            _require_json_uint64(document, "ledger_outcome_count", positive=False)
+            for field in (
+                "final_portfolio_snapshot_sha256",
+                "final_risk_state_sha256",
+                "ordered_ledger_ack_sha256s_sha256",
+            ):
+                _require_json_digest(document, field)
         attempt_count = _require_json_uint64(
             document,
             "authorization_attempt_count",
@@ -1033,6 +1041,40 @@ def _require_execution_outcome_payload_values(document: dict[str, object]) -> No
             )
 
 
+_DISPATCH_COMPLETED_V3_EXTRA_FIELDS = frozenset(
+    {
+        "final_portfolio_snapshot_sha256",
+        "final_risk_state_sha256",
+        "ledger_outcome_count",
+        "ordered_ledger_ack_sha256s_sha256",
+    }
+)
+
+
+def _require_dispatch_completed_payload(document: dict[str, object]) -> None:
+    """Admit completion v2 (pre-ledger history) and v3 (ledger-frontier-bound).
+
+    ADR 0022 L371-374: a v2 record is valid history but can never be
+    interpreted as proving a ledger frontier; only v3 binds the ordered
+    ledger-acknowledgement frontier and final publication digests.
+    """
+    schema = document.get("schema")
+    if schema == "ea.audit-dispatch-completed.v2":
+        fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[AuditRecordKind.RUNTIME_DISPATCH_COMPLETED]
+    elif schema == "ea.audit-dispatch-completed.v3":
+        fields = (
+            _AUDIT_PAYLOAD_FIELDS_BY_KIND[AuditRecordKind.RUNTIME_DISPATCH_COMPLETED]
+            | _DISPATCH_COMPLETED_V3_EXTRA_FIELDS
+        )
+    else:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch completion schema is invalid")
+    if set(document) != fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload fields conflict with its kind")
+    if document.get("canonicalization") != AUDIT_CANONICALIZATION:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload schema is invalid")
+    _require_audit_owned_payload_values(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, document)
+
+
 def require_canonical_audit_payload(
     record_kind: AuditRecordKind,
     canonical_payload: bytes,
@@ -1071,7 +1113,9 @@ def require_canonical_audit_payload(
         ) from error
     if type(document) is not dict or _canonical_json(document) != canonical_payload:
         raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload is not canonical JSON")
-    if record_kind in {
+    if record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
+        _require_dispatch_completed_payload(document)
+    elif record_kind in {
         AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
         AuditRecordKind.RISK_PORTFOLIO_REFRESH,
         AuditRecordKind.RECONCILIATION_ADJUSTMENT_OUTCOME,

@@ -129,6 +129,7 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.execution_messages",
             "ea.core.execution_state",
             "ea.core.historical_matching",
+            "ea.core.ledger_integration",
             "ea.core.lifecycle",
             "ea.core.market_data",
             "ea.core.market_data_codec",
