@@ -1173,10 +1173,29 @@ class Phase1HistoricalLifecycleCoordinator:
                 refresh_payload,
             )
             active.refresh_value_sha256 = portfolio_risk_refresh_digest(refresh)
-        active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
-            self._ledger_handoff_authority.snapshot
-        )
-        active.final_risk_state_sha256 = risk_state_snapshot_digest(self._risk_authority.risk_state)
+            if self._frontier is not None:
+                # ADR 0022 step 8: advance the joint published frontier only
+                # after the exact ledger and refresh acknowledgements.
+                self._frontier.advance(
+                    snapshot=self._ledger_handoff_authority.snapshot,
+                    risk_state=risk_state,
+                    refresh=refresh,
+                )
+                self._rebind_active_authorities(active)
+        if self._frontier is not None:
+            active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
+                self._frontier.current_snapshot()
+            )
+            active.final_risk_state_sha256 = risk_state_snapshot_digest(
+                self._frontier.current_state()
+            )
+        else:
+            active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
+                self._ledger_handoff_authority.snapshot
+            )
+            active.final_risk_state_sha256 = risk_state_snapshot_digest(
+                self._risk_authority.risk_state
+            )
 
     def _complete_active(self, active: _ActiveDispatch) -> CoordinatorDispatchOutcome:
         root = active.lease.root
@@ -2536,12 +2555,25 @@ def _recover_ledger_frontier(
             )
         active.refresh_ack = refresh_ack
         active.refresh_sha256 = refresh_record.subject_sha256
-        active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
-            coordinator._ledger_handoff_authority.snapshot
-        )
-        active.final_risk_state_sha256 = risk_state_snapshot_digest(
-            coordinator._risk_authority.risk_state
-        )
+        if coordinator._frontier is not None:
+            coordinator._frontier.advance(
+                snapshot=coordinator._ledger_handoff_authority.snapshot,
+                risk_state=coordinator._risk_authority.risk_state,
+                refresh=refresh,
+            )
+            active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
+                coordinator._frontier.current_snapshot()
+            )
+            active.final_risk_state_sha256 = risk_state_snapshot_digest(
+                coordinator._frontier.current_state()
+            )
+        else:
+            active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
+                coordinator._ledger_handoff_authority.snapshot
+            )
+            active.final_risk_state_sha256 = risk_state_snapshot_digest(
+                coordinator._risk_authority.risk_state
+            )
 
 
 def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:

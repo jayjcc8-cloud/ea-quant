@@ -113,6 +113,7 @@ def _ledger_ports(matcher: Phase1HistoricalMatcher) -> dict[str, Any]:
         "frontier": create_acknowledged_lifecycle_frontier(
             initial_snapshot=ledger.snapshot,
             initial_risk_state=risk_authority.risk_state,
+            initial_predecessor_sha256=Sha256Digest("aa" * 32),
         ),
     }
 

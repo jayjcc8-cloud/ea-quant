@@ -122,6 +122,20 @@ class _RiskGatePort(Protocol):
     ) -> RiskStateSnapshot: ...
 
 
+class _FrontierGatePort(Protocol):
+    def advance(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        risk_state: RiskStateSnapshot,
+        refresh: PortfolioRiskRefresh,
+    ) -> None: ...
+
+    def current_snapshot(self) -> PortfolioSnapshot: ...
+
+    def current_state(self) -> RiskStateSnapshot: ...
+
+
 class _RiskRefreshGatePort(Protocol):
     run_id: RunId
     spec_set: InstrumentExecutionSpecSet
@@ -515,6 +529,7 @@ def create_phase1_historical_lifecycle(
     ledger_handoff_authority: _LedgerGatePort | None = None,
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
+    frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycle:
     """Construct dormant authority, matcher, facts, coordinator, then activate once.
 
@@ -571,6 +586,7 @@ def create_phase1_historical_lifecycle(
         ledger_handoff_authority=ledger_handoff_authority,
         risk_authority=risk_authority,
         risk_refresh_authority=risk_refresh_authority,
+        frontier=frontier,
     )
     try:
         authorization.activate(coordinator, seal=activation_seal)
@@ -603,6 +619,7 @@ def recover_phase1_historical_lifecycle(
     ledger_handoff_authority: _LedgerGatePort | None = None,
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
+    frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycle:
     """Rebind sealed canonical histories without exposing authorization capability."""
     if (
@@ -653,6 +670,7 @@ def recover_phase1_historical_lifecycle(
             ledger_handoff_authority=ledger_handoff_authority,
             risk_authority=risk_authority,
             risk_refresh_authority=risk_refresh_authority,
+            frontier=frontier,
             binding=binding,
             audit=audit,
             runtime=runtime,

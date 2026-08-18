@@ -9,6 +9,7 @@ from ea.core.ledger_integration import PortfolioRiskRefresh
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import PortfolioSnapshot, portfolio_snapshot_digest
 from ea.core.risk import RiskStateSnapshot, risk_state_snapshot_digest
+from ea.core.run import Sha256Digest
 
 _ERROR_CODES = frozenset(
     {
@@ -40,6 +41,7 @@ class _FrontierState:
     published_snapshot: PortfolioSnapshot
     published_risk_state: RiskStateSnapshot
     published_refresh: PortfolioRiskRefresh | None
+    predecessor_sha256: Sha256Digest | None
     internal_snapshot: PortfolioSnapshot
     internal_risk_state: RiskStateSnapshot
 
@@ -100,7 +102,9 @@ class AcknowledgedLifecycleFrontier:
         state = self._state
         _require_candidate(snapshot, risk_state, refresh)
         expected_previous = (
-            None if state.published_refresh is None else _refresh_digest(state.published_refresh)
+            state.predecessor_sha256
+            if state.published_refresh is None
+            else _refresh_digest(state.published_refresh)
         )
         if refresh.previous_refresh_sha256 != expected_previous:
             raise _fail(
@@ -118,6 +122,7 @@ class AcknowledgedLifecycleFrontier:
             published_snapshot=snapshot,
             published_risk_state=risk_state,
             published_refresh=refresh,
+            predecessor_sha256=state.predecessor_sha256,
             internal_snapshot=snapshot,
             internal_risk_state=risk_state,
         )
@@ -146,14 +151,24 @@ def create_acknowledged_lifecycle_frontier(
     *,
     initial_snapshot: PortfolioSnapshot,
     initial_risk_state: RiskStateSnapshot,
+    initial_predecessor_sha256: Sha256Digest | None = None,
 ) -> AcknowledgedLifecycleFrontier:
-    """Create one frontier at the initial acknowledged portfolio/risk states."""
+    """Create one frontier at the initial acknowledged portfolio/risk states.
+
+    ``initial_predecessor_sha256`` binds the retained predecessor for a
+    recovered run whose refresh chain already advanced; fresh runs start with
+    None and require the first refresh to carry no predecessor.
+    """
     if type(initial_snapshot) is not PortfolioSnapshot or (
         type(initial_risk_state) is not RiskStateSnapshot
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "initial frontier values must be exact")
     if initial_snapshot.run_id != initial_risk_state.run_id:
         raise _fail(OutcomeCode.CONFLICTING_ID, "initial frontier runs conflict")
+    if initial_predecessor_sha256 is not None and (
+        type(initial_predecessor_sha256) is not Sha256Digest
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "initial predecessor must be exact or None")
     value = object.__new__(AcknowledgedLifecycleFrontier)
     object.__setattr__(
         value,
@@ -162,6 +177,7 @@ def create_acknowledged_lifecycle_frontier(
             published_snapshot=initial_snapshot,
             published_risk_state=initial_risk_state,
             published_refresh=None,
+            predecessor_sha256=initial_predecessor_sha256,
             internal_snapshot=initial_snapshot,
             internal_risk_state=initial_risk_state,
         ),
