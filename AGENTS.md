@@ -8,6 +8,19 @@ accountability, not a permanently running agent. Review agents are activated onl
 receive a bounded context package, publish a SHA-bound report, and are released after their useful
 knowledge is recorded.
 
+## EA Governance Protocol v1.0
+
+This file is the repository policy authority for Protocol v1.0. The files under `.governance/`
+are versioned rules, schemas, and role prompts that implement this policy; they do not replace an
+Issue, ADR, pull request, Git history, or CI result as project authority.
+
+The governance Router is a **Classification Evidence Provider**, never a Decision Authority. It
+may produce `minimum_tier_candidate`, evidence, ambiguity, lineage, and routing recommendations.
+It must not emit `approved_tier`, `confirmed_tier`, mutate GitHub, or activate an agent. The
+confirmed risk tier remains in the authoritative Issue. A human may always raise the tier; lowering
+the Router candidate requires explicit Human Owner authorization and a SHA- and scope-bound Sol
+report.
+
 ## Risk tiers and required roles
 
 Every Issue records one risk tier, the reason for that tier, and the required owners. The highest
@@ -15,14 +28,78 @@ applicable trigger wins; uncertainty moves the Issue to the higher tier.
 
 | Tier | Trigger | Required roles |
 |---|---|---|
-| **Tier 0 — low** | Documentation, comments, or reversible non-executable metadata that does not change an ADR, CI, dependencies, schemas, security, or runtime behavior | Implementation Owner and Verification Owner |
+| **Tier 0 — low** | Documentation, comments, or reversible non-executable metadata that does not change an ADR, CI, dependencies, schemas, security, governance authority, or runtime behavior | Implementation Owner plus deterministic verification and approval gates; no review model is required |
 | **Tier 1 — normal** | Executable code, configuration, dependencies, build/CI workflow, public interfaces, or implementation of an already accepted contract | Architecture Owner, Implementation Owner, and Verification Owner |
-| **Tier 2 — high** | Data/time semantics, look-ahead behavior, strategy, portfolio/ledger, risk, execution/matching, reconciliation, credentials/security, release, live trading, or external writes | Tier 1 roles plus the relevant data, backtest, risk, security, or release expert |
+| **Tier 2 — high** | Data/time semantics, look-ahead behavior, strategy, portfolio/ledger, risk, execution/matching, reconciliation/recovery, canonical serialization or digests, credentials/security, release, live trading, or external writes | Sol Decision Owner, Implementation Owner, Adversarial Reviewer, independent Verification Owner, Approval Owner, and the relevant domain expert |
 
 Architecture and Verification Owners are always read-only. The Implementation Owner is the only
 agent or person allowed to edit the active checkout, stage, commit, push, or change iteration
 state on GitHub. A coordinator may perform those actions only when it is also the recorded
 Implementation Owner.
+
+## Classification evidence and change graph
+
+The declarative rule catalog is [`.governance/router.yaml`](.governance/router.yaml). During
+Protocol v1.0 Phase 0 it is applied manually. Automation may be added only by a later Issue after
+the Issue 67 retrospective.
+
+Classification evidence records:
+
+- rule and input hashes, evidence completeness, ambiguity, and every matched rule
+- Issue lineage, related pull requests, branch history, and recent merged changes on the same
+  semantic surfaces
+- cumulative contract-change declarations, even when work is split across commits or pull
+  requests
+- changed paths plus public API, schema, canonical bytes, digest, error, ADR, CI, security,
+  release, and external-write surfaces
+- the minimum tier candidate, required roles, requested model profiles, and Luna eligibility
+
+Issue wording never overrides actual diff or change-graph evidence. A candidate diff is classified
+again after it is frozen. A higher result invalidates the previous context package and every report
+whose required role set is now incomplete.
+
+Production additions and deletions are measured separately. The default budgets are:
+
+- pull request: at most 1,200 production additions, 1,000 production deletions, 3,000 total
+  additions, and 15 changed files
+- atomic commit: at most 400 production additions, 400 production deletions, 1,000 total
+  additions, and 8 changed files
+- new Python module: at most 1,500 lines
+
+More than 1,000 deleted production lines creates a Tier 2 candidate. A size exception is agreed
+before implementation and binds the base SHA, files, maximum budget, and rationale; it never skips
+semantic review or verification.
+
+## Model routing, capacity, and availability
+
+Route each task directly to the lowest model profile expected to complete it once. Never use a
+Luna-to-Terra-to-Sol rescue chain.
+
+- Tier 0 uses Terra medium for implementation and deterministic tools for verification and the
+  approval decision. Automatic approval never performs a merge or any GitHub write.
+- Tier 1 normally uses Terra high. Sol high owns a Tier 1 architecture decision only when it
+  changes a public boundary, dependency decision, ADR, or governance authority.
+- Tier 2 runs sequentially: Sol xhigh Decision Owner, Terra high Implementation Owner, independent
+  Terra high Adversarial Reviewer, independent Sol high Verification Owner, then an independent
+  Sol high Approval Owner.
+- Decision, implementation, adversarial, verification, and approval actors use distinct actor and
+  work-unit IDs where separation is required. Decision and verification, decision and approval,
+  verification and approval, and implementation and adversarial review must never share an actor.
+
+At most two Sol roles may be active for this repository, and at most one Sol role may be active for
+one work unit. Excess work is `QUEUED`, not downgraded. Existing limits on concurrent read-only
+experts still apply.
+
+If a required Sol or Terra profile is unavailable, rate-limited, retired, or cannot complete its
+gate, the result is `HOLD`; another profile must not silently take over. A temporary substitution
+requires explicit Human Owner authorization and a governance-debt Issue. A Sol-required Tier 2
+gate cannot be replaced by Terra or Luna. Luna is optional, non-authoritative, and eligible only
+when raw evidence exceeds about 80,000 tokens, 20 files, or 10,000 lines. Luna output must be
+schema-checked and discardable; Luna unavailability never blocks the gate.
+
+The canonical role prompts live under [`.governance/prompts/`](.governance/prompts/). A role report
+binds the prompt ID, version, and SHA-256. Prompt changes are governance changes, not invisible
+session customization.
 
 ## Reuse before build
 
@@ -66,6 +143,10 @@ Experts must not spawn other agents or expand their scope unless the Issue expli
 it. At most two read-only experts run concurrently with the Implementation Owner, and only when
 their tasks are independent. Repeated monitoring without new evidence is not an expert task.
 
+Tier 2 roles are sequential unless their bounded questions are provably independent. The Decision
+Owner must be released before the independent Verification Owner is activated. The Approval Owner
+checks governance evidence only and must not reinterpret or repair the design verdict.
+
 ## Delegated Approval Owner
 
 The user delegates routine pull-request approval to a read-only Approval Owner so that a compliant
@@ -73,6 +154,8 @@ iteration does not require a new chat confirmation at every Ready, merge, and cl
 role is
 activated only after the final candidate HEAD is frozen and every risk-tier expert has reported.
 It does not replace Architecture, Verification, domain, security, risk, or release review.
+Tier 0 instead uses the deterministic evidence decision defined above and does not activate this
+model role; all Git and GitHub mutations remain Implementation Owner actions.
 
 The bounded evidence package contains:
 
@@ -136,8 +219,10 @@ candidate, and its status is clean. Removal must use non-force `git worktree rem
 missing, shared, unrelated, or ambiguous worktree requires explicit user approval. The user may
 revoke this standing delegation at any time.
 
-The reusable context and report contract live in
-[`.agents/approval-owner.md`](.agents/approval-owner.md).
+The Approval Owner prompt registry entry lives in
+[`.governance/prompts/approval-v1.md`](.governance/prompts/approval-v1.md) and loads the canonical
+body from [`.agents/approval-owner.md`](.agents/approval-owner.md), preserving ADR 0007 consumers
+without maintaining two prompt bodies.
 The decision and its narrow supersession of ADR 0002 are recorded in
 [ADR 0007](docs/adr/0007-delegated-approval-owner.md).
 
@@ -161,9 +246,16 @@ Parallel writers require separate worktrees, separate branches, explicit writer 
 declared merge order. Never mix unrelated cleanup or refactoring into an iteration. Stop when a
 worktree contains changes whose ownership or scope is unclear.
 
-## Expert context package
+## Expert context bundle
 
-Experts receive only the context required for their review:
+Every activation receives a distinct Context Bundle conforming to
+[`.governance/schemas/context-manifest.schema.json`](.governance/schemas/context-manifest.schema.json).
+Only a `FROZEN` bundle may be used. Its lifecycle is:
+
+`CREATED -> FROZEN -> USED -> SUPERSEDED -> ARCHIVED`
+
+The immutable reference layer contains authority identifiers, paths, selection references, and
+hashes, not copied authority contents or chat transcripts. It references:
 
 - Issue goal, risk tier, explicit non-goals, and owner roles
 - base branch, base commit SHA, and exact `reviewed_sha`
@@ -173,17 +265,32 @@ Experts receive only the context required for their review:
 - current diff or pull request
 - known risks, blockers, and open finding IDs
 
-Do not use a complete chat transcript as project context.
+The optional derived-view layer may reference an ephemeral summary, dependency map, or risk map.
+Each view declares `type: derived`, `authority: none`, `non_evidentiary: true`, its source hashes,
+generator, and content hash. Derived views reduce reading cost but cannot independently prove a
+fact, finding, or verdict. Context-governance runtime state stores only their references and
+hashes. Source, base/candidate SHA, rule, role question, or scope drift supersedes the bundle and
+requires a successor. A used, superseded, or archived bundle cannot produce a new report.
 
 ## Review validity and output
 
-Every expert report must include:
+Every expert report conforms to
+[`.governance/schemas/report.schema.json`](.governance/schemas/report.schema.json) and includes:
 
 - reviewed scope and exact `reviewed_sha`
 - evidence inspected
 - findings with stable IDs classified as blocker, major, or minor
 - recommended action and finding owner
 - final verdict
+- role, actor ID, work-unit ID, base SHA, and context payload hash
+- model ID, reasoning effort, available served model version or `unavailable`, Codex version,
+  prompt ID/version/hash, Router rules hash, and skill versions or content hashes
+
+Finding IDs use `<DOMAIN>-<NNN>` inside a work unit and are referenced across work units as
+`<work-unit>/<DOMAIN>-<NNN>`. Sequences are never reused. Finding states are `OPEN`, `FIXED`,
+`SUPERSEDED`, and `ACCEPTED_RISK`. A `FIXED` finding binds the claimed repair SHA and remains stale
+until the responsible reviewer confirms it. `SUPERSEDED` links its successor. `ACCEPTED_RISK`
+requires explicit Human Owner authorization, rationale, expiry, and a governance-debt Issue.
 
 A verdict applies only to its exact `reviewed_sha`. A new commit or tracked working-tree change
 makes the verdict stale. Re-review receives the previous reviewed SHA, new SHA, open finding IDs,
@@ -193,6 +300,15 @@ the original assumptions. The final Verification Owner verdict must bind the exa
 A pull request cannot become ready or merge while any blocker remains open or any required verdict
 is stale. A delegated Approval Owner decision cannot be issued until these conditions are already
 satisfied.
+
+## Governance debt
+
+GitHub Issues labeled `governance-debt` are the only governance-debt register. Use identifiers
+`GOV-DEBT-NNN`; record the source exception or finding, owner, risk, repair condition, expiry, and
+status. Temporary model substitution, tier downgrade, size exception, accepted risk, or stale rule
+must create debt. Default expiry is at most 90 days. Extension requires explicit Human Owner
+authorization; permanent decisions require an ADR rather than indefinite debt. Phase 0 records
+this policy manually and does not add CI automation.
 
 ## Iteration handoff
 
