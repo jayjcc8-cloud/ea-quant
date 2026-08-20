@@ -73,14 +73,12 @@ from ea.runtime.coordinator import (
     Phase1HistoricalLifecycleCoordinator,
     RecoveredTerminalCoordinatorEvidence,
     _FrontierGatePort,
+    _LedgerHandoffGatePort,
     _RiskGatePort,
     _RiskRefreshGatePort,
     create_phase1_lifecycle_coordinator,
     recover_phase1_lifecycle_coordinator,
     recover_phase1_terminal_evidence,
-)
-from ea.runtime.coordinator import (
-    _LedgerHandoffGatePort as _LedgerGatePort,
 )
 from ea.runtime.historical import Phase1HistoricalMarketRuntime
 from ea.runtime.matcher import (
@@ -447,6 +445,11 @@ def _require_recovery_history_frontier(
         )
 
 
+def _require_frontier_freshness(portfolio: object, risk: object, frontier: object) -> None:
+    if frontier is not None and (portfolio is not frontier or risk is not frontier):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "freshness must use acknowledged frontier")
+
+
 def create_phase1_historical_lifecycle(
     *,
     binding: RunBinding,
@@ -462,17 +465,13 @@ def create_phase1_historical_lifecycle(
     risk: RiskFreshnessPort,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
-    ledger_handoff_authority: _LedgerGatePort | None = None,
+    ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycle:
-    """Construct dormant authority, matcher, facts, coordinator, then activate once.
-
-    The optional ledger/risk/refresh triad (ADR 0022) is forwarded to the
-    coordinator so the ledger gate and completion-v3 engage; the frontier
-    facade is supplied by the caller through the portfolio/risk freshness ports.
-    """
+    """Construct dormant authority, matcher, facts, coordinator, then activate once."""
+    _require_frontier_freshness(portfolio, risk, frontier)
     if type(prepared_acknowledgement) is not AuditAppendAcknowledgement:
         raise TypeError("fresh lifecycle construction requires one prepared acknowledgement")
     authorization, preparation_capability, activation_seal = (
@@ -552,12 +551,13 @@ def recover_phase1_historical_lifecycle(
     risk: RiskFreshnessPort,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
-    ledger_handoff_authority: _LedgerGatePort | None = None,
+    ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycle:
     """Rebind sealed canonical histories without exposing authorization capability."""
+    _require_frontier_freshness(portfolio, risk, frontier)
     if (
         type(recovery) is not AdmittedRecoveredRun
         or type(runtime) is not Phase1HistoricalMarketRuntime
@@ -649,7 +649,7 @@ def recover_phase1_historical_terminal_evidence(
     runtime: Phase1HistoricalMarketRuntime,
     matcher_history: Phase1HistoricalMatcher,
     fact_history: Phase1ExecutionFactAuthority,
-    ledger_handoff_authority: _LedgerGatePort | None = None,
+    ledger_handoff_authority: _LedgerHandoffGatePort | None = None,
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,

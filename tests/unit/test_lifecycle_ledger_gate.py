@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -310,6 +311,11 @@ def _reopen_audit(binding: RunBinding, records: Sequence[AuditRecord]) -> _Memor
     return reopened
 
 
+def _record_document(records: Sequence[AuditRecord], kind: AuditRecordKind) -> dict[str, Any]:
+    record = next(record for record in records if record.record_kind is kind)
+    return cast(dict[str, Any], json.loads(record.canonical_payload))
+
+
 def _coordinator_with_gate(
     matcher: Phase1HistoricalMatcher,
     delayed: MarketDataEnvelope,
@@ -374,19 +380,16 @@ def test_ledger_gate_commits_outcomes_refresh_and_completion_v3() -> None:
     kinds = [record.record_kind for record in audit.records]
     assert kinds.count(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME) == 1
     assert kinds.count(AuditRecordKind.RISK_PORTFOLIO_REFRESH) == 1
-    completion_record = next(
-        record
-        for record in audit.records
-        if record.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
-    )
-    document = json.loads(completion_record.canonical_payload)
+    document = _record_document(audit.records, AuditRecordKind.RUNTIME_DISPATCH_COMPLETED)
     assert document["schema"] == "ea.audit-dispatch-completed.v3"
     assert document["ledger_outcome_count"] == 1
     assert document["final_portfolio_snapshot_sha256"] != document["final_risk_state_sha256"]
 
 
 def test_ledger_gate_halts_on_reconciliation_outcome() -> None:
+    import ea.composition.lifecycle as lifecycle_composition
     from ea.core import ExecutionFactAnomaly
+    from ea.core.lifecycle import LifecycleError
 
     _fixture, matcher, orders, causal, delayed, _end = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -423,19 +426,24 @@ def test_ledger_gate_halts_on_reconciliation_outcome() -> None:
         projection_after=None,
     )
     coordinator, audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
+    frontier = coordinator._frontier
+    stale_snapshot = frontier.current_snapshot()
+    stale_risk_state = frontier.current_state()
+    stale_portfolio = SimpleNamespace(current_snapshot=lambda: stale_snapshot)
+    stale_risk = SimpleNamespace(current_state=lambda: stale_risk_state)
 
     window = coordinator.begin_next_dispatch()
     assert window is not None
     result = coordinator.complete_active_dispatch(window)
     assert result.runtime_acknowledged is True
 
-    refresh_record = next(
-        record
-        for record in audit.records
-        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
-    )
-    refresh_document = json.loads(refresh_record.canonical_payload)
+    refresh_document = _record_document(audit.records, AuditRecordKind.RISK_PORTFOLIO_REFRESH)
     assert refresh_document["submission_permitted"] is False
+    assert frontier.current_state() != stale_risk_state
+    require_frontier = getattr(lifecycle_composition, "_require_frontier_freshness", None)
+    assert require_frontier is not None, "composition must bind authorization freshness"
+    with pytest.raises(LifecycleError, match="acknowledged frontier"):
+        require_frontier(stale_portfolio, stale_risk, frontier)
 
 
 def test_gate_factory_rejects_mismatched_authority_bindings() -> None:
@@ -536,12 +544,7 @@ def test_gate_retry_after_refresh_append_failure_resolves_the_same_frontier() ->
     assert refresh_record.canonical_payload == audit.failed_refresh_payload
     assert json.loads(refresh_record.canonical_payload)["submission_permitted"] is True
     assert coordinator.state.phase is CoordinatorPhase.FAILING
-    completion_record = next(
-        record
-        for record in audit.records
-        if record.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
-    )
-    document = json.loads(completion_record.canonical_payload)
+    document = _record_document(audit.records, AuditRecordKind.RUNTIME_DISPATCH_COMPLETED)
     assert document["schema"] == "ea.audit-dispatch-completed.v3"
 
 
@@ -662,12 +665,8 @@ def test_ledger_failure_after_mutation_retries_only_the_same_record() -> None:
     assert len(ledger.transactions) == 1
     kinds = [record.record_kind for record in audit.records]
     assert kinds.count(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME) == 1
-    refresh_record = next(
-        record
-        for record in audit.records
-        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
-    )
-    assert json.loads(refresh_record.canonical_payload)["submission_permitted"] is False
+    document = _record_document(audit.records, AuditRecordKind.RISK_PORTFOLIO_REFRESH)
+    assert document["submission_permitted"] is False
 
 
 @pytest.mark.parametrize("failure_boundary", ("ledger", "refresh"))
@@ -1147,19 +1146,11 @@ def test_no_fill_frontier_does_not_halt_and_permits_submission() -> None:
     result = coordinator.complete_active_dispatch(window)
     assert result.runtime_acknowledged is True
 
-    refresh_record = next(
-        record
-        for record in audit.records
-        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
-    )
-    refresh_document = json.loads(refresh_record.canonical_payload)
+    refresh_document = _record_document(audit.records, AuditRecordKind.RISK_PORTFOLIO_REFRESH)
     assert refresh_document["submission_permitted"] is True
-    ledger_record = next(
-        record
-        for record in audit.records
-        if record.record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+    ledger_document = _record_document(
+        audit.records, AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
     )
-    ledger_document = json.loads(ledger_record.canonical_payload)
     assert ledger_document["action"] == "not_applicable"
 
 
