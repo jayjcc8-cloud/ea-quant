@@ -13,6 +13,8 @@
 
 1. Create one Issue with risk tier and reason, owners, scope, non-goals, base SHA, risks, and
    acceptance criteria.
+   Attach the Protocol v1.0 classification evidence from `.governance/router.yaml`. This evidence
+   proposes a minimum tier; the confirmed tier remains in the Issue.
 2. Before design or code, complete the bounded open-source reuse assessment required by
    [AGENTS.md](AGENTS.md): inspect existing dependencies and up to three serious mature candidates,
    then record the reuse, adapter, or local-build decision and rejection reasons. Tier 0 may record
@@ -22,15 +24,15 @@
 4. Create one branch for that Issue, for example `codex/12-data-schema`.
 5. Open a Draft pull request early and keep its scope limited to the Issue.
 6. Use Conventional Commits and keep every commit logically focused.
-7. Activate only the experts required by the Issue risk tier, at the gates defined in
-   [AGENTS.md](AGENTS.md).
+7. Freeze one actor-specific Context Bundle, then activate only the experts required by the Issue
+   risk tier and model route at the gates defined in [AGENTS.md](AGENTS.md).
 8. Run the repository verification entry point and record its exact-HEAD result in the pull
    request.
 9. Resolve every finding blocker, refresh stale SHA-bound verdicts, and wait for CI to pass.
 10. Extract durable expert knowledge into the Issue, ADR, pull request, tests, or follow-up Issues;
    release completed experts.
-11. Obtain either explicit user approval or a SHA-bound Approval Owner decision within the
-    delegated scope defined by [AGENTS.md](AGENTS.md).
+11. Obtain the deterministic Tier 0 evidence decision, explicit user approval, or a SHA-bound
+    Approval Owner decision within the delegated scope defined by [AGENTS.md](AGENTS.md).
 12. Squash merge to `main`, delete the merged feature branch, and synchronize the next iteration
     from clean `main`.
 
@@ -87,16 +89,19 @@ environment whose runtime dependencies came from `uv sync --locked --no-install-
 
 ## Expert review gates
 
-- Tier 0 activates the Verification Owner only for the final candidate SHA.
+- Tier 0 runs deterministic verification and an automatic evidence decision for the final
+  candidate SHA; no model reviewer or Approval Owner is required, and the Implementation Owner
+  still performs any Git/GitHub mutation.
 - Tier 1 activates the Architecture Owner once the design/diff is reviewable and the Verification
   Owner only for the final candidate SHA.
-- Tier 2 follows Tier 1 and adds the relevant domain expert at the decision or implementation gate
-  named by the Issue.
+- Tier 2 uses distinct sequential actors for Sol decision, Terra implementation, Terra adversarial
+  review, independent Sol verification, and independent Sol approval, plus the domain expert named
+  by the Issue.
 
-Reports and finding closures are recorded in the pull request. Any new commit makes earlier
-verdicts stale; re-review is scoped to the old-to-new SHA delta and open finding IDs. File-producing
-verification runs in CI or an isolated verification worktree, never in the Implementation Owner's
-active checkout.
+Reports and finding closures are recorded in the pull request and conform to the Protocol v1.0
+schema. Any new commit or superseded Context Bundle makes earlier verdicts stale; re-review is
+scoped to the old-to-new SHA delta and open finding IDs. File-producing verification runs in CI or
+an isolated verification worktree, never in the Implementation Owner's active checkout.
 
 ## Delegated approval gate
 
