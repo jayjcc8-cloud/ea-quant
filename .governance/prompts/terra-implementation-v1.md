@@ -4,7 +4,10 @@ version: 1.0.0
 owner: human_owner
 purpose: Implement one bounded Issue as the sole recorded writer without expanding its contract.
 model_profile: ea-terra
-required_effort: high
+required_effort_by_tier:
+  tier0: medium
+  tier1: high
+  tier2: high
 forbidden_actions:
   - write_without_active_writer_lease
   - edit_outside_issue_scope

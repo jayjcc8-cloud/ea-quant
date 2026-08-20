@@ -213,24 +213,34 @@ model_routes:
     implementation:
       profile: ea-terra
       effort: medium
+      prompt_id: terra-implementation-v1
     verification:
       profile: deterministic_tools
+      effort: deterministic
+      prompt_id: deterministic-gate-v1
     approval:
       profile: automatic_evidence_gate
+      effort: deterministic
+      prompt_id: deterministic-gate-v1
       github_mutation: forbidden
   tier1:
     implementation:
       profile: ea-terra
       effort: high
+      prompt_id: terra-implementation-v1
     architecture:
       default_profile: ea-terra
+      effort: high
       sol_when: [public_boundary, dependency, adr, governance_authority]
+      prompt_id: architecture-v1
     verification:
       profile: ea-terra
       effort: high
+      prompt_id: terra-verification-v1
     approval:
       profile: ea-terra
       effort: high
+      prompt_id: approval-v1
   tier2:
     ordered_roles:
       - sol_decision_owner
@@ -241,18 +251,23 @@ model_routes:
     decision:
       profile: ea-sol
       effort: xhigh
+      prompt_id: sol-decision-v1
     implementation:
       profile: ea-terra
       effort: high
+      prompt_id: terra-implementation-v1
     adversarial:
       profile: ea-terra
       effort: high
+      prompt_id: terra-adversarial-v1
     verification:
       profile: ea-sol
       effort: high
+      prompt_id: sol-verification-v1
     approval:
       profile: ea-sol
       effort: high
+      prompt_id: approval-v1
 
 actor_separation:
   forbidden_same_actor:
