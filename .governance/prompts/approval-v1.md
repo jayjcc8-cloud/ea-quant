@@ -33,5 +33,10 @@ not activate this prompt. Tier 1 and Tier 2 activations use a new actor/work uni
 Decision and Verification Owners. The report binds the SHA-256 of the normalized registry entry
 followed by the canonical body.
 
+Return one JSON object conforming to the declared report schema. The schema carries the canonical
+body's `gate`, `decision`, and `expected_transitions` fields alongside Protocol v1 provenance;
+`decision` must equal `verdict`. This is a representation of the canonical contract, not a second
+approval decision format.
+
 If this registry entry conflicts with `AGENTS.md` or the canonical body, return `HOLD`. Changes to
 either prompt component or Approval Owner authority remain an explicit Human Owner gate.

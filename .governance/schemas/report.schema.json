@@ -59,6 +59,13 @@
       "items": {"$ref": "#/$defs/finding"}
     },
     "verdict": {"enum": ["APPROVE", "HOLD", "PASS", "FAIL"]},
+    "gate": {"enum": ["ready", "merge", "cleanup"]},
+    "decision": {"enum": ["APPROVE", "HOLD"]},
+    "expected_transitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
     "authorized_mutation": {
       "enum": ["none", "draft_to_ready", "squash_merge", "ordered_bounded_cleanup"]
     },
@@ -104,6 +111,33 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["role"],
+        "properties": {"role": {"const": "approval_owner"}}
+      },
+      "then": {
+        "required": ["gate", "decision", "expected_transitions"],
+        "oneOf": [
+          {
+            "required": ["verdict", "decision"],
+            "properties": {
+              "verdict": {"const": "APPROVE"},
+              "decision": {"const": "APPROVE"}
+            }
+          },
+          {
+            "required": ["verdict", "decision"],
+            "properties": {
+              "verdict": {"const": "HOLD"},
+              "decision": {"const": "HOLD"}
+            }
+          }
+        ]
+      }
+    }
+  ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},

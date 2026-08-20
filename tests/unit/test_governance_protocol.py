@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,9 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ROUTER_PATH = PROJECT_ROOT / ".governance" / "router.yaml"
 PROMPT_ROOT = PROJECT_ROOT / ".governance" / "prompts"
+REPORT_SCHEMA_PATH = PROJECT_ROOT / ".governance" / "schemas" / "report.schema.json"
+CONTEXT_SCHEMA_PATH = PROJECT_ROOT / ".governance" / "schemas" / "context-manifest.schema.json"
+APPROVAL_BODY_PATH = PROJECT_ROOT / ".agents" / "approval-owner.md"
 
 
 def _prompt_frontmatter() -> dict[str, dict[str, Any]]:
@@ -118,3 +122,38 @@ def test_route_effort_matches_governed_contract() -> None:
                 mismatches[f"{tier}.{name}"] = (route.get("effort"), required_effort)
 
     assert mismatches == {}
+
+
+def test_approval_owner_contract_is_representable_by_report_schema() -> None:
+    schema = json.loads(REPORT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    required_fields = {"gate", "decision", "expected_transitions"}
+    assert required_fields <= schema["properties"].keys()
+
+    approval_contract = next(
+        clause
+        for clause in schema["allOf"]
+        if clause.get("if", {}).get("properties", {}).get("role", {}).get("const")
+        == "approval_owner"
+    )
+    assert required_fields <= set(approval_contract["then"]["required"])
+
+    approval_body = APPROVAL_BODY_PATH.read_text(encoding="utf-8")
+    assert all(f"{field}:" in approval_body for field in required_fields)
+    registry = _prompt_frontmatter()["approval-v1"]["required_output"]
+    assert registry == {
+        "schema": ".governance/schemas/report.schema.json",
+        "role": "approval_owner",
+        "verdicts": ["APPROVE", "HOLD"],
+    }
+
+
+def test_tier0_deterministic_gate_has_a_schema_valid_context_role() -> None:
+    context_schema = json.loads(CONTEXT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    report_schema = json.loads(REPORT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    router = yaml.safe_load(ROUTER_PATH.read_text(encoding="utf-8"))
+    assert isinstance(router, dict)
+
+    assert "deterministic_gate" in context_schema["properties"]["role"]["enum"]
+    assert "deterministic_gate" in report_schema["properties"]["role"]["enum"]
+    assert router["model_routes"]["tier0"]["verification"]["prompt_id"] == ("deterministic-gate-v1")
+    assert router["model_routes"]["tier0"]["approval"]["prompt_id"] == ("deterministic-gate-v1")

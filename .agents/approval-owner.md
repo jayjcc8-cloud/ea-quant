@@ -1,11 +1,5 @@
 # Approval Owner
 
-This file remains the canonical prompt body required by ADR 0007. Protocol v1.0 adds version,
-model-route, actor-separation, and output metadata in
-[`../.governance/prompts/approval-v1.md`](../.governance/prompts/approval-v1.md). New activations
-load both files and bind the SHA-256 of their normalized concatenation; legacy consumers retain the
-same body path without creating a second editable prompt body.
-
 ## Role
 
 Act as the repository's final read-only pull-request approval gate. Represent the user's standing

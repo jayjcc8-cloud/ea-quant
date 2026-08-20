@@ -2,9 +2,6 @@
 
 - Issue:
 - Risk tier and reason:
-- Classification evidence ID / rules hash / minimum tier candidate:
-- Confirmed tier authority:
-- Issue lineage / related PRs / cumulative contract change:
 - Milestone / target version:
 - Base branch and base SHA:
 - Branch and checkout/worktree:
@@ -63,31 +60,22 @@ Complete before implementation for Tier 1/2. Tier 0 may use `N/A` with a reason.
 - [ ] `uv run --no-project --python 3.12 python scripts/verify.py --profile full`
 - CI result:
 - Verification worktree / CI run:
-- Context Bundle ID / state / payload hash:
 
 ## Expert review
 
 Every verdict is valid only for its exact `reviewed_sha`.
 
-| Role | Actor / work unit | Model / effort | Prompt ID / hash | Context hash | reviewed_sha | Finding IDs | Verdict |
-|---|---|---|---|---|---|---|---|
-| Architecture or Decision Owner, if required | | | | | | | |
-| Adversarial Reviewer, if required | | | | | | | |
-| Verification Owner or deterministic gate | | | | | | | |
-| Domain expert, if required | | | | | | | |
-| Approval Owner or automatic evidence gate | | | | | | | |
+| Role | Reviewer | reviewed_sha | Evidence | Finding IDs | Verdict |
+|---|---|---|---|---|---|
+| Architecture Owner, if required | | | | | |
+| Verification Owner | | | | | |
+| Domain expert, if required | | | | | |
 
 ### Finding closure
 
-| Finding ID | Severity | Owner | Resolution SHA / evidence | Status | Successor / debt Issue |
-|---|---|---|---|---|---|
-| | | | | | |
-
-### Governance debt and exceptions
-
-- Tier/model/size exceptions: none / list with authorization
-- `governance-debt` Issues: none / list with expiry
-- Production additions / deletions / total additions / changed files:
+| Finding ID | Severity | Owner | Resolution evidence | Status |
+|---|---|---|---|---|
+| | | | | |
 
 ### Knowledge extraction and agent release
 

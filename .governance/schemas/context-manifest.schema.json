@@ -28,6 +28,7 @@
         "adversarial_reviewer",
         "verification_owner",
         "approval_owner",
+        "deterministic_gate",
         "domain_expert"
       ]
     },
