@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Protocol, final
 
 from ea.composition.run import AdmittedRecoveredRun
@@ -38,13 +37,8 @@ from ea.core.historical_matching import (
     HistoricalMatcherState,
     HistoricalSubmissionReceipt,
 )
-from ea.core.ledger_integration import (
-    LedgerHandoffOutcome,
-    PortfolioRiskRefresh,
-)
 from ea.core.lifecycle import (
     ActiveDispatchWindow,
-    AuditedExecutionFactHandoff,
     CoordinatorDispatchOutcome,
     CoordinatorRunState,
     CoordinatorTerminalOutcome,
@@ -58,12 +52,6 @@ from ea.core.lifecycle import (
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
-from ea.core.portfolio import PortfolioSnapshot
-from ea.core.risk import (
-    RiskHaltReason,
-    RiskPolicyId,
-    RiskStateSnapshot,
-)
 from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.execution.fact_authority import (
     OrderResolutionVerifier,
@@ -84,73 +72,21 @@ from ea.runtime.authorization import (
 from ea.runtime.coordinator import (
     Phase1HistoricalLifecycleCoordinator,
     RecoveredTerminalCoordinatorEvidence,
+    _FrontierGatePort,
+    _RiskGatePort,
+    _RiskRefreshGatePort,
     create_phase1_lifecycle_coordinator,
     recover_phase1_lifecycle_coordinator,
     recover_phase1_terminal_evidence,
+)
+from ea.runtime.coordinator import (
+    _LedgerHandoffGatePort as _LedgerGatePort,
 )
 from ea.runtime.historical import Phase1HistoricalMarketRuntime
 from ea.runtime.matcher import (
     create_historical_matcher_descendant_fact_dispatch_verifier,
     create_historical_matcher_dispatch_verifier,
 )
-
-
-class _LedgerGatePort(Protocol):
-    run_id: RunId
-    spec_set: InstrumentExecutionSpecSet
-    snapshot: PortfolioSnapshot
-
-    def apply_handoff(
-        self,
-        *,
-        handoff: AuditedExecutionFactHandoff,
-        outcome: ExecutionFactProcessingOutcome,
-        fill: Fill | None,
-    ) -> LedgerHandoffOutcome: ...
-
-
-class _RiskGatePort(Protocol):
-    run_id: RunId
-    spec_set: InstrumentExecutionSpecSet
-    risk_state: RiskStateSnapshot
-
-    def engage_halt(
-        self,
-        reason: RiskHaltReason,
-        causal_root_available_at: datetime,
-        dispatch_sequence: int,
-    ) -> RiskStateSnapshot: ...
-
-
-class _FrontierGatePort(Protocol):
-    def advance(
-        self,
-        *,
-        snapshot: PortfolioSnapshot,
-        risk_state: RiskStateSnapshot,
-        refresh: PortfolioRiskRefresh,
-    ) -> None: ...
-
-    def current_snapshot(self) -> PortfolioSnapshot: ...
-
-    def current_state(self) -> RiskStateSnapshot: ...
-
-
-class _RiskRefreshGatePort(Protocol):
-    run_id: RunId
-    spec_set: InstrumentExecutionSpecSet
-    policy_id: RiskPolicyId
-    policy_sha256: Sha256Digest
-
-    def create_refresh(
-        self,
-        *,
-        snapshot: PortfolioSnapshot,
-        risk_state: RiskStateSnapshot,
-        dispatch_sequence: int,
-        ordered_ledger_ack_frontier_sha256: Sha256Digest,
-    ) -> PortfolioRiskRefresh: ...
-
 
 _LIFECYCLE_SEAL = object()
 _READ_VIEW_SEAL = object()
@@ -713,6 +649,10 @@ def recover_phase1_historical_terminal_evidence(
     runtime: Phase1HistoricalMarketRuntime,
     matcher_history: Phase1HistoricalMatcher,
     fact_history: Phase1ExecutionFactAuthority,
+    ledger_handoff_authority: _LedgerGatePort | None = None,
+    risk_authority: _RiskGatePort | None = None,
+    risk_refresh_authority: _RiskRefreshGatePort | None = None,
+    frontier: _FrontierGatePort | None = None,
 ) -> RecoveredTerminalCoordinatorEvidence:
     """Consume store-issued terminal evidence and publish no mutation authority."""
     if (
@@ -742,6 +682,10 @@ def recover_phase1_historical_terminal_evidence(
             fact_authority=fact_history,
             evidence_resolver=fact_history,
             records=records,
+            ledger_handoff_authority=ledger_handoff_authority,
+            risk_authority=risk_authority,
+            risk_refresh_authority=risk_refresh_authority,
+            frontier=frontier,
         )
         _require_recovery_history_frontier(
             records=records,

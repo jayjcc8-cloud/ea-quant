@@ -97,6 +97,9 @@ class Phase1PortfolioRiskRefreshAuthority:
         risk_state: RiskStateSnapshot,
         dispatch_sequence: int,
         ordered_ledger_ack_frontier_sha256: Sha256Digest,
+        coordinator_running: bool,
+        publication_window_clear: bool,
+        candidate_matches_internal: bool,
     ) -> PortfolioRiskRefresh:
         """Issue one immutable refresh per completed dispatch frontier."""
         state = self._state
@@ -118,37 +121,36 @@ class Phase1PortfolioRiskRefreshAuthority:
             raise _fail(OutcomeCode.INVALID_TYPE, "refresh frontier digest must be exact")
         if type(dispatch_sequence) is not int or dispatch_sequence < 1:
             raise _fail(OutcomeCode.INVALID_TYPE, "refresh dispatch sequence must be positive")
-        # ADR 0022 L244-253: submission_permitted is derived against the exact
-        # post-publication candidate. The coordinator-running and no-pending-
-        # operation conditions are bound by the composition coordinator (#67);
-        # this authority derives every condition available at the portfolio
-        # boundary and rejects any later weakening at the factory.
-        submission_permitted = (
-            not risk_state.halted
-            and not snapshot.open_reconciliation_refs
-            and snapshot.open_reconciliation_bindings == ()
-        )
         key = (state.run_id, dispatch_sequence, ordered_ledger_ack_frontier_sha256)
-        # ADR 0022 L236-239: the replay key is checked before any sequence
-        # advancement so an exact retry after a failed audit append returns
-        # the original refresh instead of conflicting.
         existing: PortfolioRiskRefresh | None = state.replay_index.get(key)
         if existing is not None:
-            # Exact retry after a failed audit append: the same key must
-            # resolve to the original refresh. Rebuild the candidate bindings
-            # from the inputs and compare them against the retained refresh
-            # instead of re-issuing (a re-issue would carry the wrong
-            # predecessor for the first frontier).
             if (
                 portfolio_snapshot_digest(snapshot) == existing.portfolio_snapshot_sha256
                 and risk_state_snapshot_digest(risk_state) == existing.risk_state_sha256
-                and submission_permitted == existing.submission_permitted
             ):
                 return existing
             raise _fail(
                 OutcomeCode.CONFLICTING_ID,
                 "refresh replay conflicts with the retained frontier",
             )
+        facts = (
+            coordinator_running,
+            publication_window_clear,
+            candidate_matches_internal,
+        )
+        if any(type(value) is not bool for value in facts):
+            raise _fail(
+                OutcomeCode.INVALID_TYPE,
+                "refresh derivation facts must be exact booleans",
+            )
+        submission_permitted = (
+            not risk_state.halted
+            and not snapshot.open_reconciliation_refs
+            and snapshot.open_reconciliation_bindings == ()
+            and coordinator_running
+            and publication_window_clear
+            and candidate_matches_internal
+        )
         # RISK-001 continuity: the Phase 1 resource model keeps dispatch
         # sequences contiguous (D = M + R + 1), so refresh_sequence ==
         # dispatch_sequence and each new frontier advances by exactly one.

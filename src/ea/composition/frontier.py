@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import final
 
-from ea.core.ledger_integration import PortfolioRiskRefresh
+from ea.core.ledger_integration import (
+    PortfolioRiskRefresh,
+    portfolio_risk_refresh_digest,
+)
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import PortfolioSnapshot, portfolio_snapshot_digest
 from ea.core.risk import RiskStateSnapshot, risk_state_snapshot_digest
@@ -42,8 +45,6 @@ class _FrontierState:
     published_risk_state: RiskStateSnapshot
     published_refresh: PortfolioRiskRefresh | None
     predecessor_sha256: Sha256Digest | None
-    internal_snapshot: PortfolioSnapshot
-    internal_risk_state: RiskStateSnapshot
 
 
 @final
@@ -76,12 +77,11 @@ class AcknowledgedLifecycleFrontier:
         return self._state.published_refresh
 
     @property
-    def internal_snapshot(self) -> PortfolioSnapshot:
-        return self._state.internal_snapshot
-
-    @property
-    def internal_risk_state(self) -> RiskStateSnapshot:
-        return self._state.internal_risk_state
+    def previous_refresh_sha256(self) -> Sha256Digest | None:
+        state = self._state
+        if state.published_refresh is None:
+            return state.predecessor_sha256
+        return portfolio_risk_refresh_digest(state.published_refresh)
 
     def current_snapshot(self) -> PortfolioSnapshot:
         """PortfolioFreshnessPort view of the published frontier."""
@@ -104,7 +104,7 @@ class AcknowledgedLifecycleFrontier:
         expected_previous = (
             state.predecessor_sha256
             if state.published_refresh is None
-            else _refresh_digest(state.published_refresh)
+            else portfolio_risk_refresh_digest(state.published_refresh)
         )
         if refresh.previous_refresh_sha256 != expected_previous:
             raise _fail(
@@ -123,8 +123,6 @@ class AcknowledgedLifecycleFrontier:
             published_risk_state=risk_state,
             published_refresh=refresh,
             predecessor_sha256=state.predecessor_sha256,
-            internal_snapshot=snapshot,
-            internal_risk_state=risk_state,
         )
 
 
@@ -139,12 +137,6 @@ def _require_candidate(
         raise _fail(OutcomeCode.INVALID_TYPE, "frontier refresh must be exact")
     if snapshot.run_id != risk_state.run_id or refresh.run_id != snapshot.run_id:
         raise _fail(OutcomeCode.CONFLICTING_ID, "frontier candidate runs conflict")
-
-
-def _refresh_digest(refresh: PortfolioRiskRefresh) -> object:
-    from ea.core.ledger_integration import portfolio_risk_refresh_digest
-
-    return portfolio_risk_refresh_digest(refresh)
 
 
 def create_acknowledged_lifecycle_frontier(
@@ -178,8 +170,6 @@ def create_acknowledged_lifecycle_frontier(
             published_risk_state=initial_risk_state,
             published_refresh=None,
             predecessor_sha256=initial_predecessor_sha256,
-            internal_snapshot=initial_snapshot,
-            internal_risk_state=initial_risk_state,
         ),
     )
     return value

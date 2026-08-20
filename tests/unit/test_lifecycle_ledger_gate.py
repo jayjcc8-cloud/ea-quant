@@ -30,6 +30,7 @@ from ea.core import (
 )
 from ea.core.execution_messages import Fill
 from ea.core.execution_state import ExecutionFactProcessingOutcome
+from ea.core.historical_matching import _create_historical_matcher_dispatch_batch
 from ea.core.market_data import MarketDataEnvelope
 from ea.execution.matcher import Phase1HistoricalMatcher
 from ea.portfolio import (
@@ -41,6 +42,7 @@ from ea.risk import create_phase1_risk_authority
 from unit.test_historical_matcher import _system
 from unit.test_lifecycle_coordinator import (
     _MemoryAudit,
+    _NoFacts,
     _RetainedOutcomeFacts,
     _Runtime,
 )
@@ -53,13 +55,14 @@ EXECUTION_POLICY = ExecutionPolicyRef(
     Sha256Digest("1" * 64),
 )
 RISK_POLICY_ID = RiskPolicyId("phase1.risk.v1")
+_DEFAULT_REFRESH_PREDECESSOR = Sha256Digest("aa" * 32)
 
 
 class _FixedFillEvidence:
-    def __init__(self, fill: object) -> None:
+    def __init__(self, fill: Fill | None) -> None:
         self._fill = fill
 
-    def resolve_fill(self, *, fill_id: Any, fill_sha256: Any) -> object:
+    def resolve_fill(self, *, fill_id: EconomicId, fill_sha256: Sha256Digest) -> Fill | None:
         return self._fill
 
     def resolve_projection_after(self, **_: Any) -> None:
@@ -84,7 +87,12 @@ def _risk_policy(spec_set: InstrumentExecutionSpecSet) -> Phase1RiskPolicy:
     )
 
 
-def _ledger_ports(matcher: Phase1HistoricalMatcher) -> dict[str, Any]:
+def _ledger_ports(
+    matcher: Any,
+    *,
+    first_sequence: int = 8,
+    first_previous_refresh_sha256: Sha256Digest | None = _DEFAULT_REFRESH_PREDECESSOR,
+) -> dict[str, Any]:
     from ea.composition import create_acknowledged_lifecycle_frontier
 
     run_id = matcher.run_id
@@ -107,21 +115,90 @@ def _ledger_ports(matcher: Phase1HistoricalMatcher) -> dict[str, Any]:
             spec_set=spec_set,
             policy_id=RISK_POLICY_ID,
             policy_sha256=phase1_risk_policy_digest(policy),
-            first_sequence=8,
-            first_previous_refresh_sha256=Sha256Digest("aa" * 32),
+            first_sequence=first_sequence,
+            first_previous_refresh_sha256=first_previous_refresh_sha256,
         ),
         "frontier": create_acknowledged_lifecycle_frontier(
             initial_snapshot=ledger.snapshot,
             initial_risk_state=risk_authority.risk_state,
-            initial_predecessor_sha256=Sha256Digest("aa" * 32),
+            initial_predecessor_sha256=first_previous_refresh_sha256,
         ),
     }
 
 
+def test_bound_ledger_gate_rejects_a_partial_binding_with_domain_error() -> None:
+    import ea.runtime.coordinator as coordinator_module
+    from ea.core import OutcomeCode
+    from ea.core.lifecycle import LifecycleError
+
+    helper = getattr(coordinator_module, "_bound_ledger_gate", None)
+    assert helper is not None, "coordinator must expose the typed gate boundary"
+    marker = object()
+    with pytest.raises(LifecycleError, match="must be bound together") as captured:
+        helper(marker, None, marker, marker)
+    assert captured.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_refresh_replay_preserves_first_derivation_truth() -> None:
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    ports = _ledger_ports(matcher)
+    authority = ports["risk_refresh_authority"]
+    snapshot = ports["ledger_handoff_authority"].snapshot
+    risk_state = ports["risk_authority"].risk_state
+    frontier_sha256 = Sha256Digest("bb" * 32)
+    first = authority.create_refresh(
+        snapshot=snapshot,
+        risk_state=risk_state,
+        dispatch_sequence=8,
+        ordered_ledger_ack_frontier_sha256=frontier_sha256,
+        coordinator_running=True,
+        publication_window_clear=True,
+        candidate_matches_internal=True,
+    )
+    replay = authority.create_refresh(
+        snapshot=snapshot,
+        risk_state=risk_state,
+        dispatch_sequence=8,
+        ordered_ledger_ack_frontier_sha256=frontier_sha256,
+        coordinator_running=False,
+        publication_window_clear=False,
+        candidate_matches_internal=False,
+    )
+    assert replay is first
+    assert replay.submission_permitted is True
+
+
+@pytest.mark.parametrize(
+    "false_fact",
+    ("coordinator_running", "publication_window_clear", "candidate_matches_internal"),
+)
+def test_refresh_first_derivation_requires_every_current_fact(false_fact: str) -> None:
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    ports = _ledger_ports(matcher)
+    facts = {
+        "coordinator_running": True,
+        "publication_window_clear": True,
+        "candidate_matches_internal": True,
+    }
+    facts[false_fact] = False
+    refresh = ports["risk_refresh_authority"].create_refresh(
+        snapshot=ports["ledger_handoff_authority"].snapshot,
+        risk_state=ports["risk_authority"].risk_state,
+        dispatch_sequence=8,
+        ordered_ledger_ack_frontier_sha256=Sha256Digest("bb" * 32),
+        **facts,
+    )
+    assert refresh.submission_permitted is False
+
+
 def _outcome_bundle(
-    matcher: Phase1HistoricalMatcher, delayed: MarketDataEnvelope
+    matcher: Any,
+    delayed: MarketDataEnvelope,
+    *,
+    batch: Any | None = None,
 ) -> tuple[Fill, ExecutionFactProcessingOutcome]:
-    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
+    if batch is None:
+        batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
     ingress = batch.ingresses[0]
     fact = ingress.fact
     key_kinds = tuple(
@@ -140,7 +217,7 @@ def _outcome_bundle(
     )
     outcome = create_execution_fact_processing_outcome(
         run_id=matcher.run_id,
-        runtime_dispatch_sequence=8,
+        runtime_dispatch_sequence=batch.dispatch_sequence,
         ingress=ingress,
         action=ExecutionFactAction.ACCEPTED,
         anomalies=(),
@@ -154,6 +231,83 @@ def _outcome_bundle(
         projection_after=None,
     )
     return fill, outcome
+
+
+class _SingleBatchMatcher:
+    def __init__(
+        self, source: Phase1HistoricalMatcher, batch: Any, root: MarketDataEnvelope
+    ) -> None:
+        self.run_id = source.run_id
+        self.spec_set = source.spec_set
+        self.source_namespace = source.source_namespace
+        self._batch = batch
+        self._root = root
+
+    def match_active_market_root(self, root: MarketDataEnvelope, *, dispatch_sequence: int) -> Any:
+        assert dispatch_sequence == self._batch.dispatch_sequence
+        assert root == self._root
+        return self._batch
+
+    def expire_at_active_end(self, root: Any, *, dispatch_sequence: int) -> Any:
+        raise AssertionError((root, dispatch_sequence))
+
+    def resolve_dispatch_batch(
+        self, *, dispatch_sequence: int, trigger_root_sha256: Sha256Digest
+    ) -> Any | None:
+        if (
+            dispatch_sequence == self._batch.dispatch_sequence
+            and trigger_root_sha256 == self._batch.trigger_root_sha256
+        ):
+            return self._batch
+        return None
+
+    def resolve_submission_receipt(self, **_: Any) -> None:
+        return None
+
+    def submit(self, *_: Any, **__: Any) -> Any:
+        raise AssertionError("single-batch matcher does not admit submissions")
+
+
+def _dispatch_one_system() -> tuple[
+    _SingleBatchMatcher,
+    MarketDataEnvelope,
+    Fill,
+    ExecutionFactProcessingOutcome,
+]:
+    _fixture, source, orders, causal, delayed, _end = _system()
+    source.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    original = source.match_active_market_root(delayed, dispatch_sequence=8)
+    batch = _create_historical_matcher_dispatch_batch(
+        trigger_root=delayed,
+        run_id=original.run_id,
+        source_namespace=original.source_namespace,
+        dispatch_kind=original.dispatch_kind,
+        dispatch_sequence=1,
+        trigger_root_sha256=original.trigger_root_sha256,
+        trigger_root_key=original.trigger_root_key,
+        next_fact_sequence_before=original.next_fact_sequence_before,
+        next_fact_sequence_after=original.next_fact_sequence_after,
+        submission_sequences=original.submission_sequences,
+        order_ids=original.order_ids,
+        ingresses=original.ingresses,
+        ingress_sha256s=original.ingress_sha256s,
+    )
+    matcher = _SingleBatchMatcher(source, batch, delayed)
+    fill, outcome = _outcome_bundle(matcher, delayed, batch=batch)
+    return matcher, delayed, fill, outcome
+
+
+def _reopen_audit(binding: RunBinding, records: Sequence[AuditRecord]) -> _MemoryAudit:
+    reopened = _MemoryAudit(binding)
+    for record in records:
+        acknowledgement = reopened.append(
+            record_kind=record.record_kind,
+            subject_kind=record.subject_kind,
+            subject_sha256=record.subject_sha256,
+            canonical_payload=record.canonical_payload,
+        )
+        assert acknowledgement.record_id == record.record_id
+    return reopened
 
 
 def _coordinator_with_gate(
@@ -178,6 +332,31 @@ def _coordinator_with_gate(
         **_ledger_ports(matcher),
     )
     return coordinator, audit
+
+
+def _terminal_gate_journal() -> tuple[Any, RunBinding, _MemoryAudit, _Runtime, Any]:
+    _fixture, matcher, _orders, _causal, _delayed, end = _system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _Runtime(matcher, end)
+    coordinator = _build_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_FixedFillEvidence(None),
+        **_ledger_ports(
+            matcher,
+            first_sequence=1,
+            first_previous_refresh_sha256=None,
+        ),
+    )
+    coordinator.process_next_dispatch()
+    return matcher, binding, audit, runtime, coordinator
 
 
 def test_ledger_gate_commits_outcomes_refresh_and_completion_v3() -> None:
@@ -291,12 +470,16 @@ class _FailOnceRefreshAudit(_MemoryAudit):
     def __init__(self, binding: RunBinding) -> None:
         super().__init__(binding)
         self.refresh_failed = False
+        self.failed_refresh_payload: bytes | None = None
+        self.failed_refresh_subject: Sha256Digest | None = None
 
     def append(
         self, *, record_kind: Any, subject_kind: Any, subject_sha256: Any, canonical_payload: Any
     ) -> Any:
         if record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH and not self.refresh_failed:
             self.refresh_failed = True
+            self.failed_refresh_payload = canonical_payload
+            self.failed_refresh_subject = subject_sha256
             raise __import__("ea.core.audit", fromlist=["AuditContractError"]).AuditContractError(
                 __import__(
                     "ea.core", fromlist=["OutcomeCode"]
@@ -320,6 +503,7 @@ def test_gate_retry_after_refresh_append_failure_resolves_the_same_frontier() ->
         Sha256Digest("22" * 32),
     )
     audit = _FailOnceRefreshAudit(binding)
+    ports = _ledger_ports(matcher)
     coordinator = _build_coordinator(
         binding=binding,
         audit=audit,
@@ -327,7 +511,7 @@ def test_gate_retry_after_refresh_append_failure_resolves_the_same_frontier() ->
         matcher=matcher,
         fact_authority=_RetainedOutcomeFacts(matcher, outcome),
         evidence_resolver=_FixedFillEvidence(fill),
-        **_ledger_ports(matcher),
+        **ports,
     )
     with pytest.raises(Exception, match="injected refresh"):
         coordinator.process_next_dispatch()
@@ -335,11 +519,23 @@ def test_gate_retry_after_refresh_append_failure_resolves_the_same_frontier() ->
     from ea.core.lifecycle import CoordinatorPhase
 
     assert coordinator.state.phase is CoordinatorPhase.FAILING
+    assert coordinator._active is not None
+    assert coordinator._active.refresh_sha256 is not None
+    assert coordinator._active.refresh_ack is None
+    assert ports["frontier"].published_refresh is None
     retry = coordinator.retry_active_dispatch()
     assert retry.runtime_acknowledged is True
     kinds = [record.record_kind for record in audit.records]
     assert kinds.count(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME) == 1
     assert kinds.count(AuditRecordKind.RISK_PORTFOLIO_REFRESH) == 1
+    refresh_record = next(
+        record
+        for record in audit.records
+        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
+    )
+    assert refresh_record.canonical_payload == audit.failed_refresh_payload
+    assert json.loads(refresh_record.canonical_payload)["submission_permitted"] is True
+    assert coordinator.state.phase is CoordinatorPhase.FAILING
     completion_record = next(
         record
         for record in audit.records
@@ -376,6 +572,63 @@ class _FailOnceLedgerOutcomeAudit(_MemoryAudit):
         )
 
 
+class _FailRefreshAndFailingSafetyAudit(_FailOnceRefreshAudit):
+    def __init__(self, binding: RunBinding) -> None:
+        super().__init__(binding)
+        self.failing_safety_failures_remaining = 2
+
+    def append(
+        self, *, record_kind: Any, subject_kind: Any, subject_sha256: Any, canonical_payload: Any
+    ) -> Any:
+        if (
+            record_kind is AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION
+            and self.failing_safety_failures_remaining > 0
+        ):
+            self.failing_safety_failures_remaining -= 1
+            raise __import__("ea.core.audit", fromlist=["AuditContractError"]).AuditContractError(
+                __import__(
+                    "ea.core", fromlist=["OutcomeCode"]
+                ).OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected failing safety append failure",
+            )
+        return super().append(
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
+
+
+def test_failing_transition_must_be_durable_before_refresh_retry() -> None:
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(matcher, delayed)
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _FailRefreshAndFailingSafetyAudit(binding)
+    ports = _ledger_ports(matcher)
+    coordinator = _build_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=_Runtime(matcher, delayed, dispatch_sequence=8),
+        matcher=matcher,
+        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+        evidence_resolver=_FixedFillEvidence(fill),
+        **ports,
+    )
+    with pytest.raises(Exception, match="injected refresh"):
+        coordinator.process_next_dispatch()
+    with pytest.raises(Exception, match="injected failing safety"):
+        coordinator.retry_active_dispatch()
+    assert coordinator.state.phase.value == "failing"
+    assert ports["frontier"].published_refresh is None
+    assert all(
+        record.record_kind is not AuditRecordKind.RISK_PORTFOLIO_REFRESH for record in audit.records
+    )
+
+
 def test_ledger_failure_after_mutation_retries_only_the_same_record() -> None:
     _fixture, matcher, orders, causal, delayed, _end = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -409,6 +662,145 @@ def test_ledger_failure_after_mutation_retries_only_the_same_record() -> None:
     assert len(ledger.transactions) == 1
     kinds = [record.record_kind for record in audit.records]
     assert kinds.count(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME) == 1
+    refresh_record = next(
+        record
+        for record in audit.records
+        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
+    )
+    assert json.loads(refresh_record.canonical_payload)["submission_permitted"] is False
+
+
+@pytest.mark.parametrize("failure_boundary", ("ledger", "refresh"))
+def test_restart_recovers_failed_ledger_or_refresh_without_duplicate_effects(
+    failure_boundary: str,
+) -> None:
+    from ea.core.lifecycle import CoordinatorPhase
+    from ea.runtime.coordinator import recover_phase1_lifecycle_coordinator
+
+    matcher, delayed, fill, outcome = _dispatch_one_system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    failing_audit: _MemoryAudit = (
+        _FailOnceLedgerOutcomeAudit(binding)
+        if failure_boundary == "ledger"
+        else _FailOnceRefreshAudit(binding)
+    )
+    runtime = _Runtime(matcher, delayed, dispatch_sequence=1)
+    coordinator = _build_coordinator(
+        binding=binding,
+        audit=failing_audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+        evidence_resolver=_FixedFillEvidence(fill),
+        **_ledger_ports(
+            matcher,
+            first_sequence=1,
+            first_previous_refresh_sha256=None,
+        ),
+    )
+    with pytest.raises(Exception, match=f"injected {failure_boundary}"):
+        coordinator.process_next_dispatch()
+    failed_refresh_payload = getattr(failing_audit, "failed_refresh_payload", None)
+    reopened_audit = _reopen_audit(binding, tuple(failing_audit.records))
+    recovered_ports = _ledger_ports(
+        matcher,
+        first_sequence=1,
+        first_previous_refresh_sha256=None,
+    )
+    recovered = recover_phase1_lifecycle_coordinator(
+        binding=binding,
+        audit=reopened_audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+        evidence_resolver=_FixedFillEvidence(fill),
+        records=tuple(reopened_audit.records),
+        **recovered_ports,
+    )
+
+    assert recovered.state.phase is CoordinatorPhase.FAILING
+    result = recovered.retry_active_dispatch()
+    assert result.runtime_acknowledged is True
+    fresh_ledger = recovered_ports["ledger_handoff_authority"]._state.ledger
+    assert len(fresh_ledger.transactions) == 1
+    refresh_records = tuple(
+        record
+        for record in reopened_audit.records
+        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
+    )
+    assert len(refresh_records) == 1
+    refresh_document = json.loads(refresh_records[0].canonical_payload)
+    if failure_boundary == "ledger":
+        assert refresh_document["submission_permitted"] is False
+    else:
+        assert refresh_records[0].canonical_payload == failed_refresh_payload
+        assert refresh_document["submission_permitted"] is True
+
+
+@pytest.mark.parametrize(
+    ("refresh_seeded", "frontier_seeded"),
+    ((True, True), (True, False), (False, True)),
+)
+def test_zero_dispatch_recovery_rejects_seeded_or_mixed_frontiers(
+    refresh_seeded: bool,
+    frontier_seeded: bool,
+) -> None:
+    from ea.composition import create_acknowledged_lifecycle_frontier
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import recover_phase1_lifecycle_coordinator
+
+    matcher, delayed, fill, outcome = _dispatch_one_system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _MemoryAudit(binding)
+    runtime = _Runtime(matcher, delayed, dispatch_sequence=1)
+    ports = _ledger_ports(
+        matcher,
+        first_sequence=1,
+        first_previous_refresh_sha256=None,
+    )
+    _build_coordinator(
+        binding=binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+        evidence_resolver=_FixedFillEvidence(fill),
+        **ports,
+    )
+    predecessor = _DEFAULT_REFRESH_PREDECESSOR
+    if refresh_seeded:
+        risk = ports["risk_authority"]
+        ports["risk_refresh_authority"] = create_phase1_portfolio_risk_refresh_authority(
+            run_id=matcher.run_id,
+            spec_set=matcher.spec_set,
+            policy_id=risk.risk_state.policy_id,
+            policy_sha256=risk.risk_state.policy_sha256,
+            first_sequence=8,
+            first_previous_refresh_sha256=predecessor,
+        )
+    if frontier_seeded:
+        ports["frontier"] = create_acknowledged_lifecycle_frontier(
+            initial_snapshot=ports["ledger_handoff_authority"].snapshot,
+            initial_risk_state=ports["risk_authority"].risk_state,
+            initial_predecessor_sha256=predecessor,
+        )
+    with pytest.raises(LifecycleError, match="unseeded"):
+        recover_phase1_lifecycle_coordinator(
+            binding=binding,
+            audit=audit,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+            evidence_resolver=_FixedFillEvidence(fill),
+            records=tuple(audit.records),
+            **ports,
+        )
 
 
 def _record_entry(
@@ -427,6 +819,7 @@ def _record_entry(
 
 
 def test_recover_ledger_frontier_replays_with_byte_equality() -> None:
+    from ea.core import portfolio_risk_refresh_digest
     from ea.runtime.coordinator import _recover_ledger_frontier, _RecoveredDispatch
 
     _fixture, matcher, orders, causal, delayed, _end = _system()
@@ -456,8 +849,145 @@ def test_recover_ledger_frontier_replays_with_byte_equality() -> None:
     _recover_ledger_frontier(fresh_coordinator, active, recovered)
     assert all(value is not None for value in active.ledger_acks)
     assert active.refresh_ack is not None
+    assert active.refresh_value_sha256 == portfolio_risk_refresh_digest(
+        fresh_coordinator._frontier.published_refresh
+    )
     assert active.final_portfolio_snapshot_sha256 is not None
     assert active.final_risk_state_sha256 is not None
+
+
+def test_terminal_v2_recovery_is_byte_identical_with_gate_ports() -> None:
+    from ea.core import (
+        audit_append_acknowledgement_digest,
+        create_audit_append_acknowledgement,
+    )
+    from ea.runtime.coordinator import recover_phase1_terminal_evidence
+
+    matcher, binding, audit, runtime, coordinator = _terminal_gate_journal()
+    terminal_record = audit.records[-1]
+    assert json.loads(terminal_record.canonical_payload)["schema"] == "ea.audit-run-terminal.v2"
+    ports = _ledger_ports(
+        matcher,
+        first_sequence=1,
+        first_previous_refresh_sha256=None,
+    )
+    recovered = recover_phase1_terminal_evidence(
+        binding=binding,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_NoFacts(matcher),
+        evidence_resolver=_FixedFillEvidence(None),
+        records=tuple(audit.records),
+        **ports,
+    )
+
+    assert recovered.terminal_outcome == coordinator.terminal_outcome
+    assert recovered.terminal_outcome.terminal_ack_sha256 == (
+        audit_append_acknowledgement_digest(create_audit_append_acknowledgement(terminal_record))
+    )
+    assert recovered.terminal_outcome.terminal_ack_sha256 == (
+        coordinator.terminal_outcome.terminal_ack_sha256
+    )
+
+
+def test_terminal_v2_recovery_rejects_partial_gate_binding() -> None:
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import recover_phase1_terminal_evidence
+
+    matcher, binding, audit, runtime, _coordinator = _terminal_gate_journal()
+    ports = _ledger_ports(
+        matcher,
+        first_sequence=1,
+        first_previous_refresh_sha256=None,
+    )
+    ports.pop("frontier")
+    with pytest.raises(LifecycleError, match="must be bound together"):
+        recover_phase1_terminal_evidence(
+            binding=binding,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=_NoFacts(matcher),
+            evidence_resolver=_FixedFillEvidence(None),
+            records=tuple(audit.records),
+            **ports,
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "final_risk_refresh_sha256",
+        "final_published_snapshot_sha256",
+        "open_reconciliation_ref_aggregate_sha256",
+    ),
+)
+def test_terminal_v2_recovery_rejects_stale_publication_evidence(field: str) -> None:
+    from ea.core import AuditSubjectKind, audit_subject_digest
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import recover_phase1_terminal_evidence
+
+    matcher, binding, audit, runtime, _coordinator = _terminal_gate_journal()
+    document = json.loads(audit.records[-1].canonical_payload)
+    document[field] = "ee" * 32
+    payload = json.dumps(
+        document,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    reopened = _reopen_audit(binding, audit.records[:-1])
+    reopened.append(
+        record_kind=AuditRecordKind.RUN_TERMINAL,
+        subject_kind=AuditSubjectKind.RUN_TERMINAL_STATE,
+        subject_sha256=audit_subject_digest(AuditRecordKind.RUN_TERMINAL, payload),
+        canonical_payload=payload,
+    )
+    with pytest.raises(LifecycleError, match="terminal recovery payload conflicts"):
+        recover_phase1_terminal_evidence(
+            binding=binding,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=_NoFacts(matcher),
+            evidence_resolver=_FixedFillEvidence(None),
+            records=tuple(reopened.records),
+            **_ledger_ports(
+                matcher,
+                first_sequence=1,
+                first_previous_refresh_sha256=None,
+            ),
+        )
+
+
+def test_terminal_v1_recovery_rejects_bound_gate_ports() -> None:
+    from ea.core import AuditSubjectKind, audit_subject_digest
+    from ea.core.lifecycle import LifecycleError, canonical_run_terminal_audit_payload
+    from ea.runtime.coordinator import recover_phase1_terminal_evidence
+
+    matcher, binding, audit, runtime, coordinator = _terminal_gate_journal()
+    assert coordinator.pre_terminal_state is not None
+    payload = canonical_run_terminal_audit_payload(coordinator.pre_terminal_state)
+    reopened = _reopen_audit(binding, audit.records[:-1])
+    reopened.append(
+        record_kind=AuditRecordKind.RUN_TERMINAL,
+        subject_kind=AuditSubjectKind.RUN_TERMINAL_STATE,
+        subject_sha256=audit_subject_digest(AuditRecordKind.RUN_TERMINAL, payload),
+        canonical_payload=payload,
+    )
+    with pytest.raises(LifecycleError, match="terminal recovery payload conflicts"):
+        recover_phase1_terminal_evidence(
+            binding=binding,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=_NoFacts(matcher),
+            evidence_resolver=_FixedFillEvidence(None),
+            records=tuple(reopened.records),
+            **_ledger_ports(
+                matcher,
+                first_sequence=1,
+                first_previous_refresh_sha256=None,
+            ),
+        )
 
 
 def test_recover_ledger_frontier_rejects_corrupted_payload() -> None:

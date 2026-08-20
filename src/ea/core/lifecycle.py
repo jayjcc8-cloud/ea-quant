@@ -961,6 +961,7 @@ def create_terminal_coordinator_state(
     *,
     pre_terminal_state: PreTerminalCoordinatorState,
     terminal_acknowledgement: AuditAppendAcknowledgement,
+    terminal_payload: bytes | None = None,
 ) -> TerminalCoordinatorState:
     if type(pre_terminal_state) is not PreTerminalCoordinatorState:
         raise _fail(OutcomeCode.INVALID_TYPE, "pre-terminal state must be exact")
@@ -968,7 +969,13 @@ def create_terminal_coordinator_state(
         raise _fail(OutcomeCode.CONFLICTING_ID, "terminal acknowledgement kind conflicts")
     if terminal_acknowledgement.binding != pre_terminal_state.binding:
         raise _fail(OutcomeCode.CONFLICTING_ID, "terminal acknowledgement binding conflicts")
-    payload = canonical_run_terminal_audit_payload(pre_terminal_state)
+    payload = (
+        canonical_run_terminal_audit_payload(pre_terminal_state)
+        if terminal_payload is None
+        else terminal_payload
+    )
+    if type(payload) is not bytes:
+        raise _fail(OutcomeCode.INVALID_TYPE, "terminal payload must be exact bytes")
     require_audit_acknowledgement(
         terminal_acknowledgement,
         binding=pre_terminal_state.binding,
@@ -1046,10 +1053,12 @@ def create_coordinator_terminal_outcome(
     pre_terminal_state: PreTerminalCoordinatorState,
     terminal_acknowledgement: AuditAppendAcknowledgement,
     terminal_state: TerminalCoordinatorState,
+    terminal_payload: bytes | None = None,
 ) -> CoordinatorTerminalOutcome:
     expected = create_terminal_coordinator_state(
         pre_terminal_state=pre_terminal_state,
         terminal_acknowledgement=terminal_acknowledgement,
+        terminal_payload=terminal_payload,
     )
     expected_bytes = canonical_terminal_coordinator_state_bytes(expected)
     if expected_bytes != canonical_terminal_coordinator_state_bytes(terminal_state):

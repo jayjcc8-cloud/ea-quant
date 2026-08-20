@@ -73,6 +73,7 @@ def test_frontier_publishes_only_exact_acknowledged_refresh() -> None:
     assert frontier.published_refresh is None
     assert frontier.current_snapshot() == initial_snapshot
     assert frontier.current_state() == initial_risk
+    assert frontier.previous_refresh_sha256 is None
 
     ledger.apply_fill(_fill(spec_set, fill_sequence=1, dedup="frontier-a"))
     refresh = _refresh(ledger.snapshot, initial_risk, sequence=1, previous=None)
@@ -84,7 +85,9 @@ def test_frontier_publishes_only_exact_acknowledged_refresh() -> None:
 
     assert frontier.published_snapshot == ledger.snapshot
     assert frontier.published_refresh == refresh
-    assert frontier.internal_snapshot == ledger.snapshot
+    assert not hasattr(frontier, "internal_snapshot")
+    assert not hasattr(frontier, "internal_risk_state")
+    assert frontier.previous_refresh_sha256 == portfolio_risk_refresh_digest(refresh)
 
 
 def test_frontier_rejects_refresh_that_does_not_bind_candidate_values() -> None:
