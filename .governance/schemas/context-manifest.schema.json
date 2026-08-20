@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ea-quant.local/governance/context-manifest.schema.json",
+  "title": "EA Governance Protocol v1.0 Context Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "context_id",
+    "actor_id",
+    "work_unit_id",
+    "role",
+    "state",
+    "payload_sha256",
+    "immutable_reference",
+    "derived_views"
+  ],
+  "properties": {
+    "protocol_version": {"const": "1.0"},
+    "context_id": {"type": "string", "pattern": "^CTX-[A-Z0-9._-]+$"},
+    "actor_id": {"type": "string", "minLength": 1},
+    "work_unit_id": {"type": "string", "minLength": 1},
+    "role": {
+      "enum": [
+        "architecture_owner",
+        "decision_owner",
+        "implementation_owner",
+        "adversarial_reviewer",
+        "verification_owner",
+        "approval_owner",
+        "deterministic_gate",
+        "domain_expert"
+      ]
+    },
+    "state": {
+      "enum": ["CREATED", "FROZEN", "USED", "SUPERSEDED", "ARCHIVED"]
+    },
+    "payload_sha256": {"$ref": "#/$defs/sha256"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "frozen_at": {"type": ["string", "null"], "format": "date-time"},
+    "used_at": {"type": ["string", "null"], "format": "date-time"},
+    "superseded_by": {"type": ["string", "null"]},
+    "archived_at": {"type": ["string", "null"], "format": "date-time"},
+    "immutable_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorities",
+        "classification_evidence_sha256",
+        "base_branch",
+        "base_sha",
+        "reviewed_sha",
+        "question_reference",
+        "scope_reference",
+        "allowed_files",
+        "forbidden_actions_reference",
+        "acceptance_reference",
+        "verification_reference",
+        "open_findings_reference"
+      ],
+      "properties": {
+        "authorities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/authority"}
+        },
+        "classification_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "router_rules_sha256": {"$ref": "#/$defs/sha256"},
+        "base_branch": {"type": "string", "minLength": 1},
+        "base_sha": {"$ref": "#/$defs/git_sha"},
+        "reviewed_sha": {"$ref": "#/$defs/git_sha_or_working_tree"},
+        "question_reference": {"$ref": "#/$defs/reference"},
+        "scope_reference": {"$ref": "#/$defs/reference"},
+        "allowed_files": {"type": "array", "items": {"type": "string"}},
+        "forbidden_actions_reference": {"$ref": "#/$defs/reference"},
+        "adrs": {"type": "array", "items": {"$ref": "#/$defs/authority"}},
+        "acceptance_reference": {"$ref": "#/$defs/reference"},
+        "verification_reference": {"$ref": "#/$defs/reference"},
+        "open_findings_reference": {"$ref": "#/$defs/reference"},
+        "diff_reference": {"$ref": "#/$defs/reference"}
+      }
+    },
+    "derived_views": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "type",
+          "authority",
+          "non_evidentiary",
+          "source_sha256s",
+          "generator",
+          "content_sha256"
+        ],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "type": {"const": "derived"},
+          "authority": {"const": "none"},
+          "non_evidentiary": {"const": true},
+          "source_sha256s": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"$ref": "#/$defs/sha256"}
+          },
+          "generator": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "identity", "version"],
+            "properties": {
+              "kind": {"enum": ["deterministic_tool", "model"]},
+              "identity": {"type": "string", "minLength": 1},
+              "version": {"type": "string", "minLength": 1}
+            }
+          },
+          "content_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "git_sha_or_working_tree": {
+      "anyOf": [
+        {"$ref": "#/$defs/git_sha"},
+        {"const": "WORKING_TREE"}
+      ]
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "uri", "sha256"],
+      "properties": {
+        "kind": {"enum": ["issue", "pull_request", "adr", "policy", "workflow", "diff", "ci"]},
+        "uri": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "sha256"],
+      "properties": {
+        "uri": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "examples": [
+    {
+      "protocol_version": "1.0",
+      "context_id": "CTX-ISSUE-000-ARCH",
+      "actor_id": "architecture-000",
+      "work_unit_id": "issue-000-architecture",
+      "role": "architecture_owner",
+      "state": "FROZEN",
+      "payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "created_at": "2026-08-20T00:00:00Z",
+      "frozen_at": "2026-08-20T00:01:00Z",
+      "used_at": null,
+      "superseded_by": null,
+      "archived_at": null,
+      "immutable_reference": {
+        "authorities": [
+          {
+            "kind": "issue",
+            "uri": "https://github.com/OWNER/REPO/issues/000",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ],
+        "classification_evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "router_rules_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "base_branch": "main",
+        "base_sha": "0000000000000000000000000000000000000000",
+        "reviewed_sha": "WORKING_TREE",
+        "question_reference": {
+          "uri": "/private/tmp/context/role-question.md",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "scope_reference": {
+          "uri": "https://github.com/OWNER/REPO/issues/000#scope",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "allowed_files": ["AGENTS.md"],
+        "forbidden_actions_reference": {
+          "uri": "AGENTS.md#controlled-expert-lifecycle",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "adrs": [],
+        "acceptance_reference": {
+          "uri": "https://github.com/OWNER/REPO/issues/000#acceptance-criteria",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "verification_reference": {
+          "uri": "CONTRIBUTING.md#required-checks",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "open_findings_reference": {
+          "uri": "https://github.com/OWNER/REPO/issues/000#findings",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "derived_views": []
+    }
+  ]
+}
