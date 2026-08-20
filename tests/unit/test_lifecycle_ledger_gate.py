@@ -529,6 +529,13 @@ def test_terminal_payload_emits_v2_when_gate_bound() -> None:
     assert document["schema"] == "ea.audit-run-terminal.v2"
     assert document["final_risk_refresh_sha256"] == "ee" * 32
     assert document["open_reconciliation_ref_aggregate_sha256"]
+    # ARCH-201: the terminal record binds the PUBLISHED frontier view.
+    assert (
+        document["final_published_snapshot_sha256"]
+        == __import__("ea.core", fromlist=["portfolio_snapshot_digest"])
+        .portfolio_snapshot_digest(coordinator._frontier.current_snapshot())
+        .value
+    )
 
 
 def test_terminal_payload_requires_final_refresh_when_gate_bound() -> None:

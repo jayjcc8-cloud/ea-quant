@@ -1365,6 +1365,35 @@ class Phase1HistoricalLifecycleCoordinator:
                 OutcomeCode.CONFLICTING_ID,
                 "runtime terminal evidence is incomplete",
             )
+        if self._ledger_handoff_authority is not None:
+            # ADR 0022 L501-508: the internal ledger/risk frontier must equal
+            # the acknowledged published frontier, no open reconciliation
+            # reference may remain, and the final risk refresh is retained.
+            if self._frontier is not None and (
+                portfolio_snapshot_digest(self._frontier.current_snapshot())
+                != portfolio_snapshot_digest(self._ledger_handoff_authority.snapshot)
+                or risk_state_snapshot_digest(self._frontier.current_state())
+                != risk_state_snapshot_digest(self._risk_authority.risk_state)
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "internal and published frontiers diverge at terminalization",
+                )
+            published_snapshot = (
+                self._frontier.current_snapshot()
+                if self._frontier is not None
+                else self._ledger_handoff_authority.snapshot
+            )
+            if published_snapshot.open_reconciliation_refs:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "open reconciliation references block terminalization",
+                )
+            if self._final_refresh_value_sha256 is None:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "terminalization requires the final risk refresh",
+                )
         terminal_kind = (
             CoordinatorTerminalKind.SUCCESS
             if resulting_state.failure_code is None
