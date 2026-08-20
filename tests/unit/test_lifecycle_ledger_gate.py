@@ -4,6 +4,7 @@ import json
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -23,6 +24,7 @@ from ea.core import (
     RunBinding,
     RunReference,
     Sha256Digest,
+    create_audit_append_acknowledgement,
     create_execution_fact_processing_outcome,
     create_fill,
     create_order_resolution_binding,
@@ -197,6 +199,8 @@ def _outcome_bundle(
     delayed: MarketDataEnvelope,
     *,
     batch: Any | None = None,
+    action: ExecutionFactAction = ExecutionFactAction.ACCEPTED,
+    anomalies: Sequence[Any] = (),
 ) -> tuple[Fill, ExecutionFactProcessingOutcome]:
     if batch is None:
         batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
@@ -220,8 +224,8 @@ def _outcome_bundle(
         run_id=matcher.run_id,
         runtime_dispatch_sequence=batch.dispatch_sequence,
         ingress=ingress,
-        action=ExecutionFactAction.ACCEPTED,
-        anomalies=(),
+        action=action,
+        anomalies=tuple(anomalies),
         order_resolutions=tuple(
             create_order_resolution_binding(key_kind=kind, resolved_order=None)
             for kind in key_kinds
@@ -388,42 +392,19 @@ def test_ledger_gate_commits_outcomes_refresh_and_completion_v3() -> None:
 
 def test_ledger_gate_halts_on_reconciliation_outcome() -> None:
     import ea.composition.lifecycle as lifecycle_composition
+    from ea.composition.run import AdmittedRecoveredRun
     from ea.core import ExecutionFactAnomaly
     from ea.core.lifecycle import LifecycleError
+    from ea.execution.fact_authority import Phase1ExecutionFactAuthority
+    from ea.runtime.historical import Phase1HistoricalMarketRuntime
 
     _fixture, matcher, orders, causal, delayed, _end = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
-    batch = matcher.match_active_market_root(delayed, dispatch_sequence=8)
-    ingress = batch.ingresses[0]
-    fact = ingress.fact
-    key_kinds = tuple(
-        kind
-        for present, kind in (
-            (fact.order_id is not None, OrderResolutionKeyKind.ORDER_ID),
-            (fact.client_submission_key is not None, OrderResolutionKeyKind.CLIENT_SUBMISSION_KEY),
-            (fact.venue_order_id is not None, OrderResolutionKeyKind.VENUE_ORDER_ID),
-        )
-        if present
-    )
-    fill = create_fill(
-        fill_id=EconomicId(matcher.run_id, EconomicOwnerKind.EXECUTION_FILL, 1),
-        fact=fact,
-        spec_set=matcher.spec_set,
-    )
-    outcome = create_execution_fact_processing_outcome(
-        run_id=matcher.run_id,
-        runtime_dispatch_sequence=8,
-        ingress=ingress,
+    fill, outcome = _outcome_bundle(
+        matcher,
+        delayed,
         action=ExecutionFactAction.UNRESOLVED,
         anomalies=(ExecutionFactAnomaly.UNKNOWN_ORDER,),
-        order_resolutions=tuple(
-            create_order_resolution_binding(key_kind=kind, resolved_order=None)
-            for kind in key_kinds
-        ),
-        resolved_order=None,
-        fill=fill,
-        projection_before=None,
-        projection_after=None,
     )
     coordinator, audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
     frontier = coordinator._frontier
@@ -440,10 +421,45 @@ def test_ledger_gate_halts_on_reconciliation_outcome() -> None:
     refresh_document = _record_document(audit.records, AuditRecordKind.RISK_PORTFOLIO_REFRESH)
     assert refresh_document["submission_permitted"] is False
     assert frontier.current_state() != stale_risk_state
-    require_frontier = getattr(lifecycle_composition, "_require_frontier_freshness", None)
-    assert require_frontier is not None, "composition must bind authorization freshness"
+    freshness = {
+        "portfolio": stale_portfolio,
+        "risk": stale_risk,
+        "global_halt": None,
+        "instrument_gate": None,
+        "ledger_handoff_authority": coordinator._ledger_handoff_authority,
+        "risk_authority": coordinator._risk_authority,
+        "risk_refresh_authority": coordinator._risk_refresh_authority,
+        "frontier": frontier,
+    }
     with pytest.raises(LifecycleError, match="acknowledged frontier"):
-        require_frontier(stale_portfolio, stale_risk, frontier)
+        cast(Any, lifecycle_composition.create_phase1_historical_lifecycle)(
+            binding=coordinator._binding,
+            prepared_acknowledgement=create_audit_append_acknowledgement(audit.records[0]),
+            audit=audit,
+            runtime=None,
+            spec_set=matcher.spec_set,
+            execution_policy=matcher.execution_policy,
+            source_namespace=matcher.source_namespace,
+            provenance_id=matcher.provenance_id,
+            order_issuance_verifier=None,
+            **freshness,
+        )
+    recovery = object.__new__(AdmittedRecoveredRun)
+    with patch.object(
+        AdmittedRecoveredRun,
+        "_reserve_consumption",
+        side_effect=AssertionError("stale freshness reached recovery reservation"),
+    ) as reserve:
+        with pytest.raises(LifecycleError, match="acknowledged frontier"):
+            cast(Any, lifecycle_composition.recover_phase1_historical_lifecycle)(
+                recovery=recovery,
+                runtime=object.__new__(Phase1HistoricalMarketRuntime),
+                matcher_history=matcher,
+                fact_history=object.__new__(Phase1ExecutionFactAuthority),
+                order_issuance_verifier=None,
+                **freshness,
+            )
+        reserve.assert_not_called()
 
 
 def test_gate_factory_rejects_mismatched_authority_bindings() -> None:
@@ -807,13 +823,7 @@ def _record_entry(
 ) -> tuple[int, AuditRecord, Any]:
     for position, record in enumerate(records, start=2):
         if record.record_kind is kind:
-            return (
-                position,
-                record,
-                __import__(
-                    "ea.core", fromlist=["create_audit_append_acknowledgement"]
-                ).create_audit_append_acknowledgement(record),
-            )
+            return position, record, create_audit_append_acknowledgement(record)
     raise AssertionError("record kind not found")
 
 
