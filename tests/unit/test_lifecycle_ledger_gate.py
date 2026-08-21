@@ -490,6 +490,54 @@ def test_gate_factory_rejects_mismatched_authority_bindings() -> None:
         )
 
 
+@pytest.mark.parametrize("seed", ("ledger", "risk"))
+def test_fresh_gate_rejects_seeded_economic_authorities(seed: str) -> None:
+    from ea.core.lifecycle import LifecycleError
+    from ea.core.risk import RiskHaltReason
+
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(matcher, delayed)
+    ports = _ledger_ports(matcher)
+    if seed == "ledger":
+        ports["ledger_handoff_authority"]._state.ledger.apply_fill(fill)
+    else:
+        ports["risk_authority"].engage_halt(
+            RiskHaltReason.RECONCILIATION_REQUIRED,
+            causal_root_available_at=delayed.available_at,
+            dispatch_sequence=8,
+        )
+    refresh = ports["risk_refresh_authority"].create_refresh(
+        snapshot=ports["ledger_handoff_authority"].snapshot,
+        risk_state=ports["risk_authority"].risk_state,
+        dispatch_sequence=8,
+        ordered_ledger_ack_frontier_sha256=Sha256Digest("bb" * 32),
+        coordinator_running=True,
+        publication_window_clear=True,
+        candidate_matches_internal=True,
+    )
+    ports["frontier"].advance(
+        snapshot=ports["ledger_handoff_authority"].snapshot,
+        risk_state=ports["risk_authority"].risk_state,
+        refresh=refresh,
+    )
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+
+    with pytest.raises(LifecycleError, match="fresh-empty"):
+        _build_coordinator(
+            binding=binding,
+            audit=_MemoryAudit(binding),
+            runtime=_Runtime(matcher, delayed, dispatch_sequence=9),
+            matcher=matcher,
+            fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+            evidence_resolver=_FixedFillEvidence(fill),
+            **ports,
+        )
+
+
 class _FailOnceGateAudit(_MemoryAudit):
     def __init__(
         self,
@@ -1126,6 +1174,145 @@ def test_recover_ledger_frontier_replays_with_byte_equality() -> None:
     assert active.final_risk_state_sha256 is not None
 
 
+def test_recovery_rejects_authorization_before_acknowledged_refresh() -> None:
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import _RecoveredDispatch, _require_recovery_stage_order
+
+    marker = cast(Any, object())
+    recovered = _RecoveredDispatch(1)
+    recovered.batch_record = (2, marker, marker)
+    recovered.outcome_records[Sha256Digest("11" * 32)] = (3, marker, marker)
+    recovered.ledger_records.append((4, marker, marker))
+    recovered.authorization_records.append((5, marker, marker))
+    recovered.refresh_record = (6, marker, marker)
+
+    with pytest.raises(LifecycleError, match="authorization stage order"):
+        _require_recovery_stage_order(recovered)
+
+
+def test_recovery_rejects_failed_authorization_before_acknowledged_refresh() -> None:
+    from ea.core import AuditSubjectKind
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import _RecoveredDispatch, _require_recovery_stage_order
+
+    marker = cast(Any, object())
+    failed = SimpleNamespace(
+        canonical_payload=json.dumps(
+            {
+                "failed_record_kind": AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION.value,
+                "failed_subject_kind": AuditSubjectKind.HISTORICAL_EXECUTION_REQUEST.value,
+                "failed_subject_sha256": "22" * 32,
+            }
+        ).encode()
+    )
+    recovered = _RecoveredDispatch(1)
+    recovered.batch_record = (2, marker, marker)
+    recovered.outcome_records[Sha256Digest("11" * 32)] = (3, marker, marker)
+    recovered.failing_record = cast(Any, (4, failed, marker))
+    recovered.ledger_records.append((5, marker, marker))
+    recovered.refresh_record = (6, marker, marker)
+
+    with pytest.raises(LifecycleError, match="authorization stage order"):
+        _require_recovery_stage_order(recovered)
+
+
+def test_recovery_rejects_a_later_ledger_record_after_a_prefix_gap() -> None:
+    from ea.core import (
+        AuditSubjectKind,
+        IngressIdentity,
+        SourceNamespace,
+        audit_subject_digest,
+    )
+    from ea.core.audit import canonical_run_prepared_audit_payload
+    from ea.core.ledger_integration import (
+        LedgerHandoffAction,
+        canonical_ledger_handoff_outcome_bytes,
+        create_ledger_handoff_outcome,
+    )
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import _recover_ledger_frontier, _RecoveredDispatch
+
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    ports = _ledger_ports(matcher, first_sequence=1, first_previous_refresh_sha256=None)
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    snapshot = ports["ledger_handoff_authority"].snapshot
+
+    def result(sequence: int) -> Any:
+        return create_ledger_handoff_outcome(
+            run_id=matcher.run_id,
+            dispatch_sequence=1,
+            ingress_identity=IngressIdentity(SourceNamespace("test.recovery.v1"), sequence),
+            audited_handoff_sha256=Sha256Digest(f"{sequence:064x}"),
+            processing_outcome_sha256=Sha256Digest(f"{sequence + 2:064x}"),
+            processing_outcome_ack_sha256=Sha256Digest(f"{sequence + 4:064x}"),
+            fill_id=None,
+            fill_sha256=None,
+            action=LedgerHandoffAction.NOT_APPLICABLE,
+            original_ledger_apply_outcome=None,
+            original_ledger_apply_outcome_sha256=None,
+            before_snapshot_version=0,
+            before_snapshot_sha256=__import__(
+                "ea.core", fromlist=["portfolio_snapshot_digest"]
+            ).portfolio_snapshot_digest(snapshot),
+            after_snapshot_version=0,
+            after_snapshot_sha256=__import__(
+                "ea.core", fromlist=["portfolio_snapshot_digest"]
+            ).portfolio_snapshot_digest(snapshot),
+            requires_reconciliation=False,
+            halt_requested=False,
+            failure=None,
+        )
+
+    first, second = result(1), result(2)
+    first_handoff = SimpleNamespace(fill_id=None)
+    second_handoff = SimpleNamespace(fill_id=None)
+    outcomes = {id(first_handoff): first, id(second_handoff): second}
+    audit = _MemoryAudit(binding)
+    audit.append(
+        record_kind=AuditRecordKind.RUN_PREPARED,
+        subject_kind=AuditSubjectKind.RUN_MANIFEST,
+        subject_sha256=binding.manifest_sha256,
+        canonical_payload=canonical_run_prepared_audit_payload(binding),
+    )
+    second_payload = canonical_ledger_handoff_outcome_bytes(second)
+    second_ack = audit.append(
+        record_kind=AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        subject_kind=AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME, second_payload
+        ),
+        canonical_payload=second_payload,
+    )
+    recovered = _RecoveredDispatch(1)
+    recovered.ledger_records.append((4, audit.records[1], second_ack))
+    active = SimpleNamespace(
+        prior_frontier=None,
+        handoffs=[first_handoff, second_handoff],
+        outcomes=[SimpleNamespace(halt_requested=False), SimpleNamespace(halt_requested=False)],
+        ledger_outcomes=[],
+        ledger_acks=[],
+        ledger_snapshot=None,
+        risk_state=None,
+    )
+    coordinator = SimpleNamespace(
+        _binding=binding,
+        _ledger_handoff_authority=SimpleNamespace(
+            snapshot=snapshot,
+            apply_handoff=lambda *, handoff, **_values: outcomes[id(handoff)],
+        ),
+        _risk_authority=ports["risk_authority"],
+        _risk_refresh_authority=ports["risk_refresh_authority"],
+        _frontier=ports["frontier"],
+        _resolver=None,
+    )
+
+    with pytest.raises(LifecycleError, match="ledger record prefix"):
+        _recover_ledger_frontier(cast(Any, coordinator), cast(Any, active), recovered)
+
+
 def test_terminal_v2_recovery_is_byte_identical_with_gate_ports() -> None:
     from ea.core import (
         audit_append_acknowledgement_digest,
@@ -1157,6 +1344,34 @@ def test_terminal_v2_recovery_is_byte_identical_with_gate_ports() -> None:
     )
     assert recovered.terminal_outcome.terminal_ack_sha256 == (
         coordinator.terminal_outcome.terminal_ack_sha256
+    )
+
+
+def test_terminal_v2_binds_a_nonempty_open_reconciliation_aggregate() -> None:
+    from ea.core import ExecutionFactAnomaly, open_reconciliation_aggregate_digest
+    from ea.runtime.coordinator import _terminal_payload
+
+    _fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, outcome = _outcome_bundle(
+        matcher,
+        delayed,
+        action=ExecutionFactAction.UNRESOLVED,
+        anomalies=(ExecutionFactAnomaly.UNKNOWN_ORDER,),
+    )
+    coordinator, _audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
+    window = coordinator.begin_next_dispatch()
+    active = coordinator._active
+    assert active is not None
+    coordinator.complete_active_dispatch(window)
+    snapshot = coordinator._frontier.current_snapshot()
+    assert snapshot.open_reconciliation_refs
+    coordinator._runtime.terminal_acknowledged = True
+    coordinator._begin_terminalization(active, coordinator.state)
+
+    document = json.loads(_terminal_payload(coordinator, coordinator.pre_terminal_state))
+    assert document["open_reconciliation_ref_aggregate_sha256"] == (
+        open_reconciliation_aggregate_digest(snapshot).value
     )
 
 

@@ -1531,8 +1531,8 @@ class Phase1HistoricalLifecycleCoordinator:
         if ledger_gate is not None:
             ledger, risk, _refresh, frontier = ledger_gate
             # ADR 0022 L501-508: the internal ledger/risk frontier must equal
-            # the acknowledged published frontier, no open reconciliation
-            # reference may remain, and the final risk refresh is retained.
+            # the acknowledged published frontier and the final risk refresh
+            # is retained. Terminal-v2 binds any stable open-reference aggregate.
             if portfolio_snapshot_digest(frontier.current_snapshot()) != portfolio_snapshot_digest(
                 ledger.snapshot
             ) or risk_state_snapshot_digest(frontier.current_state()) != risk_state_snapshot_digest(
@@ -1541,12 +1541,6 @@ class Phase1HistoricalLifecycleCoordinator:
                 raise LifecycleError(
                     OutcomeCode.CONFLICTING_ID,
                     "internal and published frontiers diverge at terminalization",
-                )
-            published_snapshot = frontier.current_snapshot()
-            if published_snapshot.open_reconciliation_refs:
-                raise LifecycleError(
-                    OutcomeCode.CONFLICTING_ID,
-                    "open reconciliation references block terminalization",
                 )
             if self._final_refresh_value_sha256 is None:
                 raise LifecycleError(
@@ -2180,6 +2174,11 @@ def create_phase1_lifecycle_coordinator(
             risk_authority=risk_authority,
             risk_refresh_authority=risk_refresh_authority,
         )
+        _require_fresh_economic_authorities(
+            ledger_handoff_authority=ledger_handoff_authority,
+            risk_authority=risk_authority,
+            frontier=frontier,
+        )
     value = _allocate_coordinator(
         binding=binding,
         audit=audit,
@@ -2234,6 +2233,35 @@ def _require_ledger_authority_bindings(
         )
 
 
+def _require_fresh_economic_authorities(
+    *,
+    ledger_handoff_authority: _LedgerHandoffGatePort,
+    risk_authority: _RiskGatePort,
+    frontier: _FrontierGatePort,
+) -> None:
+    snapshot = ledger_handoff_authority.snapshot
+    risk_state = risk_authority.risk_state
+    if (
+        snapshot.snapshot_version != 0
+        or ledger_handoff_authority.retained_handoff_count != 0
+        or risk_state.risk_state_version != 0
+        or risk_state.halted
+        or risk_state.halt_reason is not None
+        or risk_state.halt_causal_root_available_at is not None
+        or risk_state.halt_dispatch_sequence is not None
+        or risk_state.conflict_existing_intent_sha256 is not None
+        or risk_state.conflict_submitted_intent_sha256 is not None
+        or portfolio_snapshot_digest(frontier.current_snapshot())
+        != portfolio_snapshot_digest(snapshot)
+        or risk_state_snapshot_digest(frontier.current_state())
+        != risk_state_snapshot_digest(risk_state)
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "coordinator requires fresh-empty economic authorities",
+        )
+
+
 def recover_phase1_lifecycle_coordinator(
     *,
     binding: RunBinding,
@@ -2275,24 +2303,14 @@ def recover_phase1_lifecycle_coordinator(
             risk_authority=risk_authority,
             risk_refresh_authority=risk_refresh_authority,
         )
-        snapshot = ledger_handoff_authority.snapshot
-        risk_state = risk_authority.risk_state
+        _require_fresh_economic_authorities(
+            ledger_handoff_authority=ledger_handoff_authority,
+            risk_authority=risk_authority,
+            frontier=frontier,
+        )
         if (
             risk_refresh_authority.next_sequence != 1
             or frontier.previous_refresh_sha256 is not None
-            or snapshot.snapshot_version != 0
-            or ledger_handoff_authority.retained_handoff_count != 0
-            or risk_state.risk_state_version != 0
-            or risk_state.halted
-            or risk_state.halt_reason is not None
-            or risk_state.halt_causal_root_available_at is not None
-            or risk_state.halt_dispatch_sequence is not None
-            or risk_state.conflict_existing_intent_sha256 is not None
-            or risk_state.conflict_submitted_intent_sha256 is not None
-            or portfolio_snapshot_digest(frontier.current_snapshot())
-            != portfolio_snapshot_digest(snapshot)
-            or risk_state_snapshot_digest(frontier.current_state())
-            != risk_state_snapshot_digest(risk_state)
         ):
             raise LifecycleError(
                 OutcomeCode.CONFLICTING_ID,
@@ -2808,7 +2826,8 @@ def _recover_ledger_frontier(
     assert coordinator._risk_refresh_authority is not None
     assert coordinator._frontier is not None
     active.prior_frontier = _frontier_state(coordinator._frontier)
-    ledger_entries = {entry[1].logical_key: entry for entry in recovered.ledger_records}
+    ledger_records = recovered.ledger_records
+    ledger_record_index = 0
     failed_key = (
         None
         if recovered.failing_record is None
@@ -2838,7 +2857,16 @@ def _recover_ledger_frontier(
             AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
             audit_subject_digest(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME, payload),
         )
-        entry = ledger_entries.pop(key, None)
+        entry = None
+        if ledger_record_index < len(ledger_records):
+            candidate = ledger_records[ledger_record_index]
+            if candidate[1].logical_key != key:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "recovered ledger record prefix conflicts",
+                )
+            entry = candidate
+            ledger_record_index += 1
         if entry is not None:
             _position, ledger_record, ledger_ack = entry
             if ledger_record.canonical_payload != payload:
@@ -2861,7 +2889,7 @@ def _recover_ledger_frontier(
             or result.action is LedgerHandoffAction.FAILED
         ):
             halt_required = True
-    if ledger_entries:
+    if ledger_record_index != len(ledger_records):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "orphan recovered ledger outcome")
     if halt_required:
         batch = active.batch
@@ -2974,6 +3002,7 @@ def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
     positions.extend(entry[0] for entry in group.authorization_records)
     if not positions:
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery dispatch is empty")
+    authorization_positions = [entry[0] for entry in group.authorization_records]
     if group.authorization_records:
         authorization_position = group.authorization_records[0][0]
         inbound_positions = [
@@ -2988,6 +3017,24 @@ def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
                 OutcomeCode.CONFLICTING_ID,
                 "recovery authorization stage order conflicts",
             )
+    if (
+        group.failing_record is not None
+        and _recovered_failed_logical_key(group.failing_record[1]).record_kind
+        is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+    ):
+        authorization_positions.append(group.failing_record[0])
+    if (
+        authorization_positions
+        and (group.ledger_records or group.refresh_record is not None)
+        and (
+            group.refresh_record is None
+            or any(position <= group.refresh_record[0] for position in authorization_positions)
+        )
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovery authorization stage order conflicts",
+        )
     if group.ledger_records or group.refresh_record is not None:
         # ADR 0022 L371-374: fact-outcome acknowledgements precede ledger-outcome
         # acknowledgements, which precede the refresh, which precedes completion.
