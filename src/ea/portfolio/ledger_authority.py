@@ -65,6 +65,7 @@ class _AuthorityState:
     run_id: RunId
     spec_set: InstrumentExecutionSpecSet
     ledger: PortfolioLedger
+    outcome_index: dict[Sha256Digest, LedgerHandoffOutcome]
 
 
 @final
@@ -90,6 +91,18 @@ class Phase1LedgerHandoffAuthority:
     def snapshot(self) -> object:
         return self._state.ledger.snapshot
 
+    @property
+    def retained_handoff_count(self) -> int:
+        return len(self._state.outcome_index)
+
+    def resolve_handoff_outcome(
+        self,
+        handoff_sha256: Sha256Digest,
+    ) -> LedgerHandoffOutcome | None:
+        if type(handoff_sha256) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "handoff digest must be exact")
+        return self._state.outcome_index.get(handoff_sha256)
+
     def apply_handoff(
         self,
         *,
@@ -103,11 +116,14 @@ class Phase1LedgerHandoffAuthority:
         ledger = state.ledger
         run_id = state.run_id
         handoff_sha256 = audited_execution_fact_handoff_digest(handoff)
+        existing = state.outcome_index.get(handoff_sha256)
+        if existing is not None:
+            return existing
         unchanged_version = ledger.snapshot.snapshot_version
         unchanged_sha256 = portfolio_snapshot_digest(ledger.snapshot)
 
         if fill is None:
-            return create_ledger_handoff_outcome(
+            retained = create_ledger_handoff_outcome(
                 run_id=run_id,
                 dispatch_sequence=handoff.dispatch_sequence,
                 ingress_identity=handoff.ingress_identity,
@@ -127,17 +143,21 @@ class Phase1LedgerHandoffAuthority:
                 halt_requested=outcome.halt_requested,
                 failure=None,
             )
+            state.outcome_index[handoff_sha256] = retained
+            return retained
         if outcome.action not in {
             ExecutionFactAction.ACCEPTED,
             ExecutionFactAction.UNRESOLVED,
         }:
-            return _evidence_mismatch_handoff(
+            retained = _evidence_mismatch_handoff(
                 run_id=run_id,
                 handoff=handoff,
                 handoff_sha256=handoff_sha256,
                 version=unchanged_version,
                 snapshot_sha256=unchanged_sha256,
             )
+            state.outcome_index[handoff_sha256] = retained
+            return retained
         fill_sha256 = fill_digest(fill)
         missing_ancestry = (
             fill.order_id is None or fill.correlation_id is None or fill.causation_id is None
@@ -156,7 +176,7 @@ class Phase1LedgerHandoffAuthority:
         if result.code is OutcomeCode.LEDGER_APPLIED:
             binding = ledger._resolve_handoff_binding(command.audited_handoff_sha256)
             assert binding is not None
-            return create_ledger_handoff_outcome(
+            retained = create_ledger_handoff_outcome(
                 run_id=run_id,
                 dispatch_sequence=handoff.dispatch_sequence,
                 ingress_identity=handoff.ingress_identity,
@@ -178,6 +198,8 @@ class Phase1LedgerHandoffAuthority:
                 halt_requested=requires_reconciliation,
                 failure=None,
             )
+            state.outcome_index[handoff_sha256] = retained
+            return retained
         if (
             result.code is OutcomeCode.LEDGER_CONFLICT
             and result.conflict_kind is LedgerConflictKind.UNBOUND_EXISTING_FILL
@@ -197,7 +219,7 @@ class Phase1LedgerHandoffAuthority:
         # A conflict or failure is audited as its own evidence; the closed
         # handoff matrix retains original apply-outcome bytes only for the
         # first application (ADR 0022 L92-104).
-        return create_ledger_handoff_outcome(
+        retained = create_ledger_handoff_outcome(
             run_id=run_id,
             dispatch_sequence=handoff.dispatch_sequence,
             ingress_identity=handoff.ingress_identity,
@@ -217,6 +239,8 @@ class Phase1LedgerHandoffAuthority:
             halt_requested=True,
             failure=failure,
         )
+        state.outcome_index[handoff_sha256] = retained
+        return retained
 
 
 def _evidence_mismatch_handoff(
@@ -293,5 +317,5 @@ def create_phase1_ledger_handoff_authority(
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "ledger specification binding conflicts")
     value = object.__new__(Phase1LedgerHandoffAuthority)
-    object.__setattr__(value, "_state", _AuthorityState(run_id, spec_set, ledger))
+    object.__setattr__(value, "_state", _AuthorityState(run_id, spec_set, ledger, {}))
     return value

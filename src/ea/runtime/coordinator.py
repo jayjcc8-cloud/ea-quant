@@ -127,6 +127,7 @@ class _LedgerHandoffGatePort(Protocol):
     run_id: RunId
     spec_set: InstrumentExecutionSpecSet
     snapshot: PortfolioSnapshot
+    retained_handoff_count: int
 
     def apply_handoff(
         self,
@@ -135,6 +136,11 @@ class _LedgerHandoffGatePort(Protocol):
         outcome: ExecutionFactProcessingOutcome,
         fill: Fill | None,
     ) -> LedgerHandoffOutcome: ...
+
+    def resolve_handoff_outcome(
+        self,
+        handoff_sha256: Sha256Digest,
+    ) -> LedgerHandoffOutcome | None: ...
 
 
 class _RiskGatePort(Protocol):
@@ -172,6 +178,13 @@ class _RiskRefreshGatePort(Protocol):
     policy_id: RiskPolicyId
     policy_sha256: Sha256Digest
     next_sequence: int
+
+    def resolve_refresh(
+        self,
+        *,
+        dispatch_sequence: int,
+        ordered_ledger_ack_frontier_sha256: Sha256Digest,
+    ) -> PortfolioRiskRefresh | None: ...
 
     def create_refresh(
         self,
@@ -211,6 +224,15 @@ def _bound_ledger_gate(
 
 
 _MAX_UINT64 = (1 << 64) - 1
+_FrontierState = tuple[Sha256Digest, Sha256Digest, Sha256Digest | None]
+
+
+def _frontier_state(frontier: _FrontierGatePort) -> _FrontierState:
+    return (
+        portfolio_snapshot_digest(frontier.current_snapshot()),
+        risk_state_snapshot_digest(frontier.current_state()),
+        frontier.previous_refresh_sha256,
+    )
 
 
 @dataclass(slots=True)
@@ -232,9 +254,14 @@ class _ActiveDispatch:
     submission_receipt: HistoricalSubmissionReceipt | None = None
     ledger_outcomes: list[LedgerHandoffOutcome | None] = field(default_factory=list)
     ledger_acks: list[AuditAppendAcknowledgement | None] = field(default_factory=list)
+    ledger_snapshot: PortfolioSnapshot | None = None
+    risk_state: RiskStateSnapshot | None = None
+    refresh: PortfolioRiskRefresh | None = None
     refresh_ack: AuditAppendAcknowledgement | None = None
     refresh_sha256: Sha256Digest | None = None
     refresh_value_sha256: Sha256Digest | None = None
+    prior_frontier: _FrontierState | None = None
+    refresh_published: bool = False
     final_portfolio_snapshot_sha256: Sha256Digest | None = None
     final_risk_state_sha256: Sha256Digest | None = None
 
@@ -1129,6 +1156,12 @@ class Phase1HistoricalLifecycleCoordinator:
         ledger, risk, refresh_authority, frontier = gate
         root = active.lease.root
         sequence = active.lease.dispatch_sequence
+        if active.ledger_snapshot is None:
+            active.ledger_snapshot = ledger.snapshot
+        if active.risk_state is None:
+            active.risk_state = risk.risk_state
+        if active.prior_frontier is None:
+            active.prior_frontier = _frontier_state(frontier)
         if not active.ledger_outcomes:
             active.ledger_outcomes = [None] * len(active.handoffs)
             active.ledger_acks = [None] * len(active.handoffs)
@@ -1153,6 +1186,8 @@ class Phase1HistoricalLifecycleCoordinator:
                 )
                 self._require_same_active_lease(active)
                 active.ledger_outcomes[index] = ledger_outcome
+                active.ledger_snapshot = ledger.snapshot
+                self._rebind_active_authorities(active)
             if active.ledger_acks[index] is None:
                 payload = canonical_ledger_handoff_outcome_bytes(ledger_outcome)
                 acknowledgement = self._audit.append(
@@ -1186,24 +1221,27 @@ class Phase1HistoricalLifecycleCoordinator:
             ):
                 halt_required = True
         if halt_required:
-            risk.engage_halt(
+            active.risk_state = risk.engage_halt(
                 RiskHaltReason.RECONCILIATION_REQUIRED,
                 causal_root_available_at=_root_available_at(root),
                 dispatch_sequence=sequence,
             )
             self._rebind_active_authorities(active)
-        if active.refresh_ack is None:
+        if active.refresh is None:
             ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
             snapshot = ledger.snapshot
             risk_state = risk.risk_state
+            active.ledger_snapshot = snapshot
+            active.risk_state = risk_state
+            refresh_frontier_sha256 = ordered_digest_tuple(
+                ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
+                tuple(audit_append_acknowledgement_digest(value) for value in ledger_acks),
+            )
             refresh = refresh_authority.create_refresh(
                 snapshot=snapshot,
                 risk_state=risk_state,
                 dispatch_sequence=sequence,
-                ordered_ledger_ack_frontier_sha256=ordered_digest_tuple(
-                    ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
-                    tuple(audit_append_acknowledgement_digest(value) for value in ledger_acks),
-                ),
+                ordered_ledger_ack_frontier_sha256=refresh_frontier_sha256,
                 coordinator_running=self._state.phase is CoordinatorPhase.RUNNING,
                 publication_window_clear=self._refresh_publication_window_clear(active),
                 candidate_matches_internal=(
@@ -1213,6 +1251,7 @@ class Phase1HistoricalLifecycleCoordinator:
                     == risk_state_snapshot_digest(risk.risk_state)
                 ),
             )
+            active.refresh = refresh
             refresh_payload = canonical_portfolio_risk_refresh_bytes(refresh)
             refresh_subject_sha256 = audit_subject_digest(
                 AuditRecordKind.RISK_PORTFOLIO_REFRESH,
@@ -1220,6 +1259,20 @@ class Phase1HistoricalLifecycleCoordinator:
             )
             active.refresh_sha256 = refresh_subject_sha256
             active.refresh_value_sha256 = portfolio_risk_refresh_digest(refresh)
+        refresh = active.refresh
+        snapshot = active.ledger_snapshot
+        risk_state = active.risk_state
+        if refresh is None or snapshot is None or risk_state is None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "retained refresh publication candidate is incomplete",
+            )
+        refresh_payload = canonical_portfolio_risk_refresh_bytes(refresh)
+        refresh_subject_sha256 = audit_subject_digest(
+            AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+            refresh_payload,
+        )
+        if active.refresh_ack is None:
             refresh_acknowledgement = self._audit.append(
                 record_kind=AuditRecordKind.RISK_PORTFOLIO_REFRESH,
                 subject_kind=AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
@@ -1238,12 +1291,65 @@ class Phase1HistoricalLifecycleCoordinator:
             )
             self._rebind_active_authorities(active)
             active.refresh_ack = refresh_acknowledgement
-            frontier.advance(snapshot=snapshot, risk_state=risk_state, refresh=refresh)
-            self._rebind_active_authorities(active)
+        self._publish_retained_refresh(active, frontier)
+        self._rebind_active_authorities(active)
         active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
             frontier.current_snapshot()
         )
         active.final_risk_state_sha256 = risk_state_snapshot_digest(frontier.current_state())
+
+    def _publish_retained_refresh(
+        self,
+        active: _ActiveDispatch,
+        frontier: _FrontierGatePort,
+    ) -> None:
+        refresh = active.refresh
+        snapshot = active.ledger_snapshot
+        risk_state = active.risk_state
+        if (
+            refresh is None
+            or snapshot is None
+            or risk_state is None
+            or active.refresh_ack is None
+            or active.prior_frontier is None
+        ):
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "retained refresh publication evidence is incomplete",
+            )
+        expected = (
+            portfolio_snapshot_digest(snapshot),
+            risk_state_snapshot_digest(risk_state),
+            portfolio_risk_refresh_digest(refresh),
+        )
+        current = _frontier_state(frontier)
+        if current == expected:
+            active.refresh_published = True
+            return
+        if current != active.prior_frontier:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "refresh publication frontier is neither exact old nor exact new",
+            )
+        try:
+            frontier.advance(snapshot=snapshot, risk_state=risk_state, refresh=refresh)
+        except BaseException as error:
+            current = _frontier_state(frontier)
+            if current == expected:
+                active.refresh_published = True
+                return
+            if current != active.prior_frontier:
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "refresh publication exception left an ambiguous frontier",
+                ) from error
+            raise
+        if _frontier_state(frontier) != expected:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "refresh publication did not commit the exact candidate",
+            )
+        active.refresh_published = True
 
     def _complete_active(self, active: _ActiveDispatch) -> CoordinatorDispatchOutcome:
         root = active.lease.root
@@ -1632,6 +1738,7 @@ class Phase1HistoricalLifecycleCoordinator:
         self._require_same_active_lease(active)
         batch = active.batch
         if batch is None:
+            self._rebind_economic_authorities(active)
             return
         self._require_batch(active, batch)
         for ingress, outcome in zip(batch.ingresses, active.outcomes, strict=False):
@@ -1640,6 +1747,72 @@ class Phase1HistoricalLifecycleCoordinator:
                 self._require_same_active_lease(active)
                 self._require_evidence(outcome)
                 self._require_same_active_lease(active)
+        self._rebind_economic_authorities(active)
+
+    def _rebind_economic_authorities(self, active: _ActiveDispatch) -> None:
+        gate = _bound_ledger_gate(
+            self._ledger_handoff_authority,
+            self._risk_authority,
+            self._risk_refresh_authority,
+            self._frontier,
+        )
+        if gate is None:
+            return
+        ledger, risk, refresh_authority, frontier = gate
+        for handoff, retained in zip(active.handoffs, active.ledger_outcomes, strict=False):
+            if handoff is None or retained is None:
+                continue
+            resolved = ledger.resolve_handoff_outcome(
+                audited_execution_fact_handoff_digest(handoff)
+            )
+            if resolved is None or canonical_ledger_handoff_outcome_bytes(resolved) != (
+                canonical_ledger_handoff_outcome_bytes(retained)
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "ledger handoff outcome drifted",
+                )
+        if active.ledger_snapshot is not None and (
+            portfolio_snapshot_digest(ledger.snapshot)
+            != portfolio_snapshot_digest(active.ledger_snapshot)
+        ):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "ledger snapshot drifted")
+        if active.risk_state is not None and (
+            risk_state_snapshot_digest(risk.risk_state)
+            != risk_state_snapshot_digest(active.risk_state)
+        ):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "risk state drifted")
+        if active.refresh is not None:
+            resolved_refresh = refresh_authority.resolve_refresh(
+                dispatch_sequence=active.lease.dispatch_sequence,
+                ordered_ledger_ack_frontier_sha256=(
+                    active.refresh.ordered_ledger_ack_frontier_sha256
+                ),
+            )
+            if resolved_refresh is None or canonical_portfolio_risk_refresh_bytes(
+                resolved_refresh
+            ) != canonical_portfolio_risk_refresh_bytes(active.refresh):
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "risk refresh drifted")
+        if active.refresh_published:
+            if (
+                active.refresh is None
+                or active.ledger_snapshot is None
+                or active.risk_state is None
+                or _frontier_state(frontier)
+                != (
+                    portfolio_snapshot_digest(active.ledger_snapshot),
+                    risk_state_snapshot_digest(active.risk_state),
+                    portfolio_risk_refresh_digest(active.refresh),
+                )
+            ):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "published frontier drifted",
+                )
+        elif active.prior_frontier is not None and (
+            _frontier_state(frontier) != active.prior_frontier
+        ):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "pending frontier drifted")
 
     def _missing_keys(self, active: _ActiveDispatch) -> tuple[AuditLogicalKey, ...]:
         missing: list[AuditLogicalKey] = []
@@ -2099,13 +2272,29 @@ def recover_phase1_lifecycle_coordinator(
             risk_authority=risk_authority,
             risk_refresh_authority=risk_refresh_authority,
         )
+        snapshot = ledger_handoff_authority.snapshot
+        risk_state = risk_authority.risk_state
         if (
             risk_refresh_authority.next_sequence != 1
             or frontier.previous_refresh_sha256 is not None
+            or snapshot.snapshot_version != 0
+            or ledger_handoff_authority.retained_handoff_count != 0
+            or risk_state.risk_state_version != 0
+            or risk_state.halted
+            or risk_state.halt_reason is not None
+            or risk_state.halt_causal_root_available_at is not None
+            or risk_state.halt_dispatch_sequence is not None
+            or risk_state.conflict_existing_intent_sha256 is not None
+            or risk_state.conflict_submitted_intent_sha256 is not None
+            or portfolio_snapshot_digest(frontier.current_snapshot())
+            != portfolio_snapshot_digest(snapshot)
+            or risk_state_snapshot_digest(frontier.current_state())
+            != risk_state_snapshot_digest(risk_state)
         ):
             raise LifecycleError(
                 OutcomeCode.CONFLICTING_ID,
-                "full-journal recovery requires an unseeded refresh frontier",
+                "full-journal recovery requires fresh-empty economic authorities and an "
+                "unseeded refresh frontier",
             )
     recovered = iter(_require_recovery_records(binding, records, audit=audit))
     try:
@@ -2615,6 +2804,7 @@ def _recover_ledger_frontier(
     assert coordinator._risk_authority is not None
     assert coordinator._risk_refresh_authority is not None
     assert coordinator._frontier is not None
+    active.prior_frontier = _frontier_state(coordinator._frontier)
     ledger_entries = {entry[1].logical_key: entry for entry in recovered.ledger_records}
     failed_key = (
         None
@@ -2661,6 +2851,7 @@ def _recover_ledger_frontier(
             )
             active.ledger_acks[index] = ledger_ack
         active.ledger_outcomes[index] = result
+        active.ledger_snapshot = coordinator._ledger_handoff_authority.snapshot
         if (
             outcome.halt_requested
             or result.requires_reconciliation
@@ -2673,11 +2864,13 @@ def _recover_ledger_frontier(
         batch = active.batch
         if batch is None:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovered ledger batch is missing")
-        coordinator._risk_authority.engage_halt(
+        active.risk_state = coordinator._risk_authority.engage_halt(
             RiskHaltReason.RECONCILIATION_REQUIRED,
             causal_root_available_at=batch.trigger_root_key.available_at,
             dispatch_sequence=recovered.sequence,
         )
+    elif active.risk_state is None:
+        active.risk_state = coordinator._risk_authority.risk_state
     ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
     complete_ledger_frontier = len(ledger_acks) == len(active.handoffs) and all(
         value is not None for value in active.handoffs
@@ -2696,14 +2889,17 @@ def _recover_ledger_frontier(
             )
         refresh_position = None if refresh_entry is None else refresh_entry[0]
         failing_position = None if recovered.failing_record is None else recovered.failing_record[0]
+        snapshot = coordinator._ledger_handoff_authority.snapshot
+        risk_state = coordinator._risk_authority.risk_state
+        refresh_frontier_sha256 = ordered_digest_tuple(
+            ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
+            tuple(audit_append_acknowledgement_digest(value) for value in ledger_acks),
+        )
         refresh = coordinator._risk_refresh_authority.create_refresh(
-            snapshot=coordinator._ledger_handoff_authority.snapshot,
-            risk_state=coordinator._risk_authority.risk_state,
+            snapshot=snapshot,
+            risk_state=risk_state,
             dispatch_sequence=recovered.sequence,
-            ordered_ledger_ack_frontier_sha256=ordered_digest_tuple(
-                ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
-                tuple(audit_append_acknowledgement_digest(value) for value in ledger_acks),
-            ),
+            ordered_ledger_ack_frontier_sha256=refresh_frontier_sha256,
             coordinator_running=(
                 coordinator._state.phase in {CoordinatorPhase.ADMITTED, CoordinatorPhase.RUNNING}
                 and active.batch is not None
@@ -2719,6 +2915,9 @@ def _recover_ledger_frontier(
         )
         payload = canonical_portfolio_risk_refresh_bytes(refresh)
         subject = audit_subject_digest(AuditRecordKind.RISK_PORTFOLIO_REFRESH, payload)
+        active.ledger_snapshot = snapshot
+        active.risk_state = risk_state
+        active.refresh = refresh
         active.refresh_sha256 = subject
         active.refresh_value_sha256 = portfolio_risk_refresh_digest(refresh)
         if refresh_entry is None:
@@ -2747,11 +2946,8 @@ def _recover_ledger_frontier(
                 payload=payload,
             )
             active.refresh_ack = refresh_ack
-            coordinator._frontier.advance(
-                snapshot=coordinator._ledger_handoff_authority.snapshot,
-                risk_state=coordinator._risk_authority.risk_state,
-                refresh=refresh,
-            )
+            coordinator._publish_retained_refresh(active, coordinator._frontier)
+            coordinator._rebind_economic_authorities(active)
             active.final_portfolio_snapshot_sha256 = portfolio_snapshot_digest(
                 coordinator._frontier.current_snapshot()
             )

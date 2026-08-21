@@ -566,6 +566,7 @@ def recover_phase1_historical_lifecycle(
     ):
         raise TypeError("historical lifecycle recovery requires exact authoritative carriers")
     reservation, binding, audit, records = recovery._reserve_consumption()
+    economic_recovery_started = False
     try:
         authorization, authorization_capability, activation_seal = (
             create_dormant_historical_submission_authorization_authority(
@@ -601,6 +602,12 @@ def recover_phase1_historical_lifecycle(
             orders=order_issuance_verifier,
             submissions=matcher,
             seal=activation_seal,
+        )
+        economic_recovery_started = (
+            ledger_handoff_authority is not None
+            and risk_authority is not None
+            and risk_refresh_authority is not None
+            and frontier is not None
         )
         coordinator = recover_phase1_lifecycle_coordinator(
             ledger_handoff_authority=ledger_handoff_authority,
@@ -639,7 +646,10 @@ def recover_phase1_historical_lifecycle(
         recovery._commit_consumption(reservation)
         return lifecycle
     except BaseException:
-        recovery._abort_consumption(reservation)
+        if economic_recovery_started:
+            recovery._fail_consumption(reservation)
+        else:
+            recovery._abort_consumption(reservation)
         raise
 
 

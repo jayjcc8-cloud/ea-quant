@@ -4,7 +4,7 @@ import json
 import os
 from inspect import signature
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -110,6 +110,91 @@ class _UncertainOnceAuthorizationAudit:
             self.settlement_failed = True
             raise RuntimeError("injected uncertain authorization settlement failure")
         return self._inner.settle_append(**values)
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ("coordinator", "history-frontier", "activation", "reconciliation"),
+)
+def test_gated_recovery_failure_cannot_reopen_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    from ea.execution.fact_authority import Phase1ExecutionFactAuthority
+    from ea.runtime.historical import Phase1HistoricalMarketRuntime
+
+    recovery = object.__new__(run_composition.AdmittedRecoveredRun)
+    object.__setattr__(recovery, "_consumption_lock", Lock())
+    object.__setattr__(recovery, "_consumption_state", "available")
+    object.__setattr__(recovery, "_consumption_token", None)
+    object.__setattr__(recovery, "binding", SimpleNamespace())
+    object.__setattr__(recovery, "audit", SimpleNamespace())
+    object.__setattr__(recovery, "records", SimpleNamespace())
+
+    def fail_at(stage: str) -> None:
+        if failure_stage == stage:
+            raise RuntimeError(f"injected {stage} failure after economic replay began")
+
+    authorization = SimpleNamespace(
+        recover_attempts=lambda *args, **kwargs: None,
+        activate=lambda *args, **kwargs: fail_at("activation"),
+    )
+    coordinator = SimpleNamespace(
+        _reconcile_recovered_authorization=lambda: fail_at("reconciliation")
+    )
+    for name, replacement in (
+        (
+            "create_dormant_historical_submission_authorization_authority",
+            lambda **kwargs: (authorization, object(), object()),
+        ),
+        ("create_historical_matcher_dispatch_verifier", lambda runtime: object()),
+        ("recover_phase1_historical_matcher_history", lambda *args, **kwargs: object()),
+        (
+            "create_historical_matcher_descendant_fact_dispatch_verifier",
+            lambda **kwargs: object(),
+        ),
+        (
+            "recover_phase1_execution_fact_authority_history",
+            lambda *args, **kwargs: object(),
+        ),
+    ):
+        monkeypatch.setattr(lifecycle_composition, name, replacement)
+
+    def recover_coordinator(**kwargs: Any) -> Any:
+        fail_at("coordinator")
+        return coordinator
+
+    monkeypatch.setattr(
+        lifecycle_composition,
+        "recover_phase1_lifecycle_coordinator",
+        recover_coordinator,
+    )
+    monkeypatch.setattr(
+        lifecycle_composition,
+        "_require_recovery_history_frontier",
+        lambda **kwargs: fail_at("history-frontier"),
+    )
+    _fixture, matcher, _orders_value, _causal, _delayed, _end = _system()
+    frontier = object()
+    with pytest.raises(RuntimeError, match=failure_stage):
+        recover_phase1_historical_lifecycle(
+            recovery=recovery,
+            runtime=object.__new__(Phase1HistoricalMarketRuntime),
+            matcher_history=matcher,
+            fact_history=object.__new__(Phase1ExecutionFactAuthority),
+            order_issuance_verifier=object(),  # type: ignore[arg-type]
+            portfolio=frontier,  # type: ignore[arg-type]
+            risk=frontier,  # type: ignore[arg-type]
+            global_halt=object(),  # type: ignore[arg-type]
+            instrument_gate=object(),  # type: ignore[arg-type]
+            ledger_handoff_authority=object(),  # type: ignore[arg-type]
+            risk_authority=object(),  # type: ignore[arg-type]
+            risk_refresh_authority=object(),  # type: ignore[arg-type]
+            frontier=frontier,  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(RunCompositionError, match="already consumed"):
+        recovery._reserve_consumption()
 
 
 class _FailOnceAuthorizationAudit(_MemoryAudit):

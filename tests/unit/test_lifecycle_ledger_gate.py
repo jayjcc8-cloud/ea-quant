@@ -518,6 +518,220 @@ class _FailOnceRefreshAudit(_MemoryAudit):
         )
 
 
+class _FailOnceFrontierAdvance:
+    def __init__(self, inner: Any, *, commit_before_raise: bool) -> None:
+        self.inner = inner
+        self.commit_before_raise = commit_before_raise
+        self.raised = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def advance(self, **values: Any) -> None:
+        if not self.raised:
+            self.raised = True
+            if self.commit_before_raise:
+                self.inner.advance(**values)
+            raise RuntimeError("injected frontier publication failure")
+        self.inner.advance(**values)
+
+
+class _AppendHookAudit(_MemoryAudit):
+    def __init__(self, binding: RunBinding) -> None:
+        super().__init__(binding)
+        self.record_kind: AuditRecordKind | None = None
+        self.hook: Any = None
+
+    def append(self, **values: Any) -> Any:
+        acknowledgement = super().append(**values)
+        if values["record_kind"] is self.record_kind and self.hook is not None:
+            hook, self.hook = self.hook, None
+            hook()
+        return acknowledgement
+
+
+class _DriftingLedgerPort:
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.stale_snapshot = inner.snapshot
+        self.drifted = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    @property
+    def snapshot(self) -> Any:
+        return self.stale_snapshot if self.drifted else self.inner.snapshot
+
+
+class _DriftingRefreshAuthority:
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.drifted = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def create_refresh(self, **values: Any) -> Any:
+        return self.inner.create_refresh(**values)
+
+    def resolve_refresh(self, **values: Any) -> Any:
+        if self.drifted:
+            return None
+        return self.inner.resolve_refresh(**values)
+
+
+class _DriftingFrontier:
+    def __init__(self, inner: Any, ledger: Any) -> None:
+        self.inner = inner
+        self.ledger = ledger
+        self.drifted = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def current_snapshot(self) -> Any:
+        return self.ledger.snapshot if self.drifted else self.inner.current_snapshot()
+
+
+def _gate_case(*, hooked_audit: bool = False) -> tuple[Any, ...]:
+    matcher, delayed, fill, outcome = _dispatch_one_system()
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    audit = _AppendHookAudit(binding) if hooked_audit else _MemoryAudit(binding)
+    runtime = _Runtime(matcher, delayed, dispatch_sequence=1)
+    ports = _ledger_ports(matcher, first_sequence=1, first_previous_refresh_sha256=None)
+    return matcher, delayed, fill, outcome, runtime, audit, ports
+
+
+def _build_gate_case(
+    matcher: Any,
+    fill: Fill,
+    outcome: ExecutionFactProcessingOutcome,
+    runtime: Any,
+    audit: _MemoryAudit,
+    ports: dict[str, Any],
+) -> Any:
+    return _build_coordinator(
+        binding=audit.binding,
+        audit=audit,
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+        evidence_resolver=_FixedFillEvidence(fill),
+        **ports,
+    )
+
+
+@pytest.mark.parametrize("commit_before_raise", (False, True))
+def test_frontier_publication_failure_resolves_exact_old_or_new(
+    commit_before_raise: bool,
+) -> None:
+    from ea.core import portfolio_snapshot_digest, risk_state_snapshot_digest
+
+    matcher, _delayed, fill, outcome, runtime, audit, ports = _gate_case()
+    inner_frontier = ports["frontier"]
+    ports["frontier"] = _FailOnceFrontierAdvance(
+        inner_frontier,
+        commit_before_raise=commit_before_raise,
+    )
+    coordinator = _build_gate_case(matcher, fill, outcome, runtime, audit, ports)
+
+    if commit_before_raise:
+        result = coordinator.process_next_dispatch()
+    else:
+        with pytest.raises(RuntimeError, match="frontier publication"):
+            coordinator.process_next_dispatch()
+        assert coordinator._active is not None
+        assert coordinator._active.refresh_ack is not None
+        assert inner_frontier.published_refresh is None
+        result = coordinator.retry_active_dispatch()
+
+    assert result.runtime_acknowledged is True
+    assert inner_frontier.published_refresh is not None
+    completion = _record_document(audit.records, AuditRecordKind.RUNTIME_DISPATCH_COMPLETED)
+    assert (
+        completion["final_portfolio_snapshot_sha256"]
+        == portfolio_snapshot_digest(inner_frontier.current_snapshot()).value
+    )
+    assert (
+        completion["final_risk_state_sha256"]
+        == risk_state_snapshot_digest(inner_frontier.current_state()).value
+    )
+    assert (
+        sum(
+            record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH for record in audit.records
+        )
+        == 1
+    )
+
+
+def test_refresh_audit_callback_rebinds_internal_risk_before_publication() -> None:
+    from ea.core import RiskHaltReason
+    from ea.core.lifecycle import LifecycleError
+
+    matcher, delayed, fill, outcome, runtime, audit, ports = _gate_case(hooked_audit=True)
+    coordinator = _build_gate_case(matcher, fill, outcome, runtime, audit, ports)
+    audit.record_kind = AuditRecordKind.RISK_PORTFOLIO_REFRESH
+    audit.hook = lambda: ports["risk_authority"].engage_halt(
+        RiskHaltReason.RECONCILIATION_REQUIRED,
+        delayed.available_at,
+        1,
+    )
+
+    with pytest.raises(LifecycleError, match="risk state drifted"):
+        coordinator.process_next_dispatch()
+
+    assert ports["frontier"].published_refresh is None
+
+
+def test_ledger_audit_callback_rebinds_internal_snapshot() -> None:
+    from ea.core.lifecycle import LifecycleError
+
+    matcher, _delayed, fill, outcome, runtime, audit, ports = _gate_case(hooked_audit=True)
+    drifting_ledger = _DriftingLedgerPort(ports["ledger_handoff_authority"])
+    ports["ledger_handoff_authority"] = drifting_ledger
+    coordinator = _build_gate_case(matcher, fill, outcome, runtime, audit, ports)
+    audit.record_kind = AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+    audit.hook = lambda: setattr(drifting_ledger, "drifted", True)
+
+    with pytest.raises(LifecycleError, match="ledger snapshot drifted"):
+        coordinator.process_next_dispatch()
+
+
+def test_refresh_audit_callback_rebinds_retained_refresh() -> None:
+    from ea.core.lifecycle import LifecycleError
+
+    matcher, _delayed, fill, outcome, runtime, audit, ports = _gate_case(hooked_audit=True)
+    drifting_refresh = _DriftingRefreshAuthority(ports["risk_refresh_authority"])
+    ports["risk_refresh_authority"] = drifting_refresh
+    coordinator = _build_gate_case(matcher, fill, outcome, runtime, audit, ports)
+    audit.record_kind = AuditRecordKind.RISK_PORTFOLIO_REFRESH
+    audit.hook = lambda: setattr(drifting_refresh, "drifted", True)
+
+    with pytest.raises(LifecycleError, match="risk refresh drifted"):
+        coordinator.process_next_dispatch()
+
+
+def test_ledger_audit_callback_rebinds_pending_public_frontier() -> None:
+    from ea.core.lifecycle import LifecycleError
+
+    matcher, _delayed, fill, outcome, runtime, audit, ports = _gate_case(hooked_audit=True)
+    drifting_frontier = _DriftingFrontier(
+        ports["frontier"],
+        ports["ledger_handoff_authority"],
+    )
+    ports["frontier"] = drifting_frontier
+    coordinator = _build_gate_case(matcher, fill, outcome, runtime, audit, ports)
+    audit.record_kind = AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+    audit.hook = lambda: setattr(drifting_frontier, "drifted", True)
+
+    with pytest.raises(LifecycleError, match="pending frontier drifted"):
+        coordinator.process_next_dispatch()
+
+
 def test_gate_retry_after_refresh_append_failure_resolves_the_same_frontier() -> None:
     _fixture, matcher, orders, causal, delayed, _end = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -767,27 +981,8 @@ def test_zero_dispatch_recovery_rejects_seeded_or_mixed_frontiers(
     from ea.core.lifecycle import LifecycleError
     from ea.runtime.coordinator import recover_phase1_lifecycle_coordinator
 
-    matcher, delayed, fill, outcome = _dispatch_one_system()
-    binding = RunBinding(
-        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
-        Sha256Digest("22" * 32),
-    )
-    audit = _MemoryAudit(binding)
-    runtime = _Runtime(matcher, delayed, dispatch_sequence=1)
-    ports = _ledger_ports(
-        matcher,
-        first_sequence=1,
-        first_previous_refresh_sha256=None,
-    )
-    _build_coordinator(
-        binding=binding,
-        audit=audit,
-        runtime=runtime,
-        matcher=matcher,
-        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
-        evidence_resolver=_FixedFillEvidence(fill),
-        **ports,
-    )
+    matcher, delayed, fill, outcome, runtime, audit, ports = _gate_case()
+    _build_gate_case(matcher, fill, outcome, runtime, audit, ports)
     predecessor = _DEFAULT_REFRESH_PREDECESSOR
     if refresh_seeded:
         risk = ports["risk_authority"]
@@ -807,7 +1002,63 @@ def test_zero_dispatch_recovery_rejects_seeded_or_mixed_frontiers(
         )
     with pytest.raises(LifecycleError, match="unseeded"):
         recover_phase1_lifecycle_coordinator(
-            binding=binding,
+            binding=audit.binding,
+            audit=audit,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+            evidence_resolver=_FixedFillEvidence(fill),
+            records=tuple(audit.records),
+            **ports,
+        )
+
+
+@pytest.mark.parametrize(
+    "preseeded_authority",
+    ("ledger", "handoff", "risk", "frontier"),
+)
+def test_zero_dispatch_recovery_requires_fresh_empty_economic_authorities(
+    preseeded_authority: str,
+) -> None:
+    from ea.composition import create_acknowledged_lifecycle_frontier
+    from ea.core import RiskHaltReason
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import recover_phase1_lifecycle_coordinator
+    from unit.test_ledger_handoff_authority import _handoff_bundle
+
+    matcher, delayed, fill, outcome, runtime, audit, ports = _gate_case()
+    _build_gate_case(matcher, fill, outcome, runtime, audit, ports)
+    if preseeded_authority == "ledger":
+        ports["ledger_handoff_authority"]._state.ledger.apply_fill(fill)
+    elif preseeded_authority == "handoff":
+        handoff_matcher, no_fill, no_fill_outcome, handoff = _handoff_bundle(
+            action=ExecutionFactAction.DUPLICATE,
+            with_fill=False,
+        )
+        assert no_fill is None
+        assert handoff_matcher.run_id == matcher.run_id
+        ports["ledger_handoff_authority"].apply_handoff(
+            handoff=handoff,
+            outcome=no_fill_outcome,
+            fill=None,
+        )
+    elif preseeded_authority == "risk":
+        ports["risk_authority"].engage_halt(
+            RiskHaltReason.RECONCILIATION_REQUIRED,
+            delayed.available_at,
+            1,
+        )
+    else:
+        ahead_ledger = create_portfolio_ledger(matcher.run_id, matcher.spec_set)
+        ahead_ledger.apply_fill(fill)
+        ports["frontier"] = create_acknowledged_lifecycle_frontier(
+            initial_snapshot=ahead_ledger.snapshot,
+            initial_risk_state=ports["risk_authority"].risk_state,
+        )
+
+    with pytest.raises(LifecycleError, match="fresh-empty"):
+        recover_phase1_lifecycle_coordinator(
+            binding=audit.binding,
             audit=audit,
             runtime=runtime,
             matcher=matcher,

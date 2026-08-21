@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from ea.core import (
@@ -14,6 +20,7 @@ from ea.core import (
     ExecutionFactProcessingOutcome,
     LedgerHandoffAction,
     LedgerHandoffFailure,
+    LedgerHandoffOutcome,
     OrderResolutionKeyKind,
     RunBinding,
     RunReference,
@@ -39,6 +46,19 @@ from ea.portfolio import (
 from ea.portfolio.ledger_authority import LedgerHandoffAuthorityError
 from unit.test_audit_journal import _batch_payload
 from unit.test_historical_matcher import _system
+
+_NO_FILL_REPLAY_SCRIPT = """
+import json
+from ea.core import canonical_ledger_handoff_outcome_bytes, ledger_handoff_outcome_digest
+from unit.test_ledger_handoff_authority import _replayed_no_fill_outcomes
+first, replay, _version = _replayed_no_fill_outcomes()
+print(json.dumps({
+    "first_bytes": canonical_ledger_handoff_outcome_bytes(first).hex(),
+    "replay_bytes": canonical_ledger_handoff_outcome_bytes(replay).hex(),
+    "first_digest": ledger_handoff_outcome_digest(first).value,
+    "replay_digest": ledger_handoff_outcome_digest(replay).value,
+}, sort_keys=True))
+"""
 
 
 def _handoff_bundle(
@@ -162,6 +182,68 @@ def test_no_fill_handoff_binds_unchanged_snapshot_without_mutation() -> None:
     assert result.after_snapshot_sha256 == before
     assert portfolio_snapshot_digest(ledger.snapshot) == before
     assert result.failure is None
+
+
+def _replayed_no_fill_outcomes() -> tuple[
+    LedgerHandoffOutcome,
+    LedgerHandoffOutcome,
+    int,
+]:
+    matcher, _no_fill, no_fill_outcome, no_fill_handoff = _handoff_bundle(
+        action=ExecutionFactAction.DUPLICATE,
+        with_fill=False,
+    )
+    later_matcher, fill, fill_outcome, fill_handoff = _handoff_bundle()
+    assert later_matcher.run_id == matcher.run_id
+    assert later_matcher.spec_set == matcher.spec_set
+    ledger = create_portfolio_ledger(matcher.run_id, matcher.spec_set)
+    authority = create_phase1_ledger_handoff_authority(
+        matcher.run_id,
+        matcher.spec_set,
+        ledger,
+    )
+
+    first = authority.apply_handoff(
+        handoff=no_fill_handoff,
+        outcome=no_fill_outcome,
+        fill=None,
+    )
+    authority.apply_handoff(
+        handoff=fill_handoff,
+        outcome=fill_outcome,
+        fill=fill,
+    )
+    replay = authority.apply_handoff(
+        handoff=no_fill_handoff,
+        outcome=no_fill_outcome,
+        fill=None,
+    )
+    return first, replay, ledger.snapshot.snapshot_version
+
+
+def test_no_fill_handoff_replay_retains_first_snapshot_after_later_ledger_advance() -> None:
+    first, replay, snapshot_version = _replayed_no_fill_outcomes()
+
+    assert snapshot_version == 1
+    assert replay is first
+
+
+def test_no_fill_handoff_replay_is_byte_identical_across_processes() -> None:
+    vectors: list[dict[str, str]] = []
+    for hash_seed in ("7", "19"):
+        environment = dict(os.environ, PYTHONHASHSEED=hash_seed, PYTHONPATH="src:tests")
+        output = subprocess.check_output(
+            [sys.executable, "-c", _NO_FILL_REPLAY_SCRIPT],
+            text=True,
+            env=environment,
+            cwd=Path(__file__).resolve().parents[2],
+            timeout=120,
+        )
+        vectors.append(json.loads(output.strip().splitlines()[-1]))
+
+    assert vectors[0] == vectors[1]
+    assert vectors[0]["first_bytes"] == vectors[0]["replay_bytes"]
+    assert vectors[0]["first_digest"] == vectors[0]["replay_digest"]
 
 
 def test_applied_fill_handoff_commits_once_and_retains_original_result() -> None:

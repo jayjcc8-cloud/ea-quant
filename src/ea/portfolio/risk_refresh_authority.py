@@ -90,6 +90,20 @@ class Phase1PortfolioRiskRefreshAuthority:
     def policy_sha256(self) -> Sha256Digest:
         return self._state.policy_sha256
 
+    def resolve_refresh(
+        self,
+        *,
+        dispatch_sequence: int,
+        ordered_ledger_ack_frontier_sha256: Sha256Digest,
+    ) -> PortfolioRiskRefresh | None:
+        if type(dispatch_sequence) is not int or dispatch_sequence < 1:
+            raise _fail(OutcomeCode.INVALID_TYPE, "refresh dispatch sequence must be positive")
+        if type(ordered_ledger_ack_frontier_sha256) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "refresh frontier digest must be exact")
+        return self._state.replay_index.get(
+            (self._state.run_id, dispatch_sequence, ordered_ledger_ack_frontier_sha256)
+        )
+
     def create_refresh(
         self,
         *,

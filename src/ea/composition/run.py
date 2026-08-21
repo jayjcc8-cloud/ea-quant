@@ -387,6 +387,15 @@ class AdmittedRecoveredRun:
             object.__setattr__(self, "_consumption_state", "available")
             object.__setattr__(self, "_consumption_token", None)
 
+    def _fail_consumption(self, token: object) -> None:
+        with self._consumption_lock:
+            if self._consumption_state != "assembling" or self._consumption_token is not token:
+                object.__setattr__(self, "_consumption_state", "failed")
+                object.__setattr__(self, "_consumption_token", None)
+                raise RunCompositionError("recovery admission reservation changed")
+            object.__setattr__(self, "_consumption_state", "failed")
+            object.__setattr__(self, "_consumption_token", None)
+
 
 def prepare_reproducible_run(
     *,
