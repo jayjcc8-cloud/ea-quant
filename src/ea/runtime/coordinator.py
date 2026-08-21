@@ -1351,6 +1351,50 @@ class Phase1HistoricalLifecycleCoordinator:
             )
         active.refresh_published = True
 
+    def _completion_payload(
+        self,
+        active: _ActiveDispatch,
+        outcome_acks: tuple[AuditAppendAcknowledgement, ...],
+    ) -> bytes:
+        batch = active.batch
+        if batch is None:
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion batch is missing")
+        pre_ack_state_sha256 = coordinator_run_state_digest(
+            self._pre_ack_state(active, outcome_acks)
+        )
+        receipts = () if active.submission_receipt is None else (active.submission_receipt,)
+        if self._ledger_handoff_authority is None:
+            return canonical_dispatch_completed_audit_payload(
+                binding=self._binding,
+                batch=batch,
+                outcome_acknowledgements=outcome_acks,
+                pre_ack_state_sha256=pre_ack_state_sha256,
+                authorization_attempt_outcome=active.authorization_attempt,
+                submission_receipts=receipts,
+            )
+        ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
+        if len(ledger_acks) != len(active.handoffs) or active.refresh_ack is None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "ledger and refresh frontier is incomplete",
+            )
+        if active.final_portfolio_snapshot_sha256 is None or active.final_risk_state_sha256 is None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "ledger final frontier digests are incomplete",
+            )
+        return canonical_dispatch_completed_v3_audit_payload(
+            binding=self._binding,
+            batch=batch,
+            outcome_acknowledgements=outcome_acks,
+            pre_ack_state_sha256=pre_ack_state_sha256,
+            ledger_outcome_acknowledgements=ledger_acks,
+            final_portfolio_snapshot_sha256=active.final_portfolio_snapshot_sha256,
+            final_risk_state_sha256=active.final_risk_state_sha256,
+            authorization_attempt_outcome=active.authorization_attempt,
+            submission_receipts=receipts,
+        )
+
     def _complete_active(self, active: _ActiveDispatch) -> CoordinatorDispatchOutcome:
         root = active.lease.root
         try:
@@ -1371,50 +1415,9 @@ class Phase1HistoricalLifecycleCoordinator:
             self._rebind_active_authorities(active)
             if active.completion_ack is None:
                 active.window_stage = ActiveDispatchWindowStage.COMPLETION_FROZEN
-                pre_ack_state = self._pre_ack_state(active, outcome_acks)
-                if self._ledger_handoff_authority is None:
-                    completion_payload = canonical_dispatch_completed_audit_payload(
-                        binding=self._binding,
-                        batch=batch,
-                        outcome_acknowledgements=outcome_acks,
-                        pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
-                        authorization_attempt_outcome=active.authorization_attempt,
-                        submission_receipts=(
-                            ()
-                            if active.submission_receipt is None
-                            else (active.submission_receipt,)
-                        ),
-                    )
-                else:
-                    ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
-                    if len(ledger_acks) != len(handoffs) or active.refresh_ack is None:
-                        raise LifecycleError(
-                            OutcomeCode.CONFLICTING_ID,
-                            "ledger and refresh frontier is incomplete",
-                        )
-                    if (
-                        active.final_portfolio_snapshot_sha256 is None
-                        or active.final_risk_state_sha256 is None
-                    ):
-                        raise LifecycleError(
-                            OutcomeCode.CONFLICTING_ID,
-                            "ledger final frontier digests are incomplete",
-                        )
-                    completion_payload = canonical_dispatch_completed_v3_audit_payload(
-                        binding=self._binding,
-                        batch=batch,
-                        outcome_acknowledgements=outcome_acks,
-                        pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
-                        ledger_outcome_acknowledgements=ledger_acks,
-                        final_portfolio_snapshot_sha256=(active.final_portfolio_snapshot_sha256),
-                        final_risk_state_sha256=active.final_risk_state_sha256,
-                        authorization_attempt_outcome=active.authorization_attempt,
-                        submission_receipts=(
-                            ()
-                            if active.submission_receipt is None
-                            else (active.submission_receipt,)
-                        ),
-                    )
+                completion_payload = active.completion_payload
+                if completion_payload is None:
+                    completion_payload = self._completion_payload(active, outcome_acks)
                 active.completion_payload = completion_payload
                 completion_key = AuditLogicalKey(
                     AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
@@ -3257,43 +3260,7 @@ def _recover_dispatch(
     outcome_acks = tuple(value for value in active.outcome_acks if value is not None)
     expected_completion_payload = active.completion_payload
     if expected_completion_payload is None:
-        pre_ack_state = coordinator._pre_ack_state(active, outcome_acks)
-        if coordinator._ledger_handoff_authority is None:
-            expected_completion_payload = canonical_dispatch_completed_audit_payload(
-                binding=coordinator._binding,
-                batch=batch,
-                outcome_acknowledgements=outcome_acks,
-                pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
-                authorization_attempt_outcome=active.authorization_attempt,
-                submission_receipts=(
-                    () if active.submission_receipt is None else (active.submission_receipt,)
-                ),
-            )
-        else:
-            ledger_acks = tuple(value for value in active.ledger_acks if value is not None)
-            if (
-                len(ledger_acks) != len(active.handoffs)
-                or active.refresh_ack is None
-                or active.final_portfolio_snapshot_sha256 is None
-                or active.final_risk_state_sha256 is None
-            ):
-                raise LifecycleError(
-                    OutcomeCode.CONFLICTING_ID,
-                    "completion lacks the ordered ledger frontier",
-                )
-            expected_completion_payload = canonical_dispatch_completed_v3_audit_payload(
-                binding=coordinator._binding,
-                batch=batch,
-                outcome_acknowledgements=outcome_acks,
-                pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
-                ledger_outcome_acknowledgements=ledger_acks,
-                final_portfolio_snapshot_sha256=active.final_portfolio_snapshot_sha256,
-                final_risk_state_sha256=active.final_risk_state_sha256,
-                authorization_attempt_outcome=active.authorization_attempt,
-                submission_receipts=(
-                    () if active.submission_receipt is None else (active.submission_receipt,)
-                ),
-            )
+        expected_completion_payload = coordinator._completion_payload(active, outcome_acks)
         active.completion_payload = expected_completion_payload
     _completion_position, completion_record, completion_ack = completion_entry
     if completion_record.canonical_payload != expected_completion_payload:
@@ -3592,17 +3559,9 @@ def _recover_failing_transition(
                 OutcomeCode.CONFLICTING_ID,
                 "failed completion has incomplete inbound evidence",
             )
-        ordered_outcome_acks = tuple(value for value in active.outcome_acks if value is not None)
-        pre_ack_state = coordinator._pre_ack_state(active, ordered_outcome_acks)
-        active.completion_payload = canonical_dispatch_completed_audit_payload(
-            binding=coordinator._binding,
-            batch=active.batch,
-            outcome_acknowledgements=ordered_outcome_acks,
-            pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
-            authorization_attempt_outcome=active.authorization_attempt,
-            submission_receipts=(
-                () if active.submission_receipt is None else (active.submission_receipt,)
-            ),
+        active.completion_payload = coordinator._completion_payload(
+            active,
+            tuple(value for value in active.outcome_acks if value is not None),
         )
         completion_key = AuditLogicalKey(
             AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,

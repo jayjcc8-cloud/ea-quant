@@ -490,25 +490,28 @@ def test_gate_factory_rejects_mismatched_authority_bindings() -> None:
         )
 
 
-class _FailOnceRefreshAudit(_MemoryAudit):
-    def __init__(self, binding: RunBinding) -> None:
+class _FailOnceGateAudit(_MemoryAudit):
+    def __init__(
+        self,
+        binding: RunBinding,
+        record_kind: AuditRecordKind,
+        boundary: str,
+    ) -> None:
         super().__init__(binding)
-        self.refresh_failed = False
-        self.failed_refresh_payload: bytes | None = None
-        self.failed_refresh_subject: Sha256Digest | None = None
+        self.failed_record_kind = record_kind
+        self.boundary = boundary
+        self.failed_payload: bytes | None = None
 
     def append(
         self, *, record_kind: Any, subject_kind: Any, subject_sha256: Any, canonical_payload: Any
     ) -> Any:
-        if record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH and not self.refresh_failed:
-            self.refresh_failed = True
-            self.failed_refresh_payload = canonical_payload
-            self.failed_refresh_subject = subject_sha256
+        if record_kind is self.failed_record_kind and self.failed_payload is None:
+            self.failed_payload = canonical_payload
             raise __import__("ea.core.audit", fromlist=["AuditContractError"]).AuditContractError(
                 __import__(
                     "ea.core", fromlist=["OutcomeCode"]
                 ).OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
-                "injected refresh append failure",
+                f"injected {self.boundary} append failure",
             )
         return super().append(
             record_kind=record_kind,
@@ -516,6 +519,11 @@ class _FailOnceRefreshAudit(_MemoryAudit):
             subject_sha256=subject_sha256,
             canonical_payload=canonical_payload,
         )
+
+
+class _FailOnceRefreshAudit(_FailOnceGateAudit):
+    def __init__(self, binding: RunBinding) -> None:
+        super().__init__(binding, AuditRecordKind.RISK_PORTFOLIO_REFRESH, "refresh")
 
 
 class _FailOnceFrontierAdvance:
@@ -771,37 +779,28 @@ def test_gate_retry_after_refresh_append_failure_resolves_the_same_frontier() ->
         for record in audit.records
         if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
     )
-    assert refresh_record.canonical_payload == audit.failed_refresh_payload
+    assert refresh_record.canonical_payload == audit.failed_payload
     assert json.loads(refresh_record.canonical_payload)["submission_permitted"] is True
     assert coordinator.state.phase is CoordinatorPhase.FAILING
     document = _record_document(audit.records, AuditRecordKind.RUNTIME_DISPATCH_COMPLETED)
     assert document["schema"] == "ea.audit-dispatch-completed.v3"
 
 
-class _FailOnceLedgerOutcomeAudit(_MemoryAudit):
+class _FailOnceLedgerOutcomeAudit(_FailOnceGateAudit):
     def __init__(self, binding: RunBinding) -> None:
-        super().__init__(binding)
-        self.ledger_failed = False
+        super().__init__(
+            binding,
+            AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+            "ledger outcome",
+        )
 
-    def append(
-        self, *, record_kind: Any, subject_kind: Any, subject_sha256: Any, canonical_payload: Any
-    ) -> Any:
-        if (
-            record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
-            and not self.ledger_failed
-        ):
-            self.ledger_failed = True
-            raise __import__("ea.core.audit", fromlist=["AuditContractError"]).AuditContractError(
-                __import__(
-                    "ea.core", fromlist=["OutcomeCode"]
-                ).OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
-                "injected ledger outcome append failure",
-            )
-        return super().append(
-            record_kind=record_kind,
-            subject_kind=subject_kind,
-            subject_sha256=subject_sha256,
-            canonical_payload=canonical_payload,
+
+class _FailOnceCompletionAudit(_FailOnceGateAudit):
+    def __init__(self, binding: RunBinding) -> None:
+        super().__init__(
+            binding,
+            AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
+            "completion",
         )
 
 
@@ -899,8 +898,8 @@ def test_ledger_failure_after_mutation_retries_only_the_same_record() -> None:
     assert document["submission_permitted"] is False
 
 
-@pytest.mark.parametrize("failure_boundary", ("ledger", "refresh"))
-def test_restart_recovers_failed_ledger_or_refresh_without_duplicate_effects(
+@pytest.mark.parametrize("failure_boundary", ("ledger", "refresh", "completion"))
+def test_restart_recovers_failed_gate_stage_without_duplicate_effects(
     failure_boundary: str,
 ) -> None:
     from ea.core.lifecycle import CoordinatorPhase
@@ -911,11 +910,12 @@ def test_restart_recovers_failed_ledger_or_refresh_without_duplicate_effects(
         RunReference(matcher.run_id, Sha256Digest("11" * 32)),
         Sha256Digest("22" * 32),
     )
-    failing_audit: _MemoryAudit = (
-        _FailOnceLedgerOutcomeAudit(binding)
-        if failure_boundary == "ledger"
-        else _FailOnceRefreshAudit(binding)
-    )
+    audit_type = {
+        "ledger": _FailOnceLedgerOutcomeAudit,
+        "refresh": _FailOnceRefreshAudit,
+        "completion": _FailOnceCompletionAudit,
+    }[failure_boundary]
+    failing_audit: _MemoryAudit = audit_type(binding)
     runtime = _Runtime(matcher, delayed, dispatch_sequence=1)
     coordinator = _build_coordinator(
         binding=binding,
@@ -932,7 +932,7 @@ def test_restart_recovers_failed_ledger_or_refresh_without_duplicate_effects(
     )
     with pytest.raises(Exception, match=f"injected {failure_boundary}"):
         coordinator.process_next_dispatch()
-    failed_refresh_payload = getattr(failing_audit, "failed_refresh_payload", None)
+    failed_payload = getattr(failing_audit, "failed_payload", None)
     reopened_audit = _reopen_audit(binding, tuple(failing_audit.records))
     recovered_ports = _ledger_ports(
         matcher,
@@ -964,9 +964,19 @@ def test_restart_recovers_failed_ledger_or_refresh_without_duplicate_effects(
     refresh_document = json.loads(refresh_records[0].canonical_payload)
     if failure_boundary == "ledger":
         assert refresh_document["submission_permitted"] is False
-    else:
-        assert refresh_records[0].canonical_payload == failed_refresh_payload
+    elif failure_boundary == "refresh":
+        assert refresh_records[0].canonical_payload == failed_payload
         assert refresh_document["submission_permitted"] is True
+    else:
+        completion_record = next(
+            record
+            for record in reopened_audit.records
+            if record.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
+        )
+        assert completion_record.canonical_payload == failed_payload
+        assert json.loads(completion_record.canonical_payload)["schema"] == (
+            "ea.audit-dispatch-completed.v3"
+        )
 
 
 @pytest.mark.parametrize(
