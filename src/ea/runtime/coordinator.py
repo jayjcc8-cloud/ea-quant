@@ -2833,12 +2833,28 @@ def _recover_ledger_frontier(
         if recovered.failing_record is None
         else _recovered_failed_logical_key(recovered.failing_record[1])
     )
+    if recovered.refresh_record is None and (
+        recovered.authorization_records
+        or (
+            failed_key is not None
+            and failed_key.record_kind is AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION
+        )
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID,
+            "recovery authorization stage order conflicts",
+        )
     active.ledger_outcomes = [None] * len(active.handoffs)
     active.ledger_acks = [None] * len(active.handoffs)
     halt_required = False
     for index, (handoff, outcome) in enumerate(zip(active.handoffs, active.outcomes, strict=True)):
         if handoff is None or outcome is None:
-            continue
+            if ledger_record_index != len(ledger_records):
+                raise LifecycleError(
+                    OutcomeCode.CONFLICTING_ID,
+                    "recovered ledger record prefix conflicts",
+                )
+            break
         fill = None
         if handoff.fill_id is not None:
             assert handoff.fill_sha256 is not None

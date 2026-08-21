@@ -1190,6 +1190,37 @@ def test_recovery_rejects_authorization_before_acknowledged_refresh() -> None:
         _require_recovery_stage_order(recovered)
 
 
+def test_ledger_gate_recovery_rejects_authorization_without_refresh() -> None:
+    from ea.core.lifecycle import LifecycleError
+    from ea.runtime.coordinator import _recover_ledger_frontier, _RecoveredDispatch
+
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    ports = _ledger_ports(matcher)
+    recovered = _RecoveredDispatch(1)
+    marker = cast(Any, object())
+    recovered.authorization_records.append((2, marker, marker))
+    active = SimpleNamespace(
+        prior_frontier=None,
+        handoffs=[],
+        outcomes=[],
+        ledger_outcomes=[],
+        ledger_acks=[],
+        ledger_snapshot=None,
+        risk_state=None,
+    )
+    coordinator = SimpleNamespace(
+        _binding=object(),
+        _resolver=None,
+        _ledger_handoff_authority=ports["ledger_handoff_authority"],
+        _risk_authority=ports["risk_authority"],
+        _risk_refresh_authority=ports["risk_refresh_authority"],
+        _frontier=ports["frontier"],
+    )
+
+    with pytest.raises(LifecycleError, match="authorization stage order"):
+        _recover_ledger_frontier(cast(Any, coordinator), cast(Any, active), recovered)
+
+
 def test_recovery_rejects_failed_authorization_before_acknowledged_refresh() -> None:
     from ea.core import AuditSubjectKind
     from ea.core.lifecycle import LifecycleError
@@ -1290,8 +1321,8 @@ def test_recovery_rejects_a_later_ledger_record_after_a_prefix_gap() -> None:
     recovered.ledger_records.append((4, audit.records[1], second_ack))
     active = SimpleNamespace(
         prior_frontier=None,
-        handoffs=[first_handoff, second_handoff],
-        outcomes=[SimpleNamespace(halt_requested=False), SimpleNamespace(halt_requested=False)],
+        handoffs=[None, second_handoff],
+        outcomes=[None, SimpleNamespace(halt_requested=False)],
         ledger_outcomes=[],
         ledger_acks=[],
         ledger_snapshot=None,
