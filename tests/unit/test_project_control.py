@@ -12,6 +12,7 @@ ROADMAP_PATH = PROJECT_ROOT / "docs" / "ROADMAP.md"
 WORKFLOW_PATH = PROJECT_ROOT / "docs" / "governance" / "WORKFLOW.md"
 ADR_PATH = PROJECT_ROOT / "docs" / "adr" / "0025-project-control-plane-and-authority-precedence.md"
 ISSUE_FORM_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml"
+ISSUE_TEMPLATE_CONFIG_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "config.yml"
 PR_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
 ROUTER_PATH = PROJECT_ROOT / ".governance" / "router.yaml"
 
@@ -218,6 +219,12 @@ def test_pull_request_template_records_evidence_cost_and_state_sync() -> None:
     ) in template
     assert "GitHub pull request review state: Draft / Ready for review" in template
     assert "separate from the governed Issue lifecycle" in template
+
+
+def test_issue_template_chooser_disables_blank_issue_bypass() -> None:
+    config = yaml.safe_load(_read(ISSUE_TEMPLATE_CONFIG_PATH))
+    assert config == {"blank_issues_enabled": False}
+    assert type(config["blank_issues_enabled"]) is bool
 
 
 def test_workflow_defines_state_machine_capacity_compression_and_done() -> None:
