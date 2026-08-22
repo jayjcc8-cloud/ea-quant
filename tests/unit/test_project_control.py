@@ -215,6 +215,15 @@ def test_workflow_defines_state_machine_capacity_compression_and_done() -> None:
         assert condition.lower() in workflow.lower()
 
 
+def test_workflow_absorbs_the_focused_green_checkpoint_rule() -> None:
+    workflow = _read(WORKFLOW_PATH).lower()
+    assert "focused-green" in workflow
+    assert "checkpoint sha" in workflow
+    assert "before the next independent slice" in workflow
+    assert "at most one bounded dirty slice" in workflow
+    assert "does not authorize ready or merge" in workflow
+
+
 def test_tier_vocabulary_and_adr_location_remain_canonical() -> None:
     router = yaml.safe_load(_read(ROUTER_PATH))
     assert isinstance(router, dict)

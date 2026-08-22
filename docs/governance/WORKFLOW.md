@@ -141,6 +141,24 @@ branches, leases, and declared merge order. Stop on unknown or unrelated changes
 One actor may hold at most **one active task for Tier 1/2**, or **two independent tasks for Tier 0**.
 Do not open a new exploration direction until the current task has a reviewable artifact.
 
+### Focused-green checkpoints
+
+Long iterations define one atomic file/symbol slice before editing, implement only that slice, and
+run its focused tests and focused static checks. Once focused-green, the Implementation Owner
+creates a clean checkpoint commit, records its checkpoint SHA and evidence in the Issue/PR, and
+pushes it when a branch/remote is available and the platform permits.
+This happens **before the next independent slice** begins.
+
+At most one bounded dirty slice may exist. A Git/platform write failure is recorded immediately;
+do not continue accumulating independent slices on the uncheckpointed tree. Never checkpoint
+known failures, unrelated/user-owned changes, secrets, caches, generated output, or ambiguous
+ownership. Commit messages name the atomic contract rather than generic “WIP”.
+
+A checkpoint SHA protects recovery and handoff; it does not authorize Ready or merge, refresh a
+stale report, replace final quality/full/CI, or waive independent exact-HEAD verification. Squash
+merge may still keep public history concise. Context recovery starts from the latest recorded clean
+checkpoint plus at most the one bounded dirty slice.
+
 ## Context and Review Evidence
 
 Every activation receives an actor-specific Context Bundle conforming to
