@@ -56,6 +56,13 @@ body:
     validations:
       required: true
   - type: textarea
+    id: risk_rationale
+    attributes:
+      label: Risk Trigger and Rationale
+      description: Identify the highest applicable trigger and explain why it determines this tier.
+    validations:
+      required: true
+  - type: textarea
     id: validation
     attributes:
       label: Validation

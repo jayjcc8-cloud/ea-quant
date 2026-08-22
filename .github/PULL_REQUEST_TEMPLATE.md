@@ -2,7 +2,7 @@
 
 - Issue:
 - Risk tier and reason:
-- Lifecycle state: Review / Verified
+- Lifecycle state: Draft / Ready / In Progress / Review / Verified / Done
 - Base branch and exact base SHA:
 - Branch and checkout/worktree:
 - Merge order with other active work:

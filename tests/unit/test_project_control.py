@@ -180,6 +180,7 @@ def test_task_issue_form_requires_the_complete_task_package() -> None:
         "authoritative_inputs",
         "acceptance_criteria",
         "risk_tier",
+        "risk_rationale",
         "validation",
         "expected_outputs",
         "reuse_assessment",
@@ -193,6 +194,10 @@ def test_task_issue_form_requires_the_complete_task_package() -> None:
 
     options = fields["risk_tier"]["attributes"]["options"]
     assert options == ["Tier 0 — low", "Tier 1 — normal", "Tier 2 — high"]
+    rationale = fields["risk_rationale"]
+    assert rationale["type"] == "textarea"
+    assert "highest" in rationale["attributes"]["description"].lower()
+    assert "trigger" in rationale["attributes"]["description"].lower()
 
 
 def test_pull_request_template_records_evidence_cost_and_state_sync() -> None:
@@ -208,6 +213,7 @@ def test_pull_request_template_records_evidence_cost_and_state_sync() -> None:
         "Successor Issues",
     }
     assert all(item in template for item in required)
+    assert "Draft / Ready / In Progress / Review / Verified / Done" in template
 
 
 def test_workflow_defines_state_machine_capacity_compression_and_done() -> None:
