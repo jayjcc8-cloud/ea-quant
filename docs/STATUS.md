@@ -27,6 +27,10 @@ report, with durable audit evidence and no live or external order-writing capabi
   Ledger/Reconciliation, independent Verification, Merge Approval, and merged-main CI passed.
 - `ADV-001/002`, `RUNTIME-004/005/006`, and `LEDGER-001/002` are FIXED. CI run `32598577572`
   confirms merged-main quality/full/build/install health.
+- Issue #67 bounded cleanup completed under Cleanup Approval R22: the runtime work unit was closed,
+  `/private/tmp/ea-issue67-ledger-recovery` was removed non-force, and the exact local and remote
+  `codex/67-ledger-coordinator-recovery` refs were deleted. Approval report SHA-256:
+  `bfc018aa48305144f47a49f7ceece822a3fcd6ee441fdfcdc76bbf19b26f3e45`.
 
 ## Incomplete
 
@@ -43,8 +47,6 @@ report, with durable audit evidence and no live or external order-writing capabi
 
 - Phase 1 cannot close until #77, #76, sample strategy, end-to-end composition, result/report,
   and release gates complete in order. Issue #67 no longer blocks this chain.
-- Issue #67 bounded cleanup remains pending a successor Cleanup Approval after this STATUS
-  synchronization; this is control-plane closeout work, not a runtime or ledger semantic defect.
 
 No blocker authorizes Phase 2 work, live trading, tool migration, or unrelated refactoring.
 
@@ -68,6 +70,7 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
   mutable open, closed, Draft, or merged state; resolve that state from GitHub.
 - [#67 — Ledger/coordinator recovery (Done)](https://github.com/jayjcc8-cloud/ea-quant/issues/67)
 - [#87 — #67 STATUS closeout](https://github.com/jayjcc8-cloud/ea-quant/issues/87)
+- [#89 — #67 cleanup status synchronization](https://github.com/jayjcc8-cloud/ea-quant/issues/89)
 - [#77 — GOV-DEBT-001 coordinator decomposition](https://github.com/jayjcc8-cloud/ea-quant/issues/77)
 - [#79 — GOV-DEBT-002 consolidation file-count exception](https://github.com/jayjcc8-cloud/ea-quant/issues/79)
 - [#76 — Reconciliation observation roots](https://github.com/jayjcc8-cloud/ea-quant/issues/76)
@@ -89,7 +92,8 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
   from any feature branch, resolve current `main` through GitHub rather than treating that branch's
   candidate SHA as merged reality.
 - Issue #67 / PR #73 state at this confirmation: closed/merged; all seven exact-SHA findings are
-  FIXED. The only remaining #67 action is bounded cleanup under a successor exact-state approval.
+  FIXED. Cleanup Approval R22 passed and its bounded action manifest completed; Issue #67 has no
+  remaining action.
 - Control-plane provenance: Issue #78 / PR #80; this does not assert mutable open, closed, Draft,
   or merged state.
 - Live capability: unavailable and prohibited
