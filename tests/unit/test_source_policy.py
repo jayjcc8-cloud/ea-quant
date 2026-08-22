@@ -24,7 +24,7 @@ def test_composition_package_does_not_export_mutable_frontier_capabilities() -> 
     runtime_exports = next(
         ast.literal_eval(node.value) for node in runtime.body if isinstance(node, ast.Assign)
     )
-    assert "create_phase1_lifecycle_coordinator" not in runtime_exports
+    assert not {name for name in runtime_exports if name.endswith("_phase1_lifecycle_coordinator")}
 
 
 def test_production_source_has_no_type_ignore_comments() -> None:
