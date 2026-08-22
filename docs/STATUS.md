@@ -4,9 +4,10 @@
 
 **Phase 1 — Backtest MVP: Incomplete / main healthy / live unavailable.**
 
-The authoritative merged baseline is
-`main@af7bc08cecd70fc5479b92e4393da468727ddb55`. Its CI succeeded. The open #67 candidate is
-separate, Draft, and blocked; it is not part of current `main`.
+When this file is read from merged `main`, the containing `main` commit and its exact CI are the
+authoritative implementation checkpoint. The last independently verified pre-consolidation
+checkpoint is `main@af7bc08cecd70fc5479b92e4393da468727ddb55`; its CI succeeded. The #67
+candidate is separate, Draft, and blocked until this control-plane iteration merges.
 
 ## Phase Objective
 
@@ -62,7 +63,9 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 
 ## Primary Issues
 
-- [#78 — Phase 1 project-control consolidation](https://github.com/jayjcc8-cloud/ea-quant/issues/78)
+- Control-plane provenance: [#78](https://github.com/jayjcc8-cloud/ea-quant/issues/78) and
+  [PR #80](https://github.com/jayjcc8-cloud/ea-quant/pull/80). This reference does not assert
+  mutable open, closed, Draft, or merged state; resolve that state from GitHub.
 - [#67 — Ledger/coordinator recovery](https://github.com/jayjcc8-cloud/ea-quant/issues/67)
 - [#77 — GOV-DEBT-001 coordinator decomposition](https://github.com/jayjcc8-cloud/ea-quant/issues/77)
 - [#79 — GOV-DEBT-002 consolidation file-count exception](https://github.com/jayjcc8-cloud/ea-quant/issues/79)
@@ -75,9 +78,14 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 ## Last Confirmed
 
 - Date: **2026-08-22** (Asia/Shanghai)
-- Merged baseline: `af7bc08cecd70fc5479b92e4393da468727ddb55`
-- Baseline CI: successful
-- Open pull requests: Draft #73 and Draft #80
+- Last independently verified pre-consolidation checkpoint:
+  `main@af7bc08cecd70fc5479b92e4393da468727ddb55`; checkpoint CI successful.
+- Current-main resolution: on merged `main`, use the containing `main` commit and its exact CI;
+  from any feature branch, resolve current `main` through GitHub rather than treating that branch's
+  candidate SHA as merged reality.
+- Active product candidate at this confirmation: Draft #73, blocked by `LEDGER-001/002`.
+- Control-plane provenance: Issue #78 / PR #80; this does not assert mutable open, closed, Draft,
+  or merged state.
 - Live capability: unavailable and prohibited
 
 Update this section whenever merged code/CI, primary Issues, blockers, or Phase completion changes.
@@ -96,8 +104,8 @@ Update this section whenever merged code/CI, primary Issues, blockers, or Phase 
 
 ## Weekly Governance Metrics
 
-First durable measurement starts with Issue #78. Until its PR merges, unavailable values are
-reported as `N/A`, never estimated.
+The first durable measurement is the first scheduled weekly review after Issue #78 merges. Until
+that review, unavailable values are reported as `N/A`, never estimated.
 
 | Metric | Latest |
 |---|---:|
@@ -107,4 +115,4 @@ reported as `N/A`, never estimated.
 | Ready-to-Merge time | N/A |
 | Merges missing evidence or status updates | N/A |
 | Token and human-time cost per accepted PR | N/A |
-| Unresolved decisions existing only in comments | audit in progress |
+| Unresolved decisions existing only in comments | 0 identified by the #78 historical audit |
