@@ -61,6 +61,7 @@ from ea.core.ledger_integration import (
     PortfolioRiskRefresh,
     canonical_ledger_handoff_outcome_bytes,
     canonical_portfolio_risk_refresh_bytes,
+    decode_portfolio_risk_refresh,
     portfolio_risk_refresh_digest,
 )
 from ea.core.lifecycle import (
@@ -1530,9 +1531,6 @@ class Phase1HistoricalLifecycleCoordinator:
         )
         if ledger_gate is not None:
             ledger, risk, _refresh, frontier = ledger_gate
-            # ADR 0022 L501-508: the internal ledger/risk frontier must equal
-            # the acknowledged published frontier and the final risk refresh
-            # is retained. Terminal-v2 binds any stable open-reference aggregate.
             if portfolio_snapshot_digest(frontier.current_snapshot()) != portfolio_snapshot_digest(
                 ledger.snapshot
             ) or risk_state_snapshot_digest(frontier.current_state()) != risk_state_snapshot_digest(
@@ -2119,12 +2117,7 @@ def create_phase1_lifecycle_coordinator(
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
-    """Bind dependency-neutral owners after the journal preparation record is durable.
-
-    The three ledger/risk authorities are an optional ADR 0022 composition
-    injection; they must be bound together or not at all, and the ledger gate
-    plus completion-v3 emission only engage when all three are present.
-    """
+    """Bind lower-level owners; composition supplies the complete economic gate."""
     if type(binding) is not RunBinding:
         raise LifecycleError(OutcomeCode.INVALID_TYPE, "binding must be exact")
     if (authorization is None) != (authorization_capability is None):
@@ -2934,8 +2927,16 @@ def _recover_ledger_frontier(
                 OutcomeCode.CONFLICTING_ID,
                 "recovered refresh lacks the ordered ledger frontier",
             )
-        refresh_position = None if refresh_entry is None else refresh_entry[0]
-        failing_position = None if recovered.failing_record is None else recovered.failing_record[0]
+        retained_submission_permitted = None
+        if (
+            refresh_entry is not None
+            and recovered.failing_record is not None
+            and recovered.failing_record[0] < refresh_entry[0]
+            and failed_key == refresh_entry[1].logical_key
+        ):
+            retained_submission_permitted = decode_portfolio_risk_refresh(
+                refresh_entry[1].canonical_payload
+            ).submission_permitted
         snapshot = coordinator._ledger_handoff_authority.snapshot
         risk_state = coordinator._risk_authority.risk_state
         refresh_frontier_sha256 = ordered_digest_tuple(
@@ -2948,14 +2949,12 @@ def _recover_ledger_frontier(
             dispatch_sequence=recovered.sequence,
             ordered_ledger_ack_frontier_sha256=refresh_frontier_sha256,
             coordinator_running=(
-                coordinator._state.phase in {CoordinatorPhase.ADMITTED, CoordinatorPhase.RUNNING}
+                retained_submission_permitted
+                if retained_submission_permitted is not None
+                else coordinator._state.phase
+                in {CoordinatorPhase.ADMITTED, CoordinatorPhase.RUNNING}
                 and active.batch is not None
                 and active.batch.dispatch_kind is not HistoricalDispatchKind.END_OF_RUN
-                and (
-                    refresh_position is None
-                    or failing_position is None
-                    or failing_position > refresh_position
-                )
             ),
             publication_window_clear=True,
             candidate_matches_internal=True,
@@ -3052,8 +3051,6 @@ def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
             "recovery authorization stage order conflicts",
         )
     if group.ledger_records or group.refresh_record is not None:
-        # ADR 0022 L371-374: fact-outcome acknowledgements precede ledger-outcome
-        # acknowledgements, which precede the refresh, which precedes completion.
         outcome_positions = [entry[0] for entry in group.outcome_records.values()]
         ledger_positions = [entry[0] for entry in group.ledger_records]
         if group.batch_record is None or ledger_positions != sorted(ledger_positions):

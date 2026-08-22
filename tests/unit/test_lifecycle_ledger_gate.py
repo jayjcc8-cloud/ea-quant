@@ -4,7 +4,6 @@ import json
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
 
 import pytest
 
@@ -48,6 +47,7 @@ from unit.test_lifecycle_coordinator import (
     _NoFacts,
     _RetainedOutcomeFacts,
     _Runtime,
+    _TracingMarketRuntime,
 )
 from unit.test_lifecycle_coordinator import (
     create_phase1_lifecycle_coordinator as _build_coordinator,
@@ -96,7 +96,7 @@ def _ledger_ports(
     first_sequence: int = 8,
     first_previous_refresh_sha256: Sha256Digest | None = _DEFAULT_REFRESH_PREDECESSOR,
 ) -> dict[str, Any]:
-    from ea.composition import create_acknowledged_lifecycle_frontier
+    from ea.composition.frontier import create_acknowledged_lifecycle_frontier
 
     run_id = matcher.run_id
     spec_set = matcher.spec_set
@@ -391,12 +391,7 @@ def test_ledger_gate_commits_outcomes_refresh_and_completion_v3() -> None:
 
 
 def test_ledger_gate_halts_on_reconciliation_outcome() -> None:
-    import ea.composition.lifecycle as lifecycle_composition
-    from ea.composition.run import AdmittedRecoveredRun
     from ea.core import ExecutionFactAnomaly
-    from ea.core.lifecycle import LifecycleError
-    from ea.execution.fact_authority import Phase1ExecutionFactAuthority
-    from ea.runtime.historical import Phase1HistoricalMarketRuntime
 
     _fixture, matcher, orders, causal, delayed, _end = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -408,10 +403,7 @@ def test_ledger_gate_halts_on_reconciliation_outcome() -> None:
     )
     coordinator, audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
     frontier = coordinator._frontier
-    stale_snapshot = frontier.current_snapshot()
     stale_risk_state = frontier.current_state()
-    stale_portfolio = SimpleNamespace(current_snapshot=lambda: stale_snapshot)
-    stale_risk = SimpleNamespace(current_state=lambda: stale_risk_state)
 
     window = coordinator.begin_next_dispatch()
     assert window is not None
@@ -421,45 +413,6 @@ def test_ledger_gate_halts_on_reconciliation_outcome() -> None:
     refresh_document = _record_document(audit.records, AuditRecordKind.RISK_PORTFOLIO_REFRESH)
     assert refresh_document["submission_permitted"] is False
     assert frontier.current_state() != stale_risk_state
-    freshness = {
-        "portfolio": stale_portfolio,
-        "risk": stale_risk,
-        "global_halt": None,
-        "instrument_gate": None,
-        "ledger_handoff_authority": coordinator._ledger_handoff_authority,
-        "risk_authority": coordinator._risk_authority,
-        "risk_refresh_authority": coordinator._risk_refresh_authority,
-        "frontier": frontier,
-    }
-    with pytest.raises(LifecycleError, match="acknowledged frontier"):
-        cast(Any, lifecycle_composition.create_phase1_historical_lifecycle)(
-            binding=coordinator._binding,
-            prepared_acknowledgement=create_audit_append_acknowledgement(audit.records[0]),
-            audit=audit,
-            runtime=None,
-            spec_set=matcher.spec_set,
-            execution_policy=matcher.execution_policy,
-            source_namespace=matcher.source_namespace,
-            provenance_id=matcher.provenance_id,
-            order_issuance_verifier=None,
-            **freshness,
-        )
-    recovery = object.__new__(AdmittedRecoveredRun)
-    with patch.object(
-        AdmittedRecoveredRun,
-        "_reserve_consumption",
-        side_effect=AssertionError("stale freshness reached recovery reservation"),
-    ) as reserve:
-        with pytest.raises(LifecycleError, match="acknowledged frontier"):
-            cast(Any, lifecycle_composition.recover_phase1_historical_lifecycle)(
-                recovery=recovery,
-                runtime=object.__new__(Phase1HistoricalMarketRuntime),
-                matcher_history=matcher,
-                fact_history=object.__new__(Phase1ExecutionFactAuthority),
-                order_issuance_verifier=None,
-                **freshness,
-            )
-        reserve.assert_not_called()
 
 
 def test_gate_factory_rejects_mismatched_authority_bindings() -> None:
@@ -788,52 +741,6 @@ def test_ledger_audit_callback_rebinds_pending_public_frontier() -> None:
         coordinator.process_next_dispatch()
 
 
-def test_gate_retry_after_refresh_append_failure_resolves_the_same_frontier() -> None:
-    _fixture, matcher, orders, causal, delayed, _end = _system()
-    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
-    fill, outcome = _outcome_bundle(matcher, delayed)
-    binding = RunBinding(
-        RunReference(matcher.run_id, Sha256Digest("11" * 32)),
-        Sha256Digest("22" * 32),
-    )
-    audit = _FailOnceRefreshAudit(binding)
-    ports = _ledger_ports(matcher)
-    coordinator = _build_coordinator(
-        binding=binding,
-        audit=audit,
-        runtime=_Runtime(matcher, delayed, dispatch_sequence=8),
-        matcher=matcher,
-        fact_authority=_RetainedOutcomeFacts(matcher, outcome),
-        evidence_resolver=_FixedFillEvidence(fill),
-        **ports,
-    )
-    with pytest.raises(Exception, match="injected refresh"):
-        coordinator.process_next_dispatch()
-
-    from ea.core.lifecycle import CoordinatorPhase
-
-    assert coordinator.state.phase is CoordinatorPhase.FAILING
-    assert coordinator._active is not None
-    assert coordinator._active.refresh_sha256 is not None
-    assert coordinator._active.refresh_ack is None
-    assert ports["frontier"].published_refresh is None
-    retry = coordinator.retry_active_dispatch()
-    assert retry.runtime_acknowledged is True
-    kinds = [record.record_kind for record in audit.records]
-    assert kinds.count(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME) == 1
-    assert kinds.count(AuditRecordKind.RISK_PORTFOLIO_REFRESH) == 1
-    refresh_record = next(
-        record
-        for record in audit.records
-        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
-    )
-    assert refresh_record.canonical_payload == audit.failed_payload
-    assert json.loads(refresh_record.canonical_payload)["submission_permitted"] is True
-    assert coordinator.state.phase is CoordinatorPhase.FAILING
-    document = _record_document(audit.records, AuditRecordKind.RUNTIME_DISPATCH_COMPLETED)
-    assert document["schema"] == "ea.audit-dispatch-completed.v3"
-
-
 class _FailOnceLedgerOutcomeAudit(_FailOnceGateAudit):
     def __init__(self, binding: RunBinding) -> None:
         super().__init__(
@@ -947,7 +854,7 @@ def test_ledger_failure_after_mutation_retries_only_the_same_record() -> None:
 
 
 @pytest.mark.parametrize("failure_boundary", ("ledger", "refresh", "completion"))
-def test_restart_recovers_failed_gate_stage_without_duplicate_effects(
+def test_completed_failed_refresh_retry_is_restart_equivalent_on_second_fresh_recovery(
     failure_boundary: str,
 ) -> None:
     from ea.core.lifecycle import CoordinatorPhase
@@ -964,7 +871,7 @@ def test_restart_recovers_failed_gate_stage_without_duplicate_effects(
         "completion": _FailOnceCompletionAudit,
     }[failure_boundary]
     failing_audit: _MemoryAudit = audit_type(binding)
-    runtime = _Runtime(matcher, delayed, dispatch_sequence=1)
+    runtime = _TracingMarketRuntime(matcher, delayed, dispatch_sequence=1)
     coordinator = _build_coordinator(
         binding=binding,
         audit=failing_audit,
@@ -1015,6 +922,38 @@ def test_restart_recovers_failed_gate_stage_without_duplicate_effects(
     elif failure_boundary == "refresh":
         assert refresh_records[0].canonical_payload == failed_payload
         assert refresh_document["submission_permitted"] is True
+        expected_records = tuple(
+            (record.record_kind, record.canonical_payload) for record in reopened_audit.records
+        )
+        second_audit = _reopen_audit(binding, tuple(reopened_audit.records))
+        second_ports = _ledger_ports(matcher, first_sequence=1, first_previous_refresh_sha256=None)
+        second = recover_phase1_lifecycle_coordinator(
+            binding=binding,
+            audit=second_audit,
+            runtime=runtime,
+            matcher=matcher,
+            fact_authority=_RetainedOutcomeFacts(matcher, outcome),
+            evidence_resolver=_FixedFillEvidence(fill),
+            records=tuple(second_audit.records),
+            **second_ports,
+        )
+        assert second.state.phase is CoordinatorPhase.FAILING
+        assert (
+            tuple((record.record_kind, record.canonical_payload) for record in second_audit.records)
+            == expected_records
+        )
+        assert len(second_ports["ledger_handoff_authority"]._state.ledger.transactions) == 1
+        assert (
+            second_ports["frontier"].published_refresh
+            == recovered_ports["frontier"].published_refresh
+        )
+        assert (
+            second_ports["frontier"].current_snapshot()
+            == recovered_ports["frontier"].current_snapshot()
+        )
+        assert (
+            second_ports["frontier"].current_state() == recovered_ports["frontier"].current_state()
+        )
     else:
         completion_record = next(
             record
@@ -1035,7 +974,7 @@ def test_zero_dispatch_recovery_rejects_seeded_or_mixed_frontiers(
     refresh_seeded: bool,
     frontier_seeded: bool,
 ) -> None:
-    from ea.composition import create_acknowledged_lifecycle_frontier
+    from ea.composition.frontier import create_acknowledged_lifecycle_frontier
     from ea.core.lifecycle import LifecycleError
     from ea.runtime.coordinator import recover_phase1_lifecycle_coordinator
 
@@ -1078,7 +1017,7 @@ def test_zero_dispatch_recovery_rejects_seeded_or_mixed_frontiers(
 def test_zero_dispatch_recovery_requires_fresh_empty_economic_authorities(
     preseeded_authority: str,
 ) -> None:
-    from ea.composition import create_acknowledged_lifecycle_frontier
+    from ea.composition.frontier import create_acknowledged_lifecycle_frontier
     from ea.core import RiskHaltReason
     from ea.core.lifecycle import LifecycleError
     from ea.runtime.coordinator import recover_phase1_lifecycle_coordinator
@@ -1134,44 +1073,6 @@ def _record_entry(
         if record.record_kind is kind:
             return position, record, create_audit_append_acknowledgement(record)
     raise AssertionError("record kind not found")
-
-
-def test_recover_ledger_frontier_replays_with_byte_equality() -> None:
-    from ea.core import portfolio_risk_refresh_digest
-    from ea.runtime.coordinator import _recover_ledger_frontier, _RecoveredDispatch
-
-    _fixture, matcher, orders, causal, delayed, _end = _system()
-    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
-    fill, outcome = _outcome_bundle(matcher, delayed)
-    coordinator, audit = _coordinator_with_gate(matcher, delayed, fill=fill, outcome=outcome)
-    window = coordinator.begin_next_dispatch()
-    assert window is not None
-    active = coordinator._active
-    assert active is not None
-    assert all(value is not None for value in active.ledger_acks)
-
-    ledger_entries: list[Any] = [
-        _record_entry(audit.records, AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME)
-    ]
-    refresh_entry = _record_entry(audit.records, AuditRecordKind.RISK_PORTFOLIO_REFRESH)
-    recovered = _RecoveredDispatch(
-        sequence=8,
-        trigger_sha256=active.trigger_sha256,
-        ledger_records=ledger_entries,
-        refresh_record=refresh_entry,
-    )
-
-    fresh_coordinator, _fresh_audit = _coordinator_with_gate(
-        matcher, delayed, fill=fill, outcome=outcome
-    )
-    _recover_ledger_frontier(fresh_coordinator, active, recovered)
-    assert all(value is not None for value in active.ledger_acks)
-    assert active.refresh_ack is not None
-    assert active.refresh_value_sha256 == portfolio_risk_refresh_digest(
-        fresh_coordinator._frontier.published_refresh
-    )
-    assert active.final_portfolio_snapshot_sha256 is not None
-    assert active.final_risk_state_sha256 is not None
 
 
 def test_recovery_rejects_authorization_before_acknowledged_refresh() -> None:

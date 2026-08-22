@@ -7,6 +7,21 @@ from pathlib import Path
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "ea"
 
 
+def test_composition_package_does_not_export_mutable_frontier_capabilities() -> None:
+    tree = ast.parse((SOURCE_ROOT / "composition" / "__init__.py").read_text(encoding="utf-8"))
+    exports = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
+    )
+    assert not {
+        "AcknowledgedLifecycleFrontier",
+        "FrontierError",
+        "create_acknowledged_lifecycle_frontier",
+    }.intersection(exports)
+
+
 def test_production_source_has_no_type_ignore_comments() -> None:
     violations: list[str] = []
     for source in sorted(SOURCE_ROOT.rglob("*.py")):
