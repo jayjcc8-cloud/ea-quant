@@ -917,11 +917,12 @@ def test_completed_failed_refresh_retry_is_restart_equivalent_on_second_fresh_re
     )
     assert len(refresh_records) == 1
     refresh_document = json.loads(refresh_records[0].canonical_payload)
-    if failure_boundary == "ledger":
-        assert refresh_document["submission_permitted"] is False
-    elif failure_boundary == "refresh":
-        assert refresh_records[0].canonical_payload == failed_payload
-        assert refresh_document["submission_permitted"] is True
+    if failure_boundary in {"ledger", "refresh"}:
+        if failure_boundary == "ledger":
+            assert refresh_document["submission_permitted"] is False
+        else:
+            assert refresh_records[0].canonical_payload == failed_payload
+            assert refresh_document["submission_permitted"] is True
         expected_records = tuple(
             (record.record_kind, record.canonical_payload) for record in reopened_audit.records
         )

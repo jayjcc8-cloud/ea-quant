@@ -2932,11 +2932,12 @@ def _recover_ledger_frontier(
             refresh_entry is not None
             and recovered.failing_record is not None
             and recovered.failing_record[0] < refresh_entry[0]
-            and failed_key == refresh_entry[1].logical_key
         ):
-            retained_submission_permitted = decode_portfolio_risk_refresh(
-                refresh_entry[1].canonical_payload
-            ).submission_permitted
+            retained_submission_permitted = False
+            if failed_key == refresh_entry[1].logical_key:
+                retained_submission_permitted = decode_portfolio_risk_refresh(
+                    refresh_entry[1].canonical_payload
+                ).submission_permitted
         snapshot = coordinator._ledger_handoff_authority.snapshot
         risk_state = coordinator._risk_authority.risk_state
         refresh_frontier_sha256 = ordered_digest_tuple(
@@ -3588,7 +3589,8 @@ def _recover_failing_transition(
     if refresh_key is not None:
         refresh_entry = recovered.refresh_record
         refresh_position = None if refresh_entry is None else refresh_entry[0]
-        logical_positions.append((refresh_key, refresh_position))
+        if refresh_entry is None or refresh_entry[0] < position or refresh_key == failed_key:
+            logical_positions.append((refresh_key, refresh_position))
         if refresh_entry is not None and refresh_entry[0] < position:
             acknowledgement_by_key[refresh_key] = refresh_entry[2]
     if failed_key.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH and (
