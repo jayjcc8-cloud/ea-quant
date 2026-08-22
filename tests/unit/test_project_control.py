@@ -108,6 +108,13 @@ def test_status_declares_the_current_phase_and_health_without_claiming_live_read
     assert "af7bc08cecd70fc5479b92e4393da468727ddb55" in status
 
 
+def test_status_links_the_phase1_closeout_and_clean_successor_issues() -> None:
+    status = _read(STATUS_PATH)
+    for issue_number in (81, 82, 83, 84):
+        assert f"https://github.com/jayjcc8-cloud/ea-quant/issues/{issue_number}" in status
+    assert "Draft #73 and Draft #80" in status
+
+
 def test_authority_precedence_is_identical_in_adr_and_workflow() -> None:
     expected = [
         "merged code, test results, and CI",

@@ -30,9 +30,11 @@ report, with durable audit evidence and no live or external order-writing capabi
 - #67: close `LEDGER-001/002` and complete all Tier 2 gates.
 - #77: repay the temporary coordinator size debt through behavior-preserving decomposition.
 - #76: admit reconciliation observation roots and ancestry resolution.
-- Add concrete sample strategies.
-- Compose a deterministic end-to-end historical backtest.
-- Add the result/report adapter and golden report.
+- [#81](https://github.com/jayjcc8-cloud/ea-quant/issues/81): add concrete sample strategies.
+- [#82](https://github.com/jayjcc8-cloud/ea-quant/issues/82): compose a deterministic end-to-end
+  historical backtest.
+- [#83](https://github.com/jayjcc8-cloud/ea-quant/issues/83): add the result/report adapter and
+  golden report.
 - Re-run the Phase 1 acceptance suite on merged `main` and publish `v0.2.0`.
 
 ## Blockers
@@ -65,14 +67,17 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 - [#77 — GOV-DEBT-001 coordinator decomposition](https://github.com/jayjcc8-cloud/ea-quant/issues/77)
 - [#79 — GOV-DEBT-002 consolidation file-count exception](https://github.com/jayjcc8-cloud/ea-quant/issues/79)
 - [#76 — Reconciliation observation roots](https://github.com/jayjcc8-cloud/ea-quant/issues/76)
-- Phase 1 Closeout Issue: created by #78 after the 37-PR audit freezes its dependency evidence.
+- [#81 — Deterministic sample strategies](https://github.com/jayjcc8-cloud/ea-quant/issues/81)
+- [#82 — Deterministic end-to-end backtest](https://github.com/jayjcc8-cloud/ea-quant/issues/82)
+- [#83 — Result adapter and golden report](https://github.com/jayjcc8-cloud/ea-quant/issues/83)
+- [#84 — Phase 1 Closeout and v0.2.0](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
 
 ## Last Confirmed
 
 - Date: **2026-08-22** (Asia/Shanghai)
 - Merged baseline: `af7bc08cecd70fc5479b92e4393da468727ddb55`
 - Baseline CI: successful
-- Open pull requests: Draft #73 only
+- Open pull requests: Draft #73 and Draft #80
 - Live capability: unavailable and prohibited
 
 Update this section whenever merged code/CI, primary Issues, blockers, or Phase completion changes.
