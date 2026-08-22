@@ -1026,6 +1026,40 @@ def _snapshot_document(snapshot: PortfolioSnapshot) -> dict[str, object]:
     }
 
 
+OPEN_RECONCILIATION_AGGREGATE_DIGEST_DOMAIN = b"ea.audit-open-reconciliation-refs.v1\0"
+
+
+def open_reconciliation_aggregate_digest(
+    snapshot: PortfolioSnapshot,
+) -> Sha256Digest:
+    """Ordered aggregate digest over the snapshot's open reconciliation references."""
+    from ea.core.audit import ordered_digest_tuple
+
+    documents = tuple(
+        _canonical_ref_document(reference) for reference in snapshot.open_reconciliation_refs
+    )
+    if not documents:
+        return ordered_digest_tuple(OPEN_RECONCILIATION_AGGREGATE_DIGEST_DOMAIN, ())
+    return ordered_digest_tuple(
+        OPEN_RECONCILIATION_AGGREGATE_DIGEST_DOMAIN,
+        tuple(Sha256Digest(sha256(document).hexdigest()) for document in documents),
+    )
+
+
+def _canonical_ref_document(reference: OpenReconciliationRef) -> bytes:
+    return json.dumps(
+        {
+            "fill_id": _economic_id_document(reference.fill_id),
+            "fill_sha256": reference.fill_sha256.value,
+            "processing_outcome_sha256": reference.processing_outcome_sha256.value,
+        },
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def _binding_document(binding: ExistingLedgerBinding) -> dict[str, object]:
     return {
         "entry_id": _economic_id_document(binding.entry_id),

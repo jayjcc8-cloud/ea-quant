@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, final
+from typing import Any, Protocol, final
 
+import ea.portfolio as portfolio
+import ea.risk as risk
+from ea.composition.frontier import create_acknowledged_lifecycle_frontier
 from ea.composition.run import AdmittedRecoveredRun
 from ea.core.audit import (
     AuditAppendAcknowledgement,
@@ -45,13 +48,12 @@ from ea.core.lifecycle import (
     GlobalHaltFreshnessPort,
     InstrumentGateFreshnessPort,
     LifecycleError,
-    PortfolioFreshnessPort,
     PreTerminalCoordinatorState,
-    RiskFreshnessPort,
     TerminalCoordinatorState,
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
+from ea.core.risk import Phase1RiskPolicy, phase1_risk_policy_digest
 from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.execution.fact_authority import (
     OrderResolutionVerifier,
@@ -441,6 +443,29 @@ def _require_recovery_history_frontier(
         )
 
 
+def _create_economic_gate(
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+) -> tuple[Any, Any, Any, Any]:
+    ledger = portfolio.create_portfolio_ledger(run_id, spec_set)
+    ledger_authority = portfolio.create_phase1_ledger_handoff_authority(run_id, spec_set, ledger)
+    risk_authority = risk.create_phase1_risk_authority(
+        run_id=run_id, spec_set=spec_set, execution_policy=execution_policy, policy=risk_policy
+    )
+    refresh_authority = portfolio.create_phase1_portfolio_risk_refresh_authority(
+        run_id=run_id,
+        spec_set=spec_set,
+        policy_id=risk_policy.policy_id,
+        policy_sha256=phase1_risk_policy_digest(risk_policy),
+    )
+    frontier = create_acknowledged_lifecycle_frontier(
+        initial_snapshot=ledger.snapshot, initial_risk_state=risk_authority.risk_state
+    )
+    return ledger_authority, risk_authority, refresh_authority, frontier
+
+
 def create_phase1_historical_lifecycle(
     *,
     binding: RunBinding,
@@ -452,14 +477,16 @@ def create_phase1_historical_lifecycle(
     source_namespace: SourceNamespace,
     provenance_id: FactProvenanceId,
     order_issuance_verifier: HistoricalLifecycleOrderVerifier,
-    portfolio: PortfolioFreshnessPort,
-    risk: RiskFreshnessPort,
+    risk_policy: Phase1RiskPolicy,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
 ) -> Phase1HistoricalLifecycle:
     """Construct dormant authority, matcher, facts, coordinator, then activate once."""
     if type(prepared_acknowledgement) is not AuditAppendAcknowledgement:
         raise TypeError("fresh lifecycle construction requires one prepared acknowledgement")
+    ledger_handoff_authority, risk_authority, risk_refresh_authority, frontier = (
+        _create_economic_gate(binding.reference.run_id, spec_set, execution_policy, risk_policy)
+    )
     authorization, preparation_capability, activation_seal = (
         create_dormant_historical_submission_authorization_authority(
             binding=binding,
@@ -467,8 +494,8 @@ def create_phase1_historical_lifecycle(
             runtime=runtime,
             spec_set=spec_set,
             execution_policy=execution_policy,
-            portfolio=portfolio,
-            risk=risk,
+            portfolio=frontier,
+            risk=frontier,
             global_halt=global_halt,
             instrument_gate=instrument_gate,
         )
@@ -504,6 +531,10 @@ def create_phase1_historical_lifecycle(
         evidence_resolver=fact_authority,
         authorization=authorization,
         authorization_capability=preparation_capability,
+        ledger_handoff_authority=ledger_handoff_authority,
+        risk_authority=risk_authority,
+        risk_refresh_authority=risk_refresh_authority,
+        frontier=frontier,
     )
     try:
         authorization.activate(coordinator, seal=activation_seal)
@@ -529,8 +560,7 @@ def recover_phase1_historical_lifecycle(
     matcher_history: Phase1HistoricalMatcher,
     fact_history: Phase1ExecutionFactAuthority,
     order_issuance_verifier: HistoricalLifecycleOrderVerifier,
-    portfolio: PortfolioFreshnessPort,
-    risk: RiskFreshnessPort,
+    risk_policy: Phase1RiskPolicy,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
 ) -> Phase1HistoricalLifecycle:
@@ -543,7 +573,16 @@ def recover_phase1_historical_lifecycle(
     ):
         raise TypeError("historical lifecycle recovery requires exact authoritative carriers")
     reservation, binding, audit, records = recovery._reserve_consumption()
+    replay_started = False
     try:
+        ledger_handoff_authority, risk_authority, risk_refresh_authority, frontier = (
+            _create_economic_gate(
+                binding.reference.run_id,
+                matcher_history.spec_set,
+                matcher_history.execution_policy,
+                risk_policy,
+            )
+        )
         authorization, authorization_capability, activation_seal = (
             create_dormant_historical_submission_authorization_authority(
                 binding=binding,
@@ -551,8 +590,8 @@ def recover_phase1_historical_lifecycle(
                 runtime=runtime,
                 spec_set=matcher_history.spec_set,
                 execution_policy=matcher_history.execution_policy,
-                portfolio=portfolio,
-                risk=risk,
+                portfolio=frontier,
+                risk=frontier,
                 global_halt=global_halt,
                 instrument_gate=instrument_gate,
             )
@@ -579,7 +618,12 @@ def recover_phase1_historical_lifecycle(
             submissions=matcher,
             seal=activation_seal,
         )
+        replay_started = True
         coordinator = recover_phase1_lifecycle_coordinator(
+            ledger_handoff_authority=ledger_handoff_authority,
+            risk_authority=risk_authority,
+            risk_refresh_authority=risk_refresh_authority,
+            frontier=frontier,
             binding=binding,
             audit=audit,
             runtime=runtime,
@@ -612,7 +656,8 @@ def recover_phase1_historical_lifecycle(
         recovery._commit_consumption(reservation)
         return lifecycle
     except BaseException:
-        recovery._abort_consumption(reservation)
+        finish = recovery._fail_consumption if replay_started else recovery._abort_consumption
+        finish(reservation)
         raise
 
 
@@ -622,6 +667,7 @@ def recover_phase1_historical_terminal_evidence(
     runtime: Phase1HistoricalMarketRuntime,
     matcher_history: Phase1HistoricalMatcher,
     fact_history: Phase1ExecutionFactAuthority,
+    risk_policy: Phase1RiskPolicy,
 ) -> RecoveredTerminalCoordinatorEvidence:
     """Consume store-issued terminal evidence and publish no mutation authority."""
     if (
@@ -636,6 +682,14 @@ def recover_phase1_historical_terminal_evidence(
     except StoreError as error:
         raise TypeError("historical terminal recovery evidence was already consumed") from error
     try:
+        ledger_handoff_authority, risk_authority, risk_refresh_authority, frontier = (
+            _create_economic_gate(
+                binding.reference.run_id,
+                matcher_history.spec_set,
+                matcher_history.execution_policy,
+                risk_policy,
+            )
+        )
         if (
             runtime.run_id != binding.reference.run_id
             or matcher_history.run_id != binding.reference.run_id
@@ -651,6 +705,10 @@ def recover_phase1_historical_terminal_evidence(
             fact_authority=fact_history,
             evidence_resolver=fact_history,
             records=records,
+            ledger_handoff_authority=ledger_handoff_authority,
+            risk_authority=risk_authority,
+            risk_refresh_authority=risk_refresh_authority,
+            frontier=frontier,
         )
         _require_recovery_history_frontier(
             records=records,

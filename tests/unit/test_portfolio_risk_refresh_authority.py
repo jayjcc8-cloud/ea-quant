@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from ea.core import (
@@ -8,6 +10,7 @@ from ea.core import (
     RiskPolicyId,
     RunId,
     Sha256Digest,
+    canonical_portfolio_risk_refresh_bytes,
     portfolio_risk_refresh_digest,
 )
 from ea.core.risk import RiskStateSnapshot, _create_risk_state_snapshot
@@ -82,6 +85,9 @@ def test_first_refresh_derives_permitted_flag_and_predecessor_chain() -> None:
         risk_state=risk_state,
         dispatch_sequence=1,
         ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+        coordinator_running=True,
+        publication_window_clear=True,
+        candidate_matches_internal=True,
     )
 
     assert refresh.refresh_sequence == 1
@@ -95,6 +101,9 @@ def test_first_refresh_derives_permitted_flag_and_predecessor_chain() -> None:
         risk_state=risk_state,
         dispatch_sequence=2,
         ordered_ledger_ack_frontier_sha256=DIGESTS[4],
+        coordinator_running=True,
+        publication_window_clear=True,
+        candidate_matches_internal=True,
     )
     assert second.previous_refresh_sha256 == portfolio_risk_refresh_digest(refresh)
 
@@ -109,6 +118,9 @@ def test_halted_risk_state_derives_blocked_submission() -> None:
         risk_state=risk_state,
         dispatch_sequence=1,
         ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+        coordinator_running=True,
+        publication_window_clear=True,
+        candidate_matches_internal=True,
     )
 
     assert refresh.submission_permitted is False
@@ -123,6 +135,9 @@ def test_open_reconciliation_reference_derives_blocked_submission() -> None:
         risk_state=_risk_state(),
         dispatch_sequence=1,
         ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+        coordinator_running=True,
+        publication_window_clear=True,
+        candidate_matches_internal=True,
     )
 
     assert snapshot.open_reconciliation_refs != ()
@@ -139,6 +154,9 @@ def test_refresh_sequence_must_follow_contiguous_frontier() -> None:
             risk_state=_risk_state(),
             dispatch_sequence=3,
             ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+            coordinator_running=True,
+            publication_window_clear=True,
+            candidate_matches_internal=True,
         )
 
 
@@ -153,6 +171,9 @@ def test_exact_replay_returns_original_and_conflicting_bytes_are_rejected() -> N
         risk_state=risk_state,
         dispatch_sequence=1,
         ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+        coordinator_running=True,
+        publication_window_clear=True,
+        candidate_matches_internal=True,
     )
 
     # Exact retry after a failed audit append: same key returns the original.
@@ -161,8 +182,18 @@ def test_exact_replay_returns_original_and_conflicting_bytes_are_rejected() -> N
         risk_state=risk_state,
         dispatch_sequence=1,
         ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+        coordinator_running=False,
+        publication_window_clear=False,
+        candidate_matches_internal=False,
     )
-    assert replay == first
+    assert replay is first
+    assert canonical_portfolio_risk_refresh_bytes(replay) == (
+        canonical_portfolio_risk_refresh_bytes(first)
+    )
+    assert portfolio_risk_refresh_digest(replay) == portfolio_risk_refresh_digest(first)
+    assert replay.refresh_sequence == first.refresh_sequence
+    assert replay.previous_refresh_sha256 == first.previous_refresh_sha256
+    assert replay.submission_permitted is True
     assert authority.next_sequence == 2
 
     # Same key with different evidence bytes is a conflict.
@@ -174,6 +205,9 @@ def test_exact_replay_returns_original_and_conflicting_bytes_are_rejected() -> N
             risk_state=risk_state,
             dispatch_sequence=1,
             ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+            coordinator_running=False,
+            publication_window_clear=False,
+            candidate_matches_internal=False,
         )
 
 
@@ -188,6 +222,54 @@ def test_binding_conflicts_are_rejected_before_issue() -> None:
             risk_state=_risk_state(policy_id=RiskPolicyId("phase1.other-risk.v1")),
             dispatch_sequence=1,
             ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+            coordinator_running=True,
+            publication_window_clear=True,
+            candidate_matches_internal=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "false_fact",
+    ("coordinator_running", "publication_window_clear", "candidate_matches_internal"),
+)
+def test_new_refresh_requires_every_derivation_fact(false_fact: str) -> None:
+    authority = _authority()
+    facts = {
+        "coordinator_running": True,
+        "publication_window_clear": True,
+        "candidate_matches_internal": True,
+    }
+    facts[false_fact] = False
+    refresh = authority.create_refresh(
+        snapshot=create_portfolio_ledger(RUN_ID, _spec_set()).snapshot,
+        risk_state=_risk_state(),
+        dispatch_sequence=1,
+        ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+        **facts,
+    )
+    assert refresh.submission_permitted is False
+
+
+@pytest.mark.parametrize(
+    "fact_name",
+    ("coordinator_running", "publication_window_clear", "candidate_matches_internal"),
+)
+@pytest.mark.parametrize("invalid", (1, None, "true"))
+def test_refresh_derivation_facts_require_exact_booleans(fact_name: str, invalid: object) -> None:
+    authority = _authority()
+    facts: dict[str, Any] = {
+        "coordinator_running": True,
+        "publication_window_clear": True,
+        "candidate_matches_internal": True,
+    }
+    facts[fact_name] = invalid
+    with pytest.raises(PortfolioRiskRefreshAuthorityError, match="exact booleans"):
+        authority.create_refresh(
+            snapshot=create_portfolio_ledger(RUN_ID, _spec_set()).snapshot,
+            risk_state=_risk_state(),
+            dispatch_sequence=1,
+            ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+            **facts,
         )
 
 

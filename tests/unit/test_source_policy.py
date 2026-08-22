@@ -7,6 +7,26 @@ from pathlib import Path
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "ea"
 
 
+def test_composition_package_does_not_export_mutable_frontier_capabilities() -> None:
+    tree = ast.parse((SOURCE_ROOT / "composition" / "__init__.py").read_text(encoding="utf-8"))
+    exports = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
+    )
+    assert not {
+        "AcknowledgedLifecycleFrontier",
+        "FrontierError",
+        "create_acknowledged_lifecycle_frontier",
+    }.intersection(exports)
+    runtime = ast.parse((SOURCE_ROOT / "runtime" / "__init__.py").read_text(encoding="utf-8"))
+    runtime_exports = next(
+        ast.literal_eval(node.value) for node in runtime.body if isinstance(node, ast.Assign)
+    )
+    assert not {name for name in runtime_exports if name.endswith("_phase1_lifecycle_coordinator")}
+
+
 def test_production_source_has_no_type_ignore_comments() -> None:
     violations: list[str] = []
     for source in sorted(SOURCE_ROOT.rglob("*.py")):
@@ -129,6 +149,7 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.execution_messages",
             "ea.core.execution_state",
             "ea.core.historical_matching",
+            "ea.core.ledger_integration",
             "ea.core.lifecycle",
             "ea.core.market_data",
             "ea.core.market_data_codec",

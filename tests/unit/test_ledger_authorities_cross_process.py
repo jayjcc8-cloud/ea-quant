@@ -127,6 +127,9 @@ refresh = refresh_authority.create_refresh(
     risk_state=risk_state,
     dispatch_sequence=1,
     ordered_ledger_ack_frontier_sha256=Sha256Digest("77" * 32),
+    coordinator_running=True,
+    publication_window_clear=True,
+    candidate_matches_internal=True,
 )
 
 vectors = {

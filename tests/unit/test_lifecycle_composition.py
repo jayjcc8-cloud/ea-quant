@@ -4,7 +4,7 @@ import json
 import os
 from inspect import signature
 from pathlib import Path
-from threading import Event, Thread
+from threading import Lock
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -84,6 +84,18 @@ from unit.test_lifecycle_coordinator import _MemoryAudit
 from unit.test_store import _root, _spec
 
 
+def _policy_for(matcher: Any) -> Any:
+    from ea.core import create_phase1_risk_policy
+
+    policy = _policy(matcher.spec_set)
+    return create_phase1_risk_policy(
+        policy_id=policy.policy_id,
+        spec_set=matcher.spec_set,
+        execution_policy=matcher.execution_policy,
+        instrument_limits=policy.instrument_limits,
+    )
+
+
 class _UncertainOnceAuthorizationAudit:
     def __init__(self, binding: RunBinding) -> None:
         self.binding = binding
@@ -110,6 +122,96 @@ class _UncertainOnceAuthorizationAudit:
             self.settlement_failed = True
             raise RuntimeError("injected uncertain authorization settlement failure")
         return self._inner.settle_append(**values)
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ("coordinator", "history-frontier", "activation", "reconciliation"),
+)
+def test_gated_recovery_failure_cannot_reopen_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    from ea.execution.fact_authority import Phase1ExecutionFactAuthority
+    from ea.runtime.historical import Phase1HistoricalMarketRuntime
+
+    recovery = object.__new__(run_composition.AdmittedRecoveredRun)
+    object.__setattr__(recovery, "_consumption_lock", Lock())
+    object.__setattr__(recovery, "_consumption_state", "available")
+    object.__setattr__(recovery, "_consumption_token", None)
+    object.__setattr__(recovery, "binding", SimpleNamespace())
+    object.__setattr__(recovery, "audit", SimpleNamespace())
+    object.__setattr__(recovery, "records", SimpleNamespace())
+
+    def fail_at(stage: str) -> None:
+        if failure_stage == stage:
+            raise RuntimeError(f"injected {stage} failure after economic replay began")
+
+    authorization = SimpleNamespace(
+        recover_attempts=lambda *args, **kwargs: None,
+        activate=lambda *args, **kwargs: fail_at("activation"),
+    )
+    coordinator = SimpleNamespace(
+        _reconcile_recovered_authorization=lambda: fail_at("reconciliation")
+    )
+    for name, replacement in (
+        (
+            "create_dormant_historical_submission_authorization_authority",
+            lambda **kwargs: (authorization, object(), object()),
+        ),
+        ("create_historical_matcher_dispatch_verifier", lambda runtime: object()),
+        ("recover_phase1_historical_matcher_history", lambda *args, **kwargs: object()),
+        (
+            "create_historical_matcher_descendant_fact_dispatch_verifier",
+            lambda **kwargs: object(),
+        ),
+        (
+            "recover_phase1_execution_fact_authority_history",
+            lambda *args, **kwargs: object(),
+        ),
+    ):
+        monkeypatch.setattr(lifecycle_composition, name, replacement)
+
+    def recover_coordinator(**kwargs: Any) -> Any:
+        fail_at("coordinator")
+        return coordinator
+
+    monkeypatch.setattr(
+        lifecycle_composition,
+        "recover_phase1_lifecycle_coordinator",
+        recover_coordinator,
+    )
+    monkeypatch.setattr(
+        lifecycle_composition,
+        "_require_recovery_history_frontier",
+        lambda **kwargs: fail_at("history-frontier"),
+    )
+    _fixture, matcher, _orders_value, _causal, _delayed, _end = _system()
+    object.__setattr__(
+        recovery,
+        "binding",
+        RunBinding(RunReference(matcher.run_id, Sha256Digest("11" * 32)), Sha256Digest("22" * 32)),
+    )
+    frontier = object()
+    monkeypatch.setattr(
+        lifecycle_composition,
+        "_create_economic_gate",
+        lambda *args: (frontier, frontier, frontier, frontier),
+    )
+    with pytest.raises(RuntimeError, match=failure_stage):
+        recover_phase1_historical_lifecycle(
+            recovery=recovery,
+            runtime=object.__new__(Phase1HistoricalMarketRuntime),
+            matcher_history=matcher,
+            fact_history=object.__new__(Phase1ExecutionFactAuthority),
+            order_issuance_verifier=object(),  # type: ignore[arg-type]
+            risk_policy=_policy_for(matcher),
+            global_halt=object(),  # type: ignore[arg-type]
+            instrument_gate=object(),  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(RunCompositionError, match="already consumed"):
+        recovery._reserve_consumption()
 
 
 class _FailOnceAuthorizationAudit(_MemoryAudit):
@@ -243,6 +345,25 @@ def _empty_runtime_for(matcher: Any) -> Any:
     )
 
 
+def test_public_lifecycle_composition_owns_economic_capabilities() -> None:
+    forbidden = {
+        "portfolio",
+        "risk",
+        "ledger_handoff_authority",
+        "risk_authority",
+        "risk_refresh_authority",
+        "frontier",
+    }
+    for factory in (
+        create_phase1_historical_lifecycle,
+        recover_phase1_historical_lifecycle,
+        recover_phase1_historical_terminal_evidence,
+    ):
+        parameters = signature(factory).parameters
+        assert "risk_policy" in parameters
+        assert forbidden.isdisjoint(parameters)
+
+
 def _staged_lifecycle(
     audit_factory: Any = _MemoryAudit,
 ) -> tuple[Any, Any, tuple[Any, ...], Any, Any, tuple[Any, ...]]:
@@ -312,8 +433,7 @@ def _staged_lifecycle(
         source_namespace=SourceNamespace("phase1.historical-matcher.v1"),
         provenance_id=FactProvenanceId("phase1.simulator.v1"),
         order_issuance_verifier=order_authority,
-        portfolio=freshness[0],
-        risk=freshness[1],
+        risk_policy=risk_policy,
         global_halt=freshness[2],
         instrument_gate=freshness[3],
     )
@@ -330,6 +450,12 @@ def _recover_staged_lifecycle(
 ) -> tuple[Any, Any]:
     matcher_history = cast(Any, lifecycle.matcher)._HistoricalMatcherHistoryView__matcher
     fact_history = cast(Any, lifecycle.fact_authority)._ExecutionFactHistoryView__authority
+    gate = lifecycle_composition._create_economic_gate(
+        audit.binding.reference.run_id,
+        matcher_history.spec_set,
+        matcher_history.execution_policy,
+        _policy_for(matcher_history),
+    )
     authorization, capability, activation_seal = (
         create_dormant_historical_submission_authorization_authority(
             binding=audit.binding,
@@ -337,8 +463,8 @@ def _recover_staged_lifecycle(
             runtime=runtime,
             spec_set=matcher_history.spec_set,
             execution_policy=matcher_history.execution_policy,
-            portfolio=freshness[0],
-            risk=freshness[1],
+            portfolio=gate[3],
+            risk=gate[3],
             global_halt=freshness[2],
             instrument_gate=freshness[3],
         )
@@ -374,6 +500,10 @@ def _recover_staged_lifecycle(
         records=records,
         authorization=authorization,
         authorization_capability=capability,
+        ledger_handoff_authority=gate[0],
+        risk_authority=gate[1],
+        risk_refresh_authority=gate[2],
+        frontier=gate[3],
     )
     authorization.activate(coordinator, seal=activation_seal)
     coordinator._reconcile_recovered_authorization()
@@ -410,18 +540,6 @@ def test_composed_staged_window_authorizes_and_submits_before_completion() -> No
         source=source,
     )
     risk_policy = _policy(spec_set)
-    risk = _create_risk_state_snapshot(
-        run_id=order.run_id,
-        policy_id=risk_policy.policy_id,
-        policy_sha256=phase1_risk_policy_digest(risk_policy),
-        risk_state_version=0,
-        halted=False,
-        halt_reason=None,
-        halt_causal_root_available_at=None,
-        halt_dispatch_sequence=None,
-        conflict_existing_intent_sha256=None,
-        conflict_submitted_intent_sha256=None,
-    )
     lifecycle = create_phase1_historical_lifecycle(
         binding=binding,
         prepared_acknowledgement=prepared_acknowledgement,
@@ -432,8 +550,7 @@ def test_composed_staged_window_authorizes_and_submits_before_completion() -> No
         source_namespace=SourceNamespace("phase1.historical-matcher.v1"),
         provenance_id=FactProvenanceId("phase1.simulator.v1"),
         order_issuance_verifier=order_authority,
-        portfolio=_Freshness(_snapshot(spec_set)),
-        risk=_Freshness(risk),
+        risk_policy=risk_policy,
         global_halt=_Freshness(GlobalHaltSnapshot(order.run_id, False, 0)),
         instrument_gate=_Freshness(
             InstrumentGateSnapshot(
@@ -499,6 +616,7 @@ def test_composed_staged_window_authorizes_and_submits_before_completion() -> No
     assert [record.record_kind for record in audit.records] == [
         AuditRecordKind.RUN_PREPARED,
         AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditRecordKind.RISK_PORTFOLIO_REFRESH,
         AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
         AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
     ]
@@ -1129,26 +1247,18 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     original_coordinator_factory = recover_phase1_lifecycle_coordinator
     factory_calls = 0
     coordinator_calls = 0
-    concurrent_entered = Event()
-    concurrent_release = Event()
 
     def fail_first_factory(**kwargs: Any) -> Any:
         nonlocal factory_calls
         factory_calls += 1
         if factory_calls == 1:
             raise OSError("declared transient reconstruction failure")
-        if factory_calls == 3:
-            concurrent_entered.set()
-            assert concurrent_release.wait(timeout=5)
         return original_factory(**kwargs)
 
     def fail_first_coordinator(**kwargs: Any) -> Any:
         nonlocal coordinator_calls
         coordinator_calls += 1
-        value = original_coordinator_factory(**kwargs)
-        if coordinator_calls == 1:
-            raise OSError("declared late reconstruction failure")
-        return value
+        return original_coordinator_factory(**kwargs)
 
     monkeypatch.setattr(
         lifecycle_composition,
@@ -1167,8 +1277,7 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
             matcher_history=matcher,
             fact_history=fact_history,
             order_issuance_verifier=order_verifier,
-            portfolio=freshness,
-            risk=freshness,
+            risk_policy=_policy_for(matcher),
             global_halt=freshness,
             instrument_gate=freshness,
         )
@@ -1178,72 +1287,24 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     matcher_state = matcher.state
     fact_outcomes = fact_history.outcomes
     runtime_trace = runtime.trace_records
-    with pytest.raises(OSError, match="declared late reconstruction failure"):
-        recover_phase1_historical_lifecycle(
-            recovery=admitted,
-            runtime=runtime,
-            matcher_history=matcher,
-            fact_history=fact_history,
-            order_issuance_verifier=order_verifier,
-            portfolio=freshness,
-            risk=freshness,
-            global_halt=freshness,
-            instrument_gate=freshness,
-        )
+    lifecycle = recover_phase1_historical_lifecycle(
+        recovery=admitted,
+        runtime=runtime,
+        matcher_history=matcher,
+        fact_history=fact_history,
+        order_issuance_verifier=order_verifier,
+        risk_policy=_policy_for(matcher),
+        global_halt=freshness,
+        instrument_gate=freshness,
+    )
 
     assert journal_path.read_bytes() == journal_bytes
     assert matcher.state == matcher_state
     assert fact_history.outcomes == fact_outcomes
     assert runtime.trace_records == runtime_trace
 
-    results: list[Phase1HistoricalLifecycle] = []
-    errors: list[BaseException] = []
-
-    def recover() -> None:
-        try:
-            results.append(
-                recover_phase1_historical_lifecycle(
-                    recovery=admitted,
-                    runtime=runtime,
-                    matcher_history=matcher,
-                    fact_history=fact_history,
-                    order_issuance_verifier=order_verifier,
-                    portfolio=freshness,
-                    risk=freshness,
-                    global_halt=freshness,
-                    instrument_gate=freshness,
-                )
-            )
-        except BaseException as error:
-            errors.append(error)
-
-    worker = Thread(target=recover)
-    worker.start()
-    assert concurrent_entered.wait(timeout=5)
-    try:
-        with pytest.raises(RunCompositionError, match="already consumed"):
-            recover_phase1_historical_lifecycle(
-                recovery=admitted,
-                runtime=runtime,
-                matcher_history=matcher,
-                fact_history=fact_history,
-                order_issuance_verifier=order_verifier,
-                portfolio=freshness,
-                risk=freshness,
-                global_halt=freshness,
-                instrument_gate=freshness,
-            )
-    finally:
-        concurrent_release.set()
-        worker.join(timeout=5)
-
-    assert not worker.is_alive()
-    assert errors == []
-    assert len(results) == 1
-    lifecycle = results[0]
-
-    assert factory_calls == 3
-    assert coordinator_calls == 2
+    assert factory_calls == 2
+    assert coordinator_calls == 1
 
     assert lifecycle.coordinator.state.phase is CoordinatorPhase.ADMITTED
     assert type(lifecycle.matcher) is HistoricalMatcherHistoryView
@@ -1265,6 +1326,7 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
             runtime=runtime,
             matcher_history=matcher,
             fact_history=fact_history,
+            risk_policy=_policy_for(matcher),
         )
 
     with pytest.raises(TypeError, match="created only by composition"):
@@ -1291,8 +1353,7 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
             source_namespace=matcher.source_namespace,
             provenance_id=matcher.provenance_id,
             order_issuance_verifier=order_verifier,
-            portfolio=freshness,
-            risk=freshness,
+            risk_policy=_policy_for(matcher),
             global_halt=freshness,
             instrument_gate=freshness,
         )
@@ -1303,8 +1364,7 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
             matcher_history=matcher,
             fact_history=fact_history,
             order_issuance_verifier=order_verifier,
-            portfolio=freshness,
-            risk=freshness,
+            risk_policy=_policy_for(matcher),
             global_halt=freshness,
             instrument_gate=freshness,
         )

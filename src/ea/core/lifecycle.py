@@ -52,6 +52,10 @@ ORDERED_INGRESS_DIGEST_DOMAIN = b"ea.audit-ordered-ingress-digests.v1\0"
 ORDERED_OUTCOME_ACK_DIGEST_DOMAIN = b"ea.audit-ordered-outcome-ack-digests.v1\0"
 ORDERED_HANDOFF_DIGEST_DOMAIN = b"ea.coordinator-ordered-handoff-digests.v1\0"
 ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN = b"ea.coordinator-ordered-submission-receipt-digests.v1\0"
+ORDERED_LEDGER_ACK_DIGEST_DOMAIN = b"ea.audit-ordered-ledger-ack-digests.v1\0"
+ORDERED_RECONCILIATION_FRONTIER_DIGEST_DOMAIN = (
+    b"ea.audit-ordered-reconciliation-frontier-digests.v1\0"
+)
 
 _STATE_DOMAIN = b"ea.coordinator-state.v1\0"
 _PRE_TERMINAL_STATE_DOMAIN = b"ea.coordinator-pre-terminal-state.v1\0"
@@ -957,6 +961,7 @@ def create_terminal_coordinator_state(
     *,
     pre_terminal_state: PreTerminalCoordinatorState,
     terminal_acknowledgement: AuditAppendAcknowledgement,
+    terminal_payload: bytes | None = None,
 ) -> TerminalCoordinatorState:
     if type(pre_terminal_state) is not PreTerminalCoordinatorState:
         raise _fail(OutcomeCode.INVALID_TYPE, "pre-terminal state must be exact")
@@ -964,7 +969,13 @@ def create_terminal_coordinator_state(
         raise _fail(OutcomeCode.CONFLICTING_ID, "terminal acknowledgement kind conflicts")
     if terminal_acknowledgement.binding != pre_terminal_state.binding:
         raise _fail(OutcomeCode.CONFLICTING_ID, "terminal acknowledgement binding conflicts")
-    payload = canonical_run_terminal_audit_payload(pre_terminal_state)
+    payload = (
+        canonical_run_terminal_audit_payload(pre_terminal_state)
+        if terminal_payload is None
+        else terminal_payload
+    )
+    if type(payload) is not bytes:
+        raise _fail(OutcomeCode.INVALID_TYPE, "terminal payload must be exact bytes")
     require_audit_acknowledgement(
         terminal_acknowledgement,
         binding=pre_terminal_state.binding,
@@ -1042,10 +1053,12 @@ def create_coordinator_terminal_outcome(
     pre_terminal_state: PreTerminalCoordinatorState,
     terminal_acknowledgement: AuditAppendAcknowledgement,
     terminal_state: TerminalCoordinatorState,
+    terminal_payload: bytes | None = None,
 ) -> CoordinatorTerminalOutcome:
     expected = create_terminal_coordinator_state(
         pre_terminal_state=pre_terminal_state,
         terminal_acknowledgement=terminal_acknowledgement,
+        terminal_payload=terminal_payload,
     )
     expected_bytes = canonical_terminal_coordinator_state_bytes(expected)
     if expected_bytes != canonical_terminal_coordinator_state_bytes(terminal_state):
@@ -1435,6 +1448,95 @@ def canonical_dispatch_completed_audit_payload(
             "trigger_root_sha256": batch.trigger_root_sha256.value,
         }
     )
+
+
+def canonical_dispatch_completed_v3_audit_payload(
+    *,
+    binding: RunBinding,
+    batch: HistoricalMatcherDispatchBatch,
+    outcome_acknowledgements: tuple[AuditAppendAcknowledgement, ...],
+    pre_ack_state_sha256: Sha256Digest,
+    ledger_outcome_acknowledgements: tuple[AuditAppendAcknowledgement, ...],
+    final_portfolio_snapshot_sha256: Sha256Digest,
+    final_risk_state_sha256: Sha256Digest,
+    authorization_attempt_outcome: SubmissionAuthorizationAttemptOutcome | None = None,
+    submission_receipts: tuple[HistoricalSubmissionReceipt, ...] = (),
+) -> bytes:
+    """Build completion-v3 with the ledger and final publication frontiers."""
+    if type(ledger_outcome_acknowledgements) is not tuple or any(
+        type(value) is not AuditAppendAcknowledgement for value in ledger_outcome_acknowledgements
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "completion ledger acknowledgements are invalid")
+    if any(
+        value.binding != binding
+        or value.record_kind is not AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+        or value.subject_kind is not AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+        for value in ledger_outcome_acknowledgements
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion ledger acknowledgements conflict")
+    if (
+        type(final_portfolio_snapshot_sha256) is not Sha256Digest
+        or type(final_risk_state_sha256) is not Sha256Digest
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "completion final frontier digests must be exact")
+    base_document = json.loads(
+        canonical_dispatch_completed_audit_payload(
+            binding=binding,
+            batch=batch,
+            outcome_acknowledgements=outcome_acknowledgements,
+            pre_ack_state_sha256=pre_ack_state_sha256,
+            authorization_attempt_outcome=authorization_attempt_outcome,
+            submission_receipts=submission_receipts,
+        )
+    )
+    ledger_digests = tuple(
+        audit_append_acknowledgement_digest(value) for value in ledger_outcome_acknowledgements
+    )
+    document = {
+        **base_document,
+        "final_portfolio_snapshot_sha256": final_portfolio_snapshot_sha256.value,
+        "final_risk_state_sha256": final_risk_state_sha256.value,
+        "ledger_outcome_count": len(ledger_digests),
+        "ordered_ledger_ack_sha256s_sha256": ordered_digest_tuple(
+            ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
+            ledger_digests,
+        ).value,
+        "schema": "ea.audit-dispatch-completed.v3",
+    }
+    return _canonical_json(document)
+
+
+def canonical_run_terminal_v2_audit_payload(
+    state: PreTerminalCoordinatorState,
+    *,
+    final_published_snapshot_sha256: Sha256Digest,
+    final_risk_refresh_sha256: Sha256Digest,
+    open_reconciliation_ref_aggregate_sha256: Sha256Digest,
+    ordered_reconciliation_frontier_sha256s_sha256: Sha256Digest,
+) -> bytes:
+    """Build the ADR 0022 terminal-v2 record binding the final publication frontier."""
+    for digest in (
+        final_published_snapshot_sha256,
+        final_risk_refresh_sha256,
+        open_reconciliation_ref_aggregate_sha256,
+        ordered_reconciliation_frontier_sha256s_sha256,
+    ):
+        if type(digest) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "terminal frontier digests must be exact")
+    base_document = json.loads(canonical_run_terminal_audit_payload(state))
+    document = {
+        **base_document,
+        "final_published_snapshot_sha256": final_published_snapshot_sha256.value,
+        "final_risk_refresh_sha256": final_risk_refresh_sha256.value,
+        "open_reconciliation_ref_aggregate_sha256": (
+            open_reconciliation_ref_aggregate_sha256.value
+        ),
+        "ordered_reconciliation_frontier_sha256s_sha256": (
+            ordered_reconciliation_frontier_sha256s_sha256.value
+        ),
+        "schema": "ea.audit-run-terminal.v2",
+    }
+    return _canonical_json(document)
 
 
 def dispatch_completed_subject_digest(canonical_payload: bytes) -> Sha256Digest:

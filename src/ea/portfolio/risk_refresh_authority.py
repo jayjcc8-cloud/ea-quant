@@ -78,6 +78,32 @@ class Phase1PortfolioRiskRefreshAuthority:
     def next_sequence(self) -> int:
         return self._state.next_sequence
 
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self._state.spec_set
+
+    @property
+    def policy_id(self) -> RiskPolicyId:
+        return self._state.policy_id
+
+    @property
+    def policy_sha256(self) -> Sha256Digest:
+        return self._state.policy_sha256
+
+    def resolve_refresh(
+        self,
+        *,
+        dispatch_sequence: int,
+        ordered_ledger_ack_frontier_sha256: Sha256Digest,
+    ) -> PortfolioRiskRefresh | None:
+        if type(dispatch_sequence) is not int or dispatch_sequence < 1:
+            raise _fail(OutcomeCode.INVALID_TYPE, "refresh dispatch sequence must be positive")
+        if type(ordered_ledger_ack_frontier_sha256) is not Sha256Digest:
+            raise _fail(OutcomeCode.INVALID_TYPE, "refresh frontier digest must be exact")
+        return self._state.replay_index.get(
+            (self._state.run_id, dispatch_sequence, ordered_ledger_ack_frontier_sha256)
+        )
+
     def create_refresh(
         self,
         *,
@@ -85,6 +111,9 @@ class Phase1PortfolioRiskRefreshAuthority:
         risk_state: RiskStateSnapshot,
         dispatch_sequence: int,
         ordered_ledger_ack_frontier_sha256: Sha256Digest,
+        coordinator_running: bool,
+        publication_window_clear: bool,
+        candidate_matches_internal: bool,
     ) -> PortfolioRiskRefresh:
         """Issue one immutable refresh per completed dispatch frontier."""
         state = self._state
@@ -106,37 +135,36 @@ class Phase1PortfolioRiskRefreshAuthority:
             raise _fail(OutcomeCode.INVALID_TYPE, "refresh frontier digest must be exact")
         if type(dispatch_sequence) is not int or dispatch_sequence < 1:
             raise _fail(OutcomeCode.INVALID_TYPE, "refresh dispatch sequence must be positive")
-        # ADR 0022 L244-253: submission_permitted is derived against the exact
-        # post-publication candidate. The coordinator-running and no-pending-
-        # operation conditions are bound by the composition coordinator (#67);
-        # this authority derives every condition available at the portfolio
-        # boundary and rejects any later weakening at the factory.
-        submission_permitted = (
-            not risk_state.halted
-            and not snapshot.open_reconciliation_refs
-            and snapshot.open_reconciliation_bindings == ()
-        )
         key = (state.run_id, dispatch_sequence, ordered_ledger_ack_frontier_sha256)
-        # ADR 0022 L236-239: the replay key is checked before any sequence
-        # advancement so an exact retry after a failed audit append returns
-        # the original refresh instead of conflicting.
         existing: PortfolioRiskRefresh | None = state.replay_index.get(key)
         if existing is not None:
-            # Exact retry after a failed audit append: the same key must
-            # resolve to the original refresh. Rebuild the candidate bindings
-            # from the inputs and compare them against the retained refresh
-            # instead of re-issuing (a re-issue would carry the wrong
-            # predecessor for the first frontier).
             if (
                 portfolio_snapshot_digest(snapshot) == existing.portfolio_snapshot_sha256
                 and risk_state_snapshot_digest(risk_state) == existing.risk_state_sha256
-                and submission_permitted == existing.submission_permitted
             ):
                 return existing
             raise _fail(
                 OutcomeCode.CONFLICTING_ID,
                 "refresh replay conflicts with the retained frontier",
             )
+        facts = (
+            coordinator_running,
+            publication_window_clear,
+            candidate_matches_internal,
+        )
+        if any(type(value) is not bool for value in facts):
+            raise _fail(
+                OutcomeCode.INVALID_TYPE,
+                "refresh derivation facts must be exact booleans",
+            )
+        submission_permitted = (
+            not risk_state.halted
+            and not snapshot.open_reconciliation_refs
+            and snapshot.open_reconciliation_bindings == ()
+            and coordinator_running
+            and publication_window_clear
+            and candidate_matches_internal
+        )
         # RISK-001 continuity: the Phase 1 resource model keeps dispatch
         # sequences contiguous (D = M + R + 1), so refresh_sequence ==
         # dispatch_sequence and each new frontier advances by exactly one.
@@ -174,12 +202,34 @@ def create_phase1_portfolio_risk_refresh_authority(
     spec_set: InstrumentExecutionSpecSet,
     policy_id: RiskPolicyId,
     policy_sha256: Sha256Digest,
+    first_sequence: int = 1,
+    first_previous_refresh_sha256: Sha256Digest | None = None,
 ) -> Phase1PortfolioRiskRefreshAuthority:
-    """Create one run/specification/policy-bound refresh authority."""
+    """Create one run/specification/policy-bound refresh authority.
+
+    ``first_sequence`` binds the contiguous frontier start and
+    ``first_previous_refresh_sha256`` the retained predecessor; composition
+    supplies both for recovered runs whose journal already advanced the
+    refresh frontier.
+    """
     if type(run_id) is not RunId or type(spec_set) is not InstrumentExecutionSpecSet:
         raise _fail(OutcomeCode.INVALID_TYPE, "refresh authority binding must be exact")
     if type(policy_id) is not RiskPolicyId or type(policy_sha256) is not Sha256Digest:
         raise _fail(OutcomeCode.INVALID_TYPE, "refresh policy binding must be exact")
+    if type(first_sequence) is not int or not 1 <= first_sequence <= (1 << 64) - 1:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "refresh first sequence must be positive")
+    if first_previous_refresh_sha256 is not None and (
+        type(first_previous_refresh_sha256) is not Sha256Digest or first_sequence == 1
+    ):
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "refresh predecessor requires a later first sequence",
+        )
+    if first_sequence > 1 and first_previous_refresh_sha256 is None:
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "recovered refresh frontier requires its predecessor",
+        )
     value = object.__new__(Phase1PortfolioRiskRefreshAuthority)
     object.__setattr__(
         value,
@@ -189,8 +239,8 @@ def create_phase1_portfolio_risk_refresh_authority(
             spec_set=spec_set,
             policy_id=policy_id,
             policy_sha256=policy_sha256,
-            next_sequence=1,
-            previous_refresh_sha256=None,
+            next_sequence=first_sequence,
+            previous_refresh_sha256=first_previous_refresh_sha256,
             replay_index=MappingProxyType({}),
         ),
     )
