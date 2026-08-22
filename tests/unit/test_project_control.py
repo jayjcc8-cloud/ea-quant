@@ -224,6 +224,7 @@ def test_pull_request_template_records_evidence_cost_and_state_sync() -> None:
 def test_issue_template_chooser_disables_blank_issue_bypass() -> None:
     config = yaml.safe_load(_read(ISSUE_TEMPLATE_CONFIG_PATH))
     assert config == {"blank_issues_enabled": False}
+    assert type(config["blank_issues_enabled"]) is bool
 
 
 def test_workflow_defines_state_machine_capacity_compression_and_done() -> None:
