@@ -73,8 +73,11 @@ diff or cumulative change graph.
 | Tier | Triggers | Required route |
 |---|---|---|
 | Tier 0 — low | Reversible non-executable docs/comments/metadata with no ADR, CI, dependency, schema, security, governance-authority, or runtime effect | Terra medium implementation; deterministic verification and approval decision |
-| Tier 1 — normal | Executable code/config/dependency/CI, public interface, or implementation of an accepted contract | Architecture Owner, Terra high Implementation Owner, Terra high Verification Owner |
-| Tier 2 — high | Data/time/look-ahead, strategy, portfolio/ledger, risk, execution/matching, reconciliation/recovery, canonical bytes/digests, credentials/security, release/live/external writes, or governance authority | Sol xhigh Decision, Terra high implementation, independent Terra high adversarial, independent Sol high verification, independent Sol high approval, plus domain expert |
+| Tier 1 — normal | Executable code/config/dependency/CI, public interface, governance authority, or implementation of an accepted contract | Architecture Owner, Terra high Implementation Owner, Terra high Verification Owner |
+| Tier 2 — high | Data/time/look-ahead, strategy, portfolio/ledger, risk, execution/matching, reconciliation/recovery, state-machine semantics, canonical bytes/digests, credentials/security, or release/live/external writes | Sol xhigh Decision, Terra high implementation, independent Terra high adversarial, independent Sol high verification, independent Sol high approval, plus domain expert |
+
+These are minimum classifications. A Human may always raise the confirmed tier in the Issue;
+lowering the Router candidate requires the governed evidence and authorization defined below.
 
 Route directly to the lowest profile expected to complete the task once. Never use a
 Luna → Terra → Sol rescue chain. Model routing optimizes accepted-task total cost, not price per

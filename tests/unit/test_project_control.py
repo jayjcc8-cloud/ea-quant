@@ -245,6 +245,20 @@ def test_tier_vocabulary_and_adr_location_remain_canonical() -> None:
     assert all(path.parent == PROJECT_ROOT / "docs" / "adr" for path in adr_documents)
 
 
+def test_workflow_preserves_router_governance_authority_minimum_tier() -> None:
+    router = yaml.safe_load(_read(ROUTER_PATH))
+    assert isinstance(router, dict)
+    tier1_surfaces = router["rules"]["tier1_contract_surfaces"]["surfaces"]
+    assert "governance_authority" in tier1_surfaces
+
+    workflow = _read(WORKFLOW_PATH).lower()
+    tier1_row = next(line for line in workflow.splitlines() if line.startswith("| tier 1"))
+    tier2_row = next(line for line in workflow.splitlines() if line.startswith("| tier 2"))
+    assert "governance authority" in tier1_row
+    assert "governance authority" not in tier2_row
+    assert "human may always raise" in workflow
+
+
 def test_governance_consumers_reference_workflow_as_the_full_contract() -> None:
     router = yaml.safe_load(_read(ROUTER_PATH))
     assert router["authority_references"] == {
