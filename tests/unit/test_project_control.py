@@ -122,9 +122,7 @@ def test_status_rejects_self_referential_premerge_facts() -> None:
     assert "The authoritative merged baseline is" not in status
     assert "Open pull requests: Draft #73 and Draft #80" not in status
     assert "PR #80" in status
-    assert re.search(
-        r"does not assert\s+mutable open, closed, Draft, or merged state", status
-    )
+    assert re.search(r"does not assert\s+mutable open, closed, Draft, or merged state", status)
 
 
 def test_authority_precedence_is_identical_in_adr_and_workflow() -> None:
