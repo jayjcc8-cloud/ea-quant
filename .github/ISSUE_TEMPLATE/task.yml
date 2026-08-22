@@ -1,0 +1,89 @@
+name: Governed task package
+description: Create one bounded implementation, review, or governance task.
+title: ""
+labels:
+  - status:draft
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Complete every field. Comments are historical evidence; this Issue body is the current
+        task authority until merged code, tests, CI, an Accepted ADR, or STATUS outranks it.
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: State the one final outcome this task changes.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List allowed files, systems, semantic surfaces, and external state.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: State what this task explicitly will not do.
+    validations:
+      required: true
+  - type: textarea
+    id: authoritative_inputs
+    attributes:
+      label: Authoritative Inputs
+      description: Link STATUS, WORKFLOW, relevant ADRs/specifications, code, and evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Provide a verifiable checklist. An Issue without it cannot become Ready.
+    validations:
+      required: true
+  - type: dropdown
+    id: risk_tier
+    attributes:
+      label: Risk Tier
+      description: Select the highest applicable semantic trigger; uncertainty raises the tier.
+      options:
+        - Tier 0 — low
+        - Tier 1 — normal
+        - Tier 2 — high
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: List focused tests, quality/full profiles, CI, and required review gates.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_outputs
+    attributes:
+      label: Expected Outputs
+      description: List code, tests, ADR, STATUS, reports, or successor Issues.
+    validations:
+      required: true
+  - type: textarea
+    id: reuse_assessment
+    attributes:
+      label: Reuse Assessment
+      description: >-
+        Tier 1/2: record capability, sources/candidates, versions/licenses/security/fit/cost, and
+        reuse/adapter/local-build decision. Tier 0 may record N/A with a reason.
+    validations:
+      required: true
+  - type: textarea
+    id: owners
+    attributes:
+      label: Owners
+      description: >-
+        Name Implementation and required Architecture/Decision/Adversarial/Verification/Approval/
+        domain owners. Tier 0 may record N/A for roles not required.
+    validations:
+      required: true

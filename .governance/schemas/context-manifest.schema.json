@@ -183,9 +183,9 @@
           "uri": "https://github.com/OWNER/REPO/issues/000#scope",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         },
-        "allowed_files": ["AGENTS.md"],
+        "allowed_files": ["AGENTS.md", "docs/governance/WORKFLOW.md"],
         "forbidden_actions_reference": {
-          "uri": "AGENTS.md#controlled-expert-lifecycle",
+          "uri": "docs/governance/WORKFLOW.md#expert-lifecycle",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         },
         "adrs": [],
@@ -194,7 +194,7 @@
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         },
         "verification_reference": {
-          "uri": "CONTRIBUTING.md#required-checks",
+          "uri": "docs/governance/WORKFLOW.md#git-verification-and-release",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         },
         "open_findings_reference": {
