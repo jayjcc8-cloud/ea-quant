@@ -245,7 +245,9 @@ def test_governance_consumers_reference_workflow_as_the_full_contract() -> None:
     for path in consumers:
         assert "docs/governance/WORKFLOW.md" in _read(path), path
 
-    context_schema = _read(PROJECT_ROOT / ".governance" / "schemas" / "context-manifest.schema.json")
+    context_schema = _read(
+        PROJECT_ROOT / ".governance" / "schemas" / "context-manifest.schema.json"
+    )
     report_schema = _read(PROJECT_ROOT / ".governance" / "schemas" / "report.schema.json")
     assert "docs/governance/WORKFLOW.md" in context_schema
     assert "docs/governance/WORKFLOW.md" in report_schema
