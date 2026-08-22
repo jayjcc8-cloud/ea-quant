@@ -5,9 +5,9 @@
 **Phase 1 — Backtest MVP: Incomplete / main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its exact CI are the
-authoritative implementation checkpoint. The last independently verified pre-consolidation
-checkpoint is `main@af7bc08cecd70fc5479b92e4393da468727ddb55`; its CI succeeded. The #67
-candidate is separate, Draft, and blocked until this control-plane iteration merges.
+authoritative implementation checkpoint. The latest completed Tier 2 delivery checkpoint is
+`main@ac1eb959685478185db438005df133b6ec206eaa`; its exact merged-main CI run `32598577572`
+succeeded. Issue #67 and PR #73 are closed and merged respectively.
 
 ## Phase Objective
 
@@ -22,13 +22,14 @@ report, with durable audit evidence and no live or external order-writing capabi
 - Typed configuration, canonical market data/time visibility, reproducible lineage, deterministic
   strategy/portfolio planning, historical matching, execution, audit, risk, ledger, and
   reconciliation contracts represented by Accepted ADRs 0001–0024 and merged tests.
-- `main@af7bc08` quality/full CI is healthy.
-- Issue #67 candidate `1d3a166` is frozen with successful exact-head CI and Runtime/Recovery PASS
-  evidence; it remains outside `main`.
+- Issue #67 / PR #73 completed the first full Tier 2 Protocol v1 loop. Ledger/reconciliation is
+  integrated with coordinator recovery at `main@ac1eb959`; exact-head adversarial, Runtime/Recovery,
+  Ledger/Reconciliation, independent Verification, Merge Approval, and merged-main CI passed.
+- `ADV-001/002`, `RUNTIME-004/005/006`, and `LEDGER-001/002` are FIXED. CI run `32598577572`
+  confirms merged-main quality/full/build/install health.
 
 ## Incomplete
 
-- #67: close `LEDGER-001/002` and complete all Tier 2 gates.
 - #77: repay the temporary coordinator size debt through behavior-preserving decomposition.
 - #76: admit reconciliation observation roots and ancestry resolution.
 - [#81](https://github.com/jayjcc8-cloud/ea-quant/issues/81): add concrete sample strategies.
@@ -40,11 +41,10 @@ report, with durable audit evidence and no live or external order-writing capabi
 
 ## Blockers
 
-- **#67 / LEDGER-001:** the lifecycle ledger gate remains optional/caller-owned, allowing the
-  sealed composition boundary to be bypassed.
-- **#67 / LEDGER-002:** a completed failed-refresh retry journal is not restart-equivalent.
-- Phase 1 cannot close until #67, #77, #76, sample strategy, end-to-end composition, result/report,
-  and release gates complete in order.
+- Phase 1 cannot close until #77, #76, sample strategy, end-to-end composition, result/report,
+  and release gates complete in order. Issue #67 no longer blocks this chain.
+- Issue #67 bounded cleanup remains pending a successor Cleanup Approval after this STATUS
+  synchronization; this is control-plane closeout work, not a runtime or ledger semantic defect.
 
 No blocker authorizes Phase 2 work, live trading, tool migration, or unrelated refactoring.
 
@@ -66,7 +66,8 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 - Control-plane provenance: [#78](https://github.com/jayjcc8-cloud/ea-quant/issues/78) and
   [PR #80](https://github.com/jayjcc8-cloud/ea-quant/pull/80). This reference does not assert
   mutable open, closed, Draft, or merged state; resolve that state from GitHub.
-- [#67 — Ledger/coordinator recovery](https://github.com/jayjcc8-cloud/ea-quant/issues/67)
+- [#67 — Ledger/coordinator recovery (Done)](https://github.com/jayjcc8-cloud/ea-quant/issues/67)
+- [#87 — #67 STATUS closeout](https://github.com/jayjcc8-cloud/ea-quant/issues/87)
 - [#77 — GOV-DEBT-001 coordinator decomposition](https://github.com/jayjcc8-cloud/ea-quant/issues/77)
 - [#79 — GOV-DEBT-002 consolidation file-count exception](https://github.com/jayjcc8-cloud/ea-quant/issues/79)
 - [#76 — Reconciliation observation roots](https://github.com/jayjcc8-cloud/ea-quant/issues/76)
@@ -77,13 +78,18 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 
 ## Last Confirmed
 
-- Date: **2026-08-22** (Asia/Shanghai)
-- Last independently verified pre-consolidation checkpoint:
-  `main@af7bc08cecd70fc5479b92e4393da468727ddb55`; checkpoint CI successful.
+- Date: **2026-08-23** (Asia/Shanghai)
+- The last independently verified pre-consolidation checkpoint,
+  `af7bc08cecd70fc5479b92e4393da468727ddb55`, was confirmed on **2026-08-22**; this successor
+  confirmation replaces its mutable #67 state while retaining that immutable provenance.
+- Latest completed Tier 2 checkpoint:
+  `main@ac1eb959685478185db438005df133b6ec206eaa`; merged-main CI run `32598577572`
+  succeeded.
 - Current-main resolution: on merged `main`, use the containing `main` commit and its exact CI;
   from any feature branch, resolve current `main` through GitHub rather than treating that branch's
   candidate SHA as merged reality.
-- Active product candidate at this confirmation: Draft #73, blocked by `LEDGER-001/002`.
+- Issue #67 / PR #73 state at this confirmation: closed/merged; all seven exact-SHA findings are
+  FIXED. The only remaining #67 action is bounded cleanup under a successor exact-state approval.
 - Control-plane provenance: Issue #78 / PR #80; this does not assert mutable open, closed, Draft,
   or merged state.
 - Live capability: unavailable and prohibited
@@ -92,8 +98,8 @@ Update this section whenever merged code/CI, primary Issues, blockers, or Phase 
 
 ## Phase Completion Conditions
 
-- [ ] Core governance workflow has completed a real Tier 2 loop.
-- [ ] #67, #77, and #76 are Done.
+- [x] Core governance workflow has completed a real Tier 2 loop through Issue #67 / PR #73.
+- [ ] #77 and #76 are Done (#67 is Done via PR #73).
 - [ ] Concrete sample strategies are Done.
 - [ ] Deterministic end-to-end backtest composition is Done.
 - [ ] Result/report adapter and golden report are Done.
