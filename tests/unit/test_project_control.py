@@ -213,7 +213,11 @@ def test_pull_request_template_records_evidence_cost_and_state_sync() -> None:
         "Successor Issues",
     }
     assert all(item in template for item in required)
-    assert "Draft / Ready / In Progress / Review / Verified / Done" in template
+    assert (
+        "Governed Issue lifecycle state: Draft / Ready / In Progress / Review / Verified / Done"
+    ) in template
+    assert "GitHub pull request review state: Draft / Ready for review" in template
+    assert "separate from the governed Issue lifecycle" in template
 
 
 def test_workflow_defines_state_machine_capacity_compression_and_done() -> None:

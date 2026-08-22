@@ -2,7 +2,8 @@
 
 - Issue:
 - Risk tier and reason:
-- Lifecycle state: Draft / Ready / In Progress / Review / Verified / Done
+- Governed Issue lifecycle state: Draft / Ready / In Progress / Review / Verified / Done
+- GitHub pull request review state: Draft / Ready for review (separate from the governed Issue lifecycle)
 - Base branch and exact base SHA:
 - Branch and checkout/worktree:
 - Merge order with other active work:
