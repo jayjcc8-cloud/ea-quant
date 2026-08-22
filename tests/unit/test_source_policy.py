@@ -20,6 +20,11 @@ def test_composition_package_does_not_export_mutable_frontier_capabilities() -> 
         "FrontierError",
         "create_acknowledged_lifecycle_frontier",
     }.intersection(exports)
+    runtime = ast.parse((SOURCE_ROOT / "runtime" / "__init__.py").read_text(encoding="utf-8"))
+    runtime_exports = next(
+        ast.literal_eval(node.value) for node in runtime.body if isinstance(node, ast.Assign)
+    )
+    assert "create_phase1_lifecycle_coordinator" not in runtime_exports
 
 
 def test_production_source_has_no_type_ignore_comments() -> None:

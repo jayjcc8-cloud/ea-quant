@@ -1145,7 +1145,6 @@ class Phase1HistoricalLifecycleCoordinator:
         )
 
     def _apply_ledger_gate(self, active: _ActiveDispatch) -> None:
-        """ADR 0022 per-dispatch steps 2-8: ledger outcomes, halt, refresh, acks."""
         gate = _bound_ledger_gate(
             self._ledger_handoff_authority,
             self._risk_authority,
@@ -2045,16 +2044,17 @@ def _pre_ack_chain_head(
     active: _ActiveDispatch,
     outcome_acks: tuple[AuditAppendAcknowledgement, ...],
 ) -> Sha256Digest:
-    if active.refresh_ack is not None:
-        return active.refresh_ack.chain_head_sha256
-    for acknowledgement in reversed(active.ledger_acks):
-        if acknowledgement is not None:
-            return acknowledgement.chain_head_sha256
-    if active.authorization_ack is not None:
-        return active.authorization_ack.chain_head_sha256
-    if not outcome_acks and active.batch_ack is not None:
-        return active.batch_ack.chain_head_sha256
-    return outcome_acks[-1].chain_head_sha256
+    candidates = (
+        *outcome_acks,
+        *active.ledger_acks,
+        active.refresh_ack,
+        active.authorization_ack,
+        active.batch_ack,
+    )
+    return max(
+        (value for value in candidates if value is not None),
+        key=lambda value: value.record_id.owner_sequence,
+    ).chain_head_sha256
 
 
 def _latest_ledger_ack_chain_head(active: _ActiveDispatch) -> Sha256Digest | None:
@@ -2068,7 +2068,6 @@ def _terminal_payload(
     coordinator: Phase1HistoricalLifecycleCoordinator,
     pre_terminal: PreTerminalCoordinatorState,
 ) -> bytes:
-    """Emit terminal v2 (publication-frontier-bound) when the ledger gate is bound."""
     if coordinator._ledger_handoff_authority is None:
         return canonical_run_terminal_audit_payload(pre_terminal)
     if coordinator._final_refresh_value_sha256 is None:
@@ -2117,7 +2116,6 @@ def create_phase1_lifecycle_coordinator(
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
-    """Bind lower-level owners; composition supplies the complete economic gate."""
     if type(binding) is not RunBinding:
         raise LifecycleError(OutcomeCode.INVALID_TYPE, "binding must be exact")
     if (authorization is None) != (authorization_capability is None):
@@ -2813,7 +2811,6 @@ def _recover_ledger_frontier(
     active: _ActiveDispatch,
     recovered: _RecoveredDispatch,
 ) -> None:
-    """ADR 0022 L465-477: replay ledger operations and require byte equality."""
     assert coordinator._ledger_handoff_authority is not None
     assert coordinator._risk_authority is not None
     assert coordinator._risk_refresh_authority is not None

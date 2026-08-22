@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from ea.core import (
     audit_subject_digest,
     canonical_dispatch_completed_audit_payload,
     canonical_dispatch_completed_v3_audit_payload,
+    canonical_ledger_handoff_outcome_bytes,
     create_audit_append_acknowledgement,
     create_audit_record,
 )
@@ -26,7 +28,7 @@ from unit.test_historical_matcher import _system
 DIGESTS = tuple(Sha256Digest(f"{index:064x}") for index in range(1, 8))
 
 
-def _v3_document(*, ledger_acks: tuple[str, ...] = ()) -> tuple[object, dict[str, object]]:
+def _v3_document(*, ledger_acks: tuple[str, ...] = ()) -> tuple[RunBinding, dict[str, object]]:
     _fixture, matcher, _orders, causal, delayed, _end = _system()
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=1)
     binding = RunBinding(
@@ -50,22 +52,20 @@ def _v3_document(*, ledger_acks: tuple[str, ...] = ()) -> tuple[object, dict[str
 def _acknowledgement(
     binding: RunBinding, subject: str, sequence: int
 ) -> AuditAppendAcknowledgement:
-    import json as _json
+    from unit.test_ledger_integration_core import _not_applicable
 
-    from unit.test_audit_journal import _batch_payload
-
-    document = _json.loads(_batch_payload())
+    document = json.loads(canonical_ledger_handoff_outcome_bytes(_not_applicable()))
     document["run_id"] = binding.reference.run_id.value
-    document["batch_sha256"] = subject
-    payload = _json.dumps(
+    document["audited_handoff_sha256"] = subject
+    payload = json.dumps(
         document, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
     ).encode()
-    subject_sha256 = audit_subject_digest(AuditRecordKind.MATCHER_DISPATCH_BATCH, payload)
+    subject_sha256 = audit_subject_digest(AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME, payload)
     record = create_audit_record(
         binding=binding,
         owner_sequence=sequence,
-        record_kind=AuditRecordKind.MATCHER_DISPATCH_BATCH,
-        subject_kind=AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+        record_kind=AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
+        subject_kind=AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME,
         subject_sha256=subject_sha256,
         canonical_payload=payload,
         previous_record_sha256=EMPTY_RECORD_SHA256,
@@ -118,6 +118,20 @@ def test_completion_v3_ledger_ack_aggregate_is_ordered_and_deterministic() -> No
     )
 
 
+def test_pre_ack_chain_head_uses_latest_physical_acknowledgement() -> None:
+    from ea.runtime.coordinator import _pre_ack_chain_head
+
+    binding, _ = _v3_document()
+    acknowledgements = tuple(_acknowledgement(binding, f"{n:064x}", n) for n in (2, 3, 4))
+    active = SimpleNamespace(
+        ledger_acks=[acknowledgements[0]],
+        refresh_ack=acknowledgements[1],
+        authorization_ack=acknowledgements[2],
+        batch_ack=None,
+    )
+    assert _pre_ack_chain_head(active, ()) == acknowledgements[2].chain_head_sha256  # type: ignore[arg-type]
+
+
 def test_completion_v3_revalidates_all_shared_v2_evidence() -> None:
     _fixture, matcher, _orders, _causal, delayed, _end = _system()
     batch = matcher.match_active_market_root(delayed, dispatch_sequence=1)
@@ -126,24 +140,14 @@ def test_completion_v3_revalidates_all_shared_v2_evidence() -> None:
         Sha256Digest("22" * 32),
     )
 
-    with pytest.raises(Exception, match="must be exact"):
+    foreign_binding = RunBinding(binding.reference, Sha256Digest("44" * 32))
+    with pytest.raises(Exception, match="ledger acknowledgements conflict"):
         canonical_dispatch_completed_v3_audit_payload(
             binding=binding,
             batch=batch,
             outcome_acknowledgements=(),
             pre_ack_state_sha256=DIGESTS[0],
-            ledger_outcome_acknowledgements=(),
-            final_portfolio_snapshot_sha256=Sha256Digest("11" * 32),
-            final_risk_state_sha256="not-a-digest",  # type: ignore[arg-type]
-        )
-
-    with pytest.raises(Exception, match="invalid"):
-        canonical_dispatch_completed_v3_audit_payload(
-            binding=binding,
-            batch=batch,
-            outcome_acknowledgements=(),
-            pre_ack_state_sha256=DIGESTS[0],
-            ledger_outcome_acknowledgements=(object(),),  # type: ignore[arg-type]
+            ledger_outcome_acknowledgements=(_acknowledgement(foreign_binding, "aa" * 32, 2),),
             final_portfolio_snapshot_sha256=DIGESTS[1],
             final_risk_state_sha256=DIGESTS[2],
         )

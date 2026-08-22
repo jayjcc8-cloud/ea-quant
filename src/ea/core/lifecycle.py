@@ -1462,15 +1462,18 @@ def canonical_dispatch_completed_v3_audit_payload(
     authorization_attempt_outcome: SubmissionAuthorizationAttemptOutcome | None = None,
     submission_receipts: tuple[HistoricalSubmissionReceipt, ...] = (),
 ) -> bytes:
-    """Build the ADR 0022 completion-v3 record that additionally binds the ordered
-    ledger-acknowledgement frontier, the final published portfolio snapshot, and
-    the final risk state. All v2 evidence re-validates through the v2 builder;
-    an old v2 record can never be interpreted as proving a ledger frontier.
-    """
+    """Build completion-v3 with the ledger and final publication frontiers."""
     if type(ledger_outcome_acknowledgements) is not tuple or any(
         type(value) is not AuditAppendAcknowledgement for value in ledger_outcome_acknowledgements
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "completion ledger acknowledgements are invalid")
+    if any(
+        value.binding != binding
+        or value.record_kind is not AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+        or value.subject_kind is not AuditSubjectKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
+        for value in ledger_outcome_acknowledgements
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion ledger acknowledgements conflict")
     if (
         type(final_portfolio_snapshot_sha256) is not Sha256Digest
         or type(final_risk_state_sha256) is not Sha256Digest
