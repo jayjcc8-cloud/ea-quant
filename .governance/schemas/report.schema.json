@@ -204,7 +204,7 @@
       "reviewed_sha": "WORKING_TREE",
       "scope": ["governance policy"],
       "evidence": [
-        {"source": "AGENTS.md", "sha256": null, "fact": "Router is non-authoritative"}
+        {"source": "docs/governance/WORKFLOW.md", "sha256": null, "fact": "Router is non-authoritative"}
       ],
       "findings": [],
       "verdict": "PASS",

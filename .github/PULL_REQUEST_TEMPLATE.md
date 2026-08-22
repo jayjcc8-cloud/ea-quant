@@ -1,97 +1,88 @@
-## Iteration
+## Iteration and state
 
 - Issue:
 - Risk tier and reason:
-- Milestone / target version:
-- Base branch and base SHA:
+- Governed Issue lifecycle state: Draft / Ready / In Progress / Review / Verified / Done
+- GitHub pull request review state: Draft / Ready for review (separate from the governed Issue lifecycle)
+- Base branch and exact base SHA:
 - Branch and checkout/worktree:
 - Merge order with other active work:
-- Architecture Owner:
-- Implementation Owner:
-- Verification Owner:
-- Domain expert(s), or N/A:
-- Writer lease started / handoff status:
+- Writer lease / handoff status:
+- Required owners and actor separation:
 
-## Goal
+## Objective and scope
 
-<!-- State the single outcome this PR delivers. -->
-
-## Non-goals
-
-<!-- List work that is explicitly outside this PR. -->
+- Objective:
+- Scope:
+- Non-goals:
+- Authoritative inputs:
+  - STATUS:
+  - WORKFLOW:
+  - ADRs/specifications:
+  - Code/tests/CI or other evidence:
 
 ## Changes
 
-<!-- Summarize the important files, behavior, and interfaces changed. -->
+<!-- Summarize important files, behavior, interfaces, and semantic surfaces. -->
 
-## Decisions and assumptions
+## Decisions, reuse, and risk
 
-- Related ADRs:
-- New assumptions:
-- Data/config/dependency impact, or N/A with reason:
+- Related ADRs / new decision required:
+- Reuse decision and evidence:
+- Public API/schema/canonical bytes/digest/error impact:
+- Time/look-ahead/execution/risk/recovery impact:
+- Secrets/live/external-write/release impact:
+- Rollback or recovery plan:
 
-## Reuse assessment
+## STATUS / ADR synchronization
 
-Complete before implementation for Tier 1/2. Tier 0 may use `N/A` with a reason.
+- STATUS change: updated / not required with evidence
+- ADR change: updated / not required with evidence
+- ROADMAP change: updated / not required with evidence
+- No critical decision exists only in comments: yes / blocker
 
-- Capability needed:
-- Existing project/standard-library capability inspected:
-- Search sources and date:
-
-| Candidate and supported/locked version | License | Maintenance / supply-chain / security evidence | Technical fit | Integration / migration / lock-in cost | Decision or rejection reason |
-|---|---|---|---|---|---|
-| | | | | | |
-
-- Decision: reuse directly / adapter / local build / N/A
-- Why this is the smallest safe ownership choice:
-
-## Quant and operational risk
-
-- Look-ahead bias / time semantics, or N/A with reason:
-- Execution and fill assumptions, or N/A with reason:
-- Reproducibility impact, or N/A with reason:
-- Secrets, live-trading flags, and external writes:
-- Rollback plan:
-
-## Verification
+## Validation evidence
 
 - Candidate HEAD SHA:
+- Focused command and result:
 - [ ] `uv run --no-project --python 3.12 python scripts/verify.py --profile quality`
 - [ ] `uv run --no-project --python 3.12 python scripts/verify.py --profile full`
-- CI result:
-- Verification worktree / CI run:
+- Exact-head CI URL and conclusion:
+- Verification worktree / CI identity:
 
 ## Expert review
 
 Every verdict is valid only for its exact `reviewed_sha`.
 
-| Role | Reviewer | reviewed_sha | Evidence | Finding IDs | Verdict |
+| Role | Actor | reviewed_sha | Context/report evidence | Finding IDs | Verdict |
 |---|---|---|---|---|---|
-| Architecture Owner, if required | | | | | |
-| Verification Owner | | | | | |
+| Decision / Architecture | | | | | |
+| Adversarial, if required | | | | | |
 | Domain expert, if required | | | | | |
+| Verification | | | | | |
+| Approval gate | | | | | |
 
 ### Finding closure
 
-| Finding ID | Severity | Owner | Resolution evidence | Status |
+| Finding ID | Severity | Owner | Repair/confirmation SHA | Status |
 |---|---|---|---|---|
 | | | | | |
 
-### Knowledge extraction and agent release
+## Delivery efficiency
 
-- Durable decisions/evidence recorded in:
-- Follow-up Issues:
-- Completed experts released:
-- Stale verdicts after the final HEAD: none / list
+- Rework rounds:
+- Token cost (accepted PR total):
+- Human time:
+- Ready-to-Merge time:
 
 ## Completion
 
-- [ ] All blockers are resolved.
-- [ ] Every required verdict binds the final candidate HEAD.
-- [ ] Documentation and ADRs are synchronized.
-- [ ] Required reuse assessment and dependency decision evidence are recorded.
+- [ ] Acceptance criteria are satisfied.
+- [ ] All blockers are closed and every required verdict binds Candidate HEAD SHA.
+- [ ] Exact-head local verification and CI succeed.
+- [ ] STATUS / ADR synchronization is complete.
 - [ ] No unrelated changes are included.
-- [ ] Follow-up work is recorded as Issues.
-- [ ] Useful expert knowledge is extracted and completed agents are released.
+- [ ] Successor Issues own every deferred item.
+- [ ] Useful expert knowledge is durable and completed experts are released.
 - [ ] Version impact is declared: none / patch / minor / major.
-- [ ] Worktree is clean and the PR diff has been reviewed.
+- [ ] Human or delegated Ready/Merge/Cleanup gates are identified.

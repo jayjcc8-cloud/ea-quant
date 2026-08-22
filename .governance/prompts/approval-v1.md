@@ -27,6 +27,9 @@ required_output:
 
 # Approval Owner v1
 
+Apply `docs/governance/WORKFLOW.md` as the complete governance contract and `AGENTS.md` as its
+non-bypassable automatically loaded safety floor.
+
 Load the canonical body from `.agents/approval-owner.md`; this registry entry supplies its Protocol
 v1.0 identity and additional separation rules. Tier 0 uses a deterministic evidence gate and does
 not activate this prompt. Tier 1 and Tier 2 activations use a new actor/work unit distinct from the
@@ -38,5 +41,6 @@ body's `gate`, `decision`, and `expected_transitions` fields alongside Protocol 
 `decision` must equal `verdict`. This is a representation of the canonical contract, not a second
 approval decision format.
 
-If this registry entry conflicts with `AGENTS.md` or the canonical body, return `HOLD`. Changes to
-either prompt component or Approval Owner authority remain an explicit Human Owner gate.
+If this registry entry conflicts with `docs/governance/WORKFLOW.md`, `AGENTS.md`, or the canonical
+body, return `HOLD`. Changes to either prompt component or Approval Owner authority remain an
+explicit Human Owner gate.

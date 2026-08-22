@@ -4,6 +4,12 @@ mode: manual
 role: classification_evidence_provider
 authority: none
 
+authority_references:
+  status: docs/STATUS.md
+  roadmap: docs/ROADMAP.md
+  workflow: docs/governance/WORKFLOW.md
+  adrs: docs/adr/
+
 prohibited_outputs:
   - approved_tier
   - confirmed_tier
