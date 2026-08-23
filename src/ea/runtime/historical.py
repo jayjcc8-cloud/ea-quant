@@ -12,17 +12,24 @@ from typing import Any, Protocol, cast, final
 
 from ea.core.execution import (
     InstrumentExecutionSpecSet,
+    InstrumentSpecSetId,
     instrument_spec_set_digest,
 )
-from ea.core.execution_identity import SourceNamespace
+from ea.core.execution_identity import EconomicId, SourceNamespace
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.outcomes import OutcomeCode
+from ea.core.reconciliation import (
+    ReconciliationObservation,
+    canonical_reconciliation_observation_bytes,
+    reconciliation_observation_digest,
+)
 from ea.core.run import DataFingerprint, ReplayWindow, RunId, Sha256Digest
 from ea.core.runtime import (
     BoundedRuntimeRootPlan,
     EndOfRunKind,
     EndOfRunRoot,
+    ReconciliationObservationRoot,
     RuntimeIdentifier,
     RuntimeOrderingError,
     RuntimeRoot,
@@ -34,9 +41,13 @@ from ea.core.time import Clock, TimeValidationError, require_utc
 from ea.runtime.queue import RuntimeDispatchLease
 
 PHASE1_HISTORICAL_MARKET_PROFILE = "ea-phase1-ohlcv-csv-v1"
+PHASE1_HISTORICAL_RECONCILIATION_PROFILE = "ea-phase1-reconciliation-observation-v1"
 HISTORICAL_RUNTIME_TRACE_SCHEMA = "ea.phase1-historical-runtime-trace.v1"
 HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN = b"ea.phase1-historical-runtime-trace.v1\0"
+_HISTORICAL_RUNTIME_TRACE_V2_SCHEMA = "ea.phase1-historical-runtime-trace.v2"
+_HISTORICAL_RUNTIME_TRACE_V2_DIGEST_DOMAIN = b"ea.phase1-historical-runtime-trace.v2\0"
 HISTORICAL_RUNTIME_PRODUCER_NAMESPACE = "runtime.phase1.historical"
+_HISTORICAL_RECONCILIATION_PRODUCER_NAMESPACE = "runtime.phase1.reconciliation"
 
 _MAX_UINT64 = (1 << 64) - 1
 _MAX_PHASE1_MARKET_RECORDS = 100_000
@@ -126,6 +137,75 @@ class HistoricalMarketSourcePort(Protocol):
     ) -> HistoricalMarketPreparedCommit: ...
 
     def commit(self, prepared: HistoricalMarketPreparedCommit) -> None: ...
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class HistoricalReconciliationSourceBinding:
+    """Exact immutable identity and finite bound for a reconciliation source."""
+
+    profile: str
+    run_id: RunId
+    instrument_spec_set_id: InstrumentSpecSetId
+    instrument_spec_set_sha256: Sha256Digest
+    observation_count: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.profile) is not str
+            or type(self.run_id) is not RunId
+            or type(self.instrument_spec_set_id) is not InstrumentSpecSetId
+            or type(self.instrument_spec_set_sha256) is not Sha256Digest
+            or type(self.observation_count) is not int
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation source binding types are invalid")
+        if self.profile != PHASE1_HISTORICAL_RECONCILIATION_PROFILE:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation source profile conflicts")
+        if not 0 <= self.observation_count <= _MAX_UINT64:
+            raise _fail(
+                OutcomeCode.OUT_OF_RANGE,
+                "reconciliation observation count is outside uint64",
+            )
+
+
+class HistoricalReconciliationCandidate(Protocol):
+    """Opaque source-issued observation candidate retained until acknowledgement."""
+
+    @property
+    def observation(self) -> ReconciliationObservation: ...
+
+    @property
+    def scheduled_at(self) -> datetime: ...
+
+    @property
+    def canonical_observation_bytes(self) -> bytes: ...
+
+    @property
+    def observation_sha256(self) -> Sha256Digest: ...
+
+
+class HistoricalReconciliationPreparedCommit(Protocol):
+    """Opaque source-issued prepared observation commit marker."""
+
+    def _historical_reconciliation_prepared_commit_marker(self) -> None: ...
+
+
+class HistoricalReconciliationSourcePort(Protocol):
+    """Consumer-owned deterministic reconciliation observation source."""
+
+    @property
+    def binding(self) -> HistoricalReconciliationSourceBinding: ...
+
+    def next_available_at(self) -> datetime | None: ...
+
+    def admit_one(self, *, clock: Clock) -> HistoricalReconciliationCandidate: ...
+
+    def prepare_commit(
+        self,
+        candidate: HistoricalReconciliationCandidate,
+    ) -> HistoricalReconciliationPreparedCommit: ...
+
+    def commit(self, prepared: HistoricalReconciliationPreparedCommit) -> None: ...
 
 
 @final
@@ -289,6 +369,48 @@ def _candidate_view(candidate_object: object) -> _CandidateView:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ReconciliationCandidateView:
+    candidate: HistoricalReconciliationCandidate
+    observation: ReconciliationObservation
+    scheduled_at: datetime
+    canonical_observation_bytes: bytes
+    observation_sha256: Sha256Digest
+
+
+def _reconciliation_candidate_view(candidate_object: object) -> _ReconciliationCandidateView:
+    candidate = cast(Any, candidate_object)
+    try:
+        observation = candidate.observation
+        scheduled_at = candidate.scheduled_at
+        canonical_bytes = candidate.canonical_observation_bytes
+        digest = candidate.observation_sha256
+    except (AttributeError, TypeError) as error:
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "reconciliation candidate has an incomplete operation contract",
+        ) from error
+    if (
+        type(observation) is not ReconciliationObservation
+        or type(canonical_bytes) is not bytes
+        or type(digest) is not Sha256Digest
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation candidate types are invalid")
+    canonical_scheduled_at = _utc(scheduled_at, field="reconciliation.scheduled_at")
+    if (
+        canonical_bytes != canonical_reconciliation_observation_bytes(observation)
+        or digest != reconciliation_observation_digest(observation)
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation candidate evidence conflicts")
+    return _ReconciliationCandidateView(
+        candidate=cast(HistoricalReconciliationCandidate, candidate_object),
+        observation=observation,
+        scheduled_at=canonical_scheduled_at,
+        canonical_observation_bytes=canonical_bytes,
+        observation_sha256=digest,
+    )
+
+
 def _terminal_root_bytes(root: EndOfRunRoot) -> bytes:
     document = {
         "available_at": _utc_text(root.available_at),
@@ -329,6 +451,7 @@ def _trace_record_bytes(
     committed_event_count: int,
     committed_cursor_as_of: datetime | None,
     terminal_acknowledged: bool,
+    trace_schema: str = HISTORICAL_RUNTIME_TRACE_SCHEMA,
 ) -> bytes:
     root_document = json.loads(offer.canonical_root_bytes.decode("utf-8"))
     if type(root_document) is not dict:
@@ -344,7 +467,7 @@ def _trace_record_bytes(
         "root": root_document,
         "root_order_key": _json_order_key(offer.order_key),
         "run_id": run_id.value,
-        "schema": HISTORICAL_RUNTIME_TRACE_SCHEMA,
+        "schema": trace_schema,
         "terminal_acknowledged": terminal_acknowledged,
     }
     return json.dumps(
@@ -632,6 +755,180 @@ class _HistoricalMarketProducer:
         elif not prepared.next_state.terminal_acknowledged:
             raise AssertionError("market commit lost source prepared state")
         self._state = prepared.next_state
+
+
+@dataclass(frozen=True, slots=True)
+class _ReconciliationProducerState:
+    committed_count: int
+    current_offer: _RuntimeRootOffer | None
+    promise: datetime | None
+    last_key: RuntimeRootOrderKey | None
+    committed_primary_identities: tuple[tuple[str, int], ...]
+    committed_observation_ids: tuple[EconomicId, ...]
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class _PreparedReconciliationCommit:
+    _seal: object
+    offer: _RuntimeRootOffer
+    source_prepared: HistoricalReconciliationPreparedCommit
+    next_state: _ReconciliationProducerState
+    trace_record: bytes
+
+    def __init__(self) -> None:
+        raise TypeError("reconciliation commits are created only by prepare_commit")
+
+
+@final
+class _HistoricalReconciliationProducer:
+    __slots__ = (
+        "_binding",
+        "_clock",
+        "_fingerprint",
+        "_market_producer",
+        "_producer_id",
+        "_run_id",
+        "_source",
+        "_state",
+    )
+
+    def __init__(self) -> None:
+        raise TypeError("reconciliation producers are created only by the runtime factory")
+
+    @property
+    def producer_id(self) -> RuntimeIdentifier:
+        return self._producer_id
+
+    def poll(self, *, clock: Clock) -> _ProducerResponse:
+        if clock is not self._clock:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation producer clock conflicts")
+        state = self._state
+        if state.current_offer is not None:
+            return _offer_response(state.current_offer)
+        now = self._clock.now()
+        scheduled = state.promise
+        if scheduled is None:
+            scheduled_value = self._source.next_available_at()
+            if scheduled_value is None:
+                if state.committed_count != self._binding.observation_count:
+                    raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation source exhausted early")
+                return _exhausted_response()
+            if state.committed_count >= self._binding.observation_count:
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "reconciliation source supplied extra candidate",
+                )
+            scheduled = _utc(scheduled_value, field="reconciliation_source.next_available_at")
+            replay_end = self._market_producer._binding.replay_window.end_exclusive
+            if scheduled < now or scheduled >= replay_end:
+                raise _fail(
+                    OutcomeCode.OUT_OF_RANGE,
+                    "reconciliation schedule is outside replay window",
+                )
+            self._state = replace(state, promise=scheduled)
+            state = self._state
+        if now < scheduled:
+            return _lower_bound_response(scheduled)
+        if now > scheduled:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "clock advanced beyond reconciliation promise")
+        view = _reconciliation_candidate_view(self._source.admit_one(clock=self._clock))
+        if view.scheduled_at != view.observation.available_at or view.scheduled_at != now:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "reconciliation candidate time evidence conflicts",
+            )
+        from ea.core.runtime import create_reconciliation_observation_root
+
+        root = create_reconciliation_observation_root(view.observation)
+        key = runtime_root_order_key(root)
+        primary_identity = (root.source_namespace.value, root.source_sequence)
+        if (
+            primary_identity in state.committed_primary_identities
+            or root.observation_id in state.committed_observation_ids
+            or (state.last_key is not None and key <= state.last_key)
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation identity or key is not new")
+        offer = _create_offer(
+            producer_id=self._producer_id,
+            plan=prepare_bounded_runtime_roots((root,)),
+            root=root,
+            canonical_root_bytes=view.canonical_observation_bytes,
+            candidate=view.candidate,
+            terminal=False,
+        )
+        self._state = replace(state, current_offer=offer)
+        return _offer_response(offer)
+
+    def prepare_commit(
+        self,
+        offer: _RuntimeRootOffer,
+        *,
+        dispatch_sequence: int,
+    ) -> _PreparedReconciliationCommit:
+        state = self._state
+        if (
+            type(offer) is not _RuntimeRootOffer
+            or offer._seal is not _OFFER_SEAL
+            or offer is not state.current_offer
+            or type(offer.root) is not ReconciliationObservationRoot
+            or offer.candidate is None
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation offer is stale or invalid")
+        if type(dispatch_sequence) is not int or not 1 <= dispatch_sequence <= _MAX_UINT64:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch sequence is outside uint64")
+        view = _reconciliation_candidate_view(offer.candidate)
+        root = offer.root
+        if not (
+            state.promise == self._clock.now() == view.scheduled_at == root.available_at
+            and root.observation is view.observation
+            and root.canonical_observation_bytes == view.canonical_observation_bytes
+            and root.observation_sha256 == view.observation_sha256
+            and offer.canonical_root_bytes == view.canonical_observation_bytes
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "live reconciliation evidence conflicts")
+        source_prepared = self._source.prepare_commit(view.candidate)
+        primary_identity = (root.source_namespace.value, root.source_sequence)
+        next_state = replace(
+            state,
+            committed_count=state.committed_count + 1,
+            current_offer=None,
+            promise=None,
+            last_key=offer.order_key,
+            committed_primary_identities=(*state.committed_primary_identities, primary_identity),
+            committed_observation_ids=(*state.committed_observation_ids, root.observation_id),
+        )
+        prepared = object.__new__(_PreparedReconciliationCommit)
+        object.__setattr__(prepared, "_seal", _PREPARED_SEAL)
+        object.__setattr__(prepared, "offer", offer)
+        object.__setattr__(prepared, "source_prepared", source_prepared)
+        object.__setattr__(prepared, "next_state", next_state)
+        object.__setattr__(
+            prepared,
+            "trace_record",
+            _trace_record_bytes(
+                run_id=self._run_id,
+                fingerprint=self._fingerprint,
+                clock_now=self._clock.now(),
+                dispatch_sequence=dispatch_sequence,
+                offer=offer,
+                committed_event_count=self._market_producer.committed_event_count,
+                committed_cursor_as_of=self._clock.now(),
+                terminal_acknowledged=False,
+                trace_schema=_HISTORICAL_RUNTIME_TRACE_V2_SCHEMA,
+            ),
+        )
+        return prepared
+
+    def commit(self, prepared_object: _RuntimePreparedCommit) -> None:
+        if (
+            type(prepared_object) is not _PreparedReconciliationCommit
+            or prepared_object._seal is not _PREPARED_SEAL
+            or prepared_object.offer is not self._state.current_offer
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation commit is stale or invalid")
+        self._source.commit(prepared_object.source_prepared)
+        self._state = prepared_object.next_state
 
 
 @dataclass(frozen=True, slots=True)
