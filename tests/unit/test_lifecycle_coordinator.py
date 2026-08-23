@@ -1525,7 +1525,12 @@ def test_reconciliation_root_bypasses_matcher_and_emits_v4_completion() -> None:
     """Rank-20 completion has a distinct immutable completion carrier."""
     from ea.core.historical_matching import ReconciliationCoordinatorDispatchOutcome
 
-    assert ReconciliationCoordinatorDispatchOutcome.__module__ == "ea.core.historical_matching"
+    fields = ReconciliationCoordinatorDispatchOutcome.__dataclass_fields__
+    assert set(fields) >= {
+        "observation_sha256",
+        "reconciliation_outcome_ack_sha256",
+        "runtime_acknowledged",
+    }
 
 
 def test_reconciliation_physical_order_and_audit_failures_prevent_effect() -> None:
@@ -1533,3 +1538,4 @@ def test_reconciliation_physical_order_and_audit_failures_prevent_effect() -> No
     from ea.core.historical_matching import canonical_dispatch_completed_v4_audit_payload
 
     assert callable(canonical_dispatch_completed_v4_audit_payload)
+    assert canonical_dispatch_completed_v4_audit_payload.__name__.endswith("v4_audit_payload")

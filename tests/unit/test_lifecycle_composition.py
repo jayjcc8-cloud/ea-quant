@@ -1469,6 +1469,7 @@ def test_reconciliation_capabilities_remain_private_in_fresh_and_recovered_bundl
     from ea.runtime import HistoricalReconciliationSourcePort
 
     assert HistoricalReconciliationSourcePort.__module__ == "ea.runtime.historical"
+    assert "commit" in HistoricalReconciliationSourcePort.__dict__
 
 
 def test_reconciliation_recovery_rejects_future_or_incomplete_histories() -> None:
@@ -1476,3 +1477,4 @@ def test_reconciliation_recovery_rejects_future_or_incomplete_histories() -> Non
     from ea.runtime import HistoricalReconciliationSourceBinding
 
     assert HistoricalReconciliationSourceBinding.__module__ == "ea.runtime.historical"
+    assert "observation_count" in HistoricalReconciliationSourceBinding.__dataclass_fields__

@@ -1612,11 +1612,12 @@ def test_reconciliation_adjustment_retry_and_restart_are_exactly_once() -> None:
     """Rank-20 completion records the independently acknowledged adjustment path."""
     from ea.core.historical_matching import ReconciliationCoordinatorDispatchOutcome
 
-    assert ReconciliationCoordinatorDispatchOutcome.__module__ == "ea.core.historical_matching"
+    assert "adjustment_outcome_ack_sha256" in ReconciliationCoordinatorDispatchOutcome.__dataclass_fields__
 
 
 def test_ancestry_resolution_has_zero_postings_and_only_named_removals() -> None:
     """The authority must expose the narrowly proven ancestry-resolution operation."""
     from ea.reconciliation.authority import Phase1ReconciliationAuthority
 
-    assert callable(getattr(Phase1ReconciliationAuthority, "propose_ancestry_resolution"))
+    method = getattr(Phase1ReconciliationAuthority, "propose_ancestry_resolution")
+    assert "outcome_acknowledgement" in method.__annotations__

@@ -171,9 +171,17 @@ def _two_rows() -> tuple[str, str]:
 
 def test_reconciliation_producer_interleaves_without_lookahead_and_commits_on_ack() -> None:
     """The runtime surface must expose the private rank-20 source contract."""
-    from ea.runtime import HistoricalReconciliationSourcePort
+    from ea.runtime import (
+        HistoricalReconciliationSourceBinding,
+        HistoricalReconciliationSourcePort,
+        create_phase1_historical_market_runtime,
+    )
 
+    market_runtime, _bridge = _runtime(_two_rows()[0])
     assert HistoricalReconciliationSourcePort.__module__ == "ea.runtime.historical"
+    assert HistoricalReconciliationSourceBinding.__module__ == "ea.runtime.historical"
+    assert market_runtime.committed_event_count == 0
+    assert "reconciliation_source" in create_phase1_historical_market_runtime.__annotations__
 
 
 def test_reconciliation_runtime_admission_enforces_joint_root_bound() -> None:
@@ -181,11 +189,13 @@ def test_reconciliation_runtime_admission_enforces_joint_root_bound() -> None:
     from ea.runtime import HistoricalReconciliationSourceBinding
 
     assert HistoricalReconciliationSourceBinding.__module__ == "ea.runtime.historical"
+    assert HistoricalReconciliationSourceBinding.__dataclass_fields__["observation_count"].type is int
 
 
 def test_reconciliation_trace_v2_and_replay_are_byte_identical_across_processes() -> None:
     """A reconciliation-enabled runtime uses the distinct v2 trace profile."""
     assert historical_runtime.HISTORICAL_RUNTIME_TRACE_SCHEMA == "ea.phase1-historical-runtime-trace.v2"
+    assert historical_runtime.HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN.endswith(b"trace.v2\0")
 
 
 def test_historical_runtime_dispatches_market_roots_then_one_terminal() -> None:

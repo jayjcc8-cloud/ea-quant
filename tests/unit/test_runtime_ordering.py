@@ -601,6 +601,27 @@ def test_public_boundary_has_no_generic_root_or_mutable_queue_escape_hatch() -> 
 
 def test_reconciliation_observation_root_uses_exact_rank20_suffix_and_collisions() -> None:
     """Rank-20 roots must be a factory-issued, public immutable carrier."""
-    from ea.core import ReconciliationObservationRoot
+    from ea.core import (
+        EconomicOwnerKind,
+        ReconciliationObservationRoot,
+        create_reconciliation_observation_root,
+    )
+    from unit.test_reconciliation_authority import _observation
 
-    assert ReconciliationObservationRoot.__module__ == "ea.core.runtime"
+    observation = _observation(source_sequence=17, observation_sequence=5)
+    root = create_reconciliation_observation_root(observation)
+
+    assert type(root) is ReconciliationObservationRoot
+    assert root.observation is observation
+    assert root.canonical_observation_bytes
+    assert runtime_root_order_key(root).as_tuple()[1:] == (
+        20,
+        20,
+        "reconciliation.sim",
+        17,
+        "ledger.portfolio",
+        3,
+        RUN_ID.value,
+        EconomicOwnerKind.RECONCILIATION_OBSERVATION.value,
+        5,
+    )
