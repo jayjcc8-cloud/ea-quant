@@ -94,6 +94,7 @@ if TYPE_CHECKING:
 
 _MAX_UINT64 = (1 << 64) - 1
 
+
 def _require_recovery_records(
     binding: RunBinding,
     records: AuditRecoveryRecordSource | tuple[AuditRecord, ...],
