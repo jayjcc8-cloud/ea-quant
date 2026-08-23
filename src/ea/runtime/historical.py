@@ -824,6 +824,15 @@ class _HistoricalReconciliationProducer:
         "_state",
     )
 
+    _binding: HistoricalReconciliationSourceBinding
+    _clock: Phase1VirtualClock
+    _fingerprint: DataFingerprint
+    _market_producer: _HistoricalMarketProducer
+    _producer_id: RuntimeIdentifier
+    _run_id: RunId
+    _source: HistoricalReconciliationSourcePort
+    _state: _ReconciliationProducerState
+
     def __init__(self) -> None:
         raise TypeError("reconciliation producers are created only by the runtime factory")
 

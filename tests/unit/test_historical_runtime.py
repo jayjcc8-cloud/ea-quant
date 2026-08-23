@@ -31,6 +31,7 @@ from ea.core import (
     PriceDomain,
     ReconciliationObservation,
     ReconciliationObservationKind,
+    ReconciliationObservationRoot,
     ReconciliationScopeKind,
     ReplayWindow,
     RunId,
@@ -68,6 +69,9 @@ from ea.runtime import (
     HistoricalMarketCandidate,
     HistoricalMarketPreparedCommit,
     HistoricalMarketSourceBinding,
+    HistoricalReconciliationCandidate,
+    HistoricalReconciliationPreparedCommit,
+    HistoricalReconciliationSourceBinding,
     Phase1HistoricalMarketRuntime,
     Phase1VirtualClock,
     RuntimeDispatchLease,
@@ -228,9 +232,7 @@ def _reconciliation_observation(
     )
 
 
-def _reconciliation_binding(*, observation_count: int) -> object:
-    from ea.runtime import HistoricalReconciliationSourceBinding
-
+def _reconciliation_binding(*, observation_count: int) -> HistoricalReconciliationSourceBinding:
     return HistoricalReconciliationSourceBinding(
         profile="ea-phase1-reconciliation-observation-v1",
         run_id=RUN_ID,
@@ -245,7 +247,7 @@ class _ReconciliationCandidate:
     observation: ReconciliationObservation
     scheduled_at: datetime
     canonical_observation_bytes: bytes
-    observation_sha256: object
+    observation_sha256: Sha256Digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +279,7 @@ class _ScriptedReconciliationPort:
         self.commit_calls = 0
 
     @property
-    def binding(self) -> object:
+    def binding(self) -> HistoricalReconciliationSourceBinding:
         return self._binding
 
     def next_available_at(self) -> datetime | None:
@@ -286,17 +288,20 @@ class _ScriptedReconciliationPort:
             return None
         return self.candidates[self.index].scheduled_at
 
-    def admit_one(self, *, clock: Clock) -> _ReconciliationCandidate:
+    def admit_one(self, *, clock: Clock) -> HistoricalReconciliationCandidate:
         assert clock.now() == self.candidates[self.index].scheduled_at
         self.admit_calls += 1
         return self.candidates[self.index]
 
-    def prepare_commit(self, candidate: object) -> _ReconciliationPrepared:
+    def prepare_commit(
+        self,
+        candidate: HistoricalReconciliationCandidate,
+    ) -> HistoricalReconciliationPreparedCommit:
         self.prepare_calls += 1
         assert candidate is self.candidates[self.index]
         return _ReconciliationPrepared(self.candidates[self.index])
 
-    def commit(self, prepared: object) -> None:
+    def commit(self, prepared: HistoricalReconciliationPreparedCommit) -> None:
         self.commit_calls += 1
         assert type(prepared) is _ReconciliationPrepared
         assert prepared.candidate is self.candidates[self.index]
@@ -330,7 +335,7 @@ def test_reconciliation_producer_interleaves_without_lookahead_and_commits_on_ac
     )
 
     first = runtime.pop()
-    assert type(first.root).__name__ == "ReconciliationObservationRoot"
+    assert type(first.root) is ReconciliationObservationRoot
     assert first.root.observation is reconciliation
     assert runtime_root_order_key(first.root).domain_rank == 20
     assert reconciliation_port.admit_calls == 1
@@ -348,6 +353,7 @@ def test_reconciliation_producer_interleaves_without_lookahead_and_commits_on_ac
     runtime.acknowledge(market_lease)
 
     later_lease = runtime.pop()
+    assert type(later_lease.root) is ReconciliationObservationRoot
     assert later_lease.root.observation is later
     assert reconciliation_port.admit_calls == 2
 
