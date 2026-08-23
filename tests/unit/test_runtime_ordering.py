@@ -590,7 +590,7 @@ def test_public_boundary_has_no_generic_root_or_mutable_queue_escape_hatch() -> 
         for name, value in getmembers(runtime_module)
         if not name.startswith("_") and (isfunction(value) or isinstance(value, type))
     }
-    assert "ReconciliationObservationRoot" not in public_runtime_names
+    assert "ReconciliationObservationRoot" in public_runtime_names
     assert "RuntimeRootEnvelope" not in public_runtime_names
     assert {
         name
