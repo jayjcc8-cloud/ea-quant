@@ -11,7 +11,7 @@ from itertools import pairwise
 from types import MappingProxyType
 from typing import TYPE_CHECKING, final
 
-from ea.core.execution_identity import SourceNamespace
+from ea.core.execution_identity import EconomicId, SourceNamespace
 from ea.core.execution_messages import (
     ExecutionFactIngress,
     ExecutionFactKind,
@@ -40,6 +40,7 @@ _RUNTIME_ERROR_CODES = frozenset(
 
 _ACTIVE_MARKET_DISPATCH_PROOF_SEAL = object()
 _ACTIVE_END_OF_RUN_DISPATCH_PROOF_SEAL = object()
+_RECONCILIATION_OBSERVATION_ROOT_SEAL = object()
 
 
 class RuntimeOrderingError(ValueError):
@@ -564,6 +565,7 @@ class ReconciliationObservationRoot:
     observation: ReconciliationObservation
     canonical_observation_bytes: bytes
     observation_sha256: Sha256Digest
+    _seal: object
 
     def __init__(self) -> None:
         raise TypeError("reconciliation observation roots are created only by their factory")
@@ -593,7 +595,7 @@ class ReconciliationObservationRoot:
         return self.observation.watermark_sequence
 
     @property
-    def observation_id(self) -> object:
+    def observation_id(self) -> EconomicId:
         return self.observation.observation_id
 
 
@@ -614,7 +616,34 @@ def create_reconciliation_observation_root(
     object.__setattr__(value, "observation", observation)
     object.__setattr__(value, "canonical_observation_bytes", payload)
     object.__setattr__(value, "observation_sha256", reconciliation_observation_digest(observation))
+    object.__setattr__(value, "_seal", _RECONCILIATION_OBSERVATION_ROOT_SEAL)
     return value
+
+
+def _require_reconciliation_observation_root(
+    root: object,
+) -> ReconciliationObservationRoot:
+    from ea.core.reconciliation import (
+        ReconciliationObservation,
+        canonical_reconciliation_observation_bytes,
+        reconciliation_observation_digest,
+    )
+
+    if (
+        type(root) is not ReconciliationObservationRoot
+        or getattr(root, "_seal", None) is not _RECONCILIATION_OBSERVATION_ROOT_SEAL
+        or type(root.observation) is not ReconciliationObservation
+        or type(root.canonical_observation_bytes) is not bytes
+        or type(root.observation_sha256) is not Sha256Digest
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation root is not factory-issued")
+    if (
+        root.canonical_observation_bytes
+        != canonical_reconciliation_observation_bytes(root.observation)
+        or root.observation_sha256 != reconciliation_observation_digest(root.observation)
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation root evidence conflicts")
+    return root
 
 
 type RuntimeRoot = (
@@ -838,6 +867,7 @@ def runtime_root_order_key(root: RuntimeRoot) -> RuntimeRootOrderKey:
             ),
         )
     if type(root) is ReconciliationObservationRoot:
+        root = _require_reconciliation_observation_root(root)
         identifier = root.observation.observation_id
         return RuntimeRootOrderKey(
             available_at=root.available_at,
@@ -1018,6 +1048,7 @@ def prepare_bounded_runtime_roots(
                 )
             fact_identities.add(fact_identity)
         elif type(root) is ReconciliationObservationRoot:
+            root = _require_reconciliation_observation_root(root)
             identity = (root.source_namespace.value, root.source_sequence)
             if identity in reconciliation_identities:
                 raise _fail(

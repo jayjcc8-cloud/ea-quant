@@ -625,3 +625,21 @@ def test_reconciliation_observation_root_uses_exact_rank20_suffix_and_collisions
         EconomicOwnerKind.RECONCILIATION_OBSERVATION.value,
         5,
     )
+
+
+def test_reconciliation_observation_root_rejects_forged_or_mismatched_carriers() -> None:
+    from ea.core import ReconciliationObservationRoot
+    from unit.test_reconciliation_authority import _observation
+
+    forged = object.__new__(ReconciliationObservationRoot)
+    object.__setattr__(forged, "observation", _observation())
+    object.__setattr__(forged, "canonical_observation_bytes", b"forged")
+    object.__setattr__(forged, "observation_sha256", Sha256Digest("f" * 64))
+
+    for operation in (
+        lambda: runtime_root_order_key(forged),
+        lambda: prepare_bounded_runtime_roots((forged,)),
+    ):
+        with pytest.raises(RuntimeOrderingError) as error:
+            operation()
+        assert error.value.code is OutcomeCode.INVALID_TYPE
