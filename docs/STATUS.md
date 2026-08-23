@@ -6,8 +6,9 @@
 
 When this file is read from merged `main`, the containing `main` commit and its exact CI are the
 authoritative implementation checkpoint. The latest completed Tier 2 delivery checkpoint is
-`main@ac1eb959685478185db438005df133b6ec206eaa`; its exact merged-main CI run `32598577572`
-succeeded. Issue #67 and PR #73 are closed and merged respectively.
+`main@43faa491f79615ce901fde5b306bf0bcfc1d59f9`; its exact merged-main CI run `32621789347`
+succeeded. The completed Tier 2 recovery delivery is preserved by Issue #77 and PR #91; resolve
+mutable Issue and pull-request state from GitHub.
 
 ## Phase Objective
 
@@ -31,12 +32,18 @@ report, with durable audit evidence and no live or external order-writing capabi
   `/private/tmp/ea-issue67-ledger-recovery` was removed non-force, and the exact local and remote
   `codex/67-ledger-coordinator-recovery` refs were deleted. Approval report SHA-256:
   `bfc018aa48305144f47a49f7ceece822a3fcd6ee441fdfcdc76bbf19b26f3e45`.
+- Issue #77 / PR #91 completed the behavior-equivalent coordinator recovery extraction at
+  `main@43faa491f79615ce901fde5b306bf0bcfc1d59f9`: the coordinator is 2,636 lines and the private
+  recovery helper is 1,462 lines. `ADV-001` and `VERIFY-001` are FIXED. The pinned comparison
+  measured +1.2579% wall time and +0.0215% RSS, within the 10% threshold; merged-main CI run
+  `32621789347` succeeded.
+- Bounded Issue #77 runtime cleanup/archive completed: the Approval report SHA-256 is
+  `198ffc3ae4046de8e4f7ba73fdc87714f25db68bbfc168e8c2d523a50ba27ed6`; the 20-entry archived
+  evidence manifest `SHA256SUMS` has SHA-256
+  `7c36163ee36b6dfd3a31e2627742d118b7784d7c9ea1684637846f1cdd84ed18`.
 
 ## Incomplete
 
-- #77: the candidate contains a behavior-equivalent private coordinator recovery boundary; it is
-  not Done until merged-main CI, Issue/#84 synchronization, and approved cleanup complete.
-- After #77 closes, #76 is the next ordered product blocker.
 - #76: admit reconciliation observation roots and ancestry resolution.
 - [#81](https://github.com/jayjcc8-cloud/ea-quant/issues/81): add concrete sample strategies.
 - [#82](https://github.com/jayjcc8-cloud/ea-quant/issues/82): compose a deterministic end-to-end
@@ -47,8 +54,8 @@ report, with durable audit evidence and no live or external order-writing capabi
 
 ## Blockers
 
-- Phase 1 cannot close until #77, #76, sample strategy, end-to-end composition, result/report,
-  and release gates complete in order. Issue #67 no longer blocks this chain.
+- Phase 1 cannot close until #76, sample strategy, end-to-end composition, result/report, and
+  release gates complete in order. The completed #77 delivery no longer blocks this chain.
 
 No blocker authorizes Phase 2 work, live trading, tool migration, or unrelated refactoring.
 Governance remains in maintenance mode.
@@ -74,7 +81,7 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 - [#67 — Ledger/coordinator recovery (Done)](https://github.com/jayjcc8-cloud/ea-quant/issues/67)
 - [#87 — #67 STATUS closeout](https://github.com/jayjcc8-cloud/ea-quant/issues/87)
 - [#89 — #67 cleanup status synchronization](https://github.com/jayjcc8-cloud/ea-quant/issues/89)
-- [#77 — GOV-DEBT-001 coordinator decomposition](https://github.com/jayjcc8-cloud/ea-quant/issues/77)
+- [#77 — GOV-DEBT-001 coordinator decomposition (delivered by PR #91)](https://github.com/jayjcc8-cloud/ea-quant/issues/77)
 - [#79 — GOV-DEBT-002 consolidation file-count exception](https://github.com/jayjcc8-cloud/ea-quant/issues/79)
 - [#76 — Reconciliation observation roots](https://github.com/jayjcc8-cloud/ea-quant/issues/76)
 - [#81 — Deterministic sample strategies](https://github.com/jayjcc8-cloud/ea-quant/issues/81)
@@ -86,17 +93,18 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 
 - Date: **2026-08-23** (Asia/Shanghai)
 - The last independently verified pre-consolidation checkpoint,
-  `af7bc08cecd70fc5479b92e4393da468727ddb55`, was confirmed on **2026-08-22**; this successor
-  confirmation replaces its mutable #67 state while retaining that immutable provenance.
+  `af7bc08cecd70fc5479b92e4393da468727ddb55`, remains immutable provenance from **2026-08-22**;
+  the current confirmation below records the later #77 delivery and cleanup.
 - Latest completed Tier 2 checkpoint:
-  `main@ac1eb959685478185db438005df133b6ec206eaa`; merged-main CI run `32598577572`
+  `main@43faa491f79615ce901fde5b306bf0bcfc1d59f9`; merged-main CI run `32621789347`
   succeeded.
 - Current-main resolution: on merged `main`, use the containing `main` commit and its exact CI;
   from any feature branch, resolve current `main` through GitHub rather than treating that branch's
   candidate SHA as merged reality.
-- Issue #67 / PR #73 state at this confirmation: closed/merged; all seven exact-SHA findings are
-  FIXED. Cleanup Approval R22 passed and its bounded action manifest completed; Issue #67 has no
-  remaining action.
+- Issue #77 / PR #91 delivered the behavior-equivalent coordinator recovery extraction. Exact-SHA
+  Decision, Adversarial, and Verification evidence records `ADV-001`/`VERIFY-001` FIXED; the
+  performance delta is +1.2579% wall / +0.0215% RSS. Runtime cleanup/archive completed under the
+  bounded Cleanup Approval report and verified 20-entry archive manifest recorded above.
 - Control-plane provenance: Issue #78 / PR #80; this does not assert mutable open, closed, Draft,
   or merged state.
 - Live capability: unavailable and prohibited
@@ -105,8 +113,9 @@ Update this section whenever merged code/CI, primary Issues, blockers, or Phase 
 
 ## Phase Completion Conditions
 
-- [x] Core governance workflow has completed a real Tier 2 loop through Issue #67 / PR #73.
-- [ ] #77 and #76 are Done (#67 is Done via PR #73).
+- [x] Core governance workflow has completed real Tier 2 loops through Issue #67 / PR #73 and
+  the delivered Issue #77 / PR #91 recovery extraction.
+- [ ] #76 is Done; the remaining ordered product work follows #76.
 - [ ] Concrete sample strategies are Done.
 - [ ] Deterministic end-to-end backtest composition is Done.
 - [ ] Result/report adapter and golden report are Done.
@@ -117,15 +126,20 @@ Update this section whenever merged code/CI, primary Issues, blockers, or Phase 
 
 ## Weekly Governance Metrics
 
-The first durable measurement is the first scheduled weekly review after Issue #78 merges. Until
-that review, unavailable values are reported as `N/A`, never estimated.
+The first governed delivery sample is Issue #77 / PR #91. Values without an authoritative source
+remain `N/A`, never estimated.
 
 | Metric | Latest |
 |---|---:|
-| Accepted pull requests | N/A |
-| First-pass acceptance rate | N/A |
-| Average rework rounds | N/A |
-| Ready-to-Merge time | N/A |
-| Merges missing evidence or status updates | N/A |
-| Token and human-time cost per accepted PR | N/A |
-| Unresolved decisions existing only in comments | 0 identified by the #78 historical audit |
+| Accepted pull requests | 1 (#91) |
+| First-pass acceptance rate | 0% (false) |
+| Average rework rounds | 6 tracked implementation retries: five `model-capability`, one `context-assembly` |
+| Ready-to-Merge time | N/A — no authoritative Ready and merge interval endpoints were recorded |
+| HOLD duration | N/A — no authoritative HOLD interval endpoints were recorded |
+| Merges missing evidence or status updates | 0% (0/1) — PR #91 has exact evidence and this STATUS synchronization closes its recorded state lag |
+| Token and human-time cost per accepted PR | N/A — platform/API exposes no authoritative token counts or human-time ledger |
+| Unresolved decisions existing only in comments | 0 known; decisions are not known to exist only in comments |
+
+Two evidence-only `context-assembly` reworks repaired `VERIFY-001` evidence and do not increase
+the six implementation retries. Three drift incidents were recorded. Human correction
+interventions: 0.
