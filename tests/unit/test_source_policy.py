@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 import tokenize
+import typing
 from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "ea"
@@ -79,6 +80,25 @@ def test_coordinator_recovery_boundary_is_private_and_compatibly_reexported() ->
         "_latest_completion_chain_head",
     )
     assert all(hasattr(coordinator, name) for name in expected_names)
+
+
+def test_coordinator_reexported_recovery_helpers_resolve_type_hints() -> None:
+    coordinator = importlib.import_module("ea.runtime.coordinator")
+    moved_helper_names = (
+        "_group_recovery_records",
+        "_recover_ledger_frontier",
+        "_require_recovery_stage_order",
+        "_recover_dispatch",
+        "_recover_authorization_frontier",
+        "_recover_failing_transition",
+        "_recover_pre_batch_failing_transition",
+        "_latest_active_chain_head",
+        "_recovered_capture_state",
+        "_recovered_completed_state",
+    )
+
+    for helper_name in moved_helper_names:
+        assert typing.get_type_hints(getattr(coordinator, helper_name)), helper_name
 
 
 def test_production_source_has_no_type_ignore_comments() -> None:
