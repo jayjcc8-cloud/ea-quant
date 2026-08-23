@@ -486,7 +486,29 @@ def historical_runtime_trace_digest(records: tuple[bytes, ...]) -> Sha256Digest:
             OutcomeCode.INVALID_TYPE,
             "historical runtime trace records must be one exact tuple of bytes",
         )
-    digest = sha256(HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN)
+    domains = {
+        HISTORICAL_RUNTIME_TRACE_SCHEMA: HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN,
+        _HISTORICAL_RUNTIME_TRACE_V2_SCHEMA: _HISTORICAL_RUNTIME_TRACE_V2_DIGEST_DOMAIN,
+    }
+    selected_schema: str | None = None
+    for record in records:
+        try:
+            document = json.loads(record.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "historical trace record is not canonical JSON",
+            ) from error
+        if type(document) is not dict or type(document.get("schema")) is not str:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "historical trace record has no exact schema")
+        record_schema = document["schema"]
+        if record_schema not in domains:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "historical trace schema is unsupported")
+        if selected_schema is not None and record_schema != selected_schema:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "historical trace schemas are mixed")
+        selected_schema = record_schema
+    digest_schema = HISTORICAL_RUNTIME_TRACE_SCHEMA if selected_schema is None else selected_schema
+    digest = sha256(domains[digest_schema])
     for record in records:
         if len(record) > _MAX_UINT64:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "historical runtime trace record is too large")
@@ -521,7 +543,15 @@ class _PreparedHistoricalCommit:
 
 @final
 class _HistoricalMarketProducer:
-    __slots__ = ("_binding", "_clock", "_producer_id", "_run_id", "_source", "_state")
+    __slots__ = (
+        "_binding",
+        "_clock",
+        "_producer_id",
+        "_run_id",
+        "_source",
+        "_state",
+        "_trace_schema",
+    )
 
     _binding: HistoricalMarketSourceBinding
     _clock: Phase1VirtualClock
@@ -529,6 +559,7 @@ class _HistoricalMarketProducer:
     _run_id: RunId
     _source: HistoricalMarketSourcePort
     _state: _HistoricalProducerState
+    _trace_schema: str
 
     def __init__(self) -> None:
         raise TypeError("historical producers are created only by the runtime factory")
@@ -732,6 +763,7 @@ class _HistoricalMarketProducer:
             committed_event_count=next_state.committed_count,
             committed_cursor_as_of=cursor_as_of,
             terminal_acknowledged=offer.terminal,
+            trace_schema=self._trace_schema,
         )
         prepared = object.__new__(_PreparedHistoricalCommit)
         object.__setattr__(prepared, "_seal", _PREPARED_SEAL)
@@ -1036,6 +1068,44 @@ class _RunWideDispatcher:
             )
         return active.offer.canonical_root_bytes
 
+    def _require_active_reconciliation_dispatch_bytes(
+        self,
+        root: ReconciliationObservationRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> bytes:
+        if (
+            type(root) is not ReconciliationObservationRoot
+            or type(dispatch_sequence) is not int
+            or not 1 <= dispatch_sequence <= _MAX_UINT64
+        ):
+            raise _fail(
+                OutcomeCode.INVALID_TYPE,
+                "active reconciliation dispatch types are invalid",
+            )
+        state = self._state
+        active = state.active
+        if (
+            active is None
+            or active.lease.root is not root
+            or active.offer.root is not root
+            or active.dispatch_sequence != dispatch_sequence
+            or active.lease.dispatch_sequence != dispatch_sequence
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation root is not active")
+        payload = canonical_reconciliation_observation_bytes(root.observation)
+        digest = reconciliation_observation_digest(root.observation)
+        if (
+            state is not self._state
+            or active is not state.active
+            or root.canonical_observation_bytes != payload
+            or root.observation_sha256 != digest
+            or active.offer.canonical_root_bytes != payload
+            or runtime_root_order_key(root) != active.offer.order_key
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "active reconciliation evidence conflicts")
+        return payload
+
     def _require_active_end_of_run_dispatch_bytes(
         self,
         end_root: EndOfRunRoot,
@@ -1317,11 +1387,19 @@ def _create_run_wide_dispatcher(
 class Phase1HistoricalMarketRuntime:
     """Single-use Phase 1 historical market runtime facade."""
 
-    __slots__ = ("_clock", "_dispatcher", "_producer", "_run_id", "_spec_set")
+    __slots__ = (
+        "_clock",
+        "_dispatcher",
+        "_producer",
+        "_reconciliation_producer",
+        "_run_id",
+        "_spec_set",
+    )
 
     _clock: Phase1VirtualClock
     _dispatcher: _RunWideDispatcher
     _producer: _HistoricalMarketProducer
+    _reconciliation_producer: _HistoricalReconciliationProducer | None
     _run_id: RunId
     _spec_set: InstrumentExecutionSpecSet
 
@@ -1362,6 +1440,17 @@ class Phase1HistoricalMarketRuntime:
     ) -> bytes:
         return self._dispatcher._require_active_market_dispatch_bytes(
             market_root,
+            dispatch_sequence=dispatch_sequence,
+        )
+
+    def _require_active_reconciliation_dispatch_bytes(
+        self,
+        root: ReconciliationObservationRoot,
+        *,
+        dispatch_sequence: int,
+    ) -> bytes:
+        return self._dispatcher._require_active_reconciliation_dispatch_bytes(
+            root,
             dispatch_sequence=dispatch_sequence,
         )
 
@@ -1421,12 +1510,36 @@ def _require_source_port(
     return cast(HistoricalMarketSourcePort, source), binding
 
 
+def _require_reconciliation_source_port(
+    source: object,
+) -> tuple[HistoricalReconciliationSourcePort, HistoricalReconciliationSourceBinding]:
+    candidate = cast(Any, source)
+    try:
+        binding = candidate.binding
+        next_available_at = candidate.next_available_at
+        admit_one = candidate.admit_one
+        prepare_commit = candidate.prepare_commit
+        commit = candidate.commit
+    except (AttributeError, TypeError) as error:
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation source port is incomplete") from error
+    if (
+        type(binding) is not HistoricalReconciliationSourceBinding
+        or not callable(next_available_at)
+        or not callable(admit_one)
+        or not callable(prepare_commit)
+        or not callable(commit)
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation source port has invalid members")
+    return cast(HistoricalReconciliationSourcePort, source), binding
+
+
 def _create_historical_market_producer(
     *,
     run_id: RunId,
     source: HistoricalMarketSourcePort,
     binding: HistoricalMarketSourceBinding,
     clock: Phase1VirtualClock,
+    trace_schema: str = HISTORICAL_RUNTIME_TRACE_SCHEMA,
 ) -> _HistoricalMarketProducer:
     producer = object.__new__(_HistoricalMarketProducer)
     producer._binding = binding
@@ -1434,6 +1547,7 @@ def _create_historical_market_producer(
     producer._producer_id = RuntimeIdentifier(HISTORICAL_RUNTIME_PRODUCER_NAMESPACE)
     producer._run_id = run_id
     producer._source = source
+    producer._trace_schema = trace_schema
     producer._state = _HistoricalProducerState(
         committed_count=0,
         current_offer=None,
@@ -1445,11 +1559,33 @@ def _create_historical_market_producer(
     return producer
 
 
+def _create_historical_reconciliation_producer(
+    *,
+    run_id: RunId,
+    source: HistoricalReconciliationSourcePort,
+    binding: HistoricalReconciliationSourceBinding,
+    clock: Phase1VirtualClock,
+    fingerprint: DataFingerprint,
+    market_producer: _HistoricalMarketProducer,
+) -> _HistoricalReconciliationProducer:
+    producer = object.__new__(_HistoricalReconciliationProducer)
+    producer._binding = binding
+    producer._clock = clock
+    producer._fingerprint = fingerprint
+    producer._market_producer = market_producer
+    producer._producer_id = RuntimeIdentifier(_HISTORICAL_RECONCILIATION_PRODUCER_NAMESPACE)
+    producer._run_id = run_id
+    producer._source = source
+    producer._state = _ReconciliationProducerState(0, None, None, None, (), ())
+    return producer
+
+
 def create_phase1_historical_market_runtime(
     *,
     run_id: RunId,
     spec_set: InstrumentExecutionSpecSet,
     source: HistoricalMarketSourcePort,
+    reconciliation_source: HistoricalReconciliationSourcePort | None = None,
 ) -> Phase1HistoricalMarketRuntime:
     """Create one run-wide historical market runtime over a consumer-owned source port."""
     if type(run_id) is not RunId or type(spec_set) is not InstrumentExecutionSpecSet:
@@ -1460,28 +1596,68 @@ def create_phase1_historical_market_runtime(
     port, binding = _require_source_port(source)
     if binding.profile != PHASE1_HISTORICAL_MARKET_PROFILE:
         raise _fail(OutcomeCode.CONFLICTING_ID, "historical source profile conflicts")
-    if binding.data_fingerprint.record_count > _MAX_PHASE1_MARKET_RECORDS:
+    reconciliation_port: HistoricalReconciliationSourcePort | None = None
+    reconciliation_binding: HistoricalReconciliationSourceBinding | None = None
+    if reconciliation_source is not None:
+        reconciliation_port, reconciliation_binding = _require_reconciliation_source_port(
+            reconciliation_source
+        )
+        spec_set_sha256 = instrument_spec_set_digest(spec_set)
+        if (
+            reconciliation_binding.run_id != run_id
+            or reconciliation_binding.instrument_spec_set_id != spec_set.identifier
+            or reconciliation_binding.instrument_spec_set_sha256 != spec_set_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation source binding conflicts")
+    reconciliation_count = (
+        0 if reconciliation_binding is None else reconciliation_binding.observation_count
+    )
+    total_roots = binding.data_fingerprint.record_count + reconciliation_count
+    if total_roots > _MAX_PHASE1_MARKET_RECORDS:
         raise _fail(
             OutcomeCode.OUT_OF_RANGE,
-            "Phase 1 historical runtime exceeds the "
+            "Phase 1 historical runtime exceeds the joint "
             f"{_MAX_PHASE1_MARKET_RECORDS:,}-record profile admission bound",
         )
-    if binding.data_fingerprint.record_count + 1 > _MAX_UINT64:
+    if total_roots + 1 > _MAX_UINT64:
         raise _fail(
             OutcomeCode.OUT_OF_RANGE,
             "historical source cannot reserve dispatch identity for the terminal root",
         )
     instrument_spec_set_digest(spec_set)
     clock = _create_virtual_clock(binding.replay_window.start_inclusive)
+    trace_schema = (
+        HISTORICAL_RUNTIME_TRACE_SCHEMA
+        if reconciliation_port is None
+        else _HISTORICAL_RUNTIME_TRACE_V2_SCHEMA
+    )
     producer = _create_historical_market_producer(
         run_id=run_id,
         source=port,
         binding=binding,
         clock=clock,
+        trace_schema=trace_schema,
+    )
+    reconciliation_producer = (
+        None
+        if reconciliation_port is None or reconciliation_binding is None
+        else _create_historical_reconciliation_producer(
+            run_id=run_id,
+            source=reconciliation_port,
+            binding=reconciliation_binding,
+            clock=clock,
+            fingerprint=binding.data_fingerprint,
+            market_producer=producer,
+        )
+    )
+    producers: tuple[_RuntimeRootProducer, ...] = (
+        (producer,)
+        if reconciliation_producer is None
+        else (producer, reconciliation_producer)
     )
     dispatcher = _create_run_wide_dispatcher(
         clock=clock,
-        producers=(producer,),
+        producers=producers,
         replay_end=binding.replay_window.end_exclusive,
         terminal_producer_id=producer.producer_id,
     )
@@ -1489,6 +1665,7 @@ def create_phase1_historical_market_runtime(
     runtime._clock = clock
     runtime._dispatcher = dispatcher
     runtime._producer = producer
+    runtime._reconciliation_producer = reconciliation_producer
     runtime._run_id = run_id
     runtime._spec_set = spec_set
     return runtime

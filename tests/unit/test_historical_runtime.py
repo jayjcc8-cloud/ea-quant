@@ -429,7 +429,7 @@ def test_reconciliation_trace_v2_and_replay_are_byte_identical_across_processes(
     assert document["root_order_key"] == [
         "2026-01-02T09:31:00.000000Z",
         20,
-        0,
+        20,
         "reconciliation.fixture",
         1,
         "ledger.portfolio",
