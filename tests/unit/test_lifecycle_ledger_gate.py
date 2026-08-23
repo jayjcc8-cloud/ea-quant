@@ -23,6 +23,9 @@ from ea.core import (
     RunBinding,
     RunReference,
     Sha256Digest,
+    audit_append_acknowledgement_digest,
+    audit_chain_head,
+    audit_record_digest,
     create_audit_append_acknowledgement,
     create_execution_fact_processing_outcome,
     create_fill,
@@ -318,6 +321,19 @@ def _reopen_audit(binding: RunBinding, records: Sequence[AuditRecord]) -> _Memor
 def _record_document(records: Sequence[AuditRecord], kind: AuditRecordKind) -> dict[str, Any]:
     record = next(record for record in records if record.record_kind is kind)
     return cast(dict[str, Any], json.loads(record.canonical_payload))
+
+
+def _audit_history_signature(records: Sequence[AuditRecord]) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            record.canonical_payload,
+            record.subject_sha256,
+            audit_record_digest(record),
+            audit_append_acknowledgement_digest(create_audit_append_acknowledgement(record)),
+            audit_chain_head(record),
+        )
+        for record in records
+    )
 
 
 def _coordinator_with_gate(
@@ -923,9 +939,7 @@ def test_completed_failed_refresh_retry_is_restart_equivalent_on_second_fresh_re
         else:
             assert refresh_records[0].canonical_payload == failed_payload
             assert refresh_document["submission_permitted"] is True
-        expected_records = tuple(
-            (record.record_kind, record.canonical_payload) for record in reopened_audit.records
-        )
+        expected_history = _audit_history_signature(reopened_audit.records)
         second_audit = _reopen_audit(binding, tuple(reopened_audit.records))
         second_ports = _ledger_ports(matcher, first_sequence=1, first_previous_refresh_sha256=None)
         second = recover_phase1_lifecycle_coordinator(
@@ -939,10 +953,7 @@ def test_completed_failed_refresh_retry_is_restart_equivalent_on_second_fresh_re
             **second_ports,
         )
         assert second.state.phase is CoordinatorPhase.FAILING
-        assert (
-            tuple((record.record_kind, record.canonical_payload) for record in second_audit.records)
-            == expected_records
-        )
+        assert _audit_history_signature(second_audit.records) == expected_history
         assert len(second_ports["ledger_handoff_authority"]._state.ledger.transactions) == 1
         assert (
             second_ports["frontier"].published_refresh

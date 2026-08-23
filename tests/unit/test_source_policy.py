@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import tokenize
+import typing
 from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "ea"
@@ -25,6 +27,78 @@ def test_composition_package_does_not_export_mutable_frontier_capabilities() -> 
         ast.literal_eval(node.value) for node in runtime.body if isinstance(node, ast.Assign)
     )
     assert not {name for name in runtime_exports if name.endswith("_phase1_lifecycle_coordinator")}
+
+
+def test_coordinator_recovery_boundary_is_private_and_compatibly_reexported() -> None:
+    coordinator_source = SOURCE_ROOT / "runtime" / "coordinator.py"
+    recovery_source = SOURCE_ROOT / "runtime" / "_coordinator_recovery.py"
+    assert recovery_source.is_file(), "recovery helpers require one private module"
+    assert len(coordinator_source.read_text(encoding="utf-8").splitlines()) <= 2800
+    assert len(recovery_source.read_text(encoding="utf-8").splitlines()) <= 1500
+
+    runtime = ast.parse((SOURCE_ROOT / "runtime" / "__init__.py").read_text(encoding="utf-8"))
+    exports = next(
+        ast.literal_eval(node.value)
+        for node in runtime.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
+    )
+    assert "_coordinator_recovery" not in exports
+    recovery_tree = ast.parse(recovery_source.read_text(encoding="utf-8"))
+    assert not any(
+        isinstance(node, ast.ImportFrom) and node.module == "ea.runtime.coordinator"
+        for node in recovery_tree.body
+    )
+
+    coordinator = importlib.import_module("ea.runtime.coordinator")
+    expected_names = (
+        "Phase1HistoricalLifecycleCoordinator",
+        "RecoveredTerminalCoordinatorEvidence",
+        "create_phase1_lifecycle_coordinator",
+        "recover_phase1_lifecycle_coordinator",
+        "recover_phase1_terminal_evidence",
+        "_require_recovery_records",
+        "_recovery_record_count",
+        "_recovery_record_at",
+        "_recovery_record_prefix",
+        "_record_document",
+        "_group_recovery_records",
+        "_recovered_failed_logical_key",
+        "_recover_ledger_frontier",
+        "_require_recovery_stage_order",
+        "_require_runtime_trace",
+        "_recover_dispatch",
+        "_recover_authorization_frontier",
+        "_recover_failing_transition",
+        "_recover_pre_batch_failing_transition",
+        "_is_pre_batch_failing_record",
+        "_root_digest",
+        "_trace_root_order_key_document",
+        "_latest_active_chain_head",
+        "_recovered_capture_state",
+        "_recovered_completed_state",
+        "_latest_completion_chain_head",
+    )
+    assert all(hasattr(coordinator, name) for name in expected_names)
+
+
+def test_coordinator_reexported_recovery_helpers_resolve_type_hints() -> None:
+    coordinator = importlib.import_module("ea.runtime.coordinator")
+    moved_helper_names = (
+        "_group_recovery_records",
+        "_recover_ledger_frontier",
+        "_require_recovery_stage_order",
+        "_recover_dispatch",
+        "_recover_authorization_frontier",
+        "_recover_failing_transition",
+        "_recover_pre_batch_failing_transition",
+        "_latest_active_chain_head",
+        "_recovered_capture_state",
+        "_recovered_completed_state",
+    )
+
+    for helper_name in moved_helper_names:
+        assert typing.get_type_hints(getattr(coordinator, helper_name)), helper_name
 
 
 def test_production_source_has_no_type_ignore_comments() -> None:
@@ -161,6 +235,7 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.strategy",
             "ea.core.time",
             "ea.runtime.coordinator",
+            "ea.runtime._coordinator_recovery",
             "ea.runtime.historical",
             "ea.runtime.ingress",
             "ea.runtime.matcher",

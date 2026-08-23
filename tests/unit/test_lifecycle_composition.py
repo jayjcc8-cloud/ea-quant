@@ -28,7 +28,11 @@ from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.audit import (
     AuditRecordKind,
     AuditSubjectKind,
+    audit_append_acknowledgement_digest,
+    audit_chain_head,
+    audit_record_digest,
     canonical_run_prepared_audit_payload,
+    create_audit_append_acknowledgement,
 )
 from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import FactProvenanceId
@@ -82,6 +86,19 @@ from unit.test_historical_matcher import _system
 from unit.test_historical_runtime import _row, _source
 from unit.test_lifecycle_coordinator import _MemoryAudit
 from unit.test_store import _root, _spec
+
+
+def _audit_history_signature(records: tuple[Any, ...]) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            record.canonical_payload,
+            record.subject_sha256,
+            audit_record_digest(record),
+            audit_append_acknowledgement_digest(create_audit_append_acknowledgement(record)),
+            audit_chain_head(record),
+        )
+        for record in records
+    )
 
 
 def _policy_for(matcher: Any) -> Any:
@@ -1284,6 +1301,7 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
 
     journal_path = root / str(UUID(matcher.run_id.value)) / "audit" / "audit-v1.journal"
     journal_bytes = journal_path.read_bytes()
+    journal_history = _audit_history_signature(tuple(admitted_journals[0].records))
     matcher_state = matcher.state
     fact_outcomes = fact_history.outcomes
     runtime_trace = runtime.trace_records
@@ -1299,6 +1317,7 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     )
 
     assert journal_path.read_bytes() == journal_bytes
+    assert _audit_history_signature(tuple(admitted_journals[0].records)) == journal_history
     assert matcher.state == matcher_state
     assert fact_history.outcomes == fact_outcomes
     assert runtime.trace_records == runtime_trace
