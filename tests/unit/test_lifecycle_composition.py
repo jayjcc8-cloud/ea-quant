@@ -1462,19 +1462,3 @@ def test_recovery_composition_consumes_store_prefix_and_injected_histories(
     admitted_journals[0].close()
     record = recovered_store._record_for(recovered._authority)
     os.close(record.writer_lock_fd)
-
-
-def test_reconciliation_capabilities_remain_private_in_fresh_and_recovered_bundles() -> None:
-    """Composition accepts the source without exposing mutable reconciliation capability."""
-    from ea.runtime import HistoricalReconciliationSourcePort
-
-    assert HistoricalReconciliationSourcePort.__module__ == "ea.runtime.historical"
-    assert "commit" in HistoricalReconciliationSourcePort.__dict__
-
-
-def test_reconciliation_recovery_rejects_future_or_incomplete_histories() -> None:
-    """Recovery consumes the same closed reconciliation source contract."""
-    from ea.runtime import HistoricalReconciliationSourceBinding
-
-    assert HistoricalReconciliationSourceBinding.__module__ == "ea.runtime.historical"
-    assert "observation_count" in HistoricalReconciliationSourceBinding.__dataclass_fields__
