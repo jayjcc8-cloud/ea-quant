@@ -485,29 +485,33 @@ def historical_runtime_trace_digest(records: tuple[bytes, ...]) -> Sha256Digest:
             OutcomeCode.INVALID_TYPE,
             "historical runtime trace records must be one exact tuple of bytes",
         )
-    domains = {
-        HISTORICAL_RUNTIME_TRACE_SCHEMA: HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN,
-        _HISTORICAL_RUNTIME_TRACE_V2_SCHEMA: _HISTORICAL_RUNTIME_TRACE_V2_DIGEST_DOMAIN,
-    }
-    selected_schema: str | None = None
+    v2_present = False
     for record in records:
         try:
             document = json.loads(record.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise _fail(
-                OutcomeCode.CONFLICTING_ID,
-                "historical trace record is not canonical JSON",
-            ) from error
-        if type(document) is not dict or type(document.get("schema")) is not str:
-            raise _fail(OutcomeCode.CONFLICTING_ID, "historical trace record has no exact schema")
-        record_schema = document["schema"]
-        if record_schema not in domains:
-            raise _fail(OutcomeCode.CONFLICTING_ID, "historical trace schema is unsupported")
-        if selected_schema is not None and record_schema != selected_schema:
-            raise _fail(OutcomeCode.CONFLICTING_ID, "historical trace schemas are mixed")
-        selected_schema = record_schema
-    digest_schema = HISTORICAL_RUNTIME_TRACE_SCHEMA if selected_schema is None else selected_schema
-    digest = sha256(domains[digest_schema])
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if type(document) is dict and document.get("schema") == _HISTORICAL_RUNTIME_TRACE_V2_SCHEMA:
+            v2_present = True
+    if v2_present:
+        for record in records:
+            try:
+                document = json.loads(record.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "historical trace v2 records are mixed with invalid evidence",
+                ) from error
+            if (
+                type(document) is not dict
+                or document.get("schema") != _HISTORICAL_RUNTIME_TRACE_V2_SCHEMA
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "historical trace schemas are mixed")
+    digest = sha256(
+        _HISTORICAL_RUNTIME_TRACE_V2_DIGEST_DOMAIN
+        if v2_present
+        else HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN
+    )
     for record in records:
         if len(record) > _MAX_UINT64:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "historical runtime trace record is too large")

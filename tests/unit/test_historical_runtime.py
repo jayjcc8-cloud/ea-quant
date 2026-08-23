@@ -6,6 +6,7 @@ import subprocess
 import sys
 from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 
@@ -65,6 +66,7 @@ from ea.data import (
     decode_phase1_ohlcv_csv,
 )
 from ea.runtime import (
+    HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN,
     HISTORICAL_RUNTIME_TRACE_SCHEMA,
     HistoricalMarketCandidate,
     HistoricalMarketPreparedCommit,
@@ -459,6 +461,24 @@ def test_reconciliation_trace_v2_and_replay_are_byte_identical_across_processes(
         text=True,
     )
     assert completed.stdout.strip() == runtime.trace_digest.value
+
+
+def test_historical_runtime_trace_digest_keeps_v1_opaque_bytes_and_rejects_v2_mixtures() -> None:
+    """v2 selection must not reinterpret legacy opaque v1 evidence."""
+    legacy_records = (b"{", b"\xffopaque-v1")
+    expected = sha256(HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN)
+    for record in legacy_records:
+        expected.update(len(record).to_bytes(8, "big"))
+        expected.update(record)
+    expected.update(len(legacy_records).to_bytes(8, "big"))
+
+    assert historical_runtime_trace_digest(legacy_records) == Sha256Digest(expected.hexdigest())
+
+    v2_record = b'{"schema":"ea.phase1-historical-runtime-trace.v2"}'
+    for mixed_records in ((v2_record, legacy_records[0]), (legacy_records[0], v2_record)):
+        with pytest.raises(RuntimeOrderingError) as mixed:
+            historical_runtime_trace_digest(mixed_records)
+        assert mixed.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_historical_runtime_dispatches_market_roots_then_one_terminal() -> None:
