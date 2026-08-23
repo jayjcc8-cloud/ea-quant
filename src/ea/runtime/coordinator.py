@@ -2625,5 +2625,3 @@ def _admitted_state(
         last_completed_dispatch_sequence=None,
         last_audit_chain_head_sha256=prepared_chain_head,
     )
-
-

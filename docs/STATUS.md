@@ -34,7 +34,9 @@ report, with durable audit evidence and no live or external order-writing capabi
 
 ## Incomplete
 
-- #77: repay the temporary coordinator size debt through behavior-preserving decomposition.
+- #77: the candidate contains a behavior-equivalent private coordinator recovery boundary; it is
+  not Done until merged-main CI, Issue/#84 synchronization, and approved cleanup complete.
+- After #77 closes, #76 is the next ordered product blocker.
 - #76: admit reconciliation observation roots and ancestry resolution.
 - [#81](https://github.com/jayjcc8-cloud/ea-quant/issues/81): add concrete sample strategies.
 - [#82](https://github.com/jayjcc8-cloud/ea-quant/issues/82): compose a deterministic end-to-end
@@ -49,6 +51,7 @@ report, with durable audit evidence and no live or external order-writing capabi
   and release gates complete in order. Issue #67 no longer blocks this chain.
 
 No blocker authorizes Phase 2 work, live trading, tool migration, or unrelated refactoring.
+Governance remains in maintenance mode.
 
 ## Effective ADRs
 
