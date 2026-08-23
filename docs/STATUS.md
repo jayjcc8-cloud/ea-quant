@@ -135,11 +135,6 @@ remain `N/A`, never estimated.
 | First-pass acceptance rate | 0% (false) |
 | Average rework rounds | 6 tracked implementation retries: five `model-capability`, one `context-assembly` |
 | Ready-to-Merge time | N/A — no authoritative Ready and merge interval endpoints were recorded |
-| HOLD duration | N/A — no authoritative HOLD interval endpoints were recorded |
 | Merges missing evidence or status updates | 0% (0/1) — PR #91 has exact evidence and this STATUS synchronization closes its recorded state lag |
 | Token and human-time cost per accepted PR | N/A — platform/API exposes no authoritative token counts or human-time ledger |
 | Unresolved decisions existing only in comments | 0 known; decisions are not known to exist only in comments |
-
-Two evidence-only `context-assembly` reworks repaired `VERIFY-001` evidence and do not increase
-the six implementation retries. Three drift incidents were recorded. Human correction
-interventions: 0.
