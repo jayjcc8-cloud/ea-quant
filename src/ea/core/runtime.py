@@ -637,11 +637,9 @@ def _require_reconciliation_observation_root(
         or type(root.observation_sha256) is not Sha256Digest
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation root is not factory-issued")
-    if (
-        root.canonical_observation_bytes
-        != canonical_reconciliation_observation_bytes(root.observation)
-        or root.observation_sha256 != reconciliation_observation_digest(root.observation)
-    ):
+    if root.canonical_observation_bytes != canonical_reconciliation_observation_bytes(
+        root.observation
+    ) or root.observation_sha256 != reconciliation_observation_digest(root.observation):
         raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation root evidence conflicts")
     return root
 

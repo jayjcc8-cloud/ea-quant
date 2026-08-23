@@ -397,10 +397,9 @@ def _reconciliation_candidate_view(candidate_object: object) -> _ReconciliationC
     ):
         raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation candidate types are invalid")
     canonical_scheduled_at = _utc(scheduled_at, field="reconciliation.scheduled_at")
-    if (
-        canonical_bytes != canonical_reconciliation_observation_bytes(observation)
-        or digest != reconciliation_observation_digest(observation)
-    ):
+    if canonical_bytes != canonical_reconciliation_observation_bytes(
+        observation
+    ) or digest != reconciliation_observation_digest(observation):
         raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation candidate evidence conflicts")
     return _ReconciliationCandidateView(
         candidate=cast(HistoricalReconciliationCandidate, candidate_object),
@@ -1651,9 +1650,7 @@ def create_phase1_historical_market_runtime(
         )
     )
     producers: tuple[_RuntimeRootProducer, ...] = (
-        (producer,)
-        if reconciliation_producer is None
-        else (producer, reconciliation_producer)
+        (producer,) if reconciliation_producer is None else (producer, reconciliation_producer)
     )
     dispatcher = _create_run_wide_dispatcher(
         clock=clock,
