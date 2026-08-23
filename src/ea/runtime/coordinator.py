@@ -2089,6 +2089,15 @@ class Phase1HistoricalLifecycleCoordinator:
         )
 
 
+_group_recovery_records.__globals__.update(
+    {
+        "Phase1HistoricalLifecycleCoordinator": Phase1HistoricalLifecycleCoordinator,
+        "_ActiveDispatch": _ActiveDispatch,
+        "_RecoveredDispatch": _RecoveredDispatch,
+    }
+)
+
+
 def _pre_ack_chain_head(
     active: _ActiveDispatch,
     outcome_acks: tuple[AuditAppendAcknowledgement, ...],
