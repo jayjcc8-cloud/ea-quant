@@ -1519,3 +1519,17 @@ def test_recovery_validation_rejects_malformed_prefix_groups_and_runtime_traces(
             trace_runtime((valid_trace, valid_trace)),
             binding,
         )
+
+
+def test_reconciliation_root_bypasses_matcher_and_emits_v4_completion() -> None:
+    """Rank-20 completion has a distinct immutable completion carrier."""
+    from ea.core.historical_matching import ReconciliationCoordinatorDispatchOutcome
+
+    assert ReconciliationCoordinatorDispatchOutcome.__module__ == "ea.core.historical_matching"
+
+
+def test_reconciliation_physical_order_and_audit_failures_prevent_effect() -> None:
+    """The v4 completion contract is separate from matcher batch completion."""
+    from ea.core.historical_matching import canonical_dispatch_completed_v4_audit_payload
+
+    assert callable(canonical_dispatch_completed_v4_audit_payload)

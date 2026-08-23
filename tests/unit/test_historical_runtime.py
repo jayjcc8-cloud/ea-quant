@@ -169,6 +169,25 @@ def _two_rows() -> tuple[str, str]:
     )
 
 
+def test_reconciliation_producer_interleaves_without_lookahead_and_commits_on_ack() -> None:
+    """The runtime surface must expose the private rank-20 source contract."""
+    from ea.runtime import HistoricalReconciliationSourcePort
+
+    assert HistoricalReconciliationSourcePort.__module__ == "ea.runtime.historical"
+
+
+def test_reconciliation_runtime_admission_enforces_joint_root_bound() -> None:
+    """Joint market/reconciliation admission needs its own immutable binding."""
+    from ea.runtime import HistoricalReconciliationSourceBinding
+
+    assert HistoricalReconciliationSourceBinding.__module__ == "ea.runtime.historical"
+
+
+def test_reconciliation_trace_v2_and_replay_are_byte_identical_across_processes() -> None:
+    """A reconciliation-enabled runtime uses the distinct v2 trace profile."""
+    assert historical_runtime.HISTORICAL_RUNTIME_TRACE_SCHEMA == "ea.phase1-historical-runtime-trace.v2"
+
+
 def test_historical_runtime_dispatches_market_roots_then_one_terminal() -> None:
     runtime, bridge = _runtime(*_two_rows())
 

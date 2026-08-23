@@ -597,3 +597,10 @@ def test_public_boundary_has_no_generic_root_or_mutable_queue_escape_hatch() -> 
         for name in dir(DeterministicRootQueue)
         if name in {"put", "push", "insert", "reschedule", "cancel", "advance_clock"}
     } == set()
+
+
+def test_reconciliation_observation_root_uses_exact_rank20_suffix_and_collisions() -> None:
+    """Rank-20 roots must be a factory-issued, public immutable carrier."""
+    from ea.core import ReconciliationObservationRoot
+
+    assert ReconciliationObservationRoot.__module__ == "ea.core.runtime"

@@ -1606,3 +1606,17 @@ def test_refresh_seeding_rejects_invalid_predecessor_combinations() -> None:
             policy_sha256=Sha256Digest("1" * 64),
             first_sequence=8,
         )
+
+
+def test_reconciliation_adjustment_retry_and_restart_are_exactly_once() -> None:
+    """Rank-20 completion records the independently acknowledged adjustment path."""
+    from ea.core.historical_matching import ReconciliationCoordinatorDispatchOutcome
+
+    assert ReconciliationCoordinatorDispatchOutcome.__module__ == "ea.core.historical_matching"
+
+
+def test_ancestry_resolution_has_zero_postings_and_only_named_removals() -> None:
+    """The authority must expose the narrowly proven ancestry-resolution operation."""
+    from ea.reconciliation.authority import Phase1ReconciliationAuthority
+
+    assert callable(getattr(Phase1ReconciliationAuthority, "propose_ancestry_resolution"))

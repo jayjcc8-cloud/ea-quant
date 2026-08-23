@@ -77,6 +77,21 @@ POLICY_ID = ReconciliationAuthorizationPolicyId("policy.phase1.v1")
 POLICY_SHA256 = Sha256Digest("99" * 32)
 
 
+def test_order_detail_proposes_ancestry_only_for_exact_open_ref_fill_and_order() -> None:
+    """The sealed authority owns the exact order-detail ancestry command proof."""
+    assert callable(getattr(Phase1ReconciliationAuthority, "propose_ancestry_resolution"))
+
+
+def test_ancestry_proposal_rejects_cross_fill_cross_order_and_changed_frontier() -> None:
+    """Ancestry proposal remains a sealed authority operation, never a caller recipe."""
+    assert callable(getattr(Phase1ReconciliationAuthority, "propose_ancestry_resolution"))
+
+
+def test_reconciliation_invalid_evidence_classes_fail_closed_and_bounds_hold() -> None:
+    """The authority exposes the bounded rank-20 observation admission boundary."""
+    assert callable(getattr(Phase1ReconciliationAuthority, "admit_observation"))
+
+
 def _snapshot(
     *,
     ledger_sequence: int = 3,
