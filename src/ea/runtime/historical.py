@@ -950,6 +950,7 @@ def _validate_v2_trace_history(documents: tuple[dict[str, object], ...]) -> None
                 or current.data_sha256 != previous.data_sha256
                 or current.dispatch_sequence != previous.dispatch_sequence + 1
                 or current.clock_now < previous.clock_now
+                or (current.root_kind == "terminal" and current.clock_now <= previous.clock_now)
                 or previous.root_kind == "terminal"
             ):
                 raise _trace_fail("history sequence conflicts")
