@@ -9,9 +9,9 @@ from enum import StrEnum
 from functools import total_ordering
 from itertools import pairwise
 from types import MappingProxyType
-from typing import final
+from typing import TYPE_CHECKING, final
 
-from ea.core.execution_identity import SourceNamespace
+from ea.core.execution_identity import EconomicId, SourceNamespace
 from ea.core.execution_messages import (
     ExecutionFactIngress,
     ExecutionFactKind,
@@ -27,6 +27,9 @@ from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunId, Sha256Digest
 from ea.core.time import TimeValidationError, require_utc
 
+if TYPE_CHECKING:
+    from ea.core.reconciliation import ReconciliationObservation
+
 _RUNTIME_ERROR_CODES = frozenset(
     {
         OutcomeCode.INVALID_TYPE,
@@ -37,6 +40,7 @@ _RUNTIME_ERROR_CODES = frozenset(
 
 _ACTIVE_MARKET_DISPATCH_PROOF_SEAL = object()
 _ACTIVE_END_OF_RUN_DISPATCH_PROOF_SEAL = object()
+_RECONCILIATION_OBSERVATION_ROOT_SEAL = object()
 
 
 class RuntimeOrderingError(ValueError):
@@ -553,7 +557,101 @@ class EndOfRunRoot:
             )
 
 
-type RuntimeRoot = SafetyRoot | ExecutionFactIngress | MarketDataEnvelope | TimerRoot | EndOfRunRoot
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class ReconciliationObservationRoot:
+    """Factory-issued rank-20 carrier for one exact reconciliation observation."""
+
+    observation: ReconciliationObservation
+    canonical_observation_bytes: bytes
+    observation_sha256: Sha256Digest
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("reconciliation observation roots are created only by their factory")
+
+    @property
+    def available_at(self) -> datetime:
+        return self.observation.available_at
+
+    @property
+    def kind(self) -> ReconciliationObservationKind:
+        return self.observation.kind
+
+    @property
+    def source_namespace(self) -> SourceNamespace:
+        return self.observation.source_namespace
+
+    @property
+    def source_sequence(self) -> int:
+        return self.observation.source_sequence
+
+    @property
+    def watermark_namespace(self) -> SourceNamespace:
+        return self.observation.watermark_namespace
+
+    @property
+    def watermark_sequence(self) -> int:
+        return self.observation.watermark_sequence
+
+    @property
+    def observation_id(self) -> EconomicId:
+        return self.observation.observation_id
+
+
+def create_reconciliation_observation_root(
+    observation: ReconciliationObservation,
+) -> ReconciliationObservationRoot:
+    """Wrap one exact factory-issued observation without duplicating its identity fields."""
+    from ea.core.reconciliation import (
+        ReconciliationObservation,
+        canonical_reconciliation_observation_bytes,
+        reconciliation_observation_digest,
+    )
+
+    if type(observation) is not ReconciliationObservation:
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation root requires an exact observation")
+    payload = canonical_reconciliation_observation_bytes(observation)
+    value = object.__new__(ReconciliationObservationRoot)
+    object.__setattr__(value, "observation", observation)
+    object.__setattr__(value, "canonical_observation_bytes", payload)
+    object.__setattr__(value, "observation_sha256", reconciliation_observation_digest(observation))
+    object.__setattr__(value, "_seal", _RECONCILIATION_OBSERVATION_ROOT_SEAL)
+    return value
+
+
+def _require_reconciliation_observation_root(
+    root: object,
+) -> ReconciliationObservationRoot:
+    from ea.core.reconciliation import (
+        ReconciliationObservation,
+        canonical_reconciliation_observation_bytes,
+        reconciliation_observation_digest,
+    )
+
+    if (
+        type(root) is not ReconciliationObservationRoot
+        or getattr(root, "_seal", None) is not _RECONCILIATION_OBSERVATION_ROOT_SEAL
+        or type(root.observation) is not ReconciliationObservation
+        or type(root.canonical_observation_bytes) is not bytes
+        or type(root.observation_sha256) is not Sha256Digest
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation root is not factory-issued")
+    if root.canonical_observation_bytes != canonical_reconciliation_observation_bytes(
+        root.observation
+    ) or root.observation_sha256 != reconciliation_observation_digest(root.observation):
+        raise _fail(OutcomeCode.INVALID_TYPE, "reconciliation root evidence conflicts")
+    return root
+
+
+type RuntimeRoot = (
+    SafetyRoot
+    | ExecutionFactIngress
+    | ReconciliationObservationRoot
+    | MarketDataEnvelope
+    | TimerRoot
+    | EndOfRunRoot
+)
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -587,6 +685,30 @@ class _ExecutionFactSuffix:
             self.kind_rank,
             self.source_namespace,
             self.ingress_sequence,
+        )
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class _ReconciliationObservationSuffix:
+    kind_rank: int
+    source_namespace: str
+    source_sequence: int
+    watermark_namespace: str
+    watermark_sequence: int
+    observation_run_id: str
+    observation_owner_kind: str
+    observation_owner_sequence: int
+
+    def values(self) -> tuple[object, ...]:
+        return (
+            self.kind_rank,
+            self.source_namespace,
+            self.source_sequence,
+            self.watermark_namespace,
+            self.watermark_sequence,
+            self.observation_run_id,
+            self.observation_owner_kind,
+            self.observation_owner_sequence,
         )
 
 
@@ -651,7 +773,12 @@ class _EndOfRunSuffix:
 
 
 type _RuntimeSuffix = (
-    _SafetySuffix | _ExecutionFactSuffix | _MarketDataSuffix | _TimerSuffix | _EndOfRunSuffix
+    _SafetySuffix
+    | _ExecutionFactSuffix
+    | _ReconciliationObservationSuffix
+    | _MarketDataSuffix
+    | _TimerSuffix
+    | _EndOfRunSuffix
 )
 
 
@@ -677,6 +804,11 @@ class RuntimeRootOrderKey:
         if type(left) is _SafetySuffix and type(right) is _SafetySuffix:
             return left < right
         if type(left) is _ExecutionFactSuffix and type(right) is _ExecutionFactSuffix:
+            return left < right
+        if (
+            type(left) is _ReconciliationObservationSuffix
+            and type(right) is _ReconciliationObservationSuffix
+        ):
             return left < right
         if type(left) is _MarketDataSuffix and type(right) is _MarketDataSuffix:
             return left < right
@@ -730,6 +862,23 @@ def runtime_root_order_key(root: RuntimeRoot) -> RuntimeRootOrderKey:
                 kind_rank=EXECUTION_FACT_KIND_RANKS[root.fact.kind],
                 source_namespace=root.source_namespace.value,
                 ingress_sequence=root.ingress_sequence,
+            ),
+        )
+    if type(root) is ReconciliationObservationRoot:
+        root = _require_reconciliation_observation_root(root)
+        identifier = root.observation.observation_id
+        return RuntimeRootOrderKey(
+            available_at=root.available_at,
+            domain_rank=RUNTIME_ROOT_DOMAIN_RANKS[RuntimeRootDomain.RECONCILIATION_OBSERVATION],
+            _suffix=_ReconciliationObservationSuffix(
+                kind_rank=RECONCILIATION_OBSERVATION_KIND_RANKS[root.kind],
+                source_namespace=root.source_namespace.value,
+                source_sequence=root.source_sequence,
+                watermark_namespace=root.watermark_namespace.value,
+                watermark_sequence=root.watermark_sequence,
+                observation_run_id=identifier.run_id.value,
+                observation_owner_kind=identifier.owner_kind.value,
+                observation_owner_sequence=identifier.owner_sequence,
             ),
         )
     if type(root) is MarketDataEnvelope:
@@ -868,6 +1017,7 @@ def prepare_bounded_runtime_roots(
     supported_types = (
         SafetyRoot,
         ExecutionFactIngress,
+        ReconciliationObservationRoot,
         MarketDataEnvelope,
         TimerRoot,
         EndOfRunRoot,
@@ -882,6 +1032,7 @@ def prepare_bounded_runtime_roots(
     _validate_market_subset(markets)
 
     fact_identities: set[tuple[str, int]] = set()
+    reconciliation_identities: set[tuple[str, int]] = set()
     safety_identities: set[tuple[str, int]] = set()
     timer_identities: set[tuple[str, int]] = set()
     end_identities: set[tuple[str, str, int]] = set()
@@ -894,6 +1045,15 @@ def prepare_bounded_runtime_roots(
                     "runtime root batch contains a duplicate domain identity",
                 )
             fact_identities.add(fact_identity)
+        elif type(root) is ReconciliationObservationRoot:
+            root = _require_reconciliation_observation_root(root)
+            identity = (root.source_namespace.value, root.source_sequence)
+            if identity in reconciliation_identities:
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "runtime root batch contains a duplicate domain identity",
+                )
+            reconciliation_identities.add(identity)
         elif type(root) is SafetyRoot:
             safety_identity = (
                 root.producer_namespace.value,

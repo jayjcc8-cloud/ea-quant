@@ -590,10 +590,56 @@ def test_public_boundary_has_no_generic_root_or_mutable_queue_escape_hatch() -> 
         for name, value in getmembers(runtime_module)
         if not name.startswith("_") and (isfunction(value) or isinstance(value, type))
     }
-    assert "ReconciliationObservationRoot" not in public_runtime_names
+    assert "ReconciliationObservationRoot" in public_runtime_names
     assert "RuntimeRootEnvelope" not in public_runtime_names
     assert {
         name
         for name in dir(DeterministicRootQueue)
         if name in {"put", "push", "insert", "reschedule", "cancel", "advance_clock"}
     } == set()
+
+
+def test_reconciliation_observation_root_uses_exact_rank20_suffix_and_collisions() -> None:
+    """Rank-20 roots must be a factory-issued, public immutable carrier."""
+    from ea.core import (
+        EconomicOwnerKind,
+        ReconciliationObservationRoot,
+        create_reconciliation_observation_root,
+    )
+    from unit.test_reconciliation_authority import _observation
+
+    observation = _observation(source_sequence=17, observation_sequence=5)
+    root = create_reconciliation_observation_root(observation)
+
+    assert type(root) is ReconciliationObservationRoot
+    assert root.observation is observation
+    assert root.canonical_observation_bytes
+    assert runtime_root_order_key(root).as_tuple()[1:] == (
+        20,
+        20,
+        "reconciliation.sim",
+        17,
+        "ledger.portfolio",
+        3,
+        RUN_ID.value,
+        EconomicOwnerKind.RECONCILIATION_OBSERVATION.value,
+        5,
+    )
+
+
+def test_reconciliation_observation_root_rejects_forged_or_mismatched_carriers() -> None:
+    from ea.core import ReconciliationObservationRoot
+    from unit.test_reconciliation_authority import _observation
+
+    forged = object.__new__(ReconciliationObservationRoot)
+    object.__setattr__(forged, "observation", _observation())
+    object.__setattr__(forged, "canonical_observation_bytes", b"forged")
+    object.__setattr__(forged, "observation_sha256", Sha256Digest("f" * 64))
+
+    for operation in (
+        lambda: runtime_root_order_key(forged),
+        lambda: prepare_bounded_runtime_roots((forged,)),
+    ):
+        with pytest.raises(RuntimeOrderingError) as error:
+            operation()
+        assert error.value.code is OutcomeCode.INVALID_TYPE

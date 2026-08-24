@@ -157,6 +157,7 @@ def test_execution_value_modules_keep_the_frozen_import_boundary() -> None:
                 "ea.core.execution_messages",
                 "ea.core.market_data",
                 "ea.core.outcomes",
+                "ea.core.reconciliation",
                 "ea.core.run",
                 "ea.core.time",
             }
@@ -229,6 +230,7 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.market_data_codec",
             "ea.core.outcomes",
             "ea.core.portfolio",
+            "ea.core.reconciliation",
             "ea.core.risk",
             "ea.core.run",
             "ea.core.runtime",
