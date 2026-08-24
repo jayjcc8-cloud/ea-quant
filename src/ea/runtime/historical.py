@@ -10,6 +10,7 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, Protocol, cast, final
 
+import ea.core.reconciliation as reconciliation_contract
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import (
     InstrumentExecutionSpecSet,
@@ -517,6 +518,11 @@ def _trace_text(value: object, *, field: str) -> str:
     return value
 
 
+def _trace_canonical_instrument(venue: str, symbol: str) -> None:
+    identities = reconciliation_contract.__dict__
+    identities["Instrument"](identities["VenueId"](venue), symbol)
+
+
 def _trace_uint64(value: object, *, field: str, minimum: int = 0) -> int:
     if type(value) is not int or not minimum <= value <= _MAX_UINT64:
         raise _trace_fail(f"{field} is outside the exact uint64 contract")
@@ -582,6 +588,7 @@ def _trace_market_root(root: dict[str, object]) -> tuple[datetime, list[str | in
     source_sequence = _trace_uint64(root["source_sequence"], field="root.source_sequence")
     venue = _trace_text(root["venue"], field="root.venue")
     symbol = _trace_text(root["symbol"], field="root.symbol")
+    _trace_canonical_instrument(venue, symbol)
     revision = _trace_uint64(root["revision"], field="root.revision")
     for field in ("open_bits", "high_bits", "low_bits", "close_bits", "volume_bits"):
         _trace_float_bits(root[field], field=f"root.{field}")
@@ -737,10 +744,10 @@ def _trace_reconciliation_balances(
                 "venue",
             }:
                 raise _trace_fail("reconciliation position instrument fields conflict")
-            instrument_key = (
-                _trace_text(instrument_document["venue"], field="root.balances.venue"),
-                _trace_text(instrument_document["symbol"], field="root.balances.symbol"),
-            )
+            venue = _trace_text(instrument_document["venue"], field="root.balances.venue")
+            symbol = _trace_text(instrument_document["symbol"], field="root.balances.symbol")
+            _trace_canonical_instrument(venue, symbol)
+            instrument_key = (venue, symbol)
             CanonicalDecimal(_trace_text(balance["quantity"], field="root.balances.quantity"))
             keys.append(instrument_key)
         else:
@@ -774,21 +781,21 @@ def _trace_terminal_root(
     if set(root) != expected_fields or _trace_text(root["type"], field="root.type") != "end_of_run":
         raise _trace_fail("terminal root fields conflict")
     available_at = _trace_timestamp(root["available_at"], field="root.available_at")
-    kind_rank = {
-        "bounded_source_exhausted": 0,
-        "requested_end": 10,
-    }.get(_trace_text(root["kind"], field="root.kind"))
-    if kind_rank is None:
-        raise _trace_fail("terminal root kind conflicts")
+    kind = _trace_text(root["kind"], field="root.kind")
     namespace = _trace_text(root["producer_namespace"], field="root.producer_namespace")
     sequence = _trace_uint64(root["producer_sequence"], field="root.producer_sequence")
     run_id = _trace_text(root["run_id"], field="root.run_id")
-    if run_id != trace_run_id.value:
+    if (
+        kind != EndOfRunKind.BOUNDED_SOURCE_EXHAUSTED.value
+        or namespace != HISTORICAL_RUNTIME_PRODUCER_NAMESPACE
+        or sequence != 0
+        or run_id != trace_run_id.value
+    ):
         raise _trace_fail("terminal root run conflicts")
     return available_at, [
         _utc_text(available_at),
         50,
-        kind_rank,
+        0,
         namespace,
         sequence,
         run_id,
@@ -817,6 +824,8 @@ def _decode_v2_trace_record(record: bytes) -> dict[str, object] | None:
 @dataclass(frozen=True, slots=True)
 class _V2TraceRecord:
     root_kind: str
+    root_order_key: tuple[str | int, ...]
+    reconciliation_spec: tuple[str, str] | None
     clock_now: datetime
     run_id: str
     data_sha256: str
@@ -864,12 +873,20 @@ def _validate_v2_trace_record(document: dict[str, object]) -> _V2TraceRecord:
         root = document["root"]
         if type(root) is not dict:
             raise _trace_fail("root must be one exact object")
+        reconciliation_spec: tuple[str, str] | None = None
         if root.get("type") == "end_of_run":
             root_kind = "terminal"
             root_time, root_order_key = _trace_terminal_root(root, trace_run_id=run_id)
         elif root.get("schema") == RECONCILIATION_OBSERVATION_SCHEMA:
             root_kind = "reconciliation"
             root_time, root_order_key = _trace_reconciliation_root(root, trace_run_id=run_id)
+            reconciliation_spec = (
+                _trace_text(root["instrument_spec_set_id"], field="root.instrument_spec_set_id"),
+                _trace_text(
+                    root["instrument_spec_set_sha256"],
+                    field="root.instrument_spec_set_sha256",
+                ),
+            )
         else:
             root_kind = "market"
             root_time, root_order_key = _trace_market_root(root)
@@ -892,6 +909,8 @@ def _validate_v2_trace_record(document: dict[str, object]) -> _V2TraceRecord:
         raise _trace_fail("values conflict") from error
     return _V2TraceRecord(
         root_kind=root_kind,
+        root_order_key=tuple(root_order_key),
+        reconciliation_spec=reconciliation_spec,
         clock_now=clock_now,
         run_id=run_id.value,
         data_sha256=data_sha256.value,
@@ -903,11 +922,28 @@ def _validate_v2_trace_record(document: dict[str, object]) -> _V2TraceRecord:
 
 def _validate_v2_trace_history(documents: tuple[dict[str, object], ...]) -> None:
     previous: _V2TraceRecord | None = None
+    reconciliation_spec: tuple[str, str] | None = None
     for document in documents:
         current = _validate_v2_trace_record(document)
+        if current.reconciliation_spec is not None:
+            if reconciliation_spec is None:
+                reconciliation_spec = current.reconciliation_spec
+            elif current.reconciliation_spec != reconciliation_spec:
+                raise _trace_fail("history reconciliation spec conflicts")
         if previous is None:
             if current.dispatch_sequence != 1:
                 raise _trace_fail("history does not begin at dispatch sequence one")
+            if current.root_kind == "reconciliation":
+                if current.committed_event_count != 0 or current.committed_cursor_as_of is not None:
+                    raise _trace_fail("history reconciliation origin conflicts")
+            elif current.root_kind == "market":
+                if (
+                    current.committed_event_count != 1
+                    or current.committed_cursor_as_of != current.clock_now
+                ):
+                    raise _trace_fail("history market origin conflicts")
+            else:
+                raise _trace_fail("history cannot begin with terminal")
         else:
             if (
                 current.run_id != previous.run_id
@@ -917,6 +953,11 @@ def _validate_v2_trace_history(documents: tuple[dict[str, object], ...]) -> None
                 or previous.root_kind == "terminal"
             ):
                 raise _trace_fail("history sequence conflicts")
+            if (
+                current.clock_now == previous.clock_now
+                and current.root_order_key <= previous.root_order_key
+            ):
+                raise _trace_fail("history same-clock root ordering conflicts")
             if current.root_kind == "market":
                 if current.committed_event_count != previous.committed_event_count + 1:
                     raise _trace_fail("market history count conflicts")
@@ -1332,6 +1373,13 @@ class _HistoricalReconciliationProducer:
                 OutcomeCode.CONFLICTING_ID,
                 "reconciliation candidate time evidence conflicts",
             )
+        if (
+            view.observation.run_id != self._binding.run_id
+            or view.observation.instrument_spec_set_id != self._binding.instrument_spec_set_id
+            or view.observation.instrument_spec_set_sha256
+            != self._binding.instrument_spec_set_sha256
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation candidate binding conflicts")
         from ea.core.runtime import create_reconciliation_observation_root
 
         root = create_reconciliation_observation_root(view.observation)
