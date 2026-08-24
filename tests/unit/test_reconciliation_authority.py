@@ -592,6 +592,32 @@ def test_trade_detail_observation_is_incomparable_invalid_retain_and_halt() -> N
     assert outcome.discrepancies == ()
 
 
+def test_observation_only_authority_rejects_trade_detail_before_retaining_state() -> None:
+    from ea.reconciliation.authority import _create_observation_only_reconciliation_authority
+
+    authority = _create_observation_only_reconciliation_authority(
+        run_id=RUN_ID,
+        spec_set=_spec_set(),
+        snapshot_view=lambda: _snapshot(),
+    )
+    trade_detail = _observation(
+        kind=ReconciliationObservationKind.TRADE_DETAIL,
+        scope=ReconciliationScopeKind.TRADE,
+        balances=(),
+    )
+
+    with pytest.raises(ReconciliationAuthorityError, match="trade detail"):
+        authority.admit_observation(trade_detail, dispatch_sequence=7)
+
+    assert authority.observation_index == {}
+    assert authority.outcome_index == {}
+    assert not {
+        "propose_adjustment_command",
+        "issue_adjustment_authorization",
+        "has_issued_authorization",
+    } & set(dir(authority))
+
+
 def test_non_ledger_watermark_namespace_is_incomparable_invalid_retain_and_halt() -> None:
     snapshot = _snapshot()
     authority = _authority(snapshot)
