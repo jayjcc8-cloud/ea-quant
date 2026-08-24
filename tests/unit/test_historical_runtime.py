@@ -362,6 +362,42 @@ def test_reconciliation_producer_interleaves_without_lookahead_and_commits_on_ac
     assert reconciliation_port.admit_calls == 2
 
 
+def test_reconciliation_identity_indexes_remain_stable_across_commits() -> None:
+    observations = (
+        _reconciliation_observation(
+            source_sequence=1,
+            observation_sequence=1,
+            available_at=datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+        ),
+        _reconciliation_observation(
+            source_sequence=2,
+            observation_sequence=2,
+            available_at=datetime(2026, 1, 2, 9, 32, tzinfo=UTC),
+        ),
+    )
+    runtime = create_phase1_historical_market_runtime(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        source=_scripted_port((_first_market_event(),)),
+        reconciliation_source=_scripted_reconciliation_port(observations),
+    )
+    producer = runtime._reconciliation_producer
+    assert producer is not None
+    primary_index = producer._committed_primary_identities
+    observation_index = producer._committed_observation_ids
+    assert type(primary_index) is set
+    assert type(observation_index) is set
+
+    for _ in range(3):
+        lease = runtime.pop()
+        runtime.acknowledge(lease)
+
+    assert producer._committed_primary_identities is primary_index
+    assert producer._committed_observation_ids is observation_index
+    assert primary_index == {("reconciliation.fixture", 1), ("reconciliation.fixture", 2)}
+    assert observation_index == {observation.observation_id for observation in observations}
+
+
 def test_reconciliation_trace_v2_binds_cursor_to_committed_market_frontier() -> None:
     first_reconciliation = _reconciliation_observation(
         source_sequence=1,
@@ -773,6 +809,25 @@ def test_historical_runtime_trace_digest_rejects_same_clock_key_disorder_and_col
         for document in documents[1:]:
             document["dispatch_sequence"] += 1
         documents = [documents[0], duplicate, *documents[1:]]
+
+    _trace_conflicts(documents)
+
+
+@pytest.mark.parametrize("identity", ("primary", "observation"))
+def test_historical_runtime_trace_digest_rejects_reused_reconciliation_identity(
+    identity: str,
+) -> None:
+    documents = _trace_documents(_complete_reconciliation_v2_trace())
+    first = documents[0]
+    later = documents[2]
+
+    if identity == "primary":
+        later["root"]["source_namespace"] = first["root"]["source_namespace"]
+        later["root"]["source_sequence"] = first["root"]["source_sequence"]
+        later["root_order_key"][3:5] = first["root_order_key"][3:5]
+    else:
+        later["root"]["observation_id"] = first["root"]["observation_id"]
+        later["root_order_key"][7:10] = first["root_order_key"][7:10]
 
     _trace_conflicts(documents)
 

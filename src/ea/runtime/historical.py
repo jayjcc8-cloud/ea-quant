@@ -826,6 +826,7 @@ class _V2TraceRecord:
     root_kind: str
     root_order_key: tuple[str | int, ...]
     reconciliation_spec: tuple[str, str] | None
+    reconciliation_identities: tuple[tuple[str, int], tuple[str, int]] | None
     clock_now: datetime
     run_id: str
     data_sha256: str
@@ -874,6 +875,7 @@ def _validate_v2_trace_record(document: dict[str, object]) -> _V2TraceRecord:
         if type(root) is not dict:
             raise _trace_fail("root must be one exact object")
         reconciliation_spec: tuple[str, str] | None = None
+        reconciliation_identities: tuple[tuple[str, int], tuple[str, int]] | None = None
         if root.get("type") == "end_of_run":
             root_kind = "terminal"
             root_time, root_order_key = _trace_terminal_root(root, trace_run_id=run_id)
@@ -886,6 +888,10 @@ def _validate_v2_trace_record(document: dict[str, object]) -> _V2TraceRecord:
                     root["instrument_spec_set_sha256"],
                     field="root.instrument_spec_set_sha256",
                 ),
+            )
+            reconciliation_identities = (
+                (cast(str, root_order_key[3]), cast(int, root_order_key[4])),
+                (cast(str, root_order_key[7]), cast(int, root_order_key[9])),
             )
         else:
             root_kind = "market"
@@ -911,6 +917,7 @@ def _validate_v2_trace_record(document: dict[str, object]) -> _V2TraceRecord:
         root_kind=root_kind,
         root_order_key=tuple(root_order_key),
         reconciliation_spec=reconciliation_spec,
+        reconciliation_identities=reconciliation_identities,
         clock_now=clock_now,
         run_id=run_id.value,
         data_sha256=data_sha256.value,
@@ -923,8 +930,16 @@ def _validate_v2_trace_record(document: dict[str, object]) -> _V2TraceRecord:
 def _validate_v2_trace_history(documents: tuple[dict[str, object], ...]) -> None:
     previous: _V2TraceRecord | None = None
     reconciliation_spec: tuple[str, str] | None = None
+    primary_identities: set[tuple[str, int]] = set()
+    observation_identities: set[tuple[str, int]] = set()
     for document in documents:
         current = _validate_v2_trace_record(document)
+        if current.reconciliation_identities is not None:
+            primary, observation = current.reconciliation_identities
+            if primary in primary_identities or observation in observation_identities:
+                raise _trace_fail("history reconciliation identity conflicts")
+            primary_identities.add(primary)
+            observation_identities.add(observation)
         if current.reconciliation_spec is not None:
             if reconciliation_spec is None:
                 reconciliation_spec = current.reconciliation_spec
@@ -1290,8 +1305,6 @@ class _ReconciliationProducerState:
     current_offer: _RuntimeRootOffer | None
     promise: datetime | None
     last_key: RuntimeRootOrderKey | None
-    committed_primary_identities: tuple[tuple[str, int], ...]
-    committed_observation_ids: tuple[EconomicId, ...]
 
 
 @final
@@ -1312,6 +1325,8 @@ class _HistoricalReconciliationProducer:
     __slots__ = (
         "_binding",
         "_clock",
+        "_committed_observation_ids",
+        "_committed_primary_identities",
         "_fingerprint",
         "_market_producer",
         "_producer_id",
@@ -1322,6 +1337,8 @@ class _HistoricalReconciliationProducer:
 
     _binding: HistoricalReconciliationSourceBinding
     _clock: Phase1VirtualClock
+    _committed_observation_ids: set[EconomicId]
+    _committed_primary_identities: set[tuple[str, int]]
     _fingerprint: DataFingerprint
     _market_producer: _HistoricalMarketProducer
     _producer_id: RuntimeIdentifier
@@ -1387,8 +1404,8 @@ class _HistoricalReconciliationProducer:
         key = runtime_root_order_key(root)
         primary_identity = (root.source_namespace.value, root.source_sequence)
         if (
-            primary_identity in state.committed_primary_identities
-            or root.observation_id in state.committed_observation_ids
+            primary_identity in self._committed_primary_identities
+            or root.observation_id in self._committed_observation_ids
             or (state.last_key is not None and key <= state.last_key)
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation identity or key is not new")
@@ -1431,15 +1448,12 @@ class _HistoricalReconciliationProducer:
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "live reconciliation evidence conflicts")
         source_prepared = self._source.prepare_commit(view.candidate)
-        primary_identity = (root.source_namespace.value, root.source_sequence)
         next_state = replace(
             state,
             committed_count=state.committed_count + 1,
             current_offer=None,
             promise=None,
             last_key=offer.order_key,
-            committed_primary_identities=(*state.committed_primary_identities, primary_identity),
-            committed_observation_ids=(*state.committed_observation_ids, root.observation_id),
         )
         prepared = object.__new__(_PreparedReconciliationCommit)
         object.__setattr__(prepared, "_seal", _PREPARED_SEAL)
@@ -1471,6 +1485,9 @@ class _HistoricalReconciliationProducer:
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "reconciliation commit is stale or invalid")
         self._source.commit(prepared_object.source_prepared)
+        root = cast(ReconciliationObservationRoot, prepared_object.offer.root)
+        self._committed_primary_identities.add((root.source_namespace.value, root.source_sequence))
+        self._committed_observation_ids.add(root.observation_id)
         self._state = prepared_object.next_state
 
 
@@ -2083,12 +2100,14 @@ def _create_historical_reconciliation_producer(
     producer = object.__new__(_HistoricalReconciliationProducer)
     producer._binding = binding
     producer._clock = clock
+    producer._committed_observation_ids = set()
+    producer._committed_primary_identities = set()
     producer._fingerprint = fingerprint
     producer._market_producer = market_producer
     producer._producer_id = RuntimeIdentifier(_HISTORICAL_RECONCILIATION_PRODUCER_NAMESPACE)
     producer._run_id = run_id
     producer._source = source
-    producer._state = _ReconciliationProducerState(0, None, None, None, (), ())
+    producer._state = _ReconciliationProducerState(0, None, None, None)
     return producer
 
 
