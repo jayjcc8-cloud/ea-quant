@@ -800,6 +800,19 @@ def test_historical_runtime_trace_digest_accepts_only_the_fixed_terminal_authori
     _trace_conflicts(documents)
 
 
+def test_historical_runtime_trace_digest_rejects_terminal_clock_collision() -> None:
+    records = _complete_reconciliation_v2_trace()
+    assert historical_runtime_trace_digest(records)
+    documents = _trace_documents(records)
+    preceding = documents[-2]
+    terminal = documents[-1]
+    terminal["clock_now"] = preceding["clock_now"]
+    terminal["root"]["available_at"] = preceding["clock_now"]
+    terminal["root_order_key"][0] = preceding["clock_now"]
+
+    _trace_conflicts(documents)
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
