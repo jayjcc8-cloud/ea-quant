@@ -10,12 +10,15 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, Protocol, cast, final
 
+from ea.core.economics import CanonicalDecimal
 from ea.core.execution import (
     InstrumentExecutionSpecSet,
     InstrumentSpecSetId,
+    SettlementCurrency,
     instrument_spec_set_digest,
 )
-from ea.core.execution_identity import EconomicId, SourceNamespace
+from ea.core.execution_identity import EconomicId, EconomicOwnerKind, SourceNamespace
+from ea.core.execution_messages import FactProvenanceId
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.market_data_codec import canonical_market_data_record_bytes
 from ea.core.outcomes import OutcomeCode
@@ -23,6 +26,7 @@ from ea.core.reconciliation import (
     RECONCILIATION_CANONICALIZATION,
     RECONCILIATION_OBSERVATION_SCHEMA,
     ReconciliationObservation,
+    ReconciliationScopeKind,
     canonical_reconciliation_observation_bytes,
     reconciliation_observation_digest,
 )
@@ -31,6 +35,7 @@ from ea.core.runtime import (
     BoundedRuntimeRootPlan,
     EndOfRunKind,
     EndOfRunRoot,
+    ReconciliationObservationKind,
     ReconciliationObservationRoot,
     RuntimeIdentifier,
     RuntimeOrderingError,
@@ -632,33 +637,39 @@ def _trace_reconciliation_root(
     run_id = _trace_text(root["run_id"], field="root.run_id")
     if run_id != trace_run_id.value:
         raise _trace_fail("reconciliation root run conflicts")
-    for field in (
-        "declared_scope_id",
-        "instrument_spec_set_id",
-        "provenance_id",
-        "source_namespace",
-        "watermark_namespace",
-    ):
-        _trace_text(root[field], field=f"root.{field}")
+    RuntimeIdentifier(_trace_text(root["declared_scope_id"], field="root.declared_scope_id"))
+    InstrumentSpecSetId(
+        _trace_text(root["instrument_spec_set_id"], field="root.instrument_spec_set_id")
+    )
+    FactProvenanceId(_trace_text(root["provenance_id"], field="root.provenance_id"))
+    source_namespace = SourceNamespace(
+        _trace_text(root["source_namespace"], field="root.source_namespace")
+    )
+    watermark_namespace = SourceNamespace(
+        _trace_text(root["watermark_namespace"], field="root.watermark_namespace")
+    )
     for field in (
         "instrument_spec_set_sha256",
         "provenance_payload_sha256",
     ):
         Sha256Digest(_trace_text(root[field], field=f"root.{field}"))
-    kind = _trace_text(root["kind"], field="root.kind")
-    kind_rank = {
-        "trade_detail": 0,
-        "order_detail": 10,
-        "position_snapshot": 20,
-        "cash_snapshot": 30,
-    }.get(kind)
-    if kind_rank is None:
-        raise _trace_fail("reconciliation root kind fields conflict")
-    _trace_text(root["declared_scope_kind"], field="root.declared_scope_kind")
+    kind = ReconciliationObservationKind(_trace_text(root["kind"], field="root.kind"))
+    scope_kind = ReconciliationScopeKind(
+        _trace_text(root["declared_scope_kind"], field="root.declared_scope_kind")
+    )
+    kind_rank, expected_scope = {
+        ReconciliationObservationKind.TRADE_DETAIL: (0, ReconciliationScopeKind.TRADE),
+        ReconciliationObservationKind.ORDER_DETAIL: (10, ReconciliationScopeKind.ORDER),
+        ReconciliationObservationKind.POSITION_SNAPSHOT: (20, ReconciliationScopeKind.POSITION),
+        ReconciliationObservationKind.CASH_SNAPSHOT: (30, ReconciliationScopeKind.CASH),
+    }[kind]
+    if scope_kind is not expected_scope:
+        raise _trace_fail("reconciliation root kind and scope conflict")
     source_sequence = _trace_uint64(root["source_sequence"], field="root.source_sequence")
     watermark_sequence = _trace_uint64(root["watermark_sequence"], field="root.watermark_sequence")
     available_at = _trace_timestamp(root["available_at"], field="root.available_at")
-    _trace_timestamp(root["occurred_at"], field="root.occurred_at")
+    if _trace_timestamp(root["occurred_at"], field="root.occurred_at") > available_at:
+        raise _trace_fail("reconciliation root time fields conflict")
     observation_id = root["observation_id"]
     if type(observation_id) is not dict or set(observation_id) != {
         "owner_kind",
@@ -666,53 +677,85 @@ def _trace_reconciliation_root(
         "run_id",
     }:
         raise _trace_fail("reconciliation observation identity fields conflict")
-    owner_kind = _trace_text(observation_id["owner_kind"], field="root.observation_id.owner_kind")
+    owner_kind = EconomicOwnerKind(
+        _trace_text(observation_id["owner_kind"], field="root.observation_id.owner_kind")
+    )
     owner_sequence = _trace_uint64(
         observation_id["owner_sequence"], field="root.observation_id.owner_sequence"
     )
     if (
-        owner_kind != "reconciliation.observation"
+        owner_kind is not EconomicOwnerKind.RECONCILIATION_OBSERVATION
         or _trace_text(observation_id["run_id"], field="root.observation_id.run_id") != run_id
     ):
         raise _trace_fail("reconciliation observation identity conflicts")
-    _trace_reconciliation_balances(root["balances"])
+    EconomicId(trace_run_id, owner_kind, owner_sequence)
+    _trace_reconciliation_balances(root["balances"], kind=kind)
     return available_at, [
         _utc_text(available_at),
         20,
         kind_rank,
-        _trace_text(root["source_namespace"], field="root.source_namespace"),
+        source_namespace.value,
         source_sequence,
-        _trace_text(root["watermark_namespace"], field="root.watermark_namespace"),
+        watermark_namespace.value,
         watermark_sequence,
         run_id,
-        owner_kind,
+        owner_kind.value,
         owner_sequence,
     ]
 
 
-def _trace_reconciliation_balances(balances: object) -> None:
+def _trace_reconciliation_balances(
+    balances: object,
+    *,
+    kind: ReconciliationObservationKind,
+) -> None:
     if type(balances) is not list:
         raise _trace_fail("reconciliation balances must be an array")
+    if kind in {
+        ReconciliationObservationKind.TRADE_DETAIL,
+        ReconciliationObservationKind.ORDER_DETAIL,
+    }:
+        if balances:
+            raise _trace_fail("reconciliation detail balances conflict")
+        return
+    if not 1 <= len(balances) <= 32:
+        raise _trace_fail("reconciliation snapshot balance count conflicts")
+    keys: list[tuple[str, str] | str] = []
     for balance in balances:
         if type(balance) is not dict:
             raise _trace_fail("reconciliation balance must be an object")
-        balance_kind = _trace_text(balance.get("kind"), field="root.balances.kind")
-        if balance_kind == "instrument_position" and set(balance) == {
-            "instrument",
-            "kind",
-            "quantity",
-        }:
-            instrument = balance["instrument"]
-            if type(instrument) is dict and set(instrument) == {"symbol", "venue"}:
-                _trace_text(instrument["venue"], field="root.balances.venue")
-                _trace_text(instrument["symbol"], field="root.balances.symbol")
-                _trace_text(balance["quantity"], field="root.balances.quantity")
-                continue
-        elif balance_kind == "settlement_cash" and set(balance) == {"amount", "currency", "kind"}:
-            _trace_text(balance["currency"], field="root.balances.currency")
-            _trace_text(balance["amount"], field="root.balances.amount")
-            continue
-        raise _trace_fail("reconciliation balance fields conflict")
+        if kind is ReconciliationObservationKind.POSITION_SNAPSHOT:
+            if (
+                set(balance) != {"instrument", "kind", "quantity"}
+                or _trace_text(balance.get("kind"), field="root.balances.kind")
+                != "instrument_position"
+            ):
+                raise _trace_fail("reconciliation position balance fields conflict")
+            instrument_document = balance["instrument"]
+            if type(instrument_document) is not dict or set(instrument_document) != {
+                "symbol",
+                "venue",
+            }:
+                raise _trace_fail("reconciliation position instrument fields conflict")
+            instrument_key = (
+                _trace_text(instrument_document["venue"], field="root.balances.venue"),
+                _trace_text(instrument_document["symbol"], field="root.balances.symbol"),
+            )
+            CanonicalDecimal(_trace_text(balance["quantity"], field="root.balances.quantity"))
+            keys.append(instrument_key)
+        else:
+            if (
+                set(balance) != {"amount", "currency", "kind"}
+                or _trace_text(balance.get("kind"), field="root.balances.kind") != "settlement_cash"
+            ):
+                raise _trace_fail("reconciliation cash balance fields conflict")
+            currency = SettlementCurrency(
+                _trace_text(balance["currency"], field="root.balances.currency")
+            )
+            CanonicalDecimal(_trace_text(balance["amount"], field="root.balances.amount"))
+            keys.append(currency.code)
+    if keys != sorted(set(keys)):
+        raise _trace_fail("reconciliation balances are not canonical and unique")
 
 
 def _trace_terminal_root(
@@ -771,7 +814,18 @@ def _decode_v2_trace_record(record: bytes) -> dict[str, object] | None:
     return document
 
 
-def _validate_v2_trace_record(document: dict[str, object]) -> None:
+@dataclass(frozen=True, slots=True)
+class _V2TraceRecord:
+    root_kind: str
+    clock_now: datetime
+    run_id: str
+    data_sha256: str
+    dispatch_sequence: int
+    committed_event_count: int
+    committed_cursor_as_of: datetime | None
+
+
+def _validate_v2_trace_record(document: dict[str, object]) -> _V2TraceRecord:
     expected_fields = {
         "clock_now",
         "committed_cursor_as_of",
@@ -791,8 +845,10 @@ def _validate_v2_trace_record(document: dict[str, object]) -> None:
             raise _trace_fail("schema conflicts")
         clock_now = _trace_timestamp(document["clock_now"], field="clock_now")
         run_id = RunId(_trace_text(document["run_id"], field="run_id"))
-        Sha256Digest(_trace_text(document["data_sha256"], field="data_sha256"))
-        _trace_uint64(document["dispatch_sequence"], field="dispatch_sequence", minimum=1)
+        data_sha256 = Sha256Digest(_trace_text(document["data_sha256"], field="data_sha256"))
+        dispatch_sequence = _trace_uint64(
+            document["dispatch_sequence"], field="dispatch_sequence", minimum=1
+        )
         committed_event_count = _trace_uint64(
             document["committed_event_count"], field="committed_event_count"
         )
@@ -834,6 +890,45 @@ def _validate_v2_trace_record(document: dict[str, object]) -> None:
             raise _trace_fail("terminal acknowledgement conflicts with the root")
     except (TypeError, ValueError) as error:
         raise _trace_fail("values conflict") from error
+    return _V2TraceRecord(
+        root_kind=root_kind,
+        clock_now=clock_now,
+        run_id=run_id.value,
+        data_sha256=data_sha256.value,
+        dispatch_sequence=dispatch_sequence,
+        committed_event_count=committed_event_count,
+        committed_cursor_as_of=cursor,
+    )
+
+
+def _validate_v2_trace_history(documents: tuple[dict[str, object], ...]) -> None:
+    previous: _V2TraceRecord | None = None
+    for document in documents:
+        current = _validate_v2_trace_record(document)
+        if previous is None:
+            if current.dispatch_sequence != 1:
+                raise _trace_fail("history does not begin at dispatch sequence one")
+        else:
+            if (
+                current.run_id != previous.run_id
+                or current.data_sha256 != previous.data_sha256
+                or current.dispatch_sequence != previous.dispatch_sequence + 1
+                or current.clock_now < previous.clock_now
+                or previous.root_kind == "terminal"
+            ):
+                raise _trace_fail("history sequence conflicts")
+            if current.root_kind == "market":
+                if current.committed_event_count != previous.committed_event_count + 1:
+                    raise _trace_fail("market history count conflicts")
+            elif current.root_kind == "reconciliation":
+                if (
+                    current.committed_event_count != previous.committed_event_count
+                    or current.committed_cursor_as_of != previous.committed_cursor_as_of
+                ):
+                    raise _trace_fail("reconciliation history frontier conflicts")
+            elif current.committed_event_count != previous.committed_event_count:
+                raise _trace_fail("terminal history count conflicts")
+        previous = current
 
 
 def historical_runtime_trace_digest(records: tuple[bytes, ...]) -> Sha256Digest:
@@ -848,8 +943,7 @@ def historical_runtime_trace_digest(records: tuple[bytes, ...]) -> Sha256Digest:
     if v2_present:
         if any(document is None for document in documents):
             raise _trace_fail("records are mixed with invalid or legacy evidence")
-        for document in cast(tuple[dict[str, object], ...], documents):
-            _validate_v2_trace_record(document)
+        _validate_v2_trace_history(cast(tuple[dict[str, object], ...], documents))
     digest = sha256(
         _HISTORICAL_RUNTIME_TRACE_V2_DIGEST_DOMAIN
         if v2_present
