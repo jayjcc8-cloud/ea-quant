@@ -588,6 +588,143 @@ def test_historical_runtime_trace_digest_rejects_malformed_standalone_v2_evidenc
         assert caught.value.code is OutcomeCode.CONFLICTING_ID
 
 
+def _canonical_trace_bytes(document: object) -> bytes:
+    return json.dumps(
+        document,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _complete_reconciliation_v2_trace() -> tuple[bytes, ...]:
+    observations = (
+        _reconciliation_observation(
+            source_sequence=1,
+            observation_sequence=1,
+            available_at=datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+        ),
+        _reconciliation_observation(
+            source_sequence=2,
+            observation_sequence=2,
+            available_at=datetime(2026, 1, 2, 9, 32, tzinfo=UTC),
+        ),
+    )
+    market_events = decode_phase1_ohlcv_csv(
+        ("\n".join((HEADER, *_two_rows())) + "\n").encode(),
+        replay_window=WINDOW,
+    ).selection.events
+    runtime = create_phase1_historical_market_runtime(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        source=_scripted_port(market_events),
+        reconciliation_source=_scripted_reconciliation_port(observations),
+    )
+    while True:
+        lease = runtime.pop()
+        runtime.acknowledge(lease)
+        if type(lease.root) is EndOfRunRoot:
+            break
+    return runtime.trace_records
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "noncanonical_quantity",
+        "noncanonical_amount",
+        "invalid_declared_scope_id",
+        "invalid_provenance_id",
+        "invalid_source_namespace",
+        "invalid_spec_set_id",
+        "kind_scope_balance_mismatch",
+        "duplicate_balances",
+        "unsorted_balances",
+    ),
+)
+def test_historical_runtime_trace_digest_rejects_semantically_invalid_reconciliation_root(
+    mutation: str,
+) -> None:
+    document = cast(dict[str, Any], json.loads(_complete_reconciliation_v2_trace()[0]))
+    root = cast(dict[str, Any], document["root"])
+    root_order_key = cast(list[Any], document["root_order_key"])
+
+    if mutation == "noncanonical_quantity":
+        root["balances"][0]["quantity"] = "01.0"
+    elif mutation == "noncanonical_amount":
+        root["kind"] = "cash_snapshot"
+        root["declared_scope_kind"] = "cash"
+        root["balances"] = [{"amount": "01.0", "currency": "USD", "kind": "settlement_cash"}]
+        root_order_key[2] = 30
+    elif mutation == "invalid_declared_scope_id":
+        root["declared_scope_id"] = ""
+    elif mutation == "invalid_provenance_id":
+        root["provenance_id"] = ""
+    elif mutation == "invalid_source_namespace":
+        root["source_namespace"] = "INVALID"
+        root_order_key[3] = "INVALID"
+    elif mutation == "invalid_spec_set_id":
+        root["instrument_spec_set_id"] = "INVALID"
+    elif mutation == "kind_scope_balance_mismatch":
+        root["kind"] = "cash_snapshot"
+        root["declared_scope_kind"] = "position"
+        root_order_key[2] = 30
+    elif mutation == "duplicate_balances":
+        root["balances"] = [root["balances"][0], root["balances"][0]]
+    else:
+        unsorted = json.loads(json.dumps(root["balances"][0]))
+        unsorted["instrument"]["symbol"] = "ZZZZ"
+        root["balances"] = [unsorted, root["balances"][0]]
+
+    with pytest.raises(RuntimeOrderingError) as caught:
+        historical_runtime_trace_digest((_canonical_trace_bytes(document),))
+    assert caught.value.code is OutcomeCode.CONFLICTING_ID
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "duplicate",
+        "reordered",
+        "dispatch_sequence_gap",
+        "changed_run",
+        "changed_data_fingerprint",
+        "cursor_count_discontinuity",
+        "after_terminal",
+    ),
+)
+def test_historical_runtime_trace_digest_rejects_discontinuous_v2_history(mutation: str) -> None:
+    records = _complete_reconciliation_v2_trace()
+    assert historical_runtime_trace_digest(records)
+
+    if mutation == "duplicate":
+        invalid = (records[0], records[0], *records[1:])
+    elif mutation == "reordered":
+        invalid = (records[1], records[0], *records[2:])
+    elif mutation == "dispatch_sequence_gap":
+        invalid = (records[0], *records[2:])
+    elif mutation == "changed_run":
+        changed = cast(dict[str, Any], json.loads(records[1]))
+        changed["run_id"] = "87654321-4321-4234-8234-123456789abc"
+        invalid = (*records[:1], _canonical_trace_bytes(changed), *records[2:])
+    elif mutation == "changed_data_fingerprint":
+        changed = cast(dict[str, Any], json.loads(records[1]))
+        changed["data_sha256"] = "cd" * 32
+        invalid = (*records[:1], _canonical_trace_bytes(changed), *records[2:])
+    elif mutation == "cursor_count_discontinuity":
+        changed = cast(dict[str, Any], json.loads(records[2]))
+        changed["committed_event_count"] = 0
+        changed["committed_cursor_as_of"] = None
+        invalid = (*records[:2], _canonical_trace_bytes(changed), *records[3:])
+    else:
+        invalid = (*records, records[0])
+
+    with pytest.raises(RuntimeOrderingError) as caught:
+        historical_runtime_trace_digest(invalid)
+    assert caught.value.code is OutcomeCode.CONFLICTING_ID
+
+
 def test_historical_runtime_dispatches_market_roots_then_one_terminal() -> None:
     runtime, bridge = _runtime(*_two_rows())
 
