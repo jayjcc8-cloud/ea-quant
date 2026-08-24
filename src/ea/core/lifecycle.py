@@ -1506,6 +1506,133 @@ def canonical_dispatch_completed_v3_audit_payload(
     return _canonical_json(document)
 
 
+def canonical_dispatch_completed_v4_audit_payload(
+    *,
+    binding: RunBinding,
+    dispatch_sequence: int,
+    trigger_root_key: RuntimeRootOrderKey,
+    trigger_root_sha256: Sha256Digest,
+    observation_sha256: Sha256Digest,
+    outcome_acknowledgement: AuditAppendAcknowledgement,
+    refresh_acknowledgement: AuditAppendAcknowledgement,
+    refresh_value_sha256: Sha256Digest,
+    final_portfolio_snapshot_sha256: Sha256Digest,
+    final_risk_state_sha256: Sha256Digest,
+    pre_ack_state_sha256: Sha256Digest,
+) -> bytes:
+    """Build the read-only reconciliation completion-v4 frontier."""
+    if (
+        type(binding) is not RunBinding
+        or type(dispatch_sequence) is not int
+        or type(trigger_root_key) is not RuntimeRootOrderKey
+        or any(
+            type(value) is not Sha256Digest
+            for value in (
+                trigger_root_sha256,
+                observation_sha256,
+                refresh_value_sha256,
+                final_portfolio_snapshot_sha256,
+                final_risk_state_sha256,
+                pre_ack_state_sha256,
+            )
+        )
+        or type(outcome_acknowledgement) is not AuditAppendAcknowledgement
+        or type(refresh_acknowledgement) is not AuditAppendAcknowledgement
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "completion-v4 carriers are invalid")
+    if not 1 <= dispatch_sequence <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "completion-v4 dispatch sequence is outside uint64")
+    if trigger_root_key.domain_rank != 20:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root is not rank-20 reconciliation")
+    if (
+        outcome_acknowledgement.binding != binding
+        or outcome_acknowledgement.record_kind
+        is not AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME
+        or outcome_acknowledgement.subject_kind is not AuditSubjectKind.RECONCILIATION_OUTCOME
+        or refresh_acknowledgement.binding != binding
+        or refresh_acknowledgement.record_kind is not AuditRecordKind.RISK_PORTFOLIO_REFRESH
+        or refresh_acknowledgement.subject_kind is not AuditSubjectKind.PORTFOLIO_RISK_REFRESH
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 acknowledgement frontier conflicts")
+    outcome_ack_sha256 = audit_append_acknowledgement_digest(outcome_acknowledgement)
+    refresh_ack_sha256 = audit_append_acknowledgement_digest(refresh_acknowledgement)
+    empty_ledger = ordered_digest_tuple(ORDERED_LEDGER_ACK_DIGEST_DOMAIN, ())
+    empty_submissions = ordered_digest_tuple(ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN, ())
+    return _canonical_json(
+        {
+            "authorization_allowed": False,
+            "authorization_attempt_count": 0,
+            "authorization_attempt_outcome": None,
+            "authorization_attempt_outcome_sha256": None,
+            "batch_ack_sha256": None,
+            "batch_sha256": None,
+            "canonicalization": "ea-canonical-json-v1",
+            "dispatch_kind": "reconciliation_observation",
+            "dispatch_sequence": dispatch_sequence,
+            "final_portfolio_snapshot_sha256": final_portfolio_snapshot_sha256.value,
+            "final_risk_state_sha256": final_risk_state_sha256.value,
+            "ledger_outcome_count": 0,
+            "observation_sha256": observation_sha256.value,
+            "ordered_ledger_ack_sha256s_sha256": empty_ledger.value,
+            "ordered_outcome_ack_sha256s_sha256": outcome_ack_sha256.value,
+            "ordered_submission_receipt_sha256s_sha256": empty_submissions.value,
+            "outcome_acknowledgement_sha256": outcome_ack_sha256.value,
+            "outcome_count": 1,
+            "pre_ack_state_sha256": pre_ack_state_sha256.value,
+            "refresh_acknowledgement_sha256": refresh_ack_sha256.value,
+            "refresh_value_sha256": refresh_value_sha256.value,
+            "run_id": binding.reference.run_id.value,
+            "schema": "ea.audit-dispatch-completed.v4",
+            "submission_count": 0,
+            "trigger_root_key": _reconciliation_root_key_document(trigger_root_key),
+            "trigger_root_sha256": trigger_root_sha256.value,
+        }
+    )
+
+
+def _reconciliation_root_key_document(key: RuntimeRootOrderKey) -> dict[str, object]:
+    """Project only the public comparable fields of a rank-20 root key."""
+    values = key.as_tuple()
+    if len(values) != 10 or values[1:3] != (20, 20):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts")
+    (
+        available_at,
+        _domain_rank,
+        _kind_rank,
+        namespace,
+        sequence,
+        watermark_namespace,
+        watermark_sequence,
+        run_id,
+        owner_kind,
+        owner_sequence,
+    ) = values
+    if (
+        type(namespace) is not str
+        or type(sequence) is not int
+        or type(watermark_namespace) is not str
+        or type(watermark_sequence) is not int
+        or type(run_id) is not str
+        or type(owner_kind) is not str
+        or type(owner_sequence) is not int
+        or not hasattr(available_at, "strftime")
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key is not canonical")
+    return {
+        "available_at": available_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "domain_rank": 20,
+        "kind_rank": 20,
+        "observation_owner_kind": owner_kind,
+        "observation_owner_sequence": owner_sequence,
+        "producer_namespace": namespace,
+        "producer_sequence": sequence,
+        "root_domain": "reconciliation_observation",
+        "run_id": run_id,
+        "watermark_namespace": watermark_namespace,
+        "watermark_sequence": watermark_sequence,
+    }
+
+
 def canonical_run_terminal_v2_audit_payload(
     state: PreTerminalCoordinatorState,
     *,

@@ -106,6 +106,120 @@ def test_completion_v3_binds_ledger_frontier_and_final_digests() -> None:
     }
 
 
+def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
+    from ea.core import (
+        canonical_reconciliation_outcome_bytes,
+        create_reconciliation_observation_root,
+        reconciliation_observation_digest,
+        runtime_root_order_key,
+    )
+    from ea.core.lifecycle import canonical_dispatch_completed_v4_audit_payload
+    from unit.test_lifecycle_ledger_gate import (
+        _coordinator_with_gate,
+        _outcome_bundle,
+    )
+    from unit.test_reconciliation_authority import _authority, _mismatch_observation, _snapshot
+
+    fixture, matcher, orders, causal, delayed, _end = _system()
+    matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
+    fill, execution_outcome = _outcome_bundle(matcher, delayed)
+    coordinator, audit = _coordinator_with_gate(
+        matcher, delayed, fill=fill, outcome=execution_outcome
+    )
+    coordinator.complete_active_dispatch(coordinator.begin_next_dispatch())
+    refresh_record = next(
+        record
+        for record in audit.records
+        if record.record_kind is AuditRecordKind.RISK_PORTFOLIO_REFRESH
+    )
+    binding = refresh_record.binding
+    refresh_ack = create_audit_append_acknowledgement(refresh_record)
+    observation = _mismatch_observation()
+    reconciliation_outcome = _authority(_snapshot()).admit_observation(
+        observation, dispatch_sequence=1
+    )
+    outcome_payload = canonical_reconciliation_outcome_bytes(reconciliation_outcome)
+    outcome_record = create_audit_record(
+        binding=binding,
+        owner_sequence=2,
+        record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        subject_kind=AuditSubjectKind.RECONCILIATION_OUTCOME,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME, outcome_payload
+        ),
+        canonical_payload=outcome_payload,
+        previous_record_sha256=EMPTY_RECORD_SHA256,
+        previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+    )
+    outcome_ack = create_audit_append_acknowledgement(outcome_record)
+    root = create_reconciliation_observation_root(observation)
+
+    payload = canonical_dispatch_completed_v4_audit_payload(
+        binding=binding,
+        dispatch_sequence=1,
+        trigger_root_key=runtime_root_order_key(root),
+        trigger_root_sha256=root.observation_sha256,
+        observation_sha256=reconciliation_observation_digest(observation),
+        outcome_acknowledgement=outcome_ack,
+        refresh_acknowledgement=refresh_ack,
+        refresh_value_sha256=DIGESTS[2],
+        final_portfolio_snapshot_sha256=DIGESTS[3],
+        final_risk_state_sha256=DIGESTS[4],
+        pre_ack_state_sha256=DIGESTS[5],
+    )
+
+    document = json.loads(payload)
+    assert document["schema"] == "ea.audit-dispatch-completed.v4"
+    assert document["dispatch_kind"] == "reconciliation_observation"
+    assert document["batch_sha256"] is None
+    assert document["authorization_allowed"] is False
+    assert document["outcome_count"] == 1
+    assert document["ledger_outcome_count"] == 0
+    assert document["submission_count"] == 0
+    from ea.core.audit import require_canonical_audit_payload
+
+    assert (
+        require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
+        == payload
+    )
+
+
+def test_completion_v4_rejects_non_null_effect_frontier() -> None:
+    from ea.core.audit import require_canonical_audit_payload
+
+    binding, document = _v3_document()
+    document["schema"] = "ea.audit-dispatch-completed.v4"
+    document["dispatch_kind"] = "reconciliation_observation"
+    document["batch_sha256"] = None
+    document["batch_ack_sha256"] = None
+    document["authorization_allowed"] = False
+    document["observation_sha256"] = DIGESTS[0].value
+    document["outcome_acknowledgement_sha256"] = DIGESTS[1].value
+    document["refresh_acknowledgement_sha256"] = DIGESTS[2].value
+    document["refresh_value_sha256"] = DIGESTS[3].value
+    document["ledger_outcome_count"] = 0
+    document["ordered_ledger_ack_sha256s_sha256"] = DIGESTS[4].value
+    document["final_portfolio_snapshot_sha256"] = DIGESTS[5].value
+    document["final_risk_state_sha256"] = DIGESTS[6].value
+    document["trigger_root_key"] = {
+        "available_at": "2026-01-02T09:31:00.000000Z",
+        "domain_rank": 20,
+        "kind_rank": 20,
+        "observation_owner_kind": "reconciliation.observation",
+        "observation_owner_sequence": 1,
+        "producer_namespace": "reconciliation.sim",
+        "producer_sequence": 1,
+        "root_domain": "reconciliation_observation",
+        "run_id": binding.reference.run_id.value,
+        "watermark_namespace": "ledger.portfolio",
+        "watermark_sequence": 3,
+    }
+    payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(Exception, match="completion-v4 requires one outcome acknowledgement"):
+        require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
+
+
 def test_completion_v3_ledger_ack_aggregate_is_ordered_and_deterministic() -> None:
     _, first = _v3_document(ledger_acks=("aa" * 32, "bb" * 32, "cc" * 32))
     _, second = _v3_document(ledger_acks=("aa" * 32, "bb" * 32, "cc" * 32))
