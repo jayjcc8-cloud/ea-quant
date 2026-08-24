@@ -24,6 +24,7 @@ from ea.core import (
     FactProvenanceId,
     Instrument,
     InstrumentExecutionSpec,
+    InstrumentExecutionSpecSet,
     InstrumentSpecId,
     InstrumentSpecSetId,
     MarketDataEnvelope,
@@ -205,10 +206,11 @@ def _reconciliation_observation(
     observation_sequence: int,
     available_at: datetime,
     watermark_sequence: int = 1,
+    spec_set: InstrumentExecutionSpecSet = SPEC_SET,
 ) -> ReconciliationObservation:
     return create_reconciliation_observation(
         run_id=RUN_ID,
-        spec_set=SPEC_SET,
+        spec_set=spec_set,
         observation_id=EconomicId(
             RUN_ID,
             EconomicOwnerKind.RECONCILIATION_OBSERVATION,
@@ -227,7 +229,7 @@ def _reconciliation_observation(
         provenance_payload_sha256=Sha256Digest("ab" * 32),
         balances=(
             PositionReconciliationBalance(
-                SPEC_SET.specifications[0].instrument,
+                spec_set.specifications[0].instrument,
                 CanonicalDecimal("10"),
             ),
         ),
@@ -598,18 +600,26 @@ def _canonical_trace_bytes(document: object) -> bytes:
     ).encode("utf-8")
 
 
-def _complete_reconciliation_v2_trace() -> tuple[bytes, ...]:
-    observations = (
+def _complete_reconciliation_v2_trace(
+    *,
+    market_first: bool = False,
+    same_clock_reconciliations: bool = False,
+) -> tuple[bytes, ...]:
+    observation_times = (
+        (datetime(2026, 1, 2, 9, 32, tzinfo=UTC),)
+        if market_first
+        else (
+            datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+            datetime(2026, 1, 2, 9, 31 if same_clock_reconciliations else 32, tzinfo=UTC),
+        )
+    )
+    observations = tuple(
         _reconciliation_observation(
-            source_sequence=1,
-            observation_sequence=1,
-            available_at=datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
-        ),
-        _reconciliation_observation(
-            source_sequence=2,
-            observation_sequence=2,
-            available_at=datetime(2026, 1, 2, 9, 32, tzinfo=UTC),
-        ),
+            source_sequence=index,
+            observation_sequence=index,
+            available_at=available_at,
+        )
+        for index, available_at in enumerate(observation_times, start=1)
     )
     market_events = decode_phase1_ohlcv_csv(
         ("\n".join((HEADER, *_two_rows())) + "\n").encode(),
@@ -627,6 +637,167 @@ def _complete_reconciliation_v2_trace() -> tuple[bytes, ...]:
         if type(lease.root) is EndOfRunRoot:
             break
     return runtime.trace_records
+
+
+def _trace_documents(records: tuple[bytes, ...]) -> list[dict[str, Any]]:
+    return [cast(dict[str, Any], json.loads(record)) for record in records]
+
+
+def _trace_conflicts(documents: list[dict[str, Any]]) -> None:
+    with pytest.raises(RuntimeOrderingError) as caught:
+        historical_runtime_trace_digest(
+            tuple(_canonical_trace_bytes(document) for document in documents)
+        )
+    assert caught.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def _different_spec_set() -> InstrumentExecutionSpecSet:
+    return build_instrument_spec_set(
+        InstrumentSpecSetId("historical-runtime-test-v2"),
+        (replace(SPEC_SET.specifications[0], specification_id=InstrumentSpecId("xnas-aapl-v2")),),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("reconciliation_venue", "reconciliation_symbol", "market_venue", "market_symbol"),
+)
+def test_historical_runtime_trace_digest_rejects_noncanonical_instrument_lexemes(
+    mutation: str,
+) -> None:
+    records = _complete_reconciliation_v2_trace()
+    assert historical_runtime_trace_digest(records)
+    documents = _trace_documents(records)
+
+    if mutation.startswith("reconciliation"):
+        instrument = documents[0]["root"]["balances"][0]["instrument"]
+        instrument["venue" if mutation.endswith("venue") else "symbol"] = (
+            "xnas" if mutation.endswith("venue") else "AA PL"
+        )
+    else:
+        root = documents[1]["root"]
+        field, value, key_index = (
+            ("venue", "xnas", 6) if mutation.endswith("venue") else ("symbol", "AA PL", 7)
+        )
+        root[field] = value
+        documents[1]["root_order_key"][key_index] = value
+
+    _trace_conflicts(documents)
+
+
+def test_reconciliation_runtime_and_trace_bind_one_exact_spec_set() -> None:
+    other_spec_set = _different_spec_set()
+    observation = _reconciliation_observation(
+        source_sequence=1,
+        observation_sequence=1,
+        available_at=datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+        spec_set=other_spec_set,
+    )
+    port = _scripted_reconciliation_port((observation,))
+    runtime = create_phase1_historical_market_runtime(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        source=_scripted_port((_first_market_event(),)),
+        reconciliation_source=port,
+    )
+
+    with pytest.raises(RuntimeOrderingError) as live:
+        runtime.pop()
+    assert live.value.code is OutcomeCode.CONFLICTING_ID
+    assert runtime.active_lease is None
+    assert port.prepare_calls == port.commit_calls == 0
+
+    records = _complete_reconciliation_v2_trace()
+    assert historical_runtime_trace_digest(records)
+    documents = _trace_documents(records)
+    root = documents[2]["root"]
+    root["instrument_spec_set_id"] = other_spec_set.identifier.value
+    root["instrument_spec_set_sha256"] = instrument_spec_set_digest(other_spec_set).value
+    _trace_conflicts(documents)
+
+
+@pytest.mark.parametrize("origin", ("reconciliation", "market", "terminal"))
+def test_historical_runtime_trace_digest_rejects_nonzero_or_invalid_first_frontier(
+    origin: str,
+) -> None:
+    records = _complete_reconciliation_v2_trace(market_first=origin == "market")
+    assert historical_runtime_trace_digest(records)
+    documents = _trace_documents(records)
+
+    if origin == "reconciliation":
+        for document, count in zip(documents, (1, 2, 2, 3, 3), strict=True):
+            document["committed_event_count"] = count
+        documents[0]["committed_cursor_as_of"] = documents[1]["committed_cursor_as_of"]
+        documents[2]["committed_cursor_as_of"] = documents[1]["committed_cursor_as_of"]
+    elif origin == "market":
+        for document, count in zip(documents, (2, 2, 3, 3), strict=True):
+            document["committed_event_count"] = count
+        documents[1]["committed_cursor_as_of"] = documents[0]["committed_cursor_as_of"]
+    else:
+        documents = [documents[-1]]
+        documents[0]["dispatch_sequence"] = 1
+        documents[0]["committed_event_count"] = 1
+
+    _trace_conflicts(documents)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("market_before_reconciliation", "descending_reconciliation", "complete_key_collision"),
+)
+def test_historical_runtime_trace_digest_rejects_same_clock_key_disorder_and_collision(
+    mode: str,
+) -> None:
+    records = _complete_reconciliation_v2_trace(
+        same_clock_reconciliations=mode == "descending_reconciliation"
+    )
+    assert historical_runtime_trace_digest(records)
+    documents = _trace_documents(records)
+
+    if mode == "market_before_reconciliation":
+        reconciliation, market = documents[:2]
+        market["dispatch_sequence"] = 1
+        reconciliation["dispatch_sequence"] = 2
+        reconciliation["committed_event_count"] = 1
+        reconciliation["committed_cursor_as_of"] = market["committed_cursor_as_of"]
+        documents = [market, reconciliation, *documents[2:]]
+    elif mode == "descending_reconciliation":
+        first, second = documents[:2]
+        first["dispatch_sequence"] = 2
+        second["dispatch_sequence"] = 1
+        documents = [second, first, *documents[2:]]
+    else:
+        duplicate = json.loads(json.dumps(documents[0]))
+        duplicate["dispatch_sequence"] = 2
+        duplicate["root"]["provenance_id"] = "reconciliation.runtime.fixture.v2"
+        for document in documents[1:]:
+            document["dispatch_sequence"] += 1
+        documents = [documents[0], duplicate, *documents[1:]]
+
+    _trace_conflicts(documents)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "key_index"),
+    (
+        ("kind", "requested_end", 2),
+        ("producer_namespace", "runtime.phase1.other", 3),
+        ("producer_sequence", 1, 4),
+    ),
+)
+def test_historical_runtime_trace_digest_accepts_only_the_fixed_terminal_authority(
+    field: str,
+    value: str | int,
+    key_index: int,
+) -> None:
+    records = _complete_reconciliation_v2_trace()
+    assert historical_runtime_trace_digest(records)
+    documents = _trace_documents(records)
+    terminal = documents[-1]
+    terminal["root"][field] = value
+    terminal["root_order_key"][key_index] = 10 if field == "kind" else value
+
+    _trace_conflicts(documents)
 
 
 @pytest.mark.parametrize(
