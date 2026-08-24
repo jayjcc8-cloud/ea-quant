@@ -360,6 +360,52 @@ def test_reconciliation_producer_interleaves_without_lookahead_and_commits_on_ac
     assert reconciliation_port.admit_calls == 2
 
 
+def test_reconciliation_trace_v2_binds_cursor_to_committed_market_frontier() -> None:
+    first_reconciliation = _reconciliation_observation(
+        source_sequence=1,
+        observation_sequence=1,
+        available_at=datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+    )
+    later_reconciliation = _reconciliation_observation(
+        source_sequence=2,
+        observation_sequence=2,
+        available_at=datetime(2026, 1, 2, 9, 32, tzinfo=UTC),
+    )
+    market_events = decode_phase1_ohlcv_csv(
+        ("\n".join((HEADER, *_two_rows())) + "\n").encode(),
+        replay_window=WINDOW,
+    ).selection.events
+    runtime = create_phase1_historical_market_runtime(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        source=_scripted_port(market_events),
+        reconciliation_source=_scripted_reconciliation_port(
+            (first_reconciliation, later_reconciliation)
+        ),
+    )
+
+    first_lease = runtime.pop()
+    assert type(first_lease.root) is ReconciliationObservationRoot
+    runtime.acknowledge(first_lease)
+    before_market = json.loads(runtime.trace_records[-1])
+    assert before_market["committed_event_count"] == 0
+    assert before_market["committed_cursor_as_of"] is None
+
+    market_lease = runtime.pop()
+    assert type(market_lease.root) is MarketDataEnvelope
+    runtime.acknowledge(market_lease)
+    market_trace = json.loads(runtime.trace_records[-1])
+    assert market_trace["committed_event_count"] == 1
+    assert market_trace["committed_cursor_as_of"] == "2026-01-02T09:31:00.000000Z"
+
+    later_lease = runtime.pop()
+    assert type(later_lease.root) is ReconciliationObservationRoot
+    runtime.acknowledge(later_lease)
+    after_market = json.loads(runtime.trace_records[-1])
+    assert after_market["committed_event_count"] == 1
+    assert after_market["committed_cursor_as_of"] == "2026-01-02T09:31:00.000000Z"
+
+
 @pytest.mark.parametrize("mode", ("redelivery", "identity_collision"))
 def test_reconciliation_runtime_admission_enforces_joint_root_bound(mode: str) -> None:
     market_port = _scripted_port(())
@@ -479,6 +525,67 @@ def test_historical_runtime_trace_digest_keeps_v1_opaque_bytes_and_rejects_v2_mi
         with pytest.raises(RuntimeOrderingError) as mixed:
             historical_runtime_trace_digest(mixed_records)
         assert mixed.value.code is OutcomeCode.CONFLICTING_ID
+
+
+def test_historical_runtime_trace_digest_rejects_malformed_standalone_v2_evidence() -> None:
+    observation = _reconciliation_observation(
+        source_sequence=1,
+        observation_sequence=1,
+        available_at=datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+    )
+    runtime = create_phase1_historical_market_runtime(
+        run_id=RUN_ID,
+        spec_set=SPEC_SET,
+        source=_scripted_port((_first_market_event(),)),
+        reconciliation_source=_scripted_reconciliation_port((observation,)),
+    )
+    lease = runtime.pop()
+    runtime.acknowledge(lease)
+    valid_v2 = runtime.trace_records[0]
+    valid_document = json.loads(valid_v2)
+
+    assert historical_runtime_trace_digest((valid_v2,)) == runtime.trace_digest
+
+    legacy_v1 = (b"\xffopaque-v1",)
+    expected_v1 = sha256(HISTORICAL_RUNTIME_TRACE_DIGEST_DOMAIN)
+    expected_v1.update(len(legacy_v1[0]).to_bytes(8, "big"))
+    expected_v1.update(legacy_v1[0])
+    expected_v1.update(len(legacy_v1).to_bytes(8, "big"))
+    assert historical_runtime_trace_digest(legacy_v1) == Sha256Digest(expected_v1.hexdigest())
+
+    extra_field = dict(valid_document)
+    extra_field["unexpected"] = "extra"
+    wrong_exact_type = dict(valid_document)
+    wrong_exact_type["committed_event_count"] = False
+    root_key_mismatch = dict(valid_document)
+    root_key_mismatch["root_order_key"] = [
+        *valid_document["root_order_key"][:-1],
+        999,
+    ]
+
+    def canonical(document: Any) -> bytes:
+        return json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    malformed_records = (
+        b'{"schema":"ea.phase1-historical-runtime-trace.v2"}',
+        canonical(extra_field),
+        canonical(wrong_exact_type),
+        json.dumps(valid_document, ensure_ascii=True, allow_nan=False, sort_keys=True).encode(
+            "utf-8"
+        ),
+        canonical(root_key_mismatch),
+    )
+
+    for malformed in malformed_records:
+        with pytest.raises(RuntimeOrderingError) as caught:
+            historical_runtime_trace_digest((malformed,))
+        assert caught.value.code is OutcomeCode.CONFLICTING_ID
 
 
 def test_historical_runtime_dispatches_market_roots_then_one_terminal() -> None:
