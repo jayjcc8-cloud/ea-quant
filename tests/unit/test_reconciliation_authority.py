@@ -609,8 +609,7 @@ def test_observation_only_authority_rejects_trade_detail_before_retaining_state(
     with pytest.raises(ReconciliationAuthorityError, match="trade detail"):
         authority.admit_observation(trade_detail, dispatch_sequence=7)
 
-    assert authority.observation_index == {}
-    assert authority.outcome_index == {}
+    assert not authority.observation_index and not authority.outcome_index
     assert not {
         "propose_adjustment_command",
         "issue_adjustment_authorization",

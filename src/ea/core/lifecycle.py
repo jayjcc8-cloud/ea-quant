@@ -491,8 +491,133 @@ def active_dispatch_window_digest(window: ActiveDispatchWindow) -> Sha256Digest:
 
 @final
 @dataclass(frozen=True, slots=True, init=False)
+class _StructurallyValidReadOnlyReconciliationCarrier:
+    """Canonical completion-v4 evidence with no journal-derived authority."""
+
+    binding: RunBinding
+    coordinator_state_version: int
+    dispatch_sequence: int
+    trigger_root_key: RuntimeRootOrderKey
+    trigger_root_sha256: Sha256Digest
+    observation_sha256: Sha256Digest
+    outcome_ack_sha256: Sha256Digest
+    refresh_ack_sha256: Sha256Digest
+    refresh_value_sha256: Sha256Digest
+    final_portfolio_snapshot_sha256: Sha256Digest
+    final_risk_state_sha256: Sha256Digest
+    pre_ack_state_sha256: Sha256Digest
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("structural read-only carriers are created only by the coordinator")
+
+    def __copy__(self) -> _StructurallyValidReadOnlyReconciliationCarrier:
+        raise TypeError("structural read-only carriers cannot be copied")
+
+    def __deepcopy__(
+        self, memo: dict[int, object]
+    ) -> _StructurallyValidReadOnlyReconciliationCarrier:
+        del memo
+        raise TypeError("structural read-only carriers cannot be copied")
+
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        raise TypeError("structural read-only carriers cannot be serialized")
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class _SubjectBoundReadOnlyReconciliationWitness:
+    """Future #97 journal-aware proof that one structural carrier is subject-bound."""
+
+    carrier: _StructurallyValidReadOnlyReconciliationCarrier
+    _seal: object
+
+    def __init__(self) -> None:
+        raise TypeError("subject-bound read-only witnesses are journal-issued only")
+
+    def __copy__(self) -> _SubjectBoundReadOnlyReconciliationWitness:
+        raise TypeError("subject-bound read-only witnesses cannot be copied")
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _SubjectBoundReadOnlyReconciliationWitness:
+        del memo
+        raise TypeError("subject-bound read-only witnesses cannot be copied")
+
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        raise TypeError("subject-bound read-only witnesses cannot be serialized")
+
+
+def _create_structurally_valid_read_only_reconciliation_carrier(
+    *,
+    binding: RunBinding,
+    coordinator_state_version: int,
+    dispatch_sequence: int,
+    trigger_root_key: RuntimeRootOrderKey,
+    trigger_root_sha256: Sha256Digest,
+    observation_sha256: Sha256Digest,
+    outcome_ack_sha256: Sha256Digest,
+    refresh_ack_sha256: Sha256Digest,
+    refresh_value_sha256: Sha256Digest,
+    final_portfolio_snapshot_sha256: Sha256Digest,
+    final_risk_state_sha256: Sha256Digest,
+    pre_ack_state_sha256: Sha256Digest,
+) -> _StructurallyValidReadOnlyReconciliationCarrier:
+    values = (
+        trigger_root_sha256,
+        observation_sha256,
+        outcome_ack_sha256,
+        refresh_ack_sha256,
+        refresh_value_sha256,
+        final_portfolio_snapshot_sha256,
+        final_risk_state_sha256,
+        pre_ack_state_sha256,
+    )
+    if (
+        type(binding) is not RunBinding
+        or type(coordinator_state_version) is not int
+        or type(dispatch_sequence) is not int
+        or type(trigger_root_key) is not RuntimeRootOrderKey
+        or any(type(value) is not Sha256Digest for value in values)
+    ):
+        raise _fail(
+            OutcomeCode.INVALID_TYPE, "structural read-only reconciliation carriers are invalid"
+        )
+    if (
+        not 1 <= coordinator_state_version <= _MAX_UINT64
+        or not 1 <= dispatch_sequence <= _MAX_UINT64
+    ):
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE,
+            "structural read-only reconciliation sequence is outside uint64",
+        )
+    _canonical_completion_v4_reconciliation_root_key_document(
+        trigger_root_key, expected_run_id=binding.reference.run_id.value
+    )
+    if trigger_root_sha256 != observation_sha256:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "read-only reconciliation root conflicts")
+    value = object.__new__(_StructurallyValidReadOnlyReconciliationCarrier)
+    for name, field in {
+        "binding": binding,
+        "coordinator_state_version": coordinator_state_version,
+        "dispatch_sequence": dispatch_sequence,
+        "trigger_root_key": trigger_root_key,
+        "trigger_root_sha256": trigger_root_sha256,
+        "observation_sha256": observation_sha256,
+        "outcome_ack_sha256": outcome_ack_sha256,
+        "refresh_ack_sha256": refresh_ack_sha256,
+        "refresh_value_sha256": refresh_value_sha256,
+        "final_portfolio_snapshot_sha256": final_portfolio_snapshot_sha256,
+        "final_risk_state_sha256": final_risk_state_sha256,
+        "pre_ack_state_sha256": pre_ack_state_sha256,
+    }.items():
+        object.__setattr__(value, name, field)
+    object.__setattr__(value, "_seal", _VALUE_SEAL)
+    return value
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
 class ReadOnlyReconciliationDispatchWindow:
-    """Sealed rank-20 staged carrier with no matcher or effect evidence."""
+    """Sealed authority-eligible window derived from a subject-bound witness."""
 
     binding: RunBinding
     coordinator_state_version: int
@@ -524,66 +649,40 @@ class ReadOnlyReconciliationDispatchWindow:
 
 
 def _create_read_only_reconciliation_dispatch_window(
-    *,
-    binding: RunBinding,
-    coordinator_state_version: int,
-    dispatch_sequence: int,
-    trigger_root_key: RuntimeRootOrderKey,
-    trigger_root_sha256: Sha256Digest,
-    observation_sha256: Sha256Digest,
-    outcome_ack_sha256: Sha256Digest,
-    refresh_ack_sha256: Sha256Digest,
-    refresh_value_sha256: Sha256Digest,
-    final_portfolio_snapshot_sha256: Sha256Digest,
-    final_risk_state_sha256: Sha256Digest,
-    pre_ack_state_sha256: Sha256Digest,
+    *, witness: _SubjectBoundReadOnlyReconciliationWitness
 ) -> ReadOnlyReconciliationDispatchWindow:
-    values = (
-        trigger_root_sha256,
-        observation_sha256,
-        outcome_ack_sha256,
-        refresh_ack_sha256,
-        refresh_value_sha256,
-        final_portfolio_snapshot_sha256,
-        final_risk_state_sha256,
-        pre_ack_state_sha256,
+    if (
+        type(witness) is not _SubjectBoundReadOnlyReconciliationWitness
+        or witness._seal is not _VALUE_SEAL
+        or type(witness.carrier) is not _StructurallyValidReadOnlyReconciliationCarrier
+        or witness.carrier._seal is not _VALUE_SEAL
+    ):
+        raise _fail(
+            OutcomeCode.INVALID_TYPE, "read-only reconciliation witness is not subject-bound"
+        )
+    carrier = witness.carrier
+    _canonical_completion_v4_reconciliation_root_key_document(
+        carrier.trigger_root_key, expected_run_id=carrier.binding.reference.run_id.value
     )
-    if (
-        type(binding) is not RunBinding
-        or type(coordinator_state_version) is not int
-        or type(dispatch_sequence) is not int
-        or type(trigger_root_key) is not RuntimeRootOrderKey
-        or any(type(value) is not Sha256Digest for value in values)
-    ):
-        raise _fail(
-            OutcomeCode.INVALID_TYPE, "read-only reconciliation window carriers are invalid"
-        )
-    if (
-        not 1 <= coordinator_state_version <= _MAX_UINT64
-        or not 1 <= dispatch_sequence <= _MAX_UINT64
-    ):
-        raise _fail(
-            OutcomeCode.OUT_OF_RANGE, "read-only reconciliation window sequence is outside uint64"
-        )
-    if trigger_root_key.domain_rank != 20 or trigger_root_sha256 != observation_sha256:
+    if carrier.trigger_root_sha256 != carrier.observation_sha256:
         raise _fail(OutcomeCode.CONFLICTING_ID, "read-only reconciliation window root conflicts")
     value = object.__new__(ReadOnlyReconciliationDispatchWindow)
-    for name, field in {
-        "binding": binding,
-        "coordinator_state_version": coordinator_state_version,
-        "dispatch_sequence": dispatch_sequence,
-        "trigger_root_key": trigger_root_key,
-        "trigger_root_sha256": trigger_root_sha256,
-        "observation_sha256": observation_sha256,
-        "outcome_ack_sha256": outcome_ack_sha256,
-        "refresh_ack_sha256": refresh_ack_sha256,
-        "refresh_value_sha256": refresh_value_sha256,
-        "final_portfolio_snapshot_sha256": final_portfolio_snapshot_sha256,
-        "final_risk_state_sha256": final_risk_state_sha256,
-        "pre_ack_state_sha256": pre_ack_state_sha256,
-        "authorization_allowed": False,
-    }.items():
-        object.__setattr__(value, name, field)
+    for name in (
+        "binding",
+        "coordinator_state_version",
+        "dispatch_sequence",
+        "trigger_root_key",
+        "trigger_root_sha256",
+        "observation_sha256",
+        "outcome_ack_sha256",
+        "refresh_ack_sha256",
+        "refresh_value_sha256",
+        "final_portfolio_snapshot_sha256",
+        "final_risk_state_sha256",
+        "pre_ack_state_sha256",
+    ):
+        object.__setattr__(value, name, getattr(carrier, name))
+    object.__setattr__(value, "authorization_allowed", False)
     object.__setattr__(value, "_seal", _VALUE_SEAL)
     return value
 

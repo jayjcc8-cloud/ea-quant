@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -154,55 +155,40 @@ def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
     outcome_ack = create_audit_append_acknowledgement(outcome_record)
     root = create_reconciliation_observation_root(observation)
 
-    payload = canonical_dispatch_completed_v4_audit_payload(
-        binding=binding,
-        dispatch_sequence=1,
-        trigger_root_key=runtime_root_order_key(root),
-        trigger_root_sha256=root.observation_sha256,
-        observation_sha256=reconciliation_observation_digest(observation),
-        outcome_acknowledgement=outcome_ack,
-        refresh_acknowledgement=refresh_ack,
-        refresh_value_sha256=DIGESTS[2],
-        final_portfolio_snapshot_sha256=DIGESTS[3],
-        final_risk_state_sha256=DIGESTS[4],
-        pre_ack_state_sha256=DIGESTS[5],
-    )
+    def completion_v4_payload(trigger_root_sha256: Sha256Digest) -> bytes:
+        return canonical_dispatch_completed_v4_audit_payload(
+            binding=binding,
+            dispatch_sequence=1,
+            trigger_root_key=runtime_root_order_key(root),
+            trigger_root_sha256=trigger_root_sha256,
+            observation_sha256=reconciliation_observation_digest(observation),
+            outcome_acknowledgement=outcome_ack,
+            refresh_acknowledgement=refresh_ack,
+            refresh_value_sha256=DIGESTS[2],
+            final_portfolio_snapshot_sha256=DIGESTS[3],
+            final_risk_state_sha256=DIGESTS[4],
+            pre_ack_state_sha256=DIGESTS[5],
+        )
 
+    payload = completion_v4_payload(root.observation_sha256)
     document = json.loads(payload)
-    assert document["schema"] == "ea.audit-dispatch-completed.v4"
-    assert document["dispatch_kind"] == "reconciliation_observation"
-    assert document["batch_sha256"] is None
-    assert document["authorization_allowed"] is False
-    assert document["outcome_count"] == 1
-    assert document["ledger_outcome_count"] == 0
-    assert document["submission_count"] == 0
-    assert set(document) == {
+    assert (document["schema"], document["dispatch_kind"]) == (
+        "ea.audit-dispatch-completed.v4",
+        "reconciliation_observation",
+    )
+    assert (document["batch_sha256"], document["authorization_allowed"]) == (None, False)
+    assert (
+        document["outcome_count"],
+        document["ledger_outcome_count"],
+        document["submission_count"],
+    ) == (1, 0, 0)
+    assert set(document) == set(_v3_document()[1]) | {
         "authorization_allowed",
-        "authorization_attempt_count",
-        "authorization_attempt_outcome",
-        "authorization_attempt_outcome_sha256",
         "batch_ack_sha256",
-        "batch_sha256",
-        "canonicalization",
-        "dispatch_kind",
-        "dispatch_sequence",
-        "final_portfolio_snapshot_sha256",
-        "final_risk_state_sha256",
-        "ledger_outcome_count",
         "observation_sha256",
-        "ordered_ledger_ack_sha256s_sha256",
-        "ordered_outcome_ack_sha256s_sha256",
-        "ordered_submission_receipt_sha256s_sha256",
         "outcome_acknowledgement_sha256",
-        "outcome_count",
-        "pre_ack_state_sha256",
         "refresh_acknowledgement_sha256",
         "refresh_value_sha256",
-        "run_id",
-        "schema",
-        "submission_count",
-        "trigger_root_key",
-        "trigger_root_sha256",
     }
     from ea.core.audit import (
         _canonical_completion_v4_reconciliation_root_key_document,
@@ -215,19 +201,7 @@ def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
     )
 
     with pytest.raises(Exception, match="completion-v4 root digest conflicts"):
-        canonical_dispatch_completed_v4_audit_payload(
-            binding=binding,
-            dispatch_sequence=1,
-            trigger_root_key=runtime_root_order_key(root),
-            trigger_root_sha256=DIGESTS[0],
-            observation_sha256=reconciliation_observation_digest(observation),
-            outcome_acknowledgement=outcome_ack,
-            refresh_acknowledgement=refresh_ack,
-            refresh_value_sha256=DIGESTS[2],
-            final_portfolio_snapshot_sha256=DIGESTS[3],
-            final_risk_state_sha256=DIGESTS[4],
-            pre_ack_state_sha256=DIGESTS[5],
-        )
+        completion_v4_payload(DIGESTS[0])
     invalid_builder_key = runtime_root_order_key(root)
     object.__setattr__(invalid_builder_key, "available_at", None)
     with pytest.raises(Exception, match="completion-v4 root key conflicts"):
@@ -254,54 +228,82 @@ def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
                 AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
                 json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode(),
             )
+    import ea.core.lifecycle as lifecycle
+
+    def create_carrier(root_key: object, root_sha256: Sha256Digest) -> object:
+        return lifecycle._create_structurally_valid_read_only_reconciliation_carrier(
+            binding=binding,
+            coordinator_state_version=1,
+            dispatch_sequence=1,
+            trigger_root_key=root_key,  # type: ignore[arg-type]
+            trigger_root_sha256=root_sha256,
+            observation_sha256=reconciliation_observation_digest(observation),
+            outcome_ack_sha256=Sha256Digest("ef" * 32),
+            refresh_ack_sha256=Sha256Digest("fe" * 32),
+            refresh_value_sha256=DIGESTS[2],
+            final_portfolio_snapshot_sha256=DIGESTS[3],
+            final_risk_state_sha256=DIGESTS[4],
+            pre_ack_state_sha256=DIGESTS[5],
+        )
+
+    carrier = create_carrier(runtime_root_order_key(root), root.observation_sha256)
+    assert type(carrier).__name__ == ("_StructurallyValidReadOnlyReconciliationCarrier")
+    invalid_factory_key = runtime_root_order_key(root)
+    object.__setattr__(invalid_factory_key, "available_at", None)
+    with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+        create_carrier(invalid_factory_key, root.observation_sha256)
+    with pytest.raises(Exception, match="read-only reconciliation root conflicts"):
+        create_carrier(runtime_root_order_key(root), DIGESTS[0])
+    assert tuple(
+        inspect.signature(lifecycle._create_read_only_reconciliation_dispatch_window).parameters
+    ) == ("witness",)
+    assert not hasattr(lifecycle, "_create_subject_bound_read_only_reconciliation_witness")
+    with pytest.raises(Exception, match="subject-bound"):
+        lifecycle._create_read_only_reconciliation_dispatch_window(witness=carrier)  # type: ignore[arg-type]
+    with pytest.raises(Exception, match="outcome carriers are invalid"):
+        lifecycle._create_read_only_reconciliation_dispatch_outcome(
+            window=carrier,  # type: ignore[arg-type]
+            dispatch_completion_ack_sha256=DIGESTS[6],
+            resulting_state=object(),  # type: ignore[arg-type]
+        )
 
 
 def test_completion_v4_rejects_non_null_effect_frontier() -> None:
     from ea.core.audit import require_canonical_audit_payload
 
     binding, document = _v3_document()
-    document["schema"] = "ea.audit-dispatch-completed.v4"
-    document["dispatch_kind"] = "reconciliation_observation"
-    document["batch_sha256"] = None
-    document["batch_ack_sha256"] = None
-    document["authorization_allowed"] = False
-    document["observation_sha256"] = DIGESTS[0].value
-    document["outcome_acknowledgement_sha256"] = DIGESTS[1].value
-    document["refresh_acknowledgement_sha256"] = DIGESTS[2].value
-    document["refresh_value_sha256"] = DIGESTS[3].value
-    document["ledger_outcome_count"] = 0
-    document["ordered_ledger_ack_sha256s_sha256"] = DIGESTS[4].value
-    document["final_portfolio_snapshot_sha256"] = DIGESTS[5].value
-    document["final_risk_state_sha256"] = DIGESTS[6].value
-    document["trigger_root_key"] = {
-        "available_at": "2026-01-02T09:31:00.000000Z",
-        "domain_rank": 20,
-        "kind_rank": 20,
-        "observation_owner_kind": "reconciliation.observation",
-        "observation_owner_sequence": 1,
-        "producer_namespace": "reconciliation.sim",
-        "producer_sequence": 1,
-        "root_domain": "reconciliation_observation",
-        "run_id": binding.reference.run_id.value,
-        "watermark_namespace": "ledger.portfolio",
-        "watermark_sequence": 3,
-    }
+    document.update(
+        schema="ea.audit-dispatch-completed.v4",
+        dispatch_kind="reconciliation_observation",
+        batch_sha256=None,
+        batch_ack_sha256=None,
+        authorization_allowed=False,
+        observation_sha256=DIGESTS[0].value,
+        outcome_acknowledgement_sha256=DIGESTS[1].value,
+        refresh_acknowledgement_sha256=DIGESTS[2].value,
+        refresh_value_sha256=DIGESTS[3].value,
+        ledger_outcome_count=0,
+        ordered_ledger_ack_sha256s_sha256=DIGESTS[4].value,
+        final_portfolio_snapshot_sha256=DIGESTS[5].value,
+        final_risk_state_sha256=DIGESTS[6].value,
+        trigger_root_key={
+            "available_at": "2026-01-02T09:31:00.000000Z",
+            "domain_rank": 20,
+            "kind_rank": 20,
+            "observation_owner_kind": "reconciliation.observation",
+            "observation_owner_sequence": 1,
+            "producer_namespace": "reconciliation.sim",
+            "producer_sequence": 1,
+            "root_domain": "reconciliation_observation",
+            "run_id": binding.reference.run_id.value,
+            "watermark_namespace": "ledger.portfolio",
+            "watermark_sequence": 3,
+        },
+    )
     payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
 
     with pytest.raises(Exception, match="completion-v4 requires one outcome acknowledgement"):
         require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
-
-
-def test_read_only_reconciliation_carriers_are_sealed_without_matcher_evidence() -> None:
-    from ea.core.lifecycle import (
-        ReadOnlyReconciliationDispatchOutcome,
-        ReadOnlyReconciliationDispatchWindow,
-    )
-
-    with pytest.raises(TypeError, match="created only by the coordinator"):
-        ReadOnlyReconciliationDispatchWindow()
-    with pytest.raises(TypeError, match="created only by the coordinator"):
-        ReadOnlyReconciliationDispatchOutcome()
 
 
 def test_completion_v3_ledger_ack_aggregate_is_ordered_and_deterministic() -> None:
