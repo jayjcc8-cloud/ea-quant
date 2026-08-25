@@ -220,6 +220,18 @@ def test_completion_v4_rejects_non_null_effect_frontier() -> None:
         require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
 
 
+def test_read_only_reconciliation_carriers_are_sealed_without_matcher_evidence() -> None:
+    from ea.core.lifecycle import (
+        ReadOnlyReconciliationDispatchOutcome,
+        ReadOnlyReconciliationDispatchWindow,
+    )
+
+    with pytest.raises(TypeError, match="created only by the coordinator"):
+        ReadOnlyReconciliationDispatchWindow()
+    with pytest.raises(TypeError, match="created only by the coordinator"):
+        ReadOnlyReconciliationDispatchOutcome()
+
+
 def test_completion_v3_ledger_ack_aggregate_is_ordered_and_deterministic() -> None:
     _, first = _v3_document(ledger_acks=("aa" * 32, "bb" * 32, "cc" * 32))
     _, second = _v3_document(ledger_acks=("aa" * 32, "bb" * 32, "cc" * 32))
