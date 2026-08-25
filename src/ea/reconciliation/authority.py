@@ -475,6 +475,8 @@ def create_phase1_reconciliation_authority(
 class _ObservationOnlyReconciliationAuthority:
     """Private sealed comparison port for the read-only observation vertical."""
 
+    _state: _AuthorityState
+
     __slots__ = ("_state",)
 
     def __init__(self) -> None:
