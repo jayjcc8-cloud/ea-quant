@@ -176,6 +176,34 @@ def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
     assert document["outcome_count"] == 1
     assert document["ledger_outcome_count"] == 0
     assert document["submission_count"] == 0
+    assert set(document) == {
+        "authorization_allowed",
+        "authorization_attempt_count",
+        "authorization_attempt_outcome",
+        "authorization_attempt_outcome_sha256",
+        "batch_ack_sha256",
+        "batch_sha256",
+        "canonicalization",
+        "dispatch_kind",
+        "dispatch_sequence",
+        "final_portfolio_snapshot_sha256",
+        "final_risk_state_sha256",
+        "ledger_outcome_count",
+        "observation_sha256",
+        "ordered_ledger_ack_sha256s_sha256",
+        "ordered_outcome_ack_sha256s_sha256",
+        "ordered_submission_receipt_sha256s_sha256",
+        "outcome_acknowledgement_sha256",
+        "outcome_count",
+        "pre_ack_state_sha256",
+        "refresh_acknowledgement_sha256",
+        "refresh_value_sha256",
+        "run_id",
+        "schema",
+        "submission_count",
+        "trigger_root_key",
+        "trigger_root_sha256",
+    }
     from ea.core.audit import require_canonical_audit_payload
 
     assert (

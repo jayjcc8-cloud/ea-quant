@@ -64,12 +64,8 @@ _HANDOFF_DOMAIN = b"ea.coordinator-audited-fact-handoff.v1\0"
 _DISPATCH_OUTCOME_DOMAIN = b"ea.coordinator-dispatch-outcome.v1\0"
 _TERMINAL_OUTCOME_DOMAIN = b"ea.coordinator-terminal-outcome.v1\0"
 _ACTIVE_DISPATCH_WINDOW_DOMAIN = b"ea.coordinator-active-dispatch-window.v1\0"
-_READ_ONLY_RECONCILIATION_WINDOW_DOMAIN = (
-    b"ea.coordinator-read-only-reconciliation-window.v1\0"
-)
-_READ_ONLY_RECONCILIATION_OUTCOME_DOMAIN = (
-    b"ea.coordinator-read-only-reconciliation-outcome.v1\0"
-)
+_READ_ONLY_RECONCILIATION_WINDOW_DOMAIN = b"ea.coordinator-read-only-reconciliation-window.v1\0"
+_READ_ONLY_RECONCILIATION_OUTCOME_DOMAIN = b"ea.coordinator-read-only-reconciliation-outcome.v1\0"
 _AUTHORIZATION_ATTEMPT_OUTCOME_DOMAIN = b"ea.submission-authorization-attempt-outcome.v1\0"
 _MAX_UINT64 = (1 << 64) - 1
 _VALUE_SEAL = object()
@@ -558,9 +554,16 @@ def _create_read_only_reconciliation_dispatch_window(
         or type(trigger_root_key) is not RuntimeRootOrderKey
         or any(type(value) is not Sha256Digest for value in values)
     ):
-        raise _fail(OutcomeCode.INVALID_TYPE, "read-only reconciliation window carriers are invalid")
-    if not 1 <= coordinator_state_version <= _MAX_UINT64 or not 1 <= dispatch_sequence <= _MAX_UINT64:
-        raise _fail(OutcomeCode.OUT_OF_RANGE, "read-only reconciliation window sequence is outside uint64")
+        raise _fail(
+            OutcomeCode.INVALID_TYPE, "read-only reconciliation window carriers are invalid"
+        )
+    if (
+        not 1 <= coordinator_state_version <= _MAX_UINT64
+        or not 1 <= dispatch_sequence <= _MAX_UINT64
+    ):
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE, "read-only reconciliation window sequence is outside uint64"
+        )
     if trigger_root_key.domain_rank != 20 or trigger_root_sha256 != observation_sha256:
         raise _fail(OutcomeCode.CONFLICTING_ID, "read-only reconciliation window root conflicts")
     value = object.__new__(ReadOnlyReconciliationDispatchWindow)
@@ -588,7 +591,9 @@ def canonical_read_only_reconciliation_dispatch_window_bytes(
     window: ReadOnlyReconciliationDispatchWindow,
 ) -> bytes:
     if type(window) is not ReadOnlyReconciliationDispatchWindow or window._seal is not _VALUE_SEAL:
-        raise _fail(OutcomeCode.INVALID_TYPE, "read-only reconciliation window must be coordinator-issued")
+        raise _fail(
+            OutcomeCode.INVALID_TYPE, "read-only reconciliation window must be coordinator-issued"
+        )
     binding = window.binding
     return _canonical_json(
         {
@@ -670,18 +675,29 @@ def _create_read_only_reconciliation_dispatch_outcome(
         or type(dispatch_completion_ack_sha256) is not Sha256Digest
         or type(resulting_state) is not CoordinatorRunState
     ):
-        raise _fail(OutcomeCode.INVALID_TYPE, "read-only reconciliation outcome carriers are invalid")
+        raise _fail(
+            OutcomeCode.INVALID_TYPE, "read-only reconciliation outcome carriers are invalid"
+        )
     value = object.__new__(ReadOnlyReconciliationDispatchOutcome)
     for name in (
-        "binding", "dispatch_sequence", "trigger_root_key", "trigger_root_sha256",
-        "observation_sha256", "outcome_ack_sha256", "refresh_ack_sha256",
-        "refresh_value_sha256", "final_portfolio_snapshot_sha256",
-        "final_risk_state_sha256", "pre_ack_state_sha256",
+        "binding",
+        "dispatch_sequence",
+        "trigger_root_key",
+        "trigger_root_sha256",
+        "observation_sha256",
+        "outcome_ack_sha256",
+        "refresh_ack_sha256",
+        "refresh_value_sha256",
+        "final_portfolio_snapshot_sha256",
+        "final_risk_state_sha256",
+        "pre_ack_state_sha256",
     ):
         object.__setattr__(value, name, getattr(window, name))
     object.__setattr__(value, "dispatch_completion_ack_sha256", dispatch_completion_ack_sha256)
     object.__setattr__(value, "runtime_acknowledged", True)
-    object.__setattr__(value, "resulting_state_sha256", coordinator_run_state_digest(resulting_state))
+    object.__setattr__(
+        value, "resulting_state_sha256", coordinator_run_state_digest(resulting_state)
+    )
     object.__setattr__(value, "_seal", _VALUE_SEAL)
     return value
 
@@ -689,8 +705,13 @@ def _create_read_only_reconciliation_dispatch_outcome(
 def canonical_read_only_reconciliation_dispatch_outcome_bytes(
     outcome: ReadOnlyReconciliationDispatchOutcome,
 ) -> bytes:
-    if type(outcome) is not ReadOnlyReconciliationDispatchOutcome or outcome._seal is not _VALUE_SEAL:
-        raise _fail(OutcomeCode.INVALID_TYPE, "read-only reconciliation outcome must be coordinator-issued")
+    if (
+        type(outcome) is not ReadOnlyReconciliationDispatchOutcome
+        or outcome._seal is not _VALUE_SEAL
+    ):
+        raise _fail(
+            OutcomeCode.INVALID_TYPE, "read-only reconciliation outcome must be coordinator-issued"
+        )
     binding = outcome.binding
     return _canonical_json(
         {

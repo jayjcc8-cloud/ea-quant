@@ -1058,15 +1058,11 @@ _DISPATCH_COMPLETED_V3_EXTRA_FIELDS = frozenset(
     }
 )
 
-_DISPATCH_COMPLETED_V4_EXTRA_FIELDS = frozenset(
+_DISPATCH_COMPLETED_V4_EXTRA_FIELDS = _DISPATCH_COMPLETED_V3_EXTRA_FIELDS | frozenset(
     {
         "authorization_allowed",
         "batch_ack_sha256",
-        "final_portfolio_snapshot_sha256",
-        "final_risk_state_sha256",
-        "ledger_outcome_count",
         "observation_sha256",
-        "ordered_ledger_ack_sha256s_sha256",
         "outcome_acknowledgement_sha256",
         "refresh_acknowledgement_sha256",
         "refresh_value_sha256",
@@ -1179,17 +1175,26 @@ def _require_dispatch_completed_v4_values(document: dict[str, object]) -> None:
         _require_json_digest(document, field)
     if document["ordered_outcome_ack_sha256s_sha256"] != document["outcome_acknowledgement_sha256"]:
         raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 outcome acknowledgement conflicts")
-    if document["ordered_ledger_ack_sha256s_sha256"] != ordered_digest_tuple(
-        ORDERED_LEDGER_ACK_DIGEST_DOMAIN, ()
-    ).value or document["ordered_submission_receipt_sha256s_sha256"] != ordered_digest_tuple(
-        ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN, ()
-    ).value:
+    if (
+        document["ordered_ledger_ack_sha256s_sha256"]
+        != ordered_digest_tuple(ORDERED_LEDGER_ACK_DIGEST_DOMAIN, ()).value
+        or document["ordered_submission_receipt_sha256s_sha256"]
+        != ordered_digest_tuple(ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN, ()).value
+    ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 empty aggregate conflicts")
     key = document["trigger_root_key"]
     expected_key_fields = {
-        "available_at", "domain_rank", "kind_rank", "observation_owner_kind",
-        "observation_owner_sequence", "producer_namespace", "producer_sequence",
-        "root_domain", "run_id", "watermark_namespace", "watermark_sequence",
+        "available_at",
+        "domain_rank",
+        "kind_rank",
+        "observation_owner_kind",
+        "observation_owner_sequence",
+        "producer_namespace",
+        "producer_sequence",
+        "root_domain",
+        "run_id",
+        "watermark_namespace",
+        "watermark_sequence",
     }
     if (
         type(key) is not dict
