@@ -13,6 +13,7 @@ from ea.core.audit import (
     AuditLogicalKey,
     AuditRecordKind,
     AuditSubjectKind,
+    _canonical_completion_v4_reconciliation_root_key_document,
     audit_append_acknowledgement_digest,
     audit_subject_digest,
     ordered_digest_tuple,
@@ -613,7 +614,9 @@ def canonical_read_only_reconciliation_dispatch_window_bytes(
             "refresh_value_sha256": window.refresh_value_sha256.value,
             "run_id": binding.reference.run_id.value,
             "schema": "ea.coordinator-read-only-reconciliation-window.v1",
-            "trigger_root_key": _reconciliation_root_key_document(window.trigger_root_key),
+            "trigger_root_key": _canonical_completion_v4_reconciliation_root_key_document(
+                window.trigger_root_key, expected_run_id=binding.reference.run_id.value
+            ),
             "trigger_root_sha256": window.trigger_root_sha256.value,
         }
     )
@@ -732,7 +735,9 @@ def canonical_read_only_reconciliation_dispatch_outcome_bytes(
             "run_id": binding.reference.run_id.value,
             "runtime_acknowledged": True,
             "schema": "ea.coordinator-read-only-reconciliation-outcome.v1",
-            "trigger_root_key": _reconciliation_root_key_document(outcome.trigger_root_key),
+            "trigger_root_key": _canonical_completion_v4_reconciliation_root_key_document(
+                outcome.trigger_root_key, expected_run_id=binding.reference.run_id.value
+            ),
             "trigger_root_sha256": outcome.trigger_root_sha256.value,
         }
     )
@@ -1807,8 +1812,11 @@ def canonical_dispatch_completed_v4_audit_payload(
         raise _fail(OutcomeCode.INVALID_TYPE, "completion-v4 carriers are invalid")
     if not 1 <= dispatch_sequence <= _MAX_UINT64:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "completion-v4 dispatch sequence is outside uint64")
-    if trigger_root_key.domain_rank != 20:
-        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root is not rank-20 reconciliation")
+    root_key_document = _canonical_completion_v4_reconciliation_root_key_document(
+        trigger_root_key, expected_run_id=binding.reference.run_id.value
+    )
+    if trigger_root_sha256 != observation_sha256:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root digest conflicts")
     if (
         outcome_acknowledgement.binding != binding
         or outcome_acknowledgement.record_kind
@@ -1849,53 +1857,10 @@ def canonical_dispatch_completed_v4_audit_payload(
             "run_id": binding.reference.run_id.value,
             "schema": "ea.audit-dispatch-completed.v4",
             "submission_count": 0,
-            "trigger_root_key": _reconciliation_root_key_document(trigger_root_key),
+            "trigger_root_key": root_key_document,
             "trigger_root_sha256": trigger_root_sha256.value,
         }
     )
-
-
-def _reconciliation_root_key_document(key: RuntimeRootOrderKey) -> dict[str, object]:
-    """Project only the public comparable fields of a rank-20 root key."""
-    values = key.as_tuple()
-    if len(values) != 10 or values[1:3] != (20, 20):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts")
-    (
-        available_at,
-        _domain_rank,
-        _kind_rank,
-        namespace,
-        sequence,
-        watermark_namespace,
-        watermark_sequence,
-        run_id,
-        owner_kind,
-        owner_sequence,
-    ) = values
-    if (
-        type(namespace) is not str
-        or type(sequence) is not int
-        or type(watermark_namespace) is not str
-        or type(watermark_sequence) is not int
-        or type(run_id) is not str
-        or type(owner_kind) is not str
-        or type(owner_sequence) is not int
-        or not hasattr(available_at, "strftime")
-    ):
-        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key is not canonical")
-    return {
-        "available_at": available_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "domain_rank": 20,
-        "kind_rank": 20,
-        "observation_owner_kind": owner_kind,
-        "observation_owner_sequence": owner_sequence,
-        "producer_namespace": namespace,
-        "producer_sequence": sequence,
-        "root_domain": "reconciliation_observation",
-        "run_id": run_id,
-        "watermark_namespace": watermark_namespace,
-        "watermark_sequence": watermark_sequence,
-    }
 
 
 def canonical_run_terminal_v2_audit_payload(

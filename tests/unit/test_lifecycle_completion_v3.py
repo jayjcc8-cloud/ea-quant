@@ -204,12 +204,56 @@ def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
         "trigger_root_key",
         "trigger_root_sha256",
     }
-    from ea.core.audit import require_canonical_audit_payload
+    from ea.core.audit import (
+        _canonical_completion_v4_reconciliation_root_key_document,
+        require_canonical_audit_payload,
+    )
 
     assert (
         require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
         == payload
     )
+
+    with pytest.raises(Exception, match="completion-v4 root digest conflicts"):
+        canonical_dispatch_completed_v4_audit_payload(
+            binding=binding,
+            dispatch_sequence=1,
+            trigger_root_key=runtime_root_order_key(root),
+            trigger_root_sha256=DIGESTS[0],
+            observation_sha256=reconciliation_observation_digest(observation),
+            outcome_acknowledgement=outcome_ack,
+            refresh_acknowledgement=refresh_ack,
+            refresh_value_sha256=DIGESTS[2],
+            final_portfolio_snapshot_sha256=DIGESTS[3],
+            final_risk_state_sha256=DIGESTS[4],
+            pre_ack_state_sha256=DIGESTS[5],
+        )
+    invalid_builder_key = runtime_root_order_key(root)
+    object.__setattr__(invalid_builder_key, "available_at", None)
+    with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+        _canonical_completion_v4_reconciliation_root_key_document(
+            invalid_builder_key, expected_run_id=binding.reference.run_id.value
+        )
+    for field, invalid in (
+        ("available_at", "2026-01-02T09:31:00Z"),
+        ("producer_namespace", ""),
+        ("watermark_namespace", ""),
+        ("producer_sequence", -1),
+        ("watermark_sequence", -1),
+        ("observation_owner_sequence", -1),
+        ("observation_owner_kind", "execution.order"),
+        ("trigger_root_sha256", DIGESTS[0].value),
+    ):
+        candidate = json.loads(payload)
+        root_key = dict(candidate["trigger_root_key"])
+        target = candidate if field == "trigger_root_sha256" else root_key
+        target[field] = invalid
+        candidate["trigger_root_key"] = root_key
+        with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+            require_canonical_audit_payload(
+                AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
+                json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode(),
+            )
 
 
 def test_completion_v4_rejects_non_null_effect_frontier() -> None:
