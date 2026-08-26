@@ -124,9 +124,13 @@ def test_completion_v3_binds_ledger_frontier_and_final_digests() -> None:
 )
 def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boolean: bool) -> None:
     from ea.core import (
+        CanonicalDecimal,
+        CashReconciliationBalance,
+        ReconciliationObservationKind,
+        ReconciliationObservationRoot,
+        ReconciliationScopeKind,
         canonical_reconciliation_outcome_bytes,
         create_reconciliation_observation_root,
-        reconciliation_observation_digest,
         runtime_root_order_key,
     )
     from ea.core.lifecycle import canonical_dispatch_completed_v4_audit_payload
@@ -134,7 +138,13 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
         _coordinator_with_gate,
         _outcome_bundle,
     )
-    from unit.test_reconciliation_authority import _authority, _mismatch_observation, _snapshot
+    from unit.test_portfolio_ledger import USD
+    from unit.test_reconciliation_authority import (
+        _authority,
+        _mismatch_observation,
+        _observation,
+        _snapshot,
+    )
 
     fixture, matcher, orders, causal, delayed, _end = _system()
     matcher.submit(orders[0], causal_market_root=causal, dispatch_sequence=7)
@@ -170,13 +180,15 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
     outcome_ack = create_audit_append_acknowledgement(outcome_record)
     root = create_reconciliation_observation_root(observation)
 
-    def completion_v4_payload(trigger_root_sha256: Sha256Digest) -> bytes:
+    def completion_v4_payload(
+        trigger_root_sha256: Sha256Digest, selected_root: ReconciliationObservationRoot = root
+    ) -> bytes:
         return canonical_dispatch_completed_v4_audit_payload(
             binding=binding,
             dispatch_sequence=1,
-            trigger_root_key=runtime_root_order_key(root),
+            trigger_root_key=runtime_root_order_key(selected_root),
             trigger_root_sha256=trigger_root_sha256,
-            observation_sha256=reconciliation_observation_digest(observation),
+            observation_sha256=selected_root.observation_sha256,
             outcome_acknowledgement=outcome_ack,
             refresh_acknowledgement=refresh_ack,
             refresh_value_sha256=DIGESTS[2],
@@ -235,6 +247,40 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
         require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
         == payload
     )
+    roots = (
+        root,
+        create_reconciliation_observation_root(
+            _observation(
+                kind=ReconciliationObservationKind.ORDER_DETAIL,
+                scope=ReconciliationScopeKind.ORDER,
+                balances=(),
+            )
+        ),
+        create_reconciliation_observation_root(
+            _observation(
+                kind=ReconciliationObservationKind.CASH_SNAPSHOT,
+                scope=ReconciliationScopeKind.CASH,
+                balances=(CashReconciliationBalance(USD, CanonicalDecimal("125.5")),),
+            )
+        ),
+    )
+    for selected_root, kind_rank in zip(roots, (20, 10, 30), strict=True):
+        selected_key = runtime_root_order_key(selected_root)
+        assert (
+            _canonical_completion_v4_reconciliation_root_key_document(
+                selected_key, expected_run_id=binding.reference.run_id.value
+            )["kind_rank"]
+            == kind_rank
+        )
+        selected_payload = completion_v4_payload(selected_root.observation_sha256, selected_root)
+        assert json.loads(selected_payload)["trigger_root_key"]["kind_rank"] == kind_rank
+        assert (
+            require_canonical_audit_payload(
+                AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, selected_payload
+            )
+            == selected_payload
+        )
+        assert audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, selected_payload)
     candidate = json.loads(payload)
     candidate[field] = boolean
     boolean_payload = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
@@ -282,14 +328,18 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
             )
     import ea.core.lifecycle as lifecycle
 
-    def create_carrier(root_key: object, root_sha256: Sha256Digest) -> object:
+    def create_carrier(
+        root_key: object,
+        root_sha256: Sha256Digest,
+        observation_sha256: Sha256Digest = root.observation_sha256,
+    ) -> object:
         return lifecycle._create_structurally_valid_read_only_reconciliation_carrier(
             binding=binding,
             coordinator_state_version=1,
             dispatch_sequence=1,
             trigger_root_key=root_key,  # type: ignore[arg-type]
             trigger_root_sha256=root_sha256,
-            observation_sha256=reconciliation_observation_digest(observation),
+            observation_sha256=observation_sha256,
             outcome_ack_sha256=Sha256Digest("ef" * 32),
             refresh_ack_sha256=Sha256Digest("fe" * 32),
             refresh_value_sha256=DIGESTS[2],
@@ -300,6 +350,42 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
 
     carrier = create_carrier(runtime_root_order_key(root), root.observation_sha256)
     assert type(carrier).__name__ == ("_StructurallyValidReadOnlyReconciliationCarrier")
+    for selected_root in roots:
+        assert (
+            type(
+                create_carrier(
+                    runtime_root_order_key(selected_root),
+                    selected_root.observation_sha256,
+                    selected_root.observation_sha256,
+                )
+            ).__name__
+            == "_StructurallyValidReadOnlyReconciliationCarrier"
+        )
+    trade_root = create_reconciliation_observation_root(
+        _observation(
+            kind=ReconciliationObservationKind.TRADE_DETAIL,
+            scope=ReconciliationScopeKind.TRADE,
+            balances=(),
+        )
+    )
+    with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+        completion_v4_payload(trade_root.observation_sha256, trade_root)
+    with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+        create_carrier(
+            runtime_root_order_key(trade_root),
+            trade_root.observation_sha256,
+            trade_root.observation_sha256,
+        )
+    for invalid_rank in (False, True, -1, 11, 40):
+        candidate = json.loads(payload)
+        candidate["trigger_root_key"]["kind_rank"] = invalid_rank
+        invalid_payload = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
+        with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+            require_canonical_audit_payload(
+                AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, invalid_payload
+            )
+        with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+            audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, invalid_payload)
     invalid_factory_key = runtime_root_order_key(root)
     object.__setattr__(invalid_factory_key, "available_at", None)
     with pytest.raises(Exception, match="completion-v4 root key conflicts"):
