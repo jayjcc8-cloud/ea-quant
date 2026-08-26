@@ -118,14 +118,20 @@ def test_rank_20_position_observation_settles_to_a_read_only_outcome() -> None:
     assert outcome.runtime_acknowledged is True
 
 
-def test_retained_read_only_window_completes_and_publishes_only_once() -> None:
+@pytest.mark.parametrize(
+    "retry",
+    ("retry_active_dispatch_completion", "retry_active_dispatch"),
+)
+def test_retained_read_only_window_completes_and_publishes_only_once(retry: str) -> None:
     _fixture, matcher, _orders, _causal, _delayed, _end = _system()
-    coordinator, _audit, ports, runtime = _read_only_coordinator(matcher, _root(matcher))
+    coordinator, audit, ports, runtime = _read_only_coordinator(matcher, _root(matcher))
 
     window = coordinator.begin_next_dispatch()
 
-    with pytest.raises(LifecycleError, match="completion-only retry"):
-        coordinator.retry_active_dispatch_completion()
+    with pytest.raises(LifecycleError, match="retry"):
+        getattr(coordinator, retry)()
+    assert len(audit.records) == 3
+    assert runtime.acknowledgement_calls == 0
     assert type(window) is ReadOnlyReconciliationDispatchWindow
     assert ports["frontier"].advance_calls == 1
     assert coordinator.resume_active_dispatch() is window
@@ -133,6 +139,17 @@ def test_retained_read_only_window_completes_and_publishes_only_once() -> None:
     assert type(outcome) is ReadOnlyReconciliationDispatchOutcome
     assert ports["frontier"].advance_calls == 1
     assert runtime.acknowledgement_calls == 1
+
+    coordinator, audit, ports, runtime = _read_only_coordinator(
+        matcher, _root(matcher), fail_once=True
+    )
+    with pytest.raises(RuntimeError, match="injected acknowledgement failure"):
+        coordinator.complete_active_dispatch(coordinator.begin_next_dispatch())
+    getattr(coordinator, retry)()
+
+    assert ports["frontier"].advance_calls == 1
+    assert runtime.acknowledgement_calls == 2
+    assert len(audit.records) == 4
 
 
 @pytest.mark.parametrize(
@@ -181,20 +198,6 @@ def test_read_only_completion_rejects_arbitrary_and_stale_windows_before_effects
         assert _effect_snapshot(coordinator, audit, ports["frontier"]) == before
     assert runtime.acknowledgement_calls == 1
     assert current is coordinator._active.read_only.window
-
-
-def test_read_only_completion_retry_does_not_republish_refresh() -> None:
-    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
-    coordinator, _audit, ports, runtime = _read_only_coordinator(
-        matcher, _root(matcher), fail_once=True
-    )
-
-    with pytest.raises(RuntimeError, match="injected acknowledgement failure"):
-        coordinator.complete_active_dispatch(coordinator.begin_next_dispatch())
-    coordinator.retry_active_dispatch_completion()
-
-    assert ports["frontier"].advance_calls == 1
-    assert runtime.acknowledgement_calls == 2
 
 
 def test_composition_keeps_the_read_only_authority_private() -> None:

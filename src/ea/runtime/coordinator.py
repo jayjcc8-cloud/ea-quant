@@ -76,7 +76,6 @@ from ea.core.lifecycle import (
     LifecycleDispatchWindow,
     LifecycleError,
     PreTerminalCoordinatorState,
-    ReadOnlyReconciliationDispatchWindow,
     RuntimeDispatchLeaseView,
     RuntimeLifecyclePort,
     SubmissionAuthorizationAttemptOutcome,
@@ -555,11 +554,7 @@ class Phase1HistoricalLifecycleCoordinator:
         try:
             active = self._active
             if active is not None and _is_read_only_root(active.lease.root):
-                if (
-                    type(window) is not ReadOnlyReconciliationDispatchWindow
-                    or active.read_only is None
-                    or getattr(active.read_only, "window", None) is not window
-                ):
+                if getattr(active.read_only, "window", None) is not window:
                     raise LifecycleError(
                         OutcomeCode.CONFLICTING_ID, "active dispatch window conflicts"
                     )
@@ -720,6 +715,11 @@ class Phase1HistoricalLifecycleCoordinator:
             if active is None:
                 raise LifecycleError(OutcomeCode.CONFLICTING_ID, "no active dispatch is retained")
             if _is_read_only_root(active.lease.root):
+                if getattr(active.read_only, "completion_ack", None) is None:
+                    raise LifecycleError(
+                        OutcomeCode.CONFLICTING_ID,
+                        "read-only retry needs route ack",
+                    )
                 return _drive_read_only(self, active, complete=True)
             if active.completion_ack is not None:
                 return self._complete_active(active)
