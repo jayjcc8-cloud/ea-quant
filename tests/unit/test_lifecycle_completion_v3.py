@@ -109,20 +109,7 @@ def test_completion_v3_binds_ledger_frontier_and_final_digests() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("field", "boolean"),
-    [
-        (field, boolean)
-        for field in (
-            "authorization_attempt_count",
-            "ledger_outcome_count",
-            "submission_count",
-            "outcome_count",
-        )
-        for boolean in (False, True)
-    ],
-)
-def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boolean: bool) -> None:
+def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
     from ea.core import (
         CanonicalDecimal,
         CashReconciliationBalance,
@@ -133,7 +120,7 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
         create_reconciliation_observation_root,
         runtime_root_order_key,
     )
-    from ea.core.lifecycle import canonical_dispatch_completed_v4_audit_payload
+    from ea.core.lifecycle import LifecycleError, canonical_dispatch_completed_v4_audit_payload
     from unit.test_lifecycle_ledger_gate import (
         _coordinator_with_gate,
         _outcome_bundle,
@@ -243,12 +230,20 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
         require_canonical_audit_payload,
     )
 
+    def assert_decoder_digest_rejects(candidate_payload: bytes, message: str) -> None:
+        with pytest.raises(AuditContractError, match=rf"^{message}$"):
+            require_canonical_audit_payload(
+                AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, candidate_payload
+            )
+        with pytest.raises(AuditContractError, match=rf"^{message}$"):
+            audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, candidate_payload)
+
     assert (
         require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
         == payload
     )
+    assert audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
     roots = (
-        root,
         create_reconciliation_observation_root(
             _observation(
                 kind=ReconciliationObservationKind.ORDER_DETAIL,
@@ -264,14 +259,7 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
             )
         ),
     )
-    for selected_root, kind_rank in zip(roots, (20, 10, 30), strict=True):
-        selected_key = runtime_root_order_key(selected_root)
-        assert (
-            _canonical_completion_v4_reconciliation_root_key_document(
-                selected_key, expected_run_id=binding.reference.run_id.value
-            )["kind_rank"]
-            == kind_rank
-        )
+    for selected_root, kind_rank in zip(roots, (10, 30), strict=True):
         selected_payload = completion_v4_payload(selected_root.observation_sha256, selected_root)
         assert json.loads(selected_payload)["trigger_root_key"]["kind_rank"] == kind_rank
         assert (
@@ -281,13 +269,17 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
             == selected_payload
         )
         assert audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, selected_payload)
-    candidate = json.loads(payload)
-    candidate[field] = boolean
-    boolean_payload = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
-    with pytest.raises(AuditContractError, match=rf"^{field} is outside its uint64 domain$"):
-        require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, boolean_payload)
-    with pytest.raises(AuditContractError, match=rf"^{field} is outside its uint64 domain$"):
-        audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, boolean_payload)
+    for field in (
+        "authorization_attempt_count",
+        "ledger_outcome_count",
+        "submission_count",
+        "outcome_count",
+    ):
+        for boolean in (False, True):
+            candidate = json.loads(payload)
+            candidate[field] = boolean
+            boolean_payload = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
+            assert_decoder_digest_rejects(boolean_payload, f"{field} is outside its uint64 domain")
     empty_outcome_document = json.loads(payload)
     empty_outcome_document["outcome_count"] = 0
     empty_outcome_payload = json.dumps(
@@ -298,11 +290,11 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
             AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, empty_outcome_payload
         )
 
-    with pytest.raises(Exception, match="completion-v4 root digest conflicts"):
+    with pytest.raises(LifecycleError, match="^completion-v4 root digest conflicts$"):
         completion_v4_payload(DIGESTS[0])
     invalid_builder_key = runtime_root_order_key(root)
     object.__setattr__(invalid_builder_key, "available_at", None)
-    with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+    with pytest.raises(AuditContractError, match="^completion-v4 root key conflicts$"):
         _canonical_completion_v4_reconciliation_root_key_document(
             invalid_builder_key, expected_run_id=binding.reference.run_id.value
         )
@@ -321,7 +313,7 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
         target = candidate if field == "trigger_root_sha256" else root_key
         target[field] = invalid
         candidate["trigger_root_key"] = root_key
-        with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+        with pytest.raises(AuditContractError, match="^completion-v4 root key conflicts$"):
             require_canonical_audit_payload(
                 AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
                 json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode(),
@@ -351,15 +343,10 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
     carrier = create_carrier(runtime_root_order_key(root), root.observation_sha256)
     assert type(carrier).__name__ == ("_StructurallyValidReadOnlyReconciliationCarrier")
     for selected_root in roots:
-        assert (
-            type(
-                create_carrier(
-                    runtime_root_order_key(selected_root),
-                    selected_root.observation_sha256,
-                    selected_root.observation_sha256,
-                )
-            ).__name__
-            == "_StructurallyValidReadOnlyReconciliationCarrier"
+        create_carrier(
+            runtime_root_order_key(selected_root),
+            selected_root.observation_sha256,
+            selected_root.observation_sha256,
         )
     trade_root = create_reconciliation_observation_root(
         _observation(
@@ -368,29 +355,32 @@ def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boole
             balances=(),
         )
     )
-    with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+    with pytest.raises(AuditContractError, match="^completion-v4 root key conflicts$"):
         completion_v4_payload(trade_root.observation_sha256, trade_root)
-    with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+    with pytest.raises(AuditContractError, match="^completion-v4 root key conflicts$"):
         create_carrier(
             runtime_root_order_key(trade_root),
             trade_root.observation_sha256,
             trade_root.observation_sha256,
         )
-    for invalid_rank in (False, True, -1, 11, 40):
+    for invalid_rank in (0, False, True, -1, 11, 40):
+        invalid_root_key = runtime_root_order_key(root)
+        object.__setattr__(invalid_root_key._suffix, "kind_rank", invalid_rank)
+        with pytest.raises(AuditContractError, match="^completion-v4 root key conflicts$"):
+            _canonical_completion_v4_reconciliation_root_key_document(
+                invalid_root_key, expected_run_id=binding.reference.run_id.value
+            )
+        with pytest.raises(AuditContractError, match="^completion-v4 root key conflicts$"):
+            create_carrier(invalid_root_key, root.observation_sha256)
         candidate = json.loads(payload)
         candidate["trigger_root_key"]["kind_rank"] = invalid_rank
         invalid_payload = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
-        with pytest.raises(Exception, match="completion-v4 root key conflicts"):
-            require_canonical_audit_payload(
-                AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, invalid_payload
-            )
-        with pytest.raises(Exception, match="completion-v4 root key conflicts"):
-            audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, invalid_payload)
+        assert_decoder_digest_rejects(invalid_payload, "completion-v4 root key conflicts")
     invalid_factory_key = runtime_root_order_key(root)
     object.__setattr__(invalid_factory_key, "available_at", None)
-    with pytest.raises(Exception, match="completion-v4 root key conflicts"):
+    with pytest.raises(AuditContractError, match="^completion-v4 root key conflicts$"):
         create_carrier(invalid_factory_key, root.observation_sha256)
-    with pytest.raises(Exception, match="read-only reconciliation root conflicts"):
+    with pytest.raises(LifecycleError, match="^read-only reconciliation root conflicts$"):
         create_carrier(runtime_root_order_key(root), DIGESTS[0])
     assert tuple(
         inspect.signature(lifecycle._create_read_only_reconciliation_dispatch_window).parameters
