@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from ea.core import (
     EMPTY_CHAIN_HEAD_SHA256,
     EMPTY_RECORD_SHA256,
     AuditAppendAcknowledgement,
+    AuditContractError,
     AuditRecordKind,
     AuditSubjectKind,
     OpenReconciliationRef,
@@ -107,7 +109,20 @@ def test_completion_v3_binds_ledger_frontier_and_final_digests() -> None:
     }
 
 
-def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
+@pytest.mark.parametrize(
+    ("field", "boolean"),
+    [
+        (field, boolean)
+        for field in (
+            "authorization_attempt_count",
+            "ledger_outcome_count",
+            "submission_count",
+            "outcome_count",
+        )
+        for boolean in (False, True)
+    ],
+)
+def test_completion_v4_binds_read_only_reconciliation_frontier(field: str, boolean: bool) -> None:
     from ea.core import (
         canonical_reconciliation_outcome_bytes,
         create_reconciliation_observation_root,
@@ -177,11 +192,32 @@ def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
         "reconciliation_observation",
     )
     assert (document["batch_sha256"], document["authorization_allowed"]) == (None, False)
+    assert set(
+        inspect.signature(canonical_dispatch_completed_v4_audit_payload).parameters
+    ).isdisjoint(
+        {"authorization_attempt_count", "ledger_outcome_count", "submission_count", "outcome_count"}
+    )
     assert (
-        document["outcome_count"],
+        inspect.signature(canonical_dispatch_completed_v4_audit_payload).return_annotation
+        == "bytes"
+    )
+    assert (
+        type(document["authorization_attempt_count"]),
+        type(document["ledger_outcome_count"]),
+        type(document["submission_count"]),
+        type(document["outcome_count"]),
+    ) == (int, int, int, int)
+    assert (
+        document["authorization_attempt_count"],
         document["ledger_outcome_count"],
         document["submission_count"],
-    ) == (1, 0, 0)
+        document["outcome_count"],
+    ) == (0, 0, 0, 1)
+    assert len(payload) == 1922
+    assert (
+        sha256(payload).hexdigest()
+        == "a074b8507d7d1b3dea68a9aafe97c358bdad692dab564549d3032349362d54eb"
+    )
     assert set(document) == set(_v3_document()[1]) | {
         "authorization_allowed",
         "batch_ack_sha256",
@@ -199,6 +235,22 @@ def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
         require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
         == payload
     )
+    candidate = json.loads(payload)
+    candidate[field] = boolean
+    boolean_payload = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
+    with pytest.raises(AuditContractError, match=rf"^{field} is outside its uint64 domain$"):
+        require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, boolean_payload)
+    with pytest.raises(AuditContractError, match=rf"^{field} is outside its uint64 domain$"):
+        audit_subject_digest(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, boolean_payload)
+    empty_outcome_document = json.loads(payload)
+    empty_outcome_document["outcome_count"] = 0
+    empty_outcome_payload = json.dumps(
+        empty_outcome_document, sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(Exception, match="completion-v4 requires one outcome acknowledgement"):
+        require_canonical_audit_payload(
+            AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, empty_outcome_payload
+        )
 
     with pytest.raises(Exception, match="completion-v4 root digest conflicts"):
         completion_v4_payload(DIGESTS[0])
@@ -266,44 +318,6 @@ def test_completion_v4_binds_read_only_reconciliation_frontier() -> None:
             dispatch_completion_ack_sha256=DIGESTS[6],
             resulting_state=object(),  # type: ignore[arg-type]
         )
-
-
-def test_completion_v4_rejects_non_null_effect_frontier() -> None:
-    from ea.core.audit import require_canonical_audit_payload
-
-    binding, document = _v3_document()
-    document.update(
-        schema="ea.audit-dispatch-completed.v4",
-        dispatch_kind="reconciliation_observation",
-        batch_sha256=None,
-        batch_ack_sha256=None,
-        authorization_allowed=False,
-        observation_sha256=DIGESTS[0].value,
-        outcome_acknowledgement_sha256=DIGESTS[1].value,
-        refresh_acknowledgement_sha256=DIGESTS[2].value,
-        refresh_value_sha256=DIGESTS[3].value,
-        ledger_outcome_count=0,
-        ordered_ledger_ack_sha256s_sha256=DIGESTS[4].value,
-        final_portfolio_snapshot_sha256=DIGESTS[5].value,
-        final_risk_state_sha256=DIGESTS[6].value,
-        trigger_root_key={
-            "available_at": "2026-01-02T09:31:00.000000Z",
-            "domain_rank": 20,
-            "kind_rank": 20,
-            "observation_owner_kind": "reconciliation.observation",
-            "observation_owner_sequence": 1,
-            "producer_namespace": "reconciliation.sim",
-            "producer_sequence": 1,
-            "root_domain": "reconciliation_observation",
-            "run_id": binding.reference.run_id.value,
-            "watermark_namespace": "ledger.portfolio",
-            "watermark_sequence": 3,
-        },
-    )
-    payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
-
-    with pytest.raises(Exception, match="completion-v4 requires one outcome acknowledgement"):
-        require_canonical_audit_payload(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, payload)
 
 
 def test_completion_v3_ledger_ack_aggregate_is_ordered_and_deterministic() -> None:

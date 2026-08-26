@@ -1242,14 +1242,14 @@ def _require_dispatch_completed_v4_values(document: dict[str, object]) -> None:
         "ledger_outcome_count",
         "submission_count",
     ):
-        if document[field] != 0:
+        if _require_json_uint64(document, field, positive=False) != 0:
             raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 effect frontier is not empty")
     if (
         document["authorization_attempt_outcome"] is not None
         or document["authorization_attempt_outcome_sha256"] is not None
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 authorization frontier is not empty")
-    if document["outcome_count"] != 1:
+    if _require_json_uint64(document, "outcome_count", positive=False) != 1:
         raise _fail(
             OutcomeCode.CONFLICTING_ID,
             "completion-v4 requires one outcome acknowledgement",
