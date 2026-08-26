@@ -596,8 +596,18 @@ def _canonical_completion_v4_reconciliation_root_key_document(
     *,
     expected_run_id: str,
 ) -> dict[str, object]:
-    """Validate and re-project the one rank-20 completion-v4 root key."""
-    from ea.core.runtime import RuntimeRootOrderKey
+    """Validate and re-project one allowed completion-v4 reconciliation root key."""
+    from ea.core.runtime import (
+        RECONCILIATION_OBSERVATION_KIND_RANKS,
+        ReconciliationObservationKind,
+        RuntimeRootOrderKey,
+    )
+
+    allowed_kind_ranks = {
+        RECONCILIATION_OBSERVATION_KIND_RANKS[ReconciliationObservationKind.ORDER_DETAIL],
+        RECONCILIATION_OBSERVATION_KIND_RANKS[ReconciliationObservationKind.POSITION_SNAPSHOT],
+        RECONCILIATION_OBSERVATION_KIND_RANKS[ReconciliationObservationKind.CASH_SNAPSHOT],
+    }
 
     if type(value) is RuntimeRootOrderKey:
         values = value.as_tuple()
@@ -661,7 +671,7 @@ def _canonical_completion_v4_reconciliation_root_key_document(
         or type(value["kind_rank"]) is not int
         or type(value["observation_owner_kind"]) is not str
         or value["domain_rank"] != 20
-        or value["kind_rank"] != 20
+        or value["kind_rank"] not in allowed_kind_ranks
         or value["observation_owner_kind"] != EconomicOwnerKind.RECONCILIATION_OBSERVATION.value
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts")
@@ -671,7 +681,7 @@ def _canonical_completion_v4_reconciliation_root_key_document(
     return {
         "available_at": available_text,
         "domain_rank": 20,
-        "kind_rank": 20,
+        "kind_rank": value["kind_rank"],
         "observation_owner_kind": EconomicOwnerKind.RECONCILIATION_OBSERVATION.value,
         "observation_owner_sequence": value["observation_owner_sequence"],
         "producer_namespace": value["producer_namespace"],
