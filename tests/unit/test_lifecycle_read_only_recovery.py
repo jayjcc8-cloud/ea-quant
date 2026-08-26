@@ -295,6 +295,38 @@ def test_completed_journal_recovery_matches_the_uninterrupted_frontier_and_trace
     )
 
 
+def test_completed_journal_recovery_admits_the_root_to_a_fresh_authority(
+    tmp_path: Path,
+) -> None:
+    coordinator, matcher, _reconciliation, source_ports, runtime, journal, _root_value = (
+        _journal_bound_read_only_dispatch(tmp_path, write_trace=True)
+    )
+    active = coordinator._capture_lease(runtime.pop())
+    coordinator._active = active
+    uninterrupted = drive_read_only(coordinator, active, complete=True)
+    from ea.reconciliation.authority import _create_observation_only_reconciliation_authority
+
+    fresh_reconciliation = _create_observation_only_reconciliation_authority(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        snapshot_view=source_ports["frontier"].current_snapshot,
+    )
+
+    recovered, recovered_ports = _recover_read_only_dispatch(
+        matcher=matcher,
+        reconciliation=fresh_reconciliation,
+        runtime=runtime,
+        journal=journal,
+    )
+
+    assert recovered.state == coordinator.state
+    assert recovered_ports["frontier"].previous_refresh_sha256 == (
+        source_ports["frontier"].previous_refresh_sha256
+    )
+    assert recovered._active is None
+    assert uninterrupted.observation_sha256 == active.lease.root.observation_sha256
+
+
 def test_completed_journal_with_wrong_trace_fails_before_recovery_side_effects(
     tmp_path: Path,
 ) -> None:

@@ -199,9 +199,12 @@ def _prove_completed_read_only_family(
     root = active.lease.root
     sequence = active.lease.dispatch_sequence
     authority = coordinator._reconciliation_authority
+    admitted = authority.admit_observation(root.observation, dispatch_sequence=sequence)
     outcome = authority.resolve_outcome(root.observation)
     if (
         type(outcome) is not ReconciliationOutcome
+        or canonical_reconciliation_outcome_bytes(outcome)
+        != canonical_reconciliation_outcome_bytes(admitted)
         or outcome.observation_sha256 != reconciliation_observation_digest(root.observation)
         or outcome.dispatch_sequence != sequence
     ):
