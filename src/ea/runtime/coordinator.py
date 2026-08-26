@@ -604,7 +604,7 @@ class Phase1HistoricalLifecycleCoordinator:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
         try:
             active = self._active
-            if active is not None and _is_read_only_root(active.lease.root):
+            if active is not None and getattr(active.read_only, "completion_ack", None) is not None:
                 return _drive_read_only(self, active, complete=True)
             if active is None or active.completion_ack is None:
                 raise LifecycleError(

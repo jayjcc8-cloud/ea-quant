@@ -124,6 +124,8 @@ def test_retained_read_only_window_completes_and_publishes_only_once() -> None:
 
     window = coordinator.begin_next_dispatch()
 
+    with pytest.raises(LifecycleError, match="completion-only retry"):
+        coordinator.retry_active_dispatch_completion()
     assert type(window) is ReadOnlyReconciliationDispatchWindow
     assert ports["frontier"].advance_calls == 1
     assert coordinator.resume_active_dispatch() is window
@@ -189,7 +191,7 @@ def test_read_only_completion_retry_does_not_republish_refresh() -> None:
 
     with pytest.raises(RuntimeError, match="injected acknowledgement failure"):
         coordinator.complete_active_dispatch(coordinator.begin_next_dispatch())
-    coordinator.retry_active_dispatch()
+    coordinator.retry_active_dispatch_completion()
 
     assert ports["frontier"].advance_calls == 1
     assert runtime.acknowledgement_calls == 2
