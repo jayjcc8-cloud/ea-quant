@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Protocol, final
 
@@ -379,8 +380,24 @@ def _require_recovery_history_frontier(
 ) -> None:
     """Reject canonical inner histories that extend beyond durable recovery evidence."""
     matcher_state = matcher.state
-    completed_sequence = len(runtime.trace_records)
-    expected_matcher_sequence = completed_sequence
+    expected_matcher_sequence = 0
+    for trace_record in runtime.trace_records:
+        try:
+            trace = json.loads(trace_record)
+            sequence = trace["dispatch_sequence"]
+            root = trace["root"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "matcher recovery runtime trace conflicts",
+            ) from error
+        if type(sequence) is not int or type(root) is not dict:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID,
+                "matcher recovery runtime trace conflicts",
+            )
+        if "schema" not in root:
+            expected_matcher_sequence = sequence
     if coordinator is not None:
         active = coordinator._active
         if active is not None and active.batch is not None:

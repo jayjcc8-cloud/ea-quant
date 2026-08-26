@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
 from inspect import signature
 from pathlib import Path
 from threading import Lock
@@ -34,6 +35,7 @@ from ea.core.audit import (
     canonical_run_prepared_audit_payload,
     create_audit_append_acknowledgement,
 )
+from ea.core.execution import instrument_spec_set_digest
 from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import FactProvenanceId
 from ea.core.lifecycle import (
@@ -67,11 +69,15 @@ from ea.experiments.store import (
     LocalResultStore,
     VerifiedIncompleteRecoveryBinding,
 )
+from ea.runtime._coordinator_recovery import _require_runtime_trace
 from ea.runtime.authorization import (
     create_dormant_historical_submission_authorization_authority,
 )
 from ea.runtime.coordinator import recover_phase1_lifecycle_coordinator
-from ea.runtime.historical import create_phase1_historical_market_runtime
+from ea.runtime.historical import (
+    HistoricalReconciliationSourceBinding,
+    create_phase1_historical_market_runtime,
+)
 from ea.runtime.matcher import (
     create_historical_matcher_descendant_fact_dispatch_verifier,
     create_historical_matcher_dispatch_verifier,
@@ -84,7 +90,14 @@ from unit.test_execution_fact_authority import (
     _snapshot,
 )
 from unit.test_historical_matcher import _system
-from unit.test_historical_runtime import _row, _source
+from unit.test_historical_runtime import (
+    _first_market_event,
+    _reconciliation_observation,
+    _row,
+    _scripted_port,
+    _scripted_reconciliation_port,
+    _source,
+)
 from unit.test_lifecycle_coordinator import _MemoryAudit
 from unit.test_store import _root, _spec
 
@@ -1172,6 +1185,56 @@ def test_recovery_frontier_rejects_future_matcher_dispatch() -> None:
             fact_authority=fact_history,
             coordinator=None,
         )
+
+
+def test_recovery_frontier_excludes_valid_read_only_v2_traces() -> None:
+    """Rank-20 traces are runtime history, not matcher dispatches."""
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    observations = tuple(
+        _reconciliation_observation(
+            source_sequence=index,
+            observation_sequence=index,
+            available_at=datetime(2026, 1, 2, 9, 31 + index, tzinfo=UTC),
+            spec_set=matcher.spec_set,
+        )
+        for index in (1, 2)
+    )
+    reconciliation_source = _scripted_reconciliation_port(observations)
+    reconciliation_source._binding = HistoricalReconciliationSourceBinding(
+        profile="ea-phase1-reconciliation-observation-v1",
+        run_id=matcher.run_id,
+        instrument_spec_set_id=matcher.spec_set.identifier,
+        instrument_spec_set_sha256=instrument_spec_set_digest(matcher.spec_set),
+        observation_count=len(observations),
+    )
+    runtime = create_phase1_historical_market_runtime(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        source=_scripted_port((_first_market_event(),)),
+        reconciliation_source=reconciliation_source,
+    )
+    binding = RunBinding(
+        RunReference(matcher.run_id, Sha256Digest("11" * 32)), Sha256Digest("22" * 32)
+    )
+
+    market_lease = runtime.pop()
+    assert type(market_lease.root) is MarketDataEnvelope
+    matcher.match_active_market_root(market_lease.root, dispatch_sequence=1)
+    runtime.acknowledge(market_lease)
+    for sequence in (2, 3):
+        read_only_lease = runtime.pop()
+        assert read_only_lease.dispatch_sequence == sequence
+        runtime.acknowledge(read_only_lease)
+
+    trace = _require_runtime_trace(runtime, binding)
+    assert set(trace) == {1, 2, 3}
+    _require_recovery_history_frontier(
+        records=(),
+        runtime=runtime,
+        matcher=matcher,
+        fact_authority=SimpleNamespace(ingresses=(), outcomes=(), fills=(), projections=()),
+        coordinator=None,
+    )
 
 
 def test_recovery_frontier_rejects_submission_without_durable_authorization() -> None:

@@ -677,7 +677,10 @@ def _require_runtime_trace(
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        if document.get("schema") == "ea.phase1-historical-runtime-trace.v2":
+        read_only_trace = (
+            document.get("schema") == "ea.phase1-historical-runtime-trace.v2" and "schema" in root
+        )
+        if read_only_trace:
             read_only_root = _decode_read_only_trace_root(document, runtime.spec_set)
             root_sha256 = read_only_root.observation_sha256
         elif (
@@ -713,7 +716,7 @@ def _require_runtime_trace(
             domain = HISTORICAL_MATCHER_MARKET_ROOT_DIGEST_DOMAIN
         else:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "runtime trace root kind is invalid")
-        if document.get("schema") == HISTORICAL_RUNTIME_TRACE_SCHEMA:
+        if not read_only_trace:
             root_sha256 = Sha256Digest(
                 sha256(domain + len(root_bytes).to_bytes(8, "big") + root_bytes).hexdigest()
             )
