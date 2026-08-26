@@ -1232,7 +1232,9 @@ def test_recovery_frontier_excludes_valid_read_only_v2_traces() -> None:
         records=(),
         runtime=runtime,
         matcher=matcher,
-        fact_authority=SimpleNamespace(ingresses=(), outcomes=(), fills=(), projections=()),
+        fact_authority=SimpleNamespace(  # type: ignore[arg-type]
+            ingresses=(), outcomes=(), fills=(), projections=()
+        ),
         coordinator=None,
     )
 
