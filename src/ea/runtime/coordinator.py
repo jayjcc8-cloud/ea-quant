@@ -2383,6 +2383,7 @@ def recover_phase1_lifecycle_coordinator(
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
+    reconciliation_authority: _ReadOnlyReconciliationAuthorityPort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     """Reconcile one reopened non-terminal journal with injected authority histories."""
     _require_static_bindings(
@@ -2444,6 +2445,7 @@ def recover_phase1_lifecycle_coordinator(
         risk_authority=risk_authority,
         risk_refresh_authority=risk_refresh_authority,
         frontier=frontier,
+        reconciliation_authority=reconciliation_authority,
     )
     value._state = _admitted_state(binding, prepared_acknowledgement.chain_head_sha256)
     expected_sequence = 1
@@ -2498,6 +2500,7 @@ def recover_phase1_terminal_evidence(
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
+    reconciliation_authority: _ReadOnlyReconciliationAuthorityPort | None = None,
 ) -> RecoveredTerminalCoordinatorEvidence:
     """Reconstruct a closed run without issuing any mutation authority."""
     _bound_ledger_gate(
@@ -2535,6 +2538,7 @@ def recover_phase1_terminal_evidence(
         risk_authority=risk_authority,
         risk_refresh_authority=risk_refresh_authority,
         frontier=frontier,
+        reconciliation_authority=reconciliation_authority,
     )
     pre_terminal = coordinator.pre_terminal_state
     if pre_terminal is None or coordinator.terminal_state is not None:

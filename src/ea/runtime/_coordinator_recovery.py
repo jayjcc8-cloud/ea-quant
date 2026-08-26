@@ -80,10 +80,11 @@ from ea.core.portfolio import (
 from ea.core.risk import RiskHaltReason, risk_state_snapshot_digest
 from ea.core.run import RunBinding, Sha256Digest
 from ea.core.runtime import EndOfRunRoot, RuntimeRoot, RuntimeRootOrderKey
-from ea.runtime._coordinator_read_only import (
+from ea.runtime._coordinator_read_only_recovery import (
     _decode_read_only_trace_root,
     _require_read_only_recovery_order,
     _retain_read_only_recovery_record,
+    recover_read_only_dispatch,
 )
 from ea.runtime.historical import (
     HISTORICAL_RUNTIME_TRACE_SCHEMA,
@@ -731,6 +732,9 @@ def _recover_dispatch(
 
     if coordinator._active is not None or coordinator._pre_terminal_state is not None:
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "recovery dispatch follows open state")
+    if recovered.read_only_outcome_record is not None:
+        recover_read_only_dispatch(coordinator, recovered, trace_by_sequence)
+        return
     runtime_lease = coordinator._runtime.active_lease
     trigger_sha256 = recovered.trigger_sha256
     if trigger_sha256 is None and runtime_lease is not None:

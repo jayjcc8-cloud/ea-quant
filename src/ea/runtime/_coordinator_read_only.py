@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,14 +43,12 @@ from ea.core.portfolio import portfolio_snapshot_digest
 from ea.core.reconciliation import (
     ReconciliationOutcome,
     canonical_reconciliation_outcome_bytes,
-    decode_reconciliation_observation,
     reconciliation_observation_digest,
 )
 from ea.core.risk import RiskHaltReason, risk_state_snapshot_digest
 from ea.core.runtime import (
     ReconciliationObservationKind,
     ReconciliationObservationRoot,
-    create_reconciliation_observation_root,
     runtime_root_order_key,
 )
 
@@ -69,46 +66,6 @@ class _ReadOnlyDispatch:
 
 def is_read_only_root(root: object) -> bool:
     return type(root) is ReconciliationObservationRoot
-
-
-def _decode_read_only_trace_root(
-    document: dict[str, object], spec_set: object
-) -> ReconciliationObservationRoot:
-    root_document = document.get("root")
-    if type(root_document) is not dict:
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only trace root is invalid")
-    try:
-        payload = json.dumps(
-            root_document, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        root = create_reconciliation_observation_root(
-            decode_reconciliation_observation(payload, spec_set)
-        )
-    except (TypeError, ValueError) as error:
-        raise LifecycleError(
-            OutcomeCode.CONFLICTING_ID, "read-only trace root conflicts"
-        ) from error
-    if root.kind not in {
-        ReconciliationObservationKind.ORDER_DETAIL,
-        ReconciliationObservationKind.POSITION_SNAPSHOT,
-        ReconciliationObservationKind.CASH_SNAPSHOT,
-    }:
-        raise LifecycleError(OutcomeCode.OUT_OF_RANGE, "read-only trace kind is unsupported")
-    return root
-
-
-def _retain_read_only_recovery_record(group: Any, retained: tuple[int, Any, Any]) -> None:
-    if group.read_only_outcome_record is not None:
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "duplicate read-only recovery outcome")
-    group.read_only_outcome_record = retained
-
-
-def _require_read_only_recovery_order(group: Any) -> None:
-    entry = group.read_only_outcome_record
-    if entry is not None and group.batch_record is not None:
-        raise LifecycleError(
-            OutcomeCode.CONFLICTING_ID, "read-only recovery mixes matcher evidence"
-        )
 
 
 def drive_read_only(

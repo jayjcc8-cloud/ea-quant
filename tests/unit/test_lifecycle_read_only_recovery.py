@@ -4,14 +4,19 @@ import json
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from ea.core import (
+    AuditRecordKind,
     ReconciliationObservationKind,
     RunBinding,
     RunReference,
     Sha256Digest,
     create_reconciliation_observation_root,
 )
+from ea.core.lifecycle import LifecycleError
 from ea.core.runtime import runtime_root_order_key
+from ea.runtime._coordinator_read_only_recovery import _require_read_only_recovery_order
 from ea.runtime._coordinator_recovery import _require_runtime_trace
 from ea.runtime.historical import historical_runtime_trace_digest
 from unit.test_historical_matcher import _system
@@ -60,3 +65,21 @@ def test_recovery_accepts_one_canonical_v2_read_only_trace_root() -> None:
     trace = _require_runtime_trace(runtime, binding)
 
     assert trace[1][1] == root.observation_sha256
+
+
+def test_read_only_recovery_rejects_completion_without_mandatory_refresh() -> None:
+    outcome = SimpleNamespace(record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME)
+    completion = SimpleNamespace(record_kind=AuditRecordKind.RUNTIME_DISPATCH_COMPLETED)
+    group = SimpleNamespace(
+        read_only_outcome_record=(2, outcome, None),
+        batch_record=None,
+        outcome_records={},
+        authorization_records=[],
+        ledger_records=[],
+        failing_record=None,
+        refresh_record=None,
+        completion_record=(3, completion, None),
+    )
+
+    with pytest.raises(LifecycleError, match="prefix"):
+        _require_read_only_recovery_order(group)

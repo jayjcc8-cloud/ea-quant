@@ -591,6 +591,15 @@ def recover_phase1_historical_lifecycle(
                 risk_policy,
             )
         )
+        reconciliation_authority = (
+            _create_observation_only_reconciliation_authority(
+                run_id=binding.reference.run_id,
+                spec_set=matcher_history.spec_set,
+                snapshot_view=frontier.current_snapshot,
+            )
+            if callable(getattr(frontier, "current_snapshot", None))
+            else None
+        )
         authorization, authorization_capability, activation_seal = (
             create_dormant_historical_submission_authorization_authority(
                 binding=binding,
@@ -641,6 +650,7 @@ def recover_phase1_historical_lifecycle(
             records=records,
             authorization=authorization,
             authorization_capability=authorization_capability,
+            reconciliation_authority=reconciliation_authority,
         )
         _require_recovery_history_frontier(
             records=records,
@@ -698,6 +708,15 @@ def recover_phase1_historical_terminal_evidence(
                 risk_policy,
             )
         )
+        reconciliation_authority = (
+            _create_observation_only_reconciliation_authority(
+                run_id=binding.reference.run_id,
+                spec_set=matcher_history.spec_set,
+                snapshot_view=frontier.current_snapshot,
+            )
+            if callable(getattr(frontier, "current_snapshot", None))
+            else None
+        )
         if (
             runtime.run_id != binding.reference.run_id
             or matcher_history.run_id != binding.reference.run_id
@@ -717,6 +736,7 @@ def recover_phase1_historical_terminal_evidence(
             risk_authority=risk_authority,
             risk_refresh_authority=risk_refresh_authority,
             frontier=frontier,
+            reconciliation_authority=reconciliation_authority,
         )
         _require_recovery_history_frontier(
             records=records,
