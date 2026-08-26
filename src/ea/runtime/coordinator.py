@@ -107,6 +107,7 @@ from ea.core.portfolio import (
     open_reconciliation_aggregate_digest,
     portfolio_snapshot_digest,
 )
+from ea.core.reconciliation import ReconciliationObservation, ReconciliationOutcome
 from ea.core.risk import RiskHaltReason, RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
 from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.core.runtime import EndOfRunRoot, ReconciliationObservationRoot, RuntimeRoot
@@ -254,12 +255,17 @@ class _RiskRefreshGatePort(Protocol):
 
 
 class _ReadOnlyReconciliationAuthorityPort(Protocol):
-    run_id: RunId
-    spec_set: InstrumentExecutionSpecSet
+    @property
+    def run_id(self) -> RunId: ...
 
-    def admit_observation(self, observation: object, *, dispatch_sequence: int) -> object: ...
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet: ...
 
-    def resolve_outcome(self, observation: object) -> object: ...
+    def admit_observation(
+        self, observation: ReconciliationObservation, *, dispatch_sequence: int
+    ) -> ReconciliationOutcome: ...
+
+    def resolve_outcome(self, observation: ReconciliationObservation) -> ReconciliationOutcome: ...
 
 
 def _bound_ledger_gate(
@@ -549,6 +555,8 @@ class Phase1HistoricalLifecycleCoordinator:
             active = self._active
             if active is not None and _is_read_only_root(active.lease.root):
                 return _drive_read_only(self, active, complete=True)
+            if type(window) is not ActiveDispatchWindow:
+                raise LifecycleError(OutcomeCode.CONFLICTING_ID, "active dispatch window conflicts")
             active = self._require_window(window)
             if active.window_stage not in {
                 ActiveDispatchWindowStage.OPEN,

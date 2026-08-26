@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from typing import Any, cast
 
 from ea.core.audit import AuditRecordKind, audit_append_acknowledgement_digest
+from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.lifecycle import LifecycleError
 from ea.core.outcomes import OutcomeCode
 from ea.core.reconciliation import decode_reconciliation_observation
+from ea.core.run import Sha256Digest
 from ea.core.runtime import (
     ReconciliationObservationKind,
     ReconciliationObservationRoot,
@@ -51,7 +55,7 @@ def _decode_read_only_trace_root(
             root_document, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         root = create_reconciliation_observation_root(
-            decode_reconciliation_observation(payload, spec_set)
+            decode_reconciliation_observation(payload, cast(InstrumentExecutionSpecSet, spec_set))
         )
     except (TypeError, ValueError) as error:
         raise LifecycleError(
@@ -104,7 +108,7 @@ def _require_read_only_recovery_order(group: Any) -> None:
 def recover_read_only_dispatch(
     coordinator: Any,
     recovered: Any,
-    trace_by_sequence: dict[int, tuple[dict[str, object], object]],
+    trace_by_sequence: Mapping[int, tuple[dict[str, object], Sha256Digest]],
 ) -> None:
     """Replay exactly one retained read-only journal family without effect owners."""
     _require_read_only_recovery_order(recovered)
@@ -139,7 +143,10 @@ def recover_read_only_dispatch(
     if lease is not None:
         active = coordinator._capture_lease(lease)
         coordinator._active = active
-        drive_read_only(coordinator, active, complete=complete)
+        if complete:
+            drive_read_only(coordinator, active, complete=True)
+        else:
+            drive_read_only(coordinator, active, complete=False)
     else:
         recovered_lease = _RecoveredLease(root, sequence)
         acknowledged_runtime = _AcknowledgedRuntime(recovered_lease)
@@ -151,12 +158,8 @@ def recover_read_only_dispatch(
         finally:
             coordinator._runtime = runtime
     _require_retained_family(active, recovered)
-    if complete:
-        trace = getattr(runtime, "trace_records", ()) if lease is not None else (trace[0],)
-        if not trace:
-            raise LifecycleError(
-                OutcomeCode.CONFLICTING_ID, "completion acknowledgement is missing"
-            )
+    if complete and lease is not None and not getattr(runtime, "trace_records", ()):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion acknowledgement is missing")
 
 
 def _require_retained_family(active: Any, recovered: Any) -> None:
@@ -187,6 +190,8 @@ def _require_retained_family(active: Any, recovered: Any) -> None:
 
 def _trace_order_key(root: ReconciliationObservationRoot) -> list[str | int]:
     return [
-        value.strftime("%Y-%m-%dT%H:%M:%S.%fZ") if hasattr(value, "strftime") else value
+        value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        if type(value) is datetime
+        else cast(str | int, value)
         for value in runtime_root_order_key(root).as_tuple()
     ]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, final
+from typing import Any, Protocol, cast, final
 
 import ea.portfolio as portfolio
 import ea.risk as risk
@@ -306,11 +306,11 @@ class Phase1HistoricalLifecycleCoordinatorFacade:
     def terminal_outcome(self) -> CoordinatorTerminalOutcome | None:
         return self.__coordinator.terminal_outcome
 
-    def begin_next_dispatch(self) -> LifecycleDispatchWindow:
-        return self.__coordinator.begin_next_dispatch()
+    def begin_next_dispatch(self) -> ActiveDispatchWindow:
+        return cast(ActiveDispatchWindow, self.__coordinator.begin_next_dispatch())
 
     def resume_active_dispatch(self) -> ActiveDispatchWindow:
-        return self.__coordinator.resume_active_dispatch()
+        return cast(ActiveDispatchWindow, self.__coordinator.resume_active_dispatch())
 
     def prepare_submission_authorization(
         self,

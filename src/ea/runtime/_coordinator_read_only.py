@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, overload
 
 from ea.core.audit import (
     AuditAppendAcknowledgement,
@@ -66,6 +66,24 @@ class _ReadOnlyDispatch:
 
 def is_read_only_root(root: object) -> bool:
     return type(root) is ReconciliationObservationRoot
+
+
+@overload
+def drive_read_only(
+    coordinator: Any,
+    active: Any,
+    *,
+    complete: Literal[False],
+) -> ReadOnlyReconciliationDispatchWindow: ...
+
+
+@overload
+def drive_read_only(
+    coordinator: Any,
+    active: Any,
+    *,
+    complete: Literal[True],
+) -> ReadOnlyReconciliationDispatchOutcome: ...
 
 
 def drive_read_only(

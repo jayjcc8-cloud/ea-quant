@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from ea.core import (
     AuditRecordKind,
     ReconciliationObservationKind,
+    ReconciliationObservationRoot,
     RunBinding,
     RunReference,
     Sha256Digest,
@@ -23,9 +25,11 @@ from unit.test_historical_matcher import _system
 from unit.test_reconciliation_authority import _observation
 
 
-def _trace_order_key(root: object) -> list[str | int]:
+def _trace_order_key(root: ReconciliationObservationRoot) -> list[str | int]:
     return [
-        value.strftime("%Y-%m-%dT%H:%M:%S.%fZ") if type(value) is datetime else value
+        value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        if type(value) is datetime
+        else cast(str | int, value)
         for value in runtime_root_order_key(root).as_tuple()
     ]
 
