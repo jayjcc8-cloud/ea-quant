@@ -42,11 +42,12 @@ from ea.core.historical_matching import (
 )
 from ea.core.lifecycle import (
     ActiveDispatchWindow,
-    CoordinatorDispatchOutcome,
     CoordinatorRunState,
     CoordinatorTerminalOutcome,
     GlobalHaltFreshnessPort,
     InstrumentGateFreshnessPort,
+    LifecycleDispatchOutcome,
+    LifecycleDispatchWindow,
     LifecycleError,
     PreTerminalCoordinatorState,
     TerminalCoordinatorState,
@@ -68,6 +69,7 @@ from ea.execution.matcher import (
     recover_phase1_historical_matcher_history,
 )
 from ea.experiments.store import RecoveredTerminalRun, StoreError
+from ea.reconciliation.authority import _create_observation_only_reconciliation_authority
 from ea.runtime.authorization import (
     create_dormant_historical_submission_authorization_authority,
 )
@@ -304,7 +306,7 @@ class Phase1HistoricalLifecycleCoordinatorFacade:
     def terminal_outcome(self) -> CoordinatorTerminalOutcome | None:
         return self.__coordinator.terminal_outcome
 
-    def begin_next_dispatch(self) -> ActiveDispatchWindow:
+    def begin_next_dispatch(self) -> LifecycleDispatchWindow:
         return self.__coordinator.begin_next_dispatch()
 
     def resume_active_dispatch(self) -> ActiveDispatchWindow:
@@ -334,11 +336,11 @@ class Phase1HistoricalLifecycleCoordinatorFacade:
 
     def complete_active_dispatch(
         self,
-        window: ActiveDispatchWindow,
-    ) -> CoordinatorDispatchOutcome:
+        window: LifecycleDispatchWindow,
+    ) -> LifecycleDispatchOutcome:
         return self.__coordinator.complete_active_dispatch(window)
 
-    def retry_active_dispatch_completion(self) -> CoordinatorDispatchOutcome:
+    def retry_active_dispatch_completion(self) -> LifecycleDispatchOutcome:
         return self.__coordinator.retry_active_dispatch_completion()
 
     def retry_terminalization(self) -> CoordinatorTerminalOutcome:
@@ -487,6 +489,11 @@ def create_phase1_historical_lifecycle(
     ledger_handoff_authority, risk_authority, risk_refresh_authority, frontier = (
         _create_economic_gate(binding.reference.run_id, spec_set, execution_policy, risk_policy)
     )
+    reconciliation_authority = _create_observation_only_reconciliation_authority(
+        run_id=binding.reference.run_id,
+        spec_set=spec_set,
+        snapshot_view=frontier.current_snapshot,
+    )
     authorization, preparation_capability, activation_seal = (
         create_dormant_historical_submission_authorization_authority(
             binding=binding,
@@ -535,6 +542,7 @@ def create_phase1_historical_lifecycle(
         risk_authority=risk_authority,
         risk_refresh_authority=risk_refresh_authority,
         frontier=frontier,
+        reconciliation_authority=reconciliation_authority,
     )
     try:
         authorization.activate(coordinator, seal=activation_seal)

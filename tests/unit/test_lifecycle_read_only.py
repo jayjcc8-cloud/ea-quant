@@ -12,6 +12,7 @@ from ea.core.run import RunBinding, RunReference, Sha256Digest
 from ea.reconciliation.authority import _create_observation_only_reconciliation_authority
 from ea.runtime.coordinator import create_phase1_lifecycle_coordinator
 from unit.test_historical_matcher import _system
+from unit.test_lifecycle_composition import _staged_lifecycle
 from unit.test_lifecycle_coordinator import _MemoryAudit, _NoFacts, _Runtime
 from unit.test_lifecycle_ledger_gate import _FixedFillEvidence, _ledger_ports
 from unit.test_reconciliation_authority import _observation
@@ -62,3 +63,11 @@ def test_rank_20_position_observation_settles_to_a_read_only_outcome() -> None:
     assert type(outcome) is ReadOnlyReconciliationDispatchOutcome
     assert outcome.observation_sha256 == root.observation_sha256
     assert outcome.runtime_acknowledged is True
+
+
+def test_composition_keeps_the_read_only_authority_private() -> None:
+    lifecycle, *_ = _staged_lifecycle()
+
+    coordinator = lifecycle.coordinator._Phase1HistoricalLifecycleCoordinatorFacade__coordinator
+
+    assert coordinator._reconciliation_authority is not None
