@@ -8,11 +8,38 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
-from ea.core.audit import AuditRecordKind, audit_append_acknowledgement_digest
+from ea.core.audit import (
+    AuditLogicalKey,
+    AuditRecordKind,
+    AuditSubjectKind,
+    audit_subject_digest,
+    ordered_digest_tuple,
+    require_audit_acknowledgement,
+)
 from ea.core.execution import InstrumentExecutionSpecSet
-from ea.core.lifecycle import LifecycleError
+from ea.core.ledger_integration import (
+    canonical_portfolio_risk_refresh_bytes,
+    portfolio_risk_refresh_digest,
+)
+from ea.core.lifecycle import (
+    ORDERED_INGRESS_DIGEST_DOMAIN,
+    ORDERED_OUTCOME_ACK_DIGEST_DOMAIN,
+    CoordinatorPhase,
+    LifecycleError,
+    canonical_dispatch_completed_v4_audit_payload,
+    coordinator_run_state_digest,
+    create_coordinator_run_state,
+    dispatch_completed_subject_digest,
+)
 from ea.core.outcomes import OutcomeCode
-from ea.core.reconciliation import decode_reconciliation_observation
+from ea.core.portfolio import portfolio_snapshot_digest
+from ea.core.reconciliation import (
+    ReconciliationOutcome,
+    canonical_reconciliation_outcome_bytes,
+    decode_reconciliation_observation,
+    reconciliation_observation_digest,
+)
+from ea.core.risk import RiskHaltReason, risk_state_snapshot_digest
 from ea.core.run import Sha256Digest
 from ea.core.runtime import (
     ReconciliationObservationKind,
@@ -20,7 +47,7 @@ from ea.core.runtime import (
     create_reconciliation_observation_root,
     runtime_root_order_key,
 )
-from ea.runtime._coordinator_read_only import drive_read_only
+from ea.runtime._coordinator_read_only import _pre_ack_state, _ReadOnlyDispatch, drive_read_only
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,52 +163,177 @@ def recover_read_only_dispatch(
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery trace conflicts")
     complete = recovered.completion_record is not None
-    if complete and trace is None and lease is None:
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completed read-only recovery lacks trace")
+    if complete and trace is None:
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion acknowledgement is missing")
     if not complete and trace is not None:
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "incomplete read-only recovery has trace")
+    if not complete:
+        assert lease is not None
+        coordinator._active = coordinator._capture_lease(lease)
+        return
     if lease is not None:
-        active = coordinator._capture_lease(lease)
-        coordinator._active = active
-        if complete:
-            drive_read_only(coordinator, active, complete=True)
-        else:
-            drive_read_only(coordinator, active, complete=False)
-    else:
-        recovered_lease = _RecoveredLease(root, sequence)
-        acknowledged_runtime = _AcknowledgedRuntime(recovered_lease)
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID, "runtime retained an acknowledged read-only lease"
+        )
+    recovered_lease = _RecoveredLease(root, sequence)
+    active = _recovery_active(recovered_lease, root.observation_sha256)
+    route = _prove_completed_read_only_family(coordinator, active, recovered)
+    acknowledged_runtime = _AcknowledgedRuntime(recovered_lease)
+    coordinator._runtime = acknowledged_runtime
+    try:
         active = coordinator._capture_lease(recovered_lease)
+        active.read_only = route
         coordinator._active = active
-        coordinator._runtime = acknowledged_runtime
-        try:
-            drive_read_only(coordinator, active, complete=True)
-        finally:
-            coordinator._runtime = runtime
-    _require_retained_family(active, recovered)
-    if complete and lease is not None and not getattr(runtime, "trace_records", ()):
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion acknowledgement is missing")
+        drive_read_only(coordinator, active, complete=True)
+    finally:
+        coordinator._runtime = runtime
 
 
-def _require_retained_family(active: Any, recovered: Any) -> None:
-    route = active.read_only
-    for acknowledgement, retained in zip(
-        (route.outcome_ack, route.refresh_ack, route.completion_ack),
-        (
-            recovered.read_only_outcome_record,
-            recovered.refresh_record,
-            recovered.completion_record,
-        ),
-        strict=True,
+def _recovery_active(lease: _RecoveredLease, trigger_sha256: Sha256Digest) -> Any:
+    return type("_RecoveryActive", (), {"lease": lease, "trigger_sha256": trigger_sha256})()
+
+
+def _prove_completed_read_only_family(
+    coordinator: Any, active: Any, recovered: Any
+) -> _ReadOnlyDispatch:
+    root = active.lease.root
+    sequence = active.lease.dispatch_sequence
+    authority = coordinator._reconciliation_authority
+    outcome = authority.resolve_outcome(root.observation)
+    if (
+        type(outcome) is not ReconciliationOutcome
+        or outcome.observation_sha256 != reconciliation_observation_digest(root.observation)
+        or outcome.dispatch_sequence != sequence
     ):
-        if retained is None:
-            continue
-        if acknowledgement is None or (
-            audit_append_acknowledgement_digest(acknowledgement)
-            != audit_append_acknowledgement_digest(retained[2])
-        ):
-            raise LifecycleError(
-                OutcomeCode.CONFLICTING_ID, "read-only recovery settlement conflicts"
-            )
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery outcome conflicts")
+    outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
+    outcome_key = AuditLogicalKey(
+        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        AuditSubjectKind.RECONCILIATION_OUTCOME,
+        audit_subject_digest(AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME, outcome_payload),
+    )
+    outcome_ack = _require_retained_ack(
+        coordinator, recovered.read_only_outcome_record, outcome_key, outcome_payload
+    )
+    ledger, risk, refresh_authority, _frontier = coordinator._read_only_gate()
+    if outcome.halt_requested:
+        risk.engage_halt(
+            RiskHaltReason.RECONCILIATION_REQUIRED,
+            causal_root_available_at=root.available_at,
+            dispatch_sequence=sequence,
+        )
+    snapshot = ledger.snapshot
+    risk_state = risk.risk_state
+    refresh = refresh_authority.create_refresh(
+        snapshot=snapshot,
+        risk_state=risk_state,
+        dispatch_sequence=sequence,
+        ordered_ledger_ack_frontier_sha256=_empty_ledger_frontier(),
+        coordinator_running=coordinator._state.phase.value == "running",
+        publication_window_clear=True,
+        candidate_matches_internal=True,
+    )
+    refresh_payload = canonical_portfolio_risk_refresh_bytes(refresh)
+    refresh_key = AuditLogicalKey(
+        AuditRecordKind.RISK_PORTFOLIO_REFRESH,
+        AuditSubjectKind.PORTFOLIO_RISK_REFRESH,
+        audit_subject_digest(AuditRecordKind.RISK_PORTFOLIO_REFRESH, refresh_payload),
+    )
+    refresh_ack = _require_retained_ack(
+        coordinator, recovered.refresh_record, refresh_key, refresh_payload
+    )
+    if refresh_ack.record_id.owner_sequence != outcome_ack.record_id.owner_sequence + 1:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID, "outcome and refresh records are not contiguous"
+        )
+    pre_ack_state = _pre_ack_state(
+        _recovery_state_view(coordinator, active), active, outcome_ack, refresh_ack
+    )
+    completion_payload = canonical_dispatch_completed_v4_audit_payload(
+        binding=coordinator._binding,
+        dispatch_sequence=sequence,
+        trigger_root_key=runtime_root_order_key(root),
+        trigger_root_sha256=active.trigger_sha256,
+        observation_sha256=root.observation_sha256,
+        outcome_acknowledgement=outcome_ack,
+        refresh_acknowledgement=refresh_ack,
+        refresh_value_sha256=portfolio_risk_refresh_digest(refresh),
+        final_portfolio_snapshot_sha256=portfolio_snapshot_digest(snapshot),
+        final_risk_state_sha256=risk_state_snapshot_digest(risk_state),
+        pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
+    )
+    completion_key = AuditLogicalKey(
+        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
+        AuditSubjectKind.RUNTIME_DISPATCH,
+        dispatch_completed_subject_digest(completion_payload),
+    )
+    completion_ack = _require_retained_ack(
+        coordinator, recovered.completion_record, completion_key, completion_payload
+    )
+    if completion_ack.record_id.owner_sequence != refresh_ack.record_id.owner_sequence + 1:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID, "refresh and completion records are not contiguous"
+        )
+    return _ReadOnlyDispatch(
+        outcome=outcome,
+        outcome_ack=outcome_ack,
+        refresh=refresh,
+        refresh_ack=refresh_ack,
+        completion_ack=completion_ack,
+        pre_ack_state=pre_ack_state,
+    )
+
+
+def _require_retained_ack(
+    coordinator: Any, retained: Any, key: AuditLogicalKey, payload: bytes
+) -> Any:
+    if retained is None or retained[1].canonical_payload != payload:
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery payload conflicts")
+    acknowledgement = retained[2]
+    try:
+        require_audit_acknowledgement(
+            acknowledgement,
+            binding=coordinator._binding,
+            logical_key=key,
+            canonical_payload=payload,
+        )
+    except ValueError as error:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID, "read-only recovery settlement conflicts"
+        ) from error
+    return acknowledgement
+
+
+def _empty_ledger_frontier() -> Sha256Digest:
+    from ea.core.lifecycle import ORDERED_LEDGER_ACK_DIGEST_DOMAIN
+
+    return ordered_digest_tuple(ORDERED_LEDGER_ACK_DIGEST_DOMAIN, ())
+
+
+def _recovery_state_view(coordinator: Any, active: Any) -> Any:
+    state = coordinator._state
+    phase = (
+        CoordinatorPhase.FAILING
+        if state.phase is CoordinatorPhase.FAILING
+        else CoordinatorPhase.RUNNING
+    )
+    captured = create_coordinator_run_state(
+        binding=coordinator._binding,
+        state_version=state.state_version + 1,
+        phase=phase,
+        active_dispatch_sequence=active.lease.dispatch_sequence,
+        active_trigger_root_sha256=active.trigger_sha256,
+        matcher_batch_sha256=None,
+        ordered_ingress_sha256s_sha256=ordered_digest_tuple(ORDERED_INGRESS_DIGEST_DOMAIN, ()),
+        ordered_outcome_ack_sha256s_sha256=ordered_digest_tuple(
+            ORDERED_OUTCOME_ACK_DIGEST_DOMAIN, ()
+        ),
+        missing_audit_logical_keys=(),
+        failure_code=state.failure_code,
+        last_completed_dispatch_sequence=state.last_completed_dispatch_sequence,
+        last_audit_chain_head_sha256=state.last_audit_chain_head_sha256,
+    )
+    return type("_RecoveryStateView", (), {"_binding": coordinator._binding, "_state": captured})()
 
 
 def _trace_order_key(root: ReconciliationObservationRoot) -> list[str | int]:
