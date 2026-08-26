@@ -76,6 +76,7 @@ from ea.core.lifecycle import (
     LifecycleDispatchWindow,
     LifecycleError,
     PreTerminalCoordinatorState,
+    ReadOnlyReconciliationDispatchWindow,
     RuntimeDispatchLeaseView,
     RuntimeLifecyclePort,
     SubmissionAuthorizationAttemptOutcome,
@@ -554,6 +555,14 @@ class Phase1HistoricalLifecycleCoordinator:
         try:
             active = self._active
             if active is not None and _is_read_only_root(active.lease.root):
+                if (
+                    type(window) is not ReadOnlyReconciliationDispatchWindow
+                    or active.read_only is None
+                    or getattr(active.read_only, "window", None) is not window
+                ):
+                    raise LifecycleError(
+                        OutcomeCode.CONFLICTING_ID, "active dispatch window conflicts"
+                    )
                 return _drive_read_only(self, active, complete=True)
             if type(window) is not ActiveDispatchWindow:
                 raise LifecycleError(OutcomeCode.CONFLICTING_ID, "active dispatch window conflicts")

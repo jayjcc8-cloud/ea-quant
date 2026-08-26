@@ -210,10 +210,18 @@ def drive_read_only(
         or refresh.ordered_ledger_ack_frontier_sha256 != empty_frontier
         or refresh.portfolio_snapshot_sha256 != portfolio_snapshot_digest(snapshot)
         or refresh.risk_state_sha256 != risk_state_snapshot_digest(risk_state)
-        or portfolio_risk_refresh_digest(refresh) != portfolio_risk_refresh_digest(refresh)
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only refresh frontier conflicts")
-    frontier.advance(snapshot=snapshot, risk_state=risk_state, refresh=refresh)
+    if route.window is None:
+        frontier.advance(snapshot=snapshot, risk_state=risk_state, refresh=refresh)
+    elif (
+        frontier.previous_refresh_sha256 != portfolio_risk_refresh_digest(refresh)
+        or portfolio_snapshot_digest(frontier.current_snapshot())
+        != route.window.final_portfolio_snapshot_sha256
+        or risk_state_snapshot_digest(frontier.current_state())
+        != route.window.final_risk_state_sha256
+    ):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only refresh frontier conflicts")
     if route.pre_ack_state is None:
         route.pre_ack_state = _pre_ack_state(coordinator, active, outcome_ack, refresh_ack)
     pre_ack_sha256 = coordinator_run_state_digest(route.pre_ack_state)
