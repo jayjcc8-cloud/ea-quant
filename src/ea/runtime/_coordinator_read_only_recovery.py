@@ -174,10 +174,6 @@ def _require_retained_family(active: Any, recovered: Any) -> None:
         strict=True,
     ):
         if retained is None:
-            if acknowledgement is not None:
-                raise LifecycleError(
-                    OutcomeCode.CONFLICTING_ID, "read-only recovery overran prefix"
-                )
             continue
         if acknowledgement is None or (
             audit_append_acknowledgement_digest(acknowledgement)
