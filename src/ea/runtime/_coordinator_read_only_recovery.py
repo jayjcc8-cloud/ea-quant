@@ -12,12 +12,14 @@ from ea.core.audit import (
     AuditLogicalKey,
     AuditRecordKind,
     AuditSubjectKind,
+    audit_append_acknowledgement_digest,
     audit_subject_digest,
     ordered_digest_tuple,
     require_audit_acknowledgement,
 )
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.ledger_integration import (
+    _create_portfolio_risk_refresh,
     canonical_portfolio_risk_refresh_bytes,
     portfolio_risk_refresh_digest,
 )
@@ -26,6 +28,7 @@ from ea.core.lifecycle import (
     ORDERED_OUTCOME_ACK_DIGEST_DOMAIN,
     CoordinatorPhase,
     LifecycleError,
+    _create_read_only_reconciliation_dispatch_outcome,
     canonical_dispatch_completed_v4_audit_payload,
     coordinator_run_state_digest,
     create_coordinator_run_state,
@@ -39,7 +42,7 @@ from ea.core.reconciliation import (
     decode_reconciliation_observation,
     reconciliation_observation_digest,
 )
-from ea.core.risk import RiskHaltReason, risk_state_snapshot_digest
+from ea.core.risk import RiskHaltReason, _create_risk_state_snapshot, risk_state_snapshot_digest
 from ea.core.run import Sha256Digest
 from ea.core.runtime import (
     ReconciliationObservationKind,
@@ -47,13 +50,27 @@ from ea.core.runtime import (
     create_reconciliation_observation_root,
     runtime_root_order_key,
 )
-from ea.runtime._coordinator_read_only import _pre_ack_state, _ReadOnlyDispatch, drive_read_only
+from ea.runtime._coordinator_read_only import (
+    _completed_state,
+    _create_read_only_window,
+    _pre_ack_state,
+    _ReadOnlyDispatch,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class _RecoveredLease:
     root: ReconciliationObservationRoot
     dispatch_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ProvenReadOnlyFamily:
+    route: _ReadOnlyDispatch
+    snapshot: Any
+    before_risk: Any
+    expected_risk: Any
+    resulting_state: Any
 
 
 @dataclass(slots=True)
@@ -177,16 +194,8 @@ def recover_read_only_dispatch(
         )
     recovered_lease = _RecoveredLease(root, sequence)
     active = _recovery_active(recovered_lease, root.observation_sha256)
-    route = _prove_completed_read_only_family(coordinator, active, recovered)
-    acknowledged_runtime = _AcknowledgedRuntime(recovered_lease)
-    coordinator._runtime = acknowledged_runtime
-    try:
-        active = coordinator._capture_lease(recovered_lease)
-        active.read_only = route
-        coordinator._active = active
-        drive_read_only(coordinator, active, complete=True)
-    finally:
-        coordinator._runtime = runtime
+    proven = _prove_completed_read_only_family(coordinator, active, recovered)
+    _apply_proven_read_only_family(coordinator, active, proven)
 
 
 def _recovery_active(lease: _RecoveredLease, trigger_sha256: Sha256Digest) -> Any:
@@ -195,7 +204,7 @@ def _recovery_active(lease: _RecoveredLease, trigger_sha256: Sha256Digest) -> An
 
 def _prove_completed_read_only_family(
     coordinator: Any, active: Any, recovered: Any
-) -> _ReadOnlyDispatch:
+) -> _ProvenReadOnlyFamily:
     root = active.lease.root
     sequence = active.lease.dispatch_sequence
     authority = coordinator._reconciliation_authority
@@ -218,23 +227,18 @@ def _prove_completed_read_only_family(
     outcome_ack = _require_retained_ack(
         coordinator, recovered.read_only_outcome_record, outcome_key, outcome_payload
     )
-    ledger, risk, refresh_authority, _frontier = coordinator._read_only_gate()
-    if outcome.halt_requested:
-        risk.engage_halt(
-            RiskHaltReason.RECONCILIATION_REQUIRED,
-            causal_root_available_at=root.available_at,
-            dispatch_sequence=sequence,
-        )
+    ledger, risk, refresh_authority, frontier = coordinator._read_only_gate()
     snapshot = ledger.snapshot
-    risk_state = risk.risk_state
-    refresh = refresh_authority.create_refresh(
-        snapshot=snapshot,
-        risk_state=risk_state,
-        dispatch_sequence=sequence,
-        ordered_ledger_ack_frontier_sha256=_empty_ledger_frontier(),
-        coordinator_running=coordinator._state.phase.value == "running",
-        publication_window_clear=True,
-        candidate_matches_internal=True,
+    before_risk = risk.risk_state
+    if risk_state_snapshot_digest(before_risk) != risk_state_snapshot_digest(
+        frontier.current_state()
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID, "read-only recovery risk frontier conflicts"
+        )
+    expected_risk = _derive_expected_recovery_risk_state(before_risk, outcome, root, sequence)
+    refresh = _derive_expected_recovery_refresh(
+        coordinator, snapshot, expected_risk, refresh_authority, frontier, sequence
     )
     refresh_payload = canonical_portfolio_risk_refresh_bytes(refresh)
     refresh_key = AuditLogicalKey(
@@ -262,7 +266,7 @@ def _prove_completed_read_only_family(
         refresh_acknowledgement=refresh_ack,
         refresh_value_sha256=portfolio_risk_refresh_digest(refresh),
         final_portfolio_snapshot_sha256=portfolio_snapshot_digest(snapshot),
-        final_risk_state_sha256=risk_state_snapshot_digest(risk_state),
+        final_risk_state_sha256=risk_state_snapshot_digest(expected_risk),
         pre_ack_state_sha256=coordinator_run_state_digest(pre_ack_state),
     )
     completion_key = AuditLogicalKey(
@@ -277,13 +281,135 @@ def _prove_completed_read_only_family(
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID, "refresh and completion records are not contiguous"
         )
-    return _ReadOnlyDispatch(
+    route = _ReadOnlyDispatch(
         outcome=outcome,
         outcome_ack=outcome_ack,
         refresh=refresh,
         refresh_ack=refresh_ack,
         completion_ack=completion_ack,
         pre_ack_state=pre_ack_state,
+    )
+    return _ProvenReadOnlyFamily(
+        route=route,
+        snapshot=snapshot,
+        before_risk=before_risk,
+        expected_risk=expected_risk,
+        resulting_state=_completed_state(
+            _recovery_state_view(coordinator, active), active, completion_ack
+        ),
+    )
+
+
+def _derive_expected_recovery_risk_state(
+    current: Any, outcome: ReconciliationOutcome, root: ReconciliationObservationRoot, sequence: int
+) -> Any:
+    if not outcome.halt_requested or current.halted:
+        return current
+    return _create_risk_state_snapshot(
+        run_id=current.run_id,
+        policy_id=current.policy_id,
+        policy_sha256=current.policy_sha256,
+        risk_state_version=1,
+        halted=True,
+        halt_reason=RiskHaltReason.RECONCILIATION_REQUIRED,
+        halt_causal_root_available_at=root.available_at,
+        halt_dispatch_sequence=sequence,
+        conflict_existing_intent_sha256=None,
+        conflict_submitted_intent_sha256=None,
+    )
+
+
+def _derive_expected_recovery_refresh(
+    coordinator: Any,
+    snapshot: Any,
+    risk_state: Any,
+    refresh_authority: Any,
+    frontier: Any,
+    sequence: int,
+) -> Any:
+    if refresh_authority.next_sequence != sequence:
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID, "read-only recovery refresh sequence conflicts"
+        )
+    return _create_portfolio_risk_refresh(
+        portfolio_snapshot=snapshot,
+        risk_state=risk_state,
+        dispatch_sequence=sequence,
+        refresh_sequence=sequence,
+        ordered_ledger_ack_frontier_sha256=_empty_ledger_frontier(),
+        submission_permitted=(
+            not risk_state.halted
+            and not snapshot.open_reconciliation_refs
+            and snapshot.open_reconciliation_bindings == ()
+            and coordinator._state.phase.value == "running"
+        ),
+        previous_refresh_sha256=frontier.previous_refresh_sha256,
+    )
+
+
+def _apply_proven_read_only_family(
+    coordinator: Any, active: Any, proven: _ProvenReadOnlyFamily
+) -> None:
+    route = proven.route
+    assert route.outcome is not None and route.outcome_ack is not None
+    assert (
+        route.refresh is not None
+        and route.refresh_ack is not None
+        and route.completion_ack is not None
+        and route.pre_ack_state is not None
+    )
+    ledger, risk, refresh_authority, frontier = coordinator._read_only_gate()
+    if (
+        ledger.snapshot is not proven.snapshot
+        or risk_state_snapshot_digest(risk.risk_state)
+        != risk_state_snapshot_digest(proven.before_risk)
+        or risk_state_snapshot_digest(frontier.current_state())
+        != risk_state_snapshot_digest(proven.before_risk)
+        or refresh_authority.next_sequence != active.lease.dispatch_sequence
+        or frontier.previous_refresh_sha256 != route.refresh.previous_refresh_sha256
+    ):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery inputs drifted")
+    window = _create_read_only_window(
+        coordinator._binding,
+        coordinator._state.state_version + 1,
+        active,
+        route.outcome_ack,
+        route.refresh,
+        route.refresh_ack,
+        proven.snapshot,
+        proven.expected_risk,
+        coordinator_run_state_digest(route.pre_ack_state),
+    )
+    if route.outcome.halt_requested:
+        risk.engage_halt(
+            RiskHaltReason.RECONCILIATION_REQUIRED,
+            active.lease.root.available_at,
+            active.lease.dispatch_sequence,
+        )
+    if risk_state_snapshot_digest(risk.risk_state) != risk_state_snapshot_digest(
+        proven.expected_risk
+    ):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery risk conflicts")
+    refresh = refresh_authority.create_refresh(
+        snapshot=proven.snapshot,
+        risk_state=risk.risk_state,
+        dispatch_sequence=active.lease.dispatch_sequence,
+        ordered_ledger_ack_frontier_sha256=_empty_ledger_frontier(),
+        coordinator_running=coordinator._state.phase.value == "running",
+        publication_window_clear=True,
+        candidate_matches_internal=True,
+    )
+    if canonical_portfolio_risk_refresh_bytes(refresh) != canonical_portfolio_risk_refresh_bytes(
+        route.refresh
+    ):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery refresh conflicts")
+    frontier.advance(snapshot=proven.snapshot, risk_state=risk.risk_state, refresh=refresh)
+    coordinator._state = proven.resulting_state
+    coordinator._active = None
+    _create_read_only_reconciliation_dispatch_outcome(
+        window=window,
+        dispatch_completion_ack_sha256=audit_append_acknowledgement_digest(route.completion_ack),
+        resulting_state=proven.resulting_state,
     )
 
 

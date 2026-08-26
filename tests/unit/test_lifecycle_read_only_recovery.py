@@ -24,7 +24,12 @@ from ea.core.runtime import RuntimeOrderingError, runtime_root_order_key
 from ea.experiments.audit import create_posix_audit_journal
 from ea.experiments.store import LocalResultStore
 from ea.runtime._coordinator_read_only import drive_read_only
-from ea.runtime._coordinator_read_only_recovery import _require_read_only_recovery_order
+from ea.runtime._coordinator_read_only_recovery import (
+    _prove_completed_read_only_family,
+    _RecoveredLease,
+    _recovery_active,
+    _require_read_only_recovery_order,
+)
 from ea.runtime._coordinator_recovery import _require_runtime_trace
 from ea.runtime.coordinator import (
     create_phase1_lifecycle_coordinator,
@@ -362,6 +367,48 @@ def test_completed_journal_with_wrong_trace_fails_before_recovery_side_effects(
     assert len(journal.records) == retained_count
     assert runtime.acknowledgement_calls == acknowledgement_calls
     assert recovery_ports["frontier"].previous_refresh_sha256 is None
+
+
+def test_completed_halted_journal_with_bad_refresh_fails_before_risk_halt(
+    tmp_path: Path,
+) -> None:
+    coordinator, matcher, reconciliation, _ports, runtime, journal, _root_value = (
+        _journal_bound_read_only_dispatch(tmp_path, write_trace=True)
+    )
+    active = coordinator._capture_lease(runtime.pop())
+    coordinator._active = active
+    drive_read_only(coordinator, active, complete=True)
+    retained_count = len(journal.records)
+    acknowledgement_calls = runtime.acknowledgement_calls
+    recovery_ports = _ledger_ports(matcher, first_sequence=1, first_previous_refresh_sha256=None)
+    records = tuple(journal.records)
+    from ea.core.audit import create_audit_append_acknowledgement
+
+    recovered = SimpleNamespace(
+        read_only_outcome_record=(2, records[1], create_audit_append_acknowledgement(records[1])),
+        refresh_record=(3, SimpleNamespace(canonical_payload=b"{}"), None),
+        completion_record=(4, records[3], create_audit_append_acknowledgement(records[3])),
+    )
+    recovery_coordinator = SimpleNamespace(
+        _binding=journal.binding,
+        _state=coordinator._state,
+        _reconciliation_authority=reconciliation,
+        _read_only_gate=lambda: (
+            recovery_ports["ledger_handoff_authority"],
+            recovery_ports["risk_authority"],
+            recovery_ports["risk_refresh_authority"],
+            recovery_ports["frontier"],
+        ),
+    )
+    proof_active = _recovery_active(_RecoveredLease(_root_value, 1), _root_value.observation_sha256)
+
+    with pytest.raises(LifecycleError, match="payload conflicts"):
+        _prove_completed_read_only_family(recovery_coordinator, proof_active, recovered)
+
+    assert recovery_ports["risk_authority"].risk_state.halted is False
+    assert recovery_ports["frontier"].previous_refresh_sha256 is None
+    assert len(journal.records) == retained_count
+    assert runtime.acknowledgement_calls == acknowledgement_calls
 
 
 def test_completed_journal_with_substituted_outcome_fails_before_recovery_side_effects(

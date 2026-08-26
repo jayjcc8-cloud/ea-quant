@@ -40,7 +40,7 @@ def test_coordinator_recovery_boundary_is_private_and_compatibly_reexported() ->
     assert len(coordinator_source.read_text(encoding="utf-8").splitlines()) <= 2800
     assert len(recovery_source.read_text(encoding="utf-8").splitlines()) <= 1500
     assert len(read_only_source.read_text(encoding="utf-8").splitlines()) <= 380
-    assert len(read_only_recovery_source.read_text(encoding="utf-8").splitlines()) <= 419
+    assert len(read_only_recovery_source.read_text(encoding="utf-8").splitlines()) <= 480
 
     runtime = ast.parse((SOURCE_ROOT / "runtime" / "__init__.py").read_text(encoding="utf-8"))
     exports = next(

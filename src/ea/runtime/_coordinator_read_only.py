@@ -218,24 +218,17 @@ def drive_read_only(
         route.pre_ack_state = _pre_ack_state(coordinator, active, outcome_ack, refresh_ack)
     pre_ack_sha256 = coordinator_run_state_digest(route.pre_ack_state)
     if route.window is None:
-        carrier = _create_structurally_valid_read_only_reconciliation_carrier(
-            binding=coordinator._binding,
-            coordinator_state_version=coordinator._state.state_version,
-            dispatch_sequence=sequence,
-            trigger_root_key=runtime_root_order_key(root),
-            trigger_root_sha256=active.trigger_sha256,
-            observation_sha256=root.observation_sha256,
-            outcome_ack_sha256=audit_append_acknowledgement_digest(outcome_ack),
-            refresh_ack_sha256=audit_append_acknowledgement_digest(refresh_ack),
-            refresh_value_sha256=portfolio_risk_refresh_digest(refresh),
-            final_portfolio_snapshot_sha256=portfolio_snapshot_digest(frontier.current_snapshot()),
-            final_risk_state_sha256=risk_state_snapshot_digest(frontier.current_state()),
-            pre_ack_state_sha256=pre_ack_sha256,
+        route.window = _create_read_only_window(
+            coordinator._binding,
+            coordinator._state.state_version,
+            active,
+            outcome_ack,
+            refresh,
+            refresh_ack,
+            snapshot,
+            risk_state,
+            pre_ack_sha256,
         )
-        witness = object.__new__(_SubjectBoundReadOnlyReconciliationWitness)
-        object.__setattr__(witness, "carrier", carrier)
-        object.__setattr__(witness, "_seal", _VALUE_SEAL)
-        route.window = _create_read_only_reconciliation_dispatch_window(witness=witness)
     if not complete:
         return route.window
     completion_payload = canonical_dispatch_completed_v4_audit_payload(
@@ -280,6 +273,38 @@ def drive_read_only(
         dispatch_completion_ack_sha256=audit_append_acknowledgement_digest(completion_ack),
         resulting_state=resulting_state,
     )
+
+
+def _create_read_only_window(
+    binding: Any,
+    state_version: int,
+    active: Any,
+    outcome_ack: AuditAppendAcknowledgement,
+    refresh: PortfolioRiskRefresh,
+    refresh_ack: AuditAppendAcknowledgement,
+    snapshot: Any,
+    risk_state: Any,
+    pre_ack_sha256: Any,
+) -> ReadOnlyReconciliationDispatchWindow:
+    root = active.lease.root
+    carrier = _create_structurally_valid_read_only_reconciliation_carrier(
+        binding=binding,
+        coordinator_state_version=state_version,
+        dispatch_sequence=active.lease.dispatch_sequence,
+        trigger_root_key=runtime_root_order_key(root),
+        trigger_root_sha256=active.trigger_sha256,
+        observation_sha256=root.observation_sha256,
+        outcome_ack_sha256=audit_append_acknowledgement_digest(outcome_ack),
+        refresh_ack_sha256=audit_append_acknowledgement_digest(refresh_ack),
+        refresh_value_sha256=portfolio_risk_refresh_digest(refresh),
+        final_portfolio_snapshot_sha256=portfolio_snapshot_digest(snapshot),
+        final_risk_state_sha256=risk_state_snapshot_digest(risk_state),
+        pre_ack_state_sha256=pre_ack_sha256,
+    )
+    witness = object.__new__(_SubjectBoundReadOnlyReconciliationWitness)
+    object.__setattr__(witness, "carrier", carrier)
+    object.__setattr__(witness, "_seal", _VALUE_SEAL)
+    return _create_read_only_reconciliation_dispatch_window(witness=witness)
 
 
 def _require_ack(
