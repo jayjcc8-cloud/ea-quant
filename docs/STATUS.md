@@ -6,12 +6,13 @@
 
 When this file is read from merged `main`, the containing `main` commit and its exact CI are the
 authoritative implementation checkpoint. The latest completed Tier 2 delivery checkpoint is
-Issue #76 D76-001/D76-002 through PR #96: `VERIFIED_ON_MAIN` at
-`main@b79e13c91302bd31596126e728f83eb1f8512113`; its exact merged-main CI run `32761371288`
-succeeded. The reviewed source head is `3f26be26fdcb79aa26fb983041f4fc57dafd06cd`. The governance
-control plane is Complete and remains in Maintenance mode. The completed #77 / PR #91 recovery
-delivery is a historical checkpoint superseded as the latest checkpoint by PR #96 merged-main
-verification; resolve mutable Issue and pull-request state from GitHub.
+Issue #101 through PR #102 plus CANONICAL-003 repair PR #103: `VERIFIED_ON_MAIN` at
+`main@17b59e0d37a05f7df9f31ba41ed919f910c57157`; its exact merged-main CI run `32929095442`
+succeeded. The reviewed repair source head is `ab7ac6dbc46b8b9e49c047695d41c75b0f1b8ac5`; PR #102's
+reviewed structural source head is `5b848699809ffd662978f491ee787a7f4d593d0e`. The governance
+control plane is Complete and remains in Maintenance mode. The completed #77 / PR #91 and
+D76-001/D76-002 / PR #96 deliveries remain historical checkpoints; resolve mutable Issue and
+pull-request state from GitHub.
 
 ## Phase Objective
 
@@ -40,7 +41,7 @@ report, with durable audit evidence and no live or external order-writing capabi
   recovery helper is 1,462 lines. `ADV-001` and `VERIFY-001` are FIXED. The pinned comparison
   measured +1.2579% wall time and +0.0215% RSS, within the 10% threshold; merged-main CI run
   `32621789347` succeeded. Historical checkpoint — superseded as the latest checkpoint by PR #96
-  merged-main verification.
+  and later by Issue #101 / PRs #102/#103 merged-main verification.
 - Bounded Issue #77 runtime cleanup/archive completed: the Approval report SHA-256 is
   `198ffc3ae4046de8e4f7ba73fdc87714f25db68bbfc168e8c2d523a50ba27ed6`; the 20-entry archived
   evidence manifest `SHA256SUMS` has SHA-256
@@ -53,6 +54,16 @@ report, with durable audit evidence and no live or external order-writing capabi
   coverage, reproducible wheels, isolated installation, and doctor succeeded. `APPROVAL-001/002/003`
   are FIXED; merged-main Verification report SHA-256:
   `44f8670ba240d7b89a5f06eeb6d1e407747344ab5b4b296c995cec19f43a5572`.
+- Issue #101 delivered the dormant structural prerequisite for #97 through PR #102 and repaired
+  CANONICAL-003 through PR #103. PR #102's reviewed source
+  `5b848699809ffd662978f491ee787a7f4d593d0e` was squash-merged as
+  `main@eb6cbb06cb36571c7e4a78902c91865a38d8bb2e`; the repair source
+  `ab7ac6dbc46b8b9e49c047695d41c75b0f1b8ac5` was squash-merged as
+  `main@17b59e0d37a05f7df9f31ba41ed919f910c57157`. Source and squash trees were identical in both
+  deliveries. Exact repaired-main CI run `32929095442`, focused/governance tests, quality/full,
+  coverage, reproducible wheels, isolated installation, and doctor succeeded. `SEAM-001`,
+  `CANONICAL-001/002/003`, and `VERIFY-001` are FIXED. The structural prerequisite remains dormant:
+  it does not activate a runtime route or grant #97 journal-aware subject-binding authority.
 
 ## Incomplete
 
@@ -61,8 +72,10 @@ report, with durable audit evidence and no live or external order-writing capabi
   serialized through [#97](https://github.com/jayjcc8-cloud/ea-quant/issues/97) →
   [#98](https://github.com/jayjcc8-cloud/ea-quant/issues/98) →
   [#99](https://github.com/jayjcc8-cloud/ea-quant/issues/99) → final #76 reconciliation.
-- #97 is the next ordered successor, but remains `status:draft` + `blocked`, with no writer lease
-  or implementation authority. “Next” does not mean unlocked.
+- #97 is the next ordered successor and remains `status:in-progress` + `blocked` on
+  `JOURNAL-BINDING-001`, with no writer lease or implementation authority. Its dormant structural
+  prerequisite is verified on main, but runtime integration still requires a fresh Tier 2 Decision
+  Gate. “Next” does not mean implementation is authorized.
 - [#81](https://github.com/jayjcc8-cloud/ea-quant/issues/81): add concrete sample strategies.
 - [#82](https://github.com/jayjcc8-cloud/ea-quant/issues/82): compose a deterministic end-to-end
   historical backtest.
@@ -73,8 +86,9 @@ report, with durable audit evidence and no live or external order-writing capabi
 ## Blockers
 
 - Phase 1 cannot close until #76 completes #97 → #98 → #99 → final reconciliation, followed by
-  sample strategy, end-to-end composition, result/report, and release gates in order. #97 is not
-  unlocked. The completed #77 delivery no longer blocks this chain.
+  sample strategy, end-to-end composition, result/report, and release gates in order. #97 remains
+  blocked on `JOURNAL-BINDING-001` without a writer lease or implementation authority. The
+  completed #77 and #101 structural deliveries no longer block this chain.
 - Phase 1 Closeout #84 remains OPEN with `status:ready` + `blocked`.
 
 No blocker authorizes Phase 2 work, live trading, tool migration, or unrelated refactoring.
@@ -104,6 +118,7 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 - [#77 — GOV-DEBT-001 coordinator decomposition (delivered by PR #91)](https://github.com/jayjcc8-cloud/ea-quant/issues/77)
 - [#79 — GOV-DEBT-002 consolidation file-count exception](https://github.com/jayjcc8-cloud/ea-quant/issues/79)
 - [#76 — Reconciliation observation roots](https://github.com/jayjcc8-cloud/ea-quant/issues/76)
+- [#101 — #97 dormant structural prerequisite (delivered by PRs #102 and #103)](https://github.com/jayjcc8-cloud/ea-quant/issues/101)
 - [#97 — Read-only observation and completion successor](https://github.com/jayjcc8-cloud/ea-quant/issues/97)
 - [#98 — Execution fact, Fill, ledger, and position/cash successor](https://github.com/jayjcc8-cloud/ea-quant/issues/98)
 - [#99 — Order/Fill ancestry authority successor](https://github.com/jayjcc8-cloud/ea-quant/issues/99)
@@ -114,25 +129,26 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 
 ## Last Confirmed
 
-- Date: **2026-08-25** (Asia/Shanghai)
+- Date: **2026-08-26** (Asia/Shanghai)
 - The last independently verified pre-consolidation checkpoint,
   `af7bc08cecd70fc5479b92e4393da468727ddb55`, remains immutable provenance from **2026-08-22**;
   the current confirmation below records the later #77 delivery and cleanup.
-- Latest completed Tier 2 checkpoint: Issue #76 D76-001/D76-002 / PR #96 is
-  `VERIFIED_ON_MAIN` at `main@b79e13c91302bd31596126e728f83eb1f8512113`; merged-main CI run
-  `32761371288` succeeded. The reviewed source head is
-  `3f26be26fdcb79aa26fb983041f4fc57dafd06cd`.
+- Latest completed Tier 2 checkpoint: Issue #101 / PR #102 plus repair PR #103 is
+  `VERIFIED_ON_MAIN` at `main@17b59e0d37a05f7df9f31ba41ed919f910c57157`; merged-main CI run
+  `32929095442` succeeded. The reviewed repair source head is
+  `ab7ac6dbc46b8b9e49c047695d41c75b0f1b8ac5`; the reviewed PR #102 structural source is
+  `5b848699809ffd662978f491ee787a7f4d593d0e`.
 - Current-main resolution: on merged `main`, use the containing `main` commit and its exact CI;
   from any feature branch, resolve current `main` through GitHub rather than treating that branch's
   candidate SHA as merged reality.
 - Issue #77 / PR #91 remains historical delivery evidence for the behavior-equivalent coordinator
-  recovery extraction. It is superseded as the latest checkpoint by PR #96 merged-main
-  verification; its exact-SHA findings, performance comparison, and cleanup/archive evidence remain
-  recorded above.
+  recovery extraction. It is superseded as the latest checkpoint by PR #96 and then Issue #101 /
+  PRs #102/#103 merged-main verification; its exact-SHA findings, performance comparison, and
+  cleanup/archive evidence remain recorded above.
 - Issue #76 remains OPEN with `status:in-progress` + `blocked`. D76-001/D76-002 are complete;
-  #97/#98/#99 and final reconciliation remain. #97 is the next ordered successor but remains
-  `status:draft` + `blocked` with no writer lease or implementation authority. #84 remains OPEN
-  with `status:ready` + `blocked`.
+  #97/#98/#99 and final reconciliation remain. #97 is the next ordered successor and remains
+  `status:in-progress` + `blocked` on `JOURNAL-BINDING-001`, with no writer lease or implementation
+  authority. #84 remains OPEN with `status:ready` + `blocked`.
 - Control-plane provenance: Issue #78 / PR #80; this does not assert mutable open, closed, Draft,
   or merged state.
 - Live capability: unavailable and prohibited
@@ -142,7 +158,8 @@ Update this section whenever merged code/CI, primary Issues, blockers, or Phase 
 ## Phase Completion Conditions
 
 - [x] Core governance workflow has completed real Tier 2 loops through Issue #67 / PR #73 and
-  the delivered Issue #77 / PR #91 recovery extraction.
+  the delivered Issue #77 / PR #91 recovery extraction, with later governed delivery through
+  Issue #101 / PRs #102/#103.
 - [ ] #76 is Done; D76-001/D76-002 are complete, while #97 → #98 → #99 → final reconciliation
   remain in their mandatory order.
 - [ ] Concrete sample strategies are Done.
@@ -155,16 +172,16 @@ Update this section whenever merged code/CI, primary Issues, blockers, or Phase 
 
 ## Weekly Governance Metrics
 
-The first fully instrumented governed delivery sample remains Issue #77 / PR #91. PR #96 is the
-latest verified delivery checkpoint, but values without an authoritative source remain `N/A` and
-are never estimated.
+The first fully instrumented governed delivery sample remains Issue #77 / PR #91. Issue #101 through
+PRs #102/#103 is the latest verified Tier 2 delivery checkpoint, but values without an authoritative
+source remain `N/A` and are never estimated.
 
 | Metric | Latest |
 |---|---:|
-| Accepted pull requests | 2 (#91, #96) |
-| First-pass acceptance rate | 0% (0/2; both required tracked revisions after their first review candidates) |
-| Average rework rounds | N/A — #77 recorded 6 tracked implementation retries; #96 did not record a normalized total suitable for averaging |
+| Accepted pull requests | 4 (#91, #96, #102, #103; docs-only synchronization PRs excluded) |
+| First-pass acceptance rate | 0% (0/4; each delivery required at least one tracked revision after its first review candidate) |
+| Average rework rounds | N/A — #77 recorded 6 tracked implementation retries; later deliveries did not record normalized totals suitable for averaging |
 | Ready-to-Merge time | N/A — no authoritative Ready and merge interval endpoints were recorded |
-| Merges missing evidence or status updates | 0% (0/2) — PR #91 and PR #96 have exact evidence, and this STATUS synchronization closes the PR #96 state lag |
+| Merges missing evidence or status updates | 0% (0/4) — PRs #91/#96/#102/#103 have exact evidence, and this STATUS synchronization closes the #101 state lag |
 | Token and human-time cost per accepted PR | N/A — platform/API exposes no authoritative token counts or human-time ledger |
 | Unresolved decisions existing only in comments | 0 known; decisions are not known to exist only in comments |
