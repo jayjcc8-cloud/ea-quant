@@ -110,7 +110,12 @@ from ea.core.portfolio import (
 from ea.core.reconciliation import ReconciliationObservation, ReconciliationOutcome
 from ea.core.risk import RiskHaltReason, RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
 from ea.core.run import RunBinding, RunId, Sha256Digest
-from ea.core.runtime import EndOfRunRoot, ReconciliationObservationRoot, RuntimeRoot
+from ea.core.runtime import (
+    EndOfRunRoot,
+    ReconciliationObservationRoot,
+    RuntimeRoot,
+    runtime_root_order_key,
+)
 from ea.runtime._coordinator_read_only import drive_read_only as _drive_read_only
 from ea.runtime._coordinator_read_only import is_read_only_root as _is_read_only_root
 from ea.runtime._coordinator_recovery import (
@@ -1562,11 +1567,7 @@ class Phase1HistoricalLifecycleCoordinator:
                 active.completion_ack = completion_acknowledgement
                 active.window_stage = ActiveDispatchWindowStage.COMPLETION_ACKNOWLEDGED
             self._rebind_active_authorities(active)
-            try:
-                self._runtime.acknowledge(active.lease)
-            except Exception:
-                if not self._confirm_committed_runtime_acknowledgement(active):
-                    raise
+            self._acknowledge_runtime(active)
             if type(root) is EndOfRunRoot and not self._confirm_committed_terminal(active):
                 raise LifecycleError(
                     OutcomeCode.CONFLICTING_ID,
@@ -1678,18 +1679,29 @@ class Phase1HistoricalLifecycleCoordinator:
             active.lease.root
         ) is EndOfRunRoot and self._confirm_committed_runtime_acknowledgement(active)
 
+    def _acknowledge_runtime(self, active: _ActiveDispatch) -> None:
+        try:
+            self._runtime.acknowledge(active.lease)
+        except Exception:
+            if not self._confirm_committed_runtime_acknowledgement(active):
+                raise
+
     def _confirm_committed_runtime_acknowledgement(
         self,
         active: _ActiveDispatch,
     ) -> bool:
         root = active.lease.root
         batch = active.batch
-        if (
-            batch is None
-            or self._runtime.active_lease is not None
-            or type(root) not in {MarketDataEnvelope, EndOfRunRoot}
-        ):
+        if self._runtime.active_lease is not None:
             return False
+        if type(root) is ReconciliationObservationRoot:
+            root_order_key = _trace_root_order_key_document(runtime_root_order_key(root))
+            is_terminal = False
+        else:
+            if batch is None or type(root) not in {MarketDataEnvelope, EndOfRunRoot}:
+                return False
+            root_order_key = _trace_root_order_key_document(batch.trigger_root_key)
+            is_terminal = type(root) is EndOfRunRoot
         try:
             trace = _require_runtime_trace(self._runtime, self._binding)
         except LifecycleError:
@@ -1700,11 +1712,9 @@ class Phase1HistoricalLifecycleCoordinator:
         if trace_entry is None:
             return False
         document, root_sha256 = trace_entry
-        is_terminal = type(root) is EndOfRunRoot
         return (
             root_sha256 == active.trigger_sha256
-            and document.get("root_order_key")
-            == _trace_root_order_key_document(batch.trigger_root_key)
+            and document.get("root_order_key") == root_order_key
             and document.get("terminal_acknowledged") is is_terminal
             and self._runtime.terminal_acknowledged is is_terminal
         )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -13,8 +15,11 @@ from ea.core.lifecycle import (
     ReadOnlyReconciliationDispatchOutcome,
     ReadOnlyReconciliationDispatchWindow,
 )
+from ea.core.reconciliation import canonical_reconciliation_observation_bytes
 from ea.core.run import RunBinding, RunReference, Sha256Digest
+from ea.core.runtime import runtime_root_order_key
 from ea.reconciliation.authority import _create_observation_only_reconciliation_authority
+from ea.runtime.historical import historical_runtime_trace_digest
 from unit.test_historical_matcher import _system
 from unit.test_lifecycle_composition import _staged_lifecycle
 from unit.test_lifecycle_coordinator import (
@@ -44,11 +49,43 @@ class _CountingFrontier:
 class _CountingRuntime(_Runtime):
     acknowledgement_calls = 0
     fail_once = False
+    commit_then_raise = False
 
     def acknowledge(self, lease: Any) -> None:
         self.acknowledgement_calls += 1
         if self.fail_once:
             self.fail_once = False
+            if self.commit_then_raise:
+                super().acknowledge(lease)
+                root_document = json.loads(
+                    canonical_reconciliation_observation_bytes(lease.root.observation)
+                )
+                root_order_key = [
+                    value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                    if type(value) is datetime
+                    else value
+                    for value in runtime_root_order_key(lease.root).as_tuple()
+                ]
+                record = json.dumps(
+                    {
+                        "clock_now": root_document["available_at"],
+                        "committed_cursor_as_of": None,
+                        "committed_event_count": 0,
+                        "data_sha256": "00" * 32,
+                        "dispatch_sequence": lease.dispatch_sequence,
+                        "root": root_document,
+                        "root_order_key": root_order_key,
+                        "run_id": self.run_id.value,
+                        "schema": "ea.phase1-historical-runtime-trace.v2",
+                        "terminal_acknowledged": False,
+                    },
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                self.trace_records = (record,)
+                self.trace_digest = historical_runtime_trace_digest(self.trace_records)
             raise RuntimeError("injected acknowledgement failure")
         super().acknowledge(lease)
 
@@ -59,6 +96,7 @@ def _read_only_coordinator(
     *,
     dispatch_sequence: int = 1,
     fail_once: bool = False,
+    commit_then_raise: bool = False,
 ) -> tuple[Any, _MemoryAudit, dict[str, Any], _CountingRuntime]:
     ports = _ledger_ports(
         matcher,
@@ -77,6 +115,7 @@ def _read_only_coordinator(
     audit = _MemoryAudit(binding)
     runtime = _CountingRuntime(matcher, root, dispatch_sequence=dispatch_sequence)
     runtime.fail_once = fail_once
+    runtime.commit_then_raise = commit_then_raise
     coordinator = create_phase1_lifecycle_coordinator(
         binding=binding,
         audit=audit,
@@ -150,6 +189,35 @@ def test_retained_read_only_window_completes_and_publishes_only_once(retry: str)
     assert ports["frontier"].advance_calls == 1
     assert runtime.acknowledgement_calls == 2
     assert len(audit.records) == 4
+
+
+@pytest.mark.parametrize(
+    "retry",
+    ("retry_active_dispatch_completion", "retry_active_dispatch"),
+)
+def test_read_only_commit_then_raise_retries_without_duplicate_effects(retry: str) -> None:
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    coordinator, audit, ports, runtime = _read_only_coordinator(
+        matcher,
+        _root(matcher),
+        fail_once=True,
+        commit_then_raise=True,
+    )
+    window = coordinator.begin_next_dispatch()
+
+    outcome = coordinator.complete_active_dispatch(window)
+
+    assert runtime.active_lease is None
+    assert len(runtime.trace_records) == 1
+    assert len(audit.records) == 4
+    assert ports["frontier"].advance_calls == 1
+
+    assert type(outcome) is ReadOnlyReconciliationDispatchOutcome
+    assert outcome.runtime_acknowledged is True
+    assert runtime.acknowledgement_calls == 1
+    with pytest.raises(LifecycleError):
+        getattr(coordinator, retry)()
+    assert (len(audit.records), ports["frontier"].advance_calls) == (4, 1)
 
 
 @pytest.mark.parametrize(

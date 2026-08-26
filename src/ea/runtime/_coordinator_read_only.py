@@ -272,7 +272,7 @@ def drive_read_only(
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID, "refresh and completion records are not contiguous"
         )
-    coordinator._runtime.acknowledge(active.lease)
+    coordinator._acknowledge_runtime(active)
     resulting_state = _completed_state(coordinator, active, completion_ack)
     coordinator._state = resulting_state
     coordinator._active = None
