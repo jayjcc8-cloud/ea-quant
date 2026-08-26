@@ -11,10 +11,10 @@ from hashlib import sha256
 from typing import Protocol, final
 
 from ea.core.execution import InstrumentExecutionSpecSet
-from ea.core.execution_identity import EconomicId, EconomicOwnerKind
+from ea.core.execution_identity import EconomicId, EconomicOwnerKind, SourceNamespace
 from ea.core.execution_state import EXECUTION_FACT_PROCESSING_OUTCOME_DIGEST_DOMAIN
 from ea.core.outcomes import OutcomeCode
-from ea.core.run import RunBinding, RunContractError, Sha256Digest
+from ea.core.run import RunBinding, RunContractError, RunId, Sha256Digest
 
 AUDIT_RECORD_HEADER_SCHEMA = "ea.audit-record-header.v1"
 AUDIT_ACKNOWLEDGEMENT_SCHEMA = "ea.audit-append-acknowledgement.v1"
@@ -591,6 +591,98 @@ def _require_json_root_key(
         raise _fail(OutcomeCode.CONFLICTING_ID, f"{field} domain conflicts with its record")
 
 
+def _canonical_completion_v4_reconciliation_root_key_document(
+    value: object,
+    *,
+    expected_run_id: str,
+) -> dict[str, object]:
+    """Validate and re-project the one rank-20 completion-v4 root key."""
+    from ea.core.runtime import RuntimeRootOrderKey
+
+    if type(value) is RuntimeRootOrderKey:
+        values = value.as_tuple()
+        if len(values) != 10:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts")
+        available_at, domain_rank, kind_rank, *suffix = values
+        value = {
+            "available_at": (
+                available_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                if type(available_at) is datetime and available_at.tzinfo is UTC
+                else None
+            ),
+            "domain_rank": domain_rank,
+            "kind_rank": kind_rank,
+            "observation_owner_kind": suffix[5],
+            "observation_owner_sequence": suffix[6],
+            "producer_namespace": suffix[0],
+            "producer_sequence": suffix[1],
+            "root_domain": "reconciliation_observation",
+            "run_id": suffix[4],
+            "watermark_namespace": suffix[2],
+            "watermark_sequence": suffix[3],
+        }
+    fields = {
+        "available_at",
+        "domain_rank",
+        "kind_rank",
+        "observation_owner_kind",
+        "observation_owner_sequence",
+        "producer_namespace",
+        "producer_sequence",
+        "root_domain",
+        "run_id",
+        "watermark_namespace",
+        "watermark_sequence",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts")
+    try:
+        available_text = value["available_at"]
+        if type(available_text) is not str:
+            raise ValueError("time is not text")
+        available_at = datetime.strptime(available_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=UTC
+        )
+        run_id = RunId(value["run_id"])
+        SourceNamespace(value["producer_namespace"])
+        SourceNamespace(value["watermark_namespace"])
+        EconomicId(
+            run_id,
+            EconomicOwnerKind.RECONCILIATION_OBSERVATION,
+            value["observation_owner_sequence"],
+        )
+    except (TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts") from error
+    if (
+        available_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != available_text
+        or run_id.value != expected_run_id
+        or value["root_domain"] != "reconciliation_observation"
+        or type(value["domain_rank"]) is not int
+        or type(value["kind_rank"]) is not int
+        or type(value["observation_owner_kind"]) is not str
+        or value["domain_rank"] != 20
+        or value["kind_rank"] != 20
+        or value["observation_owner_kind"] != EconomicOwnerKind.RECONCILIATION_OBSERVATION.value
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts")
+    for field in ("producer_sequence", "watermark_sequence"):
+        if type(value[field]) is not int or not 0 <= value[field] <= _MAX_UINT64:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts")
+    return {
+        "available_at": available_text,
+        "domain_rank": 20,
+        "kind_rank": 20,
+        "observation_owner_kind": EconomicOwnerKind.RECONCILIATION_OBSERVATION.value,
+        "observation_owner_sequence": value["observation_owner_sequence"],
+        "producer_namespace": value["producer_namespace"],
+        "producer_sequence": value["producer_sequence"],
+        "root_domain": "reconciliation_observation",
+        "run_id": run_id.value,
+        "watermark_namespace": value["watermark_namespace"],
+        "watermark_sequence": value["watermark_sequence"],
+    }
+
+
 def _require_audit_owned_payload_values(
     record_kind: AuditRecordKind,
     document: dict[str, object],
@@ -1058,6 +1150,17 @@ _DISPATCH_COMPLETED_V3_EXTRA_FIELDS = frozenset(
     }
 )
 
+_DISPATCH_COMPLETED_V4_EXTRA_FIELDS = _DISPATCH_COMPLETED_V3_EXTRA_FIELDS | frozenset(
+    {
+        "authorization_allowed",
+        "batch_ack_sha256",
+        "observation_sha256",
+        "outcome_acknowledgement_sha256",
+        "refresh_acknowledgement_sha256",
+        "refresh_value_sha256",
+    }
+)
+
 
 _RUN_TERMINAL_V2_EXTRA_FIELDS = frozenset(
     {
@@ -1102,13 +1205,80 @@ def _require_dispatch_completed_payload(document: dict[str, object]) -> None:
             _AUDIT_PAYLOAD_FIELDS_BY_KIND[AuditRecordKind.RUNTIME_DISPATCH_COMPLETED]
             | _DISPATCH_COMPLETED_V3_EXTRA_FIELDS
         )
+    elif schema == "ea.audit-dispatch-completed.v4":
+        fields = (
+            _AUDIT_PAYLOAD_FIELDS_BY_KIND[AuditRecordKind.RUNTIME_DISPATCH_COMPLETED]
+            | _DISPATCH_COMPLETED_V4_EXTRA_FIELDS
+        )
     else:
         raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch completion schema is invalid")
     if set(document) != fields:
         raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload fields conflict with its kind")
     if document.get("canonicalization") != AUDIT_CANONICALIZATION:
         raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload schema is invalid")
-    _require_audit_owned_payload_values(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, document)
+    if schema == "ea.audit-dispatch-completed.v4":
+        _require_dispatch_completed_v4_values(document)
+    else:
+        _require_audit_owned_payload_values(AuditRecordKind.RUNTIME_DISPATCH_COMPLETED, document)
+
+
+def _require_dispatch_completed_v4_values(document: dict[str, object]) -> None:
+    """Validate the strictly zero-effect read-only completion frontier."""
+    from ea.core.lifecycle import (
+        ORDERED_LEDGER_ACK_DIGEST_DOMAIN,
+        ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN,
+    )
+
+    if _require_json_text(document, "dispatch_kind") != "reconciliation_observation":
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 dispatch kind conflicts")
+    run_id = _require_json_text(document, "run_id")
+    _require_json_uint64(document, "dispatch_sequence", positive=True)
+    if document["batch_sha256"] is not None or document["batch_ack_sha256"] is not None:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 matcher frontier is not empty")
+    if document["authorization_allowed"] is not False:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 cannot authorize effects")
+    for field in (
+        "authorization_attempt_count",
+        "ledger_outcome_count",
+        "submission_count",
+    ):
+        if _require_json_uint64(document, field, positive=False) != 0:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 effect frontier is not empty")
+    if (
+        document["authorization_attempt_outcome"] is not None
+        or document["authorization_attempt_outcome_sha256"] is not None
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 authorization frontier is not empty")
+    if _require_json_uint64(document, "outcome_count", positive=False) != 1:
+        raise _fail(
+            OutcomeCode.CONFLICTING_ID,
+            "completion-v4 requires one outcome acknowledgement",
+        )
+    for field in (
+        "trigger_root_sha256",
+        "observation_sha256",
+        "outcome_acknowledgement_sha256",
+        "refresh_acknowledgement_sha256",
+        "refresh_value_sha256",
+        "final_portfolio_snapshot_sha256",
+        "final_risk_state_sha256",
+        "pre_ack_state_sha256",
+    ):
+        _require_json_digest(document, field)
+    if document["trigger_root_sha256"] != document["observation_sha256"]:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 root key conflicts")
+    if document["ordered_outcome_ack_sha256s_sha256"] != document["outcome_acknowledgement_sha256"]:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 outcome acknowledgement conflicts")
+    if (
+        document["ordered_ledger_ack_sha256s_sha256"]
+        != ordered_digest_tuple(ORDERED_LEDGER_ACK_DIGEST_DOMAIN, ()).value
+        or document["ordered_submission_receipt_sha256s_sha256"]
+        != ordered_digest_tuple(ORDERED_SUBMISSION_RECEIPT_DIGEST_DOMAIN, ()).value
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "completion-v4 empty aggregate conflicts")
+    _canonical_completion_v4_reconciliation_root_key_document(
+        document["trigger_root_key"], expected_run_id=run_id
+    )
 
 
 def require_canonical_audit_payload(

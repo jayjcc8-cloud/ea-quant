@@ -471,6 +471,129 @@ def create_phase1_reconciliation_authority(
     return value
 
 
+@final
+class _ObservationOnlyReconciliationAuthority:
+    """Private sealed comparison port for the read-only observation vertical."""
+
+    _state: _AuthorityState
+
+    __slots__ = ("_state",)
+
+    def __init__(self) -> None:
+        raise TypeError("observation-only authorities are created only by their factory")
+
+    @property
+    def run_id(self) -> RunId:
+        return self._state.run_id
+
+    @property
+    def spec_set(self) -> InstrumentExecutionSpecSet:
+        return self._state.spec_set
+
+    @property
+    def observation_index(self) -> Mapping[tuple[SourceNamespace, int], Sha256Digest]:
+        return self._state.observation_index
+
+    @property
+    def outcome_index(self) -> Mapping[Sha256Digest, ReconciliationOutcome]:
+        return self._state.outcome_index
+
+    def admit_observation(
+        self,
+        observation: ReconciliationObservation,
+        *,
+        dispatch_sequence: int,
+    ) -> ReconciliationOutcome:
+        """Retain only a deterministic comparison outcome, never an effect capability."""
+        state = self._state
+        _require_observation_evidence(observation, state.run_id, state.spec_set)
+        if observation.kind is ReconciliationObservationKind.TRADE_DETAIL:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "trade detail is outside observation-only scope")
+        checked_dispatch_sequence = _require_uint64(dispatch_sequence, "dispatch_sequence")
+        if checked_dispatch_sequence == 0:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "dispatch_sequence must be positive")
+        observation_sha256 = reconciliation_observation_digest(observation)
+        identity = (observation.source_namespace, observation.source_sequence)
+        prior = state.observation_index.get(identity)
+        if prior is not None:
+            if prior != observation_sha256:
+                raise _fail(
+                    OutcomeCode.CONFLICTING_ID,
+                    "observation identity conflicts with earlier canonical bytes",
+                )
+            outcome = state.outcome_index.get(observation_sha256)
+            if outcome is None:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "observation outcome index is inconsistent")
+            return outcome
+        snapshot = _require_snapshot_view(state.snapshot_view, state.run_id, state.spec_set)
+        outcome = _compare_observation(
+            observation=observation,
+            snapshot=snapshot,
+            run_id=state.run_id,
+            spec_set=state.spec_set,
+            dispatch_sequence=checked_dispatch_sequence,
+        )
+        self._state = _AuthorityState(
+            run_id=state.run_id,
+            spec_set=state.spec_set,
+            snapshot_view=state.snapshot_view,
+            observation_index=_freeze_observation_index(
+                {**dict(state.observation_index), identity: observation_sha256}
+            ),
+            outcome_index=_freeze_outcome_index(
+                {**dict(state.outcome_index), observation_sha256: outcome}
+            ),
+            authorization_index=state.authorization_index,
+            adjustment_index=state.adjustment_index,
+            command_index=state.command_index,
+            next_authorization_sequence=state.next_authorization_sequence,
+            next_adjustment_sequence=state.next_adjustment_sequence,
+        )
+        return outcome
+
+    def resolve_outcome(self, observation: ReconciliationObservation) -> ReconciliationOutcome:
+        """Return the one retained canonical outcome for exactly one observation."""
+        state = self._state
+        _require_observation_evidence(observation, state.run_id, state.spec_set)
+        digest = reconciliation_observation_digest(observation)
+        outcome = state.outcome_index.get(digest)
+        if outcome is None:
+            raise _fail(OutcomeCode.CONFLICTING_ID, "observation outcome is not retained")
+        return outcome
+
+
+def _create_observation_only_reconciliation_authority(
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    snapshot_view: SnapshotView,
+) -> _ObservationOnlyReconciliationAuthority:
+    """Create the private narrow port used only by lifecycle composition."""
+    if type(run_id) is not RunId or type(spec_set) is not InstrumentExecutionSpecSet:
+        raise _fail(OutcomeCode.INVALID_TYPE, "authority binding must be exact")
+    if not callable(snapshot_view):
+        raise _fail(OutcomeCode.INVALID_TYPE, "snapshot_view must be callable")
+    _require_snapshot_view(snapshot_view, run_id, spec_set)
+    value = object.__new__(_ObservationOnlyReconciliationAuthority)
+    object.__setattr__(
+        value,
+        "_state",
+        _AuthorityState(
+            run_id=run_id,
+            spec_set=spec_set,
+            snapshot_view=snapshot_view,
+            observation_index=_freeze_observation_index({}),
+            outcome_index=_freeze_outcome_index({}),
+            authorization_index=_freeze_authorization_index({}),
+            adjustment_index=_freeze_adjustment_index({}),
+            command_index=_freeze_command_index({}),
+            next_authorization_sequence=1,
+            next_adjustment_sequence=1,
+        ),
+    )
+    return value
+
+
 def _require_observation_evidence(
     observation: ReconciliationObservation,
     run_id: RunId,
