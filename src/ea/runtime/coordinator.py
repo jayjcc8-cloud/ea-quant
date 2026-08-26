@@ -334,6 +334,7 @@ class _ActiveDispatch:
 class _RecoveredDispatch:
     sequence: int
     trigger_sha256: Sha256Digest | None = None
+    read_only_outcome_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
     batch_record: tuple[int, AuditRecord, AuditAppendAcknowledgement] | None = None
     outcome_records: dict[
         Sha256Digest,

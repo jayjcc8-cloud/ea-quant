@@ -80,6 +80,11 @@ from ea.core.portfolio import (
 from ea.core.risk import RiskHaltReason, risk_state_snapshot_digest
 from ea.core.run import RunBinding, Sha256Digest
 from ea.core.runtime import EndOfRunRoot, RuntimeRoot, RuntimeRootOrderKey
+from ea.runtime._coordinator_read_only import (
+    _decode_read_only_trace_root,
+    _require_read_only_recovery_order,
+    _retain_read_only_recovery_record,
+)
 from ea.runtime.historical import (
     HISTORICAL_RUNTIME_TRACE_SCHEMA,
     historical_runtime_trace_digest,
@@ -283,6 +288,8 @@ def _group_recovery_records(
             if record.subject_sha256 in group.outcome_records:
                 raise LifecycleError(OutcomeCode.CONFLICTING_ID, "duplicate recovered outcome")
             group.outcome_records[record.subject_sha256] = retained
+        elif kind is AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME:
+            _retain_read_only_recovery_record(group, retained)
         elif kind is AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION:
             if group.failing_record is not None:
                 raise LifecycleError(OutcomeCode.CONFLICTING_ID, "duplicate failing transition")
@@ -522,6 +529,9 @@ def _recover_ledger_frontier(
 
 
 def _require_recovery_stage_order(group: _RecoveredDispatch) -> None:
+    if group.read_only_outcome_record is not None:
+        _require_read_only_recovery_order(group)
+        return
     positions = [
         position
         for entry in (
@@ -651,7 +661,8 @@ def _require_runtime_trace(
         if (
             type(document) is not dict
             or canonical != canonical_record
-            or document.get("schema") != HISTORICAL_RUNTIME_TRACE_SCHEMA
+            or document.get("schema")
+            not in {HISTORICAL_RUNTIME_TRACE_SCHEMA, "ea.phase1-historical-runtime-trace.v2"}
             or document.get("run_id") != binding.reference.run_id.value
             or type(sequence) is not int
             or sequence in result
@@ -665,7 +676,10 @@ def _require_runtime_trace(
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        if (
+        if document.get("schema") == "ea.phase1-historical-runtime-trace.v2":
+            read_only_root = _decode_read_only_trace_root(document, runtime.spec_set)
+            root_sha256 = read_only_root.observation_sha256
+        elif (
             set(root)
             == {
                 "available_at",
@@ -698,9 +712,10 @@ def _require_runtime_trace(
             domain = HISTORICAL_MATCHER_MARKET_ROOT_DIGEST_DOMAIN
         else:
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "runtime trace root kind is invalid")
-        root_sha256 = Sha256Digest(
-            sha256(domain + len(root_bytes).to_bytes(8, "big") + root_bytes).hexdigest()
-        )
+        if document.get("schema") == HISTORICAL_RUNTIME_TRACE_SCHEMA:
+            root_sha256 = Sha256Digest(
+                sha256(domain + len(root_bytes).to_bytes(8, "big") + root_bytes).hexdigest()
+            )
         result[sequence] = (document, root_sha256)
     if set(result) != set(range(1, len(result) + 1)):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "runtime trace sequence is not contiguous")

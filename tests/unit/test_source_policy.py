@@ -32,9 +32,12 @@ def test_composition_package_does_not_export_mutable_frontier_capabilities() -> 
 def test_coordinator_recovery_boundary_is_private_and_compatibly_reexported() -> None:
     coordinator_source = SOURCE_ROOT / "runtime" / "coordinator.py"
     recovery_source = SOURCE_ROOT / "runtime" / "_coordinator_recovery.py"
+    read_only_source = SOURCE_ROOT / "runtime" / "_coordinator_read_only.py"
     assert recovery_source.is_file(), "recovery helpers require one private module"
+    assert read_only_source.is_file(), "read-only helpers require one private module"
     assert len(coordinator_source.read_text(encoding="utf-8").splitlines()) <= 2800
     assert len(recovery_source.read_text(encoding="utf-8").splitlines()) <= 1500
+    assert len(read_only_source.read_text(encoding="utf-8").splitlines()) <= 380
 
     runtime = ast.parse((SOURCE_ROOT / "runtime" / "__init__.py").read_text(encoding="utf-8"))
     exports = next(
@@ -45,9 +48,15 @@ def test_coordinator_recovery_boundary_is_private_and_compatibly_reexported() ->
     )
     assert "_coordinator_recovery" not in exports
     recovery_tree = ast.parse(recovery_source.read_text(encoding="utf-8"))
+    read_only_tree = ast.parse(read_only_source.read_text(encoding="utf-8"))
     assert not any(
         isinstance(node, ast.ImportFrom) and node.module == "ea.runtime.coordinator"
         for node in recovery_tree.body
+    )
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and node.module in {"ea.runtime.coordinator", "ea.runtime._coordinator_recovery"}
+        for node in read_only_tree.body
     )
 
     coordinator = importlib.import_module("ea.runtime.coordinator")
