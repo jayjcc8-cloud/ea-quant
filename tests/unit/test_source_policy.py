@@ -124,6 +124,15 @@ def test_coordinator_reexported_recovery_helpers_resolve_type_hints() -> None:
         assert typing.get_type_hints(getattr(coordinator, helper_name)), helper_name
 
 
+def test_lifecycle_coordinator_facade_preserves_dispatch_window_type_hints() -> None:
+    lifecycle = importlib.import_module("ea.composition.lifecycle")
+    facade = lifecycle.Phase1HistoricalLifecycleCoordinatorFacade
+    expected = lifecycle.LifecycleDispatchWindow
+
+    assert typing.get_type_hints(facade.begin_next_dispatch)["return"] is expected
+    assert typing.get_type_hints(facade.resume_active_dispatch)["return"] is expected
+
+
 def test_production_source_has_no_type_ignore_comments() -> None:
     violations: list[str] = []
     for source in sorted(SOURCE_ROOT.rglob("*.py")):

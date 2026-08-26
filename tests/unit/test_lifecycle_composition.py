@@ -37,6 +37,7 @@ from ea.core.audit import (
 from ea.core.execution_identity import SourceNamespace
 from ea.core.execution_messages import FactProvenanceId
 from ea.core.lifecycle import (
+    ActiveDispatchWindow,
     ActiveDispatchWindowStage,
     CoordinatorPhase,
     GlobalHaltSnapshot,
@@ -589,6 +590,7 @@ def test_composed_staged_window_authorizes_and_submits_before_completion() -> No
     assert not hasattr(lifecycle.coordinator, "_runtime")
 
     window = lifecycle.coordinator.begin_next_dispatch()
+    assert type(window) is ActiveDispatchWindow
     lease = runtime.active_lease
     assert lease is not None
     root = lease.root
