@@ -72,6 +72,8 @@ from ea.core.lifecycle import (
     ExecutionEvidenceResolverPort,
     ExecutionFactAuthorityPort,
     HistoricalMatcherPort,
+    LifecycleDispatchOutcome,
+    LifecycleDispatchWindow,
     LifecycleError,
     PreTerminalCoordinatorState,
     RuntimeDispatchLeaseView,
@@ -107,7 +109,9 @@ from ea.core.portfolio import (
 )
 from ea.core.risk import RiskHaltReason, RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
 from ea.core.run import RunBinding, RunId, Sha256Digest
-from ea.core.runtime import EndOfRunRoot, RuntimeRoot
+from ea.core.runtime import EndOfRunRoot, ReconciliationObservationRoot, RuntimeRoot
+from ea.runtime._coordinator_read_only import drive_read_only as _drive_read_only
+from ea.runtime._coordinator_read_only import is_read_only_root as _is_read_only_root
 from ea.runtime._coordinator_recovery import (
     _group_recovery_records as _group_recovery_records,
 )
@@ -249,6 +253,15 @@ class _RiskRefreshGatePort(Protocol):
     ) -> PortfolioRiskRefresh: ...
 
 
+class _ReadOnlyReconciliationAuthorityPort(Protocol):
+    run_id: RunId
+    spec_set: InstrumentExecutionSpecSet
+
+    def admit_observation(self, observation: object, *, dispatch_sequence: int) -> object: ...
+
+    def resolve_outcome(self, observation: object) -> object: ...
+
+
 def _bound_ledger_gate(
     ledger: _LedgerHandoffGatePort | None,
     risk: _RiskGatePort | None,
@@ -314,6 +327,7 @@ class _ActiveDispatch:
     refresh_published: bool = False
     final_portfolio_snapshot_sha256: Sha256Digest | None = None
     final_risk_state_sha256: Sha256Digest | None = None
+    read_only: object | None = None
 
 
 @dataclass(slots=True)
@@ -425,6 +439,7 @@ class Phase1HistoricalLifecycleCoordinator:
         "_mutation_lock",
         "_resolver",
         "_risk_authority",
+        "_reconciliation_authority",
         "_risk_refresh_authority",
         "_runtime",
         "_state",
@@ -449,6 +464,7 @@ class Phase1HistoricalLifecycleCoordinator:
     _mutation_lock: Lock
     _resolver: ExecutionEvidenceResolverPort
     _risk_authority: _RiskGatePort | None
+    _reconciliation_authority: _ReadOnlyReconciliationAuthorityPort | None
     _risk_refresh_authority: _RiskRefreshGatePort | None
     _runtime: RuntimeLifecyclePort
     _state: CoordinatorRunState
@@ -480,7 +496,7 @@ class Phase1HistoricalLifecycleCoordinator:
     def terminal_outcome(self) -> CoordinatorTerminalOutcome | None:
         return self._terminal_outcome
 
-    def begin_next_dispatch(self) -> ActiveDispatchWindow:
+    def begin_next_dispatch(self) -> LifecycleDispatchWindow:
         """Drive one new runtime lease only through the audited handoff frontier."""
         if not self._mutation_lock.acquire(blocking=False):
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
@@ -497,11 +513,13 @@ class Phase1HistoricalLifecycleCoordinator:
                 )
             active = self._capture_lease(self._runtime.pop())
             self._active = active
+            if _is_read_only_root(active.lease.root):
+                return _drive_read_only(self, active, complete=False)
             return self._drive_to_window(active)
         finally:
             self._mutation_lock.release()
 
-    def resume_active_dispatch(self) -> ActiveDispatchWindow:
+    def resume_active_dispatch(self) -> LifecycleDispatchWindow:
         """Replay missing pre-completion stages and return the retained window."""
         if not self._mutation_lock.acquire(blocking=False):
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
@@ -513,18 +531,23 @@ class Phase1HistoricalLifecycleCoordinator:
                     "coordinator has no resumable active window",
                 )
             self._require_same_active_lease(active)
+            if _is_read_only_root(active.lease.root):
+                return _drive_read_only(self, active, complete=False)
             return self._drive_to_window(active)
         finally:
             self._mutation_lock.release()
 
     def complete_active_dispatch(
         self,
-        window: ActiveDispatchWindow,
-    ) -> CoordinatorDispatchOutcome:
+        window: LifecycleDispatchWindow,
+    ) -> LifecycleDispatchOutcome:
         """Freeze and durably complete only the exact retained open window."""
         if not self._mutation_lock.acquire(blocking=False):
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
         try:
+            active = self._active
+            if active is not None and _is_read_only_root(active.lease.root):
+                return _drive_read_only(self, active, complete=True)
             active = self._require_window(window)
             if active.window_stage not in {
                 ActiveDispatchWindowStage.OPEN,
@@ -557,12 +580,14 @@ class Phase1HistoricalLifecycleCoordinator:
         finally:
             self._mutation_lock.release()
 
-    def retry_active_dispatch_completion(self) -> CoordinatorDispatchOutcome:
+    def retry_active_dispatch_completion(self) -> LifecycleDispatchOutcome:
         """Retry only a dispatch whose durable completion record already closed authorization."""
         if not self._mutation_lock.acquire(blocking=False):
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
         try:
             active = self._active
+            if active is not None and _is_read_only_root(active.lease.root):
+                return _drive_read_only(self, active, complete=True)
             if active is None or active.completion_ack is None:
                 raise LifecycleError(
                     OutcomeCode.CONFLICTING_ID,
@@ -628,7 +653,7 @@ class Phase1HistoricalLifecycleCoordinator:
         finally:
             self._mutation_lock.release()
 
-    def process_next_dispatch(self) -> CoordinatorDispatchOutcome:
+    def process_next_dispatch(self) -> LifecycleDispatchOutcome:
         """Pop and process exactly one root; never loop over the complete run."""
         if not self._mutation_lock.acquire(blocking=False):
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
@@ -646,6 +671,8 @@ class Phase1HistoricalLifecycleCoordinator:
             lease = self._runtime.pop()
             active = self._capture_lease(lease)
             self._active = active
+            if _is_read_only_root(active.lease.root):
+                return _drive_read_only(self, active, complete=True)
             return self._drive_active(active)
         finally:
             self._mutation_lock.release()
@@ -666,7 +693,7 @@ class Phase1HistoricalLifecycleCoordinator:
         finally:
             self._mutation_lock.release()
 
-    def retry_active_dispatch(self) -> CoordinatorDispatchOutcome:
+    def retry_active_dispatch(self) -> LifecycleDispatchOutcome:
         """Replay only missing stages for the exact retained active lease."""
         if not self._mutation_lock.acquire(blocking=False):
             raise LifecycleError(OutcomeCode.CONFLICTING_ID, "coordinator call is reentrant")
@@ -674,6 +701,8 @@ class Phase1HistoricalLifecycleCoordinator:
             active = self._active
             if active is None:
                 raise LifecycleError(OutcomeCode.CONFLICTING_ID, "no active dispatch is retained")
+            if _is_read_only_root(active.lease.root):
+                return _drive_read_only(self, active, complete=True)
             if active.completion_ack is not None:
                 return self._complete_active(active)
             self._require_same_active_lease(active)
@@ -949,6 +978,8 @@ class Phase1HistoricalLifecycleCoordinator:
             raise LifecycleError(OutcomeCode.OUT_OF_RANGE, "dispatch sequence must be positive")
         if type(root) is MarketDataEnvelope:
             trigger_sha256 = historical_market_root_digest(root)
+        elif type(root) is ReconciliationObservationRoot:
+            trigger_sha256 = root.observation_sha256
         elif type(root) is EndOfRunRoot:
             trigger_sha256 = historical_end_root_digest(root)
         else:
@@ -983,6 +1014,21 @@ class Phase1HistoricalLifecycleCoordinator:
             last_audit_chain_head_sha256=state.last_audit_chain_head_sha256,
         )
         return _ActiveDispatch(lease=lease, trigger_sha256=trigger_sha256)
+
+    def _read_only_gate(
+        self,
+    ) -> tuple[_LedgerHandoffGatePort, _RiskGatePort, _RiskRefreshGatePort, _FrontierGatePort]:
+        gate = _bound_ledger_gate(
+            self._ledger_handoff_authority,
+            self._risk_authority,
+            self._risk_refresh_authority,
+            self._frontier,
+        )
+        if gate is None or self._reconciliation_authority is None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID, "read-only reconciliation route is not bound"
+            )
+        return gate
 
     def _require_same_active_lease(self, active: _ActiveDispatch) -> None:
         current = self._runtime.active_lease
@@ -2173,6 +2219,7 @@ def create_phase1_lifecycle_coordinator(
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
+    reconciliation_authority: _ReadOnlyReconciliationAuthorityPort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     if type(binding) is not RunBinding:
         raise LifecycleError(OutcomeCode.INVALID_TYPE, "binding must be exact")
@@ -2228,6 +2275,14 @@ def create_phase1_lifecycle_coordinator(
             risk_authority=risk_authority,
             frontier=frontier,
         )
+    if reconciliation_authority is not None and (
+        ledger_gate is None
+        or reconciliation_authority.run_id != binding.reference.run_id
+        or instrument_spec_set_digest(reconciliation_authority.spec_set) != spec_digests[0]
+    ):
+        raise LifecycleError(
+            OutcomeCode.CONFLICTING_ID, "reconciliation authority bindings conflict"
+        )
     value = _allocate_coordinator(
         binding=binding,
         audit=audit,
@@ -2241,6 +2296,7 @@ def create_phase1_lifecycle_coordinator(
         risk_authority=risk_authority,
         risk_refresh_authority=risk_refresh_authority,
         frontier=frontier,
+        reconciliation_authority=reconciliation_authority,
     )
     value._state = _admitted_state(binding, prepared_acknowledgement.chain_head_sha256)
     return value
@@ -2583,6 +2639,7 @@ def _allocate_coordinator(
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
+    reconciliation_authority: _ReadOnlyReconciliationAuthorityPort | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     value = object.__new__(Phase1HistoricalLifecycleCoordinator)
     value._binding = binding
@@ -2597,6 +2654,7 @@ def _allocate_coordinator(
     value._frontier = frontier
     value._ledger_handoff_authority = ledger_handoff_authority
     value._risk_authority = risk_authority
+    value._reconciliation_authority = reconciliation_authority
     value._risk_refresh_authority = risk_refresh_authority
     value._resolver = evidence_resolver
     value._authorization = authorization

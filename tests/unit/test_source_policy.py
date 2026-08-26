@@ -237,6 +237,7 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
             "ea.core.strategy",
             "ea.core.time",
             "ea.runtime.coordinator",
+            "ea.runtime._coordinator_read_only",
             "ea.runtime._coordinator_recovery",
             "ea.runtime.historical",
             "ea.runtime.ingress",
