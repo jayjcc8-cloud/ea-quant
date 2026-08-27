@@ -119,16 +119,10 @@ def drive_read_only(
         outcome = authority.admit_observation(root.observation, dispatch_sequence=sequence)
         coordinator._require_same_active_lease(active)
         retained = authority.resolve_outcome(root.observation)
-        if (
-            type(retained) is not ReconciliationOutcome
-            or canonical_reconciliation_outcome_bytes(retained)
-            != canonical_reconciliation_outcome_bytes(outcome)
-            or retained.observation_sha256 != root.observation_sha256
-            or retained.dispatch_sequence != sequence
-        ):
-            raise LifecycleError(
-                OutcomeCode.CONFLICTING_ID, "reconciliation outcome is not authoritative"
-            )
+        coordinator._require_read_only_outcome_authority(root, retained, sequence)
+        retained_payload = canonical_reconciliation_outcome_bytes(retained)
+        if retained_payload != canonical_reconciliation_outcome_bytes(outcome):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only outcome conflicts")
         route.outcome = retained
     outcome = route.outcome
     assert outcome is not None

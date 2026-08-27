@@ -40,7 +40,7 @@ from ea.core.reconciliation import (
     ReconciliationOutcome,
     canonical_reconciliation_outcome_bytes,
     decode_reconciliation_observation,
-    reconciliation_observation_digest,
+    decode_reconciliation_outcome,
 )
 from ea.core.risk import RiskHaltReason, _create_risk_state_snapshot, risk_state_snapshot_digest
 from ea.core.run import Sha256Digest
@@ -157,6 +157,7 @@ def recover_read_only_dispatch(
     """Replay exactly one retained read-only journal family without effect owners."""
     _require_read_only_recovery_order(recovered)
     sequence = recovered.sequence
+    outcome_record = recovered.read_only_outcome_record
     trace = trace_by_sequence.get(sequence)
     runtime = coordinator._runtime
     lease = runtime.active_lease
@@ -185,7 +186,13 @@ def recover_read_only_dispatch(
     if not complete and trace is not None:
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "incomplete read-only recovery has trace")
     if not complete:
-        assert lease is not None
+        try:
+            outcome_payload = outcome_record[1].canonical_payload
+            outcome = decode_reconciliation_outcome(outcome_payload, runtime.spec_set)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "outcome conflicts") from error
+        _require_retained_outcome(coordinator, outcome_record, outcome_payload)
+        coordinator._require_read_only_outcome_authority(root, outcome, sequence)
         coordinator._active = coordinator._capture_lease(lease)
         return
     if lease is not None:
@@ -207,26 +214,15 @@ def _prove_completed_read_only_family(
 ) -> _ProvenReadOnlyFamily:
     root = active.lease.root
     sequence = active.lease.dispatch_sequence
+    outcome_record = recovered.read_only_outcome_record
     authority = coordinator._reconciliation_authority
     admitted = authority.admit_observation(root.observation, dispatch_sequence=sequence)
     outcome = authority.resolve_outcome(root.observation)
-    if (
-        type(outcome) is not ReconciliationOutcome
-        or canonical_reconciliation_outcome_bytes(outcome)
-        != canonical_reconciliation_outcome_bytes(admitted)
-        or outcome.observation_sha256 != reconciliation_observation_digest(root.observation)
-        or outcome.dispatch_sequence != sequence
-    ):
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery outcome conflicts")
+    coordinator._require_read_only_outcome_authority(root, outcome, sequence)
     outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
-    outcome_key = AuditLogicalKey(
-        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
-        AuditSubjectKind.RECONCILIATION_OUTCOME,
-        audit_subject_digest(AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME, outcome_payload),
-    )
-    outcome_ack = _require_retained_ack(
-        coordinator, recovered.read_only_outcome_record, outcome_key, outcome_payload
-    )
+    if outcome_payload != canonical_reconciliation_outcome_bytes(admitted):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery outcome conflicts")
+    outcome_ack = _require_retained_outcome(coordinator, outcome_record, outcome_payload)
     ledger, risk, refresh_authority, frontier = coordinator._read_only_gate()
     snapshot = ledger.snapshot
     before_risk = risk.risk_state
@@ -431,6 +427,15 @@ def _require_retained_ack(
             OutcomeCode.CONFLICTING_ID, "read-only recovery settlement conflicts"
         ) from error
     return acknowledgement
+
+
+def _require_retained_outcome(coordinator: Any, retained: Any, payload: bytes) -> Any:
+    key = AuditLogicalKey(
+        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        AuditSubjectKind.RECONCILIATION_OUTCOME,
+        audit_subject_digest(AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME, payload),
+    )
+    return _require_retained_ack(coordinator, retained, key, payload)
 
 
 def _empty_ledger_frontier() -> Sha256Digest:

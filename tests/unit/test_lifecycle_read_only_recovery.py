@@ -29,6 +29,7 @@ from ea.runtime._coordinator_read_only_recovery import (
     _RecoveredLease,
     _recovery_active,
     _require_read_only_recovery_order,
+    recover_read_only_dispatch,
 )
 from ea.runtime._coordinator_recovery import _require_runtime_trace
 from ea.runtime.coordinator import (
@@ -242,6 +243,96 @@ def test_incomplete_journal_recovery_retains_only_the_active_lease(tmp_path: Pat
     assert recovered._active.read_only is None
 
 
+@pytest.mark.parametrize(
+    "case",
+    (
+        "different_root",
+        "stale_sequence",
+        "spliced_ack",
+        "malformed_outcome",
+        "missing_outcome",
+        "missing_lease",
+    ),
+)
+def test_incomplete_journal_recovery_rejects_unbound_evidence_before_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    coordinator, matcher, _reconciliation, _ports, runtime, journal, _root_value = (
+        _journal_bound_read_only_dispatch(tmp_path)
+    )
+    active = coordinator._capture_lease(runtime.pop())
+    coordinator._active = active
+    drive_read_only(coordinator, active, complete=False)
+    retained_count = len(journal.records)
+    acknowledgement_calls = runtime.acknowledgement_calls
+    root = _root_value
+    sequence = 2 if case == "stale_sequence" else 1
+    if case == "different_root":
+        root = create_reconciliation_observation_root(
+            _observation(
+                spec_set=matcher.spec_set,
+                source_sequence=8,
+                observation_sequence=2,
+            )
+        )
+    runtime._lease = type(runtime._lease)(root, sequence)
+    if case == "missing_lease":
+        runtime._popped = False
+    captured: list[Any] = []
+    coordinator._active = None
+    original_capture = type(coordinator)._capture_lease
+
+    def capture(instance: Any, lease: Any) -> Any:
+        captured.append(lease)
+        return original_capture(instance, lease)
+
+    monkeypatch.setattr(type(coordinator), "_capture_lease", capture)
+    from ea.core.audit import create_audit_append_acknowledgement
+
+    outcome_record: Any = (
+        2,
+        journal.records[1],
+        create_audit_append_acknowledgement(journal.records[1]),
+    )
+    if case == "spliced_ack":
+        outcome_record = (
+            2,
+            journal.records[1],
+            create_audit_append_acknowledgement(journal.records[2]),
+        )
+    elif case == "malformed_outcome":
+        outcome_record = (
+            2,
+            SimpleNamespace(
+                record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+                canonical_payload=b"{}",
+            ),
+            None,
+        )
+    elif case == "missing_outcome":
+        outcome_record = None
+    recovered = SimpleNamespace(
+        sequence=sequence,
+        trigger_sha256=None,
+        read_only_outcome_record=outcome_record,
+        batch_record=None,
+        outcome_records={},
+        authorization_records=[],
+        ledger_records=[],
+        failing_record=None,
+        refresh_record=None,
+        completion_record=None,
+    )
+
+    with pytest.raises(LifecycleError, match="conflicts|no lease"):
+        recover_read_only_dispatch(coordinator, recovered, {})
+
+    assert captured == []
+    assert coordinator._active is None
+    assert len(journal.records) == retained_count
+    assert runtime.acknowledgement_calls == acknowledgement_calls
+
+
 def test_completed_journal_without_trace_fails_before_recovery_side_effects(tmp_path: Path) -> None:
     coordinator, matcher, reconciliation, _ports, runtime, journal, _root_value = (
         _journal_bound_read_only_dispatch(tmp_path, fail_first_acknowledgement=True)
@@ -400,6 +491,7 @@ def test_completed_halted_journal_with_bad_refresh_fails_before_risk_halt(
             recovery_ports["frontier"],
         ),
     )
+    recovery_coordinator._require_read_only_outcome_authority = lambda *_: None
     proof_active = _recovery_active(_RecoveredLease(_root_value, 1), _root_value.observation_sha256)
 
     with pytest.raises(LifecycleError, match="payload conflicts"):

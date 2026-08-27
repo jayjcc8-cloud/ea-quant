@@ -6,7 +6,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock
-from typing import Protocol, final
+from typing import Any, Protocol, final
 
 from ea.core.audit import (
     AuditAppendAcknowledgement,
@@ -107,7 +107,11 @@ from ea.core.portfolio import (
     open_reconciliation_aggregate_digest,
     portfolio_snapshot_digest,
 )
-from ea.core.reconciliation import ReconciliationObservation, ReconciliationOutcome
+from ea.core.reconciliation import (
+    ReconciliationObservation,
+    ReconciliationOutcome,
+    reconciliation_observation_digest,
+)
 from ea.core.risk import RiskHaltReason, RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
 from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.core.runtime import (
@@ -1037,6 +1041,18 @@ class Phase1HistoricalLifecycleCoordinator:
             last_audit_chain_head_sha256=state.last_audit_chain_head_sha256,
         )
         return _ActiveDispatch(lease=lease, trigger_sha256=trigger_sha256)
+
+    def _require_read_only_outcome_authority(self, root: Any, outcome: Any, sequence: int) -> None:
+        if (
+            type(root) is not ReconciliationObservationRoot
+            or root.observation.run_id != self._binding.reference.run_id
+            or root.observation_sha256 != reconciliation_observation_digest(root.observation)
+            or type(outcome) is not ReconciliationOutcome
+            or outcome.run_id != self._binding.reference.run_id
+            or outcome.dispatch_sequence != sequence
+            or outcome.observation_sha256 != root.observation_sha256
+        ):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery outcome conflicts")
 
     def _read_only_gate(
         self,
