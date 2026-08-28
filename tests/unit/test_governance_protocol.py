@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,90 @@ def _route_value(router: dict[str, Any], *keys: str) -> Any:
             return None
         value = value.get(key)
     return value
+
+
+def _representative_deterministic_report(
+    *,
+    gate: str,
+    verdict: str,
+    authorized_mutation: str,
+    reviewed_sha: str,
+    evidence_fact: str,
+) -> dict[str, Any]:
+    return {
+        "protocol_version": "1.0",
+        "report_id": f"REPORT-ISSUE-108-DETERMINISTIC-{gate.upper()}-{verdict}",
+        "role": "deterministic_gate",
+        "actor_id": "issue108-deterministic-gate",
+        "work_unit_id": "issue108-deterministic-gate",
+        "base_sha": "0" * 40,
+        "reviewed_sha": reviewed_sha,
+        "scope": ["Issue #108 deterministic gate regression representation"],
+        "evidence": [
+            {
+                "source": ".governance/prompts/deterministic-gate-v1.md",
+                "sha256": "1" * 64,
+                "fact": evidence_fact,
+            }
+        ],
+        "findings": [],
+        "verdict": verdict,
+        "gate": gate,
+        "decision": verdict,
+        "expected_transitions": [f"{gate} report produces {authorized_mutation}"],
+        "authorized_mutation": authorized_mutation,
+        "verdict_reason": evidence_fact,
+        "provenance": {
+            "model_id": "deterministic-tools",
+            "model_version": "unavailable",
+            "reasoning_effort": "deterministic",
+            "codex_version": "unavailable",
+            "prompt_id": "deterministic-gate-v1",
+            "prompt_version": "1.2.0",
+            "prompt_sha256": "2" * 64,
+            "context_payload_sha256": "3" * 64,
+            "router_rules_sha256": "4" * 64,
+            "skills": [],
+        },
+    }
+
+
+def _assert_matches_deterministic_report_schema(report: dict[str, Any]) -> None:
+    """Validate every unchanged schema constraint applicable to deterministic_gate reports."""
+    schema = json.loads(REPORT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    properties = schema["properties"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) <= report.keys()
+    assert set(report) <= properties.keys()
+    assert report["protocol_version"] == properties["protocol_version"]["const"]
+    assert report["role"] == "deterministic_gate"
+    assert report["role"] in properties["role"]["enum"]
+    assert re.fullmatch(r"REPORT-[A-Z0-9._-]+", report["report_id"])
+    assert re.fullmatch(r"[0-9a-f]{40}", report["base_sha"])
+    assert report["reviewed_sha"] == "WORKING_TREE" or re.fullmatch(
+        r"[0-9a-f]{40}", report["reviewed_sha"]
+    )
+    assert all(isinstance(value, str) and value for value in report["scope"])
+    for evidence in report["evidence"]:
+        assert set(evidence) <= properties["evidence"]["items"]["properties"].keys()
+        assert {"source", "fact"} <= evidence.keys()
+        assert isinstance(evidence["source"], str) and evidence["source"]
+        assert isinstance(evidence["fact"], str) and evidence["fact"]
+        assert evidence["sha256"] is None or re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"])
+    assert isinstance(report["findings"], list)
+    assert report["verdict"] in properties["verdict"]["enum"]
+    assert report["gate"] in properties["gate"]["enum"]
+    assert report["decision"] in properties["decision"]["enum"]
+    assert report["expected_transitions"]
+    assert report["authorized_mutation"] in properties["authorized_mutation"]["enum"]
+    provenance = report["provenance"]
+    provenance_properties = properties["provenance"]["properties"]
+    assert set(properties["provenance"]["required"]) <= provenance.keys()
+    assert set(provenance) <= provenance_properties.keys()
+    assert provenance["reasoning_effort"] in provenance_properties["reasoning_effort"]["enum"]
+    for field in ("prompt_sha256", "context_payload_sha256", "router_rules_sha256"):
+        assert re.fullmatch(r"[0-9a-f]{64}", provenance[field])
+    assert isinstance(provenance["skills"], list)
 
 
 def test_required_routes_bind_governed_role_contracts() -> None:
@@ -237,3 +322,64 @@ def test_ready_authority_sources_agree_without_schema_or_router_change() -> None
     assert schema["properties"]["gate"]["enum"] == ["ready", "merge", "cleanup"]
     router = yaml.safe_load(ROUTER_PATH.read_text(encoding="utf-8"))
     assert router["model_routes"]["tier0"]["approval"]["prompt_id"] == "deterministic-gate-v1"
+
+
+def test_deterministic_prompt_permits_bounded_authorization_but_not_mutation() -> None:
+    metadata = _prompt_frontmatter()["deterministic-gate-v1"]
+    forbidden_actions = metadata["forbidden_actions"]
+    assert "perform_git_or_github_mutations" in forbidden_actions
+    assert "authorize_or_perform_git_or_github_mutations" not in forbidden_actions
+
+    prompt = " ".join(DETERMINISTIC_GATE_PATH.read_text(encoding="utf-8").split())
+    assert "authorizes only `draft_to_ready`" in prompt
+    assert "authorizes only `squash_merge`" in prompt
+    assert "must not perform a Git or GitHub mutation" in prompt
+
+
+def test_ready_policy_keeps_absent_candidate_ci_outside_ready_hold_conditions() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert (
+        "An absent candidate or CI is not a Ready defect and must not cause Ready HOLD." in workflow
+    )
+    assert "For Merge, Approval returns `HOLD` for non-successful exact-head CI" in workflow
+    assert (
+        "For Ready and Merge, Approval returns `HOLD` for missing or contradictory applicable"
+        in workflow
+    )
+
+
+def test_representative_deterministic_ready_and_merge_reports_are_schema_valid() -> None:
+    ready = _representative_deterministic_report(
+        gate="ready",
+        verdict="APPROVE",
+        authorized_mutation="draft_to_ready",
+        reviewed_sha="WORKING_TREE",
+        evidence_fact="Complete Draft task package; no candidate or CI is required.",
+    )
+    merge_missing_ci = _representative_deterministic_report(
+        gate="merge",
+        verdict="HOLD",
+        authorized_mutation="none",
+        reviewed_sha="a" * 40,
+        evidence_fact="Frozen candidate lacks exact-head hosted CI.",
+    )
+    merge_complete = _representative_deterministic_report(
+        gate="merge",
+        verdict="APPROVE",
+        authorized_mutation="squash_merge",
+        reviewed_sha="b" * 40,
+        evidence_fact="Frozen candidate has complete scoped evidence and exact-head hosted CI.",
+    )
+
+    for report in (ready, merge_missing_ci, merge_complete):
+        _assert_matches_deterministic_report_schema(report)
+        json.dumps(report)
+
+    assert (ready["gate"], ready["authorized_mutation"]) == ("ready", "draft_to_ready")
+    assert ready["reviewed_sha"] == "WORKING_TREE"
+    assert (merge_missing_ci["gate"], merge_missing_ci["verdict"]) == ("merge", "HOLD")
+    assert merge_missing_ci["authorized_mutation"] == "none"
+    assert (merge_complete["gate"], merge_complete["authorized_mutation"]) == (
+        "merge",
+        "squash_merge",
+    )

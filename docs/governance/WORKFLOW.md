@@ -238,11 +238,13 @@ Immediately before each write, the Implementation Owner re-fetches head/base SHA
 mergeability, reviews, and unresolved threads. Any unexpected change aborts the mutation and
 requires a fresh decision.
 
-Approval returns `HOLD` for missing/contradictory evidence, open blockers, stale verdicts,
-non-successful exact-head CI, unresolved threads, changes to Approval Owner authority/prompt/rules,
-live/external order writing, credentials/resolved secrets, production release/deployment/tag,
-irreversible/destructive data operations, out-of-repository action, or a platform permission
-prompt. These mandatory cases require explicit Human Owner authorization.
+For Ready and Merge, Approval returns `HOLD` for missing or contradictory applicable task-package or
+candidate evidence, open blockers, stale applicable verdicts, changes to Approval Owner
+authority/prompt/rules, live/external order writing, credentials/resolved secrets, production
+release/deployment/tag, irreversible/destructive data operations, out-of-repository action, or a
+platform permission prompt. For Merge, Approval returns `HOLD` for non-successful exact-head CI or
+unresolved threads. An absent candidate or CI is not a Ready defect and must not cause Ready HOLD.
+These mandatory cases require explicit Human Owner authorization.
 
 Verification-worktree cleanup requires a pre-enumerated path bound to the Issue/candidate, a clean
 status, and non-force `git worktree remove`. Ambiguous, dirty, shared, unrelated, or forced cleanup

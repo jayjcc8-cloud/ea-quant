@@ -1,6 +1,6 @@
 ---
 prompt_id: deterministic-gate-v1
-version: 1.1.0
+version: 1.2.0
 kind: deterministic_contract
 owner: human_owner
 purpose: Produce the Tier 0 Ready or Merge evidence decision without a review model.
@@ -11,7 +11,7 @@ forbidden_actions:
   - accept_a_candidate_above_confirmed_tier0
   - accept_missing_or_stale_exact_head_evidence_at_merge
   - reinterpret_ambiguous_classification_as_tier0
-  - authorize_or_perform_git_or_github_mutations
+  - perform_git_or_github_mutations
   - convert_hold_to_approve
 required_output:
   schema: .governance/schemas/report.schema.json
@@ -49,5 +49,6 @@ unambiguous and the frozen candidate satisfies all of the following:
   is clean; and reviews/threads are current and resolved
 
 Missing CI or an unfrozen candidate produces `HOLD`. APPROVE authorizes only `squash_merge`.
-Otherwise return `HOLD` and identify the missing or contradictory evidence. The Implementation Owner
-remains the sole actor permitted to perform the Git or GitHub mutation.
+Otherwise return `HOLD` and identify the missing or contradictory evidence. This deterministic gate
+may authorize only the bounded report mutations stated above, but it must not perform a Git or GitHub
+mutation. The Implementation Owner remains the sole actor permitted to perform the mutation.
