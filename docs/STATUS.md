@@ -67,6 +67,12 @@ report, with durable audit evidence and no live or external order-writing capabi
 
 ## Incomplete
 
+- [#108](https://github.com/jayjcc8-cloud/ea-quant/issues/108) is the bounded Tier 1
+  governance-authority repair in progress at its recorded base and writer lease. Its eight-path
+  candidate separates candidate-less pre-implementation Ready from frozen-candidate Merge while
+  retaining the existing `ready | merge | cleanup` report representation; it is not merged reality
+  until exact-head review, hosted CI, and squash merge complete.
+
 - [#76](https://github.com/jayjcc8-cloud/ea-quant/issues/76) remains the OPEN
   `status:in-progress` + `blocked` parent. D76-001/D76-002 are complete; D76-003..D76-008 remain
   serialized through [#97](https://github.com/jayjcc8-cloud/ea-quant/issues/97) →
@@ -103,6 +109,7 @@ Governance remains in maintenance mode.
 - [ADR 0022 — Audited ledger and reconciliation integration](adr/0022-audited-ledger-and-reconciliation-integration.md)
 - [ADR 0024 — Portfolio snapshot reconciliation frontier](adr/0024-portfolio-snapshot-reconciliation-frontier.md)
 - [ADR 0025 — Project control plane and authority precedence](adr/0025-project-control-plane-and-authority-precedence.md)
+- [ADR 0026 — Pre-implementation Ready and candidate Merge approval](adr/0026-pre-implementation-ready-and-candidate-merge-approval.md)
 
 Merged code/tests/CI describe actual behavior. ADRs describe normative intent. Any conflict is
 `DRIFT/BLOCKED`, not an implicit new decision.

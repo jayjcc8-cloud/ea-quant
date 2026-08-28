@@ -208,10 +208,31 @@ reinterpret a design verdict, or mutate Git/GitHub.
 
 Approval has three separately activated and consumed decisions:
 
-1. **Ready:** Draft-to-Ready only.
-2. **Merge:** squash merge only after fresh authoritative state.
+1. **Ready:** a pre-implementation task-package decision that authorizes only `draft_to_ready`.
+2. **Merge:** a frozen-candidate decision that authorizes only `squash_merge` after fresh
+   authoritative state.
 3. **Cleanup:** only the enumerated post-merge manifest after the merge commit is reachable from
    expected `main`.
+
+Ready reviews a complete Draft task package: its objective, scope, non-goals, authoritative inputs,
+acceptance criteria, risk tier/rationale, validation, expected outputs, reuse assessment, and
+owners. It also requires Architecture review is PASS, budget and any exception are approved, and
+dependencies and named blockers are resolved. A Ready decision does not require a PR, candidate SHA,
+implementation diff, writer lease, exact-head tests, or hosted CI. Incomplete acceptance criteria
+produces `HOLD`; unapproved budget produces `HOLD`. Only after Ready may a distinct Implementation
+Owner record a branch, worktree, base SHA, and writer lease before entering In Progress.
+
+Merge reviews the frozen candidate and requires PR and exact candidate SHA, valid writer-lease
+history and complete scoped diff, implementation and acceptance completion, focused and required
+full tests, hosted CI SUCCESS at exact candidate HEAD, current required expert/Verification
+verdicts, scope and budget PASS, current mergeability/reviews, and zero unresolved review threads.
+Missing CI or an unfrozen candidate produces `HOLD`. A Ready decision is not Merge evidence and does
+not authorize `squash_merge`; Cleanup remains separately activated after merge.
+
+Tier 0 uses the existing deterministic gate in these same `ready` and `merge` modes. Its `ready`
+mode evaluates the complete Draft task package without candidate artifacts and, on APPROVE,
+authorizes only `draft_to_ready`. Its `merge` mode retains the PR, exact candidate SHA, hosted CI,
+scope, and budget evidence above and, on APPROVE, authorizes only `squash_merge`.
 
 Immediately before each write, the Implementation Owner re-fetches head/base SHA, state, CI,
 mergeability, reviews, and unresolved threads. Any unexpected change aborts the mutation and

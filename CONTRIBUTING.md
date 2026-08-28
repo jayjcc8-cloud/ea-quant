@@ -8,12 +8,18 @@ contributor entry point, not a second workflow specification.
 
 1. Create or accept one complete task-package Issue.
 2. Confirm Tier 0/1/2, reuse assessment, required owners, and acceptance criteria.
-3. Record the writer lease, exact base SHA, isolated branch/worktree, and merge order.
-4. Open one Draft pull request and keep its diff within the Issue scope.
-5. Implement through focused Conventional Commits and test-first evidence where behavior changes.
-6. Freeze exact HEAD, run required verification, and complete the risk-tier review gates.
-7. Synchronize STATUS/ADR/task evidence and create successor Issues for deferred work.
-8. Obtain the applicable Ready, merge, and cleanup decisions defined by WORKFLOW.
+3. Obtain the applicable task-package Ready decision; it reviews the complete Draft package before
+   branch/worktree, writer lease, implementation, PR, candidate SHA, or CI exist and authorizes only
+   `draft_to_ready`.
+4. Record the writer lease, exact base SHA, isolated branch/worktree, and merge order, then enter In
+   Progress.
+5. Open one Draft pull request and keep its diff within the Issue scope.
+6. Implement through focused Conventional Commits and test-first evidence where behavior changes.
+7. Freeze exact HEAD, run required verification, and complete the risk-tier Merge gate; it retains
+   PR, candidate SHA, lease-history, diff, tests, exact-head hosted CI, scope, budget, reviews, and
+   threads, and authorizes only `squash_merge`.
+8. Synchronize STATUS/ADR/task evidence and create successor Issues for deferred work, then obtain
+   the separately activated post-merge Cleanup decision.
 
 Direct pushes to `main` are forbidden. Pull requests use squash merge. Accepted ADRs are immutable;
 replace a decision with a superseding ADR under [`docs/adr/`](docs/adr/).

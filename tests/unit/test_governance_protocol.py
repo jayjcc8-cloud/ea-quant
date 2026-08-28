@@ -12,6 +12,12 @@ PROMPT_ROOT = PROJECT_ROOT / ".governance" / "prompts"
 REPORT_SCHEMA_PATH = PROJECT_ROOT / ".governance" / "schemas" / "report.schema.json"
 CONTEXT_SCHEMA_PATH = PROJECT_ROOT / ".governance" / "schemas" / "context-manifest.schema.json"
 APPROVAL_BODY_PATH = PROJECT_ROOT / ".agents" / "approval-owner.md"
+WORKFLOW_PATH = PROJECT_ROOT / "docs" / "governance" / "WORKFLOW.md"
+CONTRIBUTING_PATH = PROJECT_ROOT / "CONTRIBUTING.md"
+READY_ADR_PATH = (
+    PROJECT_ROOT / "docs" / "adr" / "0026-pre-implementation-ready-and-candidate-merge-approval.md"
+)
+DETERMINISTIC_GATE_PATH = PROMPT_ROOT / "deterministic-gate-v1.md"
 
 
 def _prompt_frontmatter() -> dict[str, dict[str, Any]]:
@@ -157,3 +163,77 @@ def test_tier0_deterministic_gate_has_a_schema_valid_context_role() -> None:
     assert "deterministic_gate" in report_schema["properties"]["role"]["enum"]
     assert router["model_routes"]["tier0"]["verification"]["prompt_id"] == ("deterministic-gate-v1")
     assert router["model_routes"]["tier0"]["approval"]["prompt_id"] == ("deterministic-gate-v1")
+
+
+def test_ready_gate_regression_matrix_preserves_candidate_less_task_package_authority() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    approval_body = APPROVAL_BODY_PATH.read_text(encoding="utf-8")
+    contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
+    ready_adr = READY_ADR_PATH.read_text(encoding="utf-8")
+    deterministic_gate = DETERMINISTIC_GATE_PATH.read_text(encoding="utf-8")
+
+    ready_contract = (
+        "complete Draft task package",
+        "Architecture review is PASS",
+        "budget and any exception are approved",
+        "does not require a PR, candidate SHA, implementation diff, writer lease, "
+        "exact-head tests, or hosted CI",
+        "authorizes only `draft_to_ready`",
+    )
+    for source in (workflow, approval_body, ready_adr, deterministic_gate):
+        source = " ".join(source.split()).lower()
+        assert all(clause.lower() in source for clause in ready_contract)
+
+    assert "Obtain the applicable task-package Ready decision" in contributing
+    assert contributing.index("task-package Ready decision") < contributing.index("writer lease")
+
+
+def test_ready_gate_holds_incomplete_acceptance_or_unapproved_budget() -> None:
+    expected_holds = (
+        "incomplete acceptance criteria produces `HOLD`",
+        "unapproved budget produces `HOLD`",
+    )
+    for source in (
+        WORKFLOW_PATH.read_text(encoding="utf-8"),
+        APPROVAL_BODY_PATH.read_text(encoding="utf-8"),
+        READY_ADR_PATH.read_text(encoding="utf-8"),
+        DETERMINISTIC_GATE_PATH.read_text(encoding="utf-8"),
+    ):
+        source = " ".join(source.split()).lower()
+        assert all(clause.lower() in source for clause in expected_holds)
+
+
+def test_merge_gate_retains_frozen_candidate_and_ci_evidence() -> None:
+    expected_merge_contract = (
+        "PR and exact candidate SHA",
+        "valid writer-lease history and complete scoped diff",
+        "hosted CI SUCCESS at exact candidate HEAD",
+        "missing CI or an unfrozen candidate produces `HOLD`",
+        "authorizes only `squash_merge`",
+    )
+    for source in (
+        WORKFLOW_PATH.read_text(encoding="utf-8"),
+        APPROVAL_BODY_PATH.read_text(encoding="utf-8"),
+        READY_ADR_PATH.read_text(encoding="utf-8"),
+        DETERMINISTIC_GATE_PATH.read_text(encoding="utf-8"),
+    ):
+        source = " ".join(source.split()).lower()
+        assert all(clause.lower() in source for clause in expected_merge_contract)
+
+
+def test_ready_authority_sources_agree_without_schema_or_router_change() -> None:
+    lifecycle = "Draft → Ready → In Progress → Review → Verified → Done"
+    sources = (
+        WORKFLOW_PATH.read_text(encoding="utf-8"),
+        APPROVAL_BODY_PATH.read_text(encoding="utf-8"),
+        READY_ADR_PATH.read_text(encoding="utf-8"),
+        DETERMINISTIC_GATE_PATH.read_text(encoding="utf-8"),
+        CONTRIBUTING_PATH.read_text(encoding="utf-8"),
+    )
+    assert lifecycle in WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert all("Ready" in source for source in sources)
+
+    schema = json.loads(REPORT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert schema["properties"]["gate"]["enum"] == ["ready", "merge", "cleanup"]
+    router = yaml.safe_load(ROUTER_PATH.read_text(encoding="utf-8"))
+    assert router["model_routes"]["tier0"]["approval"]["prompt_id"] == "deterministic-gate-v1"
