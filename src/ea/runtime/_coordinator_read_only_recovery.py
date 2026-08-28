@@ -133,20 +133,11 @@ def _require_read_only_recovery_order(group: Any) -> None:
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery family conflicts")
     entries = (outcome, group.refresh_record, group.completion_record)
-    expected_kinds = (
-        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
-        AuditRecordKind.RISK_PORTFOLIO_REFRESH,
-        AuditRecordKind.RUNTIME_DISPATCH_COMPLETED,
-    )
-    if group.refresh_record is None and group.completion_record is not None:
+    positions = [entry[0] for entry in entries if entry is not None]
+    if group.completion_record is not None and group.refresh_record is None:
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery prefix conflicts")
-    previous = outcome[0] - 1
-    for entry, kind in zip(entries, expected_kinds, strict=True):
-        if entry is None:
-            break
-        if entry[1].record_kind is not kind or entry[0] != previous + 1:
-            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery prefix conflicts")
-        previous = entry[0]
+    if positions != list(range(outcome[0], outcome[0] + len(positions))):
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery prefix conflicts")
 
 
 def recover_read_only_dispatch(
@@ -157,7 +148,6 @@ def recover_read_only_dispatch(
     """Replay exactly one retained read-only journal family without effect owners."""
     _require_read_only_recovery_order(recovered)
     sequence = recovered.sequence
-    outcome_record = recovered.read_only_outcome_record
     trace = trace_by_sequence.get(sequence)
     runtime = coordinator._runtime
     lease = runtime.active_lease
@@ -180,28 +170,25 @@ def recover_read_only_dispatch(
         or trace[0].get("root_order_key") != _trace_order_key(root)
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery trace conflicts")
-    complete = recovered.completion_record is not None
-    if complete and trace is None:
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion acknowledgement is missing")
-    if not complete and trace is not None:
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "incomplete read-only recovery has trace")
-    if not complete:
-        try:
-            outcome_payload = outcome_record[1].canonical_payload
-            outcome = decode_reconciliation_outcome(outcome_payload, runtime.spec_set)
-        except (AttributeError, TypeError, ValueError) as error:
-            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "outcome conflicts") from error
-        _require_retained_outcome(coordinator, outcome_record, outcome_payload)
-        coordinator._require_read_only_outcome_authority(root, outcome, sequence)
+    if recovered.completion_record is None:
+        if trace is not None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID, "incomplete read-only recovery has trace"
+            )
+        active = _recovery_active(_RecoveredLease(root, sequence), root.observation_sha256)
+        _prove_read_only_family(coordinator, active, recovered)
         coordinator._active = coordinator._capture_lease(lease)
         return
+    if trace is None:
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion acknowledgement is missing")
     if lease is not None:
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID, "runtime retained an acknowledged read-only lease"
         )
     recovered_lease = _RecoveredLease(root, sequence)
     active = _recovery_active(recovered_lease, root.observation_sha256)
-    proven = _prove_completed_read_only_family(coordinator, active, recovered)
+    proven = _prove_read_only_family(coordinator, active, recovered)
+    assert proven is not None
     _apply_proven_read_only_family(coordinator, active, proven)
 
 
@@ -209,20 +196,29 @@ def _recovery_active(lease: _RecoveredLease, trigger_sha256: Sha256Digest) -> An
     return type("_RecoveryActive", (), {"lease": lease, "trigger_sha256": trigger_sha256})()
 
 
-def _prove_completed_read_only_family(
+def _prove_read_only_family(
     coordinator: Any, active: Any, recovered: Any
-) -> _ProvenReadOnlyFamily:
+) -> _ProvenReadOnlyFamily | None:
     root = active.lease.root
     sequence = active.lease.dispatch_sequence
     outcome_record = recovered.read_only_outcome_record
-    authority = coordinator._reconciliation_authority
-    admitted = authority.admit_observation(root.observation, dispatch_sequence=sequence)
-    outcome = authority.resolve_outcome(root.observation)
-    coordinator._require_read_only_outcome_authority(root, outcome, sequence)
-    outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
-    if outcome_payload != canonical_reconciliation_outcome_bytes(admitted):
-        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery outcome conflicts")
+    if recovered.completion_record is None:
+        try:
+            outcome_payload = outcome_record[1].canonical_payload
+            outcome = decode_reconciliation_outcome(outcome_payload, coordinator._runtime.spec_set)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "outcome conflicts") from error
+    else:
+        authority = coordinator._reconciliation_authority
+        admitted = authority.admit_observation(root.observation, dispatch_sequence=sequence)
+        outcome = authority.resolve_outcome(root.observation)
+        outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
+        if outcome_payload != canonical_reconciliation_outcome_bytes(admitted):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery outcome conflicts")
     outcome_ack = _require_retained_outcome(coordinator, outcome_record, outcome_payload)
+    if recovered.refresh_record is None:
+        coordinator._require_read_only_outcome_authority(root, outcome, sequence)
+        return None
     ledger, risk, refresh_authority, frontier = coordinator._read_only_gate()
     snapshot = ledger.snapshot
     before_risk = risk.risk_state
@@ -249,6 +245,9 @@ def _prove_completed_read_only_family(
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID, "outcome and refresh records are not contiguous"
         )
+    coordinator._require_read_only_outcome_authority(root, outcome, sequence)
+    if recovered.completion_record is None:
+        return None
     pre_ack_state = _pre_ack_state(
         _recovery_state_view(coordinator, active), active, outcome_ack, refresh_ack
     )

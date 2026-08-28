@@ -14,6 +14,7 @@ from ea.core import (
     AuditSubjectKind,
     ReconciliationObservationKind,
     ReconciliationObservationRoot,
+    RiskHaltReason,
     RunBinding,
     RunReference,
     Sha256Digest,
@@ -25,7 +26,7 @@ from ea.experiments.audit import create_posix_audit_journal
 from ea.experiments.store import LocalResultStore
 from ea.runtime._coordinator_read_only import drive_read_only
 from ea.runtime._coordinator_read_only_recovery import (
-    _prove_completed_read_only_family,
+    _prove_read_only_family,
     _RecoveredLease,
     _recovery_active,
     _require_read_only_recovery_order,
@@ -147,8 +148,12 @@ def _recover_read_only_dispatch(
     reconciliation: Any,
     runtime: _ReadOnlyRuntime,
     journal: Any,
+    record_count: int | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     ports = _ledger_ports(matcher, first_sequence=1, first_previous_refresh_sha256=None)
+    records = journal.recovery_records
+    if record_count is not None:
+        records = records.prefix(record_count)
     coordinator = recover_phase1_lifecycle_coordinator(
         binding=journal.binding,
         audit=journal,
@@ -156,7 +161,7 @@ def _recover_read_only_dispatch(
         matcher=matcher,
         fact_authority=_NoFacts(matcher),
         evidence_resolver=_FixedFillEvidence(None),
-        records=journal.recovery_records,
+        records=records,
         reconciliation_authority=reconciliation,
         **ports,
     )
@@ -218,13 +223,18 @@ def test_read_only_recovery_rejects_completion_without_mandatory_refresh() -> No
         _require_read_only_recovery_order(group)
 
 
-def test_incomplete_journal_recovery_retains_only_the_active_lease(tmp_path: Path) -> None:
+@pytest.mark.parametrize("record_count", (2, 3))
+def test_incomplete_recovery_retains_active_lease(tmp_path: Path, record_count: int) -> None:
     coordinator, matcher, reconciliation, _ports, runtime, journal, _root_value = (
         _journal_bound_read_only_dispatch(tmp_path)
     )
     active = coordinator._capture_lease(runtime.pop())
     coordinator._active = active
-    drive_read_only(coordinator, active, complete=False)
+    if record_count == 3:
+        drive_read_only(coordinator, active, complete=True)
+        runtime._popped = True
+    else:
+        drive_read_only(coordinator, active, complete=False)
     retained_count = len(journal.records)
     acknowledgement_calls = runtime.acknowledgement_calls
 
@@ -233,6 +243,7 @@ def test_incomplete_journal_recovery_retains_only_the_active_lease(tmp_path: Pat
         reconciliation=reconciliation,
         runtime=runtime,
         journal=journal,
+        record_count=record_count,
     )
 
     assert len(journal.records) == retained_count
@@ -252,12 +263,17 @@ def test_incomplete_journal_recovery_retains_only_the_active_lease(tmp_path: Pat
         "malformed_outcome",
         "missing_outcome",
         "missing_lease",
+        "refresh_cross_observation",
+        "refresh_wrong_frontier",
+        "refresh_discontinuous",
+        "refresh_ambiguous",
+        "refresh_spliced_ack",
     ),
 )
 def test_incomplete_journal_recovery_rejects_unbound_evidence_before_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    coordinator, matcher, _reconciliation, _ports, runtime, journal, _root_value = (
+    coordinator, matcher, _reconciliation, ports, runtime, journal, _root_value = (
         _journal_bound_read_only_dispatch(tmp_path)
     )
     active = coordinator._capture_lease(runtime.pop())
@@ -267,7 +283,7 @@ def test_incomplete_journal_recovery_rejects_unbound_evidence_before_capture(
     acknowledgement_calls = runtime.acknowledgement_calls
     root = _root_value
     sequence = 2 if case == "stale_sequence" else 1
-    if case == "different_root":
+    if case in {"different_root", "refresh_cross_observation"}:
         root = create_reconciliation_observation_root(
             _observation(
                 spec_set=matcher.spec_set,
@@ -280,20 +296,16 @@ def test_incomplete_journal_recovery_rejects_unbound_evidence_before_capture(
         runtime._popped = False
     captured: list[Any] = []
     coordinator._active = None
-    original_capture = type(coordinator)._capture_lease
-
-    def capture(instance: Any, lease: Any) -> Any:
-        captured.append(lease)
-        return original_capture(instance, lease)
-
-    monkeypatch.setattr(type(coordinator), "_capture_lease", capture)
+    monkeypatch.setattr(
+        type(coordinator), "_capture_lease", lambda *args: captured.append(args[-1])
+    )
     from ea.core.audit import create_audit_append_acknowledgement
 
-    outcome_record: Any = (
-        2,
-        journal.records[1],
-        create_audit_append_acknowledgement(journal.records[1]),
-    )
+    def retained(position: int) -> tuple[int, Any, Any]:
+        record = journal.records[position - 1]
+        return position, record, create_audit_append_acknowledgement(record)
+
+    outcome_record: Any = retained(2)
     if case == "spliced_ack":
         outcome_record = (
             2,
@@ -311,6 +323,23 @@ def test_incomplete_journal_recovery_rejects_unbound_evidence_before_capture(
         )
     elif case == "missing_outcome":
         outcome_record = None
+    refresh_record: Any = retained(3) if case.startswith("refresh_") else None
+    if case == "refresh_discontinuous":
+        refresh_record = (4, *refresh_record[1:])
+    elif case == "refresh_ambiguous":
+        refresh_record = (
+            3,
+            SimpleNamespace(
+                record_kind=AuditRecordKind.RISK_PORTFOLIO_REFRESH, canonical_payload=b"{}"
+            ),
+            None,
+        )
+    elif case == "refresh_spliced_ack":
+        refresh_record = (3, journal.records[2], outcome_record[2])
+    risk, frontier = ports["risk_authority"], ports["frontier"]
+    if case == "refresh_wrong_frontier":
+        risk.engage_halt(RiskHaltReason.RECONCILIATION_REQUIRED, root.available_at, sequence)
+    before = coordinator._state, risk.risk_state, frontier.previous_refresh_sha256
     recovered = SimpleNamespace(
         sequence=sequence,
         trigger_sha256=None,
@@ -320,7 +349,7 @@ def test_incomplete_journal_recovery_rejects_unbound_evidence_before_capture(
         authorization_records=[],
         ledger_records=[],
         failing_record=None,
-        refresh_record=None,
+        refresh_record=refresh_record,
         completion_record=None,
     )
 
@@ -331,6 +360,7 @@ def test_incomplete_journal_recovery_rejects_unbound_evidence_before_capture(
     assert coordinator._active is None
     assert len(journal.records) == retained_count
     assert runtime.acknowledgement_calls == acknowledgement_calls
+    assert (coordinator._state, risk.risk_state, frontier.previous_refresh_sha256) == before
 
 
 def test_completed_journal_without_trace_fails_before_recovery_side_effects(tmp_path: Path) -> None:
@@ -495,7 +525,7 @@ def test_completed_halted_journal_with_bad_refresh_fails_before_risk_halt(
     proof_active = _recovery_active(_RecoveredLease(_root_value, 1), _root_value.observation_sha256)
 
     with pytest.raises(LifecycleError, match="payload conflicts"):
-        _prove_completed_read_only_family(recovery_coordinator, proof_active, recovered)
+        _prove_read_only_family(recovery_coordinator, proof_active, recovered)
 
     assert recovery_ports["risk_authority"].risk_state.halted is False
     assert recovery_ports["frontier"].previous_refresh_sha256 is None
