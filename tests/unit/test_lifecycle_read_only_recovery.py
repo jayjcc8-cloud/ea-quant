@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import copy
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -363,7 +364,130 @@ def test_incomplete_journal_recovery_rejects_unbound_evidence_before_capture(
     assert (coordinator._state, risk.risk_state, frontier.previous_refresh_sha256) == before
 
 
-def test_completed_journal_without_trace_fails_before_recovery_side_effects(tmp_path: Path) -> None:
+@pytest.mark.parametrize("field", ("local_snapshot_version", "requested_action", "halt_requested"))
+def test_incomplete_recovery_recomputes_full_semantic_outcome_before_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    coordinator, matcher, reconciliation, _ports, runtime, journal, _root_value = (
+        _journal_bound_read_only_dispatch(tmp_path)
+    )
+    active = coordinator._capture_lease(runtime.pop())
+    coordinator._active = active
+    drive_read_only(coordinator, active, complete=False)
+    assert active.read_only is not None and active.read_only.outcome is not None
+    substitute = copy(active.read_only.outcome)
+    if field == "local_snapshot_version":
+        object.__setattr__(substitute, field, substitute.local_snapshot_version + 1)
+    elif field == "requested_action":
+        from ea.core.reconciliation import ReconciliationRequestedAction
+
+        object.__setattr__(substitute, field, ReconciliationRequestedAction.RETAIN_AND_HALT)
+    else:
+        object.__setattr__(substitute, field, not substitute.halt_requested)
+    monkeypatch.setattr(
+        type(reconciliation), "admit_observation", lambda *_, **__: active.read_only.outcome
+    )
+    monkeypatch.setattr(type(reconciliation), "resolve_outcome", lambda *_: substitute)
+    recovery_ports = _ledger_ports(matcher, first_sequence=1, first_previous_refresh_sha256=None)
+    captured: list[Any] = []
+    recovery_coordinator = SimpleNamespace(
+        _binding=journal.binding,
+        _state=coordinator._state,
+        _runtime=runtime,
+        _reconciliation_authority=reconciliation,
+        _resolve_read_only_outcome=lambda root, sequence: type(
+            coordinator
+        )._resolve_read_only_outcome(coordinator, root, sequence),
+        _read_only_gate=lambda: (
+            recovery_ports["ledger_handoff_authority"],
+            recovery_ports["risk_authority"],
+            recovery_ports["risk_refresh_authority"],
+            recovery_ports["frontier"],
+        ),
+        _require_read_only_outcome_authority=lambda *_: None,
+        _capture_lease=lambda lease: captured.append(lease),
+    )
+    from ea.core.audit import create_audit_append_acknowledgement
+
+    recovered = SimpleNamespace(
+        sequence=1,
+        trigger_sha256=None,
+        read_only_outcome_record=(
+            2,
+            journal.records[1],
+            create_audit_append_acknowledgement(journal.records[1]),
+        ),
+        batch_record=None,
+        outcome_records={},
+        authorization_records=[],
+        ledger_records=[],
+        failing_record=None,
+        refresh_record=(
+            3,
+            journal.records[2],
+            create_audit_append_acknowledgement(journal.records[2]),
+        ),
+        completion_record=None,
+    )
+    with pytest.raises(LifecycleError, match="outcome conflicts"):
+        recover_read_only_dispatch(recovery_coordinator, recovered, {})
+
+    assert captured == []
+
+
+@pytest.mark.parametrize("mismatch", ("root", "sequence"))
+def test_completed_read_only_recovery_rejects_a_mismatched_retained_lease(
+    tmp_path: Path, mismatch: str
+) -> None:
+    coordinator, matcher, reconciliation, _ports, runtime, journal, root = (
+        _journal_bound_read_only_dispatch(tmp_path, fail_first_acknowledgement=True)
+    )
+    active = coordinator._capture_lease(runtime.pop())
+    coordinator._active = active
+    with pytest.raises(RuntimeError, match="pre-trace"):
+        drive_read_only(coordinator, active, complete=True)
+    if mismatch == "root":
+        root = create_reconciliation_observation_root(
+            _observation(spec_set=matcher.spec_set, source_sequence=8, observation_sequence=2)
+        )
+    runtime._lease = type(runtime._lease)(root, 2 if mismatch == "sequence" else 1)
+
+    with pytest.raises(LifecycleError, match="root|sequence|trigger"):
+        _recover_read_only_dispatch(
+            matcher=matcher, reconciliation=reconciliation, runtime=runtime, journal=journal
+        )
+
+
+@pytest.mark.parametrize("retry", ("retry_active_dispatch_completion", "retry_active_dispatch"))
+def test_completed_read_only_recovery_retains_only_completion_acknowledgement(
+    tmp_path: Path, retry: str
+) -> None:
+    coordinator, matcher, reconciliation, _ports, runtime, journal, _root_value = (
+        _journal_bound_read_only_dispatch(tmp_path, fail_first_acknowledgement=True)
+    )
+    active = coordinator._capture_lease(runtime.pop())
+    coordinator._active = active
+    with pytest.raises(RuntimeError, match="pre-trace"):
+        drive_read_only(coordinator, active, complete=True)
+    retained_records = tuple(journal.records)
+    acknowledgement_calls = runtime.acknowledgement_calls
+
+    recovered, ports = _recover_read_only_dispatch(
+        matcher=matcher, reconciliation=reconciliation, runtime=runtime, journal=journal
+    )
+
+    assert tuple(journal.records) == retained_records
+    assert runtime.acknowledgement_calls == acknowledgement_calls
+    assert ports["frontier"].previous_refresh_sha256 is None
+    assert recovered._active is not None
+    assert recovered._active.read_only.completion_ack is not None
+    getattr(recovered, retry)()
+    assert tuple(journal.records) == retained_records
+    assert runtime.acknowledgement_calls == acknowledgement_calls + 1
+    assert recovered._active is None
+
+
+def test_completed_journal_without_trace_retains_completion_only_recovery(tmp_path: Path) -> None:
     coordinator, matcher, reconciliation, _ports, runtime, journal, _root_value = (
         _journal_bound_read_only_dispatch(tmp_path, fail_first_acknowledgement=True)
     )
@@ -373,24 +497,14 @@ def test_completed_journal_without_trace_fails_before_recovery_side_effects(tmp_
         drive_read_only(coordinator, active, complete=True)
     retained_count = len(journal.records)
     acknowledgement_calls = runtime.acknowledgement_calls
-    recovery_ports = _ledger_ports(matcher, first_sequence=1, first_previous_refresh_sha256=None)
-
-    with pytest.raises(LifecycleError, match="completion acknowledgement is missing"):
-        recover_phase1_lifecycle_coordinator(
-            binding=journal.binding,
-            audit=journal,
-            runtime=runtime,
-            matcher=matcher,
-            fact_authority=_NoFacts(matcher),
-            evidence_resolver=_FixedFillEvidence(None),
-            records=journal.recovery_records,
-            reconciliation_authority=reconciliation,
-            **recovery_ports,
-        )
+    recovered, recovery_ports = _recover_read_only_dispatch(
+        matcher=matcher, reconciliation=reconciliation, runtime=runtime, journal=journal
+    )
 
     assert len(journal.records) == retained_count
     assert runtime.acknowledgement_calls == acknowledgement_calls
     assert recovery_ports["frontier"].previous_refresh_sha256 is None
+    assert recovered._active is not None
 
 
 def test_completed_journal_recovery_matches_the_uninterrupted_frontier_and_trace(
@@ -514,6 +628,9 @@ def test_completed_halted_journal_with_bad_refresh_fails_before_risk_halt(
         _binding=journal.binding,
         _state=coordinator._state,
         _reconciliation_authority=reconciliation,
+        _resolve_read_only_outcome=lambda root, sequence: type(
+            coordinator
+        )._resolve_read_only_outcome(coordinator, root, sequence),
         _read_only_gate=lambda: (
             recovery_ports["ledger_handoff_authority"],
             recovery_ports["risk_authority"],

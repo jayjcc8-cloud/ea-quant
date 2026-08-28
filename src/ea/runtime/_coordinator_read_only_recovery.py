@@ -40,7 +40,6 @@ from ea.core.reconciliation import (
     ReconciliationOutcome,
     canonical_reconciliation_outcome_bytes,
     decode_reconciliation_observation,
-    decode_reconciliation_outcome,
 )
 from ea.core.risk import RiskHaltReason, _create_risk_state_snapshot, risk_state_snapshot_digest
 from ea.core.run import Sha256Digest
@@ -179,6 +178,15 @@ def recover_read_only_dispatch(
         _prove_read_only_family(coordinator, active, recovered)
         coordinator._active = coordinator._capture_lease(lease)
         return
+    if trace is None and lease is not None:
+        active = _recovery_active(_RecoveredLease(root, sequence), root.observation_sha256)
+        proven = _prove_read_only_family(coordinator, active, recovered)
+        if proven is None:
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion route is incomplete")
+        retained = coordinator._capture_lease(lease)
+        retained.read_only = proven.route
+        coordinator._active = retained
+        return
     if trace is None:
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "completion acknowledgement is missing")
     if lease is not None:
@@ -202,22 +210,10 @@ def _prove_read_only_family(
     root = active.lease.root
     sequence = active.lease.dispatch_sequence
     outcome_record = recovered.read_only_outcome_record
-    if recovered.completion_record is None:
-        try:
-            outcome_payload = outcome_record[1].canonical_payload
-            outcome = decode_reconciliation_outcome(outcome_payload, coordinator._runtime.spec_set)
-        except (AttributeError, TypeError, ValueError) as error:
-            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "outcome conflicts") from error
-    else:
-        authority = coordinator._reconciliation_authority
-        admitted = authority.admit_observation(root.observation, dispatch_sequence=sequence)
-        outcome = authority.resolve_outcome(root.observation)
-        outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
-        if outcome_payload != canonical_reconciliation_outcome_bytes(admitted):
-            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery outcome conflicts")
+    outcome = coordinator._resolve_read_only_outcome(root, sequence)
+    outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
     outcome_ack = _require_retained_outcome(coordinator, outcome_record, outcome_payload)
     if recovered.refresh_record is None:
-        coordinator._require_read_only_outcome_authority(root, outcome, sequence)
         return None
     ledger, risk, refresh_authority, frontier = coordinator._read_only_gate()
     snapshot = ledger.snapshot
@@ -245,7 +241,6 @@ def _prove_read_only_family(
         raise LifecycleError(
             OutcomeCode.CONFLICTING_ID, "outcome and refresh records are not contiguous"
         )
-    coordinator._require_read_only_outcome_authority(root, outcome, sequence)
     if recovered.completion_record is None:
         return None
     pre_ack_state = _pre_ack_state(
@@ -398,7 +393,11 @@ def _apply_proven_read_only_family(
         route.refresh
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only recovery refresh conflicts")
-    frontier.advance(snapshot=proven.snapshot, risk_state=risk.risk_state, refresh=refresh)
+    active.ledger_snapshot = proven.snapshot
+    active.risk_state = risk.risk_state
+    active.refresh = refresh
+    active.refresh_ack = route.refresh_ack
+    coordinator._publish_retained_refresh(active, frontier)
     coordinator._state = proven.resulting_state
     coordinator._active = None
     _create_read_only_reconciliation_dispatch_outcome(

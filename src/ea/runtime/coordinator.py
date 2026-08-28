@@ -110,6 +110,7 @@ from ea.core.portfolio import (
 from ea.core.reconciliation import (
     ReconciliationObservation,
     ReconciliationOutcome,
+    canonical_reconciliation_outcome_bytes,
     reconciliation_observation_digest,
 )
 from ea.core.risk import RiskHaltReason, RiskPolicyId, RiskStateSnapshot, risk_state_snapshot_digest
@@ -1294,7 +1295,7 @@ class Phase1HistoricalLifecycleCoordinator:
             active.ledger_snapshot = ledger.snapshot
         if active.risk_state is None:
             active.risk_state = risk.risk_state
-        if active.prior_frontier is None:
+        if getattr(active, "prior_frontier", None) is None:
             active.prior_frontier = _frontier_state(frontier)
         if not active.ledger_outcomes:
             active.ledger_outcomes = [None] * len(active.handoffs)
@@ -1440,6 +1441,8 @@ class Phase1HistoricalLifecycleCoordinator:
         refresh = active.refresh
         snapshot = active.ledger_snapshot
         risk_state = active.risk_state
+        if getattr(active, "prior_frontier", None) is None:
+            active.prior_frontier = _frontier_state(frontier)
         if (
             refresh is None
             or snapshot is None
@@ -1484,6 +1487,27 @@ class Phase1HistoricalLifecycleCoordinator:
                 "refresh publication did not commit the exact candidate",
             )
         active.refresh_published = True
+
+    def _resolve_read_only_outcome(
+        self,
+        root: ReconciliationObservationRoot,
+        sequence: int,
+        active: _ActiveDispatch | None = None,
+    ) -> ReconciliationOutcome:
+        authority = self._reconciliation_authority
+        if authority is None:
+            raise LifecycleError(
+                OutcomeCode.CONFLICTING_ID, "read-only reconciliation authority is unavailable"
+            )
+        outcome = authority.admit_observation(root.observation, dispatch_sequence=sequence)
+        if active is not None:
+            self._require_same_active_lease(active)
+        retained = authority.resolve_outcome(root.observation)
+        retained_payload = canonical_reconciliation_outcome_bytes(retained)
+        if retained_payload != canonical_reconciliation_outcome_bytes(outcome):
+            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only outcome conflicts")
+        self._require_read_only_outcome_authority(root, retained, sequence)
+        return retained
 
     def _completion_payload(
         self,

@@ -111,19 +111,11 @@ def drive_read_only(
     if route is None:
         route = _ReadOnlyDispatch()
         active.read_only = route
-    authority = coordinator._reconciliation_authority
     gate = coordinator._read_only_gate()
     ledger, risk, refresh_authority, frontier = gate
     sequence = active.lease.dispatch_sequence
     if route.outcome is None:
-        outcome = authority.admit_observation(root.observation, dispatch_sequence=sequence)
-        coordinator._require_same_active_lease(active)
-        retained = authority.resolve_outcome(root.observation)
-        coordinator._require_read_only_outcome_authority(root, retained, sequence)
-        retained_payload = canonical_reconciliation_outcome_bytes(retained)
-        if retained_payload != canonical_reconciliation_outcome_bytes(outcome):
-            raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only outcome conflicts")
-        route.outcome = retained
+        route.outcome = coordinator._resolve_read_only_outcome(root, sequence, active)
     outcome = route.outcome
     assert outcome is not None
     outcome_payload = canonical_reconciliation_outcome_bytes(outcome)
@@ -207,7 +199,11 @@ def drive_read_only(
     ):
         raise LifecycleError(OutcomeCode.CONFLICTING_ID, "read-only refresh frontier conflicts")
     if route.window is None:
-        frontier.advance(snapshot=snapshot, risk_state=risk_state, refresh=refresh)
+        active.ledger_snapshot = snapshot
+        active.risk_state = risk_state
+        active.refresh = refresh
+        active.refresh_ack = refresh_ack
+        coordinator._publish_retained_refresh(active, frontier)
     elif (
         frontier.previous_refresh_sha256 != portfolio_risk_refresh_digest(refresh)
         or portfolio_snapshot_digest(frontier.current_snapshot())

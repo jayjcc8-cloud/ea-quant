@@ -157,6 +157,26 @@ def test_rank_20_position_observation_settles_to_a_read_only_outcome() -> None:
     assert outcome.runtime_acknowledged is True
 
 
+def test_fresh_read_only_route_uses_the_retained_refresh_publication_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    coordinator, _audit, ports, _runtime = _read_only_coordinator(matcher, _root(matcher))
+    published: list[Any] = []
+    original = type(coordinator)._publish_retained_refresh
+
+    def publish(self: Any, active: Any, frontier: Any) -> None:
+        published.append((active, frontier))
+        original(self, active, frontier)
+
+    monkeypatch.setattr(type(coordinator), "_publish_retained_refresh", publish)
+
+    coordinator.process_next_dispatch()
+
+    assert len(published) == 1
+    assert published[0][1] is ports["frontier"]
+
+
 @pytest.mark.parametrize(
     "retry",
     ("retry_active_dispatch_completion", "retry_active_dispatch"),
