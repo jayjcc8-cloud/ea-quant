@@ -13,6 +13,7 @@ from ea.core.run import DataFingerprint, ReplayWindow, RunId, Sha256Digest
 CONFIG_DOMAIN = b"ea.config.v1\0"
 LOCK_DOMAIN = b"ea.uv-lock.v1\0"
 LINEAGE_DOMAIN = b"ea.run-spec.v1\0"
+LINEAGE_V2_DOMAIN = b"ea.run-spec.v2\0"
 CONFIG_CANONICALIZATION = "ea-settings-v1"
 DATA_CANONICALIZATION = "ea-market-data-envelope-v1"
 
@@ -132,6 +133,57 @@ def _distribution_mapping(value: _DistributionLike) -> dict[str, object]:
 
 
 def _lineage_mapping(spec: _LineageLike) -> dict[str, object]:
+    if spec.lineage_schema_version == 2:
+        runtime = cast(_InstalledRuntimeV2Like, spec.runtime)
+        return {
+            "configuration": {
+                "canonicalization": CONFIG_CANONICALIZATION,
+                "normalized": _normalized_configuration_mapping(spec.configuration.normalized),
+                "sha256": spec.configuration.sha256.value,
+            },
+            "data": {
+                "canonicalization": DATA_CANONICALIZATION,
+                "record_count": spec.data.record_count,
+                "sha256": spec.data.sha256.value,
+            },
+            "initial_funding": {
+                "amount": spec.initial_funding.amount.text,
+                "canonicalization": "ea-initial-funding-spec-v1",
+                "currency_quantum": spec.initial_funding.currency_quantum.text,
+                "instrument_spec_set_id": spec.initial_funding.instrument_spec_set_id.value,
+                "instrument_spec_set_sha256": spec.initial_funding.instrument_spec_set_sha256.value,
+                "schema_version": 1,
+                "settlement_currency": spec.initial_funding.settlement_currency.code,
+            },
+            "lineage_schema_version": 2,
+            "parameters": [_parameter_mapping(item) for item in spec.parameters],
+            "randomness": {
+                "generator": spec.randomness.generator,
+                "master_seed": spec.randomness.master_seed,
+                "stream_derivation": spec.randomness.stream_derivation,
+                "stream_labels": list(spec.randomness.stream_labels),
+            },
+            "replay_window": {
+                "end_exclusive": utc_text(spec.replay_window.end_exclusive),
+                "initial_state": "empty",
+                "selection_field": "available_at",
+                "start_inclusive": utc_text(spec.replay_window.start_inclusive),
+                "timezone": "UTC",
+            },
+            "runtime": {
+                "distributions": [_distribution_mapping(item) for item in runtime.distributions],
+                "ea_distribution": _distribution_mapping(runtime.ea_distribution),
+                "ea_installed_files_sha256": runtime.ea_installed_files_sha256.value,
+                "numeric_policy": runtime.numeric_policy,
+                "platform_tag": runtime.platform_tag,
+                "provenance_kind": runtime.provenance_kind,
+                "python_cache_tag": runtime.python_cache_tag,
+                "python_implementation": runtime.python_implementation,
+                "python_version": runtime.python_version,
+                "sys_platform": runtime.sys_platform,
+            },
+            "scenario_sha256": spec.scenario_sha256.value,
+        }
     return {
         "code": {
             "commit": spec.code.commit,
@@ -174,6 +226,19 @@ def _lineage_mapping(spec: _LineageLike) -> dict[str, object]:
             "uv_lock_sha256": spec.runtime.uv_lock_sha256.value,
         },
     }
+
+
+class _InstalledRuntimeV2Like(Protocol):
+    provenance_kind: str
+    ea_distribution: _DistributionLike
+    ea_installed_files_sha256: Sha256Digest
+    python_implementation: str
+    python_version: str
+    python_cache_tag: str
+    sys_platform: str
+    platform_tag: str
+    distributions: tuple[_DistributionLike, ...]
+    numeric_policy: str
 
 
 def canonical_lineage_bytes(spec: object) -> bytes:
