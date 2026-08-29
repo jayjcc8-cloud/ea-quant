@@ -14,6 +14,15 @@ REPORT_SCHEMA_PATH = PROJECT_ROOT / ".governance" / "schemas" / "report.schema.j
 CONTEXT_SCHEMA_PATH = PROJECT_ROOT / ".governance" / "schemas" / "context-manifest.schema.json"
 APPROVAL_BODY_PATH = PROJECT_ROOT / ".agents" / "approval-owner.md"
 WORKFLOW_PATH = PROJECT_ROOT / "docs" / "governance" / "WORKFLOW.md"
+STATUS_PATH = PROJECT_ROOT / "docs" / "STATUS.md"
+ROADMAP_PATH = PROJECT_ROOT / "docs" / "ROADMAP.md"
+CI_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+PHASE1_PRODUCT_ADR_PATH = (
+    PROJECT_ROOT / "docs" / "adr" / "0027-phase1-offline-backtest-product-boundary.md"
+)
+TIER2_FOUR_PARTY_ADR_PATH = (
+    PROJECT_ROOT / "docs" / "adr" / "0028-tier2-four-party-delivery-model.md"
+)
 CONTRIBUTING_PATH = PROJECT_ROOT / "CONTRIBUTING.md"
 READY_ADR_PATH = (
     PROJECT_ROOT / "docs" / "adr" / "0026-pre-implementation-ready-and-candidate-merge-approval.md"
@@ -194,7 +203,7 @@ def test_route_effort_matches_governed_contract() -> None:
     route_names = {
         "tier0": ("implementation", "verification", "approval"),
         "tier1": ("implementation", "architecture", "verification", "approval"),
-        "tier2": ("decision", "implementation", "adversarial", "verification", "approval"),
+        "tier2": ("decision", "implementation", "safety_verification", "approval"),
     }
     mismatches: dict[str, tuple[str | None, str | None]] = {}
     for tier, names in route_names.items():
@@ -213,6 +222,156 @@ def test_route_effort_matches_governed_contract() -> None:
                 mismatches[f"{tier}.{name}"] = (route.get("effort"), required_effort)
 
     assert mismatches == {}
+
+
+def test_tier2_route_is_four_party_with_combined_safety_verification() -> None:
+    router = yaml.safe_load(ROUTER_PATH.read_text(encoding="utf-8"))
+    assert isinstance(router, dict)
+    tier2 = router["model_routes"]["tier2"]
+
+    assert tier2["ordered_roles"] == [
+        "sol_decision_owner",
+        "implementation_owner",
+        "independent_sol_safety_verification_owner",
+        "independent_sol_approval_owner",
+    ]
+    assert set(tier2) == {
+        "ordered_roles",
+        "decision",
+        "implementation",
+        "safety_verification",
+        "approval",
+    }
+    assert tier2["safety_verification"] == {
+        "profile": "ea-sol",
+        "effort": "high",
+        "prompt_id": "sol-verification-v1",
+        "scope": [
+            "time_visibility",
+            "audit_ledger",
+            "recovery",
+            "canonical_identity",
+            "capability_confinement",
+            "fail_closed",
+        ],
+    }
+    assert router["actor_separation"]["forbidden_same_actor"] == [
+        ["decision", "safety_verification"],
+        ["decision", "approval"],
+        ["implementation", "safety_verification"],
+        ["implementation", "approval"],
+        ["safety_verification", "approval"],
+    ]
+
+
+def test_phase1_convergence_contract_is_durable_and_bounded() -> None:
+    product_adr = PHASE1_PRODUCT_ADR_PATH.read_text(encoding="utf-8")
+    tier2_adr = TIER2_FOUR_PARTY_ADR_PATH.read_text(encoding="utf-8")
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    status = STATUS_PATH.read_text(encoding="utf-8")
+    roadmap = ROADMAP_PATH.read_text(encoding="utf-8")
+
+    for adr in (product_adr, tier2_adr):
+        assert "## Status" in adr
+        assert "Accepted" in adr
+        assert "## Decision" in adr
+
+    for clause in (
+        "mature offline backtest product",
+        "installed distribution",
+        "detect, audit, report, and stop",
+        "no automatic reconciliation correction",
+        "RunManifest v2",
+        "read-only verification",
+    ):
+        assert clause.lower() in product_adr.lower()
+
+    for clause in (
+        "Decision/Design",
+        "Implementation",
+        "Combined Safety Verification",
+        "Merge Approval",
+        "exact candidate SHA",
+    ):
+        assert clause in tier2_adr
+
+    assert "`status:superseded`" in workflow
+    assert "terminal state" in workflow
+    assert "300 lines" in workflow
+    assert "at most two frozen candidates" in workflow
+    assert "combined safety verification" in workflow.lower()
+    assert "automated review" in workflow.lower()
+    assert "before merge" in workflow.lower()
+
+    for delivery in (
+        "Authority and workflow convergence",
+        "Initial funding and fail-closed kernel",
+        "Sample strategies and end-to-end CLI",
+        "Reporting and release readiness",
+    ):
+        assert delivery in status
+    assert "Phase 1.1" in status
+    assert "Phase 1.1" in roadmap
+    assert "automatic reconciliation correction" in roadmap.lower()
+
+
+def test_ci_routes_docs_python_candidate_main_release_and_web_work() -> None:
+    workflow_text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(workflow_text)
+    assert isinstance(workflow, dict)
+    triggers = workflow.get("on", workflow.get(True))
+    assert isinstance(triggers, dict)
+
+    purpose = triggers["workflow_dispatch"]["inputs"]["purpose"]
+    assert purpose["options"] == ["frozen_candidate", "release_candidate"]
+
+    jobs = workflow["jobs"]
+    classify = jobs["classify"]
+    assert set(classify["outputs"]) == {
+        "docs_only",
+        "governance",
+        "python",
+        "web",
+        "ci",
+    }
+
+    governance = jobs["governance"]
+    assert "needs.classify.outputs.docs_only == 'true'" in governance["if"]
+    governance_run = "\n".join(
+        step.get("run", "") for step in governance["steps"] if isinstance(step, dict)
+    )
+    assert "tests/unit/test_project_control.py" in governance_run
+    assert "tests/unit/test_governance_protocol.py" in governance_run
+
+    quality = jobs["quality"]
+    assert "github.event_name == 'pull_request'" in quality["if"]
+    quality_run = "\n".join(
+        step.get("run", "") for step in quality["steps"] if isinstance(step, dict)
+    )
+    assert "scripts/verify.py --profile quality" in quality_run
+
+    full = jobs["test"]
+    assert full["if"] == "github.event_name == 'workflow_dispatch'"
+    full_run = "\n".join(step.get("run", "") for step in full["steps"] if isinstance(step, dict))
+    assert "scripts/verify.py --profile full" in full_run
+
+    main_smoke = jobs["main_smoke"]
+    assert main_smoke["if"] == "github.event_name == 'push'"
+    smoke_run = "\n".join(
+        step.get("run", "") for step in main_smoke["steps"] if isinstance(step, dict)
+    )
+    assert "uv build --wheel" in smoke_run
+    assert "uv pip install" in smoke_run
+    assert "ea doctor" in smoke_run
+
+    frontend = jobs["frontend"]
+    assert "needs.classify.outputs.web == 'true'" in frontend["if"]
+    classify_run = "\n".join(
+        step.get("run", "") for step in classify["steps"] if isinstance(step, dict)
+    )
+    assert "apps/web/*" in classify_run
+    assert "package-lock.json" in classify_run
+    assert ".github/workflows/*" in classify_run
 
 
 def test_approval_owner_contract_is_representable_by_report_schema() -> None:

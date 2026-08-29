@@ -13,15 +13,29 @@ on:
         description: Exact lowercase candidate commit SHA to verify from trusted main.
         required: true
         type: string
+      purpose:
+        description: Why this exact-SHA full verification is being run.
+        required: true
+        default: frozen_candidate
+        type: choice
+        options:
+          - frozen_candidate
+          - release_candidate
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  frontend:
+  classify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.routes.outputs.docs_only }}
+      governance: ${{ steps.routes.outputs.governance }}
+      python: ${{ steps.routes.outputs.python }}
+      web: ${{ steps.routes.outputs.web }}
+      ci: ${{ steps.routes.outputs.ci }}
     steps:
       - name: Validate trusted main dispatch
         if: github.event_name == 'workflow_dispatch'
@@ -36,6 +50,161 @@ jobs:
           printf 'trusted_workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
           printf 'trusted_workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
           printf 'validated_candidate_sha=%s\n' "$CANDIDATE_SHA"
+      - uses: actions/checkout@v7
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert event exact checkout
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - name: Assert dispatched exact checkout
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_SHA: ${{ inputs.candidate_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Classify changed paths
+        id: routes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE_SHA: ${{ github.event.before }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$EVENT_BASE_SHA"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            base_sha="$EVENT_BEFORE_SHA"
+            if [[ "$base_sha" =~ ^0{40}$ ]]; then
+              base_sha="$(git rev-list --max-parents=0 HEAD | tail -n 1)"
+            fi
+          else
+            git fetch --no-tags origin main
+            base_sha="$(git merge-base "$HEAD_SHA" origin/main)"
+          fi
+
+          git cat-file -e "$base_sha^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+          mapfile -t changed_files < <(git diff --name-only "$base_sha" "$HEAD_SHA")
+
+          docs_only=true
+          governance=false
+          python=false
+          web=false
+          ci=false
+          if [[ "${#changed_files[@]}" -eq 0 ]]; then
+            docs_only=false
+          fi
+
+          for changed_file in "${changed_files[@]}"; do
+            case "$changed_file" in
+              .github/workflows/*)
+                ci=true
+                governance=true
+                python=true
+                web=true
+                docs_only=false
+                ;;
+              src/*|tests/*|scripts/*|pyproject.toml|uv.lock)
+                python=true
+                docs_only=false
+                ;;
+              apps/web/*|package.json|package-lock.json|npm-shrinkwrap.json)
+                web=true
+                docs_only=false
+                ;;
+              docs/*|README.md|AGENTS.md|CONTRIBUTING.md|.governance/*|.github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE.md)
+                governance=true
+                ;;
+              *)
+                governance=true
+                docs_only=false
+                ;;
+            esac
+          done
+
+          printf 'docs_only=%s\n' "$docs_only" >> "$GITHUB_OUTPUT"
+          printf 'governance=%s\n' "$governance" >> "$GITHUB_OUTPUT"
+          printf 'python=%s\n' "$python" >> "$GITHUB_OUTPUT"
+          printf 'web=%s\n' "$web" >> "$GITHUB_OUTPUT"
+          printf 'ci=%s\n' "$ci" >> "$GITHUB_OUTPUT"
+          printf 'changed_files=%s\n' "${#changed_files[@]}"
+
+  governance:
+    needs: classify
+    if: >-
+      github.event_name != 'workflow_dispatch' &&
+      (needs.classify.outputs.docs_only == 'true' ||
+      needs.classify.outputs.governance == 'true' ||
+      needs.classify.outputs.ci == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      UV_PROJECT_ENVIRONMENT: venv
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert event exact checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version-file: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install locked governance test environment
+        run: uv sync --locked --extra dev
+      - name: Verify governance contracts
+        run: >-
+          uv run --locked pytest -q
+          tests/unit/test_project_control.py
+          tests/unit/test_governance_protocol.py
+
+  quality:
+    needs: classify
+    if: >-
+      github.event_name == 'pull_request' &&
+      (needs.classify.outputs.python == 'true' || needs.classify.outputs.ci == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UV_PROJECT_ENVIRONMENT: venv
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Assert pull request exact checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version-file: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Verify Python quality
+        run: uv run --no-project --python 3.12 python scripts/verify.py --profile quality
+
+  frontend:
+    needs: classify
+    if: needs.classify.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
       - uses: actions/checkout@v7
         if: github.event_name != 'workflow_dispatch'
         with:
@@ -69,7 +238,40 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+
+  main_smoke:
+    needs: classify
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Assert main exact checkout
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version-file: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Build, install, and smoke test wheel
+        run: |
+          set -euo pipefail
+          uv build --wheel --out-dir .ci-dist
+          uv venv --python 3.12 .ci-smoke
+          wheel_file="$(find .ci-dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$wheel_file"
+          uv pip install --python .ci-smoke/bin/python "$wheel_file"
+          .ci-smoke/bin/ea doctor
+
   test:
+    needs: classify
+    if: github.event_name == 'workflow_dispatch'
+    name: ${{ inputs.purpose == 'release_candidate' && 'Release candidate full' || 'Frozen candidate full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

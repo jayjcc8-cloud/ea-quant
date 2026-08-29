@@ -83,9 +83,8 @@ output_contract:
       required_roles:
         - sol_decision_owner
         - implementation_owner
-        - terra_adversarial_reviewer
-        - independent_verification_owner
-        - approval_owner
+        - independent_sol_safety_verification_owner
+        - independent_sol_approval_owner
       model_profiles: [ea-sol, ea-terra]
       luna_eligible: false
 
@@ -251,8 +250,7 @@ model_routes:
     ordered_roles:
       - sol_decision_owner
       - implementation_owner
-      - terra_adversarial_reviewer
-      - independent_sol_verification_owner
+      - independent_sol_safety_verification_owner
       - independent_sol_approval_owner
     decision:
       profile: ea-sol
@@ -262,14 +260,17 @@ model_routes:
       profile: ea-terra
       effort: high
       prompt_id: terra-implementation-v1
-    adversarial:
-      profile: ea-terra
-      effort: high
-      prompt_id: terra-adversarial-v1
-    verification:
+    safety_verification:
       profile: ea-sol
       effort: high
       prompt_id: sol-verification-v1
+      scope:
+        - time_visibility
+        - audit_ledger
+        - recovery
+        - canonical_identity
+        - capability_confinement
+        - fail_closed
     approval:
       profile: ea-sol
       effort: high
@@ -277,10 +278,11 @@ model_routes:
 
 actor_separation:
   forbidden_same_actor:
-    - [decision, verification]
+    - [decision, safety_verification]
     - [decision, approval]
-    - [verification, approval]
-    - [implementation, adversarial]
+    - [implementation, safety_verification]
+    - [implementation, approval]
+    - [safety_verification, approval]
 
 sol_capacity:
   repository_max_active: 2
