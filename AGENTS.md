@@ -23,8 +23,8 @@ apply the authority precedence in WORKFLOW and stop on `DRIFT/BLOCKED` where req
   tracked edits. Stop on unknown, unrelated, or conflicting changes.
 - Confirm Tier 0/1/2 in the Issue. Highest semantic trigger wins; Router output is classification
   evidence only and cannot approve a tier or activate an actor.
-- Tier 2 role separation is mandatory: Decision, Implementation, Adversarial, Verification, and
-  Approval actors are distinct where WORKFLOW requires it.
+- Tier 2 role separation is mandatory: Decision/Design, Implementation, Combined Safety
+  Verification, and Merge Approval use distinct actor IDs where WORKFLOW requires it.
 - Required-model unavailability is `HOLD`; **silent downgrade is forbidden**. Never use a cheap
   model → stronger model rescue chain as the default workflow.
 - Every review uses an actor-specific FROZEN Context Bundle and an exact-SHA schema-valid report.

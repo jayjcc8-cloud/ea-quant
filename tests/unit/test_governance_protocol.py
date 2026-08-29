@@ -14,6 +14,20 @@ REPORT_SCHEMA_PATH = PROJECT_ROOT / ".governance" / "schemas" / "report.schema.j
 CONTEXT_SCHEMA_PATH = PROJECT_ROOT / ".governance" / "schemas" / "context-manifest.schema.json"
 APPROVAL_BODY_PATH = PROJECT_ROOT / ".agents" / "approval-owner.md"
 WORKFLOW_PATH = PROJECT_ROOT / "docs" / "governance" / "WORKFLOW.md"
+STATUS_PATH = PROJECT_ROOT / "docs" / "STATUS.md"
+ROADMAP_PATH = PROJECT_ROOT / "docs" / "ROADMAP.md"
+CI_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+CANDIDATE_FULL_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "candidate-full.yml"
+ISSUE_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml"
+PULL_REQUEST_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
+AGENTS_PATH = PROJECT_ROOT / "AGENTS.md"
+SOL_VERIFICATION_PROMPT_PATH = PROMPT_ROOT / "sol-verification-v1.md"
+PHASE1_PRODUCT_ADR_PATH = (
+    PROJECT_ROOT / "docs" / "adr" / "0027-phase1-offline-backtest-product-boundary.md"
+)
+TIER2_FOUR_PARTY_ADR_PATH = (
+    PROJECT_ROOT / "docs" / "adr" / "0028-tier2-four-party-delivery-model.md"
+)
 CONTRIBUTING_PATH = PROJECT_ROOT / "CONTRIBUTING.md"
 READY_ADR_PATH = (
     PROJECT_ROOT / "docs" / "adr" / "0026-pre-implementation-ready-and-candidate-merge-approval.md"
@@ -194,7 +208,7 @@ def test_route_effort_matches_governed_contract() -> None:
     route_names = {
         "tier0": ("implementation", "verification", "approval"),
         "tier1": ("implementation", "architecture", "verification", "approval"),
-        "tier2": ("decision", "implementation", "adversarial", "verification", "approval"),
+        "tier2": ("decision", "implementation", "safety_verification", "approval"),
     }
     mismatches: dict[str, tuple[str | None, str | None]] = {}
     for tier, names in route_names.items():
@@ -213,6 +227,249 @@ def test_route_effort_matches_governed_contract() -> None:
                 mismatches[f"{tier}.{name}"] = (route.get("effort"), required_effort)
 
     assert mismatches == {}
+
+
+def test_tier2_route_is_four_party_with_combined_safety_verification() -> None:
+    router = yaml.safe_load(ROUTER_PATH.read_text(encoding="utf-8"))
+    assert isinstance(router, dict)
+    tier2 = router["model_routes"]["tier2"]
+
+    assert tier2["ordered_roles"] == [
+        "sol_decision_owner",
+        "implementation_owner",
+        "independent_sol_safety_verification_owner",
+        "independent_sol_approval_owner",
+    ]
+    assert set(tier2) == {
+        "ordered_roles",
+        "decision",
+        "implementation",
+        "safety_verification",
+        "approval",
+    }
+    assert tier2["safety_verification"] == {
+        "profile": "ea-sol",
+        "effort": "high",
+        "prompt_id": "sol-verification-v1",
+        "scope": [
+            "time_visibility",
+            "audit_ledger",
+            "recovery",
+            "canonical_identity",
+            "capability_confinement",
+            "fail_closed",
+        ],
+    }
+    assert router["actor_separation"]["forbidden_same_actor"] == [
+        ["decision", "implementation"],
+        ["decision", "safety_verification"],
+        ["decision", "approval"],
+        ["implementation", "safety_verification"],
+        ["implementation", "approval"],
+        ["safety_verification", "approval"],
+    ]
+
+
+def test_phase1_convergence_contract_is_durable_and_bounded() -> None:
+    product_adr = PHASE1_PRODUCT_ADR_PATH.read_text(encoding="utf-8")
+    tier2_adr = TIER2_FOUR_PARTY_ADR_PATH.read_text(encoding="utf-8")
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    status = STATUS_PATH.read_text(encoding="utf-8")
+    roadmap = ROADMAP_PATH.read_text(encoding="utf-8")
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+    combined_prompt = SOL_VERIFICATION_PROMPT_PATH.read_text(encoding="utf-8")
+    contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
+    issue_template = ISSUE_TEMPLATE_PATH.read_text(encoding="utf-8")
+    pull_request_template = PULL_REQUEST_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    for adr in (product_adr, tier2_adr):
+        assert "## Status" in adr
+        assert "Accepted" in adr
+        assert "## Decision" in adr
+
+    for clause in (
+        "mature offline backtest product",
+        "installed distribution",
+        "detect, audit, report, and stop",
+        "no automatic reconciliation correction",
+        "RunManifest v2",
+        "read-only verification",
+    ):
+        assert clause.lower() in product_adr.lower()
+
+    for clause in (
+        "Decision/Design",
+        "Implementation",
+        "Combined Safety Verification",
+        "Merge Approval",
+        "exact candidate SHA",
+    ):
+        assert clause in tier2_adr
+
+    assert "`status:superseded`" in workflow
+    assert "terminal state" in workflow
+    assert "300 lines" in workflow
+    assert "at most two frozen candidates" in workflow
+    assert "combined safety verification" in workflow.lower()
+    assert "automated review" in workflow.lower()
+    assert "before merge" in workflow.lower()
+
+    four_parties = (
+        "Decision/Design, Implementation, Combined Safety Verification, and Merge Approval"
+    )
+    assert four_parties in re.sub(r"\s+", " ", agents)
+    assert "Decision, Implementation, Adversarial, Verification, and Approval" not in agents
+    assert "Combined Safety Verification" in combined_prompt
+    assert "Decision/Adversarial report" not in combined_prompt
+    for surface in (
+        "time visibility",
+        "audit and ledger",
+        "recovery",
+        "canonical identity",
+        "capability confinement",
+        "fail-closed",
+    ):
+        assert surface in combined_prompt.lower()
+
+    assert "docs-only pull requests run the focused governance checks" in contributing
+    assert "Python pull requests run `quality`" in contributing
+    assert "frozen candidate" in contributing
+    assert "release candidate" in contributing
+    assert "Pull requests and CI use `full`" not in contributing
+
+    assert four_parties in re.sub(r"\s+", " ", issue_template)
+    assert "Architecture/Decision/Adversarial/Verification/Approval" not in issue_template
+    assert "| Combined Safety Verification |" in pull_request_template
+    assert "| Merge Approval |" in pull_request_template
+    assert "| Adversarial, if required |" not in pull_request_template
+    assert "| Verification |" not in pull_request_template
+
+    for delivery in (
+        "Authority and workflow convergence",
+        "Initial funding and fail-closed kernel",
+        "Sample strategies and end-to-end CLI",
+        "Reporting and release readiness",
+    ):
+        assert delivery in status
+    assert "Phase 1.1" in status
+    assert "Phase 1.1" in roadmap
+    assert "automatic reconciliation correction" in roadmap.lower()
+
+
+def test_ci_routes_docs_python_candidate_main_release_and_web_work() -> None:
+    workflow_text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(workflow_text)
+    assert isinstance(workflow, dict)
+    triggers = workflow.get("on", workflow.get(True))
+    assert isinstance(triggers, dict)
+    assert set(triggers) == {"pull_request", "push"}
+    assert "workflow_dispatch" not in workflow_text
+
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"classify", "governance", "quality", "main_smoke", "frontend"}
+    classify = jobs["classify"]
+    assert set(classify["outputs"]) == {
+        "docs_only",
+        "governance",
+        "python",
+        "web",
+        "ci",
+    }
+
+    governance = jobs["governance"]
+    assert "needs.classify.outputs.docs_only == 'true'" in governance["if"]
+    governance_run = "\n".join(
+        step.get("run", "") for step in governance["steps"] if isinstance(step, dict)
+    )
+    assert "tests/unit/test_project_control.py" in governance_run
+    assert "tests/unit/test_governance_protocol.py" in governance_run
+
+    quality = jobs["quality"]
+    assert "github.event_name == 'pull_request'" in quality["if"]
+    quality_run = "\n".join(
+        step.get("run", "") for step in quality["steps"] if isinstance(step, dict)
+    )
+    assert "scripts/verify.py --profile quality" in quality_run
+    quality_step_names = [step.get("name") for step in quality["steps"]]
+    quality_cleanup_index = quality_step_names.index("Reclaim hosted-runner audit headroom")
+    quality_preflight_index = quality_step_names.index("Verify hosted-runner audit headroom")
+    quality_verify_index = quality_step_names.index("Verify Python quality")
+    assert quality_cleanup_index < quality_preflight_index < quality_verify_index
+    quality_cleanup = quality["steps"][quality_cleanup_index]
+    assert quality_cleanup["if"] == "runner.environment == 'github-hosted'"
+    assert re.findall(
+        r"(?m)^\s*sudo rm -rf -- (\S+)\s*$",
+        quality_cleanup["run"],
+    ) == [
+        "/usr/local/lib/android/sdk",
+        "/usr/share/dotnet",
+        "/usr/local/.ghcup",
+    ]
+
+    main_smoke = jobs["main_smoke"]
+    assert main_smoke["if"] == "github.event_name == 'push'"
+    smoke_run = "\n".join(
+        step.get("run", "") for step in main_smoke["steps"] if isinstance(step, dict)
+    )
+    assert "uv build --wheel" in smoke_run
+    assert "uv pip install" in smoke_run
+    assert "ea doctor" in smoke_run
+
+    frontend = jobs["frontend"]
+    assert "needs.classify.outputs.web == 'true'" in frontend["if"]
+    classify_run = "\n".join(
+        step.get("run", "") for step in classify["steps"] if isinstance(step, dict)
+    )
+    assert "apps/web/*" in classify_run
+    assert "package-lock.json" in classify_run
+    assert ".github/workflows/*" in classify_run
+    assert 'git diff --no-renames --name-only "$base_sha" "$HEAD_SHA"' in classify_run
+    fixture_route = classify_run.split("docs/fixtures/*)", maxsplit=1)[1].split(";;", maxsplit=1)[0]
+    assert "governance=true" in fixture_route
+    assert "python=true" in fixture_route
+    assert "docs_only=false" in fixture_route
+
+    candidate_text = CANDIDATE_FULL_WORKFLOW_PATH.read_text(encoding="utf-8")
+    candidate_workflow = yaml.safe_load(candidate_text)
+    assert isinstance(candidate_workflow, dict)
+    candidate_triggers = candidate_workflow.get("on", candidate_workflow.get(True))
+    assert isinstance(candidate_triggers, dict)
+    assert set(candidate_triggers) == {"workflow_dispatch"}
+    candidate_inputs = candidate_triggers["workflow_dispatch"]["inputs"]
+    assert candidate_inputs["purpose"]["options"] == [
+        "frozen_candidate",
+        "release_candidate",
+    ]
+    assert candidate_inputs["candidate_sha"]["required"] is True
+
+    candidate_jobs = candidate_workflow["jobs"]
+    assert set(candidate_jobs) == {"classify", "full", "frontend"}
+    candidate_classify = candidate_jobs["classify"]
+    candidate_classify_run = "\n".join(
+        step.get("run", "") for step in candidate_classify["steps"] if isinstance(step, dict)
+    )
+    assert '[[ "$GITHUB_REF" == "refs/heads/main" ]]' in candidate_classify_run
+    assert "candidate-full.yml@refs/heads/main" in candidate_classify_run
+    assert 'git diff --no-renames --name-only "$base_sha" "$CANDIDATE_SHA"' in (
+        candidate_classify_run
+    )
+    assert "apps/web/*" in candidate_classify_run
+    assert "package-lock.json" in candidate_classify_run
+    assert ".github/workflows/*" in candidate_classify_run
+
+    candidate_full = candidate_jobs["full"]
+    assert candidate_full["needs"] == "classify"
+    assert "Frozen candidate full" in candidate_full["name"]
+    assert "Release candidate full" in candidate_full["name"]
+    candidate_full_run = "\n".join(
+        step.get("run", "") for step in candidate_full["steps"] if isinstance(step, dict)
+    )
+    assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in candidate_full_run
+    assert "scripts/verify.py --profile full" in candidate_full_run
+
+    candidate_frontend = candidate_jobs["frontend"]
+    assert "inputs.purpose == 'release_candidate'" in candidate_frontend["if"]
+    assert "needs.classify.outputs.web == 'true'" in candidate_frontend["if"]
 
 
 def test_approval_owner_contract_is_representable_by_report_schema() -> None:

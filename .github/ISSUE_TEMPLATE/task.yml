@@ -90,7 +90,8 @@ body:
     attributes:
       label: Owners
       description: >-
-        Name Implementation and required Architecture/Decision/Adversarial/Verification/Approval/
-        domain owners. Tier 0 may record N/A for roles not required.
+        For Tier 2, name Decision/Design, Implementation, Combined Safety Verification,
+        and Merge Approval actors; also name any required architecture or domain owner.
+        Tier 0 may record N/A for roles not required.
     validations:
       required: true
