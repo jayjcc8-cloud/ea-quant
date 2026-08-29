@@ -11,15 +11,21 @@ import json
 import marshal
 import os
 import re
+import stat
 import subprocess
 import sys
 import sysconfig
 import types
 import urllib.parse
 from dataclasses import dataclass
-from pathlib import Path
+from hashlib import sha256
+from pathlib import Path, PurePosixPath
+from unicodedata import normalize
 
 import ea
+from ea.core.run import Sha256Digest
+from ea.experiments._manifest_model import InstalledRuntimeSpecV2
+from ea.experiments._manifest_wire import canonical_json_bytes
 from ea.experiments.manifest import (
     CodeEvidence,
     DistributionIdentity,
@@ -35,6 +41,11 @@ _EXTENSION_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
 
 class ProvenanceError(RuntimeError):
     """Raised when execution provenance cannot be proved fail-closed."""
+
+
+_INSTALLED_FILES_DOMAIN = b"ea.installed-distribution-files.v1\0"
+_INSTALLED_FILES_SCHEMA = "ea-installed-distribution-files-v1"
+_INSTALLED_FILE_EXCLUSIONS = frozenset({"RECORD", "INSTALLER", "REQUESTED", "direct_url.json"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +361,122 @@ def _distribution_identity(
         return DistributionIdentity(name=name, version=version)
     except (KeyError, TypeError, ValueError) as exc:
         raise ProvenanceError("installed distribution metadata is invalid") from exc
+
+
+def _installed_file_rows(
+    distribution: importlib.metadata.Distribution,
+    identity: DistributionIdentity,
+) -> tuple[tuple[dict[str, object], ...], Path]:
+    """Read only regular, installed files named by metadata RECORD evidence."""
+    raw_files = distribution.files
+    if raw_files is None:
+        raise ProvenanceError("installed distribution has no declared files")
+    try:
+        root = Path(str(distribution.locate_file(""))).resolve(strict=True)
+    except OSError as exc:
+        raise ProvenanceError("installed distribution root cannot be resolved") from exc
+    if not root.is_dir() or root.is_symlink():
+        raise ProvenanceError("installed distribution root is not a real directory")
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for raw_path in raw_files:
+        path_text = str(raw_path)
+        canonical_path = normalize("NFC", path_text)
+        posix_path = PurePosixPath(canonical_path)
+        if (
+            canonical_path != path_text
+            or "\\" in path_text
+            or posix_path.is_absolute()
+            or not canonical_path
+            or any(part in {"", ".", ".."} for part in posix_path.parts)
+        ):
+            raise ProvenanceError("installed distribution file path is not canonical POSIX")
+        if (
+            "__pycache__" in posix_path.parts
+            or posix_path.suffix == ".pyc"
+            or posix_path.name in _INSTALLED_FILE_EXCLUSIONS
+        ):
+            continue
+        candidate = Path(distribution.locate_file(raw_path))
+        try:
+            resolved = candidate.resolve(strict=True)
+            file_stat = candidate.lstat()
+            payload = candidate.read_bytes()
+        except OSError as exc:
+            raise ProvenanceError("installed distribution file cannot be read") from exc
+        if (
+            candidate.is_symlink()
+            or not stat.S_ISREG(file_stat.st_mode)
+            or not resolved.is_relative_to(root)
+        ):
+            raise ProvenanceError("installed distribution file is not a regular in-tree file")
+        if canonical_path in seen:
+            raise ProvenanceError("installed distribution lists one file more than once")
+        seen.add(canonical_path)
+        rows.append(
+            {
+                "path": canonical_path,
+                "sha256": sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        )
+    rows.sort(key=lambda row: str(row["path"]))
+    if not rows:
+        raise ProvenanceError("installed distribution has no includable regular files")
+    return tuple(rows), root
+
+
+def _installed_files_digest(
+    identity: DistributionIdentity,
+    rows: tuple[dict[str, object], ...],
+) -> Sha256Digest:
+    payload = canonical_json_bytes(
+        {
+            "distribution": {"name": identity.name, "version": identity.version},
+            "files": list(rows),
+            "schema": _INSTALLED_FILES_SCHEMA,
+        }
+    )
+    return Sha256Digest(sha256(_INSTALLED_FILES_DOMAIN + payload).hexdigest())
+
+
+def collect_installed_runtime_spec_v2() -> InstalledRuntimeSpecV2:
+    """Collect installed-only v2 runtime evidence, refusing editable/source execution."""
+    try:
+        imported_ea = Path(ea.__file__).resolve(strict=True)
+    except (OSError, TypeError) as exc:
+        raise ProvenanceError("installed ea package origin cannot be resolved") from exc
+    if imported_ea.parent.name == "ea" and imported_ea.parent.parent.name == "src":
+        raise ProvenanceError("editable/source-tree installations are unsupported")
+    pairs = [
+        (_distribution_identity(distribution), distribution)
+        for distribution in importlib.metadata.distributions()
+    ]
+    pairs.sort(key=lambda pair: pair[0].name)
+    ea_pairs = [pair for pair in pairs if pair[0].name == "ea-quant"]
+    if len(ea_pairs) != 1:
+        raise ProvenanceError(
+            "installed environment must contain exactly one ea-quant distribution"
+        )
+    ea_identity, ea_distribution = ea_pairs[0]
+    if ea_distribution.read_text("direct_url.json") is not None:
+        raise ProvenanceError("editable/source-tree installations are unsupported")
+    rows, root = _installed_file_rows(ea_distribution, ea_identity)
+    if not imported_ea.is_relative_to(root):
+        raise ProvenanceError("editable/source-tree installations are unsupported")
+    names = tuple(identity.name for identity, _ in pairs)
+    if len(names) != len(set(names)):
+        raise ProvenanceError("installed distribution names are not unique")
+    return InstalledRuntimeSpecV2(
+        ea_distribution=ea_identity,
+        ea_installed_files_sha256=_installed_files_digest(ea_identity, rows),
+        python_implementation=sys.implementation.name,
+        python_version=".".join(str(part) for part in sys.version_info[:3]),
+        python_cache_tag=sys.implementation.cache_tag or "",
+        sys_platform=sys.platform,
+        platform_tag=sysconfig.get_platform(),
+        distributions=tuple(identity for identity, _ in pairs),
+    )
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:

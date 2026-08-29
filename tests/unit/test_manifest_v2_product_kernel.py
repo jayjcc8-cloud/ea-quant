@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
+import pytest
+
+import ea
+import ea.experiments.provenance as provenance_module
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import InstrumentSpecSetId, SettlementCurrency
 from ea.core.initial_funding import InitialFundingSpec
@@ -19,6 +24,10 @@ from ea.experiments.manifest import (
     canonical_manifest_bytes,
     read_manifest,
     read_manifest_v2,
+)
+from ea.experiments.provenance import (
+    ProvenanceError,
+    collect_installed_runtime_spec_v2,
 )
 
 
@@ -77,3 +86,52 @@ def test_manifest_v2_reader_dispatches_and_requires_exact_canonical_bytes() -> N
 
     assert read_manifest(encoded) == manifest
     assert read_manifest_v2(encoded) == manifest
+
+
+def test_installed_runtime_collector_rejects_the_editable_source_tree() -> None:
+    with pytest.raises(ProvenanceError, match="source-tree"):
+        collect_installed_runtime_spec_v2()
+
+
+def test_installed_runtime_collector_hashes_sorted_regular_distribution_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "site-packages"
+    package = root / "ea"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("__version__ = '0.2.0'\n")
+    (package / "kernel.py").write_text("value = 1\n")
+    metadata = root / "ea_quant-0.2.0.dist-info"
+    metadata.mkdir()
+    (metadata / "RECORD").write_text("ignored\n")
+
+    class FakeDistribution:
+        metadata = {"Name": "ea-quant"}
+        version = "0.2.0"
+        files = (
+            Path("ea/kernel.py"),
+            Path("ea_quant-0.2.0.dist-info/RECORD"),
+            Path("ea/__init__.py"),
+        )
+
+        def locate_file(self, path: object) -> Path:
+            return root / str(path)
+
+        def read_text(self, name: str) -> None:
+            assert name == "direct_url.json"
+            return None
+
+    distribution = FakeDistribution()
+    monkeypatch.setattr(
+        provenance_module.importlib.metadata,
+        "distributions",
+        lambda: [distribution],
+    )
+    monkeypatch.setattr(ea, "__file__", str(package / "__init__.py"))
+
+    first = collect_installed_runtime_spec_v2()
+    (package / "kernel.py").write_text("value = 2\n")
+    second = collect_installed_runtime_spec_v2()
+
+    assert first.ea_distribution == DistributionIdentity("ea-quant", "0.2.0")
+    assert first.ea_installed_files_sha256 != second.ea_installed_files_sha256
