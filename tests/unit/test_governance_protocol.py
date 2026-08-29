@@ -17,6 +17,8 @@ WORKFLOW_PATH = PROJECT_ROOT / "docs" / "governance" / "WORKFLOW.md"
 STATUS_PATH = PROJECT_ROOT / "docs" / "STATUS.md"
 ROADMAP_PATH = PROJECT_ROOT / "docs" / "ROADMAP.md"
 CI_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+AGENTS_PATH = PROJECT_ROOT / "AGENTS.md"
+SOL_VERIFICATION_PROMPT_PATH = PROMPT_ROOT / "sol-verification-v1.md"
 PHASE1_PRODUCT_ADR_PATH = (
     PROJECT_ROOT / "docs" / "adr" / "0027-phase1-offline-backtest-product-boundary.md"
 )
@@ -270,6 +272,9 @@ def test_phase1_convergence_contract_is_durable_and_bounded() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     status = STATUS_PATH.read_text(encoding="utf-8")
     roadmap = ROADMAP_PATH.read_text(encoding="utf-8")
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+    combined_prompt = SOL_VERIFICATION_PROMPT_PATH.read_text(encoding="utf-8")
+    contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
 
     for adr in (product_adr, tier2_adr):
         assert "## Status" in adr
@@ -302,6 +307,29 @@ def test_phase1_convergence_contract_is_durable_and_bounded() -> None:
     assert "combined safety verification" in workflow.lower()
     assert "automated review" in workflow.lower()
     assert "before merge" in workflow.lower()
+
+    four_parties = (
+        "Decision/Design, Implementation, Combined Safety Verification, and Merge Approval"
+    )
+    assert four_parties in agents
+    assert "Decision, Implementation, Adversarial, Verification, and Approval" not in agents
+    assert "Combined Safety Verification" in combined_prompt
+    assert "Decision/Adversarial report" not in combined_prompt
+    for surface in (
+        "time visibility",
+        "audit and ledger",
+        "recovery",
+        "canonical identity",
+        "capability confinement",
+        "fail-closed",
+    ):
+        assert surface in combined_prompt.lower()
+
+    assert "docs-only pull requests run the focused governance checks" in contributing
+    assert "Python pull requests run `quality`" in contributing
+    assert "frozen candidate" in contributing
+    assert "release candidate" in contributing
+    assert "Pull requests and CI use `full`" not in contributing
 
     for delivery in (
         "Authority and workflow convergence",
@@ -387,6 +415,7 @@ def test_ci_routes_docs_python_candidate_main_release_and_web_work() -> None:
     assert "apps/web/*" in classify_run
     assert "package-lock.json" in classify_run
     assert ".github/workflows/*" in classify_run
+    assert 'git diff --no-renames --name-only "$base_sha" "$HEAD_SHA"' in classify_run
 
 
 def test_approval_owner_contract_is_representable_by_report_schema() -> None:
