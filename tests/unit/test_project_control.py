@@ -15,6 +15,7 @@ ISSUE_FORM_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml"
 ISSUE_TEMPLATE_CONFIG_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "config.yml"
 PR_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
 ROUTER_PATH = PROJECT_ROOT / ".governance" / "router.yaml"
+CI_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def _read(path: Path) -> str:
@@ -124,6 +125,14 @@ def test_status_rejects_self_referential_premerge_facts() -> None:
     assert "Open pull requests: Draft #73 and Draft #80" not in status
     assert "PR #80" in status
     assert re.search(r"does not assert\s+mutable open, closed, Draft, or merged state", status)
+    assert "[#111 — hosted-runner audit headroom]" in status
+    assert "is In Progress: it is limited" not in status
+    assert re.search(
+        r"GitHub-hosted Linux CI reclaims only three fixed unused\s+toolchains",
+        status,
+    )
+    assert "PR #110 still requires a fresh unchanged-head CI run" in status
+    assert "#108 is not thereby complete" in status
 
 
 def test_authority_precedence_is_identical_in_adr_and_workflow() -> None:
@@ -256,6 +265,81 @@ def test_workflow_absorbs_the_focused_green_checkpoint_rule() -> None:
     assert "before the next independent slice" in workflow
     assert "at most one bounded dirty slice" in workflow
     assert "does not authorize ready or merge" in workflow
+
+
+def test_ci_hosted_runner_audit_headroom_is_bounded_and_precedes_full_verification() -> None:
+    workflow = yaml.safe_load(_read(CI_WORKFLOW_PATH))
+    assert isinstance(workflow, dict)
+    assert workflow["permissions"] == {"contents": "read"}
+
+    steps = workflow["jobs"]["test"]["steps"]
+    assert isinstance(steps, list)
+    assert steps[0] == {
+        "uses": "actions/checkout@v7",
+        "with": {"ref": "${{ github.event.pull_request.head.sha || github.sha }}"},
+    }
+    assert steps[1]["run"] == 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
+
+    setup_uv_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("uses", "").startswith("astral-sh/setup-uv@")
+    )
+    python_index = next(
+        index for index, step in enumerate(steps) if step.get("name") == "Set up Python"
+    )
+    cleanup_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Reclaim hosted-runner audit headroom"
+    )
+    preflight_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Verify hosted-runner audit headroom"
+    )
+    full_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("run")
+        == "uv run --no-project --python 3.12 python scripts/verify.py --profile full"
+    )
+
+    assert setup_uv_index < python_index < cleanup_index
+    assert preflight_index == cleanup_index + 1
+    assert full_index == preflight_index + 1
+
+    cleanup = steps[cleanup_index]
+    assert cleanup["if"] == "runner.environment == 'github-hosted'"
+    cleanup_run = cleanup["run"]
+    assert "set -euo pipefail" in cleanup_run
+    assert '"$(uname -s)" != "Linux"' in cleanup_run
+    allowed_cleanup_targets = [
+        "/usr/local/lib/android/sdk",
+        "/usr/share/dotnet",
+        "/usr/local/.ghcup",
+    ]
+    deletion_targets = re.findall(
+        r"(?m)^\s*sudo rm -rf -- (\S+)\s*$",
+        cleanup_run,
+    )
+    assert deletion_targets == allowed_cleanup_targets
+    assert all("*" not in target for target in deletion_targets)
+    assert not re.search(r"(?m)^\s*(?:sudo )?rm -rf (?!--)\S+", cleanup_run)
+    assert all(
+        target not in {"/", "/usr", "/usr/local", "/home", "$HOME", "$GITHUB_WORKSPACE"}
+        for target in deletion_targets
+    )
+
+    preflight = steps[preflight_index]
+    assert preflight["if"] == "runner.environment == 'github-hosted'"
+    preflight_run = preflight["run"]
+    assert "set -euo pipefail" in preflight_run
+    assert 'df -B1 /tmp "$GITHUB_WORKSPACE"' in preflight_run
+    assert "os.statvfs" in preflight_run
+    assert "15 * 1024**3" in preflight_run
+    assert '"/tmp"' in preflight_run
+    assert 'os.environ["GITHUB_WORKSPACE"]' in preflight_run
 
 
 def test_tier_vocabulary_and_adr_location_remain_canonical() -> None:

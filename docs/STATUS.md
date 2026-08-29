@@ -126,6 +126,11 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 - [#82 — Deterministic end-to-end backtest](https://github.com/jayjcc8-cloud/ea-quant/issues/82)
 - [#83 — Result adapter and golden report](https://github.com/jayjcc8-cloud/ea-quant/issues/83)
 - [#84 — Phase 1 Closeout and v0.2.0](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
+- [#111 — hosted-runner audit headroom](https://github.com/jayjcc8-cloud/ea-quant/issues/111)
+  records a bounded CI environment contract: GitHub-hosted Linux CI reclaims only three fixed unused
+  toolchains and verifies 15 GiB free in `/tmp` and the workspace before the unchanged full verifier.
+  PR #110 still requires a fresh unchanged-head CI run, and #108 is not thereby complete or exempt
+  from its remaining Gate C.
 
 ## Last Confirmed
 
