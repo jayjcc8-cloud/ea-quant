@@ -293,7 +293,8 @@ def test_ci_hosted_runner_audit_headroom_is_bounded_and_precedes_full_verificati
     full_index = next(
         index
         for index, step in enumerate(steps)
-        if step.get("run") == "uv run --no-project --python 3.12 python scripts/verify.py --profile full"
+        if step.get("run")
+        == "uv run --no-project --python 3.12 python scripts/verify.py --profile full"
     )
 
     assert setup_uv_index < python_index < cleanup_index
