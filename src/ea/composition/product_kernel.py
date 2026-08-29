@@ -27,10 +27,18 @@ from ea.core.initial_funding import (
 from ea.core.portfolio import PortfolioSnapshot
 from ea.core.risk import Phase1RiskPolicy, RiskStateSnapshot
 from ea.core.run import RunBinding
-from ea.experiments.audit import PosixAuditJournal, create_posix_audit_journal
+from ea.experiments.audit import (
+    PosixAuditJournal,
+    create_posix_audit_journal,
+    reopen_posix_audit_journal,
+)
 from ea.experiments.binding import BoundAuditPort
 from ea.experiments.manifest import LineageSpecV2, RunManifestV2
-from ea.experiments.store import LocalResultStore, RunIdProvider
+from ea.experiments.store import (
+    LocalResultStore,
+    RunIdProvider,
+    VerifiedIncompleteRecoveryBinding,
+)
 from ea.portfolio import (
     Phase1LedgerHandoffAuthority,
     Phase1PortfolioRiskRefreshAuthority,
@@ -269,4 +277,114 @@ def prepare_phase1_product_kernel(
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
             "product preparation failed",
+        ) from error
+
+
+def recover_phase1_product_kernel(
+    *,
+    store: LocalResultStore,
+    expected_manifest: RunManifestV2,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+) -> Phase1ProductKernel:
+    """Rebuild the funded baseline from only the declared prelude prefix."""
+    if type(expected_manifest) is not RunManifestV2:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_MANIFEST_V1,
+            "product recovery requires manifest v2",
+        )
+    journal: PosixAuditJournal | None = None
+    try:
+        verified = store.verify_recovery_attempt(expected_manifest)
+        if type(verified) is not VerifiedIncompleteRecoveryBinding:
+            raise ProductKernelError(
+                ProductKernelFailureCode.INTEGRITY_TERMINAL_DRIFT,
+                "terminal evidence is outside the funding boundary",
+            )
+        recovered = store.recover_incomplete_attempt(verified)
+        if store.verify_manifest(recovered.manifest_verification) != expected_manifest:
+            raise ProductKernelError(
+                ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "manifest drift"
+            )
+        journal = reopen_posix_audit_journal(recovered.audit)
+        audit = BoundAuditPort(recovered.audit, journal)
+        records = journal.recovery_records
+        if records.record_count not in {1, 2}:
+            raise ProductKernelError(
+                ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY,
+                "unsupported audit prefix",
+            )
+        first = records.record_at(0)
+        prepared_acknowledgement = create_audit_append_acknowledgement(first)
+        ledger = create_portfolio_ledger(expected_manifest.run_id, spec_set)
+        outcome = ledger.apply_initial_funding(
+            expected_manifest.spec.initial_funding,
+            binding=recovered.audit.binding,
+            prepared_acknowledgement=prepared_acknowledgement.record_sha256,
+        )
+        if outcome.result is not InitialFundingResult.APPLIED:
+            raise ProductKernelError(ProductKernelFailureCode.FUNDING_CONFLICT, "funding conflict")
+        payload = canonical_initial_funding_outcome_bytes(outcome)
+        subject = initial_funding_outcome_digest(outcome)
+        if records.record_count == 1:
+            audit.append(
+                record_kind=AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME,
+                subject_kind=AuditSubjectKind.INITIAL_FUNDING_OUTCOME,
+                subject_sha256=subject,
+                canonical_payload=payload,
+            )
+        else:
+            record = records.record_at(1)
+            if (
+                record.record_kind is not AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME
+                or record.subject_kind is not AuditSubjectKind.INITIAL_FUNDING_OUTCOME
+                or record.subject_sha256 != subject
+                or record.canonical_payload != payload
+            ):
+                raise ProductKernelError(
+                    ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+                    "funding outcome differs from deterministic replay",
+                )
+        risk = create_phase1_risk_authority(
+            run_id=expected_manifest.run_id,
+            spec_set=spec_set,
+            execution_policy=execution_policy,
+            policy=risk_policy,
+        )
+        snapshot = ledger.snapshot
+        handoff = _Phase1ProductKernelHandoff(
+            audit=audit,
+            ledger=ledger,
+            ledger_handoff=create_phase1_ledger_handoff_authority(
+                expected_manifest.run_id, spec_set, ledger
+            ),
+            risk=risk,
+            risk_refresh=create_phase1_portfolio_risk_refresh_authority(
+                run_id=expected_manifest.run_id,
+                spec_set=spec_set,
+                policy_id=risk.policy.policy_id,
+                policy_sha256=risk.risk_state.policy_sha256,
+            ),
+            frontier=create_acknowledged_lifecycle_frontier(
+                initial_snapshot=snapshot, initial_risk_state=risk.risk_state
+            ),
+        )
+        return Phase1ProductKernel(
+            binding=recovered.audit.binding,
+            funding_outcome=outcome,
+            portfolio_snapshot=snapshot,
+            risk_state=risk.risk_state,
+            handoff=handoff,
+        )
+    except ProductKernelError:
+        if journal is not None:
+            journal.close()
+        raise
+    except Exception as error:
+        if journal is not None:
+            journal.close()
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+            "product recovery failed",
         ) from error

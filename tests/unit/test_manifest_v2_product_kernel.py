@@ -10,7 +10,10 @@ import pytest
 
 import ea
 import ea.experiments.provenance as provenance_module
-from ea.composition.product_kernel import prepare_phase1_product_kernel
+from ea.composition.product_kernel import (
+    prepare_phase1_product_kernel,
+    recover_phase1_product_kernel,
+)
 from ea.core.audit import (
     AuditRecordKind,
     AuditSubjectKind,
@@ -253,3 +256,7 @@ def test_product_kernel_publishes_only_the_funded_read_only_boundary(tmp_path: P
     assert kernel.funding_outcome.transaction is not None
     assert kernel.portfolio_snapshot.snapshot_version == 1
     assert kernel.risk_state.risk_state_version == 0
+
+
+def test_product_kernel_recovery_api_is_exposed() -> None:
+    assert callable(recover_phase1_product_kernel)
