@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -39,6 +40,7 @@ from ea.experiments.provenance import (
     ProvenanceError,
     collect_installed_runtime_spec_v2,
 )
+from ea.experiments.store import LocalResultStore, StoreError
 from ea.portfolio import create_portfolio_ledger
 from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
@@ -181,3 +183,18 @@ def test_initial_funding_outcome_has_its_own_canonical_audit_record() -> None:
     assert audit_subject_digest(
         AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME, payload
     ) == initial_funding_outcome_digest(outcome)
+
+
+def test_store_product_prepare_requires_and_publishes_a_v2_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "results"
+    root.mkdir()
+    store = LocalResultStore(root.resolve())
+
+    prepared = store.prepare_product(
+        _manifest_v2().spec,
+        lambda: UUID("12345678-1234-4234-8234-123456789abc"),
+    )
+
+    assert store.verify_manifest(prepared.manifest_verification).manifest_schema_version == 2
+    with pytest.raises(StoreError, match="LineageSpecV2"):
+        store.prepare_product(object(), lambda: UUID("12345678-1234-4234-8234-123456789abc"))
