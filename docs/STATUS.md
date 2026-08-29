@@ -126,6 +126,11 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 - [#82 — Deterministic end-to-end backtest](https://github.com/jayjcc8-cloud/ea-quant/issues/82)
 - [#83 — Result adapter and golden report](https://github.com/jayjcc8-cloud/ea-quant/issues/83)
 - [#84 — Phase 1 Closeout and v0.2.0](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
+- [#111 — hosted-runner audit headroom](https://github.com/jayjcc8-cloud/ea-quant/issues/111)
+  is In Progress: it is limited to GitHub-hosted Linux cleanup of three fixed unused toolchain
+  directories and a 15 GiB `/tmp` and workspace preflight before the unchanged full verifier. It
+  must merge and pass merged-main CI before a new unchanged-head PR #110 CI run; this does not mark
+  #108 complete or bypass its remaining Gate C.
 
 ## Last Confirmed
 
