@@ -64,14 +64,17 @@ report, with durable audit evidence and no live or external order-writing capabi
   coverage, reproducible wheels, isolated installation, and doctor succeeded. `SEAM-001`,
   `CANONICAL-001/002/003`, and `VERIFY-001` are FIXED. The structural prerequisite remains dormant:
   it does not activate a runtime route or grant #97 journal-aware subject-binding authority.
+- Issue #108 / PR #110 restored the candidate-less Ready approval separation at
+  `main@6faa1271b1557599c8f64b28ebf3d739e7ead04b`; exact merged-main CI run `33233978652`
+  succeeded. Issue #111's hosted-runner audit-headroom contract was delivered by PRs #112/#113
+  and is likewise verified on that main checkpoint.
 
 ## Incomplete
 
-- [#108](https://github.com/jayjcc8-cloud/ea-quant/issues/108) is the bounded Tier 1
-  governance-authority repair in progress at its recorded base and writer lease. Its eight-path
-  candidate separates candidate-less pre-implementation Ready from frozen-candidate Merge while
-  retaining the existing `ready | merge | cleanup` report representation; it is not merged reality
-  until exact-head review, hosted CI, and squash merge complete.
+- [#106](https://github.com/jayjcc8-cloud/ea-quant/issues/106) is in progress on its isolated UI
+  branch at `main@6faa1271b1557599c8f64b28ebf3d739e7ead04b`, delivering the bounded Dark
+  Professional mock frontend. It is a candidate-only delivery until exact-head hosted CI,
+  independent Verification, Merge approval, squash merge, and merged-main verification complete.
 
 - [#76](https://github.com/jayjcc8-cloud/ea-quant/issues/76) remains the OPEN
   `status:in-progress` + `blocked` parent. D76-001/D76-002 are complete; D76-003..D76-008 remain
@@ -134,15 +137,18 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 - [#83 — Result adapter and golden report](https://github.com/jayjcc8-cloud/ea-quant/issues/83)
 - [#84 — Phase 1 Closeout and v0.2.0](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
 - [#111 — hosted-runner audit headroom](https://github.com/jayjcc8-cloud/ea-quant/issues/111)
-  records a bounded CI environment contract: GitHub-hosted Linux CI reclaims only three fixed unused
-  toolchains and verifies 15 GiB free in `/tmp` and the workspace before the unchanged full verifier.
-  PR #110 still requires a fresh unchanged-head CI run. Its post-repair `pull_request` event used the
-  branch's old workflow definition and therefore cannot evidence the repaired environment. A
-  trusted-main `workflow_dispatch(candidate_sha)` is required to verify its unchanged head; #108 is not thereby complete or exempt from its remaining Gate C.
+  is verified on `main@6faa1271b1557599c8f64b28ebf3d739e7ead04b` after PRs #112/#113 and the
+  merged-main CI run `33233978652`; its bounded Linux toolchain cleanup and trusted-main dispatch
+  contract remain the current CI environment evidence.
+  GitHub-hosted Linux CI reclaims only three fixed unused toolchains—the Android SDK, .NET, and GHC
+  directories—before the unchanged 15 GiB admission and full verifier.
+  Historical pre-verification record: “PR #110 still requires a fresh unchanged-head CI run.” That
+  superseded condition was satisfied by the `33233978652` merged-main success recorded above; “#108 is not thereby complete”
+  was likewise historical wording before that verified-main resolution.
 
 ## Last Confirmed
 
-- Date: **2026-08-26** (Asia/Shanghai)
+- Date: **2026-08-29** (Asia/Shanghai)
 - The last independently verified pre-consolidation checkpoint,
   `af7bc08cecd70fc5479b92e4393da468727ddb55`, remains immutable provenance from **2026-08-22**;
   the current confirmation below records the later #77 delivery and cleanup.
@@ -151,6 +157,10 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
   `32929095442` succeeded. The reviewed repair source head is
   `ab7ac6dbc46b8b9e49c047695d41c75b0f1b8ac5`; the reviewed PR #102 structural source is
   `5b848699809ffd662978f491ee787a7f4d593d0e`.
+- Current main also includes the verified Tier 1 governance/CI repairs #108 / PR #110 and #111 /
+  PRs #112/#113 at `main@6faa1271b1557599c8f64b28ebf3d739e7ead04b`, with merged-main CI run
+  `33233978652` successful. UI-001 / #106 is an in-progress candidate on an isolated branch, not
+  merged or closed reality.
 - Current-main resolution: on merged `main`, use the containing `main` commit and its exact CI;
   from any feature branch, resolve current `main` through GitHub rather than treating that branch's
   candidate SHA as merged reality.
