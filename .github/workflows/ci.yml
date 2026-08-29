@@ -123,6 +123,11 @@ jobs:
                 web=true
                 docs_only=false
                 ;;
+              docs/fixtures/*)
+                governance=true
+                python=true
+                docs_only=false
+                ;;
               docs/*|README.md|AGENTS.md|CONTRIBUTING.md|.governance/*|.github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE.md)
                 governance=true
                 ;;

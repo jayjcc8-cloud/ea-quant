@@ -258,6 +258,7 @@ def test_tier2_route_is_four_party_with_combined_safety_verification() -> None:
         ],
     }
     assert router["actor_separation"]["forbidden_same_actor"] == [
+        ["decision", "implementation"],
         ["decision", "safety_verification"],
         ["decision", "approval"],
         ["implementation", "safety_verification"],
@@ -416,6 +417,10 @@ def test_ci_routes_docs_python_candidate_main_release_and_web_work() -> None:
     assert "package-lock.json" in classify_run
     assert ".github/workflows/*" in classify_run
     assert 'git diff --no-renames --name-only "$base_sha" "$HEAD_SHA"' in classify_run
+    fixture_route = classify_run.split("docs/fixtures/*)", maxsplit=1)[1].split(";;", maxsplit=1)[0]
+    assert "governance=true" in fixture_route
+    assert "python=true" in fixture_route
+    assert "docs_only=false" in fixture_route
 
 
 def test_approval_owner_contract_is_representable_by_report_schema() -> None:

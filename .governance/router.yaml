@@ -278,6 +278,7 @@ model_routes:
 
 actor_separation:
   forbidden_same_actor:
+    - [decision, implementation]
     - [decision, safety_verification]
     - [decision, approval]
     - [implementation, safety_verification]
