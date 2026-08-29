@@ -445,9 +445,18 @@ def test_ci_routes_docs_python_candidate_main_release_and_web_work() -> None:
     candidate_jobs = candidate_workflow["jobs"]
     assert set(candidate_jobs) == {"classify", "full", "frontend"}
     candidate_classify = candidate_jobs["classify"]
+    candidate_classify_checkout = next(
+        step
+        for step in candidate_classify["steps"]
+        if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert candidate_classify_checkout["with"]["fetch-depth"] == 0
+    assert candidate_classify_checkout["with"]["persist-credentials"] is False
+    assert candidate_classify_checkout["with"]["ref"] == "${{ inputs.candidate_sha }}"
     candidate_classify_run = "\n".join(
         step.get("run", "") for step in candidate_classify["steps"] if isinstance(step, dict)
     )
+    assert "git fetch --no-tags origin main" not in candidate_classify_run
     assert '[[ "$GITHUB_REF" == "refs/heads/main" ]]' in candidate_classify_run
     assert "candidate-full.yml@refs/heads/main" in candidate_classify_run
     assert 'git diff --no-renames --name-only "$base_sha" "$CANDIDATE_SHA"' in (
