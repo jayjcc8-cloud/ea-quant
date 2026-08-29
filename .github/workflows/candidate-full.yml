@@ -1,0 +1,166 @@
+name: Candidate Full
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact lowercase candidate commit SHA to verify from trusted main.
+        required: true
+        type: string
+      purpose:
+        description: Why this exact-SHA full verification is being run.
+        required: true
+        default: frozen_candidate
+        type: choice
+        options:
+          - frozen_candidate
+          - release_candidate
+
+concurrency:
+  group: candidate-full-${{ inputs.candidate_sha }}-${{ inputs.purpose }}
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      web: ${{ steps.routes.outputs.web }}
+    steps:
+      - name: Validate trusted main dispatch
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == *".github/workflows/candidate-full.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          printf 'trusted_workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
+          printf 'trusted_workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
+          printf 'validated_candidate_sha=%s\n' "$CANDIDATE_SHA"
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - name: Assert dispatched exact checkout
+        env:
+          EXPECTED_SHA: ${{ inputs.candidate_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Classify candidate Web paths
+        id: routes
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PURPOSE: ${{ inputs.purpose }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          base_sha="$(git merge-base "$CANDIDATE_SHA" origin/main)"
+          git cat-file -e "$base_sha^{commit}"
+          git cat-file -e "$CANDIDATE_SHA^{commit}"
+          mapfile -t changed_files < <(
+            git diff --no-renames --name-only "$base_sha" "$CANDIDATE_SHA"
+          )
+
+          web=false
+          if [[ "$PURPOSE" == "release_candidate" ]]; then
+            web=true
+          fi
+          for changed_file in "${changed_files[@]}"; do
+            case "$changed_file" in
+              apps/web/*|package.json|package-lock.json|npm-shrinkwrap.json|.github/workflows/*)
+                web=true
+                ;;
+            esac
+          done
+          printf 'web=%s\n' "$web" >> "$GITHUB_OUTPUT"
+
+  full:
+    needs: classify
+    name: ${{ inputs.purpose == 'release_candidate' && 'Release candidate full' || 'Frozen candidate full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UV_PROJECT_ENVIRONMENT: venv
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - name: Assert dispatched exact checkout
+        env:
+          EXPECTED_SHA: ${{ inputs.candidate_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version-file: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Reclaim hosted-runner audit headroom
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -s)" != "Linux" ]]; then
+            echo "Refusing hosted-runner cleanup on a non-Linux runner."
+            exit 1
+          fi
+          echo "Filesystem state before bounded hosted-runner cleanup:"
+          df -B1 /tmp "$GITHUB_WORKSPACE"
+          sudo rm -rf -- /usr/local/lib/android/sdk
+          sudo rm -rf -- /usr/share/dotnet
+          sudo rm -rf -- /usr/local/.ghcup
+          echo "Filesystem state after bounded hosted-runner cleanup:"
+          df -B1 /tmp "$GITHUB_WORKSPACE"
+      - name: Verify hosted-runner audit headroom
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          df -B1 /tmp "$GITHUB_WORKSPACE"
+          python - <<'PY'
+          import os
+
+          required_bytes = 15 * 1024**3
+          for path in ("/tmp", os.environ["GITHUB_WORKSPACE"]):
+              filesystem = os.statvfs(path)
+              available_bytes = filesystem.f_bavail * filesystem.f_frsize
+              print(f"{path}: available_bytes={available_bytes}")
+              if available_bytes < required_bytes:
+                  raise SystemExit(
+                      f"{path} has {available_bytes} bytes available; "
+                      f"requires at least {required_bytes} bytes"
+                  )
+          PY
+      - name: Verify repository
+        run: uv run --no-project --python 3.12 python scripts/verify.py --profile full
+
+  frontend:
+    needs: classify
+    if: inputs.purpose == 'release_candidate' || needs.classify.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - name: Assert dispatched exact checkout
+        env:
+          EXPECTED_SHA: ${{ inputs.candidate_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Verify frontend
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run build

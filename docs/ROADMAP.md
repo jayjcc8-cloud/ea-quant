@@ -12,9 +12,10 @@ Exit: merged, verified, and tagged `v0.1.0`.
 
 ## Phase 1 — Backtest MVP
 
-Purpose: provide one deterministic historical path that composes bounded OHLCV input, strategy
-signals, portfolio/risk decisions, execution/matching, ledger/reconciliation, durable audit,
-recovery, and a stable result report.
+Purpose: deliver one mature offline backtest product that composes bounded OHLCV input, strict
+scenario validation, initial funding, strategy signals, portfolio/risk decisions,
+execution/matching, ledger reconciliation, durable audit, supported recovery, and a stable result
+report from an installed distribution.
 
 Entry: Phase 0 is released and `main` is healthy.
 
@@ -25,16 +26,33 @@ Entry: Phase 0 is released and `main` is healthy.
   production experiment tracking.
 - Multiple live adapters, multi-strategy orchestration, or portfolio-scale production scheduling.
 - Tool migration or governance automation without repeated evidence of manual failure.
+- Automatic reconciliation correction, balance adjustment, ancestry repair, or exhaustive recovery
+  across dormant correction combinations.
+- Initial positions, multiple settlement currencies, real Web/runtime integration, or research-grade
+  performance analytics.
 
 ## Phase 1 Exit Criteria
 
 - Historical inputs enforce point-in-time visibility and deterministic identity.
-- Strategy, portfolio/risk, matcher, ledger/reconciliation, audit, and recovery compose without
-  look-ahead or duplicate economic mutation.
-- At least one concrete sample strategy runs through a deterministic end-to-end backtest.
-- A result/report adapter emits a versioned golden report for fixed inputs.
+- `RunManifest v2` binds installed provenance, one strict scenario, one instrument specification,
+  one settlement currency, initial cash, data, strategy, limits, and seed lineage.
+- `ea backtest validate`, `run`, and `resume` execute from an installed wheel outside a Git checkout.
+- `always-flat-v1` and `bounded-long-v1` run through portfolio/risk, matcher, ledger, audit, and a
+  successful terminal path without look-ahead or duplicate economic mutation.
+- Supported interruption recovery is economically and audit-equivalent to uninterrupted execution.
+- Reconciliation, ledger, journal, manifest, or scenario conflicts detect, audit, report, and stop;
+  they never produce a successful terminal state or success report.
+- `BacktestReportV1` emits canonical JSON and text; exact-run regeneration is byte-identical and
+  independent runs expose a stable semantic outcome digest.
 - Required ADRs, STATUS, Issues, tests, and CI agree; no critical decision survives only in comments.
 - Full verification passes on merged `main`; Human Owner approves and publishes `v0.2.0`.
+
+## Phase 1.1 — Reconciliation and Recovery Expansion
+
+Phase 1.1 may begin after the offline v0.2.0 product is accepted. It owns the superseded
+#76/#97/#98/#99 product scope: explicit reconciliation adjustment authorization, ancestry repair,
+additional observation/fact combinations, and broader recovery matrices. It may not weaken the
+Phase 1 fail-closed product boundary or expose live/external writes.
 
 ## Phase 2 Entry Gate
 

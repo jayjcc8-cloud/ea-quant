@@ -56,11 +56,11 @@ Every verdict is valid only for its exact `reviewed_sha`.
 
 | Role | Actor | reviewed_sha | Context/report evidence | Finding IDs | Verdict |
 |---|---|---|---|---|---|
-| Decision / Architecture | | | | | |
-| Adversarial, if required | | | | | |
+| Decision / Design | | | | | |
+| Architecture, if required | | | | | |
 | Domain expert, if required | | | | | |
-| Verification | | | | | |
-| Approval gate | | | | | |
+| Combined Safety Verification | | | | | |
+| Merge Approval | | | | | |
 
 ### Finding closure
 

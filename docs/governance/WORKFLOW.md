@@ -29,12 +29,17 @@ The Router is a Classification Evidence Provider, never a Decision Authority or 
 
 ## Issue Lifecycle
 
-The state machine is:
+The normal delivery state machine is:
 
 `Draft → Ready → In Progress → Review → Verified → Done`
 
-`blocked` is an orthogonal label, not a lifecycle state. `Done` means the Issue is closed after its
-merged-main and CI evidence is recorded.
+`blocked` is an orthogonal label, not a lifecycle state. `Done` and `Superseded` are terminal;
+both are terminal states. `Done` means the Issue is closed after its merged-main and CI evidence is
+recorded.
+`Superseded` uses the `status:superseded` label for unfinished work whose objective or authority
+was replaced by a later Accepted ADR or successor task. The final Issue conclusion names the
+replacement authority and any still-owned work before closure. Superseded never means verified,
+never hides an unresolved safety finding, and cannot replace Done for delivered work.
 
 - **Draft:** task package is incomplete or still being decided.
 - **Ready:** every required task-package field and reuse decision is complete.
@@ -43,6 +48,8 @@ merged-main and CI evidence is recorded.
 - **Verified:** all required exact-HEAD tests/reports pass and blocker count is zero.
 - **Done:** merged `main` CI passes; STATUS/ADR/Issue/successors are synchronized and the Issue is
   closed.
+- **Superseded:** a later Accepted decision or bounded successor owns the remaining objective; the
+  old Issue is closed with `status:superseded` and preserves its implementation/review history.
 
 An Issue without acceptance criteria cannot become Ready. A pull request without exact-HEAD
 evidence cannot become Verified. A critical change with stale STATUS or ADR cannot become Done.
@@ -74,7 +81,7 @@ diff or cumulative change graph.
 |---|---|---|
 | Tier 0 — low | Reversible non-executable docs/comments/metadata with no ADR, CI, dependency, schema, security, governance-authority, or runtime effect | Terra medium implementation; deterministic verification and approval decision |
 | Tier 1 — normal | Executable code/config/dependency/CI, public interface, governance authority, or implementation of an accepted contract | Architecture Owner, Terra high Implementation Owner, Terra high Verification Owner |
-| Tier 2 — high | Data/time/look-ahead, strategy, portfolio/ledger, risk, execution/matching, reconciliation/recovery, state-machine semantics, canonical bytes/digests, credentials/security, or release/live/external writes | Sol xhigh Decision, Terra high implementation, independent Terra high adversarial, independent Sol high verification, independent Sol high approval, plus domain expert |
+| Tier 2 — high | Data/time/look-ahead, strategy, portfolio/ledger, risk, execution/matching, reconciliation/recovery, state-machine semantics, canonical bytes/digests, credentials/security, or release/live/external writes | Sol xhigh Decision/Design, Terra high Implementation, independent Sol high Combined Safety Verification, independent Sol high Merge Approval, plus a domain expert only when the frozen contract names one |
 
 These are minimum classifications. A Human may always raise the confirmed tier in the Issue;
 lowering the Router candidate requires the governed evidence and authorization defined below.
@@ -91,9 +98,10 @@ Luna is optional, non-authoritative extraction only when raw evidence exceeds ab
 20 files, or 10,000 lines. Its output must be schema-checked and discardable.
 
 At most two Sol roles may be active for the repository and at most one for a work unit. Excess work
-is `QUEUED`, not downgraded. Tier 2 roles run sequentially unless their read-only questions are
-provably independent. Decision, implementation, adversarial, verification, and approval actors
-use distinct IDs wherever separation is required.
+is `QUEUED`, not downgraded. Tier 2 roles run sequentially. Decision/Design, Implementation,
+Combined Safety Verification, and Merge Approval use distinct actor IDs. The combined safety
+actor performs the adversarial and verification questions once against the exact candidate SHA;
+Merge Approval consumes that report instead of repeating semantic exploration.
 
 ## Classification and Change Graph
 
@@ -185,15 +193,23 @@ States are `OPEN`, `FIXED`, `SUPERSEDED`, and `ACCEPTED_RISK`. A FIXED finding i
 reviewer confirms the repair SHA. ACCEPTED_RISK requires explicit Human Owner rationale, expiry,
 and a governance-debt Issue.
 
-A new commit or tracked working-tree change invalidates an earlier verdict. Final Verification
-binds exact candidate HEAD. A PR cannot become Ready or merge with an open blocker, stale required
-verdict, failing/incomplete exact-head CI, or unresolved review thread.
+A new commit or tracked working-tree change invalidates an earlier verdict. Combined Safety
+Verification binds exact candidate HEAD and covers time visibility, audit/ledger, recovery,
+canonical identity, capability confinement, and fail-closed behavior.
+A product PR may freeze at most two frozen candidates. A blocker on the second candidate returns
+the work to Decision/Design; it does not start a third patch/review round under the same contract.
+
+When a Draft pull request becomes Ready for review, every expected automated review must finish
+before merge and bind the exact candidate SHA. A pending, stale, different-SHA, or post-merge
+automated review is not evidence. A PR cannot merge with an open blocker, stale required verdict,
+failing/incomplete exact-head CI, or unresolved review thread.
 
 ## Expert Lifecycle
 
 1. Activate at a named gate with question, scope, base/HEAD, evidence, and exit condition.
-2. Review the bounded Context Bundle, not full chat history.
-3. Report once with stable finding IDs.
+2. Review the bounded Context Bundle, not full chat history. Combined Safety Verification answers
+   the complete six-surface Tier 2 question in one activation.
+3. Report once with stable finding IDs and one exact-candidate verdict.
 4. Extract durable knowledge to Issue, ADR, pull request, tests, or documentation.
 5. Release the expert; do not keep a resident panel.
 
@@ -224,8 +240,10 @@ Owner record a branch, worktree, base SHA, and writer lease before entering In P
 
 Merge reviews the frozen candidate and requires PR and exact candidate SHA, valid writer-lease
 history and complete scoped diff, implementation and acceptance completion, focused and required
-full tests, hosted CI SUCCESS at exact candidate HEAD, current required expert/Verification
-verdicts, scope and budget PASS, current mergeability/reviews, and zero unresolved review threads.
+tests under the CI route below, hosted CI SUCCESS at exact candidate HEAD, the current Combined
+Safety Verification verdict, completed exact-SHA automated review, scope and budget PASS, current
+mergeability/reviews, and zero unresolved review threads. Merge Approval verifies freshness and
+completeness but does not repeat the combined report's semantic exploration.
 Missing CI or an unfrozen candidate produces `HOLD`. A Ready decision is not Merge evidence and does
 not authorize `squash_merge`; Cleanup remains separately activated after merge.
 
@@ -261,6 +279,10 @@ decisions use an ADR instead of indefinite debt.
 
 ## Long-item Compression
 
+An active Issue body is limited to 300 lines. Before it exceeds that limit, replace obsolete detail
+with a current bounded task package and links to immutable ADRs, commits, reports, or successor
+Issues. Do not copy CI logs, temporary hashes, or comment history into the active body.
+
 Pause comment growth and publish a current summary when any threshold is met:
 
 - **30 or more comments**;
@@ -280,13 +302,17 @@ A task is Done only when all are true:
 - required merged code and tests exist on `main`;
 - exact-head and merged-main CI are successful;
 - required ADR updates are accepted;
-- STATUS is current;
+- STATUS is current and identifies its checkpoint as the containing `main` commit rather than a
+  guessed future SHA;
 - the Issue contains a final conclusion;
 - the pull request contains validation evidence and current reports;
 - no critical decision exists only in comments;
 - Successor Issues own every deferred item;
 - useful expert knowledge is durable and completed experts are released;
 - the branch/worktrees complete the approved cleanup manifest.
+
+Expected automated review and STATUS synchronization complete before merge. Do not create a
+docs-only successor merely to finish expected review or to replace a candidate SHA in STATUS.
 
 “Tests pass” alone is not Done. “Handle later” without a successor Issue is not Done.
 
@@ -315,6 +341,21 @@ Canonical verification:
 uv run --no-project --python 3.12 python scripts/verify.py --profile quality
 uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
+
+CI selects the minimum sufficient route without weakening required evidence:
+
+- docs-only pull requests run the focused governance checks;
+- Python pull requests run `quality`;
+- each frozen candidate uses one trusted exact-SHA `full` dispatch, subject to the two-candidate
+  limit above;
+- `main` builds and installs the wheel and runs core smoke checks;
+- a release candidate runs the complete `full` release verification; and
+- the Web job runs only when Web files, Node lock files, or CI workflow paths change.
+
+A mixed change takes the union of its applicable routes. A CI workflow change exercises
+governance, Python quality, and Web. A metadata-only change never triggers complete `full`
+verification. The trusted dispatch validates the main-hosted workflow before checking out its
+exact candidate SHA.
 
 Do not change dependencies or locks to bypass a verifier. Tests are deterministic and contain no
 private data or secrets. Phase boundaries increment the pre-1.0 minor version; compatible fixes

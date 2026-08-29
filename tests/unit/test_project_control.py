@@ -15,13 +15,9 @@ ISSUE_FORM_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml"
 ISSUE_TEMPLATE_CONFIG_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "config.yml"
 PR_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
 ROUTER_PATH = PROJECT_ROOT / ".governance" / "router.yaml"
-CI_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
-EVENT_REF_EXPRESSION = "${{ github.event.pull_request.head.sha || github.sha }}"
+CANDIDATE_FULL_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "candidate-full.yml"
 DISPATCH_REF_EXPRESSION = "${{ inputs.candidate_sha }}"
-DISPATCH_CONCURRENCY_GROUP = (
-    "ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == "
-    "'workflow_dispatch' && github.run_id || github.ref }}"
-)
+DISPATCH_CONCURRENCY_GROUP = "candidate-full-${{ inputs.candidate_sha }}-${{ inputs.purpose }}"
 
 
 def _read(path: Path) -> str:
@@ -274,28 +270,22 @@ def test_workflow_absorbs_the_focused_green_checkpoint_rule() -> None:
 
 
 def test_ci_hosted_runner_audit_headroom_is_bounded_and_precedes_full_verification() -> None:
-    workflow = yaml.safe_load(_read(CI_WORKFLOW_PATH))
+    workflow = yaml.safe_load(_read(CANDIDATE_FULL_WORKFLOW_PATH))
     assert isinstance(workflow, dict)
     assert workflow["permissions"] == {"contents": "read"}
 
-    steps = workflow["jobs"]["test"]["steps"]
+    steps = workflow["jobs"]["full"]["steps"]
     assert isinstance(steps, list)
-    event_checkout = next(
-        step
-        for step in steps
-        if step.get("uses") == "actions/checkout@v7"
-        and step.get("if") == "github.event_name != 'workflow_dispatch'"
-    )
-    assert event_checkout["with"] == {
+    candidate_checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v7")
+    assert candidate_checkout["with"] == {
         "persist-credentials": False,
-        "ref": EVENT_REF_EXPRESSION,
+        "ref": DISPATCH_REF_EXPRESSION,
     }
-    event_exact_checkout = next(
-        step for step in steps if step.get("name") == "Assert event exact checkout"
+    candidate_exact_checkout = next(
+        step for step in steps if step.get("name") == "Assert dispatched exact checkout"
     )
-    assert event_exact_checkout["if"] == "github.event_name != 'workflow_dispatch'"
-    assert event_exact_checkout["env"] == {"EXPECTED_SHA": EVENT_REF_EXPRESSION}
-    assert event_exact_checkout["run"] == 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
+    assert candidate_exact_checkout["env"] == {"EXPECTED_SHA": DISPATCH_REF_EXPRESSION}
+    assert candidate_exact_checkout["run"] == 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
     setup_uv_index = next(
         index
         for index, step in enumerate(steps)
@@ -359,7 +349,7 @@ def test_ci_hosted_runner_audit_headroom_is_bounded_and_precedes_full_verificati
 
 
 def test_ci_dispatch_validates_trusted_main_before_exact_candidate_checkout() -> None:
-    workflow_text = _read(CI_WORKFLOW_PATH)
+    workflow_text = _read(CANDIDATE_FULL_WORKFLOW_PATH)
     workflow = yaml.safe_load(workflow_text)
     assert isinstance(workflow, dict)
 
@@ -373,23 +363,15 @@ def test_ci_dispatch_validates_trusted_main_before_exact_candidate_checkout() ->
         "type": "string",
     }
 
-    steps = workflow["jobs"]["test"]["steps"]
+    classify = workflow["jobs"]["classify"]
+    steps = classify["steps"]
     trusted_main_index = next(
         index
         for index, step in enumerate(steps)
         if step.get("name") == "Validate trusted main dispatch"
     )
-    event_checkout_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("uses") == "actions/checkout@v7"
-        and step.get("if") == "github.event_name != 'workflow_dispatch'"
-    )
     dispatch_checkout_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("uses") == "actions/checkout@v7"
-        and step.get("if") == "github.event_name == 'workflow_dispatch'"
+        index for index, step in enumerate(steps) if step.get("uses") == "actions/checkout@v7"
     )
     dispatch_exact_assert_index = next(
         index
@@ -397,38 +379,40 @@ def test_ci_dispatch_validates_trusted_main_before_exact_candidate_checkout() ->
         if step.get("name") == "Assert dispatched exact checkout"
     )
 
-    assert trusted_main_index < event_checkout_index < dispatch_checkout_index
-    assert dispatch_checkout_index < dispatch_exact_assert_index
+    assert trusted_main_index < dispatch_checkout_index < dispatch_exact_assert_index
     trusted_main = steps[trusted_main_index]
-    assert trusted_main["if"] == "github.event_name == 'workflow_dispatch'"
     assert trusted_main["env"] == {"CANDIDATE_SHA": "${{ inputs.candidate_sha }}"}
     trusted_main_run = trusted_main["run"]
     assert '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]' in trusted_main_run
     assert '[[ "$GITHUB_REF" == "refs/heads/main" ]]' in trusted_main_run
-    assert '[[ "$GITHUB_WORKFLOW_REF" == *".github/workflows/ci.yml@refs/heads/main" ]]' in (
-        trusted_main_run
+    assert (
+        '[[ "$GITHUB_WORKFLOW_REF" == '
+        '*".github/workflows/candidate-full.yml@refs/heads/main" ]]' in trusted_main_run
     )
     assert '[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]' in trusted_main_run
 
     dispatch_checkout = steps[dispatch_checkout_index]
     assert dispatch_checkout["with"] == {
+        "fetch-depth": 0,
         "persist-credentials": False,
         "ref": DISPATCH_REF_EXPRESSION,
     }
     dispatch_exact_checkout = steps[dispatch_exact_assert_index]
-    assert dispatch_exact_checkout["if"] == "github.event_name == 'workflow_dispatch'"
     assert dispatch_exact_checkout["env"] == {"EXPECTED_SHA": DISPATCH_REF_EXPRESSION}
     assert dispatch_exact_checkout["run"] == 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
 
     concurrency = workflow["concurrency"]
     assert concurrency == {
         "group": DISPATCH_CONCURRENCY_GROUP,
-        "cancel-in-progress": True,
+        "cancel-in-progress": False,
     }
     assert workflow["permissions"] == {"contents": "read"}
     assert "secrets:" not in workflow_text
     assert "statuses" not in workflow_text
     assert "checks" not in workflow_text
+
+    full = workflow["jobs"]["full"]
+    assert full["needs"] == "classify"
 
     assert "run: uv run --no-project --python 3.12 python scripts/verify.py --profile full" in (
         workflow_text

@@ -47,7 +47,11 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
 
 `quality` checks the uv/lock/environment boundary, isolated installed package, reproducibility
 gate, lint, format, types, tests, and doctor. `full` also proves byte-identical isolated wheel
-builds and validates the installed wheel outside the repository. Pull requests and CI use `full`.
+builds and validates the installed wheel outside the repository. CI routes checks by evidence
+need: docs-only pull requests run the focused governance checks; Python pull requests run `quality`;
+each frozen candidate receives one trusted exact-SHA `full` run; `main` performs an
+installed-wheel core smoke; and each release candidate runs `full`. Web checks run only when Web
+sources, Node lock files, or CI workflow paths change.
 
 Tests must be deterministic and must not require private data. Secrets, broker credentials, and
 non-versionable datasets never enter Git.
