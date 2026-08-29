@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -11,6 +14,8 @@ import pytest
 import ea
 import ea.experiments.provenance as provenance_module
 from ea.composition.product_kernel import (
+    ProductKernelError,
+    ProductKernelFailureCode,
     _consume_phase1_product_kernel,
     prepare_phase1_product_kernel,
     recover_phase1_product_kernel,
@@ -31,6 +36,7 @@ from ea.core.initial_funding import (
 )
 from ea.core.risk import RiskPolicyId, create_phase1_risk_policy
 from ea.core.run import DataFingerprint, ReplayWindow, RunBinding, RunId, RunReference, Sha256Digest
+from ea.experiments.audit import create_posix_audit_journal
 from ea.experiments.manifest import (
     DistributionIdentity,
     EffectiveParameter,
@@ -91,6 +97,41 @@ def _manifest_v2():
     return manifest
 
 
+def _product_inputs():
+    spec_set = _spec_set()
+    funding = InitialFundingSpec(
+        spec_set.identifier,
+        instrument_spec_set_digest(spec_set),
+        SettlementCurrency("USD"),
+        CanonicalDecimal("0.01"),
+        CanonicalDecimal("1000"),
+    )
+    original = _manifest_v2().spec
+    spec = build_lineage_spec_v2(
+        LineageInputsV2(
+            configuration=original.configuration.normalized,
+            data=original.data,
+            replay_window=original.replay_window,
+            parameters=original.parameters,
+            runtime=original.runtime,
+            randomness_seed=original.randomness.master_seed,
+            stream_labels=original.randomness.stream_labels,
+            scenario_sha256=original.scenario_sha256,
+            initial_funding=funding,
+        )
+    )
+    execution_policy = ExecutionPolicyRef(
+        ExecutionPolicyId("phase1.execution.v1"), Sha256Digest("1" * 64)
+    )
+    risk_policy = create_phase1_risk_policy(
+        policy_id=RiskPolicyId("phase1.risk.v1"),
+        spec_set=spec_set,
+        execution_policy=execution_policy,
+        instrument_limits=(),
+    )
+    return spec, spec_set, execution_policy, risk_policy
+
+
 def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
     manifest = _manifest_v2()
     encoded = canonical_manifest_bytes(manifest)
@@ -107,6 +148,32 @@ def test_manifest_v2_reader_dispatches_and_requires_exact_canonical_bytes() -> N
 
     assert read_manifest(encoded) == manifest
     assert read_manifest_v2(encoded) == manifest
+
+
+def test_manifest_v2_bytes_are_cross_process_deterministic() -> None:
+    script = (
+        "from unit.test_manifest_v2_product_kernel import _manifest_v2; "
+        "from ea.experiments.manifest import canonical_manifest_bytes; "
+        "print(canonical_manifest_bytes(_manifest_v2()).hex())"
+    )
+    outputs = []
+    for hash_seed, timezone in (("1", "UTC"), ("999", "Asia/Shanghai")):
+        environment = os.environ | {
+            "PYTHONHASHSEED": hash_seed,
+            "TZ": timezone,
+            "PYTHONPATH": "src:tests",
+        }
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            cwd=Path.cwd(),
+            env=environment,
+            text=True,
+        )
+        outputs.append(completed.stdout)
+
+    assert outputs == [canonical_manifest_bytes(_manifest_v2()).hex() + "\n"] * 2
 
 
 def test_installed_runtime_collector_rejects_the_editable_source_tree() -> None:
@@ -263,6 +330,118 @@ def test_product_kernel_recovery_api_is_exposed() -> None:
     assert callable(recover_phase1_product_kernel)
 
 
+def test_recovery_replays_the_prepared_only_boundary(tmp_path: Path) -> None:
+    spec, spec_set, execution_policy, risk_policy = _product_inputs()
+    (tmp_path / "results").mkdir()
+    store = LocalResultStore((tmp_path / "results").resolve())
+    prepared = store.prepare_product(spec, lambda: UUID("12345678-1234-4234-8234-123456789abc"))
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    store._retire_product_attempt(prepared.audit)
+
+    recovered = recover_phase1_product_kernel(
+        store=store,
+        expected_manifest=build_manifest_v2(spec, prepared.reference.run_id),
+        spec_set=spec_set,
+        execution_policy=execution_policy,
+        risk_policy=risk_policy,
+    )
+
+    assert recovered.funding_outcome.transaction is not None
+    assert recovered.funding_outcome.transaction.ledger_sequence == 1
+    assert recovered.portfolio_snapshot.snapshot_version == 1
+    assert recovered.risk_state.risk_state_version == 0
+
+
+def test_recovery_resolves_a_committed_then_raised_funding_append(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec, spec_set, execution_policy, risk_policy = _product_inputs()
+    (tmp_path / "results").mkdir()
+    store = LocalResultStore((tmp_path / "results").resolve())
+    from ea.experiments.binding import BoundAuditPort
+
+    append = BoundAuditPort.append
+
+    def committed_then_raised(self: BoundAuditPort, **kwargs: object) -> object:
+        append(self, **kwargs)  # type: ignore[arg-type]
+        raise RuntimeError("append acknowledgement was lost after commit")
+
+    monkeypatch.setattr(BoundAuditPort, "append", committed_then_raised)
+    with pytest.raises(ProductKernelError) as raised:
+        prepare_phase1_product_kernel(
+            store=store,
+            spec=spec,
+            run_id_provider=lambda: UUID("12345678-1234-4234-8234-123456789abc"),
+            spec_set=spec_set,
+            execution_policy=execution_policy,
+            risk_policy=risk_policy,
+        )
+
+    assert raised.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
+    recovered = recover_phase1_product_kernel(
+        store=store,
+        expected_manifest=build_manifest_v2(spec, RunId("12345678-1234-4234-8234-123456789abc")),
+        spec_set=spec_set,
+        execution_policy=execution_policy,
+        risk_policy=risk_policy,
+    )
+
+    assert recovered.funding_outcome.transaction is not None
+    assert recovered.funding_outcome.transaction.ledger_sequence == 1
+
+
+def test_recovery_accepts_only_the_journal_defined_torn_final_tail(tmp_path: Path) -> None:
+    spec, spec_set, execution_policy, risk_policy = _product_inputs()
+    root = tmp_path / "results"
+    root.mkdir()
+    store = LocalResultStore(root.resolve())
+    prepared = store.prepare_product(spec, lambda: UUID("12345678-1234-4234-8234-123456789abc"))
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    store._retire_product_attempt(prepared.audit)
+    journal_path = root / prepared.reference.run_id.value / "audit" / "audit-v1.journal"
+    with journal_path.open("ab") as damaged:
+        damaged.write(b"torn")
+
+    recovered = recover_phase1_product_kernel(
+        store=store,
+        expected_manifest=build_manifest_v2(spec, prepared.reference.run_id),
+        spec_set=spec_set,
+        execution_policy=execution_policy,
+        risk_policy=risk_policy,
+    )
+
+    assert recovered.funding_outcome.transaction is not None
+    assert recovered.portfolio_snapshot.snapshot_version == 1
+
+
+def test_recovery_fails_closed_on_non_tail_journal_corruption(tmp_path: Path) -> None:
+    spec, spec_set, execution_policy, risk_policy = _product_inputs()
+    root = tmp_path / "results"
+    root.mkdir()
+    store = LocalResultStore(root.resolve())
+    prepared = store.prepare_product(spec, lambda: UUID("12345678-1234-4234-8234-123456789abc"))
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+    store._retire_product_attempt(prepared.audit)
+    journal_path = root / prepared.reference.run_id.value / "audit" / "audit-v1.journal"
+    with journal_path.open("r+b") as damaged:
+        damaged.seek(-1, 2)
+        damaged.write(b"\\x00")
+
+    with pytest.raises(ProductKernelError) as raised:
+        recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=build_manifest_v2(spec, prepared.reference.run_id),
+            spec_set=spec_set,
+            execution_policy=execution_policy,
+            risk_policy=risk_policy,
+        )
+
+    assert raised.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
+
+
 def test_failed_handoff_retires_the_store_writer_lease(tmp_path: Path) -> None:
     spec_set = _spec_set()
     funding = InitialFundingSpec(
@@ -319,4 +498,7 @@ def test_failed_handoff_retires_the_store_writer_lease(tmp_path: Path) -> None:
         risk_policy=risk_policy,
     )
 
+    assert recovered.binding == kernel.binding
     assert recovered.funding_outcome == kernel.funding_outcome
+    assert recovered.portfolio_snapshot == kernel.portfolio_snapshot
+    assert recovered.risk_state == kernel.risk_state
