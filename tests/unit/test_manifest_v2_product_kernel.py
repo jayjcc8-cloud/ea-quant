@@ -9,10 +9,20 @@ import pytest
 
 import ea
 import ea.experiments.provenance as provenance_module
+from ea.core.audit import (
+    AuditRecordKind,
+    AuditSubjectKind,
+    audit_subject_digest,
+    require_canonical_audit_payload,
+)
 from ea.core.economics import CanonicalDecimal
-from ea.core.execution import InstrumentSpecSetId, SettlementCurrency
-from ea.core.initial_funding import InitialFundingSpec
-from ea.core.run import DataFingerprint, ReplayWindow, RunId, Sha256Digest
+from ea.core.execution import InstrumentSpecSetId, SettlementCurrency, instrument_spec_set_digest
+from ea.core.initial_funding import (
+    InitialFundingSpec,
+    canonical_initial_funding_outcome_bytes,
+    initial_funding_outcome_digest,
+)
+from ea.core.run import DataFingerprint, ReplayWindow, RunBinding, RunId, RunReference, Sha256Digest
 from ea.experiments.manifest import (
     DistributionIdentity,
     EffectiveParameter,
@@ -29,6 +39,8 @@ from ea.experiments.provenance import (
     ProvenanceError,
     collect_installed_runtime_spec_v2,
 )
+from ea.portfolio import create_portfolio_ledger
+from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
 
 def _manifest_v2():
@@ -135,3 +147,37 @@ def test_installed_runtime_collector_hashes_sorted_regular_distribution_files(
 
     assert first.ea_distribution == DistributionIdentity("ea-quant", "0.2.0")
     assert first.ea_installed_files_sha256 != second.ea_installed_files_sha256
+
+
+def test_initial_funding_outcome_has_its_own_canonical_audit_record() -> None:
+    spec_set = _spec_set()
+    funding = InitialFundingSpec(
+        spec_set.identifier,
+        instrument_spec_set_digest(spec_set),
+        SettlementCurrency("USD"),
+        CanonicalDecimal("0.01"),
+        CanonicalDecimal("1000"),
+    )
+    binding = RunBinding(
+        RunReference(RUN_ID, Sha256Digest("11" * 32)),
+        Sha256Digest("22" * 32),
+    )
+    outcome = create_portfolio_ledger(RUN_ID, spec_set).apply_initial_funding(
+        funding,
+        binding=binding,
+        prepared_acknowledgement=Sha256Digest("33" * 32),
+    )
+
+    payload = canonical_initial_funding_outcome_bytes(outcome)
+
+    assert AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME.value == (
+        "portfolio.initial_funding_outcome"
+    )
+    assert AuditSubjectKind.INITIAL_FUNDING_OUTCOME.value == "initial_funding_outcome"
+    assert (
+        require_canonical_audit_payload(AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME, payload)
+        == payload
+    )
+    assert audit_subject_digest(
+        AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME, payload
+    ) == initial_funding_outcome_digest(outcome)
