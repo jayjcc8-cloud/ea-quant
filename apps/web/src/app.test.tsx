@@ -52,16 +52,44 @@ describe('EA Quant mock terminal', () => {
 
   it('renders deterministic loading, empty, and error mock states', () => {
     window.history.pushState({}, '', '/?state=loading')
-    const { rerender } = render(<App />)
+    const { unmount } = render(<App />)
     expect(screen.getByText('Loading mock market workspace…')).toBeTruthy()
 
+    unmount()
     window.history.pushState({}, '', '/?state=empty')
-    rerender(<App />)
+    const empty = render(<App />)
     expect(screen.getByText('No mock positions in this workspace')).toBeTruthy()
 
+    empty.unmount()
     window.history.pushState({}, '', '/?state=error')
-    rerender(<App />)
+    render(<App />)
     expect(screen.getByText('Mock data is temporarily unavailable')).toBeTruthy()
+  })
+
+  it('consumes a supplied read-only mock adapter snapshot', () => {
+    const adapter = {
+      kind: 'deterministic-read-only-mock' as const,
+      getOverview: () => ({
+        state: 'ready' as const,
+        snapshot: {
+          metrics: [{ label: 'Adapter Equity', value: '$9.00', detail: 'Provided by adapter' }],
+          executions: [],
+        },
+      }),
+    }
+
+    render(<App adapter={adapter} />)
+
+    expect(screen.getByText('Adapter Equity')).toBeTruthy()
+    expect(screen.queryByText('Total Equity')).toBeNull()
+  })
+
+  it('renders a read-only not found fallback for unknown routes', () => {
+    window.history.pushState({}, '', '/unknown-workspace')
+    render(<App />)
+
+    expect(screen.getByRole('heading', { name: 'Not Found' })).toBeTruthy()
+    expect(screen.getByText('Read-only mock workspace has no route for /unknown-workspace.')).toBeTruthy()
   })
 
   it('does not present any trading or recovery mutation controls', () => {

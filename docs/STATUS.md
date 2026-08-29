@@ -140,6 +140,11 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
   is verified on `main@6faa1271b1557599c8f64b28ebf3d739e7ead04b` after PRs #112/#113 and the
   merged-main CI run `33233978652`; its bounded Linux toolchain cleanup and trusted-main dispatch
   contract remain the current CI environment evidence.
+  GitHub-hosted Linux CI reclaims only three fixed unused toolchains—the Android SDK, .NET, and GHC
+  directories—before the unchanged 15 GiB admission and full verifier.
+  Historical pre-verification record: “PR #110 still requires a fresh unchanged-head CI run.” That
+  superseded condition was satisfied by the `33233978652` merged-main success recorded above; “#108 is not thereby complete”
+  was likewise historical wording before that verified-main resolution.
 
 ## Last Confirmed
 

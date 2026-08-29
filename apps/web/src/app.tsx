@@ -1,6 +1,6 @@
 import { BrowserRouter, NavLink, useLocation } from 'react-router-dom'
 
-type MockState = 'ready' | 'loading' | 'empty' | 'error'
+export type MockState = 'ready' | 'loading' | 'empty' | 'error'
 
 type Metric = {
   label: string
@@ -20,7 +20,22 @@ const pages = [
   'System Health',
 ]
 
-const mockOverview = {
+export type OverviewSnapshot = {
+  readonly metrics: readonly Metric[]
+  readonly executions: readonly (readonly string[])[]
+}
+
+type MockOverview = {
+  readonly state: MockState
+  readonly snapshot: OverviewSnapshot
+}
+
+export type MockAdapter = {
+  readonly kind: 'deterministic-read-only-mock'
+  getOverview(search: string): MockOverview
+}
+
+const deterministicSnapshot: OverviewSnapshot = {
   metrics: [
     { label: 'Total Equity', value: '$2,485,320.18', detail: '+2.8% month to date' },
     { label: 'Daily P&L', value: '+$18,420.64', detail: '+0.75% today', tone: 'positive' },
@@ -34,11 +49,15 @@ const mockOverview = {
   ],
 }
 
-function getMockState(): MockState {
-  const requested = new URLSearchParams(window.location.search).get('state')
-  return requested === 'loading' || requested === 'empty' || requested === 'error'
-    ? requested
-    : 'ready'
+const deterministicMockAdapter: MockAdapter = {
+  kind: 'deterministic-read-only-mock',
+  getOverview(search) {
+    const requested = new URLSearchParams(search).get('state')
+    const state: MockState = requested === 'loading' || requested === 'empty' || requested === 'error'
+      ? requested
+      : 'ready'
+    return { state, snapshot: deterministicSnapshot }
+  },
 }
 
 function StatePanel({ state }: { state: MockState }) {
@@ -58,7 +77,8 @@ function MetricCard({ metric }: { metric: Metric }) {
   )
 }
 
-function Overview({ state }: { state: MockState }) {
+function Overview({ overview }: { overview: MockOverview }) {
+  const { state, snapshot } = overview
   return (
     <>
       <PageTitle title="Overview" subtitle="Capital, exposure, and operations at a glance" />
@@ -66,7 +86,7 @@ function Overview({ state }: { state: MockState }) {
       {state === 'ready' && (
         <div className="overview-grid">
           <section className="metrics" aria-label="Mock account metrics">
-            {mockOverview.metrics.map((metric) => <MetricCard key={metric.label} metric={metric} />)}
+            {snapshot.metrics.map((metric) => <MetricCard key={metric.label} metric={metric} />)}
           </section>
           <section className="panel curve-panel">
             <PanelHeading title="Equity Curve" note="Mock · trailing 30 sessions" />
@@ -88,7 +108,7 @@ function Overview({ state }: { state: MockState }) {
           </section>
           <section className="panel executions-panel">
             <PanelHeading title="Recent Executions" note="Mock · today" />
-            <table><thead><tr><th>Time</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead><tbody>{mockOverview.executions.map((row) => <tr key={row.join('-')}>{row.map((cell) => <td key={cell}>{cell}</td>)}</tr>)}</tbody></table>
+            <table><thead><tr><th>Time</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead><tbody>{snapshot.executions.map((row) => <tr key={row.join('-')}>{row.map((cell) => <td key={cell}>{cell}</td>)}</tr>)}</tbody></table>
           </section>
           <section className="panel health-panel">
             <PanelHeading title="System Health" note="Mock · local adapter" />
@@ -113,19 +133,23 @@ function SkeletonPage({ title }: { title: string }) {
   return <><PageTitle title={title} subtitle="Operational view prepared for future read-only integration" /><section className="skeleton"><span>Mock workspace · read-only skeleton</span><div /><div /><div /></section></>
 }
 
-function Shell() {
+function NotFoundPage({ path }: { path: string }) {
+  return <><PageTitle title="Not Found" subtitle="This read-only mock workspace route is not available" /><section className="skeleton"><span>Read-only mock workspace has no route for {path}.</span></section></>
+}
+
+function Shell({ adapter }: { adapter: MockAdapter }) {
   const location = useLocation()
-  const state = getMockState()
   const current = pages.find((page) => location.pathname === `/${page.toLowerCase().replaceAll(' ', '-')}`)
+  const overview = adapter.getOverview(location.search)
 
   return (
     <div className="app-shell">
       <aside className="sidebar"><a className="brand" href="/"><span>EA</span><strong>QUANT</strong></a><p className="workspace">OPERATIONS CONSOLE</p><nav aria-label="Primary navigation"><NavLink end to="/">Overview</NavLink>{pages.map((page) => <NavLink key={page} to={`/${page.toLowerCase().replaceAll(' ', '-')}`}>{page}</NavLink>)}</nav><div className="sidebar-footer"><span className="status-dot" />Mock adapter active</div></aside>
-      <main><header className="topbar"><span>Global Markets · USD</span><span>Read-only workspace</span></header><div className="content">{current ? <SkeletonPage title={current} /> : <Overview state={state} />}</div></main>
+      <main><header className="topbar"><span>Global Markets · USD</span><span>Read-only workspace</span></header><div className="content">{current ? <SkeletonPage title={current} /> : location.pathname === '/' ? <Overview overview={overview} /> : <NotFoundPage path={location.pathname} />}</div></main>
     </div>
   )
 }
 
-export function App() {
-  return <BrowserRouter><Shell /></BrowserRouter>
+export function App({ adapter = deterministicMockAdapter }: { readonly adapter?: MockAdapter }) {
+  return <BrowserRouter><Shell adapter={adapter} /></BrowserRouter>
 }
