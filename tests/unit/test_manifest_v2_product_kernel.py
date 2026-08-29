@@ -10,6 +10,7 @@ import pytest
 
 import ea
 import ea.experiments.provenance as provenance_module
+from ea.composition.product_kernel import prepare_phase1_product_kernel
 from ea.core.audit import (
     AuditRecordKind,
     AuditSubjectKind,
@@ -18,11 +19,13 @@ from ea.core.audit import (
 )
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import InstrumentSpecSetId, SettlementCurrency, instrument_spec_set_digest
+from ea.core.execution_messages import ExecutionPolicyId, ExecutionPolicyRef
 from ea.core.initial_funding import (
     InitialFundingSpec,
     canonical_initial_funding_outcome_bytes,
     initial_funding_outcome_digest,
 )
+from ea.core.risk import RiskPolicyId, create_phase1_risk_policy
 from ea.core.run import DataFingerprint, ReplayWindow, RunBinding, RunId, RunReference, Sha256Digest
 from ea.experiments.manifest import (
     DistributionIdentity,
@@ -198,3 +201,55 @@ def test_store_product_prepare_requires_and_publishes_a_v2_manifest(tmp_path: Pa
     assert store.verify_manifest(prepared.manifest_verification).manifest_schema_version == 2
     with pytest.raises(StoreError, match="LineageSpecV2"):
         store.prepare_product(object(), lambda: UUID("12345678-1234-4234-8234-123456789abc"))
+
+
+def test_product_kernel_publishes_only_the_funded_read_only_boundary(tmp_path: Path) -> None:
+    spec_set = _spec_set()
+    funding = InitialFundingSpec(
+        spec_set.identifier,
+        instrument_spec_set_digest(spec_set),
+        SettlementCurrency("USD"),
+        CanonicalDecimal("0.01"),
+        CanonicalDecimal("1000"),
+    )
+    original = _manifest_v2().spec
+    spec = build_lineage_spec_v2(
+        LineageInputsV2(
+            configuration=original.configuration.normalized,
+            data=original.data,
+            replay_window=original.replay_window,
+            parameters=original.parameters,
+            runtime=original.runtime,
+            randomness_seed=original.randomness.master_seed,
+            stream_labels=original.randomness.stream_labels,
+            scenario_sha256=original.scenario_sha256,
+            initial_funding=funding,
+        )
+    )
+    execution_policy = ExecutionPolicyRef(
+        ExecutionPolicyId("phase1.execution.v1"), Sha256Digest("1" * 64)
+    )
+    risk_policy = create_phase1_risk_policy(
+        policy_id=RiskPolicyId("phase1.risk.v1"),
+        spec_set=spec_set,
+        execution_policy=execution_policy,
+        instrument_limits=(),
+    )
+    (tmp_path / "results").mkdir()
+    store = LocalResultStore((tmp_path / "results").resolve())
+
+    kernel = prepare_phase1_product_kernel(
+        store=store,
+        spec=spec,
+        run_id_provider=lambda: UUID("12345678-1234-4234-8234-123456789abc"),
+        spec_set=spec_set,
+        execution_policy=execution_policy,
+        risk_policy=risk_policy,
+    )
+
+    assert not hasattr(kernel, "ledger")
+    assert not hasattr(kernel, "audit")
+    assert kernel.binding.reference.run_id == RunId("12345678-1234-4234-8234-123456789abc")
+    assert kernel.funding_outcome.transaction is not None
+    assert kernel.portfolio_snapshot.snapshot_version == 1
+    assert kernel.risk_state.risk_state_version == 0
