@@ -23,6 +23,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Validate trusted main dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == *".github/workflows/ci.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          printf 'trusted_workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
+          printf 'trusted_workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
+          printf 'validated_candidate_sha=%s\n' "$CANDIDATE_SHA"
       - uses: actions/checkout@v7
         if: github.event_name != 'workflow_dispatch'
         with:
