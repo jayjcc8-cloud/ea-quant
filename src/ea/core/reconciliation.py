@@ -19,6 +19,7 @@ from ea.core.execution import (
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind, SourceNamespace
 from ea.core.execution_messages import FactProvenanceId, Fill, Order, fill_digest, order_digest
 from ea.core.identity import Instrument, VenueId
+from ea.core.initial_funding import InitialFundingTransaction
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import (
     CurrencyCommodity,
@@ -2211,7 +2212,9 @@ class ReconciliationAdjustmentOutcome:
         raise TypeError("reconciliation adjustment outcomes are issued only by the ledger")
 
 
-type CanonicalPortfolioTransaction = LedgerTransaction | ReconciliationTransaction
+type CanonicalPortfolioTransaction = (
+    InitialFundingTransaction | LedgerTransaction | ReconciliationTransaction
+)
 
 
 def _create_reconciliation_transaction(

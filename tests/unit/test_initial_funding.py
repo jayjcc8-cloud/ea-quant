@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from ea.core.economics import CanonicalDecimal
-from ea.core.execution import InstrumentSpecSetId, SettlementCurrency
+from ea.core.execution import InstrumentSpecSetId, SettlementCurrency, instrument_spec_set_digest
 from ea.core.initial_funding import (
+    InitialFundingConflictKind,
+    InitialFundingResult,
     InitialFundingSpec,
     canonical_initial_funding_spec_bytes,
     initial_funding_spec_digest,
 )
-from ea.core.run import Sha256Digest
+from ea.core.run import RunBinding, RunReference, Sha256Digest
+from ea.portfolio import create_portfolio_ledger
+from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
 
 def test_initial_funding_spec_has_stable_literal_canonical_bytes() -> None:
@@ -30,3 +34,57 @@ def test_initial_funding_spec_has_stable_literal_canonical_bytes() -> None:
     assert initial_funding_spec_digest(spec).value == (
         "d68b5f72b813bedb6be9f7276554905c881bed6c645039fcefbce2b6dc227fa4"
     )
+
+
+def test_ledger_applies_genesis_once_and_retains_exact_replay() -> None:
+    spec_set = _spec_set()
+    funding = InitialFundingSpec(
+        instrument_spec_set_id=spec_set.identifier,
+        instrument_spec_set_sha256=instrument_spec_set_digest(spec_set),
+        settlement_currency=SettlementCurrency("USD"),
+        currency_quantum=CanonicalDecimal("0.01"),
+        amount=CanonicalDecimal("1000"),
+    )
+    binding = RunBinding(RunReference(RUN_ID, Sha256Digest("11" * 32)), Sha256Digest("22" * 32))
+    acknowledgement = Sha256Digest("33" * 32)
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+
+    applied = ledger.apply_initial_funding(
+        funding, binding=binding, prepared_acknowledgement=acknowledgement
+    )
+    replay = ledger.apply_initial_funding(
+        funding, binding=binding, prepared_acknowledgement=acknowledgement
+    )
+
+    assert applied.result is InitialFundingResult.APPLIED
+    assert applied.transaction is not None
+    assert applied.transaction.ledger_sequence == 1
+    assert applied.snapshot.cash_balances[0].amount == CanonicalDecimal("1000")
+    assert replay is applied
+
+
+def test_ledger_fails_closed_when_genesis_binding_changes() -> None:
+    spec_set = _spec_set()
+    funding = InitialFundingSpec(
+        spec_set.identifier,
+        instrument_spec_set_digest(spec_set),
+        SettlementCurrency("USD"),
+        CanonicalDecimal("0.01"),
+        CanonicalDecimal("1000"),
+    )
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+    binding = RunBinding(RunReference(RUN_ID, Sha256Digest("11" * 32)), Sha256Digest("22" * 32))
+    applied = ledger.apply_initial_funding(
+        funding, binding=binding, prepared_acknowledgement=Sha256Digest("33" * 32)
+    )
+
+    conflict = ledger.apply_initial_funding(
+        funding,
+        binding=RunBinding(RunReference(RUN_ID, Sha256Digest("44" * 32)), binding.manifest_sha256),
+        prepared_acknowledgement=Sha256Digest("33" * 32),
+    )
+
+    assert conflict.result is InitialFundingResult.CONFLICT
+    assert conflict.conflict_kind is InitialFundingConflictKind.MANIFEST_BINDING_CONFLICT
+    assert conflict.snapshot == applied.snapshot
+    assert ledger.transactions == (applied.transaction,)
