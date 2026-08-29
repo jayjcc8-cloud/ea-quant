@@ -58,7 +58,6 @@ jobs:
           PURPOSE: ${{ inputs.purpose }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main
           base_sha="$(git merge-base "$CANDIDATE_SHA" origin/main)"
           git cat-file -e "$base_sha^{commit}"
           git cat-file -e "$CANDIDATE_SHA^{commit}"
