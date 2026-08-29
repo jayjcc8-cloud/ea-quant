@@ -125,6 +125,14 @@ def test_status_rejects_self_referential_premerge_facts() -> None:
     assert "Open pull requests: Draft #73 and Draft #80" not in status
     assert "PR #80" in status
     assert re.search(r"does not assert\s+mutable open, closed, Draft, or merged state", status)
+    assert "[#111 — hosted-runner audit headroom]" in status
+    assert "is In Progress: it is limited" not in status
+    assert re.search(
+        r"GitHub-hosted Linux CI reclaims only three fixed unused\s+toolchains",
+        status,
+    )
+    assert "PR #110 still requires a fresh unchanged-head CI run" in status
+    assert "#108 is not thereby complete" in status
 
 
 def test_authority_precedence_is_identical_in_adr_and_workflow() -> None:
