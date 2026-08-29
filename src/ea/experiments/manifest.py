@@ -37,6 +37,8 @@ from ea.core.run import (
     validate_stream_label as validate_stream_label,
 )
 from ea.experiments._manifest_codec import read_manifest as read_manifest
+from ea.experiments._manifest_codec import read_manifest_v1 as read_manifest_v1
+from ea.experiments._manifest_codec import read_manifest_v2 as read_manifest_v2
 from ea.experiments._manifest_evidence import (
     verify_manifest_evidence as verify_manifest_evidence,
 )
@@ -168,6 +170,8 @@ _PUBLIC_MANIFEST_OBJECTS: tuple[object, ...] = (
     build_manifest,
     build_manifest_v2,
     read_manifest,
+    read_manifest_v1,
+    read_manifest_v2,
     verify_manifest_evidence,
 )
 for _public_object in _PUBLIC_MANIFEST_OBJECTS:

@@ -17,10 +17,12 @@ from ea.experiments.manifest import (
     build_lineage_spec_v2,
     build_manifest_v2,
     canonical_manifest_bytes,
+    read_manifest,
+    read_manifest_v2,
 )
 
 
-def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
+def _manifest_v2():
     funding = InitialFundingSpec(
         InstrumentSpecSetId("phase1.test.v1"),
         Sha256Digest("11" * 32),
@@ -56,9 +58,22 @@ def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
         build_lineage_spec_v2(inputs),
         RunId("12345678-1234-4234-8234-123456789abc"),
     )
+    return manifest
+
+
+def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
+    manifest = _manifest_v2()
     encoded = canonical_manifest_bytes(manifest)
 
     assert manifest.manifest_schema_version == 2
-    assert manifest.spec.initial_funding == funding
+    assert manifest.spec.initial_funding.amount == CanonicalDecimal("1000")
     assert b'"manifest_schema_version":2' in encoded
     assert b'"scenario_sha256":"' + b"44" * 32 + b'"' in encoded
+
+
+def test_manifest_v2_reader_dispatches_and_requires_exact_canonical_bytes() -> None:
+    manifest = _manifest_v2()
+    encoded = canonical_manifest_bytes(manifest)
+
+    assert read_manifest(encoded) == manifest
+    assert read_manifest_v2(encoded) == manifest
