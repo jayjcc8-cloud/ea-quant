@@ -211,6 +211,6 @@ source remain `N/A` and are never estimated.
 | First-pass acceptance rate | 0% (0/5; each delivery required at least one tracked revision after its first review candidate) |
 | Average rework rounds | N/A — #77 recorded 6 tracked implementation retries; later deliveries did not record normalized totals suitable for averaging |
 | Ready-to-Merge time | N/A — no authoritative Ready and merge interval endpoints were recorded |
-| Merges missing evidence or status updates | 20% (1/5) — PR #114's merged-main STATUS lag is addressed only by the current docs-only successor; PRs #91/#96/#102/#103 have exact evidence |
+| Merges missing evidence or status updates | 0% (0/5) — PRs #91/#96/#102/#103/#114 have exact evidence after the merged docs-only synchronization |
 | Token and human-time cost per accepted PR | N/A — platform/API exposes no authoritative token counts or human-time ledger |
 | Unresolved decisions existing only in comments | 0 known; decisions are not known to exist only in comments |

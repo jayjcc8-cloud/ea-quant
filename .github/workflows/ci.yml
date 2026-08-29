@@ -24,12 +24,24 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        if: github.event_name != 'workflow_dispatch'
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Assert event exact checkout
+        if: github.event_name != 'workflow_dispatch'
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - name: Assert dispatched exact checkout
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_SHA: ${{ inputs.candidate_sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - uses: actions/setup-node@v4
         with:
