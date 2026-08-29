@@ -349,6 +349,21 @@ def test_ci_routes_docs_python_candidate_main_release_and_web_work() -> None:
         step.get("run", "") for step in quality["steps"] if isinstance(step, dict)
     )
     assert "scripts/verify.py --profile quality" in quality_run
+    quality_step_names = [step.get("name") for step in quality["steps"]]
+    quality_cleanup_index = quality_step_names.index("Reclaim hosted-runner audit headroom")
+    quality_preflight_index = quality_step_names.index("Verify hosted-runner audit headroom")
+    quality_verify_index = quality_step_names.index("Verify Python quality")
+    assert quality_cleanup_index < quality_preflight_index < quality_verify_index
+    quality_cleanup = quality["steps"][quality_cleanup_index]
+    assert quality_cleanup["if"] == "runner.environment == 'github-hosted'"
+    assert re.findall(
+        r"(?m)^\s*sudo rm -rf -- (\S+)\s*$",
+        quality_cleanup["run"],
+    ) == [
+        "/usr/local/lib/android/sdk",
+        "/usr/share/dotnet",
+        "/usr/local/.ghcup",
+    ]
 
     full = jobs["test"]
     assert full["if"] == "github.event_name == 'workflow_dispatch'"
