@@ -129,8 +129,9 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
 - [#111 — hosted-runner audit headroom](https://github.com/jayjcc8-cloud/ea-quant/issues/111)
   records a bounded CI environment contract: GitHub-hosted Linux CI reclaims only three fixed unused
   toolchains and verifies 15 GiB free in `/tmp` and the workspace before the unchanged full verifier.
-  PR #110 still requires a fresh unchanged-head CI run, and #108 is not thereby complete or exempt
-  from its remaining Gate C.
+  PR #110 still requires a fresh unchanged-head CI run. Its post-repair `pull_request` event used the
+  branch's old workflow definition and therefore cannot evidence the repaired environment. A
+  trusted-main `workflow_dispatch(candidate_sha)` is required to verify its unchanged head; #108 is not thereby complete or exempt from its remaining Gate C.
 
 ## Last Confirmed
 
