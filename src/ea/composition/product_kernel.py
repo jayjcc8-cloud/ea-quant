@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import StrEnum
+from functools import partial
 from threading import Lock
 from typing import final
 
@@ -85,9 +86,11 @@ class _Phase1ProductKernelHandoff:
     __slots__ = (
         "audit",
         "frontier",
+        "journal",
         "ledger",
         "ledger_handoff",
         "lock",
+        "retire",
         "risk",
         "risk_refresh",
         "state",
@@ -97,18 +100,22 @@ class _Phase1ProductKernelHandoff:
         self,
         *,
         audit: BoundAuditPort,
+        journal: PosixAuditJournal,
         ledger: object,
         ledger_handoff: Phase1LedgerHandoffAuthority,
         risk: Phase1RiskAuthority,
         risk_refresh: Phase1PortfolioRiskRefreshAuthority,
         frontier: AcknowledgedLifecycleFrontier,
+        retire: Callable[[], None],
     ) -> None:
         self.audit = audit
+        self.journal = journal
         self.ledger = ledger
         self.ledger_handoff = ledger_handoff
         self.risk = risk
         self.risk_refresh = risk_refresh
         self.frontier = frontier
+        self.retire = retire
         self.lock = Lock()
         self.state = "AVAILABLE"
 
@@ -175,10 +182,40 @@ def _consume_phase1_product_kernel[T](
     except BaseException:
         with handoff.lock:
             handoff.state = "FAILED"
+        try:
+            handoff.journal.close()
+            handoff.retire()
+        except Exception as error:
+            raise ProductKernelError(
+                ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+                "failed handoff could not retire its durable attempt",
+            ) from error
         raise
     with handoff.lock:
         handoff.state = "CONSUMED"
     return result
+
+
+def _retire_failed_product_attempt(
+    journal: PosixAuditJournal | None, retire: Callable[[], None] | None
+) -> None:
+    """Close journal and invalidate the store attempt after an unrecoverable factory failure."""
+    error: BaseException | None = None
+    if journal is not None:
+        try:
+            journal.close()
+        except BaseException as close_error:
+            error = close_error
+    if retire is not None:
+        try:
+            retire()
+        except BaseException as retirement_error:
+            error = retirement_error
+    if error is not None:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+            "failed product attempt could not retire its durable evidence",
+        ) from error
 
 
 def prepare_phase1_product_kernel(
@@ -196,8 +233,10 @@ def prepare_phase1_product_kernel(
             ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "invalid product input"
         )
     journal: PosixAuditJournal | None = None
+    retire: Callable[[], None] | None = None
     try:
         prepared = store.prepare_product(spec, run_id_provider)
+        retire = partial(store._retire_product_attempt, prepared.audit)
         manifest = store.verify_manifest(prepared.manifest_verification)
         if type(manifest) is not RunManifestV2 or manifest.spec != spec:
             raise ProductKernelError(
@@ -247,6 +286,7 @@ def prepare_phase1_product_kernel(
         )
         handoff = _Phase1ProductKernelHandoff(
             audit=audit,
+            journal=journal,
             ledger=ledger,
             ledger_handoff=create_phase1_ledger_handoff_authority(
                 manifest.run_id, spec_set, ledger
@@ -259,6 +299,7 @@ def prepare_phase1_product_kernel(
                 policy_sha256=risk.risk_state.policy_sha256,
             ),
             frontier=frontier,
+            retire=retire,
         )
         return Phase1ProductKernel(
             binding=prepared.audit.binding,
@@ -268,12 +309,10 @@ def prepare_phase1_product_kernel(
             handoff=handoff,
         )
     except ProductKernelError:
-        if journal is not None:
-            journal.close()
+        _retire_failed_product_attempt(journal, retire)
         raise
     except Exception as error:
-        if journal is not None:
-            journal.close()
+        _retire_failed_product_attempt(journal, retire)
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
             "product preparation failed",
@@ -295,6 +334,7 @@ def recover_phase1_product_kernel(
             "product recovery requires manifest v2",
         )
     journal: PosixAuditJournal | None = None
+    retire: Callable[[], None] | None = None
     try:
         verified = store.verify_recovery_attempt(expected_manifest)
         if type(verified) is not VerifiedIncompleteRecoveryBinding:
@@ -303,6 +343,7 @@ def recover_phase1_product_kernel(
                 "terminal evidence is outside the funding boundary",
             )
         recovered = store.recover_incomplete_attempt(verified)
+        retire = partial(store._retire_product_attempt, recovered.audit)
         if store.verify_manifest(recovered.manifest_verification) != expected_manifest:
             raise ProductKernelError(
                 ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "manifest drift"
@@ -355,6 +396,7 @@ def recover_phase1_product_kernel(
         snapshot = ledger.snapshot
         handoff = _Phase1ProductKernelHandoff(
             audit=audit,
+            journal=journal,
             ledger=ledger,
             ledger_handoff=create_phase1_ledger_handoff_authority(
                 expected_manifest.run_id, spec_set, ledger
@@ -369,6 +411,7 @@ def recover_phase1_product_kernel(
             frontier=create_acknowledged_lifecycle_frontier(
                 initial_snapshot=snapshot, initial_risk_state=risk.risk_state
             ),
+            retire=retire,
         )
         return Phase1ProductKernel(
             binding=recovered.audit.binding,
@@ -378,12 +421,10 @@ def recover_phase1_product_kernel(
             handoff=handoff,
         )
     except ProductKernelError:
-        if journal is not None:
-            journal.close()
+        _retire_failed_product_attempt(journal, retire)
         raise
     except Exception as error:
-        if journal is not None:
-            journal.close()
+        _retire_failed_product_attempt(journal, retire)
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
             "product recovery failed",

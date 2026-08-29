@@ -1085,6 +1085,20 @@ class LocalResultStore:
                 )
             raise
 
+    def _retire_product_attempt(self, audit: AuditRunBinding) -> None:
+        """Release one failed product prelude without deleting its durable evidence."""
+        if type(audit) is not AuditRunBinding or audit._store is not self:
+            raise StoreError("product retirement requires its exact store-owned audit binding")
+        authority = audit._authority
+        with self._registry_lock:
+            record = self._attempts.pop(authority.attempt_token, None)
+        if record is None or record.authority is not authority:
+            raise StoreError("product retirement capability is stale or foreign")
+        try:
+            os.close(record.writer_lock_fd)
+        except OSError as error:
+            raise StoreError("product retirement could not release the writer lease") from error
+
     def prepare_product(
         self,
         spec: LineageSpecV2,
