@@ -68,13 +68,17 @@ report, with durable audit evidence and no live or external order-writing capabi
   `main@6faa1271b1557599c8f64b28ebf3d739e7ead04b`; exact merged-main CI run `33233978652`
   succeeded. Issue #111's hosted-runner audit-headroom contract was delivered by PRs #112/#113
   and is likewise verified on that main checkpoint.
+- Issue #106 / PR #114 completed the bounded Dark Professional frontend delivery at
+  `main@7a52ba3c172c7683832fea12476fe2b257acb42e`. Source candidate
+  `8d5b7a689efbb7541ebe4b2d2c1aec7aba4d47d0` and the squash-merged tree are identical; exact
+  merged-main CI run `33248872046` succeeded for `frontend` and `test`. Gate B checks and visual
+  review at 1440px, 1024px, and 390px passed. The delivery uses a deterministic read-only
+  TypeScript Mock Adapter and includes no API/HTTP, backend/runtime/domain, database/WebSocket,
+  real data, trading mutation, recovery command, or #97/#98/#99 integration authority. Gate C R1
+  holds only on this factual STATUS synchronization; a docs-only successor requires final Gate C
+  before Issue lifecycle closeout.
 
 ## Incomplete
-
-- [#106](https://github.com/jayjcc8-cloud/ea-quant/issues/106) is in progress on its isolated UI
-  branch at `main@6faa1271b1557599c8f64b28ebf3d739e7ead04b`, delivering the bounded Dark
-  Professional mock frontend. It is a candidate-only delivery until exact-head hosted CI,
-  independent Verification, Merge approval, squash merge, and merged-main verification complete.
 
 - [#76](https://github.com/jayjcc8-cloud/ea-quant/issues/76) remains the OPEN
   `status:in-progress` + `blocked` parent. D76-001/D76-002 are complete; D76-003..D76-008 remain
@@ -158,9 +162,11 @@ Merged code/tests/CI describe actual behavior. ADRs describe normative intent. A
   `ab7ac6dbc46b8b9e49c047695d41c75b0f1b8ac5`; the reviewed PR #102 structural source is
   `5b848699809ffd662978f491ee787a7f4d593d0e`.
 - Current main also includes the verified Tier 1 governance/CI repairs #108 / PR #110 and #111 /
-  PRs #112/#113 at `main@6faa1271b1557599c8f64b28ebf3d739e7ead04b`, with merged-main CI run
-  `33233978652` successful. UI-001 / #106 is an in-progress candidate on an isolated branch, not
-  merged or closed reality.
+  PRs #112/#113, plus completed UI-001 / #106 / PR #114 at
+  `main@7a52ba3c172c7683832fea12476fe2b257acb42e`. Exact merged-main CI run `33248872046`
+  succeeded and the source candidate `8d5b7a689efbb7541ebe4b2d2c1aec7aba4d47d0` is tree-identical
+  to the squash merge. The only remaining #106 action is a docs-only final Gate C after this
+  merged-main STATUS synchronization; it does not reopen UI semantics or authority.
 - Current-main resolution: on merged `main`, use the containing `main` commit and its exact CI;
   from any feature branch, resolve current `main` through GitHub rather than treating that branch's
   candidate SHA as merged reality.
@@ -201,10 +207,10 @@ source remain `N/A` and are never estimated.
 
 | Metric | Latest |
 |---|---:|
-| Accepted pull requests | 4 (#91, #96, #102, #103; docs-only synchronization PRs excluded) |
-| First-pass acceptance rate | 0% (0/4; each delivery required at least one tracked revision after its first review candidate) |
+| Accepted pull requests | 5 (#91, #96, #102, #103, #114; docs-only synchronization PRs excluded) |
+| First-pass acceptance rate | 0% (0/5; each delivery required at least one tracked revision after its first review candidate) |
 | Average rework rounds | N/A — #77 recorded 6 tracked implementation retries; later deliveries did not record normalized totals suitable for averaging |
 | Ready-to-Merge time | N/A — no authoritative Ready and merge interval endpoints were recorded |
-| Merges missing evidence or status updates | 0% (0/4) — PRs #91/#96/#102/#103 have exact evidence, and this STATUS synchronization closes the #101 state lag |
+| Merges missing evidence or status updates | 20% (1/5) — PR #114's merged-main STATUS lag is addressed only by the current docs-only successor; PRs #91/#96/#102/#103 have exact evidence |
 | Token and human-time cost per accepted PR | N/A — platform/API exposes no authoritative token counts or human-time ledger |
 | Unresolved decisions existing only in comments | 0 known; decisions are not known to exist only in comments |
