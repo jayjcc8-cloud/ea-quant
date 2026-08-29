@@ -7,9 +7,15 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact lowercase candidate commit SHA to verify from trusted main.
+        required: true
+        type: string
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -19,12 +25,38 @@ jobs:
     env:
       UV_PROJECT_ENVIRONMENT: venv
     steps:
+      - name: Validate trusted main dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == *".github/workflows/ci.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          printf 'trusted_workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
+          printf 'trusted_workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
+          printf 'validated_candidate_sha=%s\n' "$CANDIDATE_SHA"
       - uses: actions/checkout@v7
+        if: github.event_name != 'workflow_dispatch'
         with:
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Assert exact checkout
+      - name: Assert event exact checkout
+        if: github.event_name != 'workflow_dispatch'
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - name: Assert dispatched exact checkout
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_SHA: ${{ inputs.candidate_sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
