@@ -231,13 +231,14 @@ def test_installed_record_rejects_a_symlinked_parent_inside_the_distribution(
         _installed_file_rows(Distribution())  # type: ignore[arg-type]
 
 
-def test_installed_record_does_not_follow_a_final_file_swapped_after_lstat(
+def test_installed_record_rejects_a_final_symlink_swap_before_fd_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = tmp_path / "payload"
     target.write_bytes(b"safe")
     outside = tmp_path / "outside"
     outside.write_bytes(b"not-recorded")
+    moved = tmp_path / "moved-payload"
 
     class Distribution:
         files = ("payload",)
@@ -245,21 +246,76 @@ def test_installed_record_does_not_follow_a_final_file_swapped_after_lstat(
         def locate_file(self, value: object) -> Path:
             return tmp_path / str(value)
 
-    original_lstat = os.lstat
-    target_checks = 0
+    original_open = os.open
+    swapped = False
 
-    def swap_after_lstat(path: os.PathLike[str] | str) -> os.stat_result:
-        nonlocal target_checks
-        result = original_lstat(path)
-        if Path(path) == target:
-            target_checks += 1
-            if target_checks == 2:
-                target.unlink()
-                target.symlink_to(outside)
-        return result
+    def swap_before_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == "payload" and dir_fd is not None and not flags & os.O_DIRECTORY:
+            target.rename(moved)
+            target.symlink_to(outside)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(os, "lstat", swap_after_lstat)
-    assert _installed_file_rows(Distribution()) == (("payload", b"safe"),)  # type: ignore[arg-type]
+    monkeypatch.setattr(os, "open", swap_before_open)
+    try:
+        with pytest.raises(ProvenanceError):
+            _installed_file_rows(Distribution())  # type: ignore[arg-type]
+        assert swapped
+    finally:
+        if target.is_symlink():
+            target.unlink()
+        moved.rename(target)
+
+
+def test_installed_record_rejects_a_final_symlink_swap_after_fd_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "payload"
+    target.write_bytes(b"safe")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"not-recorded")
+    moved = tmp_path / "moved-payload"
+
+    class Distribution:
+        files = ("payload",)
+
+        def locate_file(self, value: object) -> Path:
+            return tmp_path / str(value)
+
+    original_open = os.open
+    swapped = False
+
+    def swap_after_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "payload" and dir_fd is not None and not flags & os.O_DIRECTORY:
+            target.rename(moved)
+            target.symlink_to(outside)
+            swapped = True
+        return descriptor
+
+    monkeypatch.setattr(os, "open", swap_after_open)
+    try:
+        with pytest.raises(ProvenanceError):
+            _installed_file_rows(Distribution())  # type: ignore[arg-type]
+        assert swapped
+    finally:
+        if target.is_symlink():
+            target.unlink()
+        moved.rename(target)
 
 
 def _product_inputs() -> tuple[
