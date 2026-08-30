@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import weakref
@@ -53,7 +54,7 @@ from ea.experiments.provenance import (
     _installed_file_rows,
     _validate_installed_direct_url,
 )
-from ea.experiments.store import LocalResultStore
+from ea.experiments.store import CorruptAuditRecoveryError, LocalResultStore, StoreError
 from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
 
@@ -194,6 +195,40 @@ def test_installed_file_identity_includes_every_record_except_console_script(
         "REQUESTED",
         "direct_url.json",
     )
+
+
+@pytest.mark.parametrize("record", ("./RECORD", "x/../RECORD", "pkg//RECORD"))
+def test_installed_record_rejects_noncanonical_raw_segments(tmp_path: Path, record: str) -> None:
+    (tmp_path / "RECORD").write_bytes(b"record")
+    (tmp_path / "x").mkdir()
+    (tmp_path / "pkg").mkdir()
+
+    class Distribution:
+        files = (record,)
+
+        def locate_file(self, value: object) -> Path:
+            return tmp_path / str(value)
+
+    with pytest.raises(ProvenanceError):
+        _installed_file_rows(Distribution())  # type: ignore[arg-type]
+
+
+def test_installed_record_rejects_a_symlinked_parent_inside_the_distribution(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "payload").write_bytes(b"payload")
+    (tmp_path / "alias").symlink_to(real, target_is_directory=True)
+
+    class Distribution:
+        files = ("alias/payload",)
+
+        def locate_file(self, value: object) -> Path:
+            return tmp_path / str(value)
+
+    with pytest.raises(ProvenanceError):
+        _installed_file_rows(Distribution())  # type: ignore[arg-type]
 
 
 def _product_inputs() -> tuple[
@@ -339,9 +374,40 @@ def test_product_prepare_maps_contract_mismatches_to_precise_codes(
 
 
 def _release_for_recovery(kernel: object) -> None:
-    handoff = product_kernel._handoff_for(kernel)  # type: ignore[arg-type]
-    handoff.journal.close()
-    handoff.retire()
+    product_kernel._retire_phase1_product_kernel(kernel)  # type: ignore[arg-type]
+
+
+def _append_terminal(root: Path, manifest: RunManifestV2) -> None:
+    store = LocalResultStore(root)
+    verified = store.verify_recovery_attempt(manifest)
+    recovered = store.recover_incomplete_attempt(verified)  # type: ignore[arg-type]
+    from ea.experiments.audit import reopen_posix_audit_journal
+
+    journal = reopen_posix_audit_journal(recovered.audit)
+    payload = json.dumps(
+        {
+            "canonicalization": "ea-canonical-json-v1",
+            "last_dispatch_sequence": 1,
+            "last_trigger_root_sha256": "33" * 32,
+            "pre_terminal_state_sha256": "44" * 32,
+            "previous_chain_head_sha256": audit_chain_head(journal.records[-1]).value,
+            "run_id": RUN_ID.value,
+            "schema": "ea.audit-run-terminal.v1",
+            "terminal_kind": "success",
+        },
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    journal.append(
+        record_kind=AuditRecordKind.RUN_TERMINAL,
+        subject_kind=AuditSubjectKind.RUN_TERMINAL_STATE,
+        subject_sha256=audit_subject_digest(AuditRecordKind.RUN_TERMINAL, payload),
+        canonical_payload=payload,
+    )
+    journal.close()
+    store._retire_product_attempt(recovered.audit)
 
 
 def test_product_recovers_a_mechanically_torn_final_audit_tail(tmp_path: Path) -> None:
@@ -438,6 +504,80 @@ def test_product_recovery_maps_a_missing_journal_to_incomplete(tmp_path: Path) -
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_INCOMPLETE
 
 
+def test_first_frame_open_is_nonblocking_and_symlink_journal_is_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    audit_dir = root / RUN_ID.value / "audit"
+    flags: list[int] = []
+    original_open = os.open
+
+    def recording_open(path: object, value: int, *args: object, **kwargs: object) -> int:
+        if path == "audit-v1.journal":
+            flags.append(value)
+        return original_open(path, value, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", recording_open)
+    descriptor = original_open(audit_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        LocalResultStore._require_durable_first_audit_frame(descriptor, first.binding)
+    finally:
+        os.close(descriptor)
+    assert flags and flags[-1] & os.O_NONBLOCK
+    _release_for_recovery(first)
+    journal = audit_dir / "audit-v1.journal"
+    target = tmp_path / "other.journal"
+    target.write_bytes(journal.read_bytes())
+    journal.unlink()
+    journal.symlink_to(target)
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    with pytest.raises(ProductKernelError) as error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
+
+
+def test_first_frame_rejects_a_fifo_without_blocking(tmp_path: Path) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    audit_dir = root / RUN_ID.value / "audit"
+    _release_for_recovery(first)
+    journal = audit_dir / "audit-v1.journal"
+    journal.unlink()
+    os.mkfifo(journal)
+    descriptor = os.open(audit_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(CorruptAuditRecoveryError):
+            LocalResultStore._require_durable_first_audit_frame(descriptor, first.binding)
+    finally:
+        os.close(descriptor)
+
+
 def test_product_recovery_releases_lease_when_second_reopen_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -485,6 +625,37 @@ def test_product_kernel_does_not_publish_a_handoff_registry() -> None:
     assert not any(
         isinstance(value, weakref.WeakKeyDictionary) for value in vars(product_kernel).values()
     )
+    assert not hasattr(product_kernel, "_handoff_for")
+    assert not hasattr(product_kernel, "_consume_phase1_product_kernel")
+
+
+def test_dropping_an_unconsumed_kernel_retires_its_writer_lease(tmp_path: Path) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    kernel = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    reference = weakref.ref(kernel)
+    del kernel
+    gc.collect()
+    assert reference() is None
+    recovered = recover_phase1_product_kernel(
+        store=LocalResultStore(root),
+        expected_manifest=manifest,
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    assert recovered.funding_outcome.transaction is not None
+    assert recovered.funding_outcome.transaction.run_id == RUN_ID
 
 
 def test_product_recovery_rejects_non_tail_audit_corruption_without_a_kernel(
@@ -620,32 +791,10 @@ def test_product_recovery_closes_terminal_attempt_before_stable_drift(tmp_path: 
         execution_policy=execution,
         risk_policy=risk,
     )
-    journal = product_kernel._handoff_for(first).journal
-    payload = json.dumps(
-        {
-            "canonicalization": "ea-canonical-json-v1",
-            "last_dispatch_sequence": 1,
-            "last_trigger_root_sha256": "33" * 32,
-            "pre_terminal_state_sha256": "44" * 32,
-            "previous_chain_head_sha256": audit_chain_head(journal.records[-1]).value,
-            "run_id": RUN_ID.value,
-            "schema": "ea.audit-run-terminal.v1",
-            "terminal_kind": "success",
-        },
-        ensure_ascii=True,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    journal.append(
-        record_kind=AuditRecordKind.RUN_TERMINAL,
-        subject_kind=AuditSubjectKind.RUN_TERMINAL_STATE,
-        subject_sha256=audit_subject_digest(AuditRecordKind.RUN_TERMINAL, payload),
-        canonical_payload=payload,
-    )
     manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
     assert type(manifest) is RunManifestV2
     _release_for_recovery(first)
+    _append_terminal(root, manifest)
 
     for _ in range(2):
         with pytest.raises(ProductKernelError) as error:
@@ -657,3 +806,48 @@ def test_product_recovery_closes_terminal_attempt_before_stable_drift(tmp_path: 
                 risk_policy=risk,
             )
         assert error.value.code is ProductKernelFailureCode.INTEGRITY_TERMINAL_DRIFT
+
+
+def test_terminal_materialization_failure_is_closed_and_releases_its_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    _append_terminal(root, manifest)
+    original = LocalResultStore.recover_terminal_attempt
+
+    def fail_terminal(*_args: object) -> object:
+        raise StoreError("injected terminal materialization failure")
+
+    monkeypatch.setattr(LocalResultStore, "recover_terminal_attempt", fail_terminal)
+    with pytest.raises(ProductKernelError) as error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
+    monkeypatch.setattr(LocalResultStore, "recover_terminal_attempt", original)
+    with pytest.raises(ProductKernelError) as retry:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert retry.value.code is ProductKernelFailureCode.INTEGRITY_TERMINAL_DRIFT

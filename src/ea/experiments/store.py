@@ -677,7 +677,7 @@ class LocalResultStore:
         try:
             descriptor = os.open(
                 AUDIT_JOURNAL_NAME,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
                 dir_fd=audit_fd,
             )
             frame = LocalResultStore._first_audit_frame(binding)
@@ -701,7 +701,9 @@ class LocalResultStore:
                 "recovery audit lacks a durable run-prepared frame"
             ) from error
         except OSError as error:
-            raise StoreError("recovery audit first frame cannot be verified") from error
+            raise CorruptAuditRecoveryError(
+                "recovery audit first frame cannot be verified"
+            ) from error
         finally:
             if descriptor is not None:
                 with suppress(OSError):
@@ -1172,15 +1174,21 @@ class LocalResultStore:
             raise StoreError("product retirement could not release the writer lease") from error
 
     def _retire_verified_product_recovery(
-        self, verified: VerifiedIncompleteRecoveryBinding
+        self, verified: VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding
     ) -> None:
-        """Release an unmaterialized V2 product-recovery classification."""
-        if type(verified) is not VerifiedIncompleteRecoveryBinding or verified._store is not self:
+        """Release one V2 product-recovery classification, if it remains registered."""
+        if (
+            type(verified)
+            not in {VerifiedIncompleteRecoveryBinding, VerifiedTerminalRecoveryBinding}
+            or verified._store is not self
+        ):
             raise StoreError("product recovery retirement requires its exact classification")
         authority = verified._authority
         with self._registry_lock:
             record = self._attempts.pop(authority.attempt_token, None)
-        if record is None or record.authority is not authority:
+        if record is None:
+            return
+        if record.authority is not authority:
             raise StoreError("product recovery classification is stale or foreign")
         try:
             os.close(record.writer_lock_fd)

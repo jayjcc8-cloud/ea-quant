@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Callable
+from contextlib import suppress
 from enum import StrEnum
 from functools import partial
 from threading import Lock
@@ -165,60 +166,44 @@ class Phase1ProductKernel:
 
 def _handoff_registry() -> tuple[
     Callable[[Phase1ProductKernel, _Handoff], None],
-    Callable[[Phase1ProductKernel], _Handoff],
     Callable[[Phase1ProductKernel], None],
 ]:
-    registry: weakref.WeakKeyDictionary[Phase1ProductKernel, _Handoff] = weakref.WeakKeyDictionary()
+    registry: weakref.WeakKeyDictionary[Phase1ProductKernel, tuple[_Handoff, Any]] = (
+        weakref.WeakKeyDictionary()
+    )
+
+    def close(handoff: _Handoff) -> None:
+        with handoff.lock:
+            if handoff.state == "RETIRED":
+                return
+            handoff.state = "RETIRED"
+        try:
+            handoff.journal.close()
+        finally:
+            handoff.retire()
 
     def register(kernel: Phase1ProductKernel, handoff: _Handoff) -> None:
-        registry[kernel] = handoff
-
-    def consume(kernel: Phase1ProductKernel) -> _Handoff:
-        handoff = registry.get(kernel)
-        if handoff is None:
-            raise ProductKernelError(
-                ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY,
-                "funded handoff is unavailable",
-            )
-        return handoff
+        registry[kernel] = handoff, weakref.finalize(kernel, close, handoff)
 
     def retire(kernel: Phase1ProductKernel) -> None:
-        registry.pop(kernel, None)
+        value = registry.pop(kernel, None)
+        if value is not None:
+            handoff, finalizer = value
+            finalizer.detach()
+            close(handoff)
 
-    return register, consume, retire
+    return register, retire
 
 
-_register_handoff, _handoff_for, _retire_handoff = _handoff_registry()
+_register_handoff, _retire_handoff = _handoff_registry()
 
 
-def _consume_phase1_product_kernel(
-    kernel: Phase1ProductKernel, start: Callable[[_Handoff], object]
-) -> object:
-    if type(kernel) is not Phase1ProductKernel or not callable(start):
+def _retire_phase1_product_kernel(kernel: Phase1ProductKernel) -> None:
+    if type(kernel) is not Phase1ProductKernel:
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT, "invalid handoff"
         )
-    handoff = _handoff_for(kernel)
-    with handoff.lock:
-        if handoff.state != "AVAILABLE":
-            raise ProductKernelError(
-                ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY,
-                "funded handoff is unavailable",
-            )
-        handoff.state = "CONSUMING"
-    try:
-        result = start(handoff)
-    except BaseException:
-        with handoff.lock:
-            handoff.state = "FAILED"
-        handoff.journal.close()
-        handoff.retire()
-        _retire_handoff(kernel)
-        raise
-    with handoff.lock:
-        handoff.state = "CONSUMED"
     _retire_handoff(kernel)
-    return result
 
 
 def _make_kernel(
@@ -399,11 +384,24 @@ def recover_phase1_product_kernel(
             "recovery evidence does not match the product boundary",
         ) from error
     if type(verified) is VerifiedTerminalRecoveryBinding:
-        terminal = store.recover_terminal_attempt(verified)
         try:
-            terminal._consume()
-        finally:
-            terminal._finish()
+            terminal = store.recover_terminal_attempt(verified)
+            try:
+                terminal._consume()
+            finally:
+                terminal._finish()
+        except (AuditContractError, OSError, StoreError) as error:
+            with suppress(StoreError):
+                store._retire_verified_product_recovery(verified)
+            raise ProductKernelError(
+                ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+                "terminal recovery evidence cannot be consumed",
+            ) from error
+        except BaseException:
+            with suppress(StoreError):
+                store._retire_verified_product_recovery(verified)
+            raise
+        store._retire_verified_product_recovery(verified)
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_TERMINAL_DRIFT,
             "terminal evidence is outside funding boundary",

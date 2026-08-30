@@ -11,6 +11,7 @@ import json
 import marshal
 import os
 import re
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -427,17 +428,30 @@ def _installed_file_rows(
         raw = str(record)
         if raw == _GENERATED_CONSOLE_SCRIPT_RECORD_PATH:
             continue
-        if raw != unicodedata.normalize("NFC", raw) or "\\" in raw or raw.startswith("/"):
+        parts = raw.split("/")
+        if (
+            raw != unicodedata.normalize("NFC", raw)
+            or "\\" in raw
+            or raw.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
             raise ProvenanceError("installed RECORD path is not canonical POSIX")
         target = Path(str(distribution.locate_file(record)))
         try:
             root = Path(str(distribution.locate_file(""))).resolve(strict=True)
-            resolved = target.resolve(strict=True)
+            if target != root.joinpath(*parts):
+                raise ProvenanceError("installed RECORD path escaped its distribution root")
+            current = root
+            for index, part in enumerate(parts):
+                current = current / part
+                mode = os.lstat(current).st_mode
+                if stat.S_ISLNK(mode) or (index < len(parts) - 1 and not stat.S_ISDIR(mode)):
+                    raise ProvenanceError("installed RECORD path contains an unsafe component")
+            if not stat.S_ISREG(os.lstat(target).st_mode):
+                raise ProvenanceError("installed RECORD file is not contained regular data")
         except OSError as exc:
             raise ProvenanceError("installed distribution file cannot be resolved") from exc
-        if target.is_symlink() or not resolved.is_relative_to(root) or not resolved.is_file():
-            raise ProvenanceError("installed RECORD file is not contained regular data")
-        rows.append((raw, resolved.read_bytes()))
+        rows.append((raw, target.read_bytes()))
     if not rows or len({name for name, _ in rows}) != len(rows):
         raise ProvenanceError("installed RECORD files are empty or duplicate")
     return tuple(sorted(rows))
