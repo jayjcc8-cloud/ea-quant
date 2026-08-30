@@ -294,7 +294,9 @@ class InitialFundingOutcome:
         ):
             raise _fail("funding outcome bindings must be exact")
         if (
-            self.snapshot.run_id != self.run_id
+            type(self.before_snapshot_version) is not int
+            or type(self.after_snapshot_version) is not int
+            or self.snapshot.run_id != self.run_id
             or self.before_snapshot_version
             != self.snapshot.snapshot_version
             - (1 if self.result is InitialFundingResult.APPLIED else 0)

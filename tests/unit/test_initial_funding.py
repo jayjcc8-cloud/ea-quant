@@ -79,6 +79,12 @@ def test_ledger_applies_genesis_once_and_retains_exact_replay() -> None:
     assert applied.transaction.ledger_sequence == 1
     assert applied.snapshot.cash_balances[0].amount == CanonicalDecimal("1000")
     assert replay is applied
+    assert replace(applied, before_snapshot_version=0, after_snapshot_version=1) == applied
+    for value in (False, True):
+        with pytest.raises(InitialFundingError, match="snapshot versions conflict"):
+            replace(applied, before_snapshot_version=value)
+        with pytest.raises(InitialFundingError, match="snapshot versions conflict"):
+            replace(applied, after_snapshot_version=value)
 
 
 def test_transaction_cannot_splice_a_different_spec_set_under_the_same_digest() -> None:
