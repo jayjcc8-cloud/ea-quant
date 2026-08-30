@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import InstrumentSpecSetId, SettlementCurrency
 from ea.core.initial_funding import InitialFundingSpec
@@ -19,6 +21,7 @@ from ea.experiments._manifest_model import (
     canonical_manifest_bytes,
 )
 from ea.experiments.manifest import read_manifest, read_manifest_v2
+from ea.experiments.provenance import ProvenanceError, _validate_installed_direct_url
 
 
 def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
@@ -64,3 +67,24 @@ def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
     assert b'"scenario_sha256":"' + b"44" * 32 + b'"' in encoded
     assert read_manifest(encoded) == manifest
     assert read_manifest_v2(encoded) == manifest
+
+
+def test_installed_direct_url_accepts_only_an_absolute_local_wheel() -> None:
+    class Distribution:
+        def __init__(self, value: str | None) -> None:
+            self.value = value
+
+        def read_text(self, name: str) -> str | None:
+            assert name == "direct_url.json"
+            return self.value
+
+    _validate_installed_direct_url(Distribution(None))  # type: ignore[arg-type]
+    _validate_installed_direct_url(Distribution('{"archive_info":{},"url":"file:///tmp/ea.whl"}'))  # type: ignore[arg-type]
+    for url in (
+        "https://example/ea.whl",
+        "file:///tmp/a%zz.whl",
+        "file:///tmp/a%00.whl",
+        "file:///tmp/a b.whl",
+    ):
+        with pytest.raises(ProvenanceError):
+            _validate_installed_direct_url(Distribution('{"archive_info":{},"url":"' + url + '"}'))  # type: ignore[arg-type]
