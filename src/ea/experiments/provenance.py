@@ -429,9 +429,9 @@ def _installed_file_rows(
             continue
         if raw != unicodedata.normalize("NFC", raw) or "\\" in raw or raw.startswith("/"):
             raise ProvenanceError("installed RECORD path is not canonical POSIX")
-        target = Path(distribution.locate_file(record))
+        target = Path(str(distribution.locate_file(record)))
         try:
-            root = Path(distribution.locate_file("")).resolve(strict=True)
+            root = Path(str(distribution.locate_file(""))).resolve(strict=True)
             resolved = target.resolve(strict=True)
         except OSError as exc:
             raise ProvenanceError("installed distribution file cannot be resolved") from exc

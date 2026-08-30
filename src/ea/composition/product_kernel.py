@@ -6,7 +6,7 @@ from collections.abc import Callable
 from enum import StrEnum
 from functools import partial
 from threading import Lock
-from typing import final
+from typing import Any, final
 
 from ea.composition.frontier import create_acknowledged_lifecycle_frontier
 from ea.core.audit import AuditRecordKind, AuditSubjectKind, create_audit_append_acknowledgement
@@ -79,12 +79,13 @@ class _Handoff:
         "lock",
         "state",
     )
+    journal: Any
 
     def __init__(
         self,
         *,
         audit: BoundAuditPort,
-        journal: object,
+        journal: Any,
         ledger: object,
         ledger_handoff: object,
         risk: object,
@@ -105,6 +106,11 @@ class _Handoff:
 @final
 class Phase1ProductKernel:
     __slots__ = ("_binding", "_funding_outcome", "_portfolio_snapshot", "_risk_state", "_handoff")
+    _binding: RunBinding
+    _funding_outcome: InitialFundingOutcome
+    _portfolio_snapshot: PortfolioSnapshot
+    _risk_state: RiskStateSnapshot
+    _handoff: _Handoff
 
     def __init__(
         self,
@@ -170,12 +176,12 @@ def _consume_phase1_product_kernel(
 
 def _make_kernel(
     store: LocalResultStore,
-    prepared: object,
+    prepared: Any,
     manifest: RunManifestV2,
     spec_set: InstrumentExecutionSpecSet,
     execution_policy: ExecutionPolicyRef,
     risk_policy: Phase1RiskPolicy,
-    journal: object,
+    journal: Any,
 ) -> Phase1ProductKernel:
     audit = BoundAuditPort(prepared.audit, journal)
     records = journal.recovery_records

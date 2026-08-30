@@ -1124,8 +1124,10 @@ class LocalResultStore:
 
         if type(spec) is LineageSpec:
             manifest: RunManifest | RunManifestV2 = build_manifest(spec, run_id)
-        else:
+        elif type(spec) is LineageSpecV2:
             manifest = build_manifest_v2(spec, run_id)
+        else:
+            raise AssertionError("lineage specification type check was not exhaustive")
         payload = canonical_manifest_bytes(manifest)
         run_name = run_id.value
         root_fd: int | None = None
