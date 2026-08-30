@@ -816,6 +816,7 @@ def test_first_frame_open_is_nonblocking_and_symlink_journal_is_corrupt(
         )
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
 
+
 def test_first_frame_rejects_a_fifo_without_blocking(tmp_path: Path) -> None:
     spec, spec_set, execution, risk = _product_inputs()
     root = tmp_path / "runs"

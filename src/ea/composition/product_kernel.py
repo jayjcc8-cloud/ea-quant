@@ -172,6 +172,7 @@ def _handoff_registry() -> tuple[
     registry: weakref.WeakKeyDictionary[Phase1ProductKernel, tuple[_Handoff, Any]] = (
         weakref.WeakKeyDictionary()
     )
+
     def close(handoff: _Handoff) -> None:
         with handoff.lock:
             if handoff.state == "RETIRED":
@@ -311,6 +312,7 @@ def _make_kernel(
             retire=partial(store._retire_product_attempt, prepared.audit),
         ),
     )
+
 
 def prepare_phase1_product_kernel(
     *,
