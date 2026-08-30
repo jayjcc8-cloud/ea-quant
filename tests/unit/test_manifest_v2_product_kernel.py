@@ -132,9 +132,9 @@ def test_v2_schema_discriminators_reject_float_directly(field: str) -> None:
 
     with pytest.raises(ManifestError):
         if field == "manifest_schema_version":
-            replace(manifest, manifest_schema_version=2.0)
+            replace(manifest, manifest_schema_version=2.0)  # type: ignore[arg-type]
         else:
-            replace(spec, lineage_schema_version=2.0)
+            replace(spec, lineage_schema_version=2.0)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("field", ("manifest_schema_version", "lineage_schema_version"))
