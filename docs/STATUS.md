@@ -40,6 +40,9 @@ matching, Fill, ledger, audit, fail-closed reconciliation, terminal state, and a
   or trading mutation.
 - ADR 0027 accepts the offline-product, installed-distribution, funding, recovery-support, and
   fail-closed reconciliation boundary. ADR 0028 accepts the Tier 2 four-party delivery model.
+- Delivery 2's canonical initial funding, RunManifest v2 installed provenance, and funded
+  fail-closed kernel are delivered by this file's containing `main` commit; this does not claim
+  the separate CLI, reporting, or release deliveries.
 
 ## Incomplete
 
@@ -109,9 +112,9 @@ mutable open, closed, Draft, or merged state.
 
 ## Last Confirmed
 
-- Date: **2026-08-29** (Asia/Shanghai).
-- Current merged baseline before this convergence candidate is
-  `main@67184b1e4f387caf15b88db5529d4194de82cd81`; when this file reaches `main`, the containing
+- Date: **2026-08-30** (Asia/Shanghai).
+- Current merged baseline before Delivery 2 is
+  `main@969f5f086acd9c28f80e3960a56b83981b1d0e5d`; when this file reaches `main`, the containing
   `main` commit and exact CI replace that pre-candidate reference.
 - The last independently verified pre-consolidation checkpoint from **2026-08-22** remains
   `af7bc08cecd70fc5479b92e4393da468727ddb55` as immutable provenance, not current state.
@@ -128,7 +131,7 @@ mutable open, closed, Draft, or merged state.
 
 - [x] Core deterministic time, execution, audit, ledger, and recovery foundations exist on `main`.
 - [x] Phase 1 product and four-party governance boundaries are accepted in ADRs 0027/0028.
-- [ ] Canonical initial funding and RunManifest v2 are Done.
+- [x] Canonical initial funding and RunManifest v2 are Done.
 - [ ] Installed `ea backtest validate/run/resume` is Done for flat and bounded-long scenarios.
 - [ ] Supported resume is equivalent to uninterrupted execution and all named conflicts fail closed.
 - [ ] `BacktestReportV1` and cross-process golden evidence are Done.

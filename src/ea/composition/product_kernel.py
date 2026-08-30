@@ -38,6 +38,7 @@ from ea.experiments.store import (
     IncompleteAuditRecoveryError,
     LocalResultStore,
     RunIdProvider,
+    ScenarioRecoveryDriftError,
     StoreCollisionError,
     StoreError,
     VerifiedIncompleteRecoveryBinding,
@@ -172,6 +173,7 @@ def _handoff_registry() -> tuple[
     registry: weakref.WeakKeyDictionary[Phase1ProductKernel, tuple[_Handoff, Any]] = (
         weakref.WeakKeyDictionary()
     )
+
     def close(handoff: _Handoff) -> None:
         with handoff.lock:
             if handoff.state == "RETIRED":
@@ -312,6 +314,7 @@ def _make_kernel(
         ),
     )
 
+
 def prepare_phase1_product_kernel(
     *,
     store: LocalResultStore,
@@ -404,6 +407,11 @@ def recover_phase1_product_kernel(
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
             "recovery audit evidence is corrupt",
+        ) from error
+    except ScenarioRecoveryDriftError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_SCENARIO_DRIFT,
+            "recovery scenario does not match the product boundary",
         ) from error
     except StoreError as error:
         raise ProductKernelError(
