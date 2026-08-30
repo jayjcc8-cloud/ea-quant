@@ -18,6 +18,7 @@ from ea.experiments._manifest_model import (
     build_manifest_v2,
     canonical_manifest_bytes,
 )
+from ea.experiments.manifest import read_manifest, read_manifest_v2
 
 
 def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
@@ -59,4 +60,7 @@ def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
 
     assert manifest.manifest_schema_version == 2
     assert manifest.spec.initial_funding.amount == CanonicalDecimal("1000")
-    assert b'"scenario_sha256":"' + b"44" * 32 + b'"' in canonical_manifest_bytes(manifest)
+    encoded = canonical_manifest_bytes(manifest)
+    assert b'"scenario_sha256":"' + b"44" * 32 + b'"' in encoded
+    assert read_manifest(encoded) == manifest
+    assert read_manifest_v2(encoded) == manifest
