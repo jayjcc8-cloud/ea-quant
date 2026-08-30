@@ -14,17 +14,27 @@ from typing import Protocol
 from uuid import UUID
 
 from ea.core.audit import (
+    EMPTY_CHAIN_HEAD_SHA256,
+    EMPTY_RECORD_SHA256,
     AuditAppendAcknowledgement,
     AuditRecord,
     AuditRecordKind,
     AuditRecoveryRecordSource,
+    AuditSubjectKind,
+    audit_frame_checksum,
+    canonical_audit_record_bytes,
+    canonical_run_prepared_audit_payload,
     create_audit_append_acknowledgement,
+    create_audit_record,
 )
 from ea.core.run import RunBinding, RunContractError, RunId, RunReference, Sha256Digest
 from ea.experiments.manifest import (
     LineageSpec,
+    LineageSpecV2,
     RunManifest,
+    RunManifestV2,
     build_manifest,
+    build_manifest_v2,
     canonical_manifest_bytes,
     read_manifest,
 )
@@ -43,6 +53,14 @@ class StoreError(RuntimeError):
 
 class StoreCollisionError(StoreError):
     """Raised when an attempt path already exists and is never adopted."""
+
+
+class IncompleteAuditRecoveryError(StoreError):
+    """Raised when recovery has no durable first run-prepared record."""
+
+
+class CorruptAuditRecoveryError(StoreError):
+    """Raised when recovery's durable first run-prepared record is altered."""
 
 
 class RunIdProvider(Protocol):
@@ -634,6 +652,63 @@ class LocalResultStore:
     def _identity(value: os.stat_result) -> tuple[int, int]:
         return value.st_dev, value.st_ino
 
+    @staticmethod
+    def _first_audit_frame(binding: RunBinding) -> bytes:
+        payload = canonical_run_prepared_audit_payload(binding)
+        record = create_audit_record(
+            binding=binding,
+            owner_sequence=1,
+            record_kind=AuditRecordKind.RUN_PREPARED,
+            subject_kind=AuditSubjectKind.RUN_MANIFEST,
+            subject_sha256=binding.manifest_sha256,
+            canonical_payload=payload,
+            previous_record_sha256=EMPTY_RECORD_SHA256,
+            previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+        )
+        return canonical_audit_record_bytes(record) + bytes.fromhex(
+            audit_frame_checksum(record).value
+        )
+
+    @staticmethod
+    def _require_durable_first_audit_frame(audit_fd: int, binding: RunBinding) -> None:
+        from ea.experiments.audit import AUDIT_JOURNAL_NAME, AUDIT_JOURNAL_PREAMBLE
+
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                AUDIT_JOURNAL_NAME,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=audit_fd,
+            )
+            frame = LocalResultStore._first_audit_frame(binding)
+            stat_result = os.fstat(descriptor)
+            minimum_size = len(AUDIT_JOURNAL_PREAMBLE) + len(frame)
+            if not stat.S_ISREG(stat_result.st_mode):
+                raise CorruptAuditRecoveryError("recovery audit journal is not a regular file")
+            if stat_result.st_size < minimum_size:
+                raise IncompleteAuditRecoveryError(
+                    "recovery audit lacks a durable run-prepared frame"
+                )
+            prefix = os.pread(descriptor, minimum_size, 0)
+            if prefix[: len(AUDIT_JOURNAL_PREAMBLE)] != AUDIT_JOURNAL_PREAMBLE:
+                raise CorruptAuditRecoveryError("recovery audit preamble is invalid")
+            if prefix[len(AUDIT_JOURNAL_PREAMBLE) :] != frame:
+                raise CorruptAuditRecoveryError("recovery audit first frame is invalid")
+        except IncompleteAuditRecoveryError:
+            raise
+        except FileNotFoundError as error:
+            raise IncompleteAuditRecoveryError(
+                "recovery audit lacks a durable run-prepared frame"
+            ) from error
+        except OSError as error:
+            raise CorruptAuditRecoveryError(
+                "recovery audit first frame cannot be verified"
+            ) from error
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+
     def _record_for(self, authority: _AttemptAuthority) -> _AttemptRecord:
         if type(authority) is not _AttemptAuthority or authority.store_id is not self._store_id:
             raise StoreError("capability belongs to another result store")
@@ -725,7 +800,7 @@ class LocalResultStore:
     def verify_manifest(
         self,
         capability: ManifestVerificationCapability,
-    ) -> RunManifest:
+    ) -> RunManifest | RunManifestV2:
         """No-follow re-open and verify the original manifest bytes and file identity."""
         if type(capability) is not ManifestVerificationCapability:
             raise StoreError("manifest verification requires its exact capability")
@@ -786,10 +861,10 @@ class LocalResultStore:
 
     def verify_recovery_attempt(
         self,
-        expected_manifest: RunManifest,
+        expected_manifest: RunManifest | RunManifestV2,
     ) -> VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding:
         """Lock, rebind, scan and classify one exact existing attempt."""
-        if type(expected_manifest) is not RunManifest:
+        if type(expected_manifest) not in {RunManifest, RunManifestV2}:
             raise StoreError("recovery requires one exact expected RunManifest")
         expected_payload = canonical_manifest_bytes(expected_manifest)
         run_name = expected_manifest.run_id.value
@@ -861,6 +936,8 @@ class LocalResultStore:
                 reference=expected_manifest.reference,
                 manifest_sha256=Sha256Digest(sha256(manifest_payload).hexdigest()),
             )
+            if type(expected_manifest) is RunManifestV2:
+                self._require_durable_first_audit_frame(audit_fd, binding)
             authority = _AttemptAuthority(self._store_id, object(), binding)
             record = _AttemptRecord(
                 authority=authority,
@@ -1082,14 +1159,57 @@ class LocalResultStore:
                 )
             raise
 
+    def _retire_product_attempt(self, audit: AuditRunBinding) -> None:
+        """Release a failed product prelude without deleting durable evidence."""
+        if type(audit) is not AuditRunBinding or audit._store is not self:
+            raise StoreError("product retirement requires its exact store-owned audit binding")
+        authority = audit._authority
+        with self._registry_lock:
+            record = self._attempts.pop(authority.attempt_token, None)
+        if record is None or record.authority is not authority:
+            raise StoreError("product retirement capability is stale or foreign")
+        try:
+            os.close(record.writer_lock_fd)
+        except OSError as error:
+            raise StoreError("product retirement could not release the writer lease") from error
+
+    def _retire_verified_product_recovery(
+        self, verified: VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding
+    ) -> None:
+        """Release one V2 product-recovery classification, if it remains registered."""
+        if (
+            type(verified)
+            not in {VerifiedIncompleteRecoveryBinding, VerifiedTerminalRecoveryBinding}
+            or verified._store is not self
+        ):
+            raise StoreError("product recovery retirement requires its exact classification")
+        authority = verified._authority
+        with self._registry_lock:
+            record = self._attempts.pop(authority.attempt_token, None)
+        if record is None:
+            return
+        if record.authority is not authority:
+            raise StoreError("product recovery classification is stale or foreign")
+        try:
+            os.close(record.writer_lock_fd)
+        except OSError as error:
+            raise StoreError(
+                "product recovery retirement could not release the writer lease"
+            ) from error
+
+    def prepare_product(self, spec: LineageSpecV2, run_id_provider: RunIdProvider) -> PreparedRun:
+        if type(spec) is not LineageSpecV2:
+            raise StoreError("product preparation requires an exact LineageSpecV2")
+        return self.prepare(spec, run_id_provider)
+
     def prepare(
         self,
-        spec: LineageSpec,
+        spec: LineageSpec | LineageSpecV2,
         run_id_provider: RunIdProvider,
     ) -> PreparedRun:
         """Reserve, publish, read back, and durably acknowledge one attempt."""
-        if type(spec) is not LineageSpec:
-            raise StoreError("spec must be a LineageSpec")
+        if type(spec) not in {LineageSpec, LineageSpecV2}:
+            raise StoreError("spec must be an exact lineage specification")
         if not callable(run_id_provider):
             raise StoreError("run_id_provider must be callable")
         try:
@@ -1100,7 +1220,12 @@ class LocalResultStore:
         except RunContractError as exc:
             raise StoreError("run_id_provider did not return a canonical UUID4") from exc
 
-        manifest = build_manifest(spec, run_id)
+        if type(spec) is LineageSpec:
+            manifest: RunManifest | RunManifestV2 = build_manifest(spec, run_id)
+        elif type(spec) is LineageSpecV2:
+            manifest = build_manifest_v2(spec, run_id)
+        else:
+            raise AssertionError("lineage specification type check was not exhaustive")
         payload = canonical_manifest_bytes(manifest)
         run_name = run_id.value
         root_fd: int | None = None
