@@ -311,3 +311,178 @@ def _make_kernel(
             retire=partial(store._retire_product_attempt, prepared.audit),
         ),
     )
+
+def prepare_phase1_product_kernel(
+    *,
+    store: LocalResultStore,
+    spec: LineageSpecV2,
+    run_id_provider: RunIdProvider,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+) -> Phase1ProductKernel:
+    if type(store) is not LocalResultStore or type(spec) is not LineageSpecV2:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "invalid product input"
+        )
+    _require_product_boundary(spec, execution_policy, risk_policy)
+    prepared = None
+    journal = None
+    try:
+        prepared = store.prepare_product(spec, run_id_provider)
+        manifest = store.verify_manifest(prepared.manifest_verification)
+        if type(manifest) is not RunManifestV2 or manifest.spec != spec:
+            raise ProductKernelError(
+                ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "manifest drift"
+            )
+        journal = create_posix_audit_journal(prepared.audit)
+        return _make_kernel(
+            store, prepared, manifest, spec_set, execution_policy, risk_policy, journal
+        )
+    except InitialFundingError as error:
+        if journal is not None:
+            journal.close()
+        if prepared is not None:
+            store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.FUNDING_SPEC_MISMATCH,
+            "funding does not match the supplied specification set",
+        ) from error
+    except RiskAuthorityError as error:
+        if journal is not None:
+            journal.close()
+        if prepared is not None:
+            store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT,
+            "risk policy does not match the supplied execution boundary",
+        ) from error
+    except StoreCollisionError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT,
+            "product attempt identity already exists",
+        ) from error
+    except BaseException as error:
+        if journal is not None:
+            journal.close()
+        if prepared is not None:
+            store._retire_product_attempt(prepared.audit)
+        if type(error) is ProductKernelError:
+            raise
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT, "product preparation failed"
+        ) from error
+
+
+def recover_phase1_product_kernel(
+    *,
+    store: LocalResultStore,
+    expected_manifest: RunManifestV2,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+) -> Phase1ProductKernel:
+    if type(expected_manifest) is not RunManifestV2:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_MANIFEST_V1,
+            "product recovery requires manifest v2",
+        )
+    _require_product_boundary(expected_manifest.spec, execution_policy, risk_policy)
+    try:
+        verified = store.verify_recovery_attempt(expected_manifest)
+    except IncompleteAuditRecoveryError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_INCOMPLETE,
+            "recovery audit lacks the required preparation evidence",
+        ) from error
+    except CorruptAuditRecoveryError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+            "recovery audit preparation evidence is corrupt",
+        ) from error
+    except AuditContractError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+            "recovery audit evidence is corrupt",
+        ) from error
+    except StoreError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT,
+            "recovery evidence does not match the product boundary",
+        ) from error
+    if type(verified) is VerifiedTerminalRecoveryBinding:
+        try:
+            terminal = store.recover_terminal_attempt(verified)
+            try:
+                terminal._consume()
+            finally:
+                terminal._finish()
+        except (AuditContractError, OSError, StoreError) as error:
+            with suppress(StoreError):
+                store._retire_verified_product_recovery(verified)
+            raise ProductKernelError(
+                ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+                "terminal recovery evidence cannot be consumed",
+            ) from error
+        except BaseException:
+            with suppress(StoreError):
+                store._retire_verified_product_recovery(verified)
+            raise
+        store._retire_verified_product_recovery(verified)
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_TERMINAL_DRIFT,
+            "terminal evidence is outside funding boundary",
+        )
+    if type(verified) is not VerifiedIncompleteRecoveryBinding:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY, "unknown recovery"
+        )
+    prepared = None
+    journal = None
+    try:
+        prepared = store.recover_incomplete_attempt(verified)
+        journal = reopen_posix_audit_journal(prepared.audit)
+        return _make_kernel(
+            store, prepared, expected_manifest, spec_set, execution_policy, risk_policy, journal
+        )
+    except InitialFundingError as error:
+        if journal is not None:
+            journal.close()
+        if prepared is None:
+            store._retire_verified_product_recovery(verified)
+        else:
+            store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.FUNDING_SPEC_MISMATCH,
+            "recovered funding does not match the supplied specification set",
+        ) from error
+    except RiskAuthorityError as error:
+        if journal is not None:
+            journal.close()
+        if prepared is None:
+            store._retire_verified_product_recovery(verified)
+        else:
+            store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT,
+            "recovered risk policy does not match the execution boundary",
+        ) from error
+    except (OSError, PortfolioLedgerError, StoreError) as error:
+        if journal is not None:
+            journal.close()
+        if prepared is None:
+            store._retire_verified_product_recovery(verified)
+        else:
+            store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+            "recovery product bindings conflict",
+        ) from error
+    except BaseException:
+        if journal is not None:
+            journal.close()
+        if prepared is None:
+            store._retire_verified_product_recovery(verified)
+        else:
+            store._retire_product_attempt(prepared.audit)
+        raise
