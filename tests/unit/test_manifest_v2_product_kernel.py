@@ -59,12 +59,20 @@ from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
 
 def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
+    spec_set = _spec_set()
     funding = InitialFundingSpec(
-        InstrumentSpecSetId("phase1.test.v1"),
-        Sha256Digest("11" * 32),
+        spec_set.identifier,
+        instrument_spec_set_digest(spec_set),
         SettlementCurrency("USD"),
         CanonicalDecimal("0.01"),
         CanonicalDecimal("1000"),
+    )
+    execution = ExecutionPolicyRef(ExecutionPolicyId("phase1.execution.v1"), Sha256Digest("1" * 64))
+    risk = create_phase1_risk_policy(
+        policy_id=RiskPolicyId("phase1.risk.v1"),
+        spec_set=spec_set,
+        execution_policy=execution,
+        instrument_limits=(),
     )
     runtime = InstalledRuntimeSpecV2(
         ea_distribution=DistributionIdentity("ea-quant", "0.2.0"),
@@ -90,6 +98,8 @@ def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
                 stream_labels=("strategy",),
                 scenario_sha256=Sha256Digest("44" * 32),
                 initial_funding=funding,
+                execution_policy=execution,
+                risk_policy=risk,
             )
         ),
         RunId("12345678-1234-4234-8234-123456789abc"),
@@ -98,6 +108,8 @@ def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
     assert manifest.manifest_schema_version == 2
     assert manifest.spec.initial_funding.amount == CanonicalDecimal("1000")
     encoded = canonical_manifest_bytes(manifest)
+    assert b'"execution_policy":{"identifier":"phase1.execution.v1","sha256":"' in encoded
+    assert b'"risk_policy":{"identifier":"phase1.risk.v1","sha256":"' in encoded
     assert b'"scenario_sha256":"' + b"44" * 32 + b'"' in encoded
     assert read_manifest(encoded) == manifest
     assert read_manifest_v2(encoded) == manifest
@@ -329,6 +341,13 @@ def _product_inputs() -> tuple[
         CanonicalDecimal("0.01"),
         CanonicalDecimal("1000"),
     )
+    execution = ExecutionPolicyRef(ExecutionPolicyId("phase1.execution.v1"), Sha256Digest("1" * 64))
+    risk = create_phase1_risk_policy(
+        policy_id=RiskPolicyId("phase1.risk.v1"),
+        spec_set=spec_set,
+        execution_policy=execution,
+        instrument_limits=(),
+    )
     spec = build_lineage_spec_v2(
         LineageInputsV2(
             configuration=NormalizedConfiguration(1, "development", "backtest"),
@@ -351,16 +370,18 @@ def _product_inputs() -> tuple[
             stream_labels=("strategy",),
             scenario_sha256=Sha256Digest("44" * 32),
             initial_funding=funding,
+            execution_policy=execution,
+            risk_policy=risk,
         )
     )
-    execution = ExecutionPolicyRef(ExecutionPolicyId("phase1.execution.v1"), Sha256Digest("1" * 64))
-    risk = create_phase1_risk_policy(
-        policy_id=RiskPolicyId("phase1.risk.v1"),
-        spec_set=spec_set,
-        execution_policy=execution,
-        instrument_limits=(),
-    )
     return spec, spec_set, execution, risk
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_runtime_collector(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        product_kernel, "collect_installed_runtime_spec_v2", lambda: _product_inputs()[0].runtime
+    )
 
 
 def test_product_kernel_prepares_and_recovers_the_funded_prefix(tmp_path: Path) -> None:
@@ -425,6 +446,158 @@ def test_product_prepare_maps_a_store_collision_to_a_closed_boundary(tmp_path: P
             risk_policy=risk,
         )
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
+
+
+@pytest.mark.parametrize("collector_fails", (False, True))
+def test_product_prepare_rejects_unverified_installed_runtime_before_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_fails: bool
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    if collector_fails:
+
+        def collect() -> InstalledRuntimeSpecV2:
+            raise ProvenanceError("injected collector failure")
+    else:
+
+        def collect() -> InstalledRuntimeSpecV2:
+            return replace(spec.runtime, ea_installed_files_sha256=Sha256Digest("66" * 32))
+
+    monkeypatch.setattr(product_kernel, "collect_installed_runtime_spec_v2", collect)
+    with pytest.raises(ProductKernelError) as error:
+        prepare_phase1_product_kernel(
+            store=LocalResultStore(root),
+            spec=spec,
+            run_id_provider=lambda: UUID(RUN_ID.value),
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
+    assert not (root / RUN_ID.value).exists()
+
+    monkeypatch.setattr(product_kernel, "collect_installed_runtime_spec_v2", lambda: spec.runtime)
+    assert (
+        prepare_phase1_product_kernel(
+            store=LocalResultStore(root),
+            spec=spec,
+            run_id_provider=lambda: UUID(RUN_ID.value),
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        ).binding.reference.run_id
+        == RUN_ID
+    )
+
+
+@pytest.mark.parametrize("collector_fails", (False, True))
+def test_product_recovery_rejects_unverified_runtime_without_taking_a_writer_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_fails: bool
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    if collector_fails:
+
+        def collect() -> InstalledRuntimeSpecV2:
+            raise ProvenanceError("injected collector failure")
+    else:
+
+        def collect() -> InstalledRuntimeSpecV2:
+            return replace(spec.runtime, ea_installed_files_sha256=Sha256Digest("66" * 32))
+
+    monkeypatch.setattr(product_kernel, "collect_installed_runtime_spec_v2", collect)
+    with pytest.raises(ProductKernelError) as error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
+    monkeypatch.setattr(product_kernel, "collect_installed_runtime_spec_v2", lambda: spec.runtime)
+    assert (
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        ).binding.reference.run_id
+        == RUN_ID
+    )
+
+
+def test_product_rejects_a_mutually_consistent_replacement_execution_risk_pair(
+    tmp_path: Path,
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    replacement_execution = ExecutionPolicyRef(
+        ExecutionPolicyId("phase1.execution.replacement.v1"), Sha256Digest("77" * 32)
+    )
+    replacement_risk = create_phase1_risk_policy(
+        policy_id=RiskPolicyId("phase1.risk.replacement.v1"),
+        spec_set=spec_set,
+        execution_policy=replacement_execution,
+        instrument_limits=(),
+    )
+    root = tmp_path / "runs"
+    root.mkdir()
+    with pytest.raises(ProductKernelError) as error:
+        prepare_phase1_product_kernel(
+            store=LocalResultStore(root),
+            spec=spec,
+            run_id_provider=lambda: UUID(RUN_ID.value),
+            spec_set=spec_set,
+            execution_policy=replacement_execution,
+            risk_policy=replacement_risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT
+    assert not (root / RUN_ID.value).exists()
+
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    with pytest.raises(ProductKernelError) as recovery_error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=replacement_execution,
+            risk_policy=replacement_risk,
+        )
+    assert recovery_error.value.code is ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT
+    assert (
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        ).binding.reference.run_id
+        == RUN_ID
+    )
 
 
 @pytest.mark.parametrize(

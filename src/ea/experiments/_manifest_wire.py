@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING, Protocol, TypeGuard, cast
 from ea.core.run import DataFingerprint, ReplayWindow, RunId, Sha256Digest
 
 if TYPE_CHECKING:
+    from ea.core.execution_messages import ExecutionPolicyRef
     from ea.core.initial_funding import InitialFundingSpec
+    from ea.core.risk import RiskPolicyId
     from ea.experiments._manifest_model import InstalledRuntimeSpecV2
 
 CONFIG_DOMAIN = b"ea.config.v1\0"
@@ -96,6 +98,9 @@ class _LineageV2Like(Protocol):
     lineage_schema_version: int
     scenario_sha256: Sha256Digest
     initial_funding: InitialFundingSpec
+    execution_policy: ExecutionPolicyRef
+    risk_policy_id: RiskPolicyId
+    risk_policy_sha256: Sha256Digest
 
 
 class _ManifestLike(Protocol):
@@ -174,6 +179,10 @@ def _lineage_mapping(spec: _LineageLike) -> dict[str, object]:
                 "schema_version": 1,
                 "settlement_currency": spec.initial_funding.settlement_currency.code,
             },
+            "execution_policy": {
+                "identifier": spec.execution_policy.identifier.value,
+                "sha256": spec.execution_policy.sha256.value,
+            },
             "lineage_schema_version": 2,
             "parameters": [_parameter_mapping(item) for item in spec.parameters],
             "randomness": {
@@ -200,6 +209,10 @@ def _lineage_mapping(spec: _LineageLike) -> dict[str, object]:
                 "python_implementation": runtime.python_implementation,
                 "python_version": runtime.python_version,
                 "sys_platform": runtime.sys_platform,
+            },
+            "risk_policy": {
+                "identifier": spec.risk_policy_id.value,
+                "sha256": spec.risk_policy_sha256.value,
             },
             "scenario_sha256": spec.scenario_sha256.value,
         }

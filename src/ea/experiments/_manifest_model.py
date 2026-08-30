@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
 
+from ea.core.execution_messages import ExecutionPolicyRef
 from ea.core.initial_funding import InitialFundingSpec
+from ea.core.risk import Phase1RiskPolicy, RiskPolicyId, phase1_risk_policy_digest
 from ea.core.run import (
     DataFingerprint,
     ReplayWindow,
@@ -438,6 +440,8 @@ class LineageInputsV2:
     stream_labels: tuple[str, ...]
     scenario_sha256: Sha256Digest
     initial_funding: InitialFundingSpec
+    execution_policy: ExecutionPolicyRef
+    risk_policy: Phase1RiskPolicy
 
     def __post_init__(self) -> None:
         if (
@@ -461,8 +465,18 @@ class LineageInputsV2:
         if (
             type(self.scenario_sha256) is not Sha256Digest
             or type(self.initial_funding) is not InitialFundingSpec
+            or type(self.execution_policy) is not ExecutionPolicyRef
+            or type(self.risk_policy) is not Phase1RiskPolicy
         ):
-            raise ManifestError("v2 lineage scenario or funding is invalid")
+            raise ManifestError("v2 lineage scenario, funding, or risk is invalid")
+        if (
+            self.risk_policy.execution_policy != self.execution_policy
+            or self.risk_policy.instrument_spec_set_id
+            != self.initial_funding.instrument_spec_set_id
+            or self.risk_policy.instrument_spec_set_sha256
+            != self.initial_funding.instrument_spec_set_sha256
+        ):
+            raise ManifestError("v2 lineage risk policy does not match its funding boundary")
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,6 +489,9 @@ class LineageSpecV2:
     randomness: RandomnessSpec
     scenario_sha256: Sha256Digest
     initial_funding: InitialFundingSpec
+    execution_policy: ExecutionPolicyRef
+    risk_policy_id: RiskPolicyId
+    risk_policy_sha256: Sha256Digest
     lineage_schema_version: int = 2
 
     def __post_init__(self) -> None:
@@ -497,8 +514,11 @@ class LineageSpecV2:
         if (
             type(self.scenario_sha256) is not Sha256Digest
             or type(self.initial_funding) is not InitialFundingSpec
+            or type(self.execution_policy) is not ExecutionPolicyRef
+            or type(self.risk_policy_id) is not RiskPolicyId
+            or type(self.risk_policy_sha256) is not Sha256Digest
         ):
-            raise ManifestError("v2 lineage scenario or funding is invalid")
+            raise ManifestError("v2 lineage scenario, funding, or risk is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,6 +644,9 @@ def build_lineage_spec_v2(inputs: LineageInputsV2) -> LineageSpecV2:
         randomness=RandomnessSpec(inputs.randomness_seed, tuple(sorted(inputs.stream_labels))),
         scenario_sha256=inputs.scenario_sha256,
         initial_funding=inputs.initial_funding,
+        execution_policy=inputs.execution_policy,
+        risk_policy_id=inputs.risk_policy.policy_id,
+        risk_policy_sha256=phase1_risk_policy_digest(inputs.risk_policy),
     )
 
 

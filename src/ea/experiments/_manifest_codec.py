@@ -10,7 +10,9 @@ from typing import NoReturn, TypedDict, cast
 
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import InstrumentSpecSetId, SettlementCurrency
+from ea.core.execution_messages import ExecutionPolicyId, ExecutionPolicyRef
 from ea.core.initial_funding import InitialFundingSpec
+from ea.core.risk import RiskPolicyId
 from ea.core.run import (
     DataFingerprint,
     ReplayWindow,
@@ -135,11 +137,13 @@ class _ManifestWire(TypedDict):
 class _LineageV2Wire(TypedDict):
     configuration: object
     data: object
+    execution_policy: object
     initial_funding: object
     lineage_schema_version: int
     parameters: object
     randomness: object
     replay_window: object
+    risk_policy: object
     runtime: object
     scenario_sha256: str
 
@@ -165,6 +169,16 @@ class _InitialFundingWire(TypedDict):
     instrument_spec_set_sha256: str
     schema_version: int
     settlement_currency: str
+
+
+class _ExecutionPolicyWire(TypedDict):
+    identifier: str
+    sha256: str
+
+
+class _RiskPolicyWire(TypedDict):
+    identifier: str
+    sha256: str
 
 
 def _require_exact_keys(
@@ -463,11 +477,13 @@ def _parse_lineage_v2(value: object) -> LineageSpecV2:
                 {
                     "configuration",
                     "data",
+                    "execution_policy",
                     "initial_funding",
                     "lineage_schema_version",
                     "parameters",
                     "randomness",
                     "replay_window",
+                    "risk_policy",
                     "runtime",
                     "scenario_sha256",
                 }
@@ -548,6 +564,22 @@ def _parse_lineage_v2(value: object) -> LineageSpecV2:
             field="spec.initial_funding",
         ),
     )
+    execution = cast(
+        _ExecutionPolicyWire,
+        _require_exact_keys(
+            mapping["execution_policy"],
+            frozenset({"identifier", "sha256"}),
+            field="spec.execution_policy",
+        ),
+    )
+    risk = cast(
+        _RiskPolicyWire,
+        _require_exact_keys(
+            mapping["risk_policy"],
+            frozenset({"identifier", "sha256"}),
+            field="spec.risk_policy",
+        ),
+    )
     raw_parameters = mapping["parameters"]
     raw_labels = randomness["stream_labels"]
     raw_distributions = runtime["distributions"]
@@ -618,6 +650,11 @@ def _parse_lineage_v2(value: object) -> LineageSpecV2:
                 CanonicalDecimal(funding["currency_quantum"]),
                 CanonicalDecimal(funding["amount"]),
             ),
+            execution_policy=ExecutionPolicyRef(
+                ExecutionPolicyId(execution["identifier"]), Sha256Digest(execution["sha256"])
+            ),
+            risk_policy_id=RiskPolicyId(risk["identifier"]),
+            risk_policy_sha256=Sha256Digest(risk["sha256"]),
         )
     except (RunContractError, ValueError) as exc:
         raise ManifestFormatError(str(exc)) from exc

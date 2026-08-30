@@ -27,11 +27,12 @@ from ea.core.initial_funding import (
     initial_funding_outcome_digest,
 )
 from ea.core.portfolio import PortfolioLedgerError, PortfolioSnapshot
-from ea.core.risk import Phase1RiskPolicy, RiskStateSnapshot
+from ea.core.risk import Phase1RiskPolicy, RiskStateSnapshot, phase1_risk_policy_digest
 from ea.core.run import RunBinding
 from ea.experiments.audit import create_posix_audit_journal, reopen_posix_audit_journal
 from ea.experiments.binding import BoundAuditPort
 from ea.experiments.manifest import LineageSpecV2, RunManifestV2
+from ea.experiments.provenance import ProvenanceError, collect_installed_runtime_spec_v2
 from ea.experiments.store import (
     CorruptAuditRecoveryError,
     IncompleteAuditRecoveryError,
@@ -206,6 +207,32 @@ def _retire_phase1_product_kernel(kernel: Phase1ProductKernel) -> None:
     _retire_handoff(kernel)
 
 
+def _require_product_boundary(
+    spec: LineageSpecV2, execution_policy: ExecutionPolicyRef, risk_policy: Phase1RiskPolicy
+) -> None:
+    try:
+        runtime = collect_installed_runtime_spec_v2()
+    except ProvenanceError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT,
+            "installed runtime provenance cannot be collected",
+        ) from error
+    if runtime != spec.runtime:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT,
+            "installed runtime differs from the v2 manifest boundary",
+        )
+    if (
+        execution_policy != spec.execution_policy
+        or risk_policy.policy_id != spec.risk_policy_id
+        or phase1_risk_policy_digest(risk_policy) != spec.risk_policy_sha256
+    ):
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT,
+            "execution or risk policy differs from the v2 manifest boundary",
+        )
+
+
 def _make_kernel(
     store: LocalResultStore,
     prepared: Any,
@@ -300,6 +327,7 @@ def prepare_phase1_product_kernel(
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "invalid product input"
         )
+    _require_product_boundary(spec, execution_policy, risk_policy)
     prepared = None
     journal = None
     try:
@@ -361,6 +389,7 @@ def recover_phase1_product_kernel(
             ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_MANIFEST_V1,
             "product recovery requires manifest v2",
         )
+    _require_product_boundary(expected_manifest.spec, execution_policy, risk_policy)
     try:
         verified = store.verify_recovery_attempt(expected_manifest)
     except IncompleteAuditRecoveryError as error:
