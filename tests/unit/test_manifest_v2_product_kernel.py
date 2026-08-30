@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -13,6 +16,12 @@ from ea.composition.product_kernel import (
     ProductKernelFailureCode,
     prepare_phase1_product_kernel,
     recover_phase1_product_kernel,
+)
+from ea.core.audit import (
+    AuditRecordKind,
+    AuditSubjectKind,
+    audit_chain_head,
+    audit_subject_digest,
 )
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import (
@@ -97,15 +106,64 @@ def test_installed_direct_url_accepts_only_an_absolute_local_wheel() -> None:
             return self.value
 
     _validate_installed_direct_url(Distribution(None))  # type: ignore[arg-type]
-    _validate_installed_direct_url(Distribution('{"archive_info":{},"url":"file:///tmp/ea.whl"}'))  # type: ignore[arg-type]
-    for url in (
-        "https://example/ea.whl",
-        "file:///tmp/a%zz.whl",
-        "file:///tmp/a%00.whl",
-        "file:///tmp/a b.whl",
+    for document in (
+        '{"archive_info":{},"url":"file:///tmp/ea.whl"}',
+        '{"archive_info":{"hash":"sha256=' + "a" * 64 + '"},"url":"file:///tmp/ea.whl"}',
+        '{"archive_info":{"hashes":{"sha256":"' + "b" * 64 + '"}},"url":"file:///tmp/ea.whl"}',
     ):
-        with pytest.raises(ProvenanceError):
-            _validate_installed_direct_url(Distribution('{"archive_info":{},"url":"' + url + '"}'))  # type: ignore[arg-type]
+        _validate_installed_direct_url(Distribution(document))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        " file:///tmp/ea.whl",
+        "file:///tmp/ea.whl\\n",
+        "file:///tmp/ea\\t.whl",
+        "file:///tmp/ea\\x1f.whl",
+        "file:///tmp/a b.whl",
+        "file:///tmp/a\\\\b.whl",
+        "file:///tmp/café.whl",
+        "file:///tmp/a%zz.whl",
+        "file:///tmp/a%.whl",
+        "file:///tmp/a%00.whl",
+        "https://example/ea.whl",
+        "git+https://example/ea.whl",
+        "file:///tmp/ea",
+        "file:///tmp/source.tar.gz",
+        "file://host/tmp/ea.whl",
+        "file:///tmp/ea.whl?query",
+        "file:///tmp/ea.whl#fragment",
+    ),
+)
+def test_installed_direct_url_rejects_noncanonical_raw_or_nonwheel_origins(url: str) -> None:
+    class Distribution:
+        def read_text(self, name: str) -> str:
+            assert name == "direct_url.json"
+            return json.dumps({"archive_info": {}, "url": url})
+
+    with pytest.raises(ProvenanceError):
+        _validate_installed_direct_url(Distribution())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "document",
+    (
+        '{"archive_info":{"hash":"sha256=' + "A" * 64 + '"},"url":"file:///tmp/ea.whl"}',
+        '{"archive_info":{"hashes":{"sha256":"' + "A" * 64 + '"}},"url":"file:///tmp/ea.whl"}',
+        '{"archive_info":{"hash":"sha512=' + "a" * 64 + '"},"url":"file:///tmp/ea.whl"}',
+        '{"archive_info":{"editable":true},"url":"file:///tmp/ea.whl"}',
+        '{"archive_info":{},"dir_info":{},"url":"file:///tmp/ea.whl"}',
+    ),
+)
+def test_installed_direct_url_rejects_open_or_non_sha256_metadata(document: str) -> None:
+    class Distribution:
+        def read_text(self, name: str) -> str:
+            assert name == "direct_url.json"
+            return document
+
+    with pytest.raises(ProvenanceError):
+        _validate_installed_direct_url(Distribution())  # type: ignore[arg-type]
 
 
 def _product_inputs() -> tuple[
@@ -191,3 +249,165 @@ def test_product_rejects_v1_manifest_recovery() -> None:
             risk_policy=None,  # type: ignore[arg-type]
         )
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_MANIFEST_V1
+
+
+def _release_for_recovery(kernel: object) -> None:
+    handoff = kernel._handoff  # type: ignore[attr-defined]
+    handoff.journal.close()
+    handoff.retire()
+
+
+def test_product_recovers_a_mechanically_torn_final_audit_tail(tmp_path: Path) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    journal_path = root / RUN_ID.value / "audit" / "audit-v1.journal"
+    with journal_path.open("ab", buffering=0) as journal:
+        journal.write(b"torn")
+        os.fsync(journal.fileno())
+
+    recovered = recover_phase1_product_kernel(
+        store=LocalResultStore(root),
+        expected_manifest=manifest,
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    assert recovered.funding_outcome == first.funding_outcome
+
+
+def test_product_recovery_rejects_non_tail_audit_corruption_without_a_kernel(
+    tmp_path: Path,
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    journal_path = root / RUN_ID.value / "audit" / "audit-v1.journal"
+    with journal_path.open("r+b", buffering=0) as journal:
+        journal.seek(len(b"EA-AUDIT-V1\\n"))
+        first_header_byte = journal.read(1)
+        journal.seek(len(b"EA-AUDIT-V1\\n"))
+        journal.write(bytes((first_header_byte[0] ^ 1,)))
+        os.fsync(journal.fileno())
+
+    with pytest.raises(ProductKernelError) as error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
+
+
+@pytest.mark.parametrize("drift", ("manifest", "scenario", "funding"))
+def test_product_recovery_rejects_manifest_scenario_or_funding_drift(
+    tmp_path: Path, drift: str
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    _release_for_recovery(first)
+    if drift == "scenario":
+        changed = replace(spec, scenario_sha256=Sha256Digest("55" * 32))
+    elif drift == "funding":
+        changed = replace(
+            spec,
+            initial_funding=replace(spec.initial_funding, amount=CanonicalDecimal("2000")),
+        )
+    else:
+        changed = spec
+    manifest = build_manifest_v2(changed, RUN_ID)
+    if drift == "manifest":
+        manifest = replace(manifest, run_id=RunId("12345678-1234-4234-8234-123456789abd"))
+
+    with pytest.raises(ProductKernelError):
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+
+
+def test_product_recovery_closes_terminal_attempt_before_stable_drift(tmp_path: Path) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    journal = first._handoff.journal
+    payload = json.dumps(
+        {
+            "canonicalization": "ea-canonical-json-v1",
+            "last_dispatch_sequence": 1,
+            "last_trigger_root_sha256": "33" * 32,
+            "pre_terminal_state_sha256": "44" * 32,
+            "previous_chain_head_sha256": audit_chain_head(journal.records[-1]).value,
+            "run_id": RUN_ID.value,
+            "schema": "ea.audit-run-terminal.v1",
+            "terminal_kind": "success",
+        },
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    journal.append(
+        record_kind=AuditRecordKind.RUN_TERMINAL,
+        subject_kind=AuditSubjectKind.RUN_TERMINAL_STATE,
+        subject_sha256=audit_subject_digest(AuditRecordKind.RUN_TERMINAL, payload),
+        canonical_payload=payload,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+
+    for _ in range(2):
+        with pytest.raises(ProductKernelError) as error:
+            recover_phase1_product_kernel(
+                store=LocalResultStore(root),
+                expected_manifest=manifest,
+                spec_set=spec_set,
+                execution_policy=execution,
+                risk_policy=risk,
+            )
+        assert error.value.code is ProductKernelFailureCode.INTEGRITY_TERMINAL_DRIFT

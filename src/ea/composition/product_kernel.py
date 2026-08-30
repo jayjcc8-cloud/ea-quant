@@ -9,7 +9,12 @@ from threading import Lock
 from typing import Any, final
 
 from ea.composition.frontier import create_acknowledged_lifecycle_frontier
-from ea.core.audit import AuditRecordKind, AuditSubjectKind, create_audit_append_acknowledgement
+from ea.core.audit import (
+    AuditContractError,
+    AuditRecordKind,
+    AuditSubjectKind,
+    create_audit_append_acknowledgement,
+)
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_messages import ExecutionPolicyRef
 from ea.core.initial_funding import (
@@ -27,6 +32,7 @@ from ea.experiments.manifest import LineageSpecV2, RunManifestV2
 from ea.experiments.store import (
     LocalResultStore,
     RunIdProvider,
+    StoreError,
     VerifiedIncompleteRecoveryBinding,
     VerifiedTerminalRecoveryBinding,
 )
@@ -304,7 +310,18 @@ def recover_phase1_product_kernel(
             ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_MANIFEST_V1,
             "product recovery requires manifest v2",
         )
-    verified = store.verify_recovery_attempt(expected_manifest)
+    try:
+        verified = store.verify_recovery_attempt(expected_manifest)
+    except AuditContractError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+            "recovery audit evidence is corrupt",
+        ) from error
+    except StoreError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT,
+            "recovery evidence does not match the product boundary",
+        ) from error
     if type(verified) is VerifiedTerminalRecoveryBinding:
         terminal = store.recover_terminal_attempt(verified)
         try:
