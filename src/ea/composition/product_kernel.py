@@ -31,7 +31,7 @@ from ea.core.risk import Phase1RiskPolicy, RiskStateSnapshot, phase1_risk_policy
 from ea.core.run import RunBinding
 from ea.experiments.audit import create_posix_audit_journal, reopen_posix_audit_journal
 from ea.experiments.binding import BoundAuditPort
-from ea.experiments.manifest import LineageSpecV2, RunManifestV2
+from ea.experiments.manifest import LineageSpecV2, ManifestError, RunManifestV2
 from ea.experiments.provenance import ProvenanceError, collect_installed_runtime_spec_v2
 from ea.experiments.store import (
     CorruptAuditRecoveryError,
@@ -213,7 +213,7 @@ def _require_product_boundary(
 ) -> None:
     try:
         runtime = collect_installed_runtime_spec_v2()
-    except ProvenanceError as error:
+    except (ProvenanceError, ManifestError) as error:
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT,
             "installed runtime provenance cannot be collected",

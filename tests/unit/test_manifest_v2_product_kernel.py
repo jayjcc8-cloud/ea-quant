@@ -420,6 +420,14 @@ def _synthetic_runtime_collector(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _duplicate_runtime_metadata(runtime: InstalledRuntimeSpecV2) -> InstalledRuntimeSpecV2:
+    return replace(
+        runtime,
+        distributions=runtime.distributions
+        + (DistributionIdentity("duplicate", "1"), DistributionIdentity("duplicate", "2")),
+    )
+
+
 def test_product_kernel_prepares_and_recovers_the_funded_prefix(tmp_path: Path) -> None:
     spec, spec_set, execution, risk = _product_inputs()
     root = tmp_path / "runs"
@@ -484,21 +492,20 @@ def test_product_prepare_maps_a_store_collision_to_a_closed_boundary(tmp_path: P
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
 
 
-@pytest.mark.parametrize("collector_fails", (False, True))
+@pytest.mark.parametrize("collector_failure", ("mismatch", "provenance", "manifest"))
 def test_product_prepare_rejects_unverified_installed_runtime_before_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_fails: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_failure: str
 ) -> None:
     spec, spec_set, execution, risk = _product_inputs()
     root = tmp_path / "runs"
     root.mkdir()
-    if collector_fails:
 
-        def collect() -> InstalledRuntimeSpecV2:
+    def collect() -> InstalledRuntimeSpecV2:
+        if collector_failure == "provenance":
             raise ProvenanceError("injected collector failure")
-    else:
-
-        def collect() -> InstalledRuntimeSpecV2:
-            return replace(spec.runtime, ea_installed_files_sha256=Sha256Digest("66" * 32))
+        if collector_failure == "manifest":
+            return _duplicate_runtime_metadata(spec.runtime)
+        return replace(spec.runtime, ea_installed_files_sha256=Sha256Digest("66" * 32))
 
     monkeypatch.setattr(product_kernel, "collect_installed_runtime_spec_v2", collect)
     with pytest.raises(ProductKernelError) as error:
@@ -511,6 +518,9 @@ def test_product_prepare_rejects_unverified_installed_runtime_before_attempt(
             risk_policy=risk,
         )
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
+    if collector_failure != "mismatch":
+        expected_cause = ManifestError if collector_failure == "manifest" else ProvenanceError
+        assert type(error.value.__cause__) is expected_cause
     assert not (root / RUN_ID.value).exists()
 
     monkeypatch.setattr(product_kernel, "collect_installed_runtime_spec_v2", lambda: spec.runtime)
@@ -527,9 +537,9 @@ def test_product_prepare_rejects_unverified_installed_runtime_before_attempt(
     )
 
 
-@pytest.mark.parametrize("collector_fails", (False, True))
+@pytest.mark.parametrize("collector_failure", ("mismatch", "provenance", "manifest"))
 def test_product_recovery_rejects_unverified_runtime_without_taking_a_writer_lease(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_fails: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_failure: str
 ) -> None:
     spec, spec_set, execution, risk = _product_inputs()
     root = tmp_path / "runs"
@@ -545,14 +555,13 @@ def test_product_recovery_rejects_unverified_runtime_without_taking_a_writer_lea
     manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
     assert type(manifest) is RunManifestV2
     _release_for_recovery(first)
-    if collector_fails:
 
-        def collect() -> InstalledRuntimeSpecV2:
+    def collect() -> InstalledRuntimeSpecV2:
+        if collector_failure == "provenance":
             raise ProvenanceError("injected collector failure")
-    else:
-
-        def collect() -> InstalledRuntimeSpecV2:
-            return replace(spec.runtime, ea_installed_files_sha256=Sha256Digest("66" * 32))
+        if collector_failure == "manifest":
+            return _duplicate_runtime_metadata(spec.runtime)
+        return replace(spec.runtime, ea_installed_files_sha256=Sha256Digest("66" * 32))
 
     monkeypatch.setattr(product_kernel, "collect_installed_runtime_spec_v2", collect)
     with pytest.raises(ProductKernelError) as error:
@@ -564,6 +573,9 @@ def test_product_recovery_rejects_unverified_runtime_without_taking_a_writer_lea
             risk_policy=risk,
         )
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
+    if collector_failure != "mismatch":
+        expected_cause = ManifestError if collector_failure == "manifest" else ProvenanceError
+        assert type(error.value.__cause__) is expected_cause
     monkeypatch.setattr(product_kernel, "collect_installed_runtime_spec_v2", lambda: spec.runtime)
     assert (
         recover_phase1_product_kernel(
