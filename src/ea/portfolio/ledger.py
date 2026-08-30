@@ -592,6 +592,7 @@ class PortfolioLedger:
             observation_index=next_observation_index,
             command_index=next_command_index,
             adjustment_outcomes=next_adjustment_outcomes,
+            initial_funding_outcome=self._state.initial_funding_outcome,
             snapshot=derived.next_snapshot,
         )
         _preflight_adjustment_evidence(derived, outcome)

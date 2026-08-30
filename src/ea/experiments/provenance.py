@@ -397,7 +397,7 @@ def _installed_file_rows(
             or posix_path.name in _INSTALLED_FILE_EXCLUSIONS
         ):
             continue
-        candidate = Path(distribution.locate_file(raw_path))
+        candidate = Path(str(distribution.locate_file(raw_path)))
         try:
             resolved = candidate.resolve(strict=True)
             file_stat = candidate.lstat()

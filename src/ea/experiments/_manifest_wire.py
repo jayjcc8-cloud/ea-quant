@@ -6,9 +6,13 @@ import json
 import struct
 from datetime import datetime
 from hashlib import sha256
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, TypeGuard, cast
 
 from ea.core.run import DataFingerprint, ReplayWindow, RunId, Sha256Digest
+
+if TYPE_CHECKING:
+    from ea.core.initial_funding import InitialFundingSpec
+    from ea.experiments._manifest_model import InstalledRuntimeSpecV2
 
 CONFIG_DOMAIN = b"ea.config.v1\0"
 LOCK_DOMAIN = b"ea.uv-lock.v1\0"
@@ -45,8 +49,11 @@ class _EffectiveParameterLike(Protocol):
 
 
 class _DistributionLike(Protocol):
-    name: str
-    version: str
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def version(self) -> str: ...
 
 
 class _RandomnessLike(Protocol):
@@ -79,11 +86,16 @@ class _LineageLike(Protocol):
     lineage_schema_version: int
 
 
-class _ManifestLike(Protocol):
-    run_id: RunId
-    lineage_sha256: Sha256Digest
-    spec: _LineageLike
-    manifest_schema_version: int
+class _LineageV2Like(Protocol):
+    configuration: _ConfigurationLike
+    data: DataFingerprint
+    replay_window: ReplayWindow
+    parameters: tuple[_EffectiveParameterLike, ...]
+    runtime: InstalledRuntimeSpecV2
+    randomness: _RandomnessLike
+    lineage_schema_version: int
+    scenario_sha256: Sha256Digest
+    initial_funding: InitialFundingSpec
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -133,8 +145,8 @@ def _distribution_mapping(value: _DistributionLike) -> dict[str, object]:
 
 
 def _lineage_mapping(spec: _LineageLike) -> dict[str, object]:
-    if spec.lineage_schema_version == 2:
-        runtime = cast(_InstalledRuntimeV2Like, spec.runtime)
+    if _is_lineage_v2(spec):
+        runtime = spec.runtime
         return {
             "configuration": {
                 "canonicalization": CONFIG_CANONICALIZATION,
@@ -228,17 +240,22 @@ def _lineage_mapping(spec: _LineageLike) -> dict[str, object]:
     }
 
 
-class _InstalledRuntimeV2Like(Protocol):
-    provenance_kind: str
-    ea_distribution: _DistributionLike
-    ea_installed_files_sha256: Sha256Digest
-    python_implementation: str
-    python_version: str
-    python_cache_tag: str
-    sys_platform: str
-    platform_tag: str
-    distributions: tuple[_DistributionLike, ...]
-    numeric_policy: str
+def _is_lineage_v2(
+    spec: _LineageLike,
+) -> TypeGuard[_LineageV2Like]:
+    return (
+        spec.lineage_schema_version == 2
+        and hasattr(spec, "initial_funding")
+        and hasattr(spec, "scenario_sha256")
+        and hasattr(spec.runtime, "ea_distribution")
+    )
+
+
+class _ManifestLike(Protocol):
+    run_id: RunId
+    lineage_sha256: Sha256Digest
+    spec: _LineageLike
+    manifest_schema_version: int
 
 
 def canonical_lineage_bytes(spec: object) -> bytes:

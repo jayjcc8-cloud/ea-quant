@@ -730,8 +730,9 @@ def _require_audit_owned_payload_values(
             "submitted_funding_spec_sha256",
         ):
             _require_json_digest(document, field)
+        versions = {}
         for field in ("before_snapshot_version", "after_snapshot_version"):
-            _require_json_uint64(document, field, positive=False)
+            versions[field] = _require_json_uint64(document, field, positive=False)
         result = _require_json_text(document, "result")
         transaction_sha256 = document["transaction_sha256"]
         existing_transaction_sha256 = document["existing_transaction_sha256"]
@@ -741,7 +742,7 @@ def _require_audit_owned_payload_values(
                 type(transaction_sha256) is not str
                 or existing_transaction_sha256 is not None
                 or conflict_kind is not None
-                or document["after_snapshot_version"] != document["before_snapshot_version"] + 1
+                or versions["after_snapshot_version"] != versions["before_snapshot_version"] + 1
             ):
                 raise _fail(OutcomeCode.CONFLICTING_ID, "funding outcome applied fields conflict")
             _require_json_digest(document, "transaction_sha256")
@@ -756,7 +757,7 @@ def _require_audit_owned_payload_values(
                     "manifest_binding_conflict",
                     "audit_predecessor_conflict",
                 }
-                or document["after_snapshot_version"] != document["before_snapshot_version"]
+                or versions["after_snapshot_version"] != versions["before_snapshot_version"]
             ):
                 raise _fail(OutcomeCode.CONFLICTING_ID, "funding outcome conflict fields conflict")
             _require_json_digest(document, "existing_transaction_sha256")

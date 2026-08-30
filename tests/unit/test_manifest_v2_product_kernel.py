@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import os
 import subprocess
 import sys
@@ -12,7 +13,6 @@ from uuid import UUID
 import pytest
 
 import ea
-import ea.experiments.provenance as provenance_module
 from ea.composition.product_kernel import (
     ProductKernelError,
     ProductKernelFailureCode,
@@ -21,28 +21,39 @@ from ea.composition.product_kernel import (
     recover_phase1_product_kernel,
 )
 from ea.core.audit import (
+    AuditAppendAcknowledgement,
     AuditRecordKind,
     AuditSubjectKind,
     audit_subject_digest,
     require_canonical_audit_payload,
 )
 from ea.core.economics import CanonicalDecimal
-from ea.core.execution import InstrumentSpecSetId, SettlementCurrency, instrument_spec_set_digest
+from ea.core.execution import (
+    InstrumentExecutionSpecSet as IES,
+)
+from ea.core.execution import (
+    InstrumentSpecSetId,
+    SettlementCurrency,
+    instrument_spec_set_digest,
+)
 from ea.core.execution_messages import ExecutionPolicyId, ExecutionPolicyRef
 from ea.core.initial_funding import (
     InitialFundingSpec,
     canonical_initial_funding_outcome_bytes,
     initial_funding_outcome_digest,
 )
-from ea.core.risk import RiskPolicyId, create_phase1_risk_policy
+from ea.core.risk import Phase1RiskPolicy, RiskPolicyId, create_phase1_risk_policy
 from ea.core.run import DataFingerprint, ReplayWindow, RunBinding, RunId, RunReference, Sha256Digest
 from ea.experiments.audit import create_posix_audit_journal
+from ea.experiments.binding import BoundAuditPort
 from ea.experiments.manifest import (
     DistributionIdentity,
     EffectiveParameter,
     InstalledRuntimeSpecV2,
     LineageInputsV2,
+    LineageSpecV2,
     NormalizedConfiguration,
+    RunManifestV2,
     build_lineage_spec_v2,
     build_manifest_v2,
     canonical_manifest_bytes,
@@ -58,7 +69,7 @@ from ea.portfolio import create_portfolio_ledger
 from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
 
-def _manifest_v2():
+def _manifest_v2() -> RunManifestV2:
     funding = InitialFundingSpec(
         InstrumentSpecSetId("phase1.test.v1"),
         Sha256Digest("11" * 32),
@@ -97,7 +108,7 @@ def _manifest_v2():
     return manifest
 
 
-def _product_inputs():
+def _product_inputs() -> tuple[LineageSpecV2, IES, ExecutionPolicyRef, Phase1RiskPolicy]:
     spec_set = _spec_set()
     funding = InitialFundingSpec(
         spec_set.identifier,
@@ -211,7 +222,7 @@ def test_installed_runtime_collector_hashes_sorted_regular_distribution_files(
 
     distribution = FakeDistribution()
     monkeypatch.setattr(
-        provenance_module.importlib.metadata,
+        importlib.metadata,
         "distributions",
         lambda: [distribution],
     )
@@ -270,8 +281,25 @@ def test_store_product_prepare_requires_and_publishes_a_v2_manifest(tmp_path: Pa
     )
 
     assert store.verify_manifest(prepared.manifest_verification).manifest_schema_version == 2
+    original = _manifest_v2().spec
+
+    class DerivedLineageSpecV2(LineageSpecV2):
+        pass
+
     with pytest.raises(StoreError, match="LineageSpecV2"):
-        store.prepare_product(object(), lambda: UUID("12345678-1234-4234-8234-123456789abc"))
+        store.prepare_product(
+            DerivedLineageSpecV2(
+                original.configuration,
+                original.data,
+                original.replay_window,
+                original.parameters,
+                original.runtime,
+                original.randomness,
+                original.scenario_sha256,
+                original.initial_funding,
+            ),
+            lambda: UUID("12345678-1234-4234-8234-123456789abc"),
+        )
 
 
 def test_product_kernel_publishes_only_the_funded_read_only_boundary(tmp_path: Path) -> None:
@@ -359,12 +387,23 @@ def test_recovery_resolves_a_committed_then_raised_funding_append(
     spec, spec_set, execution_policy, risk_policy = _product_inputs()
     (tmp_path / "results").mkdir()
     store = LocalResultStore((tmp_path / "results").resolve())
-    from ea.experiments.binding import BoundAuditPort
-
     append = BoundAuditPort.append
 
-    def committed_then_raised(self: BoundAuditPort, **kwargs: object) -> object:
-        append(self, **kwargs)  # type: ignore[arg-type]
+    def committed_then_raised(
+        self: BoundAuditPort,
+        *,
+        record_kind: AuditRecordKind,
+        subject_kind: AuditSubjectKind,
+        subject_sha256: Sha256Digest,
+        canonical_payload: bytes,
+    ) -> AuditAppendAcknowledgement:
+        append(
+            self,
+            record_kind=record_kind,
+            subject_kind=subject_kind,
+            subject_sha256=subject_sha256,
+            canonical_payload=canonical_payload,
+        )
         raise RuntimeError("append acknowledgement was lost after commit")
 
     monkeypatch.setattr(BoundAuditPort, "append", committed_then_raised)

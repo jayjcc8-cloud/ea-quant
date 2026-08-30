@@ -124,6 +124,12 @@ class _Phase1ProductKernelHandoff:
 class Phase1ProductKernel:
     """Public immutable funded baseline; authorities remain factory-private."""
 
+    _binding: RunBinding
+    _funding_outcome: InitialFundingOutcome
+    _portfolio_snapshot: PortfolioSnapshot
+    _risk_state: RiskStateSnapshot
+    _handoff: _Phase1ProductKernelHandoff
+
     __slots__ = ("_binding", "_funding_outcome", "_handoff", "_portfolio_snapshot", "_risk_state")
 
     def __init__(

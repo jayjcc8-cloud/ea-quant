@@ -32,7 +32,7 @@ from ea.core import (
     create_trade_execution_fact,
 )
 from ea.core.execution_messages import Fill
-from ea.core.reconciliation import ReconciliationTransaction
+from ea.core.reconciliation import CanonicalPortfolioTransaction
 from ea.portfolio import create_portfolio_ledger
 
 RUN_ID = RunId("12345678-1234-4234-8234-123456789abc")
@@ -199,7 +199,7 @@ def test_replay_after_any_bounded_later_history_never_mutates(
 
 
 def _ledger_transaction_bytes(
-    item: LedgerTransaction | ReconciliationTransaction,
+    item: CanonicalPortfolioTransaction,
 ) -> bytes:
     assert type(item) is LedgerTransaction
     return canonical_ledger_transaction_bytes(item)

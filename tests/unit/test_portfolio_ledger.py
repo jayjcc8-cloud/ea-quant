@@ -54,6 +54,11 @@ from ea.core import (
 from ea.core.economics import EconomicValidationError
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_messages import Fill
+from ea.core.initial_funding import (
+    InitialFundingSpec,
+    InitialFundingTransaction,
+    canonical_initial_funding_transaction_bytes,
+)
 from ea.core.reconciliation import (
     ReconciliationTransaction,
     canonical_reconciliation_transaction_bytes,
@@ -146,17 +151,44 @@ def _fill(
 
 
 def _state_bytes(ledger: PortfolioLedger) -> tuple[bytes, tuple[bytes, ...]]:
+    def transaction_bytes(
+        item: InitialFundingTransaction | LedgerTransaction | ReconciliationTransaction,
+    ) -> bytes:
+        if type(item) is InitialFundingTransaction:
+            return canonical_initial_funding_transaction_bytes(item)
+        if type(item) is LedgerTransaction:
+            return canonical_ledger_transaction_bytes(item)
+        assert type(item) is ReconciliationTransaction
+        return canonical_reconciliation_transaction_bytes(item)
+
     return (
         canonical_portfolio_snapshot_bytes(ledger.snapshot),
-        tuple(
-            (
-                canonical_reconciliation_transaction_bytes(item)
-                if type(item) is ReconciliationTransaction
-                else canonical_ledger_transaction_bytes(item)
-            )
-            for item in ledger.transactions
-        ),
+        tuple(transaction_bytes(item) for item in ledger.transactions),
     )
+
+
+def test_adjustment_state_freeze_preserves_initial_funding_outcome() -> None:
+    from unit.test_ledger_adjustment import BINDING, _audited, _correction_bundle
+
+    ledger, _spec_set_value, _observation, _outcome, _acknowledgement, command, authorization = (
+        _correction_bundle()
+    )
+    original = ledger.apply_initial_funding(
+        InitialFundingSpec(
+            ledger.snapshot.instrument_spec_set_id,
+            ledger.snapshot.instrument_spec_set_sha256,
+            USD,
+            CanonicalDecimal("0.01"),
+            CanonicalDecimal("1000"),
+        ),
+        binding=BINDING,
+        prepared_acknowledgement=Sha256Digest("3" * 64),
+    )
+    ledger._state = replace(ledger._state, initial_funding_outcome=original)
+
+    ledger.apply_reconciliation_adjustment(_audited(authorization), command)
+
+    assert ledger._state.initial_funding_outcome is original
 
 
 def _replace_fill(fill: Fill, **changes: object) -> Fill:

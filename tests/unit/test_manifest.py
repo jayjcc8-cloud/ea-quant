@@ -27,6 +27,7 @@ from ea.experiments.manifest import (
     ManifestError,
     ManifestFormatError,
     NormalizedConfiguration,
+    RunManifest,
     RuntimeEvidence,
     build_lineage_spec,
     build_manifest,
@@ -175,9 +176,11 @@ def test_input_order_does_not_change_lineage_but_uuid_changes_attempt() -> None:
 def test_manifest_round_trip_is_strict_and_transitively_immutable() -> None:
     parsed = read_manifest(GOLDEN_MANIFEST)
 
+    assert type(parsed) is RunManifest
     assert canonical_manifest_bytes(parsed) == GOLDEN_MANIFEST
     with pytest.raises(FrozenInstanceError):
-        parsed.spec.runtime.ea_version = "changed"  # type: ignore[misc]
+        attribute = "ea_version"
+        setattr(parsed.spec.runtime, attribute, "changed")
 
 
 def test_manifest_facade_preserves_public_object_identity_and_pickle_paths() -> None:

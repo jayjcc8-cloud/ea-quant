@@ -1127,11 +1127,13 @@ class LocalResultStore:
         except RunContractError as exc:
             raise StoreError("run_id_provider did not return a canonical UUID4") from exc
 
-        manifest = (
-            build_manifest(spec, run_id)
-            if type(spec) is LineageSpec
-            else build_manifest_v2(spec, run_id)
-        )
+        manifest: RunManifest | RunManifestV2
+        if type(spec) is LineageSpec:
+            manifest = build_manifest(spec, run_id)
+        elif type(spec) is LineageSpecV2:
+            manifest = build_manifest_v2(spec, run_id)
+        else:  # pragma: no cover - exact type check above is exhaustive
+            raise AssertionError("lineage specification type check was not exhaustive")
         payload = canonical_manifest_bytes(manifest)
         run_name = run_id.value
         root_fd: int | None = None
