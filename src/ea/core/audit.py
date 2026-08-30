@@ -1457,9 +1457,14 @@ def require_canonical_audit_payload(
         expected_fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[record_kind]
         if set(document) != expected_fields:
             raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload fields conflict with its kind")
+        expected_canonicalization = (
+            "ea.initial-funding-outcome.v1"
+            if record_kind is AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME
+            else AUDIT_CANONICALIZATION
+        )
         if (
             document.get("schema") != _AUDIT_PAYLOAD_SCHEMA_BY_KIND[record_kind]
-            or document.get("canonicalization") != AUDIT_CANONICALIZATION
+            or document.get("canonicalization") != expected_canonicalization
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload schema is invalid")
         _require_audit_owned_payload_values(record_kind, document)
@@ -1482,6 +1487,10 @@ def audit_subject_digest(
     if record_kind is AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
         return Sha256Digest(
             sha256(EXECUTION_FACT_PROCESSING_OUTCOME_DIGEST_DOMAIN + canonical_payload).hexdigest()
+        )
+    if record_kind is AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME:
+        return Sha256Digest(
+            sha256(b"ea.initial-funding-outcome.v1\0" + canonical_payload).hexdigest()
         )
     domain = _SUBJECT_DOMAIN_BY_KIND[record_kind]
     return Sha256Digest(
