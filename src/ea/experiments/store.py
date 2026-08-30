@@ -23,8 +23,11 @@ from ea.core.audit import (
 from ea.core.run import RunBinding, RunContractError, RunId, RunReference, Sha256Digest
 from ea.experiments.manifest import (
     LineageSpec,
+    LineageSpecV2,
     RunManifest,
+    RunManifestV2,
     build_manifest,
+    build_manifest_v2,
     canonical_manifest_bytes,
     read_manifest,
 )
@@ -725,7 +728,7 @@ class LocalResultStore:
     def verify_manifest(
         self,
         capability: ManifestVerificationCapability,
-    ) -> RunManifest:
+    ) -> RunManifest | RunManifestV2:
         """No-follow re-open and verify the original manifest bytes and file identity."""
         if type(capability) is not ManifestVerificationCapability:
             raise StoreError("manifest verification requires its exact capability")
@@ -786,10 +789,10 @@ class LocalResultStore:
 
     def verify_recovery_attempt(
         self,
-        expected_manifest: RunManifest,
+        expected_manifest: RunManifest | RunManifestV2,
     ) -> VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding:
         """Lock, rebind, scan and classify one exact existing attempt."""
-        if type(expected_manifest) is not RunManifest:
+        if type(expected_manifest) not in {RunManifest, RunManifestV2}:
             raise StoreError("recovery requires one exact expected RunManifest")
         expected_payload = canonical_manifest_bytes(expected_manifest)
         run_name = expected_manifest.run_id.value
@@ -1082,14 +1085,33 @@ class LocalResultStore:
                 )
             raise
 
+    def _retire_product_attempt(self, audit: AuditRunBinding) -> None:
+        """Release a failed product prelude without deleting durable evidence."""
+        if type(audit) is not AuditRunBinding or audit._store is not self:
+            raise StoreError("product retirement requires its exact store-owned audit binding")
+        authority = audit._authority
+        with self._registry_lock:
+            record = self._attempts.pop(authority.attempt_token, None)
+        if record is None or record.authority is not authority:
+            raise StoreError("product retirement capability is stale or foreign")
+        try:
+            os.close(record.writer_lock_fd)
+        except OSError as error:
+            raise StoreError("product retirement could not release the writer lease") from error
+
+    def prepare_product(self, spec: LineageSpecV2, run_id_provider: RunIdProvider) -> PreparedRun:
+        if type(spec) is not LineageSpecV2:
+            raise StoreError("product preparation requires an exact LineageSpecV2")
+        return self.prepare(spec, run_id_provider)
+
     def prepare(
         self,
-        spec: LineageSpec,
+        spec: LineageSpec | LineageSpecV2,
         run_id_provider: RunIdProvider,
     ) -> PreparedRun:
         """Reserve, publish, read back, and durably acknowledge one attempt."""
-        if type(spec) is not LineageSpec:
-            raise StoreError("spec must be a LineageSpec")
+        if type(spec) not in {LineageSpec, LineageSpecV2}:
+            raise StoreError("spec must be an exact lineage specification")
         if not callable(run_id_provider):
             raise StoreError("run_id_provider must be callable")
         try:
@@ -1100,7 +1122,10 @@ class LocalResultStore:
         except RunContractError as exc:
             raise StoreError("run_id_provider did not return a canonical UUID4") from exc
 
-        manifest = build_manifest(spec, run_id)
+        if type(spec) is LineageSpec:
+            manifest: RunManifest | RunManifestV2 = build_manifest(spec, run_id)
+        else:
+            manifest = build_manifest_v2(spec, run_id)
         payload = canonical_manifest_bytes(manifest)
         run_name = run_id.value
         root_fd: int | None = None
