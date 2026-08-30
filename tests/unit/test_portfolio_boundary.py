@@ -24,6 +24,7 @@ def test_portfolio_public_api_has_no_arbitrary_mutation_surface() -> None:
     public = {name for name in dir(PortfolioLedger) if not name.startswith("_")}
     assert public == {
         "apply_fill",
+        "apply_initial_funding",
         "apply_ledger_application_command",
         "apply_reconciliation_adjustment",
         "snapshot",
