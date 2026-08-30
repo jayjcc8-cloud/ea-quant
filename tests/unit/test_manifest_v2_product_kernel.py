@@ -963,7 +963,7 @@ def test_product_recovery_rejects_non_tail_audit_corruption_without_a_kernel(
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
 
 
-@pytest.mark.parametrize("drift", ("manifest", "scenario", "funding"))
+@pytest.mark.parametrize("drift", ("manifest", "scenario", "funding", "scenario_funding"))
 def test_product_recovery_rejects_manifest_scenario_or_funding_drift(
     tmp_path: Path, drift: str
 ) -> None:
@@ -979,7 +979,7 @@ def test_product_recovery_rejects_manifest_scenario_or_funding_drift(
         risk_policy=risk,
     )
     _release_for_recovery(first)
-    if drift == "scenario":
+    if drift in {"scenario", "scenario_funding"}:
         changed = replace(spec, scenario_sha256=Sha256Digest("55" * 32))
     elif drift == "funding":
         changed = replace(
@@ -988,6 +988,11 @@ def test_product_recovery_rejects_manifest_scenario_or_funding_drift(
         )
     else:
         changed = spec
+    if drift == "scenario_funding":
+        changed = replace(
+            changed,
+            initial_funding=replace(changed.initial_funding, amount=CanonicalDecimal("2000")),
+        )
     manifest = build_manifest_v2(changed, RUN_ID)
     if drift == "manifest":
         manifest = replace(manifest, run_id=RunId("12345678-1234-4234-8234-123456789abd"))
@@ -1011,6 +1016,8 @@ def test_product_recovery_rejects_manifest_scenario_or_funding_drift(
             risk_policy=risk,
         )
         assert recovered.funding_outcome == first.funding_outcome
+    if drift == "scenario_funding":
+        assert error.value.code is ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
 
 
 @pytest.mark.parametrize(

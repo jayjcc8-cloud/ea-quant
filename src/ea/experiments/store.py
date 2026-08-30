@@ -6,7 +6,7 @@ import fcntl
 import os
 import stat
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
@@ -940,6 +940,14 @@ class LocalResultStore:
                 and type(persisted_manifest) is RunManifestV2
                 and persisted_manifest.spec.scenario_sha256
                 != expected_manifest.spec.scenario_sha256
+                and build_manifest_v2(
+                    replace(
+                        persisted_manifest.spec,
+                        scenario_sha256=expected_manifest.spec.scenario_sha256,
+                    ),
+                    persisted_manifest.run_id,
+                )
+                == expected_manifest
             ):
                 raise ScenarioRecoveryDriftError("recovery scenario differs from exact evidence")
             if manifest_payload != expected_payload or persisted_manifest != expected_manifest:
