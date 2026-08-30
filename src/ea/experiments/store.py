@@ -63,6 +63,10 @@ class CorruptAuditRecoveryError(StoreError):
     """Raised when recovery's durable first run-prepared record is altered."""
 
 
+class ScenarioRecoveryDriftError(StoreError):
+    """Raised when persisted v2 scenario evidence differs during recovery."""
+
+
 class RunIdProvider(Protocol):
     def __call__(self) -> UUID:
         """Return one fresh operating-system/provider UUID4."""
@@ -928,9 +932,17 @@ class LocalResultStore:
                 not stat.S_ISREG(manifest_stat.st_mode)
                 or stat.S_IMODE(manifest_stat.st_mode) != 0o600
                 or manifest_stat.st_nlink != 1
-                or manifest_payload != expected_payload
-                or read_manifest(manifest_payload) != expected_manifest
             ):
+                raise StoreError("recovery manifest differs from exact expected evidence")
+            persisted_manifest = read_manifest(manifest_payload)
+            if (
+                type(expected_manifest) is RunManifestV2
+                and type(persisted_manifest) is RunManifestV2
+                and persisted_manifest.spec.scenario_sha256
+                != expected_manifest.spec.scenario_sha256
+            ):
+                raise ScenarioRecoveryDriftError("recovery scenario differs from exact evidence")
+            if manifest_payload != expected_payload or persisted_manifest != expected_manifest:
                 raise StoreError("recovery manifest differs from exact expected evidence")
             binding = RunBinding(
                 reference=expected_manifest.reference,

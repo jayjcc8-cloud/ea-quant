@@ -58,7 +58,12 @@ from ea.experiments.provenance import (
     _installed_file_rows,
     _validate_installed_direct_url,
 )
-from ea.experiments.store import CorruptAuditRecoveryError, LocalResultStore, StoreError
+from ea.experiments.store import (
+    CorruptAuditRecoveryError,
+    LocalResultStore,
+    ScenarioRecoveryDriftError,
+    StoreError,
+)
 from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
 
@@ -987,7 +992,7 @@ def test_product_recovery_rejects_manifest_scenario_or_funding_drift(
     if drift == "manifest":
         manifest = replace(manifest, run_id=RunId("12345678-1234-4234-8234-123456789abd"))
 
-    with pytest.raises(ProductKernelError):
+    with pytest.raises(ProductKernelError) as error:
         recover_phase1_product_kernel(
             store=LocalResultStore(root),
             expected_manifest=manifest,
@@ -995,6 +1000,17 @@ def test_product_recovery_rejects_manifest_scenario_or_funding_drift(
             execution_policy=execution,
             risk_policy=risk,
         )
+    if drift == "scenario":
+        assert error.value.code is ProductKernelFailureCode.INTEGRITY_SCENARIO_DRIFT
+        assert type(error.value.__cause__) is ScenarioRecoveryDriftError
+        recovered = recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=build_manifest_v2(spec, RUN_ID),
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+        assert recovered.funding_outcome == first.funding_outcome
 
 
 @pytest.mark.parametrize(
