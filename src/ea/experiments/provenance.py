@@ -382,6 +382,8 @@ def _validate_installed_direct_url(distribution: importlib.metadata.Distribution
             index + 2 >= len(url) or not re.fullmatch(r"[0-9A-Fa-f]{2}", url[index + 1 : index + 3])
         ):
             raise ProvenanceError("ea-quant direct URL has an invalid percent escape")
+    if not url.startswith("file:"):
+        raise ProvenanceError("ea-quant direct URL scheme must be lowercase file")
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "file" or parsed.netloc or parsed.query or parsed.fragment:
         raise ProvenanceError("ea-quant direct URL must be an authority-free file URL")
@@ -424,8 +426,6 @@ def _installed_file_rows(
     for record in files:
         raw = str(record)
         if raw == _GENERATED_CONSOLE_SCRIPT_RECORD_PATH:
-            continue
-        if raw in {"RECORD", "INSTALLER", "REQUESTED", "direct_url.json"}:
             continue
         if raw != unicodedata.normalize("NFC", raw) or "\\" in raw or raw.startswith("/"):
             raise ProvenanceError("installed RECORD path is not canonical POSIX")

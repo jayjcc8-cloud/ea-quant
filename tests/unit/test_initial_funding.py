@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from ea.core.economics import CanonicalDecimal
@@ -77,3 +79,25 @@ def test_ledger_applies_genesis_once_and_retains_exact_replay() -> None:
     assert applied.transaction.ledger_sequence == 1
     assert applied.snapshot.cash_balances[0].amount == CanonicalDecimal("1000")
     assert replay is applied
+
+
+def test_transaction_cannot_splice_a_different_spec_set_under_the_same_digest() -> None:
+    spec_set = _spec_set()
+    funding = InitialFundingSpec(
+        spec_set.identifier,
+        instrument_spec_set_digest(spec_set),
+        SettlementCurrency("USD"),
+        CanonicalDecimal("0.01"),
+        CanonicalDecimal("1000"),
+    )
+    binding = RunBinding(RunReference(RUN_ID, Sha256Digest("11" * 32)), Sha256Digest("22" * 32))
+    outcome = create_portfolio_ledger(RUN_ID, spec_set).apply_initial_funding(
+        funding, binding=binding, prepared_acknowledgement=Sha256Digest("33" * 32)
+    )
+    assert outcome.transaction is not None
+
+    with pytest.raises(InitialFundingError, match="digest conflicts"):
+        replace(
+            outcome.transaction,
+            instrument_spec_set_id=InstrumentSpecSetId("phase1.splice.v1"),
+        )

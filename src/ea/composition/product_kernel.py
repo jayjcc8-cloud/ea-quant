@@ -7,6 +7,7 @@ from enum import StrEnum
 from functools import partial
 from threading import Lock
 from typing import Any, final
+from weakref import WeakKeyDictionary
 
 from ea.composition.frontier import create_acknowledged_lifecycle_frontier
 from ea.core.audit import (
@@ -18,20 +19,24 @@ from ea.core.audit import (
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_messages import ExecutionPolicyRef
 from ea.core.initial_funding import (
+    InitialFundingError,
     InitialFundingOutcome,
     InitialFundingResult,
     canonical_initial_funding_outcome_bytes,
     initial_funding_outcome_digest,
 )
-from ea.core.portfolio import PortfolioSnapshot
+from ea.core.portfolio import PortfolioLedgerError, PortfolioSnapshot
 from ea.core.risk import Phase1RiskPolicy, RiskStateSnapshot
 from ea.core.run import RunBinding
 from ea.experiments.audit import create_posix_audit_journal, reopen_posix_audit_journal
 from ea.experiments.binding import BoundAuditPort
 from ea.experiments.manifest import LineageSpecV2, RunManifestV2
 from ea.experiments.store import (
+    CorruptAuditRecoveryError,
+    IncompleteAuditRecoveryError,
     LocalResultStore,
     RunIdProvider,
+    StoreCollisionError,
     StoreError,
     VerifiedIncompleteRecoveryBinding,
     VerifiedTerminalRecoveryBinding,
@@ -42,6 +47,7 @@ from ea.portfolio import (
     create_portfolio_ledger,
 )
 from ea.risk import create_phase1_risk_authority
+from ea.risk.authority import RiskAuthorityError
 
 
 class ProductKernelFailureCode(StrEnum):
@@ -111,12 +117,17 @@ class _Handoff:
 
 @final
 class Phase1ProductKernel:
-    __slots__ = ("_binding", "_funding_outcome", "_portfolio_snapshot", "_risk_state", "_handoff")
+    __slots__ = (
+        "_binding",
+        "_funding_outcome",
+        "_portfolio_snapshot",
+        "_risk_state",
+        "__weakref__",
+    )
     _binding: RunBinding
     _funding_outcome: InitialFundingOutcome
     _portfolio_snapshot: PortfolioSnapshot
     _risk_state: RiskStateSnapshot
-    _handoff: _Handoff
 
     def __init__(
         self,
@@ -130,7 +141,7 @@ class Phase1ProductKernel:
         object.__setattr__(self, "_funding_outcome", funding)
         object.__setattr__(self, "_portfolio_snapshot", snapshot)
         object.__setattr__(self, "_risk_state", risk)
-        object.__setattr__(self, "_handoff", handoff)
+        _HANDOFFS[self] = handoff
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("Phase1ProductKernel is immutable")
@@ -152,6 +163,19 @@ class Phase1ProductKernel:
         return self._risk_state
 
 
+_HANDOFFS: WeakKeyDictionary[Phase1ProductKernel, _Handoff] = WeakKeyDictionary()
+
+
+def _handoff_for(kernel: Phase1ProductKernel) -> _Handoff:
+    handoff = _HANDOFFS.get(kernel)
+    if handoff is None:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY,
+            "funded handoff is unavailable",
+        )
+    return handoff
+
+
 def _consume_phase1_product_kernel(
     kernel: Phase1ProductKernel, start: Callable[[_Handoff], object]
 ) -> object:
@@ -159,7 +183,7 @@ def _consume_phase1_product_kernel(
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT, "invalid handoff"
         )
-    handoff = kernel._handoff
+    handoff = _handoff_for(kernel)
     with handoff.lock:
         if handoff.state != "AVAILABLE":
             raise ProductKernelError(
@@ -274,9 +298,10 @@ def prepare_phase1_product_kernel(
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "invalid product input"
         )
-    prepared = store.prepare_product(spec, run_id_provider)
+    prepared = None
     journal = None
     try:
+        prepared = store.prepare_product(spec, run_id_provider)
         manifest = store.verify_manifest(prepared.manifest_verification)
         if type(manifest) is not RunManifestV2 or manifest.spec != spec:
             raise ProductKernelError(
@@ -286,10 +311,34 @@ def prepare_phase1_product_kernel(
         return _make_kernel(
             store, prepared, manifest, spec_set, execution_policy, risk_policy, journal
         )
+    except InitialFundingError as error:
+        if journal is not None:
+            journal.close()
+        if prepared is not None:
+            store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.FUNDING_SPEC_MISMATCH,
+            "funding does not match the supplied specification set",
+        ) from error
+    except RiskAuthorityError as error:
+        if journal is not None:
+            journal.close()
+        if prepared is not None:
+            store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT,
+            "risk policy does not match the supplied execution boundary",
+        ) from error
+    except StoreCollisionError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT,
+            "product attempt identity already exists",
+        ) from error
     except BaseException as error:
         if journal is not None:
             journal.close()
-        store._retire_product_attempt(prepared.audit)
+        if prepared is not None:
+            store._retire_product_attempt(prepared.audit)
         if type(error) is ProductKernelError:
             raise
         raise ProductKernelError(
@@ -312,6 +361,16 @@ def recover_phase1_product_kernel(
         )
     try:
         verified = store.verify_recovery_attempt(expected_manifest)
+    except IncompleteAuditRecoveryError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_INCOMPLETE,
+            "recovery audit lacks the required preparation evidence",
+        ) from error
+    except CorruptAuditRecoveryError as error:
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+            "recovery audit preparation evidence is corrupt",
+        ) from error
     except AuditContractError as error:
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
@@ -342,6 +401,27 @@ def recover_phase1_product_kernel(
         return _make_kernel(
             store, prepared, expected_manifest, spec_set, execution_policy, risk_policy, journal
         )
+    except InitialFundingError as error:
+        journal.close()
+        store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.FUNDING_SPEC_MISMATCH,
+            "recovered funding does not match the supplied specification set",
+        ) from error
+    except RiskAuthorityError as error:
+        journal.close()
+        store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT,
+            "recovered risk policy does not match the execution boundary",
+        ) from error
+    except (PortfolioLedgerError, StoreError) as error:
+        journal.close()
+        store._retire_product_attempt(prepared.audit)
+        raise ProductKernelError(
+            ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
+            "recovery product bindings conflict",
+        ) from error
     except BaseException:
         journal.close()
         store._retire_product_attempt(prepared.audit)

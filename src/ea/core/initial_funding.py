@@ -190,6 +190,19 @@ class InitialFundingTransaction:
             raise _fail(str(error)) from error
         if type(self.postings) is not tuple or len(self.postings) != 2:
             raise _fail("funding transaction requires two exact postings")
+        if (
+            initial_funding_spec_digest(
+                InitialFundingSpec(
+                    self.instrument_spec_set_id,
+                    self.instrument_spec_set_sha256,
+                    self.settlement_currency,
+                    self.currency_quantum,
+                    self.amount,
+                )
+            )
+            != self.funding_spec_sha256
+        ):
+            raise _fail("funding transaction specification digest conflicts with its fields")
         positive, negative = self.postings
         if (
             type(positive) is not LedgerPosting

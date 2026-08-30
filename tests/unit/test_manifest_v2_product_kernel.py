@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 
+import ea.composition.product_kernel as product_kernel
 from ea.composition.product_kernel import (
     ProductKernelError,
     ProductKernelFailureCode,
@@ -46,7 +47,11 @@ from ea.experiments._manifest_model import (
     canonical_manifest_bytes,
 )
 from ea.experiments.manifest import RunManifestV2, read_manifest, read_manifest_v2
-from ea.experiments.provenance import ProvenanceError, _validate_installed_direct_url
+from ea.experiments.provenance import (
+    ProvenanceError,
+    _installed_file_rows,
+    _validate_installed_direct_url,
+)
 from ea.experiments.store import LocalResultStore
 from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
@@ -127,6 +132,7 @@ def test_installed_direct_url_accepts_only_an_absolute_local_wheel() -> None:
         "file:///tmp/a%zz.whl",
         "file:///tmp/a%.whl",
         "file:///tmp/a%00.whl",
+        "FILE:///tmp/ea.whl",
         "https://example/ea.whl",
         "git+https://example/ea.whl",
         "file:///tmp/ea",
@@ -164,6 +170,29 @@ def test_installed_direct_url_rejects_open_or_non_sha256_metadata(document: str)
 
     with pytest.raises(ProvenanceError):
         _validate_installed_direct_url(Distribution())  # type: ignore[arg-type]
+
+
+def test_installed_file_identity_includes_every_record_except_console_script(
+    tmp_path: Path,
+) -> None:
+    for name in ("RECORD", "INSTALLER", "REQUESTED", "direct_url.json"):
+        (tmp_path / name).write_bytes(name.encode())
+
+    class Distribution:
+        files = tuple(
+            Path(name)
+            for name in ("RECORD", "INSTALLER", "REQUESTED", "direct_url.json", "../../../bin/ea")
+        )
+
+        def locate_file(self, record: object) -> Path:
+            return tmp_path if str(record) == "." else tmp_path / str(record)
+
+    assert tuple(name for name, _ in _installed_file_rows(Distribution())) == (  # type: ignore[arg-type]
+        "INSTALLER",
+        "RECORD",
+        "REQUESTED",
+        "direct_url.json",
+    )
 
 
 def _product_inputs() -> tuple[
@@ -223,10 +252,10 @@ def test_product_kernel_prepares_and_recovers_the_funded_prefix(tmp_path: Path) 
         execution_policy=execution,
         risk_policy=risk,
     )
+    assert not hasattr(first, "_handoff")
     manifest = read_manifest((tmp_path / "runs" / RUN_ID.value / "manifest.json").read_bytes())
     assert type(manifest) is RunManifestV2
-    first._handoff.journal.close()
-    first._handoff.retire()
+    _release_for_recovery(first)
     recovered = recover_phase1_product_kernel(
         store=LocalResultStore(root),
         expected_manifest=manifest,
@@ -251,8 +280,65 @@ def test_product_rejects_v1_manifest_recovery() -> None:
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_MANIFEST_V1
 
 
+def test_product_prepare_maps_a_store_collision_to_a_closed_boundary(tmp_path: Path) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    with pytest.raises(ProductKernelError) as error:
+        prepare_phase1_product_kernel(
+            store=LocalResultStore(root),
+            spec=spec,
+            run_id_provider=lambda: UUID(RUN_ID.value),
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "code"),
+    (
+        ("spec_set", ProductKernelFailureCode.FUNDING_SPEC_MISMATCH),
+        ("execution_policy", ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT),
+    ),
+)
+def test_product_prepare_maps_contract_mismatches_to_precise_codes(
+    tmp_path: Path, mismatch: str, code: ProductKernelFailureCode
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    provided_spec_set = (
+        replace(spec_set, identifier=InstrumentSpecSetId("phase1.drift.v1"))
+        if mismatch == "spec_set"
+        else spec_set
+    )
+    provided_execution = (
+        ExecutionPolicyRef(ExecutionPolicyId("phase1.execution.drift.v1"), Sha256Digest("2" * 64))
+        if mismatch == "execution_policy"
+        else execution
+    )
+    with pytest.raises(ProductKernelError) as error:
+        prepare_phase1_product_kernel(
+            store=LocalResultStore(tmp_path),
+            spec=spec,
+            run_id_provider=lambda: UUID(RUN_ID.value),
+            spec_set=provided_spec_set,
+            execution_policy=provided_execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is code
+
+
 def _release_for_recovery(kernel: object) -> None:
-    handoff = kernel._handoff  # type: ignore[attr-defined]
+    handoff = product_kernel._handoff_for(kernel)  # type: ignore[arg-type]
     handoff.journal.close()
     handoff.retire()
 
@@ -285,6 +371,42 @@ def test_product_recovers_a_mechanically_torn_final_audit_tail(tmp_path: Path) -
         risk_policy=risk,
     )
     assert recovered.funding_outcome == first.funding_outcome
+
+
+@pytest.mark.parametrize(
+    "contents",
+    (b"", b"EA-AUDIT-V1\\n", b"EA-AUDIT-V1\\ntorn-before-first-record"),
+)
+def test_product_recovery_rejects_an_empty_or_header_only_audit_prefix(
+    tmp_path: Path, contents: bytes
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    journal_path = root / RUN_ID.value / "audit" / "audit-v1.journal"
+    journal_path.write_bytes(contents)
+
+    for _ in range(2):
+        with pytest.raises(ProductKernelError) as error:
+            recover_phase1_product_kernel(
+                store=LocalResultStore(root),
+                expected_manifest=manifest,
+                spec_set=spec_set,
+                execution_policy=execution,
+                risk_policy=risk,
+            )
+        assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_INCOMPLETE
 
 
 def test_product_recovery_rejects_non_tail_audit_corruption_without_a_kernel(
@@ -362,6 +484,52 @@ def test_product_recovery_rejects_manifest_scenario_or_funding_drift(
         )
 
 
+@pytest.mark.parametrize(
+    ("mismatch", "code"),
+    (
+        ("spec_set", ProductKernelFailureCode.FUNDING_SPEC_MISMATCH),
+        ("execution_policy", ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT),
+    ),
+)
+def test_product_recovery_maps_contract_binding_mismatch_to_closed_error(
+    tmp_path: Path, mismatch: str, code: ProductKernelFailureCode
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    recovered_spec_set = (
+        replace(spec_set, identifier=InstrumentSpecSetId("phase1.drift.v1"))
+        if mismatch == "spec_set"
+        else spec_set
+    )
+    recovered_execution = (
+        ExecutionPolicyRef(ExecutionPolicyId("phase1.execution.drift.v1"), Sha256Digest("2" * 64))
+        if mismatch == "execution_policy"
+        else execution
+    )
+
+    with pytest.raises(ProductKernelError) as error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=recovered_spec_set,
+            execution_policy=recovered_execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is code
+
+
 def test_product_recovery_closes_terminal_attempt_before_stable_drift(tmp_path: Path) -> None:
     spec, spec_set, execution, risk = _product_inputs()
     root = tmp_path / "runs"
@@ -374,7 +542,7 @@ def test_product_recovery_closes_terminal_attempt_before_stable_drift(tmp_path: 
         execution_policy=execution,
         risk_policy=risk,
     )
-    journal = first._handoff.journal
+    journal = product_kernel._handoff_for(first).journal
     payload = json.dumps(
         {
             "canonicalization": "ea-canonical-json-v1",

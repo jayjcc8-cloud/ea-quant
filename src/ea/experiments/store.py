@@ -14,11 +14,18 @@ from typing import Protocol
 from uuid import UUID
 
 from ea.core.audit import (
+    EMPTY_CHAIN_HEAD_SHA256,
+    EMPTY_RECORD_SHA256,
     AuditAppendAcknowledgement,
     AuditRecord,
     AuditRecordKind,
     AuditRecoveryRecordSource,
+    AuditSubjectKind,
+    audit_frame_checksum,
+    canonical_audit_record_bytes,
+    canonical_run_prepared_audit_payload,
     create_audit_append_acknowledgement,
+    create_audit_record,
 )
 from ea.core.run import RunBinding, RunContractError, RunId, RunReference, Sha256Digest
 from ea.experiments.manifest import (
@@ -46,6 +53,14 @@ class StoreError(RuntimeError):
 
 class StoreCollisionError(StoreError):
     """Raised when an attempt path already exists and is never adopted."""
+
+
+class IncompleteAuditRecoveryError(StoreError):
+    """Raised when recovery has no durable first run-prepared record."""
+
+
+class CorruptAuditRecoveryError(StoreError):
+    """Raised when recovery's durable first run-prepared record is altered."""
 
 
 class RunIdProvider(Protocol):
@@ -637,6 +652,55 @@ class LocalResultStore:
     def _identity(value: os.stat_result) -> tuple[int, int]:
         return value.st_dev, value.st_ino
 
+    @staticmethod
+    def _first_audit_frame(binding: RunBinding) -> bytes:
+        payload = canonical_run_prepared_audit_payload(binding)
+        record = create_audit_record(
+            binding=binding,
+            owner_sequence=1,
+            record_kind=AuditRecordKind.RUN_PREPARED,
+            subject_kind=AuditSubjectKind.RUN_MANIFEST,
+            subject_sha256=binding.manifest_sha256,
+            canonical_payload=payload,
+            previous_record_sha256=EMPTY_RECORD_SHA256,
+            previous_chain_head_sha256=EMPTY_CHAIN_HEAD_SHA256,
+        )
+        return canonical_audit_record_bytes(record) + bytes.fromhex(
+            audit_frame_checksum(record).value
+        )
+
+    @staticmethod
+    def _require_durable_first_audit_frame(audit_fd: int, binding: RunBinding) -> None:
+        from ea.experiments.audit import AUDIT_JOURNAL_NAME, AUDIT_JOURNAL_PREAMBLE
+
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                AUDIT_JOURNAL_NAME,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=audit_fd,
+            )
+            frame = LocalResultStore._first_audit_frame(binding)
+            stat_result = os.fstat(descriptor)
+            minimum_size = len(AUDIT_JOURNAL_PREAMBLE) + len(frame)
+            if not stat.S_ISREG(stat_result.st_mode) or stat_result.st_size < minimum_size:
+                raise IncompleteAuditRecoveryError(
+                    "recovery audit lacks a durable run-prepared frame"
+                )
+            prefix = os.pread(descriptor, minimum_size, 0)
+            if prefix[: len(AUDIT_JOURNAL_PREAMBLE)] != AUDIT_JOURNAL_PREAMBLE:
+                raise CorruptAuditRecoveryError("recovery audit preamble is invalid")
+            if prefix[len(AUDIT_JOURNAL_PREAMBLE) :] != frame:
+                raise CorruptAuditRecoveryError("recovery audit first frame is invalid")
+        except IncompleteAuditRecoveryError:
+            raise
+        except OSError as error:
+            raise StoreError("recovery audit first frame cannot be verified") from error
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+
     def _record_for(self, authority: _AttemptAuthority) -> _AttemptRecord:
         if type(authority) is not _AttemptAuthority or authority.store_id is not self._store_id:
             raise StoreError("capability belongs to another result store")
@@ -864,6 +928,8 @@ class LocalResultStore:
                 reference=expected_manifest.reference,
                 manifest_sha256=Sha256Digest(sha256(manifest_payload).hexdigest()),
             )
+            if type(expected_manifest) is RunManifestV2:
+                self._require_durable_first_audit_frame(audit_fd, binding)
             authority = _AttemptAuthority(self._store_id, object(), binding)
             record = _AttemptRecord(
                 authority=authority,
