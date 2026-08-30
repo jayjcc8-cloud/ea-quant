@@ -110,8 +110,8 @@ mutable open, closed, Draft, or merged state.
 ## Last Confirmed
 
 - Date: **2026-08-29** (Asia/Shanghai).
-- Current merged baseline before this convergence candidate is
-  `main@67184b1e4f387caf15b88db5529d4194de82cd81`; when this file reaches `main`, the containing
+- Current merged baseline before Delivery 2 is
+  `main@969f5f086acd9c28f80e3960a56b83981b1d0e5d`; when this file reaches `main`, the containing
   `main` commit and exact CI replace that pre-candidate reference.
 - The last independently verified pre-consolidation checkpoint from **2026-08-22** remains
   `af7bc08cecd70fc5479b92e4393da468727ddb55` as immutable provenance, not current state.
