@@ -8,6 +8,11 @@ import struct
 from datetime import UTC, datetime
 from typing import NoReturn, TypedDict, cast
 
+from ea.core.economics import CanonicalDecimal
+from ea.core.execution import InstrumentSpecSetId, SettlementCurrency
+from ea.core.execution_messages import ExecutionPolicyId, ExecutionPolicyRef
+from ea.core.initial_funding import InitialFundingSpec
+from ea.core.risk import RiskPolicyId
 from ea.core.run import (
     DataFingerprint,
     ReplayWindow,
@@ -20,13 +25,16 @@ from ea.experiments._manifest_model import (
     ConfigurationSpec,
     DistributionIdentity,
     EffectiveParameter,
+    InstalledRuntimeSpecV2,
     LineageSpec,
+    LineageSpecV2,
     ManifestError,
     ManifestFormatError,
     NormalizedConfiguration,
     ParameterKind,
     RandomnessSpec,
     RunManifest,
+    RunManifestV2,
     RuntimeSpec,
     canonical_manifest_bytes,
 )
@@ -124,6 +132,53 @@ class _ManifestWire(TypedDict):
     manifest_schema_version: int
     run_id: str
     spec: object
+
+
+class _LineageV2Wire(TypedDict):
+    configuration: object
+    data: object
+    execution_policy: object
+    initial_funding: object
+    lineage_schema_version: int
+    parameters: object
+    randomness: object
+    replay_window: object
+    risk_policy: object
+    runtime: object
+    scenario_sha256: str
+
+
+class _InstalledRuntimeV2Wire(TypedDict):
+    distributions: object
+    ea_distribution: object
+    ea_installed_files_sha256: str
+    numeric_policy: str
+    platform_tag: str
+    provenance_kind: str
+    python_cache_tag: str
+    python_implementation: str
+    python_version: str
+    sys_platform: str
+
+
+class _InitialFundingWire(TypedDict):
+    amount: str
+    canonicalization: str
+    currency_quantum: str
+    instrument_spec_set_id: str
+    instrument_spec_set_sha256: str
+    schema_version: int
+    settlement_currency: str
+
+
+class _ExecutionPolicyWire(TypedDict):
+    identifier: str
+    sha256: str
+
+
+class _RiskPolicyWire(TypedDict):
+    identifier: str
+    sha256: str
 
 
 def _require_exact_keys(
@@ -413,7 +468,199 @@ def _parse_lineage(value: object) -> LineageSpec:
     return spec
 
 
-def read_manifest(data: bytes) -> RunManifest:
+def _parse_lineage_v2(value: object) -> LineageSpecV2:
+    mapping = cast(
+        _LineageV2Wire,
+        _require_exact_keys(
+            value,
+            frozenset(
+                {
+                    "configuration",
+                    "data",
+                    "execution_policy",
+                    "initial_funding",
+                    "lineage_schema_version",
+                    "parameters",
+                    "randomness",
+                    "replay_window",
+                    "risk_policy",
+                    "runtime",
+                    "scenario_sha256",
+                }
+            ),
+            field="spec",
+        ),
+    )
+    configuration = cast(
+        _ConfigurationWire,
+        _require_exact_keys(
+            mapping["configuration"],
+            frozenset({"canonicalization", "normalized", "sha256"}),
+            field="spec.configuration",
+        ),
+    )
+    data = cast(
+        _DataWire,
+        _require_exact_keys(
+            mapping["data"],
+            frozenset({"canonicalization", "record_count", "sha256"}),
+            field="spec.data",
+        ),
+    )
+    replay = cast(
+        _ReplayWindowWire,
+        _require_exact_keys(
+            mapping["replay_window"],
+            frozenset(
+                {"end_exclusive", "initial_state", "selection_field", "start_inclusive", "timezone"}
+            ),
+            field="spec.replay_window",
+        ),
+    )
+    randomness = cast(
+        _RandomnessWire,
+        _require_exact_keys(
+            mapping["randomness"],
+            frozenset({"generator", "master_seed", "stream_derivation", "stream_labels"}),
+            field="spec.randomness",
+        ),
+    )
+    runtime = cast(
+        _InstalledRuntimeV2Wire,
+        _require_exact_keys(
+            mapping["runtime"],
+            frozenset(
+                {
+                    "distributions",
+                    "ea_distribution",
+                    "ea_installed_files_sha256",
+                    "numeric_policy",
+                    "platform_tag",
+                    "provenance_kind",
+                    "python_cache_tag",
+                    "python_implementation",
+                    "python_version",
+                    "sys_platform",
+                }
+            ),
+            field="spec.runtime",
+        ),
+    )
+    funding = cast(
+        _InitialFundingWire,
+        _require_exact_keys(
+            mapping["initial_funding"],
+            frozenset(
+                {
+                    "amount",
+                    "canonicalization",
+                    "currency_quantum",
+                    "instrument_spec_set_id",
+                    "instrument_spec_set_sha256",
+                    "schema_version",
+                    "settlement_currency",
+                }
+            ),
+            field="spec.initial_funding",
+        ),
+    )
+    execution = cast(
+        _ExecutionPolicyWire,
+        _require_exact_keys(
+            mapping["execution_policy"],
+            frozenset({"identifier", "sha256"}),
+            field="spec.execution_policy",
+        ),
+    )
+    risk = cast(
+        _RiskPolicyWire,
+        _require_exact_keys(
+            mapping["risk_policy"],
+            frozenset({"identifier", "sha256"}),
+            field="spec.risk_policy",
+        ),
+    )
+    raw_parameters = mapping["parameters"]
+    raw_labels = randomness["stream_labels"]
+    raw_distributions = runtime["distributions"]
+    if type(raw_parameters) is not list:
+        raise ManifestFormatError("spec.parameters must be an array")
+    if type(raw_labels) is not list or any(type(label) is not str for label in raw_labels):
+        raise ManifestFormatError("spec.randomness.stream_labels must be a string array")
+    if type(raw_distributions) is not list:
+        raise ManifestFormatError("spec.runtime.distributions must be an array")
+    if configuration["canonicalization"] != CONFIG_CANONICALIZATION:
+        raise ManifestFormatError("configuration canonicalization is unsupported")
+    if data["canonicalization"] != DATA_CANONICALIZATION:
+        raise ManifestFormatError("data canonicalization is unsupported")
+    if (
+        replay["timezone"] != "UTC"
+        or replay["selection_field"] != "available_at"
+        or replay["initial_state"] != "empty"
+    ):
+        raise ManifestFormatError("replay window fixed vocabulary is invalid")
+    if (
+        funding["canonicalization"] != "ea-initial-funding-spec-v1"
+        or funding["schema_version"] != 1
+    ):
+        raise ManifestFormatError("initial funding canonicalization is unsupported")
+    try:
+        return LineageSpecV2(
+            configuration=ConfigurationSpec(
+                normalized=_parse_normalized(configuration["normalized"]),
+                sha256=Sha256Digest(configuration["sha256"]),
+            ),
+            data=DataFingerprint(Sha256Digest(data["sha256"]), data["record_count"]),
+            replay_window=ReplayWindow(
+                _parse_utc_text(
+                    replay["start_inclusive"], field="spec.replay_window.start_inclusive"
+                ),
+                _parse_utc_text(replay["end_exclusive"], field="spec.replay_window.end_exclusive"),
+            ),
+            parameters=tuple(
+                _parse_parameter(item, index=index)
+                for index, item in enumerate(cast(list[object], raw_parameters))
+            ),
+            runtime=InstalledRuntimeSpecV2(
+                ea_distribution=_parse_distribution(runtime["ea_distribution"], index=0),
+                ea_installed_files_sha256=Sha256Digest(runtime["ea_installed_files_sha256"]),
+                python_implementation=runtime["python_implementation"],
+                python_version=runtime["python_version"],
+                python_cache_tag=runtime["python_cache_tag"],
+                sys_platform=runtime["sys_platform"],
+                platform_tag=runtime["platform_tag"],
+                distributions=tuple(
+                    _parse_distribution(item, index=index)
+                    for index, item in enumerate(cast(list[object], raw_distributions))
+                ),
+                numeric_policy=runtime["numeric_policy"],
+                provenance_kind=runtime["provenance_kind"],
+            ),
+            randomness=RandomnessSpec(
+                randomness["master_seed"],
+                tuple(cast(list[str], raw_labels)),
+                generator=randomness["generator"],
+                stream_derivation=randomness["stream_derivation"],
+            ),
+            scenario_sha256=Sha256Digest(mapping["scenario_sha256"]),
+            initial_funding=InitialFundingSpec(
+                InstrumentSpecSetId(funding["instrument_spec_set_id"]),
+                Sha256Digest(funding["instrument_spec_set_sha256"]),
+                SettlementCurrency(funding["settlement_currency"]),
+                CanonicalDecimal(funding["currency_quantum"]),
+                CanonicalDecimal(funding["amount"]),
+            ),
+            execution_policy=ExecutionPolicyRef(
+                ExecutionPolicyId(execution["identifier"]), Sha256Digest(execution["sha256"])
+            ),
+            risk_policy_id=RiskPolicyId(risk["identifier"]),
+            risk_policy_sha256=Sha256Digest(risk["sha256"]),
+        )
+    except (RunContractError, ValueError) as exc:
+        raise ManifestFormatError(str(exc)) from exc
+
+
+def read_manifest_v1(data: bytes) -> RunManifest:
     """Strictly parse, validate hashes, and require canonical byte-for-byte form."""
     root = cast(
         _ManifestWire,
@@ -435,3 +682,39 @@ def read_manifest(data: bytes) -> RunManifest:
     if canonical_manifest_bytes(manifest) != data:
         raise ManifestFormatError("manifest bytes are valid JSON but not canonical")
     return manifest
+
+
+def read_manifest_v2(data: bytes) -> RunManifestV2:
+    root = cast(
+        _ManifestWire,
+        _require_exact_keys(
+            _strict_json_loads(data),
+            frozenset({"lineage_sha256", "manifest_schema_version", "run_id", "spec"}),
+            field="manifest",
+        ),
+    )
+    try:
+        manifest = RunManifestV2(
+            manifest_schema_version=root["manifest_schema_version"],
+            run_id=RunId(root["run_id"]),
+            lineage_sha256=Sha256Digest(root["lineage_sha256"]),
+            spec=_parse_lineage_v2(root["spec"]),
+        )
+    except RunContractError as exc:
+        raise ManifestFormatError(str(exc)) from exc
+    if canonical_manifest_bytes(manifest) != data:
+        raise ManifestFormatError("manifest bytes are valid JSON but not canonical")
+    return manifest
+
+
+def read_manifest(data: bytes) -> RunManifest | RunManifestV2:
+    root = _require_exact_keys(
+        _strict_json_loads(data),
+        frozenset({"lineage_sha256", "manifest_schema_version", "run_id", "spec"}),
+        field="manifest",
+    )
+    if root["manifest_schema_version"] == 1:
+        return read_manifest_v1(data)
+    if root["manifest_schema_version"] == 2:
+        return read_manifest_v2(data)
+    raise ManifestFormatError("manifest_schema_version is unsupported")

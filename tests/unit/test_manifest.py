@@ -176,6 +176,7 @@ def test_manifest_round_trip_is_strict_and_transitively_immutable() -> None:
     parsed = read_manifest(GOLDEN_MANIFEST)
 
     assert canonical_manifest_bytes(parsed) == GOLDEN_MANIFEST
+    assert type(parsed) is _manifest_model.RunManifest
     with pytest.raises(FrozenInstanceError):
         parsed.spec.runtime.ea_version = "changed"  # type: ignore[misc]
 
