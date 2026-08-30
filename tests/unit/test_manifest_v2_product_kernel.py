@@ -231,6 +231,37 @@ def test_installed_record_rejects_a_symlinked_parent_inside_the_distribution(
         _installed_file_rows(Distribution())  # type: ignore[arg-type]
 
 
+def test_installed_record_does_not_follow_a_final_file_swapped_after_lstat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "payload"
+    target.write_bytes(b"safe")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"not-recorded")
+
+    class Distribution:
+        files = ("payload",)
+
+        def locate_file(self, value: object) -> Path:
+            return tmp_path / str(value)
+
+    original_lstat = os.lstat
+    target_checks = 0
+
+    def swap_after_lstat(path: os.PathLike[str] | str) -> os.stat_result:
+        nonlocal target_checks
+        result = original_lstat(path)
+        if Path(path) == target:
+            target_checks += 1
+            if target_checks == 2:
+                target.unlink()
+                target.symlink_to(outside)
+        return result
+
+    monkeypatch.setattr(os, "lstat", swap_after_lstat)
+    assert _installed_file_rows(Distribution()) == (("payload", b"safe"),)  # type: ignore[arg-type]
+
+
 def _product_inputs() -> tuple[
     LineageSpecV2, InstrumentExecutionSpecSet, ExecutionPolicyRef, Phase1RiskPolicy
 ]:

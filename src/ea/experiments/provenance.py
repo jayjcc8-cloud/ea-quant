@@ -18,6 +18,7 @@ import sysconfig
 import types
 import unicodedata
 import urllib.parse
+from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -423,35 +424,101 @@ def _installed_file_rows(
     files = distribution.files
     if files is None:
         raise ProvenanceError("installed distribution has no RECORD files")
+    root_fd: int | None = None
     rows: list[tuple[str, bytes]] = []
-    for record in files:
-        raw = str(record)
-        if raw == _GENERATED_CONSOLE_SCRIPT_RECORD_PATH:
-            continue
-        parts = raw.split("/")
-        if (
-            raw != unicodedata.normalize("NFC", raw)
-            or "\\" in raw
-            or raw.startswith("/")
-            or any(part in {"", ".", ".."} for part in parts)
-        ):
-            raise ProvenanceError("installed RECORD path is not canonical POSIX")
-        target = Path(str(distribution.locate_file(record)))
-        try:
-            root = Path(str(distribution.locate_file(""))).resolve(strict=True)
+    try:
+        root_path = Path(str(distribution.locate_file("")))
+        root = root_path.resolve(strict=True)
+        if root_path.is_symlink() or not root.is_dir():
+            raise ProvenanceError("installed distribution root is not a real directory")
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        root_stat = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise ProvenanceError("installed distribution root is not a directory")
+        for record in files:
+            raw = str(record)
+            if raw == _GENERATED_CONSOLE_SCRIPT_RECORD_PATH:
+                continue
+            parts = raw.split("/")
+            if (
+                raw != unicodedata.normalize("NFC", raw)
+                or "\\" in raw
+                or raw.startswith("/")
+                or any(part in {"", ".", ".."} for part in parts)
+            ):
+                raise ProvenanceError("installed RECORD path is not canonical POSIX")
+            target = Path(str(distribution.locate_file(record)))
             if target != root.joinpath(*parts):
                 raise ProvenanceError("installed RECORD path escaped its distribution root")
-            current = root
-            for index, part in enumerate(parts):
-                current = current / part
-                mode = os.lstat(current).st_mode
-                if stat.S_ISLNK(mode) or (index < len(parts) - 1 and not stat.S_ISDIR(mode)):
-                    raise ProvenanceError("installed RECORD path contains an unsafe component")
-            if not stat.S_ISREG(os.lstat(target).st_mode):
-                raise ProvenanceError("installed RECORD file is not contained regular data")
-        except OSError as exc:
-            raise ProvenanceError("installed distribution file cannot be resolved") from exc
-        rows.append((raw, target.read_bytes()))
+            parent_fd = root_fd
+            opened: list[tuple[int, str, os.stat_result, int]] = []
+            file_fd: int | None = None
+            try:
+                for part in parts[:-1]:
+                    named = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
+                    child_fd = os.open(
+                        part,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=parent_fd,
+                    )
+                    child_stat = os.fstat(child_fd)
+                    if (
+                        not stat.S_ISDIR(named.st_mode)
+                        or not stat.S_ISDIR(child_stat.st_mode)
+                        or (named.st_dev, named.st_ino) != (child_stat.st_dev, child_stat.st_ino)
+                    ):
+                        os.close(child_fd)
+                        raise ProvenanceError("installed RECORD path contains an unsafe component")
+                    opened.append((parent_fd, part, child_stat, child_fd))
+                    parent_fd = child_fd
+                name = parts[-1]
+                named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                file_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent_fd,
+                )
+                file_stat = os.fstat(file_fd)
+                if (
+                    not stat.S_ISREG(named.st_mode)
+                    or not stat.S_ISREG(file_stat.st_mode)
+                    or (named.st_dev, named.st_ino) != (file_stat.st_dev, file_stat.st_ino)
+                ):
+                    raise ProvenanceError("installed RECORD file is not contained regular data")
+                chunks: list[bytes] = []
+                while chunk := os.read(file_fd, 65536):
+                    chunks.append(chunk)
+                after = os.fstat(file_fd)
+                if (after.st_dev, after.st_ino, after.st_size) != (
+                    file_stat.st_dev,
+                    file_stat.st_ino,
+                    file_stat.st_size,
+                ):
+                    raise ProvenanceError("installed RECORD file changed while being read")
+                for directory_fd, component, component_stat, _ in opened:
+                    current = os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) != (
+                        component_stat.st_dev,
+                        component_stat.st_ino,
+                    ):
+                        raise ProvenanceError("installed RECORD parent changed while being read")
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (file_stat.st_dev, file_stat.st_ino):
+                    raise ProvenanceError("installed RECORD file changed while being read")
+                rows.append((raw, b"".join(chunks)))
+            finally:
+                if file_fd is not None:
+                    with suppress(OSError):
+                        os.close(file_fd)
+                for _, _, _, child_fd in reversed(opened):
+                    with suppress(OSError):
+                        os.close(child_fd)
+    except OSError as exc:
+        raise ProvenanceError("installed distribution file cannot be resolved") from exc
+    finally:
+        if root_fd is not None:
+            with suppress(OSError):
+                os.close(root_fd)
     if not rows or len({name for name, _ in rows}) != len(rows):
         raise ProvenanceError("installed RECORD files are empty or duplicate")
     return tuple(sorted(rows))
