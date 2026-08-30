@@ -495,7 +495,11 @@ class LineageSpecV2:
     lineage_schema_version: int = 2
 
     def __post_init__(self) -> None:
-        if self.lineage_schema_version != 2 or type(self.configuration) is not ConfigurationSpec:
+        if (
+            type(self.lineage_schema_version) is not int
+            or self.lineage_schema_version != 2
+            or type(self.configuration) is not ConfigurationSpec
+        ):
             raise ManifestError("v2 lineage schema or configuration is invalid")
         if type(self.data) is not DataFingerprint or type(self.replay_window) is not ReplayWindow:
             raise ManifestError("v2 lineage data or replay window is invalid")
@@ -556,7 +560,11 @@ class RunManifestV2:
     manifest_schema_version: int = 2
 
     def __post_init__(self) -> None:
-        if self.manifest_schema_version != 2 or type(self.run_id) is not RunId:
+        if (
+            type(self.manifest_schema_version) is not int
+            or self.manifest_schema_version != 2
+            or type(self.run_id) is not RunId
+        ):
             raise ManifestError("v2 manifest identity is invalid")
         if type(self.lineage_sha256) is not Sha256Digest or type(self.spec) is not LineageSpecV2:
             raise ManifestError("v2 manifest lineage is invalid")

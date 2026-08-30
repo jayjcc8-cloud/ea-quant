@@ -45,6 +45,7 @@ from ea.experiments._manifest_model import (
     InstalledRuntimeSpecV2,
     LineageInputsV2,
     LineageSpecV2,
+    ManifestError,
     NormalizedConfiguration,
     build_lineage_spec_v2,
     build_manifest_v2,
@@ -122,6 +123,32 @@ def test_manifest_v2_binds_installed_runtime_scenario_and_funding() -> None:
     assert b'"scenario_sha256":"' + b"44" * 32 + b'"' in encoded
     assert read_manifest(encoded) == manifest
     assert read_manifest_v2(encoded) == manifest
+
+
+@pytest.mark.parametrize("field", ("manifest_schema_version", "lineage_schema_version"))
+def test_v2_schema_discriminators_reject_float_directly(field: str) -> None:
+    spec, _, _, _ = _product_inputs()
+    manifest = build_manifest_v2(spec, RUN_ID)
+
+    with pytest.raises(ManifestError):
+        if field == "manifest_schema_version":
+            replace(manifest, manifest_schema_version=2.0)
+        else:
+            replace(spec, lineage_schema_version=2.0)
+
+
+@pytest.mark.parametrize("field", ("manifest_schema_version", "lineage_schema_version"))
+def test_v2_schema_discriminators_reject_float_when_persisted(field: str) -> None:
+    manifest = build_manifest_v2(_product_inputs()[0], RUN_ID)
+    document = json.loads(canonical_manifest_bytes(manifest))
+    if field == "manifest_schema_version":
+        document[field] = 2.0
+    else:
+        document["spec"][field] = 2.0
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(ManifestError):
+        read_manifest_v2(encoded)
 
 
 def test_installed_direct_url_accepts_only_an_absolute_local_wheel() -> None:
