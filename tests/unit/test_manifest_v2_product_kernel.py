@@ -15,7 +15,12 @@ from ea.composition.product_kernel import (
     recover_phase1_product_kernel,
 )
 from ea.core.economics import CanonicalDecimal
-from ea.core.execution import InstrumentSpecSetId, SettlementCurrency, instrument_spec_set_digest
+from ea.core.execution import (
+    InstrumentExecutionSpecSet,
+    InstrumentSpecSetId,
+    SettlementCurrency,
+    instrument_spec_set_digest,
+)
 from ea.core.execution_messages import ExecutionPolicyId, ExecutionPolicyRef
 from ea.core.initial_funding import InitialFundingSpec
 from ea.core.risk import Phase1RiskPolicy, RiskPolicyId, create_phase1_risk_policy
@@ -25,12 +30,13 @@ from ea.experiments._manifest_model import (
     EffectiveParameter,
     InstalledRuntimeSpecV2,
     LineageInputsV2,
+    LineageSpecV2,
     NormalizedConfiguration,
     build_lineage_spec_v2,
     build_manifest_v2,
     canonical_manifest_bytes,
 )
-from ea.experiments.manifest import read_manifest, read_manifest_v2
+from ea.experiments.manifest import RunManifestV2, read_manifest, read_manifest_v2
 from ea.experiments.provenance import ProvenanceError, _validate_installed_direct_url
 from ea.experiments.store import LocalResultStore
 from unit.test_portfolio_ledger import RUN_ID, _spec_set
@@ -102,7 +108,9 @@ def test_installed_direct_url_accepts_only_an_absolute_local_wheel() -> None:
             _validate_installed_direct_url(Distribution('{"archive_info":{},"url":"' + url + '"}'))  # type: ignore[arg-type]
 
 
-def _product_inputs() -> tuple[object, object, ExecutionPolicyRef, Phase1RiskPolicy]:
+def _product_inputs() -> tuple[
+    LineageSpecV2, InstrumentExecutionSpecSet, ExecutionPolicyRef, Phase1RiskPolicy
+]:
     spec_set = _spec_set()
     funding = InitialFundingSpec(
         spec_set.identifier,
@@ -157,12 +165,10 @@ def test_product_kernel_prepares_and_recovers_the_funded_prefix(tmp_path: Path) 
         execution_policy=execution,
         risk_policy=risk,
     )
-    manifest = read_manifest(
-        first.binding.manifest_sha256
-        and (tmp_path / "runs" / RUN_ID.value / "manifest.json").read_bytes()
-    )
-    first._handoff.journal.close()  # type: ignore[attr-defined]
-    first._handoff.retire()  # type: ignore[attr-defined]
+    manifest = read_manifest((tmp_path / "runs" / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    first._handoff.journal.close()
+    first._handoff.retire()
     recovered = recover_phase1_product_kernel(
         store=LocalResultStore(root),
         expected_manifest=manifest,
@@ -178,10 +184,10 @@ def test_product_kernel_prepares_and_recovers_the_funded_prefix(tmp_path: Path) 
 def test_product_rejects_v1_manifest_recovery() -> None:
     with pytest.raises(ProductKernelError) as error:
         recover_phase1_product_kernel(
-            store=object(),
-            expected_manifest=object(),
-            spec_set=object(),
-            execution_policy=object(),
-            risk_policy=object(),
-        )  # type: ignore[arg-type]
+            store=None,  # type: ignore[arg-type]
+            expected_manifest=None,  # type: ignore[arg-type]
+            spec_set=None,  # type: ignore[arg-type]
+            execution_policy=None,  # type: ignore[arg-type]
+            risk_policy=None,  # type: ignore[arg-type]
+        )
     assert error.value.code is ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_MANIFEST_V1
