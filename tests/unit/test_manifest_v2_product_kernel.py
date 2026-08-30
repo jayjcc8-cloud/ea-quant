@@ -21,6 +21,7 @@ from ea.composition.product_kernel import (
     recover_phase1_product_kernel,
 )
 from ea.core.audit import (
+    AuditContractError,
     AuditRecordKind,
     AuditSubjectKind,
     audit_chain_head,
@@ -35,6 +36,7 @@ from ea.core.execution import (
 )
 from ea.core.execution_messages import ExecutionPolicyId, ExecutionPolicyRef
 from ea.core.initial_funding import InitialFundingSpec
+from ea.core.outcomes import OutcomeCode
 from ea.core.risk import Phase1RiskPolicy, RiskPolicyId, create_phase1_risk_policy
 from ea.core.run import DataFingerprint, ReplayWindow, RunId, Sha256Digest
 from ea.experiments._manifest_model import (
@@ -48,6 +50,8 @@ from ea.experiments._manifest_model import (
     build_manifest_v2,
     canonical_manifest_bytes,
 )
+from ea.experiments.audit import AUDIT_JOURNAL_PREAMBLE
+from ea.experiments.binding import BoundAuditPort
 from ea.experiments.manifest import RunManifestV2, read_manifest, read_manifest_v2
 from ea.experiments.provenance import (
     ProvenanceError,
@@ -1110,3 +1114,62 @@ def test_terminal_materialization_failure_is_closed_and_releases_its_lease(
             risk_policy=risk,
         )
     assert retry.value.code is ProductKernelFailureCode.INTEGRITY_TERMINAL_DRIFT
+
+
+def test_record_count_one_recovery_append_audit_contract_error_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    journal_path = root / RUN_ID.value / "audit" / "audit-v1.journal"
+    first_frame = LocalResultStore._first_audit_frame(first.binding)
+    with journal_path.open("r+b", buffering=0) as journal:
+        journal.truncate(len(AUDIT_JOURNAL_PREAMBLE) + len(first_frame))
+        journal.flush()
+        os.fsync(journal.fileno())
+    durable_prefix = journal_path.read_bytes()
+
+    original_append = BoundAuditPort.append
+
+    def fail_funding_append(self: BoundAuditPort, **kwargs: object) -> object:
+        if kwargs["record_kind"] is AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME:
+            raise AuditContractError(
+                OutcomeCode.DURABILITY_AUDIT_APPEND_FAILED,
+                "injected funding audit append failure",
+            )
+        return original_append(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(BoundAuditPort, "append", fail_funding_append)
+    with pytest.raises(ProductKernelError) as error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
+    assert type(error.value.__cause__) is AuditContractError
+    assert journal_path.read_bytes() == durable_prefix
+
+    monkeypatch.setattr(BoundAuditPort, "append", original_append)
+    recovered = recover_phase1_product_kernel(
+        store=LocalResultStore(root),
+        expected_manifest=manifest,
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    assert recovered.funding_outcome == first.funding_outcome

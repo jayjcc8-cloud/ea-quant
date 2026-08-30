@@ -467,7 +467,7 @@ def recover_phase1_product_kernel(
             ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT,
             "recovered risk policy does not match the execution boundary",
         ) from error
-    except (OSError, PortfolioLedgerError, StoreError) as error:
+    except (AuditContractError, OSError, PortfolioLedgerError, StoreError) as error:
         if journal is not None:
             journal.close()
         if prepared is None:
