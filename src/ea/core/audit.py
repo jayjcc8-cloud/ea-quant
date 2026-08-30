@@ -68,6 +68,7 @@ class AuditRecordKind(StrEnum):
     """Closed version-one journal record kinds in canonical rank order."""
 
     RUN_PREPARED = "run.prepared"
+    PORTFOLIO_INITIAL_FUNDING_OUTCOME = "portfolio.initial_funding_outcome"
     MATCHER_DISPATCH_BATCH = "matcher.dispatch_batch"
     EXECUTION_FACT_PROCESSING_OUTCOME = "execution.fact_processing_outcome"
     PORTFOLIO_LEDGER_HANDOFF_OUTCOME = "portfolio.ledger_handoff_outcome"
@@ -85,6 +86,7 @@ class AuditSubjectKind(StrEnum):
     """Closed version-one subjects bound by audit records."""
 
     RUN_MANIFEST = "run_manifest"
+    INITIAL_FUNDING_OUTCOME = "initial_funding_outcome"
     HISTORICAL_MATCHER_DISPATCH_BATCH = "historical_matcher_dispatch_batch"
     EXECUTION_FACT_PROCESSING_OUTCOME = "execution_fact_processing_outcome"
     PORTFOLIO_LEDGER_HANDOFF_OUTCOME = "portfolio_ledger_handoff_outcome"
@@ -100,6 +102,7 @@ class AuditSubjectKind(StrEnum):
 
 AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
     AuditRecordKind.RUN_PREPARED: AuditSubjectKind.RUN_MANIFEST,
+    AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME: AuditSubjectKind.INITIAL_FUNDING_OUTCOME,
     AuditRecordKind.MATCHER_DISPATCH_BATCH: AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
     AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME: (
         AuditSubjectKind.EXECUTION_FACT_PROCESSING_OUTCOME
@@ -137,6 +140,7 @@ _LARGE_PAYLOAD_KINDS = frozenset(
 
 _AUDIT_PAYLOAD_SCHEMA_BY_KIND: dict[AuditRecordKind, str] = {
     AuditRecordKind.RUN_PREPARED: "ea.audit-run-prepared.v1",
+    AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME: "ea.initial-funding-outcome.v1",
     AuditRecordKind.MATCHER_DISPATCH_BATCH: "ea.audit-matcher-dispatch-batch.v1",
     AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME: "ea.ledger-handoff-outcome.v1",
     AuditRecordKind.RISK_PORTFOLIO_REFRESH: "ea.portfolio-risk-refresh.v1",
@@ -153,6 +157,23 @@ _AUDIT_PAYLOAD_SCHEMA_BY_KIND: dict[AuditRecordKind, str] = {
 _AUDIT_PAYLOAD_FIELDS_BY_KIND: dict[AuditRecordKind, frozenset[str]] = {
     AuditRecordKind.RUN_PREPARED: frozenset(
         {"schema", "canonicalization", "run_id", "lineage_sha256", "manifest_sha256"}
+    ),
+    AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME: frozenset(
+        {
+            "after_snapshot_version",
+            "before_snapshot_version",
+            "canonicalization",
+            "conflict_kind",
+            "existing_transaction_sha256",
+            "manifest_sha256",
+            "prepared_audit_acknowledgement_sha256",
+            "result",
+            "run_id",
+            "schema",
+            "snapshot_sha256",
+            "submitted_funding_spec_sha256",
+            "transaction_sha256",
+        }
     ),
     AuditRecordKind.MATCHER_DISPATCH_BATCH: frozenset(
         {
@@ -701,6 +722,50 @@ def _require_audit_owned_payload_values(
     if record_kind is AuditRecordKind.RUN_PREPARED:
         _require_json_digest(document, "lineage_sha256")
         _require_json_digest(document, "manifest_sha256")
+    elif record_kind is AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME:
+        for field in (
+            "manifest_sha256",
+            "prepared_audit_acknowledgement_sha256",
+            "snapshot_sha256",
+            "submitted_funding_spec_sha256",
+        ):
+            _require_json_digest(document, field)
+        versions = {
+            field: _require_json_uint64(document, field, positive=False)
+            for field in ("before_snapshot_version", "after_snapshot_version")
+        }
+        result = _require_json_text(document, "result")
+        transaction_sha256 = document["transaction_sha256"]
+        existing_transaction_sha256 = document["existing_transaction_sha256"]
+        conflict_kind = document["conflict_kind"]
+        if result == "applied":
+            if (
+                type(transaction_sha256) is not str
+                or existing_transaction_sha256 is not None
+                or conflict_kind is not None
+                or versions["after_snapshot_version"] != versions["before_snapshot_version"] + 1
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "funding outcome applied fields conflict")
+            _require_json_digest(document, "transaction_sha256")
+        elif result == "conflict":
+            if (
+                transaction_sha256 is not None
+                or type(existing_transaction_sha256) is not str
+                or conflict_kind
+                not in {
+                    "entry_id_occupied",
+                    "funding_binding_conflict",
+                    "manifest_binding_conflict",
+                    "audit_predecessor_conflict",
+                }
+                or versions["after_snapshot_version"] != versions["before_snapshot_version"]
+            ):
+                raise _fail(OutcomeCode.CONFLICTING_ID, "funding outcome conflict fields conflict")
+            _require_json_digest(document, "existing_transaction_sha256")
+        else:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID, "funding outcome result is outside its closed enum"
+            )
     elif record_kind is AuditRecordKind.MATCHER_DISPATCH_BATCH:
         if _require_json_text(document, "dispatch_kind") not in {"market", "end_of_run"}:
             raise _fail(OutcomeCode.CONFLICTING_ID, "dispatch_kind is outside its closed enum")
@@ -1392,9 +1457,14 @@ def require_canonical_audit_payload(
         expected_fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[record_kind]
         if set(document) != expected_fields:
             raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload fields conflict with its kind")
+        expected_canonicalization = (
+            "ea.initial-funding-outcome.v1"
+            if record_kind is AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME
+            else AUDIT_CANONICALIZATION
+        )
         if (
             document.get("schema") != _AUDIT_PAYLOAD_SCHEMA_BY_KIND[record_kind]
-            or document.get("canonicalization") != AUDIT_CANONICALIZATION
+            or document.get("canonicalization") != expected_canonicalization
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload schema is invalid")
         _require_audit_owned_payload_values(record_kind, document)
@@ -1417,6 +1487,10 @@ def audit_subject_digest(
     if record_kind is AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
         return Sha256Digest(
             sha256(EXECUTION_FACT_PROCESSING_OUTCOME_DIGEST_DOMAIN + canonical_payload).hexdigest()
+        )
+    if record_kind is AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME:
+        return Sha256Digest(
+            sha256(b"ea.initial-funding-outcome.v1\0" + canonical_payload).hexdigest()
         )
     domain = _SUBJECT_DOMAIN_BY_KIND[record_kind]
     return Sha256Digest(
