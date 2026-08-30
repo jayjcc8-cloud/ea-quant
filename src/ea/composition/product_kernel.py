@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Callable
 from enum import StrEnum
 from functools import partial
 from threading import Lock
 from typing import Any, final
-from weakref import WeakKeyDictionary
 
 from ea.composition.frontier import create_acknowledged_lifecycle_frontier
 from ea.core.audit import (
@@ -141,7 +141,7 @@ class Phase1ProductKernel:
         object.__setattr__(self, "_funding_outcome", funding)
         object.__setattr__(self, "_portfolio_snapshot", snapshot)
         object.__setattr__(self, "_risk_state", risk)
-        _HANDOFFS[self] = handoff
+        _register_handoff(self, handoff)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("Phase1ProductKernel is immutable")
@@ -163,17 +163,32 @@ class Phase1ProductKernel:
         return self._risk_state
 
 
-_HANDOFFS: WeakKeyDictionary[Phase1ProductKernel, _Handoff] = WeakKeyDictionary()
+def _handoff_registry() -> tuple[
+    Callable[[Phase1ProductKernel, _Handoff], None],
+    Callable[[Phase1ProductKernel], _Handoff],
+    Callable[[Phase1ProductKernel], None],
+]:
+    registry: weakref.WeakKeyDictionary[Phase1ProductKernel, _Handoff] = weakref.WeakKeyDictionary()
+
+    def register(kernel: Phase1ProductKernel, handoff: _Handoff) -> None:
+        registry[kernel] = handoff
+
+    def consume(kernel: Phase1ProductKernel) -> _Handoff:
+        handoff = registry.get(kernel)
+        if handoff is None:
+            raise ProductKernelError(
+                ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY,
+                "funded handoff is unavailable",
+            )
+        return handoff
+
+    def retire(kernel: Phase1ProductKernel) -> None:
+        registry.pop(kernel, None)
+
+    return register, consume, retire
 
 
-def _handoff_for(kernel: Phase1ProductKernel) -> _Handoff:
-    handoff = _HANDOFFS.get(kernel)
-    if handoff is None:
-        raise ProductKernelError(
-            ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY,
-            "funded handoff is unavailable",
-        )
-    return handoff
+_register_handoff, _handoff_for, _retire_handoff = _handoff_registry()
 
 
 def _consume_phase1_product_kernel(
@@ -198,9 +213,11 @@ def _consume_phase1_product_kernel(
             handoff.state = "FAILED"
         handoff.journal.close()
         handoff.retire()
+        _retire_handoff(kernel)
         raise
     with handoff.lock:
         handoff.state = "CONSUMED"
+    _retire_handoff(kernel)
     return result
 
 
@@ -395,34 +412,52 @@ def recover_phase1_product_kernel(
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY, "unknown recovery"
         )
-    prepared = store.recover_incomplete_attempt(verified)
-    journal = reopen_posix_audit_journal(prepared.audit)
+    prepared = None
+    journal = None
     try:
+        prepared = store.recover_incomplete_attempt(verified)
+        journal = reopen_posix_audit_journal(prepared.audit)
         return _make_kernel(
             store, prepared, expected_manifest, spec_set, execution_policy, risk_policy, journal
         )
     except InitialFundingError as error:
-        journal.close()
-        store._retire_product_attempt(prepared.audit)
+        if journal is not None:
+            journal.close()
+        if prepared is None:
+            store._retire_verified_product_recovery(verified)
+        else:
+            store._retire_product_attempt(prepared.audit)
         raise ProductKernelError(
             ProductKernelFailureCode.FUNDING_SPEC_MISMATCH,
             "recovered funding does not match the supplied specification set",
         ) from error
     except RiskAuthorityError as error:
-        journal.close()
-        store._retire_product_attempt(prepared.audit)
+        if journal is not None:
+            journal.close()
+        if prepared is None:
+            store._retire_verified_product_recovery(verified)
+        else:
+            store._retire_product_attempt(prepared.audit)
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_RISK_STATE_DRIFT,
             "recovered risk policy does not match the execution boundary",
         ) from error
-    except (PortfolioLedgerError, StoreError) as error:
-        journal.close()
-        store._retire_product_attempt(prepared.audit)
+    except (OSError, PortfolioLedgerError, StoreError) as error:
+        if journal is not None:
+            journal.close()
+        if prepared is None:
+            store._retire_verified_product_recovery(verified)
+        else:
+            store._retire_product_attempt(prepared.audit)
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT,
             "recovery product bindings conflict",
         ) from error
     except BaseException:
-        journal.close()
-        store._retire_product_attempt(prepared.audit)
+        if journal is not None:
+            journal.close()
+        if prepared is None:
+            store._retire_verified_product_recovery(verified)
+        else:
+            store._retire_product_attempt(prepared.audit)
         raise

@@ -683,7 +683,9 @@ class LocalResultStore:
             frame = LocalResultStore._first_audit_frame(binding)
             stat_result = os.fstat(descriptor)
             minimum_size = len(AUDIT_JOURNAL_PREAMBLE) + len(frame)
-            if not stat.S_ISREG(stat_result.st_mode) or stat_result.st_size < minimum_size:
+            if not stat.S_ISREG(stat_result.st_mode):
+                raise CorruptAuditRecoveryError("recovery audit journal is not a regular file")
+            if stat_result.st_size < minimum_size:
                 raise IncompleteAuditRecoveryError(
                     "recovery audit lacks a durable run-prepared frame"
                 )
@@ -694,6 +696,10 @@ class LocalResultStore:
                 raise CorruptAuditRecoveryError("recovery audit first frame is invalid")
         except IncompleteAuditRecoveryError:
             raise
+        except FileNotFoundError as error:
+            raise IncompleteAuditRecoveryError(
+                "recovery audit lacks a durable run-prepared frame"
+            ) from error
         except OSError as error:
             raise StoreError("recovery audit first frame cannot be verified") from error
         finally:
@@ -1164,6 +1170,24 @@ class LocalResultStore:
             os.close(record.writer_lock_fd)
         except OSError as error:
             raise StoreError("product retirement could not release the writer lease") from error
+
+    def _retire_verified_product_recovery(
+        self, verified: VerifiedIncompleteRecoveryBinding
+    ) -> None:
+        """Release an unmaterialized V2 product-recovery classification."""
+        if type(verified) is not VerifiedIncompleteRecoveryBinding or verified._store is not self:
+            raise StoreError("product recovery retirement requires its exact classification")
+        authority = verified._authority
+        with self._registry_lock:
+            record = self._attempts.pop(authority.attempt_token, None)
+        if record is None or record.authority is not authority:
+            raise StoreError("product recovery classification is stale or foreign")
+        try:
+            os.close(record.writer_lock_fd)
+        except OSError as error:
+            raise StoreError(
+                "product recovery retirement could not release the writer lease"
+            ) from error
 
     def prepare_product(self, spec: LineageSpecV2, run_id_provider: RunIdProvider) -> PreparedRun:
         if type(spec) is not LineageSpecV2:

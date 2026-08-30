@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import weakref
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -407,6 +408,83 @@ def test_product_recovery_rejects_an_empty_or_header_only_audit_prefix(
                 risk_policy=risk,
             )
         assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_INCOMPLETE
+
+
+def test_product_recovery_maps_a_missing_journal_to_incomplete(tmp_path: Path) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    (root / RUN_ID.value / "audit" / "audit-v1.journal").unlink()
+
+    with pytest.raises(ProductKernelError) as error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_INCOMPLETE
+
+
+def test_product_recovery_releases_lease_when_second_reopen_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec, spec_set, execution, risk = _product_inputs()
+    root = tmp_path / "runs"
+    root.mkdir()
+    first = prepare_phase1_product_kernel(
+        store=LocalResultStore(root),
+        spec=spec,
+        run_id_provider=lambda: UUID(RUN_ID.value),
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    manifest = read_manifest((root / RUN_ID.value / "manifest.json").read_bytes())
+    assert type(manifest) is RunManifestV2
+    _release_for_recovery(first)
+    original = product_kernel.reopen_posix_audit_journal  # type: ignore[attr-defined]
+
+    def fail_reopen(_binding: object) -> object:
+        raise OSError("injected second reopen failure")
+
+    monkeypatch.setattr(product_kernel, "reopen_posix_audit_journal", fail_reopen)
+    with pytest.raises(ProductKernelError) as error:
+        recover_phase1_product_kernel(
+            store=LocalResultStore(root),
+            expected_manifest=manifest,
+            spec_set=spec_set,
+            execution_policy=execution,
+            risk_policy=risk,
+        )
+    assert error.value.code is ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
+    monkeypatch.setattr(product_kernel, "reopen_posix_audit_journal", original)
+    recovered = recover_phase1_product_kernel(
+        store=LocalResultStore(root),
+        expected_manifest=manifest,
+        spec_set=spec_set,
+        execution_policy=execution,
+        risk_policy=risk,
+    )
+    assert recovered.funding_outcome == first.funding_outcome
+
+
+def test_product_kernel_does_not_publish_a_handoff_registry() -> None:
+    assert not any(
+        isinstance(value, weakref.WeakKeyDictionary) for value in vars(product_kernel).values()
+    )
 
 
 def test_product_recovery_rejects_non_tail_audit_corruption_without_a_kernel(
