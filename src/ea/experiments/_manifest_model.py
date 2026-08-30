@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
 
+from ea.core.execution_messages import ExecutionPolicyRef
+from ea.core.initial_funding import InitialFundingSpec
+from ea.core.risk import Phase1RiskPolicy, RiskPolicyId, phase1_risk_policy_digest
 from ea.core.run import (
     DataFingerprint,
     ReplayWindow,
@@ -21,6 +24,7 @@ from ea.core.run import (
 from ea.experiments._manifest_wire import (
     CONFIG_DOMAIN,
     LINEAGE_DOMAIN,
+    LINEAGE_V2_DOMAIN,
     LOCK_DOMAIN,
     digest,
     normalized_configuration_bytes,
@@ -325,6 +329,47 @@ class RuntimeSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class InstalledRuntimeSpecV2:
+    """Installed-distribution runtime provenance for new funded product runs."""
+
+    ea_distribution: DistributionIdentity
+    ea_installed_files_sha256: Sha256Digest
+    python_implementation: str
+    python_version: str
+    python_cache_tag: str
+    sys_platform: str
+    platform_tag: str
+    distributions: tuple[DistributionIdentity, ...]
+    numeric_policy: str = _NUMERIC_POLICY
+    provenance_kind: str = "installed_distribution"
+
+    def __post_init__(self) -> None:
+        if type(self.ea_distribution) is not DistributionIdentity:
+            raise ManifestError("installed runtime ea distribution is invalid")
+        if self.ea_distribution.name != "ea-quant":
+            raise ManifestError("installed runtime requires the ea-quant distribution")
+        if type(self.ea_installed_files_sha256) is not Sha256Digest:
+            raise ManifestError("installed runtime files digest is invalid")
+        for field in (
+            "python_implementation",
+            "python_version",
+            "python_cache_tag",
+            "sys_platform",
+            "platform_tag",
+        ):
+            _require_runtime_token(getattr(self, field), field=field)
+        distributions = _validated_distributions(self.distributions)
+        if self.ea_distribution not in distributions:
+            raise ManifestError("installed runtime distribution inventory omits ea-quant")
+        if (
+            self.numeric_policy != _NUMERIC_POLICY
+            or self.provenance_kind != "installed_distribution"
+        ):
+            raise ManifestError("installed runtime provenance vocabulary is unsupported")
+        object.__setattr__(self, "distributions", distributions)
+
+
+@dataclass(frozen=True, slots=True)
 class RandomnessSpec:
     master_seed: int
     stream_labels: tuple[str, ...]
@@ -385,6 +430,102 @@ class LineageSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class LineageInputsV2:
+    configuration: NormalizedConfiguration
+    data: DataFingerprint
+    replay_window: ReplayWindow
+    parameters: tuple[EffectiveParameter, ...]
+    runtime: InstalledRuntimeSpecV2
+    randomness_seed: int
+    stream_labels: tuple[str, ...]
+    scenario_sha256: Sha256Digest
+    initial_funding: InitialFundingSpec
+    execution_policy: ExecutionPolicyRef
+    risk_policy: Phase1RiskPolicy
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.configuration) is not NormalizedConfiguration
+            or type(self.data) is not DataFingerprint
+        ):
+            raise ManifestError("v2 lineage configuration and data are invalid")
+        if (
+            type(self.replay_window) is not ReplayWindow
+            or type(self.runtime) is not InstalledRuntimeSpecV2
+        ):
+            raise ManifestError("v2 lineage replay window or runtime is invalid")
+        if type(self.parameters) is not tuple or any(
+            type(item) is not EffectiveParameter for item in self.parameters
+        ):
+            raise ManifestError("v2 lineage parameters are invalid")
+        if type(self.randomness_seed) is not int or not 0 <= self.randomness_seed <= _MAX_UINT64:
+            raise ManifestError("v2 lineage randomness seed is invalid")
+        if type(self.stream_labels) is not tuple:
+            raise ManifestError("v2 lineage stream labels are invalid")
+        if (
+            type(self.scenario_sha256) is not Sha256Digest
+            or type(self.initial_funding) is not InitialFundingSpec
+            or type(self.execution_policy) is not ExecutionPolicyRef
+            or type(self.risk_policy) is not Phase1RiskPolicy
+        ):
+            raise ManifestError("v2 lineage scenario, funding, or risk is invalid")
+        if (
+            self.risk_policy.execution_policy != self.execution_policy
+            or self.risk_policy.instrument_spec_set_id
+            != self.initial_funding.instrument_spec_set_id
+            or self.risk_policy.instrument_spec_set_sha256
+            != self.initial_funding.instrument_spec_set_sha256
+        ):
+            raise ManifestError("v2 lineage risk policy does not match its funding boundary")
+
+
+@dataclass(frozen=True, slots=True)
+class LineageSpecV2:
+    configuration: ConfigurationSpec
+    data: DataFingerprint
+    replay_window: ReplayWindow
+    parameters: tuple[EffectiveParameter, ...]
+    runtime: InstalledRuntimeSpecV2
+    randomness: RandomnessSpec
+    scenario_sha256: Sha256Digest
+    initial_funding: InitialFundingSpec
+    execution_policy: ExecutionPolicyRef
+    risk_policy_id: RiskPolicyId
+    risk_policy_sha256: Sha256Digest
+    lineage_schema_version: int = 2
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.lineage_schema_version) is not int
+            or self.lineage_schema_version != 2
+            or type(self.configuration) is not ConfigurationSpec
+        ):
+            raise ManifestError("v2 lineage schema or configuration is invalid")
+        if type(self.data) is not DataFingerprint or type(self.replay_window) is not ReplayWindow:
+            raise ManifestError("v2 lineage data or replay window is invalid")
+        if type(self.parameters) is not tuple or any(
+            type(item) is not EffectiveParameter for item in self.parameters
+        ):
+            raise ManifestError("v2 lineage parameters are invalid")
+        names = tuple(item.name for item in self.parameters)
+        if names != tuple(sorted(names)) or len(names) != len(set(names)):
+            raise ManifestError("v2 lineage parameters must be sorted and unique")
+        if (
+            type(self.runtime) is not InstalledRuntimeSpecV2
+            or type(self.randomness) is not RandomnessSpec
+        ):
+            raise ManifestError("v2 lineage runtime or randomness is invalid")
+        if (
+            type(self.scenario_sha256) is not Sha256Digest
+            or type(self.initial_funding) is not InitialFundingSpec
+            or type(self.execution_policy) is not ExecutionPolicyRef
+            or type(self.risk_policy_id) is not RiskPolicyId
+            or type(self.risk_policy_sha256) is not Sha256Digest
+        ):
+            raise ManifestError("v2 lineage scenario, funding, or risk is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class RunManifest:
     """Immutable persisted attempt manifest."""
 
@@ -411,17 +552,41 @@ class RunManifest:
         return RunReference(run_id=self.run_id, lineage_sha256=self.lineage_sha256)
 
 
-def canonical_lineage_bytes(spec: LineageSpec) -> bytes:
+@dataclass(frozen=True, slots=True)
+class RunManifestV2:
+    run_id: RunId
+    lineage_sha256: Sha256Digest
+    spec: LineageSpecV2
+    manifest_schema_version: int = 2
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.manifest_schema_version) is not int
+            or self.manifest_schema_version != 2
+            or type(self.run_id) is not RunId
+        ):
+            raise ManifestError("v2 manifest identity is invalid")
+        if type(self.lineage_sha256) is not Sha256Digest or type(self.spec) is not LineageSpecV2:
+            raise ManifestError("v2 manifest lineage is invalid")
+        if self.lineage_sha256 != digest(LINEAGE_V2_DOMAIN, canonical_lineage_bytes(self.spec)):
+            raise ManifestError("v2 lineage digest does not match the canonical specification")
+
+    @property
+    def reference(self) -> RunReference:
+        return RunReference(run_id=self.run_id, lineage_sha256=self.lineage_sha256)
+
+
+def canonical_lineage_bytes(spec: LineageSpec | LineageSpecV2) -> bytes:
     """Return exact canonical bytes for the complete lineage specification."""
-    if type(spec) is not LineageSpec:
-        raise ManifestError("spec must be a LineageSpec")
+    if type(spec) not in {LineageSpec, LineageSpecV2}:
+        raise ManifestError("spec must be a LineageSpec or LineageSpecV2")
     return _canonical_lineage_bytes(spec)
 
 
-def canonical_manifest_bytes(manifest: RunManifest) -> bytes:
+def canonical_manifest_bytes(manifest: RunManifest | RunManifestV2) -> bytes:
     """Return exact persisted manifest bytes with no trailing newline."""
-    if type(manifest) is not RunManifest:
-        raise ManifestError("manifest must be a RunManifest")
+    if type(manifest) not in {RunManifest, RunManifestV2}:
+        raise ManifestError("manifest must be a RunManifest or RunManifestV2")
     return _canonical_manifest_bytes(manifest)
 
 
@@ -467,5 +632,37 @@ def build_manifest(spec: LineageSpec, run_id: RunId) -> RunManifest:
     return RunManifest(
         run_id=run_id,
         lineage_sha256=digest(LINEAGE_DOMAIN, canonical_lineage_bytes(spec)),
+        spec=spec,
+    )
+
+
+def build_lineage_spec_v2(inputs: LineageInputsV2) -> LineageSpecV2:
+    if type(inputs) is not LineageInputsV2:
+        raise ManifestError("inputs must be LineageInputsV2")
+    configuration = ConfigurationSpec(
+        normalized=inputs.configuration,
+        sha256=digest(CONFIG_DOMAIN, normalized_configuration_bytes(inputs.configuration)),
+    )
+    return LineageSpecV2(
+        configuration=configuration,
+        data=inputs.data,
+        replay_window=inputs.replay_window,
+        parameters=tuple(sorted(inputs.parameters, key=lambda item: item.name)),
+        runtime=inputs.runtime,
+        randomness=RandomnessSpec(inputs.randomness_seed, tuple(sorted(inputs.stream_labels))),
+        scenario_sha256=inputs.scenario_sha256,
+        initial_funding=inputs.initial_funding,
+        execution_policy=inputs.execution_policy,
+        risk_policy_id=inputs.risk_policy.policy_id,
+        risk_policy_sha256=phase1_risk_policy_digest(inputs.risk_policy),
+    )
+
+
+def build_manifest_v2(spec: LineageSpecV2, run_id: RunId) -> RunManifestV2:
+    if type(spec) is not LineageSpecV2 or type(run_id) is not RunId:
+        raise ManifestError("v2 manifest inputs are invalid")
+    return RunManifestV2(
+        run_id=run_id,
+        lineage_sha256=digest(LINEAGE_V2_DOMAIN, canonical_lineage_bytes(spec)),
         spec=spec,
     )
