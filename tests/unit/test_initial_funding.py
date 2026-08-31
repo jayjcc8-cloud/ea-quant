@@ -22,7 +22,7 @@ from ea.core.initial_funding import (
 from ea.core.portfolio import CurrencyCommodity, LedgerAccountKind, LedgerPosting
 from ea.core.run import RunId, Sha256Digest
 from ea.portfolio import create_portfolio_ledger
-from unit.test_portfolio_ledger import _spec_set
+from unit.test_portfolio_ledger import RUN_ID, _spec_set
 
 
 def test_initial_funding_spec_has_stable_literal_canonical_bytes() -> None:
@@ -116,3 +116,36 @@ def test_initial_funding_conflict_retains_the_empty_snapshot() -> None:
 
     assert outcome.snapshot is snapshot
     assert b'"result":"conflict"' in canonical_initial_funding_outcome_bytes(outcome)
+
+
+def test_ledger_applies_genesis_once_and_retains_exact_replay() -> None:
+    spec_set = _spec_set()
+    funding = InitialFundingSpec(
+        instrument_spec_set_id=spec_set.identifier,
+        instrument_spec_set_sha256=__import__(
+            "ea.core.execution", fromlist=["instrument_spec_set_digest"]
+        ).instrument_spec_set_digest(spec_set),
+        settlement_currency=SettlementCurrency("USD"),
+        currency_quantum=CanonicalDecimal("0.01"),
+        amount=CanonicalDecimal("1000"),
+    )
+    binding = __import__("ea.core.run", fromlist=["RunBinding", "RunReference"]).RunBinding(
+        __import__("ea.core.run", fromlist=["RunReference"]).RunReference(
+            RUN_ID, Sha256Digest("11" * 32)
+        ),
+        Sha256Digest("22" * 32),
+    )
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+
+    applied = ledger.apply_initial_funding(
+        funding, binding=binding, prepared_acknowledgement=Sha256Digest("33" * 32)
+    )
+    replay = ledger.apply_initial_funding(
+        funding, binding=binding, prepared_acknowledgement=Sha256Digest("33" * 32)
+    )
+
+    assert applied.result.value == "applied"
+    assert applied.transaction is not None
+    assert applied.transaction.ledger_sequence == 1
+    assert applied.snapshot.cash_balances[0].amount == CanonicalDecimal("1000")
+    assert replay is applied
