@@ -11,18 +11,28 @@ import json
 import marshal
 import os
 import re
+import stat
 import subprocess
 import sys
 import sysconfig
 import types
+import unicodedata
 import urllib.parse
+import zipfile
+from base64 import urlsafe_b64decode
+from contextlib import suppress
+from csv import Error as CsvError
+from csv import reader as csv_reader
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 import ea
+from ea.core.run import Sha256Digest
 from ea.experiments.manifest import (
     CodeEvidence,
     DistributionIdentity,
+    InstalledRuntimeSpecV2,
     RuntimeEvidence,
 )
 
@@ -31,10 +41,243 @@ _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z", flags=re.ASCII)
 _BYTECODE_SUFFIXES = tuple(importlib.machinery.BYTECODE_SUFFIXES)
 _SOURCE_SUFFIXES = tuple(importlib.machinery.SOURCE_SUFFIXES)
 _EXTENSION_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+_INSTALLED_FILES_DOMAIN = b"ea.installed-local-wheel.v1\0"
+_GENERATED_CONSOLE_SCRIPT_RECORD_PATH = "../../../bin/ea"
 
 
 class ProvenanceError(RuntimeError):
     """Raised when execution provenance cannot be proved fail-closed."""
+
+
+def _local_wheel_artifact(
+    document: str, *, require_artifact: bool = True
+) -> tuple[bytes | None, str]:
+    """Extract and verify the only supported direct local wheel artifact."""
+    try:
+        value = json.loads(document, object_pairs_hook=_reject_duplicate_json_keys)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProvenanceError("direct URL metadata is invalid") from exc
+    if type(value) is not dict or set(value) != {"url", "archive_info"}:
+        raise ProvenanceError("direct URL metadata must be closed")
+    url, raw_archive = value["url"], value["archive_info"]
+    if type(url) is not str or type(raw_archive) is not dict:
+        raise ProvenanceError("direct URL artifact metadata is invalid")
+    archive: dict[str, object] = dict(raw_archive)
+    if set(archive) not in (
+        {"hash"},
+        {"hashes"},
+        {"hash", "hashes"},
+    ):
+        raise ProvenanceError("direct URL artifact metadata is invalid")
+    has_hash = "hash" in archive
+    has_hashes = "hashes" in archive
+    raw_digest = archive.get("hash")
+    if has_hash:
+        if type(raw_digest) is not str or re.fullmatch(r"sha256=[0-9a-f]{64}", raw_digest) is None:
+            raise ProvenanceError("direct URL artifact hash is invalid")
+        digest = raw_digest
+    else:
+        digest = ""
+    raw_hashes = archive.get("hashes")
+    hashes_digest: str | None = None
+    if has_hashes:
+        if type(raw_hashes) is not dict:
+            raise ProvenanceError("direct URL artifact hashes are invalid")
+        hashes: dict[str, object] = dict(raw_hashes)
+        raw_hashes_digest = hashes.get("sha256")
+        if (
+            set(hashes) != {"sha256"}
+            or type(raw_hashes_digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", raw_hashes_digest) is None
+        ):
+            raise ProvenanceError("direct URL artifact hashes are invalid")
+        hashes_digest = raw_hashes_digest
+    if not has_hash:
+        if hashes_digest is None:
+            raise ProvenanceError("direct URL artifact hash is missing")
+        digest = "sha256=" + hashes_digest
+    elif hashes_digest is not None and digest != "sha256=" + hashes_digest:
+        raise ProvenanceError("direct URL artifact hashes disagree")
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError as exc:
+        raise ProvenanceError("direct URL must identify a local wheel") from exc
+    if parsed.scheme != "file" or parsed.netloc or parsed.query or parsed.fragment:
+        raise ProvenanceError("direct URL must identify a local wheel")
+    try:
+        path = Path(urllib.parse.unquote_to_bytes(parsed.path).decode("utf-8"))
+        if (
+            not path.is_absolute()
+            or path.suffix != ".whl"
+            or any(ord(char) <= 0x20 or char == "\\" for char in str(path))
+        ):
+            raise ProvenanceError("direct URL must identify an absolute canonical wheel path")
+        resolved = path.resolve(strict=True)
+    except (OSError, UnicodeError) as exc:
+        if not require_artifact:
+            return None, digest[7:]
+        raise ProvenanceError("local wheel artifact is unavailable") from exc
+    try:
+        if not resolved.is_file() or resolved.suffix != ".whl":
+            raise ProvenanceError("local wheel artifact hash mismatches")
+        snapshot = resolved.read_bytes()
+    except OSError as exc:
+        raise ProvenanceError("local wheel artifact is unavailable") from exc
+    actual = sha256(snapshot).hexdigest()
+    if actual != digest[7:]:
+        raise ProvenanceError("local wheel artifact hash mismatches")
+    return snapshot, actual
+
+
+def _require_pip_installer(raw: object) -> None:
+    """Admit only the pip INSTALLER marker; it is not identity material."""
+    if type(raw) is not str or re.fullmatch(r"pip[ \t\r\n\f\v]*", raw) is None:
+        raise ProvenanceError("installed runtime requires pip INSTALLER")
+
+
+def _wheel_owned_rows(wheel: bytes) -> tuple[tuple[str, bytes], ...]:
+    """Read a closed wheel-owned surface only after strict RECORD validation."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(wheel)) as archive:
+            names = archive.namelist()
+            if any(
+                name != unicodedata.normalize("NFC", name)
+                or name.startswith("/")
+                or "\\" in name
+                or any(part in {"", ".", ".."} for part in name.split("/"))
+                for name in names
+            ):
+                raise ProvenanceError("wheel member path is not canonical")
+            roots = [name.rsplit("/", 1)[0] for name in names if name.endswith(".dist-info/RECORD")]
+            if len(names) != len(set(names)) or len(roots) != 1:
+                raise ProvenanceError("wheel members or RECORD are not closed")
+            root = roots[0]
+            record_name = root + "/RECORD"
+            records: dict[str, tuple[str, int]] = {}
+            for parts in csv_reader(archive.read(record_name).decode().splitlines()):
+                if len(parts) != 3 or parts[0] in records:
+                    raise ProvenanceError("wheel RECORD is malformed")
+                if parts[0] == record_name:
+                    if parts[1:] != ["", ""]:
+                        raise ProvenanceError("wheel RECORD self row is malformed")
+                    continue
+                if (
+                    not re.fullmatch(r"sha256=[A-Za-z0-9_-]{43}", parts[1])
+                    or not parts[2].isdigit()
+                ):
+                    raise ProvenanceError("wheel RECORD must hash owned rows")
+                records[parts[0]] = (parts[1][7:], int(parts[2]))
+            selected = [
+                name
+                for name in names
+                if name.startswith("ea/") and name.endswith(".py") and not name.endswith(".pyc")
+            ]
+            selected.extend(
+                root + "/" + name
+                for name in ("METADATA", "WHEEL", "entry_points.txt", "top_level.txt")
+            )
+            if not selected or any(name not in records for name in selected):
+                raise ProvenanceError("wheel RECORD omits closed owned rows")
+            rows = []
+            for name in sorted(selected):
+                content = archive.read(name)
+                encoded, size = records[name]
+                if len(content) != size or sha256(content).digest() != urlsafe_b64decode(
+                    encoded + "=" * (-len(encoded) % 4)
+                ):
+                    raise ProvenanceError("wheel RECORD row mismatch")
+                rows.append((name, content))
+            return tuple(rows)
+    except (CsvError, KeyError, OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+        raise ProvenanceError("wheel cannot be read") from exc
+
+
+def _installed_wheel_rows(
+    distribution: importlib.metadata.Distribution,
+    expected: tuple[tuple[str, bytes], ...] | None,
+) -> tuple[tuple[str, bytes], ...]:
+    """Select the closed wheel-owned installed surface without trusting RECORD ownership."""
+    rows = dict(_installed_file_rows(distribution))
+    try:
+        root = Path(str(distribution.locate_file(""))).resolve(strict=True)
+        package = (root / "ea").resolve(strict=True)
+    except OSError as exc:
+        raise ProvenanceError("installed EA package cannot be resolved") from exc
+    if package.is_symlink() or not package.is_dir() or not package.is_relative_to(root):
+        raise ProvenanceError("installed EA package is unsafe")
+    sources = {
+        name: value
+        for name, value in rows.items()
+        if name.startswith("ea/") and name.endswith(".py")
+    }
+    if not sources:
+        raise ProvenanceError("installed EA package has no source rows")
+    cache_rows = {
+        name: value
+        for name, value in rows.items()
+        if name.startswith("ea/") and name.endswith(".pyc")
+    }
+    if any(
+        name.startswith("ea/") and name not in sources and name not in cache_rows for name in rows
+    ):
+        raise ProvenanceError("installed EA package has an unsupported RECORD row")
+    try:
+        tree_rows = {
+            item.relative_to(root).as_posix()
+            for item in _walk_without_links(package)
+            if item.is_file()
+        }
+    except OSError as exc:
+        raise ProvenanceError("installed EA package cannot be walked safely") from exc
+    if tree_rows != set(sources) | set(cache_rows):
+        raise ProvenanceError("installed EA package tree is not closed")
+    for name, content in cache_rows.items():
+        try:
+            source = Path(importlib.util.source_from_cache(str(root / name))).relative_to(root)
+            source_name = source.as_posix()
+            expected_cache = importlib.util.cache_from_source(str(root / source), optimization="")
+        except (NotImplementedError, ValueError) as exc:
+            raise ProvenanceError("installed source cache is unsupported") from exc
+        if Path(root / name) != Path(expected_cache) or source_name not in sources:
+            raise ProvenanceError("installed source cache is misplaced")
+        validate_source_cache(
+            pyc_bytes=content,
+            source_bytes=sources[source_name],
+            resolved_filename=str(root / source),
+        )
+    metadata_roots = {
+        name.rsplit("/", 1)[0] for name in rows if name.endswith(".dist-info/METADATA")
+    }
+    required = ("METADATA", "WHEEL", "entry_points.txt", "top_level.txt")
+    valid_roots = [
+        candidate
+        for candidate in metadata_roots
+        if all(candidate + "/" + leaf in rows for leaf in required)
+    ]
+    if len(valid_roots) != 1:
+        raise ProvenanceError("installed wheel metadata is not closed")
+    selected = tuple(
+        sorted(
+            (
+                *sources.items(),
+                *(
+                    (valid_roots[0] + "/" + leaf, rows[valid_roots[0] + "/" + leaf])
+                    for leaf in required
+                ),
+            )
+        )
+    )
+    if expected is not None:
+        expected_sources = {name: content for name, content in expected if name.startswith("ea/")}
+        expected_metadata = {
+            name.rsplit("/", 1)[1]: content for name, content in expected if ".dist-info/" in name
+        }
+        actual_metadata = {
+            name.rsplit("/", 1)[1]: content for name, content in selected if ".dist-info/" in name
+        }
+        if sources != expected_sources or actual_metadata != expected_metadata:
+            raise ProvenanceError("installed rows differ from the local wheel")
+    return selected
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +593,327 @@ def _distribution_identity(
         return DistributionIdentity(name=name, version=version)
     except (KeyError, TypeError, ValueError) as exc:
         raise ProvenanceError("installed distribution metadata is invalid") from exc
+
+
+def _validate_installed_direct_url(distribution: importlib.metadata.Distribution) -> None:
+    """Accept only absent metadata or one strict local wheel origin."""
+    raw = distribution.read_text("direct_url.json")
+    if raw is None:
+        return
+    if type(raw) is not str:
+        raise ProvenanceError("ea-quant direct_url.json is invalid")
+    try:
+        value = json.loads(raw, object_pairs_hook=_reject_duplicate_json_keys)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise ProvenanceError("ea-quant direct_url.json is invalid") from exc
+    if type(value) is not dict or set(value) != {"url", "archive_info"}:
+        raise ProvenanceError("ea-quant direct_url.json must be a closed object")
+    url, archive = value["url"], value["archive_info"]
+    if type(url) is not str or type(archive) is not dict or set(archive) - {"hash", "hashes"}:
+        raise ProvenanceError("ea-quant direct URL is invalid")
+    for char in url:
+        if ord(char) <= 0x20 or ord(char) == 0x7F or ord(char) > 0x7F or char == "\\":
+            raise ProvenanceError("ea-quant direct URL contains a forbidden raw character")
+    for index, char in enumerate(url):
+        if char == "%" and (
+            index + 2 >= len(url) or not re.fullmatch(r"[0-9A-Fa-f]{2}", url[index + 1 : index + 3])
+        ):
+            raise ProvenanceError("ea-quant direct URL has an invalid percent escape")
+    if not url.startswith("file:"):
+        raise ProvenanceError("ea-quant direct URL scheme must be lowercase file")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "file" or parsed.netloc or parsed.query or parsed.fragment:
+        raise ProvenanceError("ea-quant direct URL must be an authority-free file URL")
+    try:
+        path = urllib.parse.unquote_to_bytes(parsed.path).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProvenanceError("ea-quant direct URL path is not UTF-8") from exc
+    if (
+        not path.startswith("/")
+        or not path.endswith(".whl")
+        or any(ord(c) <= 0x20 or ord(c) == 0x7F or c == "\\" for c in path)
+    ):
+        raise ProvenanceError("ea-quant direct URL must be an absolute wheel path")
+
+    def valid_hash(value: object) -> bool:
+        return type(value) is str and re.fullmatch(r"sha256=[0-9a-f]{64}", value) is not None
+
+    if "hash" in archive and not valid_hash(archive["hash"]):
+        raise ProvenanceError("ea-quant wheel hash is invalid")
+    if "hashes" in archive:
+        hashes = archive["hashes"]
+        if (
+            type(hashes) is not dict
+            or set(hashes) != {"sha256"}
+            or type(hashes["sha256"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", hashes["sha256"]) is None
+        ):
+            raise ProvenanceError("ea-quant wheel hashes are invalid")
+        if "hash" in archive and archive["hash"] != "sha256=" + hashes["sha256"]:
+            raise ProvenanceError("ea-quant wheel hashes disagree")
+
+
+def _installed_file_rows(
+    distribution: importlib.metadata.Distribution,
+) -> tuple[tuple[str, bytes], ...]:
+    files = distribution.files
+    if files is None:
+        raise ProvenanceError("installed distribution has no RECORD files")
+    root_fd: int | None = None
+    rows: list[tuple[str, bytes]] = []
+    try:
+        root_path = Path(str(distribution.locate_file("")))
+        root = root_path.resolve(strict=True)
+        if root_path.is_symlink() or not root.is_dir():
+            raise ProvenanceError("installed distribution root is not a real directory")
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        root_stat = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise ProvenanceError("installed distribution root is not a directory")
+        for record in files:
+            raw = str(record)
+            if raw == _GENERATED_CONSOLE_SCRIPT_RECORD_PATH:
+                continue
+            parts = raw.split("/")
+            if (
+                raw != unicodedata.normalize("NFC", raw)
+                or "\\" in raw
+                or raw.startswith("/")
+                or any(part in {"", ".", ".."} for part in parts)
+            ):
+                raise ProvenanceError("installed RECORD path is not canonical POSIX")
+            target = Path(str(distribution.locate_file(record)))
+            if target != root.joinpath(*parts):
+                raise ProvenanceError("installed RECORD path escaped its distribution root")
+            parent_fd = root_fd
+            opened: list[tuple[int, str, os.stat_result, int]] = []
+            file_fd: int | None = None
+            try:
+                for part in parts[:-1]:
+                    named = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
+                    child_fd = os.open(
+                        part,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=parent_fd,
+                    )
+                    child_stat = os.fstat(child_fd)
+                    if (
+                        not stat.S_ISDIR(named.st_mode)
+                        or not stat.S_ISDIR(child_stat.st_mode)
+                        or (named.st_dev, named.st_ino) != (child_stat.st_dev, child_stat.st_ino)
+                    ):
+                        os.close(child_fd)
+                        raise ProvenanceError("installed RECORD path contains an unsafe component")
+                    opened.append((parent_fd, part, child_stat, child_fd))
+                    parent_fd = child_fd
+                name = parts[-1]
+                named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                file_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent_fd,
+                )
+                file_stat = os.fstat(file_fd)
+                if (
+                    not stat.S_ISREG(named.st_mode)
+                    or not stat.S_ISREG(file_stat.st_mode)
+                    or (named.st_dev, named.st_ino) != (file_stat.st_dev, file_stat.st_ino)
+                ):
+                    raise ProvenanceError("installed RECORD file is not contained regular data")
+                chunks: list[bytes] = []
+                while chunk := os.read(file_fd, 65536):
+                    chunks.append(chunk)
+                after = os.fstat(file_fd)
+                if (after.st_dev, after.st_ino, after.st_size) != (
+                    file_stat.st_dev,
+                    file_stat.st_ino,
+                    file_stat.st_size,
+                ):
+                    raise ProvenanceError("installed RECORD file changed while being read")
+                for directory_fd, component, component_stat, _ in opened:
+                    current = os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) != (
+                        component_stat.st_dev,
+                        component_stat.st_ino,
+                    ):
+                        raise ProvenanceError("installed RECORD parent changed while being read")
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (file_stat.st_dev, file_stat.st_ino):
+                    raise ProvenanceError("installed RECORD file changed while being read")
+                rows.append((raw, b"".join(chunks)))
+            finally:
+                if file_fd is not None:
+                    with suppress(OSError):
+                        os.close(file_fd)
+                for _, _, _, child_fd in reversed(opened):
+                    with suppress(OSError):
+                        os.close(child_fd)
+    except OSError as exc:
+        raise ProvenanceError("installed distribution file cannot be resolved") from exc
+    finally:
+        if root_fd is not None:
+            with suppress(OSError):
+                os.close(root_fd)
+    if not rows or len({name for name, _ in rows}) != len(rows):
+        raise ProvenanceError("installed RECORD files are empty or duplicate")
+    return tuple(sorted(rows))
+
+
+def _validate_installed_sys_path(active_roots: tuple[Path, ...]) -> None:
+    paths = sysconfig.get_paths()
+    roots: list[Path] = []
+    for key in ("stdlib", "platstdlib"):
+        raw = paths.get(key)
+        if type(raw) is not str or not raw or not Path(raw).is_absolute():
+            raise ProvenanceError(f"sysconfig {key} is not an absolute path")
+        path = Path(raw)
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise ProvenanceError(f"sysconfig {key} cannot be resolved") from exc
+        if path.is_symlink() or not resolved.is_dir():
+            raise ProvenanceError(f"sysconfig {key} is unsafe")
+        if resolved not in roots:
+            roots.append(resolved)
+    versioned_name = f"python{sys.version_info.major}{sys.version_info.minor}.zip"
+    versioned_zip = (roots[0].parent / versioned_name).resolve(strict=False)
+    seen: set[Path] = set()
+    for raw in sys.path:
+        if type(raw) is not str or not raw or not Path(raw).is_absolute():
+            raise ProvenanceError("sys.path contains an empty or relative entry")
+        path = Path(raw)
+        try:
+            resolved = path.resolve(strict=path.resolve(strict=False) != versioned_zip)
+        except OSError as exc:
+            raise ProvenanceError("sys.path entry cannot be resolved") from exc
+        if path.is_symlink() or resolved in seen:
+            raise ProvenanceError("sys.path contains an unsafe duplicate physical entry")
+        seen.add(resolved)
+        if (
+            resolved in active_roots
+            or resolved == versioned_zip
+            or any(resolved.is_relative_to(root) for root in roots)
+        ):
+            continue
+        raise ProvenanceError("sys.path contains an injected import root")
+
+
+def _validate_installed_ea_import(
+    distribution: importlib.metadata.Distribution,
+    identity: DistributionIdentity,
+    installed_rows: tuple[tuple[str, bytes], ...],
+) -> None:
+    try:
+        root_path = Path(str(distribution.locate_file("")))
+        root = root_path.resolve(strict=True)
+        package = root / "ea"
+        expected_init = package / "__init__.py"
+    except OSError as exc:
+        raise ProvenanceError("installed EA package cannot be resolved") from exc
+    if (
+        not root_path.is_absolute()
+        or root_path.is_symlink()
+        or root_path != root
+        or not root.is_dir()
+        or package.is_symlink()
+        or not package.is_dir()
+        or package.resolve(strict=True) != package
+        or expected_init.is_symlink()
+        or not expected_init.is_file()
+        or expected_init.resolve(strict=True) != expected_init
+    ):
+        raise ProvenanceError("selected installed EA package is unsafe")
+    spec = importlib.util.find_spec("ea")
+    locations = (
+        ()
+        if spec is None or spec.submodule_search_locations is None
+        else tuple(spec.submodule_search_locations)
+    )
+    if (
+        spec is None
+        or type(spec.origin) is not str
+        or Path(spec.origin).resolve(strict=True) != expected_init
+        or len(locations) != 1
+        or type(locations[0]) is not str
+        or Path(locations[0]).resolve(strict=True) != package
+        or type(ea.__file__) is not str
+        or Path(ea.__file__).resolve(strict=True) != expected_init
+    ):
+        raise ProvenanceError("executing EA package is not bound to the selected distribution")
+    try:
+        version = importlib.metadata.version("ea-quant")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise ProvenanceError("unscoped ea-quant metadata is unavailable") from exc
+    if version != identity.version or ea.__version__ != identity.version:
+        raise ProvenanceError("EA runtime and metadata versions are inconsistent")
+    source_rows = {
+        name for name, _ in installed_rows if name.startswith("ea/") and name.endswith(".py")
+    }
+    for name, module in tuple(sys.modules.items()):
+        if name != "ea" and not name.startswith("ea."):
+            continue
+        origin = getattr(module, "__file__", None)
+        if type(origin) is not str:
+            raise ProvenanceError("loaded EA module has no regular installed origin")
+        try:
+            path = Path(origin)
+            resolved = path.resolve(strict=True)
+            relative = resolved.relative_to(root).as_posix()
+        except (OSError, ValueError) as exc:
+            raise ProvenanceError("loaded EA module escaped the selected package") from exc
+        if path.is_symlink() or not resolved.is_file() or relative not in source_rows:
+            raise ProvenanceError("loaded EA module is not an owned installed source")
+
+
+def collect_installed_runtime_spec_v2(*, require_artifact: bool = True) -> InstalledRuntimeSpecV2:
+    """Collect the checkout-independent installed-distribution runtime identity."""
+    _require_runtime_flags()
+    roots = _active_metadata_roots()
+    _validate_installed_sys_path(roots)
+    distributions = tuple(importlib.metadata.distributions(path=[str(root) for root in roots]))
+    pairs = []
+    for item in distributions:
+        try:
+            root = Path(str(item.locate_file(""))).resolve(strict=True)
+        except OSError as exc:
+            raise ProvenanceError("active distribution root cannot be resolved") from exc
+        if root not in roots:
+            raise ProvenanceError("active distribution escaped active metadata roots")
+        pairs.append((_distribution_identity(item), item))
+    if len({identity.name for identity, _ in pairs}) != len(pairs):
+        raise ProvenanceError("active distribution names are not unique")
+    pairs.sort(key=lambda pair: pair[0].name)
+    ea_pairs = [pair for pair in pairs if pair[0].name == "ea-quant"]
+    if len(ea_pairs) != 1:
+        raise ProvenanceError("installed runtime requires exactly one ea-quant distribution")
+    identity, distribution = ea_pairs[0]
+    if type(require_artifact) is not bool:
+        raise ProvenanceError("artifact requirement must be an exact bool")
+    _require_pip_installer(distribution.read_text("INSTALLER"))
+    raw_direct_url = distribution.read_text("direct_url.json")
+    if type(raw_direct_url) is not str:
+        raise ProvenanceError("ea-quant direct_url.json is missing")
+    wheel_bytes, artifact_sha256 = _local_wheel_artifact(
+        raw_direct_url, require_artifact=require_artifact
+    )
+    owned_rows = _wheel_owned_rows(wheel_bytes) if wheel_bytes is not None else None
+    installed_rows = _installed_wheel_rows(distribution, owned_rows)
+    _validate_installed_ea_import(distribution, identity, installed_rows)
+    digest = sha256(_INSTALLED_FILES_DOMAIN)
+    digest.update(artifact_sha256.encode() + b"\0")
+    for name, content in installed_rows:
+        digest.update(name.encode() + b"\0" + len(content).to_bytes(8, "big") + content)
+    return InstalledRuntimeSpecV2(
+        ea_distribution=identity,
+        ea_installed_files_sha256=Sha256Digest(digest.hexdigest()),
+        python_implementation=sys.implementation.name,
+        python_version=".".join(map(str, sys.version_info[:3])),
+        python_cache_tag=sys.implementation.cache_tag or "",
+        sys_platform=sys.platform,
+        platform_tag=sysconfig.get_platform(),
+        distributions=tuple(identity for identity, _ in pairs),
+        provenance_kind="installed_local_wheel_v1",
+    )
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:

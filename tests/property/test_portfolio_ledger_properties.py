@@ -32,6 +32,10 @@ from ea.core import (
     create_trade_execution_fact,
 )
 from ea.core.execution_messages import Fill
+from ea.core.initial_funding import (
+    InitialFundingTransaction,
+    canonical_initial_funding_transaction_bytes,
+)
 from ea.core.reconciliation import ReconciliationTransaction
 from ea.portfolio import create_portfolio_ledger
 
@@ -199,7 +203,9 @@ def test_replay_after_any_bounded_later_history_never_mutates(
 
 
 def _ledger_transaction_bytes(
-    item: LedgerTransaction | ReconciliationTransaction,
+    item: InitialFundingTransaction | LedgerTransaction | ReconciliationTransaction,
 ) -> bytes:
+    if type(item) is InitialFundingTransaction:
+        return canonical_initial_funding_transaction_bytes(item)
     assert type(item) is LedgerTransaction
     return canonical_ledger_transaction_bytes(item)
