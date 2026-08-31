@@ -6,6 +6,7 @@ import hashlib
 import json
 import zipfile
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -32,6 +33,44 @@ def test_product_kernel_exposes_the_funded_recovery_boundary() -> None:
     from ea.composition.product_kernel import recover_phase1_product_kernel
 
     assert recover_phase1_product_kernel.__name__ == "recover_phase1_product_kernel"
+
+
+def test_public_product_boundaries_reject_invalid_manifest_input_without_attempt_mutation(
+    tmp_path: Path,
+) -> None:
+    from ea.composition.product_kernel import (
+        ProductKernelError,
+        prepare_phase1_product_kernel,
+        recover_phase1_product_kernel,
+    )
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments.manifest import LineageSpecV2, RunManifestV2
+    from ea.experiments.store import LocalResultStore, RunIdProvider
+
+    store = LocalResultStore(tmp_path)
+    unused_spec_set = cast(InstrumentExecutionSpecSet, object())
+    unused_policy = cast(ExecutionPolicyRef, object())
+    unused_risk = cast(Phase1RiskPolicy, object())
+    with pytest.raises(ProductKernelError, match="invalid product input"):
+        prepare_phase1_product_kernel(
+            store=store,
+            spec=cast(LineageSpecV2, object()),
+            run_id_provider=cast(RunIdProvider, object()),
+            spec_set=unused_spec_set,
+            execution_policy=unused_policy,
+            risk_policy=unused_risk,
+        )
+    with pytest.raises(ProductKernelError, match="manifest v2"):
+        recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, object()),
+            spec_set=unused_spec_set,
+            execution_policy=unused_policy,
+            risk_policy=unused_risk,
+        )
+    assert tuple(tmp_path.iterdir()) == ()
 
 
 def test_wheel_owned_rows_require_closed_record_hashes(tmp_path: Path) -> None:
