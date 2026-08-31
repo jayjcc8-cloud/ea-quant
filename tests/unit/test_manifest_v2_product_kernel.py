@@ -198,6 +198,20 @@ def test_local_wheel_runtime_uses_closed_vocabulary_and_recovery_allows_absent_a
     assert _local_wheel_artifact(document, require_artifact=False) == (None, digest)
 
 
+def test_local_wheel_recovery_rejects_a_missing_nonwheel_artifact(tmp_path: Path) -> None:
+    from ea.experiments.provenance import ProvenanceError, _local_wheel_artifact
+
+    document = json.dumps(
+        {
+            "url": (tmp_path / "not-a-wheel.txt").as_uri(),
+            "archive_info": {"hash": "sha256=" + "0" * 64},
+        }
+    )
+
+    with pytest.raises(ProvenanceError):
+        _local_wheel_artifact(document, require_artifact=False)
+
+
 def test_wheel_owned_rows_include_all_required_metadata(tmp_path: Path) -> None:
     from ea.experiments.provenance import _wheel_owned_rows
 
@@ -227,6 +241,40 @@ def test_wheel_owned_rows_include_all_required_metadata(tmp_path: Path) -> None:
         archive.writestr("ea_quant-0.1.1.dist-info/RECORD", record)
 
     assert _wheel_owned_rows(wheel) == tuple(sorted(rows.items()))
+
+
+def test_wheel_owned_rows_converts_missing_record_member_to_provenance_error(
+    tmp_path: Path,
+) -> None:
+    from ea.experiments.provenance import ProvenanceError, _wheel_owned_rows
+
+    wheel = tmp_path / "ea_quant-0.1.1-py3-none-any.whl"
+    required = "ea_quant-0.1.1.dist-info"
+    rows = {
+        "ea/__init__.py": b"value = 1\n",
+        required + "/METADATA": b"Name: ea-quant\n",
+        required + "/WHEEL": b"Wheel-Version: 1.0\n",
+        required + "/entry_points.txt": b"[console_scripts]\n",
+        required + "/top_level.txt": b"ea\n",
+    }
+    record = (
+        b"".join(
+            name.encode()
+            + b",sha256="
+            + __import__("base64").urlsafe_b64encode(hashlib.sha256(value).digest()).rstrip(b"=")
+            + b","
+            + str(len(value)).encode()
+            + b"\n"
+            for name, value in rows.items()
+        )
+        + (required + "/RECORD,,\n").encode()
+    )
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("ea/__init__.py", rows["ea/__init__.py"])
+        archive.writestr(required + "/RECORD", record)
+
+    with pytest.raises(ProvenanceError):
+        _wheel_owned_rows(wheel)
 
 
 def test_installed_rows_read_a_closed_safe_tree_and_match_wheel_rows(tmp_path: Path) -> None:
@@ -855,13 +903,15 @@ def test_product_boundary_fails_closed_for_every_runtime_or_policy_drift(
         "collect_installed_runtime_spec_v2",
         lambda **_kwargs: (_ for _ in ()).throw(ProvenanceError("missing")),
     )
-    with pytest.raises(product_kernel.ProductKernelError, match="provenance"):
+    with pytest.raises(product_kernel.ProductKernelError, match="provenance") as raised:
         product_kernel._require_product_boundary(
             cast(LineageSpecV2, spec),
             cast(ExecutionPolicyRef, policy),
             cast(Phase1RiskPolicy, risk),
             require_artifact=False,
         )
+    assert raised.value.code is product_kernel.ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
+    assert isinstance(raised.value.__cause__, ProvenanceError)
 
 
 def test_public_prepare_maps_collision_and_does_not_create_a_kernel(

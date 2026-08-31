@@ -102,7 +102,11 @@ def _local_wheel_artifact(
         raise ProvenanceError("direct URL must identify a local wheel")
     try:
         path = Path(urllib.parse.unquote_to_bytes(parsed.path).decode("utf-8"))
-        if not path.is_absolute() or any(ord(char) <= 0x20 or char == "\\" for char in str(path)):
+        if (
+            not path.is_absolute()
+            or path.suffix != ".whl"
+            or any(ord(char) <= 0x20 or char == "\\" for char in str(path))
+        ):
             raise ProvenanceError("direct URL must identify an absolute canonical wheel path")
         resolved = path.resolve(strict=True)
     except (OSError, UnicodeError) as exc:
@@ -177,7 +181,7 @@ def _wheel_owned_rows(wheel: Path) -> tuple[tuple[str, bytes], ...]:
                     raise ProvenanceError("wheel RECORD row mismatch")
                 rows.append((name, content))
             return tuple(rows)
-    except (OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+    except (KeyError, OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
         raise ProvenanceError("wheel cannot be read") from exc
 
 
