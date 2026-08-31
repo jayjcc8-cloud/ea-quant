@@ -365,6 +365,7 @@ def test_installed_runtime_collector_rejects_an_injected_import_root_before_iden
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import importlib.metadata
+    import sys
 
     import ea.experiments.provenance as provenance
 
@@ -379,7 +380,7 @@ def test_installed_runtime_collector_rejects_an_injected_import_root_before_iden
     monkeypatch.setattr(importlib.metadata, "distributions", lambda **_kwargs: [distribution])
     monkeypatch.setattr(provenance, "_require_runtime_flags", lambda: None)
     monkeypatch.setattr(provenance, "_active_metadata_roots", lambda: (Path("/active"),))
-    monkeypatch.setattr(provenance.sys, "path", [*provenance.sys.path, str(tmp_path)])
+    monkeypatch.setattr(sys, "path", [*sys.path, str(tmp_path)])
     monkeypatch.setattr(
         provenance, "_local_wheel_artifact", lambda *_args, **_kwargs: (None, "1" * 64)
     )
@@ -472,8 +473,10 @@ def test_installed_runtime_collector_rejects_foreign_executing_ea_package(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import importlib.metadata
+    import importlib.util
     from types import SimpleNamespace
 
+    import ea
     import ea.experiments.provenance as provenance
 
     package = tmp_path / "ea"
@@ -507,13 +510,13 @@ def test_installed_runtime_collector_rejects_foreign_executing_ea_package(
         lambda *_args: (("ea/__init__.py", expected_init.read_bytes()),),
     )
     monkeypatch.setattr(
-        provenance.importlib.util,
+        importlib.util,
         "find_spec",
         lambda _name: SimpleNamespace(
             origin=str(expected_init), submodule_search_locations=[str(package)]
         ),
     )
-    monkeypatch.setattr(provenance.ea, "__file__", str(foreign_init))
+    monkeypatch.setattr(ea, "__file__", str(foreign_init))
 
     with pytest.raises(provenance.ProvenanceError, match="executing EA package"):
         provenance.collect_installed_runtime_spec_v2(require_artifact=False)
