@@ -6,13 +6,20 @@ import json
 import struct
 from datetime import datetime
 from hashlib import sha256
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, TypeGuard, cast
 
 from ea.core.run import DataFingerprint, ReplayWindow, RunId, Sha256Digest
+
+if TYPE_CHECKING:
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.initial_funding import InitialFundingSpec
+    from ea.core.risk import RiskPolicyId
+    from ea.experiments._manifest_model import InstalledRuntimeSpecV2
 
 CONFIG_DOMAIN = b"ea.config.v1\0"
 LOCK_DOMAIN = b"ea.uv-lock.v1\0"
 LINEAGE_DOMAIN = b"ea.run-spec.v1\0"
+LINEAGE_V2_DOMAIN = b"ea.run-spec.v2\0"
 CONFIG_CANONICALIZATION = "ea-settings-v1"
 DATA_CANONICALIZATION = "ea-market-data-envelope-v1"
 
@@ -44,8 +51,11 @@ class _EffectiveParameterLike(Protocol):
 
 
 class _DistributionLike(Protocol):
-    name: str
-    version: str
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def version(self) -> str: ...
 
 
 class _RandomnessLike(Protocol):
@@ -76,6 +86,21 @@ class _LineageLike(Protocol):
     runtime: _RuntimeLike
     randomness: _RandomnessLike
     lineage_schema_version: int
+
+
+class _LineageV2Like(Protocol):
+    configuration: _ConfigurationLike
+    data: DataFingerprint
+    replay_window: ReplayWindow
+    parameters: tuple[_EffectiveParameterLike, ...]
+    runtime: InstalledRuntimeSpecV2
+    randomness: _RandomnessLike
+    lineage_schema_version: int
+    scenario_sha256: Sha256Digest
+    initial_funding: InitialFundingSpec
+    execution_policy: ExecutionPolicyRef
+    risk_policy_id: RiskPolicyId
+    risk_policy_sha256: Sha256Digest
 
 
 class _ManifestLike(Protocol):
@@ -132,6 +157,65 @@ def _distribution_mapping(value: _DistributionLike) -> dict[str, object]:
 
 
 def _lineage_mapping(spec: _LineageLike) -> dict[str, object]:
+    if _is_lineage_v2(spec):
+        runtime = spec.runtime
+        return {
+            "configuration": {
+                "canonicalization": CONFIG_CANONICALIZATION,
+                "normalized": _normalized_configuration_mapping(spec.configuration.normalized),
+                "sha256": spec.configuration.sha256.value,
+            },
+            "data": {
+                "canonicalization": DATA_CANONICALIZATION,
+                "record_count": spec.data.record_count,
+                "sha256": spec.data.sha256.value,
+            },
+            "initial_funding": {
+                "amount": spec.initial_funding.amount.text,
+                "canonicalization": "ea-initial-funding-spec-v1",
+                "currency_quantum": spec.initial_funding.currency_quantum.text,
+                "instrument_spec_set_id": spec.initial_funding.instrument_spec_set_id.value,
+                "instrument_spec_set_sha256": spec.initial_funding.instrument_spec_set_sha256.value,
+                "schema_version": 1,
+                "settlement_currency": spec.initial_funding.settlement_currency.code,
+            },
+            "execution_policy": {
+                "identifier": spec.execution_policy.identifier.value,
+                "sha256": spec.execution_policy.sha256.value,
+            },
+            "lineage_schema_version": 2,
+            "parameters": [_parameter_mapping(item) for item in spec.parameters],
+            "randomness": {
+                "generator": spec.randomness.generator,
+                "master_seed": spec.randomness.master_seed,
+                "stream_derivation": spec.randomness.stream_derivation,
+                "stream_labels": list(spec.randomness.stream_labels),
+            },
+            "replay_window": {
+                "end_exclusive": utc_text(spec.replay_window.end_exclusive),
+                "initial_state": "empty",
+                "selection_field": "available_at",
+                "start_inclusive": utc_text(spec.replay_window.start_inclusive),
+                "timezone": "UTC",
+            },
+            "runtime": {
+                "distributions": [_distribution_mapping(item) for item in runtime.distributions],
+                "ea_distribution": _distribution_mapping(runtime.ea_distribution),
+                "ea_installed_files_sha256": runtime.ea_installed_files_sha256.value,
+                "numeric_policy": runtime.numeric_policy,
+                "platform_tag": runtime.platform_tag,
+                "provenance_kind": runtime.provenance_kind,
+                "python_cache_tag": runtime.python_cache_tag,
+                "python_implementation": runtime.python_implementation,
+                "python_version": runtime.python_version,
+                "sys_platform": runtime.sys_platform,
+            },
+            "risk_policy": {
+                "identifier": spec.risk_policy_id.value,
+                "sha256": spec.risk_policy_sha256.value,
+            },
+            "scenario_sha256": spec.scenario_sha256.value,
+        }
     return {
         "code": {
             "commit": spec.code.commit,
@@ -174,6 +258,15 @@ def _lineage_mapping(spec: _LineageLike) -> dict[str, object]:
             "uv_lock_sha256": spec.runtime.uv_lock_sha256.value,
         },
     }
+
+
+def _is_lineage_v2(spec: _LineageLike) -> TypeGuard[_LineageV2Like]:
+    return (
+        spec.lineage_schema_version == 2
+        and hasattr(spec, "initial_funding")
+        and hasattr(spec, "scenario_sha256")
+        and hasattr(spec.runtime, "ea_distribution")
+    )
 
 
 def canonical_lineage_bytes(spec: object) -> bytes:

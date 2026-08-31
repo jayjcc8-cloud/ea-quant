@@ -54,6 +54,10 @@ from ea.core import (
 from ea.core.economics import EconomicValidationError
 from ea.core.execution import InstrumentExecutionSpecSet
 from ea.core.execution_messages import Fill
+from ea.core.initial_funding import (
+    InitialFundingTransaction,
+    canonical_initial_funding_transaction_bytes,
+)
 from ea.core.reconciliation import (
     ReconciliationTransaction,
     canonical_reconciliation_transaction_bytes,
@@ -152,6 +156,8 @@ def _state_bytes(ledger: PortfolioLedger) -> tuple[bytes, tuple[bytes, ...]]:
             (
                 canonical_reconciliation_transaction_bytes(item)
                 if type(item) is ReconciliationTransaction
+                else canonical_initial_funding_transaction_bytes(item)
+                if type(item) is InitialFundingTransaction
                 else canonical_ledger_transaction_bytes(item)
             )
             for item in ledger.transactions
