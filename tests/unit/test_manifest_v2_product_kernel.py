@@ -71,6 +71,75 @@ def test_direct_url_requires_a_present_matching_local_wheel(tmp_path: Path) -> N
     assert _local_wheel_artifact(document) == (wheel, hashlib.sha256(b"wheel").hexdigest())
 
 
+@pytest.mark.parametrize(
+    "archive_info",
+    [
+        "hash",
+        "hashes",
+        "both",
+    ],
+)
+def test_direct_url_accepts_only_pip_archive_hash_encodings(
+    tmp_path: Path, archive_info: str
+) -> None:
+    from ea.experiments.provenance import _local_wheel_artifact
+
+    wheel = tmp_path / "ea.whl"
+    wheel.write_bytes(b"wheel")
+    digest = hashlib.sha256(b"wheel").hexdigest()
+    encodings = {
+        "hash": {"hash": "sha256=" + digest},
+        "hashes": {"hashes": {"sha256": digest}},
+        "both": {"hash": "sha256=" + digest, "hashes": {"sha256": digest}},
+    }
+
+    assert _local_wheel_artifact(
+        json.dumps({"url": wheel.as_uri(), "archive_info": encodings[archive_info]})
+    ) == (wheel, digest)
+
+
+@pytest.mark.parametrize(
+    "archive_info",
+    [
+        {},
+        {"hash": "sha256=" + "0" * 63},
+        {"hash": None},
+        {"hash": "sha512=" + "0" * 64},
+        {"hash": "sha256=" + "A" * 64},
+        {"hash": "sha256=" + "0" * 64, "hashes": {"sha256": "1" * 64}},
+        {"hashes": {}},
+        {"hashes": None},
+        {"hashes": {"sha256": "0" * 64, "sha512": "0" * 64}},
+        {"hashes": {"sha256": "A" * 64}},
+        {"hash": "sha256=" + "0" * 64, "extra": "no"},
+    ],
+)
+def test_direct_url_rejects_non_pip_or_ambiguous_archive_hashes(
+    tmp_path: Path, archive_info: object
+) -> None:
+    from ea.experiments.provenance import ProvenanceError, _local_wheel_artifact
+
+    wheel = tmp_path / "ea.whl"
+    wheel.write_bytes(b"wheel")
+    with pytest.raises(ProvenanceError):
+        _local_wheel_artifact(json.dumps({"url": wheel.as_uri(), "archive_info": archive_info}))
+
+
+@pytest.mark.parametrize("raw", ["pip", "pip\n", "pip \t\r\n\f\v"])
+def test_installed_installer_admits_only_pip_with_ascii_trailing_whitespace(raw: str) -> None:
+    from ea.experiments.provenance import _require_pip_installer
+
+    _require_pip_installer(raw)
+
+
+@pytest.mark.parametrize("raw", [None, "uv\n", "pip\u00a0", " pip\n", "pipx\n", "pip\x00"])
+def test_installed_installer_rejects_missing_uv_or_noncanonical_value(raw: object) -> None:
+    from ea.experiments.provenance import ProvenanceError, _require_pip_installer
+
+    with pytest.raises(ProvenanceError):
+        _require_pip_installer(raw)
+
+
 def test_local_wheel_runtime_uses_closed_vocabulary_and_recovery_allows_absent_artifact(
     tmp_path: Path,
 ) -> None:

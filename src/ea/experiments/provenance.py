@@ -58,12 +58,45 @@ def _local_wheel_artifact(
         raise ProvenanceError("direct URL metadata is invalid") from exc
     if type(value) is not dict or set(value) != {"url", "archive_info"}:
         raise ProvenanceError("direct URL metadata must be closed")
-    url, archive = value["url"], value["archive_info"]
-    if type(url) is not str or type(archive) is not dict or set(archive) != {"hash"}:
+    url, raw_archive = value["url"], value["archive_info"]
+    if type(url) is not str or type(raw_archive) is not dict:
         raise ProvenanceError("direct URL artifact metadata is invalid")
-    digest = archive["hash"]
-    if type(digest) is not str or re.fullmatch(r"sha256=[0-9a-f]{64}", digest) is None:
-        raise ProvenanceError("direct URL artifact hash is invalid")
+    archive: dict[str, object] = dict(raw_archive)
+    if set(archive) not in (
+        {"hash"},
+        {"hashes"},
+        {"hash", "hashes"},
+    ):
+        raise ProvenanceError("direct URL artifact metadata is invalid")
+    has_hash = "hash" in archive
+    has_hashes = "hashes" in archive
+    raw_digest = archive.get("hash")
+    if has_hash:
+        if type(raw_digest) is not str or re.fullmatch(r"sha256=[0-9a-f]{64}", raw_digest) is None:
+            raise ProvenanceError("direct URL artifact hash is invalid")
+        digest = raw_digest
+    else:
+        digest = ""
+    raw_hashes = archive.get("hashes")
+    hashes_digest: str | None = None
+    if has_hashes:
+        if type(raw_hashes) is not dict:
+            raise ProvenanceError("direct URL artifact hashes are invalid")
+        hashes: dict[str, object] = dict(raw_hashes)
+        raw_hashes_digest = hashes.get("sha256")
+        if (
+            set(hashes) != {"sha256"}
+            or type(raw_hashes_digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", raw_hashes_digest) is None
+        ):
+            raise ProvenanceError("direct URL artifact hashes are invalid")
+        hashes_digest = raw_hashes_digest
+    if not has_hash:
+        if hashes_digest is None:
+            raise ProvenanceError("direct URL artifact hash is missing")
+        digest = "sha256=" + hashes_digest
+    elif hashes_digest is not None and digest != "sha256=" + hashes_digest:
+        raise ProvenanceError("direct URL artifact hashes disagree")
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "file" or parsed.netloc or parsed.query or parsed.fragment:
         raise ProvenanceError("direct URL must identify a local wheel")
@@ -83,6 +116,12 @@ def _local_wheel_artifact(
     if not resolved.is_file() or resolved.suffix != ".whl" or actual != digest[7:]:
         raise ProvenanceError("local wheel artifact hash mismatches")
     return resolved, actual
+
+
+def _require_pip_installer(raw: object) -> None:
+    """Admit only the pip INSTALLER marker; it is not identity material."""
+    if type(raw) is not str or re.fullmatch(r"pip[ \t\r\n\f\v]*", raw) is None:
+        raise ProvenanceError("installed runtime requires pip INSTALLER")
 
 
 def _wheel_owned_rows(wheel: Path) -> tuple[tuple[str, bytes], ...]:
@@ -720,6 +759,7 @@ def collect_installed_runtime_spec_v2(*, require_artifact: bool = True) -> Insta
     identity, distribution = ea_pairs[0]
     if type(require_artifact) is not bool:
         raise ProvenanceError("artifact requirement must be an exact bool")
+    _require_pip_installer(distribution.read_text("INSTALLER"))
     raw_direct_url = distribution.read_text("direct_url.json")
     if type(raw_direct_url) is not str:
         raise ProvenanceError("ea-quant direct_url.json is missing")
