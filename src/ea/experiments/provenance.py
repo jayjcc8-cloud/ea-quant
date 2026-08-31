@@ -142,11 +142,7 @@ def _local_wheel_artifact(
             raise ProvenanceError("local wheel artifact path contains a link")
         parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         parent_stat = os.fstat(parent_fd)
-        named_parent = os.stat(parent, follow_symlinks=False)
-        if not stat.S_ISDIR(parent_stat.st_mode) or (parent_stat.st_dev, parent_stat.st_ino) != (
-            named_parent.st_dev,
-            named_parent.st_ino,
-        ):
+        if not stat.S_ISDIR(parent_stat.st_mode):
             raise ProvenanceError("local wheel artifact parent is ambiguous")
         try:
             named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
@@ -180,15 +176,7 @@ def _local_wheel_artifact(
         after = os.fstat(file_fd)
         current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
         current_parent = os.stat(parent, follow_symlinks=False)
-        fields = (
-            "st_dev",
-            "st_ino",
-            "st_mode",
-            "st_nlink",
-            "st_size",
-            "st_mtime_ns",
-            "st_ctime_ns",
-        )
+        fields = ("st_dev", "st_ino", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
         states = {
             tuple(getattr(item, field) for field in fields)
             for item in (named, before, after, current)
@@ -204,12 +192,10 @@ def _local_wheel_artifact(
     except OSError as exc:
         raise ProvenanceError("local wheel artifact is unavailable") from exc
     finally:
-        if file_fd is not None:
-            with suppress(OSError):
-                os.close(file_fd)
-        if parent_fd is not None:
-            with suppress(OSError):
-                os.close(parent_fd)
+        for descriptor in (file_fd, parent_fd):
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
     actual = sha256(snapshot).hexdigest()
     if actual != digest[7:]:
         raise ProvenanceError("local wheel artifact hash mismatches")

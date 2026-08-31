@@ -320,6 +320,30 @@ class InitialFundingOutcome:
                 )
             ):
                 raise _fail("applied funding outcome bindings conflict")
+            transaction, snapshot = self.transaction, self.snapshot
+            cash = snapshot.cash_balances
+            if (
+                self.before_snapshot_version != 0
+                or self.after_snapshot_version != 1
+                or snapshot.instrument_spec_set_id != transaction.instrument_spec_set_id
+                or snapshot.instrument_spec_set_sha256 != transaction.instrument_spec_set_sha256
+                or snapshot.last_entry_id != transaction.entry_id
+                or snapshot.last_transaction_sha256
+                != initial_funding_transaction_digest(transaction)
+                or len(cash) != 1
+                or (cash[0].currency, cash[0].currency_quantum, cash[0].amount)
+                != (
+                    transaction.settlement_currency,
+                    transaction.currency_quantum,
+                    transaction.amount,
+                )
+                or snapshot.position_balances
+                or snapshot.rounding_balances
+                or snapshot.unresolved_fills
+                or snapshot.open_reconciliation_bindings
+                or snapshot.open_reconciliation_refs
+            ):
+                raise _fail("applied funding outcome conflicts with exact genesis snapshot")
         elif (
             self.transaction is not None
             or type(self.existing_transaction_sha256) is not Sha256Digest

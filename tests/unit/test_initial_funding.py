@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -241,3 +241,85 @@ def test_applied_funding_outcome_rejects_transaction_binding_drift() -> None:
         replace(applied, submitted_funding_spec_sha256=Sha256Digest("88" * 32))
     with pytest.raises(InitialFundingError, match="applied funding outcome bindings"):
         replace(applied, prepared_audit_acknowledgement_sha256=Sha256Digest("99" * 32))
+
+
+def test_applied_funding_outcome_rejects_every_non_genesis_snapshot_surface() -> None:
+    from ea.core.initial_funding import initial_funding_transaction_digest
+    from ea.core.portfolio import (
+        CashBalance,
+        ExistingLedgerBinding,
+        OpenReconciliationRef,
+        PositionBalance,
+        RoundingBalance,
+        UnresolvedFillRef,
+    )
+    from ea.core.run import RunBinding, RunReference
+
+    spec_set = _spec_set()
+    instrument = spec_set.specifications[0]
+    binding = RunBinding(RunReference(RUN_ID, Sha256Digest("11" * 32)), Sha256Digest("22" * 32))
+
+    def apply(amount: str) -> InitialFundingOutcome:
+        funding = InitialFundingSpec(
+            spec_set.identifier,
+            __import__(
+                "ea.core.execution", fromlist=["instrument_spec_set_digest"]
+            ).instrument_spec_set_digest(spec_set),
+            instrument.settlement_currency,
+            instrument.currency_quantum,
+            CanonicalDecimal(amount),
+        )
+        return create_portfolio_ledger(RUN_ID, spec_set).apply_initial_funding(
+            funding, binding=binding, prepared_acknowledgement=Sha256Digest("33" * 32)
+        )
+
+    applied, foreign = apply("1000"), apply("2000")
+    assert applied.transaction is not None
+    fill_id = EconomicId(RUN_ID, EconomicOwnerKind.EXECUTION_FILL, 1)
+    transaction_sha256 = initial_funding_transaction_digest(applied.transaction)
+    ledger_binding = ExistingLedgerBinding(
+        applied.transaction.entry_id, fill_id, Sha256Digest("44" * 32), transaction_sha256
+    )
+    reconciliation_ref = OpenReconciliationRef(
+        fill_id, Sha256Digest("44" * 32), Sha256Digest("55" * 32)
+    )
+
+    def cash(
+        currency: SettlementCurrency = instrument.settlement_currency,
+        quantum: CanonicalDecimal = instrument.currency_quantum,
+    ) -> tuple[CashBalance, ...]:
+        return (CashBalance(currency, quantum, CanonicalDecimal("1000")),)
+
+    changes: tuple[dict[str, Any], ...] = (
+        {"instrument_spec_set_id": InstrumentSpecSetId("other.v1")},
+        {"instrument_spec_set_sha256": Sha256Digest("66" * 32)},
+        {"last_transaction_sha256": Sha256Digest("77" * 32)},
+        {"cash_balances": ()},
+        {"cash_balances": cash(SettlementCurrency("EUR"))},
+        {"cash_balances": cash(quantum=CanonicalDecimal("0.1"))},
+        {"cash_balances": cash(SettlementCurrency("EUR")) + cash()},
+        {
+            "position_balances": (
+                PositionBalance(
+                    instrument.instrument, instrument.quantity_quantum, CanonicalDecimal("1")
+                ),
+            )
+        },
+        {
+            "rounding_balances": (
+                RoundingBalance(instrument.settlement_currency, CanonicalDecimal("0.01")),
+            )
+        },
+        {"unresolved_fills": (UnresolvedFillRef(fill_id, Sha256Digest("44" * 32)),)},
+        {
+            "open_reconciliation_bindings": (ledger_binding,),
+            "open_reconciliation_refs": (reconciliation_ref,),
+        },
+    )
+    snapshots = (
+        foreign.snapshot,
+        *(replace(applied.snapshot, **change) for change in changes),
+    )
+    for snapshot in snapshots:
+        with pytest.raises(InitialFundingError, match="genesis snapshot"):
+            replace(applied, snapshot=snapshot)

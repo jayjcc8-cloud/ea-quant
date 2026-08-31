@@ -113,9 +113,9 @@ mutable open, closed, Draft, or merged state.
 - Current merged baseline before this convergence candidate is
   `main@67184b1e4f387caf15b88db5529d4194de82cd81`; when this file reaches `main`, the containing
   `main` commit and exact CI replace that pre-candidate reference.
-- R8 / #146 is candidate work until merged. Its Delivery 2 checkpoint is recorded only by this
-  file in the containing `main` commit with that commit's exact CI; no docs-only successor is
-  required to replace a candidate SHA.
+- Delivery 2 remains candidate work until merged. Its checkpoint is recorded only by this file in
+  the containing `main` commit with that commit's exact CI; no docs-only successor is required to
+  replace a candidate SHA.
 - The last independently verified pre-consolidation checkpoint from **2026-08-22** remains
   `af7bc08cecd70fc5479b92e4393da468727ddb55` as immutable provenance, not current state.
 - Issue #106 is closed and its Web shell remains Mock-only. There is no outstanding docs-only
