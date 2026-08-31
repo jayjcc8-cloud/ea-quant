@@ -180,6 +180,12 @@ def test_manifest_round_trip_is_strict_and_transitively_immutable() -> None:
         parsed.spec.runtime.ea_version = "changed"  # type: ignore[misc]
 
 
+def test_manifest_v2_runtime_contract_is_not_a_v1_runtime_spec() -> None:
+    from ea.experiments._manifest_model import InstalledRuntimeSpecV2
+
+    assert InstalledRuntimeSpecV2.__name__ == "InstalledRuntimeSpecV2"
+
+
 def test_manifest_facade_preserves_public_object_identity_and_pickle_paths() -> None:
     expected = {
         "ManifestError": _manifest_model.ManifestError,
