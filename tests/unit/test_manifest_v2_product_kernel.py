@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import zipfile
@@ -93,7 +94,7 @@ def test_wheel_owned_rows_require_closed_record_hashes(tmp_path: Path) -> None:
         archive.writestr("ea_quant-0.1.1.dist-info/RECORD", record)
 
     with pytest.raises(ProvenanceError):
-        _wheel_owned_rows(wheel)
+        _wheel_owned_rows(wheel.read_bytes())
 
 
 def test_direct_url_requires_a_present_matching_local_wheel(tmp_path: Path) -> None:
@@ -108,7 +109,57 @@ def test_direct_url_requires_a_present_matching_local_wheel(tmp_path: Path) -> N
         }
     )
 
-    assert _local_wheel_artifact(document) == (wheel, hashlib.sha256(b"wheel").hexdigest())
+    assert _local_wheel_artifact(document) == (b"wheel", hashlib.sha256(b"wheel").hexdigest())
+
+
+def test_local_wheel_snapshot_owns_rows_after_same_path_replacement(tmp_path: Path) -> None:
+    from ea.experiments.provenance import _local_wheel_artifact, _wheel_owned_rows
+
+    wheel = tmp_path / "ea_quant-0.1.1-py3-none-any.whl"
+    root = "ea_quant-0.1.1.dist-info"
+
+    def write_wheel(source: bytes) -> tuple[tuple[str, bytes], ...]:
+        rows = {
+            "ea/__init__.py": source,
+            root + "/METADATA": b"Name: ea-quant\n",
+            root + "/WHEEL": b"Wheel-Version: 1.0\n",
+            root + "/entry_points.txt": b"[console_scripts]\n",
+            root + "/top_level.txt": b"ea\n",
+        }
+        record = (
+            b"".join(
+                name.encode()
+                + b",sha256="
+                + __import__("base64")
+                .urlsafe_b64encode(hashlib.sha256(value).digest())
+                .rstrip(b"=")
+                + b","
+                + str(len(value)).encode()
+                + b"\n"
+                for name, value in rows.items()
+            )
+            + (root + "/RECORD,,\n").encode()
+        )
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name, value in rows.items():
+                archive.writestr(name, value)
+            archive.writestr(root + "/RECORD", record)
+        return tuple(sorted(rows.items()))
+
+    expected = write_wheel(b"value = 'A'\n")
+    document = json.dumps(
+        {
+            "url": wheel.as_uri(),
+            "archive_info": {"hash": "sha256=" + hashlib.sha256(wheel.read_bytes()).hexdigest()},
+        }
+    )
+    snapshot, digest = _local_wheel_artifact(document)
+    write_wheel(b"value = 'B'\n")
+
+    assert snapshot is not None
+    assert hashlib.sha256(snapshot).hexdigest() == digest
+    assert snapshot != wheel.read_bytes()
+    assert _wheel_owned_rows(snapshot) == expected
 
 
 @pytest.mark.parametrize(
@@ -135,7 +186,7 @@ def test_direct_url_accepts_only_pip_archive_hash_encodings(
 
     assert _local_wheel_artifact(
         json.dumps({"url": wheel.as_uri(), "archive_info": encodings[archive_info]})
-    ) == (wheel, digest)
+    ) == (b"wheel", digest)
 
 
 @pytest.mark.parametrize(
@@ -240,7 +291,7 @@ def test_wheel_owned_rows_include_all_required_metadata(tmp_path: Path) -> None:
             archive.writestr(name, value)
         archive.writestr("ea_quant-0.1.1.dist-info/RECORD", record)
 
-    assert _wheel_owned_rows(wheel) == tuple(sorted(rows.items()))
+    assert _wheel_owned_rows(wheel.read_bytes()) == tuple(sorted(rows.items()))
 
 
 def test_wheel_owned_rows_converts_missing_record_member_to_provenance_error(
@@ -274,7 +325,30 @@ def test_wheel_owned_rows_converts_missing_record_member_to_provenance_error(
         archive.writestr(required + "/RECORD", record)
 
     with pytest.raises(ProvenanceError):
-        _wheel_owned_rows(wheel)
+        _wheel_owned_rows(wheel.read_bytes())
+
+
+def test_local_wheel_artifact_converts_malformed_bracketed_file_url_to_provenance_error() -> None:
+    from ea.experiments.provenance import ProvenanceError, _local_wheel_artifact
+
+    with pytest.raises(ProvenanceError):
+        _local_wheel_artifact(
+            '{"url":"file://[bad/ea.whl","archive_info":{"hash":"sha256=' + "0" * 64 + '"}}'
+        )
+
+
+def test_wheel_owned_rows_converts_oversized_record_field_to_provenance_error(
+    tmp_path: Path,
+) -> None:
+    from ea.experiments.provenance import ProvenanceError, _wheel_owned_rows
+
+    wheel = tmp_path / "ea_quant-0.1.1-py3-none-any.whl"
+    record = b"x" * (csv.field_size_limit() + 1) + b",sha256=" + b"a" * 43 + b",1\n"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("ea_quant-0.1.1.dist-info/RECORD", record)
+
+    with pytest.raises(ProvenanceError):
+        _wheel_owned_rows(wheel.read_bytes())
 
 
 def test_installed_rows_read_a_closed_safe_tree_and_match_wheel_rows(tmp_path: Path) -> None:

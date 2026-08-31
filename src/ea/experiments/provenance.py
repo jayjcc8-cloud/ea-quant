@@ -21,6 +21,7 @@ import urllib.parse
 import zipfile
 from base64 import urlsafe_b64decode
 from contextlib import suppress
+from csv import Error as CsvError
 from csv import reader as csv_reader
 from dataclasses import dataclass
 from hashlib import sha256
@@ -50,7 +51,7 @@ class ProvenanceError(RuntimeError):
 
 def _local_wheel_artifact(
     document: str, *, require_artifact: bool = True
-) -> tuple[Path | None, str]:
+) -> tuple[bytes | None, str]:
     """Extract and verify the only supported direct local wheel artifact."""
     try:
         value = json.loads(document, object_pairs_hook=_reject_duplicate_json_keys)
@@ -97,7 +98,10 @@ def _local_wheel_artifact(
         digest = "sha256=" + hashes_digest
     elif hashes_digest is not None and digest != "sha256=" + hashes_digest:
         raise ProvenanceError("direct URL artifact hashes disagree")
-    parsed = urllib.parse.urlsplit(url)
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError as exc:
+        raise ProvenanceError("direct URL must identify a local wheel") from exc
     if parsed.scheme != "file" or parsed.netloc or parsed.query or parsed.fragment:
         raise ProvenanceError("direct URL must identify a local wheel")
     try:
@@ -114,12 +118,15 @@ def _local_wheel_artifact(
             return None, digest[7:]
         raise ProvenanceError("local wheel artifact is unavailable") from exc
     try:
-        actual = sha256(resolved.read_bytes()).hexdigest()
+        if not resolved.is_file() or resolved.suffix != ".whl":
+            raise ProvenanceError("local wheel artifact hash mismatches")
+        snapshot = resolved.read_bytes()
     except OSError as exc:
         raise ProvenanceError("local wheel artifact is unavailable") from exc
-    if not resolved.is_file() or resolved.suffix != ".whl" or actual != digest[7:]:
+    actual = sha256(snapshot).hexdigest()
+    if actual != digest[7:]:
         raise ProvenanceError("local wheel artifact hash mismatches")
-    return resolved, actual
+    return snapshot, actual
 
 
 def _require_pip_installer(raw: object) -> None:
@@ -128,10 +135,10 @@ def _require_pip_installer(raw: object) -> None:
         raise ProvenanceError("installed runtime requires pip INSTALLER")
 
 
-def _wheel_owned_rows(wheel: Path) -> tuple[tuple[str, bytes], ...]:
+def _wheel_owned_rows(wheel: bytes) -> tuple[tuple[str, bytes], ...]:
     """Read a closed wheel-owned surface only after strict RECORD validation."""
     try:
-        with zipfile.ZipFile(wheel) as archive:
+        with zipfile.ZipFile(io.BytesIO(wheel)) as archive:
             names = archive.namelist()
             if any(
                 name != unicodedata.normalize("NFC", name)
@@ -181,7 +188,7 @@ def _wheel_owned_rows(wheel: Path) -> tuple[tuple[str, bytes], ...]:
                     raise ProvenanceError("wheel RECORD row mismatch")
                 rows.append((name, content))
             return tuple(rows)
-    except (KeyError, OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+    except (CsvError, KeyError, OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
         raise ProvenanceError("wheel cannot be read") from exc
 
 
@@ -886,10 +893,10 @@ def collect_installed_runtime_spec_v2(*, require_artifact: bool = True) -> Insta
     raw_direct_url = distribution.read_text("direct_url.json")
     if type(raw_direct_url) is not str:
         raise ProvenanceError("ea-quant direct_url.json is missing")
-    wheel, artifact_sha256 = _local_wheel_artifact(
+    wheel_bytes, artifact_sha256 = _local_wheel_artifact(
         raw_direct_url, require_artifact=require_artifact
     )
-    owned_rows = _wheel_owned_rows(wheel) if wheel is not None else None
+    owned_rows = _wheel_owned_rows(wheel_bytes) if wheel_bytes is not None else None
     installed_rows = _installed_wheel_rows(distribution, owned_rows)
     _validate_installed_ea_import(distribution, identity, installed_rows)
     digest = sha256(_INSTALLED_FILES_DOMAIN)
