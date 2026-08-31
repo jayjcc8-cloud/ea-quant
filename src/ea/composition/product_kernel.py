@@ -374,7 +374,7 @@ def prepare_phase1_product_kernel(
             journal.close()
         if prepared is not None:
             store._retire_product_attempt(prepared.audit)
-        if type(error) is ProductKernelError:
+        if not isinstance(error, Exception) or type(error) is ProductKernelError:
             raise
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT, "product preparation failed"

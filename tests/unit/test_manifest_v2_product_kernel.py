@@ -1481,6 +1481,8 @@ def test_public_recover_reopens_only_the_closed_incomplete_binding(
         ("risk", "INTEGRITY_RISK_STATE_DRIFT"),
         ("audit", "INTEGRITY_AUDIT_CORRUPT"),
         ("product", "INTEGRITY_MANIFEST_DRIFT"),
+        ("interrupt", "passthrough"),
+        ("system-exit", "passthrough"),
     ],
 )
 def test_public_prepare_closes_and_retires_every_post_prepare_failure(
@@ -1509,6 +1511,10 @@ def test_public_prepare_closes_and_retires_every_post_prepare_failure(
         error = RiskAuthorityError(OutcomeCode.INVALID_TYPE, "risk")
     elif failure == "audit":
         error = OSError("audit")
+    elif failure == "interrupt":
+        error = KeyboardInterrupt("interrupt")
+    elif failure == "system-exit":
+        error = SystemExit("system-exit")
     else:
         error = product_kernel.ProductKernelError(
             product_kernel.ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "product"
@@ -1530,7 +1536,8 @@ def test_public_prepare_closes_and_retires_every_post_prepare_failure(
         LocalResultStore, "_retire_product_attempt", lambda _self, item: retired.append(item)
     )
 
-    with pytest.raises(product_kernel.ProductKernelError) as raised:
+    expected_error = type(error) if code == "passthrough" else product_kernel.ProductKernelError
+    with pytest.raises(expected_error) as raised:
         product_kernel.prepare_phase1_product_kernel(
             store=store,
             spec=cast(LineageSpecV2, spec),
@@ -1540,7 +1547,10 @@ def test_public_prepare_closes_and_retires_every_post_prepare_failure(
             risk_policy=cast(Phase1RiskPolicy, object()),
         )
 
-    assert raised.value.code.name == code
+    if code == "passthrough":
+        assert raised.value is error
+    else:
+        assert cast(product_kernel.ProductKernelError, raised.value).code.name == code
     assert journal.closes == 1
     assert retired == [audit]
 
