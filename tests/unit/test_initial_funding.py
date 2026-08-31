@@ -6,13 +6,19 @@ import pytest
 
 from ea.core.economics import CanonicalDecimal
 from ea.core.execution import InstrumentSpecSetId, SettlementCurrency
+from ea.core.execution_identity import EconomicId, EconomicOwnerKind
 from ea.core.initial_funding import (
+    InitialFundingConflictKind,
     InitialFundingError,
+    InitialFundingResult,
     InitialFundingSpec,
+    InitialFundingTransaction,
     canonical_initial_funding_spec_bytes,
+    canonical_initial_funding_transaction_bytes,
     initial_funding_spec_digest,
 )
-from ea.core.run import Sha256Digest
+from ea.core.portfolio import CurrencyCommodity, LedgerAccountKind, LedgerPosting
+from ea.core.run import RunId, Sha256Digest
 
 
 def test_initial_funding_spec_has_stable_literal_canonical_bytes() -> None:
@@ -44,3 +50,44 @@ def test_initial_funding_requires_a_positive_quantized_amount() -> None:
             CanonicalDecimal("0.01"),
             CanonicalDecimal("0.001"),
         )
+
+
+def test_initial_funding_transaction_is_closed_first_ledger_entry() -> None:
+    run_id = RunId("123e4567-e89b-42d3-a456-426614174000")
+    amount = CanonicalDecimal("1000")
+    currency = SettlementCurrency("USD")
+    transaction = InitialFundingTransaction(
+        run_id=run_id,
+        entry_id=EconomicId(run_id, EconomicOwnerKind.LEDGER_ENTRY, 1),
+        ledger_sequence=1,
+        manifest_sha256=Sha256Digest("11" * 32),
+        lineage_sha256=Sha256Digest("22" * 32),
+        funding_spec_sha256=initial_funding_spec_digest(
+            InitialFundingSpec(
+                InstrumentSpecSetId("phase1.test.v1"),
+                Sha256Digest("33" * 32),
+                currency,
+                CanonicalDecimal("0.01"),
+                amount,
+            )
+        ),
+        instrument_spec_set_id=InstrumentSpecSetId("phase1.test.v1"),
+        instrument_spec_set_sha256=Sha256Digest("33" * 32),
+        settlement_currency=currency,
+        currency_quantum=CanonicalDecimal("0.01"),
+        amount=amount,
+        prepared_audit_acknowledgement_sha256=Sha256Digest("44" * 32),
+        previous_transaction_sha256=None,
+        postings=(
+            LedgerPosting(LedgerAccountKind.PORTFOLIO_CASH, CurrencyCommodity(currency), amount),
+            LedgerPosting(
+                LedgerAccountKind.EXTERNAL_SETTLEMENT,
+                CurrencyCommodity(currency),
+                CanonicalDecimal("-1000"),
+            ),
+        ),
+    )
+
+    assert InitialFundingResult.APPLIED.value == "applied"
+    assert InitialFundingConflictKind.ENTRY_ID_OCCUPIED.value == "entry_id_occupied"
+    assert b'"ledger_sequence":1' in canonical_initial_funding_transaction_bytes(transaction)

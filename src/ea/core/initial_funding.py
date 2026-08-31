@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import StrEnum
 from hashlib import sha256
 from typing import final
 
@@ -14,10 +15,13 @@ from ea.core.economics import (
     require_quantized,
 )
 from ea.core.execution import InstrumentExecutionSpecSet, InstrumentSpecSetId, SettlementCurrency
-from ea.core.run import RunContractError, Sha256Digest
+from ea.core.execution_identity import EconomicId, EconomicOwnerKind
+from ea.core.portfolio import CurrencyCommodity, LedgerAccountKind, LedgerPosting
+from ea.core.run import RunContractError, RunId, Sha256Digest
 
 INITIAL_FUNDING_SPEC_CANONICALIZATION = "ea-initial-funding-spec-v1"
 INITIAL_FUNDING_SPEC_DOMAIN = b"ea.initial-funding-spec.v1\0"
+INITIAL_FUNDING_TRANSACTION_DOMAIN = b"ea.initial-funding-transaction.v1\0"
 
 
 class InitialFundingError(RunContractError):
@@ -108,3 +112,143 @@ def validate_initial_funding_spec(
         or spec.currency_quantum != next(iter(quanta))
     ):
         raise _fail("funding specification does not match the complete specification set")
+
+
+class InitialFundingResult(StrEnum):
+    APPLIED = "applied"
+    CONFLICT = "conflict"
+
+
+class InitialFundingConflictKind(StrEnum):
+    ENTRY_ID_OCCUPIED = "entry_id_occupied"
+    FUNDING_BINDING_CONFLICT = "funding_binding_conflict"
+    MANIFEST_BINDING_CONFLICT = "manifest_binding_conflict"
+    AUDIT_PREDECESSOR_CONFLICT = "audit_predecessor_conflict"
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class InitialFundingTransaction:
+    """The immutable, balanced ledger genesis transaction."""
+
+    run_id: RunId
+    entry_id: EconomicId
+    ledger_sequence: int
+    manifest_sha256: Sha256Digest
+    lineage_sha256: Sha256Digest
+    funding_spec_sha256: Sha256Digest
+    instrument_spec_set_id: InstrumentSpecSetId
+    instrument_spec_set_sha256: Sha256Digest
+    settlement_currency: SettlementCurrency
+    currency_quantum: CanonicalDecimal
+    amount: CanonicalDecimal
+    prepared_audit_acknowledgement_sha256: Sha256Digest
+    previous_transaction_sha256: None
+    postings: tuple[LedgerPosting, LedgerPosting]
+
+    def __post_init__(self) -> None:
+        if type(self.run_id) is not RunId or type(self.entry_id) is not EconomicId:
+            raise _fail("funding transaction identity must be exact")
+        if (
+            self.entry_id.run_id != self.run_id
+            or self.entry_id.owner_kind is not EconomicOwnerKind.LEDGER_ENTRY
+            or self.entry_id.owner_sequence != 1
+            or type(self.ledger_sequence) is not int
+            or self.ledger_sequence != 1
+            or self.previous_transaction_sha256 is not None
+        ):
+            raise _fail("funding transaction must be the first ledger entry")
+        if any(
+            type(value) is not Sha256Digest
+            for value in (
+                self.manifest_sha256,
+                self.lineage_sha256,
+                self.funding_spec_sha256,
+                self.instrument_spec_set_sha256,
+                self.prepared_audit_acknowledgement_sha256,
+            )
+        ):
+            raise _fail("funding transaction digests must be exact")
+        if type(self.instrument_spec_set_id) is not InstrumentSpecSetId:
+            raise _fail("funding transaction specification-set identity must be exact")
+        if type(self.settlement_currency) is not SettlementCurrency:
+            raise _fail("funding transaction currency must be exact")
+        try:
+            require_positive(self.currency_quantum, field_name="funding currency_quantum")
+            require_positive(self.amount, field_name="funding amount")
+            require_quantized(self.amount, self.currency_quantum, field_name="funding amount")
+        except EconomicValidationError as error:
+            raise _fail(str(error)) from error
+        if type(self.postings) is not tuple or len(self.postings) != 2:
+            raise _fail("funding transaction requires two exact postings")
+        if (
+            initial_funding_spec_digest(
+                InitialFundingSpec(
+                    self.instrument_spec_set_id,
+                    self.instrument_spec_set_sha256,
+                    self.settlement_currency,
+                    self.currency_quantum,
+                    self.amount,
+                )
+            )
+            != self.funding_spec_sha256
+        ):
+            raise _fail("funding transaction specification digest conflicts with its fields")
+        positive, negative = self.postings
+        if (
+            type(positive) is not LedgerPosting
+            or type(negative) is not LedgerPosting
+            or positive.account is not LedgerAccountKind.PORTFOLIO_CASH
+            or negative.account is not LedgerAccountKind.EXTERNAL_SETTLEMENT
+            or positive.commodity != CurrencyCommodity(self.settlement_currency)
+            or negative.commodity != CurrencyCommodity(self.settlement_currency)
+            or positive.amount != self.amount
+            or negative.amount.coefficient != -self.amount.coefficient
+            or negative.amount.scale != self.amount.scale
+        ):
+            raise _fail("funding transaction postings conflict with funding evidence")
+
+
+def canonical_initial_funding_transaction_bytes(transaction: InitialFundingTransaction) -> bytes:
+    if type(transaction) is not InitialFundingTransaction:
+        raise _fail("funding transaction must be exact")
+    return _canonical_json(
+        {
+            "amount": transaction.amount.text,
+            "currency_quantum": transaction.currency_quantum.text,
+            "entry_id": {
+                "owner_kind": transaction.entry_id.owner_kind.value,
+                "owner_sequence": 1,
+                "run_id": transaction.run_id.value,
+            },
+            "funding_spec_sha256": transaction.funding_spec_sha256.value,
+            "instrument_spec_set_id": transaction.instrument_spec_set_id.value,
+            "instrument_spec_set_sha256": transaction.instrument_spec_set_sha256.value,
+            "ledger_sequence": 1,
+            "lineage_sha256": transaction.lineage_sha256.value,
+            "manifest_sha256": transaction.manifest_sha256.value,
+            "prepared_audit_acknowledgement_sha256": (
+                transaction.prepared_audit_acknowledgement_sha256.value
+            ),
+            "previous_transaction_sha256": None,
+            "postings": [
+                {
+                    "account": posting.account.value,
+                    "amount": posting.amount.text,
+                    "currency": transaction.settlement_currency.code,
+                }
+                for posting in transaction.postings
+            ],
+            "schema": "ea-initial-funding-transaction-v1",
+            "settlement_currency": transaction.settlement_currency.code,
+        }
+    )
+
+
+def initial_funding_transaction_digest(transaction: InitialFundingTransaction) -> Sha256Digest:
+    return Sha256Digest(
+        sha256(
+            INITIAL_FUNDING_TRANSACTION_DOMAIN
+            + canonical_initial_funding_transaction_bytes(transaction)
+        ).hexdigest()
+    )
