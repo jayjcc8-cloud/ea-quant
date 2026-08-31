@@ -186,6 +186,12 @@ def test_manifest_v2_runtime_contract_is_not_a_v1_runtime_spec() -> None:
     assert InstalledRuntimeSpecV2.__name__ == "InstalledRuntimeSpecV2"
 
 
+def test_manifest_v2_reader_is_an_explicit_new_product_boundary() -> None:
+    from ea.experiments.manifest import read_manifest_v2
+
+    assert read_manifest_v2.__name__ == "read_manifest_v2"
+
+
 def test_manifest_facade_preserves_public_object_identity_and_pickle_paths() -> None:
     expected = {
         "ManifestError": _manifest_model.ManifestError,
