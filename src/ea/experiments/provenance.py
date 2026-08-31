@@ -748,10 +748,129 @@ def _installed_file_rows(
     return tuple(sorted(rows))
 
 
+def _validate_installed_sys_path(active_roots: tuple[Path, ...]) -> None:
+    paths = sysconfig.get_paths()
+    roots: list[Path] = []
+    for key in ("stdlib", "platstdlib"):
+        raw = paths.get(key)
+        if type(raw) is not str or not raw or not Path(raw).is_absolute():
+            raise ProvenanceError(f"sysconfig {key} is not an absolute path")
+        path = Path(raw)
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise ProvenanceError(f"sysconfig {key} cannot be resolved") from exc
+        if path.is_symlink() or not resolved.is_dir():
+            raise ProvenanceError(f"sysconfig {key} is unsafe")
+        if resolved not in roots:
+            roots.append(resolved)
+    versioned_name = f"python{sys.version_info.major}{sys.version_info.minor}.zip"
+    versioned_zip = (roots[0].parent / versioned_name).resolve(strict=False)
+    seen: set[Path] = set()
+    for raw in sys.path:
+        if type(raw) is not str or not raw or not Path(raw).is_absolute():
+            raise ProvenanceError("sys.path contains an empty or relative entry")
+        path = Path(raw)
+        try:
+            resolved = path.resolve(strict=path.resolve(strict=False) != versioned_zip)
+        except OSError as exc:
+            raise ProvenanceError("sys.path entry cannot be resolved") from exc
+        if path.is_symlink() or resolved in seen:
+            raise ProvenanceError("sys.path contains an unsafe duplicate physical entry")
+        seen.add(resolved)
+        if (
+            resolved in active_roots
+            or resolved == versioned_zip
+            or any(resolved.is_relative_to(root) for root in roots)
+        ):
+            continue
+        raise ProvenanceError("sys.path contains an injected import root")
+
+
+def _validate_installed_ea_import(
+    distribution: importlib.metadata.Distribution,
+    identity: DistributionIdentity,
+    installed_rows: tuple[tuple[str, bytes], ...],
+) -> None:
+    try:
+        root_path = Path(str(distribution.locate_file("")))
+        root = root_path.resolve(strict=True)
+        package = root / "ea"
+        expected_init = package / "__init__.py"
+    except OSError as exc:
+        raise ProvenanceError("installed EA package cannot be resolved") from exc
+    if (
+        not root_path.is_absolute()
+        or root_path.is_symlink()
+        or root_path != root
+        or not root.is_dir()
+        or package.is_symlink()
+        or not package.is_dir()
+        or package.resolve(strict=True) != package
+        or expected_init.is_symlink()
+        or not expected_init.is_file()
+        or expected_init.resolve(strict=True) != expected_init
+    ):
+        raise ProvenanceError("selected installed EA package is unsafe")
+    spec = importlib.util.find_spec("ea")
+    locations = (
+        ()
+        if spec is None or spec.submodule_search_locations is None
+        else tuple(spec.submodule_search_locations)
+    )
+    if (
+        spec is None
+        or type(spec.origin) is not str
+        or Path(spec.origin).resolve(strict=True) != expected_init
+        or len(locations) != 1
+        or type(locations[0]) is not str
+        or Path(locations[0]).resolve(strict=True) != package
+        or type(ea.__file__) is not str
+        or Path(ea.__file__).resolve(strict=True) != expected_init
+    ):
+        raise ProvenanceError("executing EA package is not bound to the selected distribution")
+    try:
+        version = importlib.metadata.version("ea-quant")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise ProvenanceError("unscoped ea-quant metadata is unavailable") from exc
+    if version != identity.version or ea.__version__ != identity.version:
+        raise ProvenanceError("EA runtime and metadata versions are inconsistent")
+    source_rows = {
+        name for name, _ in installed_rows if name.startswith("ea/") and name.endswith(".py")
+    }
+    for name, module in tuple(sys.modules.items()):
+        if name != "ea" and not name.startswith("ea."):
+            continue
+        origin = getattr(module, "__file__", None)
+        if type(origin) is not str:
+            raise ProvenanceError("loaded EA module has no regular installed origin")
+        try:
+            path = Path(origin)
+            resolved = path.resolve(strict=True)
+            relative = resolved.relative_to(root).as_posix()
+        except (OSError, ValueError) as exc:
+            raise ProvenanceError("loaded EA module escaped the selected package") from exc
+        if path.is_symlink() or not resolved.is_file() or relative not in source_rows:
+            raise ProvenanceError("loaded EA module is not an owned installed source")
+
+
 def collect_installed_runtime_spec_v2(*, require_artifact: bool = True) -> InstalledRuntimeSpecV2:
     """Collect the checkout-independent installed-distribution runtime identity."""
-    distributions = tuple(importlib.metadata.distributions())
-    pairs = [(_distribution_identity(item), item) for item in distributions]
+    _require_runtime_flags()
+    roots = _active_metadata_roots()
+    _validate_installed_sys_path(roots)
+    distributions = tuple(importlib.metadata.distributions(path=[str(root) for root in roots]))
+    pairs = []
+    for item in distributions:
+        try:
+            root = Path(str(item.locate_file(""))).resolve(strict=True)
+        except OSError as exc:
+            raise ProvenanceError("active distribution root cannot be resolved") from exc
+        if root not in roots:
+            raise ProvenanceError("active distribution escaped active metadata roots")
+        pairs.append((_distribution_identity(item), item))
+    if len({identity.name for identity, _ in pairs}) != len(pairs):
+        raise ProvenanceError("active distribution names are not unique")
     pairs.sort(key=lambda pair: pair[0].name)
     ea_pairs = [pair for pair in pairs if pair[0].name == "ea-quant"]
     if len(ea_pairs) != 1:
@@ -768,6 +887,7 @@ def collect_installed_runtime_spec_v2(*, require_artifact: bool = True) -> Insta
     )
     owned_rows = _wheel_owned_rows(wheel) if wheel is not None else None
     installed_rows = _installed_wheel_rows(distribution, owned_rows)
+    _validate_installed_ea_import(distribution, identity, installed_rows)
     digest = sha256(_INSTALLED_FILES_DOMAIN)
     digest.update(artifact_sha256.encode() + b"\0")
     for name, content in installed_rows:

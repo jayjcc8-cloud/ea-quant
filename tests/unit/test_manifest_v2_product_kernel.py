@@ -261,6 +261,42 @@ def test_installed_rows_read_a_closed_safe_tree_and_match_wheel_rows(tmp_path: P
 
 
 def test_installed_runtime_collector_binds_pip_admission_artifact_and_closed_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.metadata
+
+    import ea.experiments.provenance as provenance
+
+    class Distribution:
+        metadata = {"Name": "ea-quant"}
+        version = "0.1.1"
+
+        def locate_file(self, _path: object) -> Path:
+            return tmp_path
+
+        def read_text(self, name: str) -> str:
+            return {"INSTALLER": "pip\n", "direct_url.json": "direct-url"}[name]
+
+    distribution = Distribution()
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda **_kwargs: [distribution])
+    monkeypatch.setattr(provenance, "_require_runtime_flags", lambda: None)
+    monkeypatch.setattr(provenance, "_active_metadata_roots", lambda: (tmp_path,))
+    monkeypatch.setattr(provenance, "_validate_installed_sys_path", lambda _roots: None)
+    monkeypatch.setattr(
+        provenance, "_local_wheel_artifact", lambda *_args, **_kwargs: (None, "1" * 64)
+    )
+    monkeypatch.setattr(
+        provenance, "_installed_wheel_rows", lambda *_args: (("ea/__init__.py", b""),)
+    )
+    monkeypatch.setattr(provenance, "_validate_installed_ea_import", lambda *_args: None)
+
+    collected = provenance.collect_installed_runtime_spec_v2(require_artifact=False)
+
+    assert collected.provenance_kind == "installed_local_wheel_v1"
+    assert collected.ea_distribution.name == "ea-quant"
+
+
+def test_installed_runtime_collector_requires_isolated_runtime_before_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import importlib.metadata
@@ -283,10 +319,204 @@ def test_installed_runtime_collector_binds_pip_admission_artifact_and_closed_row
         provenance, "_installed_wheel_rows", lambda *_args: (("ea/__init__.py", b""),)
     )
 
-    collected = provenance.collect_installed_runtime_spec_v2(require_artifact=False)
+    def reject_runtime() -> None:
+        raise provenance.ProvenanceError("non-isolated runtime")
 
-    assert collected.provenance_kind == "installed_local_wheel_v1"
-    assert collected.ea_distribution.name == "ea-quant"
+    monkeypatch.setattr(provenance, "_require_runtime_flags", reject_runtime)
+
+    with pytest.raises(provenance.ProvenanceError, match="non-isolated runtime"):
+        provenance.collect_installed_runtime_spec_v2(require_artifact=False)
+
+
+def test_installed_runtime_collector_requires_active_metadata_roots_before_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.metadata
+
+    import ea.experiments.provenance as provenance
+
+    class Distribution:
+        metadata = {"Name": "ea-quant"}
+        version = "0.1.1"
+
+        def read_text(self, name: str) -> str:
+            return {"INSTALLER": "pip\n", "direct_url.json": "direct-url"}[name]
+
+    distribution = Distribution()
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda **_kwargs: [distribution])
+    monkeypatch.setattr(provenance, "_require_runtime_flags", lambda: None)
+    monkeypatch.setattr(
+        provenance,
+        "_active_metadata_roots",
+        lambda: (_ for _ in ()).throw(provenance.ProvenanceError("active roots rejected")),
+    )
+    monkeypatch.setattr(
+        provenance, "_local_wheel_artifact", lambda *_args, **_kwargs: (None, "1" * 64)
+    )
+    monkeypatch.setattr(
+        provenance, "_installed_wheel_rows", lambda *_args: (("ea/__init__.py", b""),)
+    )
+
+    with pytest.raises(provenance.ProvenanceError, match="active roots rejected"):
+        provenance.collect_installed_runtime_spec_v2(require_artifact=False)
+
+
+def test_installed_runtime_collector_rejects_an_injected_import_root_before_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.metadata
+
+    import ea.experiments.provenance as provenance
+
+    class Distribution:
+        metadata = {"Name": "ea-quant"}
+        version = "0.1.1"
+
+        def read_text(self, name: str) -> str:
+            return {"INSTALLER": "pip\n", "direct_url.json": "direct-url"}[name]
+
+    distribution = Distribution()
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda **_kwargs: [distribution])
+    monkeypatch.setattr(provenance, "_require_runtime_flags", lambda: None)
+    monkeypatch.setattr(provenance, "_active_metadata_roots", lambda: (Path("/active"),))
+    monkeypatch.setattr(provenance.sys, "path", [*provenance.sys.path, str(tmp_path)])
+    monkeypatch.setattr(
+        provenance, "_local_wheel_artifact", lambda *_args, **_kwargs: (None, "1" * 64)
+    )
+    monkeypatch.setattr(
+        provenance, "_installed_wheel_rows", lambda *_args: (("ea/__init__.py", b""),)
+    )
+
+    with pytest.raises(provenance.ProvenanceError, match="injected import root"):
+        provenance.collect_installed_runtime_spec_v2(require_artifact=False)
+
+
+def test_installed_runtime_collector_scopes_metadata_to_active_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.metadata
+
+    import ea.experiments.provenance as provenance
+
+    class Distribution:
+        metadata = {"Name": "ea-quant"}
+        version = "0.1.1"
+
+        def locate_file(self, _path: object) -> Path:
+            return tmp_path
+
+        def read_text(self, name: str) -> str:
+            return {"INSTALLER": "pip\n", "direct_url.json": "direct-url"}[name]
+
+    observed: list[object] = []
+
+    def distributions(*, path: object = None) -> list[Distribution]:
+        observed.append(path)
+        return [Distribution()]
+
+    monkeypatch.setattr(importlib.metadata, "distributions", distributions)
+    monkeypatch.setattr(provenance, "_require_runtime_flags", lambda: None)
+    monkeypatch.setattr(provenance, "_active_metadata_roots", lambda: (tmp_path,))
+    monkeypatch.setattr(provenance, "_validate_installed_sys_path", lambda _roots: None)
+    monkeypatch.setattr(
+        provenance, "_local_wheel_artifact", lambda *_args, **_kwargs: (None, "1" * 64)
+    )
+    monkeypatch.setattr(
+        provenance, "_installed_wheel_rows", lambda *_args: (("ea/__init__.py", b""),)
+    )
+    monkeypatch.setattr(provenance, "_validate_installed_ea_import", lambda *_args: None)
+
+    provenance.collect_installed_runtime_spec_v2(require_artifact=False)
+
+    assert observed == [[str(tmp_path)]]
+
+
+def test_installed_runtime_collector_rejects_distribution_outside_active_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.metadata
+
+    import ea.experiments.provenance as provenance
+
+    active = tmp_path / "active"
+    foreign = tmp_path / "foreign"
+    active.mkdir()
+    foreign.mkdir()
+
+    class Distribution:
+        metadata = {"Name": "ea-quant"}
+        version = "0.1.1"
+
+        def locate_file(self, _path: object) -> Path:
+            return foreign
+
+        def read_text(self, name: str) -> str:
+            return {"INSTALLER": "pip\n", "direct_url.json": "direct-url"}[name]
+
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda **_kwargs: [Distribution()])
+    monkeypatch.setattr(provenance, "_require_runtime_flags", lambda: None)
+    monkeypatch.setattr(provenance, "_active_metadata_roots", lambda: (active,))
+    monkeypatch.setattr(provenance, "_validate_installed_sys_path", lambda _roots: None)
+    monkeypatch.setattr(
+        provenance, "_local_wheel_artifact", lambda *_args, **_kwargs: (None, "1" * 64)
+    )
+    monkeypatch.setattr(
+        provenance, "_installed_wheel_rows", lambda *_args: (("ea/__init__.py", b""),)
+    )
+
+    with pytest.raises(provenance.ProvenanceError, match="escaped active metadata roots"):
+        provenance.collect_installed_runtime_spec_v2(require_artifact=False)
+
+
+def test_installed_runtime_collector_rejects_foreign_executing_ea_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.metadata
+    from types import SimpleNamespace
+
+    import ea.experiments.provenance as provenance
+
+    package = tmp_path / "ea"
+    package.mkdir()
+    expected_init = package / "__init__.py"
+    expected_init.write_text('__version__ = "0.1.1"\n')
+    foreign_init = tmp_path / "foreign.py"
+    foreign_init.write_text('__version__ = "0.1.1"\n')
+
+    class Distribution:
+        metadata = {"Name": "ea-quant"}
+        version = "0.1.1"
+
+        def locate_file(self, _path: object) -> Path:
+            return tmp_path
+
+        def read_text(self, name: str) -> str:
+            return {"INSTALLER": "pip\n", "direct_url.json": "direct-url"}[name]
+
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda **_kwargs: [Distribution()])
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.1.1")
+    monkeypatch.setattr(provenance, "_require_runtime_flags", lambda: None)
+    monkeypatch.setattr(provenance, "_active_metadata_roots", lambda: (tmp_path,))
+    monkeypatch.setattr(provenance, "_validate_installed_sys_path", lambda _roots: None)
+    monkeypatch.setattr(
+        provenance, "_local_wheel_artifact", lambda *_args, **_kwargs: (None, "1" * 64)
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_installed_wheel_rows",
+        lambda *_args: (("ea/__init__.py", expected_init.read_bytes()),),
+    )
+    monkeypatch.setattr(
+        provenance.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(
+            origin=str(expected_init), submodule_search_locations=[str(package)]
+        ),
+    )
+    monkeypatch.setattr(provenance.ea, "__file__", str(foreign_init))
+
+    with pytest.raises(provenance.ProvenanceError, match="executing EA package"):
+        provenance.collect_installed_runtime_spec_v2(require_artifact=False)
 
 
 @pytest.mark.parametrize(
