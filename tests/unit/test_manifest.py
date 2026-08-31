@@ -27,8 +27,8 @@ from ea.experiments.manifest import (
     ManifestError,
     ManifestFormatError,
     NormalizedConfiguration,
-    RuntimeEvidence,
     RunManifest,
+    RuntimeEvidence,
     build_lineage_spec,
     build_manifest,
     canonical_lineage_bytes,
@@ -179,7 +179,8 @@ def test_manifest_round_trip_is_strict_and_transitively_immutable() -> None:
     assert type(parsed) is RunManifest
     assert canonical_manifest_bytes(parsed) == GOLDEN_MANIFEST
     with pytest.raises(FrozenInstanceError):
-        setattr(parsed.spec.runtime, "ea_version", "changed")
+        attribute = "ea_version"
+        setattr(parsed.spec.runtime, attribute, "changed")
 
 
 def test_manifest_v2_runtime_contract_is_not_a_v1_runtime_spec() -> None:
