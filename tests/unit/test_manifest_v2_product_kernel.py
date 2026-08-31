@@ -6,6 +6,7 @@ import hashlib
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -226,6 +227,1160 @@ def test_wheel_owned_rows_include_all_required_metadata(tmp_path: Path) -> None:
         archive.writestr("ea_quant-0.1.1.dist-info/RECORD", record)
 
     assert _wheel_owned_rows(wheel) == tuple(sorted(rows.items()))
+
+
+def test_installed_rows_read_a_closed_safe_tree_and_match_wheel_rows(tmp_path: Path) -> None:
+    import importlib.metadata
+
+    from ea.experiments.provenance import _installed_wheel_rows
+
+    root = tmp_path / "site"
+    rows = {
+        "ea/__init__.py": b"",
+        "ea/worker.py": b"value = 1\n",
+        "ea_quant-0.1.1.dist-info/METADATA": b"Name: ea-quant\n",
+        "ea_quant-0.1.1.dist-info/WHEEL": b"Wheel-Version: 1.0\n",
+        "ea_quant-0.1.1.dist-info/entry_points.txt": b"[console_scripts]\n",
+        "ea_quant-0.1.1.dist-info/top_level.txt": b"ea\n",
+    }
+    for name, content in rows.items():
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+    class ClosedDistribution:
+        files = tuple(rows)
+
+        def locate_file(self, path: object) -> Path:
+            return root / str(path)
+
+    distribution = cast(importlib.metadata.Distribution, ClosedDistribution())
+    expected = tuple(sorted(rows.items()))
+
+    assert _installed_wheel_rows(distribution, expected) == expected
+
+
+def test_installed_runtime_collector_binds_pip_admission_artifact_and_closed_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.metadata
+
+    import ea.experiments.provenance as provenance
+
+    class Distribution:
+        metadata = {"Name": "ea-quant"}
+        version = "0.1.1"
+
+        def read_text(self, name: str) -> str:
+            return {"INSTALLER": "pip\n", "direct_url.json": "direct-url"}[name]
+
+    distribution = Distribution()
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: [distribution])
+    monkeypatch.setattr(
+        provenance, "_local_wheel_artifact", lambda *_args, **_kwargs: (None, "1" * 64)
+    )
+    monkeypatch.setattr(
+        provenance, "_installed_wheel_rows", lambda *_args: (("ea/__init__.py", b""),)
+    )
+
+    collected = provenance.collect_installed_runtime_spec_v2(require_artifact=False)
+
+    assert collected.provenance_kind == "installed_local_wheel_v1"
+    assert collected.ea_distribution.name == "ea-quant"
+
+
+@pytest.mark.parametrize(
+    ("raw", "admitted"),
+    [
+        (None, True),
+        (
+            json.dumps(
+                {
+                    "url": "file:///private/tmp/ea.whl",
+                    "archive_info": {"hash": "sha256=" + "1" * 64},
+                }
+            ),
+            True,
+        ),
+        (
+            json.dumps(
+                {
+                    "url": "file:///private/tmp/ea.whl",
+                    "archive_info": {"hashes": {"sha256": "1" * 64}},
+                }
+            ),
+            True,
+        ),
+        (object(), False),
+        ("not-json", False),
+        ("[]", False),
+        (json.dumps({"url": "file:///bad path.whl", "archive_info": {}}), False),
+        (json.dumps({"url": "file:/bad%ZZ.whl", "archive_info": {}}), False),
+        (json.dumps({"url": "https://host/ea.whl", "archive_info": {}}), False),
+        (json.dumps({"url": "file://host/ea.whl", "archive_info": {}}), False),
+        (json.dumps({"url": "file:///tmp/ea.txt", "archive_info": {}}), False),
+        (
+            json.dumps(
+                {
+                    "url": "file:///tmp/ea.whl",
+                    "archive_info": {"hash": "sha256=" + "1" * 64, "hashes": {"sha256": "2" * 64}},
+                }
+            ),
+            False,
+        ),
+        (json.dumps({"url": "file:///tmp/ea.whl", "archive_info": {"hash": "bad"}}), False),
+        (json.dumps({"url": "file:///tmp/ea.whl", "archive_info": {"hashes": None}}), False),
+        (
+            json.dumps(
+                {"url": "file:///tmp/ea.whl", "archive_info": {"hashes": {"sha256": "A" * 64}}}
+            ),
+            False,
+        ),
+    ],
+)
+def test_legacy_direct_url_validator_is_closed_for_every_unsupported_surface(
+    raw: object, admitted: bool
+) -> None:
+    import importlib.metadata
+
+    from ea.experiments.provenance import ProvenanceError, _validate_installed_direct_url
+
+    class Distribution:
+        def read_text(self, _name: str) -> object:
+            return raw
+
+    distribution = cast(importlib.metadata.Distribution, Distribution())
+    if admitted:
+        _validate_installed_direct_url(distribution)
+    else:
+        with pytest.raises(ProvenanceError):
+            _validate_installed_direct_url(distribution)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "configuration_schema",
+        "configuration_environment",
+        "code_commit",
+        "distribution_name",
+        "distribution_version",
+        "runtime_token",
+        "runtime_duplicate_distribution",
+        "runtime_missing_ea",
+        "runtime_lock_type",
+        "parameter_kind",
+        "parameter_boolean",
+        "parameter_integer",
+        "parameter_float",
+        "parameter_string",
+        "parameter_value_type",
+        "randomness_generator",
+        "randomness_labels",
+        "installed_numeric_policy",
+        "installed_provenance_kind",
+        "installed_ea_name",
+        "installed_digest",
+        "installed_inventory",
+        "installed_token",
+        "randomness_seed",
+        "randomness_tuple",
+        "randomness_derivation",
+        "runtime_spec_lock",
+        "runtime_spec_policy",
+        "configuration_digest",
+        "code_spec_clean",
+        "inputs_configuration",
+        "inputs_data",
+        "inputs_replay_window",
+        "inputs_parameters",
+        "inputs_runtime",
+        "inputs_seed",
+        "inputs_seed_type",
+        "inputs_parameters_duplicate",
+        "runtime_distribution_list",
+        "runtime_distribution_identity",
+        "inputs_stream_tuple",
+        "inputs_stream_duplicate",
+    ],
+)
+def test_manifest_codec_rejects_each_closed_validator_surface(case: str) -> None:
+    from dataclasses import replace
+
+    from ea.core.run import DataFingerprint, ReplayWindow, Sha256Digest
+    from ea.experiments._manifest_model import (
+        CodeEvidence,
+        CodeSpec,
+        ConfigurationSpec,
+        DistributionIdentity,
+        EffectiveParameter,
+        InstalledRuntimeSpecV2,
+        ManifestError,
+        NormalizedConfiguration,
+        ParameterKind,
+        RandomnessSpec,
+        RuntimeEvidence,
+        RuntimeSpec,
+    )
+
+    ea_distribution = DistributionIdentity("ea-quant", "1")
+
+    def runtime_evidence(
+        *,
+        python_cache_tag: str = "cpython-312",
+        distributions: tuple[DistributionIdentity, ...] = (ea_distribution,),
+        uv_lock_bytes: bytes = b"",
+    ) -> RuntimeEvidence:
+        return RuntimeEvidence(
+            ea_version="1",
+            python_implementation="cpython",
+            python_version="3.12",
+            python_cache_tag=python_cache_tag,
+            sys_platform="linux",
+            platform_tag="linux-x86_64",
+            distributions=distributions,
+            uv_lock_bytes=uv_lock_bytes,
+        )
+
+    def installed_runtime(
+        *,
+        ea: DistributionIdentity = ea_distribution,
+        digest: Sha256Digest | None = None,
+        python_cache_tag: str = "cpython-312",
+        distributions: tuple[DistributionIdentity, ...] = (ea_distribution,),
+        numeric_policy: str = "deterministic-ordered-float64-v1",
+        provenance_kind: str = "installed_local_wheel_v1",
+    ) -> InstalledRuntimeSpecV2:
+        return InstalledRuntimeSpecV2(
+            ea_distribution=ea,
+            ea_installed_files_sha256=Sha256Digest("1" * 64) if digest is None else digest,
+            python_implementation="cpython",
+            python_version="3.12",
+            python_cache_tag=python_cache_tag,
+            sys_platform="linux",
+            platform_tag="linux-x86_64",
+            distributions=distributions,
+            numeric_policy=numeric_policy,
+            provenance_kind=provenance_kind,
+        )
+
+    with pytest.raises(ManifestError):
+        if case == "configuration_schema":
+            NormalizedConfiguration(2, "development", "backtest")
+        elif case == "configuration_environment":
+            NormalizedConfiguration(1, "local", "backtest")
+        elif case == "code_commit":
+            CodeEvidence("A" * 40)
+        elif case == "distribution_name":
+            DistributionIdentity("ea_quant", "1")
+        elif case == "distribution_version":
+            DistributionIdentity("ea-quant", "")
+        elif case == "runtime_token":
+            runtime_evidence(python_cache_tag="")
+        elif case == "runtime_duplicate_distribution":
+            runtime_evidence(distributions=(ea_distribution, ea_distribution))
+        elif case == "runtime_missing_ea":
+            runtime_evidence(distributions=(DistributionIdentity("numpy", "1"),))
+        elif case == "runtime_lock_type":
+            runtime_evidence(uv_lock_bytes=cast(bytes, "lock"))
+        elif case == "runtime_distribution_list":
+            runtime_evidence(
+                distributions=cast(tuple[DistributionIdentity, ...], [ea_distribution])
+            )
+        elif case == "runtime_distribution_identity":
+            runtime_evidence(distributions=cast(tuple[DistributionIdentity, ...], (object(),)))
+        elif case == "parameter_kind":
+            EffectiveParameter("value", cast(ParameterKind, "boolean"), True)
+        elif case == "parameter_boolean":
+            EffectiveParameter("value", ParameterKind.BOOLEAN, cast(bool, 1))
+        elif case == "parameter_integer":
+            EffectiveParameter("value", ParameterKind.INTEGER, cast(int, True))
+        elif case == "parameter_float":
+            EffectiveParameter("value", ParameterKind.FLOAT64, float("nan"))
+        elif case == "parameter_string":
+            EffectiveParameter("value", ParameterKind.STRING, "bad\nvalue")
+        elif case == "parameter_value_type":
+            EffectiveParameter.from_value("value", cast(bool | float | int | str, object()))
+        elif case == "randomness_generator":
+            RandomnessSpec(1, (), generator="random")
+        elif case == "randomness_labels":
+            RandomnessSpec(1, ("alpha", "alpha"))
+        elif case == "installed_numeric_policy":
+            installed_runtime(numeric_policy="other")
+        elif case == "installed_provenance_kind":
+            installed_runtime(provenance_kind="other")
+        elif case == "installed_ea_name":
+            installed_runtime(ea=DistributionIdentity("numpy", "1"))
+        elif case == "installed_digest":
+            installed_runtime(digest=cast(Sha256Digest, "digest"))
+        elif case == "installed_inventory":
+            installed_runtime(distributions=(DistributionIdentity("numpy", "1"),))
+        elif case == "installed_token":
+            installed_runtime(python_cache_tag="")
+        elif case == "randomness_seed":
+            RandomnessSpec(-1, ())
+        elif case == "randomness_tuple":
+            RandomnessSpec(1, cast(tuple[str, ...], ["alpha"]))
+        elif case == "randomness_derivation":
+            RandomnessSpec(1, (), stream_derivation="random")
+        elif case == "runtime_spec_lock":
+            RuntimeSpec(
+                "1",
+                "cpython",
+                "3.12",
+                "cpython-312",
+                "linux",
+                "linux-x86_64",
+                (ea_distribution,),
+                cast(Sha256Digest, "lock"),
+            )
+        elif case == "runtime_spec_policy":
+            RuntimeSpec(
+                "1",
+                "cpython",
+                "3.12",
+                "cpython-312",
+                "linux",
+                "linux-x86_64",
+                (ea_distribution,),
+                Sha256Digest("1" * 64),
+                "other",
+            )
+        elif case == "configuration_digest":
+            ConfigurationSpec(
+                NormalizedConfiguration(1, "development", "backtest"), Sha256Digest("1" * 64)
+            )
+        elif case == "code_spec_clean":
+            CodeSpec("1" * 40, False)
+        else:
+            from unit.test_manifest import _inputs
+
+            inputs = _inputs()
+            if case == "inputs_configuration":
+                replace(inputs, configuration=cast(NormalizedConfiguration, object()))
+            elif case == "inputs_data":
+                replace(inputs, data=cast(DataFingerprint, object()))
+            elif case == "inputs_replay_window":
+                replace(inputs, replay_window=cast(ReplayWindow, object()))
+            elif case == "inputs_parameters":
+                replace(inputs, parameters=cast(tuple[EffectiveParameter, ...], []))
+            elif case == "inputs_runtime":
+                replace(inputs, runtime=cast(RuntimeEvidence, object()))
+            elif case == "inputs_seed":
+                replace(inputs, master_seed=-1)
+            elif case == "inputs_seed_type":
+                replace(inputs, master_seed=cast(int, True))
+            elif case == "inputs_parameters_duplicate":
+                replace(inputs, parameters=(inputs.parameters[0], inputs.parameters[0]))
+            elif case == "inputs_stream_tuple":
+                replace(inputs, stream_labels=cast(tuple[str, ...], ["alpha"]))
+            else:
+                replace(inputs, stream_labels=("alpha", "alpha"))
+
+
+@pytest.mark.parametrize("drift", ["runtime", "policy", "risk"])
+def test_product_boundary_fails_closed_for_every_runtime_or_policy_drift(
+    monkeypatch: pytest.MonkeyPatch, drift: str
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import LineageSpecV2
+    from ea.experiments.provenance import ProvenanceError
+
+    runtime = object()
+    policy = object()
+    digest = object()
+    spec = SimpleNamespace(
+        runtime=runtime if drift != "runtime" else object(),
+        execution_policy=policy,
+        risk_policy_id="risk.v1",
+        risk_policy_sha256=digest,
+    )
+    risk = SimpleNamespace(policy_id="risk.v1", digest=digest)
+    monkeypatch.setattr(
+        product_kernel,
+        "collect_installed_runtime_spec_v2",
+        lambda **_kwargs: runtime,
+    )
+    monkeypatch.setattr(product_kernel, "phase1_risk_policy_digest", lambda value: value.digest)
+    if drift == "policy":
+        policy = object()
+    if drift == "risk":
+        risk.digest = object()
+
+    with pytest.raises(product_kernel.ProductKernelError):
+        product_kernel._require_product_boundary(
+            cast(LineageSpecV2, spec),
+            cast(ExecutionPolicyRef, policy),
+            cast(Phase1RiskPolicy, risk),
+            require_artifact=True,
+        )
+
+    monkeypatch.setattr(
+        product_kernel,
+        "collect_installed_runtime_spec_v2",
+        lambda **_kwargs: (_ for _ in ()).throw(ProvenanceError("missing")),
+    )
+    with pytest.raises(product_kernel.ProductKernelError, match="provenance"):
+        product_kernel._require_product_boundary(
+            cast(LineageSpecV2, spec),
+            cast(ExecutionPolicyRef, policy),
+            cast(Phase1RiskPolicy, risk),
+            require_artifact=False,
+        )
+
+
+def test_public_prepare_maps_collision_and_does_not_create_a_kernel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import LineageSpecV2
+    from ea.experiments.store import LocalResultStore, RunIdProvider, StoreCollisionError
+
+    class Spec:
+        pass
+
+    spec = Spec()
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "LineageSpecV2", Spec)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        LocalResultStore,
+        "prepare_product",
+        lambda *_args: (_ for _ in ()).throw(StoreCollisionError("occupied")),
+    )
+
+    with pytest.raises(product_kernel.ProductKernelError, match="already exists") as error:
+        product_kernel.prepare_phase1_product_kernel(
+            store=store,
+            spec=cast(LineageSpecV2, spec),
+            run_id_provider=cast(RunIdProvider, object()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    assert error.value.code is product_kernel.ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+@pytest.mark.parametrize(
+    ("failure", "code", "message"),
+    [
+        ("incomplete", "INTEGRITY_AUDIT_INCOMPLETE", "lacks"),
+        ("corrupt", "INTEGRITY_AUDIT_CORRUPT", "corrupt"),
+        ("scenario", "INTEGRITY_SCENARIO_DRIFT", "scenario"),
+        ("store", "INTEGRITY_MANIFEST_DRIFT", "evidence"),
+    ],
+)
+def test_public_recover_stably_classifies_store_boundary_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+    code: str,
+    message: str,
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import (
+        CorruptAuditRecoveryError,
+        IncompleteAuditRecoveryError,
+        LocalResultStore,
+        ScenarioRecoveryDriftError,
+        StoreError,
+    )
+
+    class Manifest:
+        spec = object()
+
+    errors = {
+        "incomplete": IncompleteAuditRecoveryError("missing"),
+        "corrupt": CorruptAuditRecoveryError("corrupt"),
+        "scenario": ScenarioRecoveryDriftError("scenario"),
+        "store": StoreError("store"),
+    }
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        LocalResultStore,
+        "verify_recovery_attempt",
+        lambda *_args: (_ for _ in ()).throw(errors[failure]),
+    )
+
+    with pytest.raises(product_kernel.ProductKernelError, match=message) as error:
+        product_kernel.recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, Manifest()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    assert error.value.code.name == code
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_kernel_materializes_one_funded_attempt_from_closed_preparation_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, replay: bool
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.composition.product_kernel import Phase1ProductKernel
+    from ea.core.audit import AuditRecordKind
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.initial_funding import InitialFundingOutcome, InitialFundingResult
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    acknowledgement = SimpleNamespace(record_sha256=object())
+    subject, payload = object(), b"outcome"
+    replay_record = SimpleNamespace(
+        record_kind=AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME,
+        subject_sha256=subject,
+        canonical_payload=payload,
+    )
+    records = SimpleNamespace(
+        record_count=2 if replay else 1,
+        record_at=lambda index: replay_record if index == 1 else object(),
+    )
+    journal = SimpleNamespace(recovery_records=records, close=lambda: None)
+    audit = SimpleNamespace(binding=object())
+    prepared = SimpleNamespace(audit=audit)
+    outcome = SimpleNamespace(result=InitialFundingResult.APPLIED)
+    ledger = SimpleNamespace(
+        apply_initial_funding=lambda *_args, **_kwargs: outcome, snapshot=object()
+    )
+    risk = SimpleNamespace(
+        risk_state=SimpleNamespace(policy_sha256=object()),
+        policy=SimpleNamespace(policy_id="risk.v1"),
+    )
+    manifest = SimpleNamespace(run_id=object(), spec=SimpleNamespace(initial_funding=object()))
+    appended: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        product_kernel,
+        "BoundAuditPort",
+        lambda *_args: SimpleNamespace(append=lambda **kwargs: appended.append(kwargs)),
+    )
+    monkeypatch.setattr(product_kernel, "create_portfolio_ledger", lambda *_args: ledger)
+    monkeypatch.setattr(
+        product_kernel, "create_audit_append_acknowledgement", lambda _record: acknowledgement
+    )
+    monkeypatch.setattr(
+        product_kernel, "canonical_initial_funding_outcome_bytes", lambda _outcome: payload
+    )
+    monkeypatch.setattr(product_kernel, "initial_funding_outcome_digest", lambda _outcome: subject)
+    monkeypatch.setattr(product_kernel, "create_phase1_risk_authority", lambda **_kwargs: risk)
+    monkeypatch.setattr(
+        product_kernel, "create_phase1_ledger_handoff_authority", lambda *_args: object()
+    )
+    monkeypatch.setattr(
+        product_kernel, "create_phase1_portfolio_risk_refresh_authority", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        product_kernel, "create_acknowledged_lifecycle_frontier", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(LocalResultStore, "_retire_product_attempt", lambda *_args: None)
+
+    kernel = product_kernel._make_kernel(
+        LocalResultStore(tmp_path),
+        prepared,
+        cast(RunManifestV2, manifest),
+        cast(InstrumentExecutionSpecSet, object()),
+        cast(ExecutionPolicyRef, object()),
+        cast(Phase1RiskPolicy, object()),
+        journal,
+    )
+
+    assert kernel.funding_outcome is cast(InitialFundingOutcome, outcome)
+    assert kernel.binding is audit.binding
+    assert kernel.portfolio_snapshot is ledger.snapshot
+    assert kernel.risk_state is risk.risk_state
+    with pytest.raises(AttributeError, match="immutable"):
+        kernel.__setattr__("binding", object())
+    with pytest.raises(product_kernel.ProductKernelError, match="invalid handoff"):
+        product_kernel._retire_phase1_product_kernel(cast(Phase1ProductKernel, object()))
+    product_kernel._retire_phase1_product_kernel(kernel)
+    product_kernel._retire_phase1_product_kernel(kernel)
+    assert len(appended) == (0 if replay else 1)
+
+
+def test_kernel_rejects_a_replayed_funding_record_with_different_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.audit import AuditRecordKind
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.initial_funding import InitialFundingResult
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    subject = object()
+    journal = SimpleNamespace(
+        recovery_records=SimpleNamespace(
+            record_count=2,
+            record_at=lambda index: SimpleNamespace(
+                record_kind=AuditRecordKind.PORTFOLIO_INITIAL_FUNDING_OUTCOME,
+                subject_sha256=object() if index == 1 else subject,
+                canonical_payload=b"other" if index == 1 else b"outcome",
+            ),
+        )
+    )
+    ledger = SimpleNamespace(
+        apply_initial_funding=lambda *_args, **_kwargs: SimpleNamespace(
+            result=InitialFundingResult.APPLIED
+        )
+    )
+    monkeypatch.setattr(product_kernel, "BoundAuditPort", lambda *_args: object())
+    monkeypatch.setattr(product_kernel, "create_portfolio_ledger", lambda *_args: ledger)
+    monkeypatch.setattr(
+        product_kernel,
+        "create_audit_append_acknowledgement",
+        lambda _record: SimpleNamespace(record_sha256=object()),
+    )
+    monkeypatch.setattr(
+        product_kernel, "canonical_initial_funding_outcome_bytes", lambda _: b"outcome"
+    )
+    monkeypatch.setattr(product_kernel, "initial_funding_outcome_digest", lambda _: subject)
+
+    with pytest.raises(product_kernel.ProductKernelError, match="funding replay differs") as raised:
+        product_kernel._make_kernel(
+            LocalResultStore(tmp_path),
+            SimpleNamespace(audit=SimpleNamespace(binding=object())),
+            cast(
+                RunManifestV2,
+                SimpleNamespace(run_id=object(), spec=SimpleNamespace(initial_funding=object())),
+            ),
+            cast(InstrumentExecutionSpecSet, object()),
+            cast(ExecutionPolicyRef, object()),
+            cast(Phase1RiskPolicy, object()),
+            journal,
+        )
+
+    assert raised.value.code is product_kernel.ProductKernelFailureCode.INTEGRITY_AUDIT_CORRUPT
+
+
+@pytest.mark.parametrize("record_count", [0, 3])
+def test_kernel_rejects_audit_prefixes_outside_funding_recovery_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, record_count: int
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    journal = SimpleNamespace(recovery_records=SimpleNamespace(record_count=record_count))
+    monkeypatch.setattr(product_kernel, "BoundAuditPort", lambda *_args: object())
+    with pytest.raises(
+        product_kernel.ProductKernelError, match="unsupported audit prefix"
+    ) as raised:
+        product_kernel._make_kernel(
+            LocalResultStore(tmp_path),
+            SimpleNamespace(audit=object()),
+            cast(RunManifestV2, object()),
+            cast(InstrumentExecutionSpecSet, object()),
+            cast(ExecutionPolicyRef, object()),
+            cast(Phase1RiskPolicy, object()),
+            journal,
+        )
+
+    assert (
+        raised.value.code
+        is product_kernel.ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY
+    )
+
+
+def test_kernel_rejects_an_initial_funding_conflict_before_risk_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.initial_funding import InitialFundingResult
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    journal = SimpleNamespace(
+        recovery_records=SimpleNamespace(record_count=1, record_at=lambda _index: object())
+    )
+    ledger = SimpleNamespace(
+        apply_initial_funding=lambda *_args, **_kwargs: SimpleNamespace(
+            result=InitialFundingResult.CONFLICT
+        )
+    )
+    monkeypatch.setattr(product_kernel, "BoundAuditPort", lambda *_args: object())
+    monkeypatch.setattr(product_kernel, "create_portfolio_ledger", lambda *_args: ledger)
+    monkeypatch.setattr(
+        product_kernel,
+        "create_audit_append_acknowledgement",
+        lambda _record: SimpleNamespace(record_sha256=object()),
+    )
+
+    with pytest.raises(product_kernel.ProductKernelError, match="funding conflict") as raised:
+        product_kernel._make_kernel(
+            LocalResultStore(tmp_path),
+            SimpleNamespace(audit=SimpleNamespace(binding=object())),
+            cast(
+                RunManifestV2,
+                SimpleNamespace(run_id=object(), spec=SimpleNamespace(initial_funding=object())),
+            ),
+            cast(InstrumentExecutionSpecSet, object()),
+            cast(ExecutionPolicyRef, object()),
+            cast(Phase1RiskPolicy, object()),
+            journal,
+        )
+
+    assert raised.value.code is product_kernel.ProductKernelFailureCode.FUNDING_CONFLICT
+
+
+def test_public_recover_reopens_only_the_closed_incomplete_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    class Manifest:
+        spec = object()
+
+    class Incomplete:
+        pass
+
+    binding, prepared, journal, result = (
+        Incomplete(),
+        SimpleNamespace(audit=object()),
+        object(),
+        object(),
+    )
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "VerifiedIncompleteRecoveryBinding", Incomplete)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(LocalResultStore, "verify_recovery_attempt", lambda *_args: binding)
+    monkeypatch.setattr(LocalResultStore, "recover_incomplete_attempt", lambda *_args: prepared)
+    monkeypatch.setattr(product_kernel, "reopen_posix_audit_journal", lambda _audit: journal)
+    monkeypatch.setattr(product_kernel, "_make_kernel", lambda *_args: result)
+
+    assert (
+        product_kernel.recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, Manifest()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+        is result
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        ("funding", "FUNDING_SPEC_MISMATCH"),
+        ("risk", "INTEGRITY_RISK_STATE_DRIFT"),
+        ("audit", "INTEGRITY_AUDIT_CORRUPT"),
+        ("product", "INTEGRITY_MANIFEST_DRIFT"),
+    ],
+)
+def test_public_prepare_closes_and_retires_every_post_prepare_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, code: str
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.initial_funding import InitialFundingError
+    from ea.core.outcomes import OutcomeCode
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import LineageSpecV2
+    from ea.experiments.store import LocalResultStore, RunIdProvider
+    from ea.risk.authority import RiskAuthorityError
+
+    class Spec:
+        pass
+
+    class Manifest:
+        def __init__(self, spec: Spec) -> None:
+            self.spec = spec
+
+    if failure == "funding":
+        error: BaseException = InitialFundingError("funding")
+    elif failure == "risk":
+        error = RiskAuthorityError(OutcomeCode.INVALID_TYPE, "risk")
+    elif failure == "audit":
+        error = OSError("audit")
+    else:
+        error = product_kernel.ProductKernelError(
+            product_kernel.ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "product"
+        )
+    spec, audit = Spec(), object()
+    prepared = SimpleNamespace(audit=audit, manifest_verification=object())
+    journal = SimpleNamespace(closes=0)
+    journal.close = lambda: setattr(journal, "closes", journal.closes + 1)
+    retired: list[object] = []
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "LineageSpecV2", Spec)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(LocalResultStore, "prepare_product", lambda *_args: prepared)
+    monkeypatch.setattr(LocalResultStore, "verify_manifest", lambda *_args: Manifest(spec))
+    monkeypatch.setattr(product_kernel, "create_posix_audit_journal", lambda *_args: journal)
+    monkeypatch.setattr(product_kernel, "_make_kernel", lambda *_args: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(
+        LocalResultStore, "_retire_product_attempt", lambda _self, item: retired.append(item)
+    )
+
+    with pytest.raises(product_kernel.ProductKernelError) as raised:
+        product_kernel.prepare_phase1_product_kernel(
+            store=store,
+            spec=cast(LineageSpecV2, spec),
+            run_id_provider=cast(RunIdProvider, object()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    assert raised.value.code.name == code
+    assert journal.closes == 1
+    assert retired == [audit]
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        ("funding", "FUNDING_SPEC_MISMATCH"),
+        ("risk", "INTEGRITY_RISK_STATE_DRIFT"),
+        ("audit", "INTEGRITY_AUDIT_CORRUPT"),
+        ("unknown", "passthrough"),
+    ],
+)
+def test_public_recover_closes_and_retires_every_reopened_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, code: str
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.initial_funding import InitialFundingError
+    from ea.core.outcomes import OutcomeCode
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+    from ea.risk.authority import RiskAuthorityError
+
+    class Manifest:
+        spec = object()
+
+    class Incomplete:
+        pass
+
+    error: BaseException = {
+        "funding": InitialFundingError("funding"),
+        "risk": RiskAuthorityError(OutcomeCode.INVALID_TYPE, "risk"),
+        "audit": OSError("audit"),
+        "unknown": RuntimeError("unknown"),
+    }[failure]
+    binding, audit = Incomplete(), object()
+    prepared = SimpleNamespace(audit=audit)
+    journal = SimpleNamespace(closes=0)
+    journal.close = lambda: setattr(journal, "closes", journal.closes + 1)
+    retired: list[object] = []
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "VerifiedIncompleteRecoveryBinding", Incomplete)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(LocalResultStore, "verify_recovery_attempt", lambda *_args: binding)
+    monkeypatch.setattr(LocalResultStore, "recover_incomplete_attempt", lambda *_args: prepared)
+    monkeypatch.setattr(product_kernel, "reopen_posix_audit_journal", lambda *_args: journal)
+    monkeypatch.setattr(product_kernel, "_make_kernel", lambda *_args: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(
+        LocalResultStore, "_retire_product_attempt", lambda _self, item: retired.append(item)
+    )
+
+    expected_error: type[BaseException] = (
+        RuntimeError if failure == "unknown" else product_kernel.ProductKernelError
+    )
+    with pytest.raises(expected_error) as raised:
+        product_kernel.recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, Manifest()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    if failure != "unknown":
+        assert isinstance(raised.value, product_kernel.ProductKernelError)
+        assert raised.value.code.name == code
+    assert journal.closes == 1
+    assert retired == [audit]
+
+
+@pytest.mark.parametrize(
+    ("consume_failure", "code"),
+    [(False, "INTEGRITY_TERMINAL_DRIFT"), (True, "INTEGRITY_AUDIT_CORRUPT")],
+)
+def test_public_recover_consumes_terminal_evidence_before_retiring_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, consume_failure: bool, code: str
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    class Manifest:
+        spec = object()
+
+    class TerminalBinding:
+        pass
+
+    class Terminal:
+        def __init__(self) -> None:
+            self.finished = 0
+
+        def _consume(self) -> None:
+            if consume_failure:
+                raise OSError("consume")
+
+        def _finish(self) -> None:
+            self.finished += 1
+
+    binding, terminal = TerminalBinding(), Terminal()
+    retired: list[object] = []
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "VerifiedTerminalRecoveryBinding", TerminalBinding)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(LocalResultStore, "verify_recovery_attempt", lambda *_args: binding)
+    monkeypatch.setattr(LocalResultStore, "recover_terminal_attempt", lambda *_args: terminal)
+    monkeypatch.setattr(
+        LocalResultStore,
+        "_retire_verified_product_recovery",
+        lambda _self, item: retired.append(item),
+    )
+
+    with pytest.raises(product_kernel.ProductKernelError) as raised:
+        product_kernel.recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, Manifest()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    assert raised.value.code.name == code
+    assert terminal.finished == 1
+    assert retired == [binding]
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        ("funding", "FUNDING_SPEC_MISMATCH"),
+        ("risk", "INTEGRITY_RISK_STATE_DRIFT"),
+        ("audit", "INTEGRITY_AUDIT_CORRUPT"),
+    ],
+)
+def test_public_recover_retires_unopened_binding_when_opening_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, code: str
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.initial_funding import InitialFundingError
+    from ea.core.outcomes import OutcomeCode
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+    from ea.risk.authority import RiskAuthorityError
+
+    class Manifest:
+        spec = object()
+
+    class Incomplete:
+        pass
+
+    if failure == "funding":
+        error: BaseException = InitialFundingError("funding")
+    elif failure == "risk":
+        error = RiskAuthorityError(OutcomeCode.INVALID_TYPE, "risk")
+    else:
+        error = OSError("audit")
+    binding = Incomplete()
+    retired: list[object] = []
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "VerifiedIncompleteRecoveryBinding", Incomplete)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(LocalResultStore, "verify_recovery_attempt", lambda *_args: binding)
+    monkeypatch.setattr(
+        LocalResultStore, "recover_incomplete_attempt", lambda *_args: (_ for _ in ()).throw(error)
+    )
+    monkeypatch.setattr(
+        LocalResultStore,
+        "_retire_verified_product_recovery",
+        lambda _self, item: retired.append(item),
+    )
+
+    with pytest.raises(product_kernel.ProductKernelError) as raised:
+        product_kernel.recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, Manifest()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    assert raised.value.code.name == code
+    assert retired == [binding]
+
+
+def test_public_recover_passes_unknown_opening_failure_after_retiring_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    class Manifest:
+        spec = object()
+
+    class Incomplete:
+        pass
+
+    binding, retired = Incomplete(), []
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "VerifiedIncompleteRecoveryBinding", Incomplete)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(LocalResultStore, "verify_recovery_attempt", lambda *_args: binding)
+    monkeypatch.setattr(
+        LocalResultStore,
+        "recover_incomplete_attempt",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("unknown")),
+    )
+    monkeypatch.setattr(
+        LocalResultStore,
+        "_retire_verified_product_recovery",
+        lambda _self, item: retired.append(item),
+    )
+
+    with pytest.raises(RuntimeError, match="unknown"):
+        product_kernel.recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, Manifest()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    assert retired == [binding]
+
+
+def test_public_recover_rejects_unknown_verified_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    class Manifest:
+        spec = object()
+
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(LocalResultStore, "verify_recovery_attempt", lambda *_args: object())
+
+    with pytest.raises(product_kernel.ProductKernelError, match="unknown recovery") as raised:
+        product_kernel.recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, Manifest()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    assert (
+        raised.value.code
+        is product_kernel.ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_RECOVERY_BOUNDARY
+    )
+
+
+def test_public_recover_retires_terminal_binding_when_consumption_raises_unknown_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ea.composition.product_kernel as product_kernel
+    from ea.core.execution import InstrumentExecutionSpecSet
+    from ea.core.execution_messages import ExecutionPolicyRef
+    from ea.core.risk import Phase1RiskPolicy
+    from ea.experiments._manifest_model import RunManifestV2
+    from ea.experiments.store import LocalResultStore
+
+    class Manifest:
+        spec = object()
+
+    class TerminalBinding:
+        pass
+
+    class Terminal:
+        finished = 0
+
+        def _consume(self) -> None:
+            raise RuntimeError("unknown")
+
+        def _finish(self) -> None:
+            self.finished += 1
+
+    binding, terminal = TerminalBinding(), Terminal()
+    retired: list[object] = []
+    store = LocalResultStore(tmp_path)
+    monkeypatch.setattr(product_kernel, "RunManifestV2", Manifest)
+    monkeypatch.setattr(product_kernel, "VerifiedTerminalRecoveryBinding", TerminalBinding)
+    monkeypatch.setattr(product_kernel, "_require_product_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(LocalResultStore, "verify_recovery_attempt", lambda *_args: binding)
+    monkeypatch.setattr(LocalResultStore, "recover_terminal_attempt", lambda *_args: terminal)
+    monkeypatch.setattr(
+        LocalResultStore,
+        "_retire_verified_product_recovery",
+        lambda _self, item: retired.append(item),
+    )
+
+    with pytest.raises(RuntimeError, match="unknown"):
+        product_kernel.recover_phase1_product_kernel(
+            store=store,
+            expected_manifest=cast(RunManifestV2, Manifest()),
+            spec_set=cast(InstrumentExecutionSpecSet, object()),
+            execution_policy=cast(ExecutionPolicyRef, object()),
+            risk_policy=cast(Phase1RiskPolicy, object()),
+        )
+
+    assert terminal.finished == 1
+    assert retired == [binding]
 
 
 def test_local_wheel_artifact_rejects_relative_file_url_after_deletion() -> None:

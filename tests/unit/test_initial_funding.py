@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import cast
+
 import pytest
 
 from ea.core.economics import CanonicalDecimal
@@ -95,6 +98,19 @@ def test_initial_funding_transaction_is_closed_first_ledger_entry() -> None:
     assert InitialFundingResult.APPLIED.value == "applied"
     assert InitialFundingConflictKind.ENTRY_ID_OCCUPIED.value == "entry_id_occupied"
     assert b'"ledger_sequence":1' in canonical_initial_funding_transaction_bytes(transaction)
+    with pytest.raises(InitialFundingError, match="first ledger entry"):
+        replace(transaction, ledger_sequence=2)
+    with pytest.raises(InitialFundingError, match="first ledger entry"):
+        replace(
+            transaction,
+            previous_transaction_sha256=cast(None, Sha256Digest("55" * 32)),
+        )
+    with pytest.raises(InitialFundingError, match="two exact postings"):
+        replace(transaction, postings=cast(tuple[LedgerPosting, LedgerPosting], ()))
+    with pytest.raises(InitialFundingError, match="specification digest"):
+        replace(transaction, funding_spec_sha256=Sha256Digest("66" * 32))
+    with pytest.raises(InitialFundingError, match="postings conflict"):
+        replace(transaction, postings=(transaction.postings[1], transaction.postings[0]))
 
 
 def test_initial_funding_conflict_retains_the_empty_snapshot() -> None:
@@ -116,6 +132,34 @@ def test_initial_funding_conflict_retains_the_empty_snapshot() -> None:
 
     assert outcome.snapshot is snapshot
     assert b'"result":"conflict"' in canonical_initial_funding_outcome_bytes(outcome)
+
+
+@pytest.mark.parametrize("case", ["snapshot", "digest", "result"])
+def test_initial_funding_outcome_rejects_conflict_shape_or_snapshot_drift(
+    case: str,
+) -> None:
+    run_id = RunId("123e4567-e89b-42d3-a456-426614174000")
+    outcome = InitialFundingOutcome(
+        run_id=run_id,
+        result=InitialFundingResult.CONFLICT,
+        manifest_sha256=Sha256Digest("11" * 32),
+        submitted_funding_spec_sha256=Sha256Digest("22" * 32),
+        prepared_audit_acknowledgement_sha256=Sha256Digest("33" * 32),
+        before_snapshot_version=0,
+        after_snapshot_version=0,
+        snapshot=create_portfolio_ledger(run_id, _spec_set()).snapshot,
+        transaction=None,
+        existing_transaction_sha256=Sha256Digest("44" * 32),
+        conflict_kind=InitialFundingConflictKind.ENTRY_ID_OCCUPIED,
+    )
+
+    with pytest.raises(InitialFundingError):
+        if case == "snapshot":
+            replace(outcome, before_snapshot_version=1)
+        elif case == "digest":
+            replace(outcome, existing_transaction_sha256=None)
+        else:
+            replace(outcome, result=InitialFundingResult.APPLIED)
 
 
 def test_ledger_applies_genesis_once_and_retains_exact_replay() -> None:
@@ -149,3 +193,9 @@ def test_ledger_applies_genesis_once_and_retains_exact_replay() -> None:
     assert applied.transaction.ledger_sequence == 1
     assert applied.snapshot.cash_balances[0].amount == CanonicalDecimal("1000")
     assert replay is applied
+    with pytest.raises(InitialFundingError, match="snapshot versions"):
+        replace(applied, before_snapshot_version=1)
+    with pytest.raises(InitialFundingError, match="applied funding outcome"):
+        replace(applied, transaction=None)
+    with pytest.raises(InitialFundingError, match="applied funding outcome"):
+        replace(applied, conflict_kind=InitialFundingConflictKind.ENTRY_ID_OCCUPIED)
