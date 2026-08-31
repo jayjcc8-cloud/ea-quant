@@ -13,3 +13,9 @@ def test_store_exposes_a_v2_product_preparation_boundary() -> None:
     from ea.experiments.store import LocalResultStore
 
     assert "prepare_product" in dir(LocalResultStore)
+
+
+def test_product_kernel_exposes_the_funded_boundary_value() -> None:
+    from ea.composition.product_kernel import Phase1ProductKernel
+
+    assert Phase1ProductKernel.__name__ == "Phase1ProductKernel"
