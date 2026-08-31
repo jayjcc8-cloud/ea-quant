@@ -19,3 +19,9 @@ def test_product_kernel_exposes_the_funded_boundary_value() -> None:
     from ea.composition.product_kernel import Phase1ProductKernel
 
     assert Phase1ProductKernel.__name__ == "Phase1ProductKernel"
+
+
+def test_product_kernel_exposes_the_funded_recovery_boundary() -> None:
+    from ea.composition.product_kernel import recover_phase1_product_kernel
+
+    assert recover_phase1_product_kernel.__name__ == "recover_phase1_product_kernel"
