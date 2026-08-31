@@ -222,26 +222,40 @@ def test_installed_direct_url_rejects_open_or_non_sha256_metadata(document: str)
         _validate_installed_direct_url(Distribution())  # type: ignore[arg-type]
 
 
-def test_installed_file_identity_includes_every_record_except_console_script(
+def test_installed_file_identity_excludes_installer_local_metadata(
     tmp_path: Path,
 ) -> None:
-    for name in ("RECORD", "INSTALLER", "REQUESTED", "direct_url.json"):
-        (tmp_path / name).write_bytes(name.encode())
+    dist_info = tmp_path / "ea_quant-0.1.1.dist-info"
+    dist_info.mkdir()
+    for name in (
+        "METADATA",
+        "RECORD",
+        "INSTALLER",
+        "REQUESTED",
+        "direct_url.json",
+        "uv_cache.json",
+    ):
+        (dist_info / name).write_bytes(name.encode())
 
     class Distribution:
         files = tuple(
-            Path(name)
-            for name in ("RECORD", "INSTALLER", "REQUESTED", "direct_url.json", "../../../bin/ea")
+            Path(f"ea_quant-0.1.1.dist-info/{name}")
+            for name in (
+                "METADATA",
+                "RECORD",
+                "INSTALLER",
+                "REQUESTED",
+                "direct_url.json",
+                "uv_cache.json",
+            )
         )
+        files += (Path("../../../bin/ea"),)
 
         def locate_file(self, record: object) -> Path:
             return tmp_path if str(record) == "." else tmp_path / str(record)
 
     assert tuple(name for name, _ in _installed_file_rows(Distribution())) == (  # type: ignore[arg-type]
-        "INSTALLER",
-        "RECORD",
-        "REQUESTED",
-        "direct_url.json",
+        "ea_quant-0.1.1.dist-info/METADATA",
     )
 
 

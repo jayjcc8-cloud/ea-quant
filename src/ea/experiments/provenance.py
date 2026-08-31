@@ -39,6 +39,9 @@ _SOURCE_SUFFIXES = tuple(importlib.machinery.SOURCE_SUFFIXES)
 _EXTENSION_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
 _INSTALLED_FILES_DOMAIN = b"ea.installed-distribution-files.v1\0"
 _GENERATED_CONSOLE_SCRIPT_RECORD_PATH = "../../../bin/ea"
+_INSTALLER_LOCAL_DIST_INFO_FILES = frozenset(
+    {"INSTALLER", "RECORD", "REQUESTED", "direct_url.json", "uv_cache.json"}
+)
 
 
 class ProvenanceError(RuntimeError):
@@ -505,7 +508,12 @@ def _installed_file_rows(
                 current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) != (file_stat.st_dev, file_stat.st_ino):
                     raise ProvenanceError("installed RECORD file changed while being read")
-                rows.append((raw, b"".join(chunks)))
+                if not (
+                    len(parts) >= 2
+                    and parts[-2].endswith(".dist-info")
+                    and parts[-1] in _INSTALLER_LOCAL_DIST_INFO_FILES
+                ):
+                    rows.append((raw, b"".join(chunks)))
             finally:
                 if file_fd is not None:
                     with suppress(OSError):
