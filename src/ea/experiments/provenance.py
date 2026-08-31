@@ -18,7 +18,10 @@ import sysconfig
 import types
 import unicodedata
 import urllib.parse
+import zipfile
+from base64 import urlsafe_b64decode
 from contextlib import suppress
+from csv import reader as csv_reader
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -37,12 +40,194 @@ _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z", flags=re.ASCII)
 _BYTECODE_SUFFIXES = tuple(importlib.machinery.BYTECODE_SUFFIXES)
 _SOURCE_SUFFIXES = tuple(importlib.machinery.SOURCE_SUFFIXES)
 _EXTENSION_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
-_INSTALLED_FILES_DOMAIN = b"ea.installed-distribution-files.v1\0"
+_INSTALLED_FILES_DOMAIN = b"ea.installed-local-wheel.v1\0"
 _GENERATED_CONSOLE_SCRIPT_RECORD_PATH = "../../../bin/ea"
 
 
 class ProvenanceError(RuntimeError):
     """Raised when execution provenance cannot be proved fail-closed."""
+
+
+def _local_wheel_artifact(
+    document: str, *, require_artifact: bool = True
+) -> tuple[Path | None, str]:
+    """Extract and verify the only supported direct local wheel artifact."""
+    try:
+        value = json.loads(document, object_pairs_hook=_reject_duplicate_json_keys)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProvenanceError("direct URL metadata is invalid") from exc
+    if type(value) is not dict or set(value) != {"url", "archive_info"}:
+        raise ProvenanceError("direct URL metadata must be closed")
+    url, archive = value["url"], value["archive_info"]
+    if type(url) is not str or type(archive) is not dict or set(archive) != {"hash"}:
+        raise ProvenanceError("direct URL artifact metadata is invalid")
+    digest = archive["hash"]
+    if type(digest) is not str or re.fullmatch(r"sha256=[0-9a-f]{64}", digest) is None:
+        raise ProvenanceError("direct URL artifact hash is invalid")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "file" or parsed.netloc or parsed.query or parsed.fragment:
+        raise ProvenanceError("direct URL must identify a local wheel")
+    try:
+        path = Path(urllib.parse.unquote_to_bytes(parsed.path).decode("utf-8"))
+        if not path.is_absolute() or any(ord(char) <= 0x20 or char == "\\" for char in str(path)):
+            raise ProvenanceError("direct URL must identify an absolute canonical wheel path")
+        resolved = path.resolve(strict=True)
+    except (OSError, UnicodeError) as exc:
+        if not require_artifact:
+            return None, digest[7:]
+        raise ProvenanceError("local wheel artifact is unavailable") from exc
+    try:
+        actual = sha256(resolved.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ProvenanceError("local wheel artifact is unavailable") from exc
+    if not resolved.is_file() or resolved.suffix != ".whl" or actual != digest[7:]:
+        raise ProvenanceError("local wheel artifact hash mismatches")
+    return resolved, actual
+
+
+def _wheel_owned_rows(wheel: Path) -> tuple[tuple[str, bytes], ...]:
+    """Read a closed wheel-owned surface only after strict RECORD validation."""
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            names = archive.namelist()
+            if any(
+                name != unicodedata.normalize("NFC", name)
+                or name.startswith("/")
+                or "\\" in name
+                or any(part in {"", ".", ".."} for part in name.split("/"))
+                for name in names
+            ):
+                raise ProvenanceError("wheel member path is not canonical")
+            roots = [name.rsplit("/", 1)[0] for name in names if name.endswith(".dist-info/RECORD")]
+            if len(names) != len(set(names)) or len(roots) != 1:
+                raise ProvenanceError("wheel members or RECORD are not closed")
+            root = roots[0]
+            record_name = root + "/RECORD"
+            records: dict[str, tuple[str, int]] = {}
+            for parts in csv_reader(archive.read(record_name).decode().splitlines()):
+                if len(parts) != 3 or parts[0] in records:
+                    raise ProvenanceError("wheel RECORD is malformed")
+                if parts[0] == record_name:
+                    if parts[1:] != ["", ""]:
+                        raise ProvenanceError("wheel RECORD self row is malformed")
+                    continue
+                if (
+                    not re.fullmatch(r"sha256=[A-Za-z0-9_-]{43}", parts[1])
+                    or not parts[2].isdigit()
+                ):
+                    raise ProvenanceError("wheel RECORD must hash owned rows")
+                records[parts[0]] = (parts[1][7:], int(parts[2]))
+            selected = [
+                name
+                for name in names
+                if name.startswith("ea/") and name.endswith(".py") and not name.endswith(".pyc")
+            ]
+            selected.extend(
+                root + "/" + name
+                for name in ("METADATA", "WHEEL", "entry_points.txt", "top_level.txt")
+            )
+            if not selected or any(name not in records for name in selected):
+                raise ProvenanceError("wheel RECORD omits closed owned rows")
+            rows = []
+            for name in sorted(selected):
+                content = archive.read(name)
+                encoded, size = records[name]
+                if len(content) != size or sha256(content).digest() != urlsafe_b64decode(
+                    encoded + "=" * (-len(encoded) % 4)
+                ):
+                    raise ProvenanceError("wheel RECORD row mismatch")
+                rows.append((name, content))
+            return tuple(rows)
+    except (OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+        raise ProvenanceError("wheel cannot be read") from exc
+
+
+def _installed_wheel_rows(
+    distribution: importlib.metadata.Distribution,
+    expected: tuple[tuple[str, bytes], ...] | None,
+) -> tuple[tuple[str, bytes], ...]:
+    """Select the closed wheel-owned installed surface without trusting RECORD ownership."""
+    rows = dict(_installed_file_rows(distribution))
+    try:
+        root = Path(str(distribution.locate_file(""))).resolve(strict=True)
+        package = (root / "ea").resolve(strict=True)
+    except OSError as exc:
+        raise ProvenanceError("installed EA package cannot be resolved") from exc
+    if package.is_symlink() or not package.is_dir() or not package.is_relative_to(root):
+        raise ProvenanceError("installed EA package is unsafe")
+    sources = {
+        name: value
+        for name, value in rows.items()
+        if name.startswith("ea/") and name.endswith(".py")
+    }
+    if not sources:
+        raise ProvenanceError("installed EA package has no source rows")
+    cache_rows = {
+        name: value
+        for name, value in rows.items()
+        if name.startswith("ea/") and name.endswith(".pyc")
+    }
+    if any(
+        name.startswith("ea/") and name not in sources and name not in cache_rows for name in rows
+    ):
+        raise ProvenanceError("installed EA package has an unsupported RECORD row")
+    try:
+        tree_rows = {
+            item.relative_to(root).as_posix()
+            for item in _walk_without_links(package)
+            if item.is_file()
+        }
+    except OSError as exc:
+        raise ProvenanceError("installed EA package cannot be walked safely") from exc
+    if tree_rows != set(sources) | set(cache_rows):
+        raise ProvenanceError("installed EA package tree is not closed")
+    for name, content in cache_rows.items():
+        try:
+            source = Path(importlib.util.source_from_cache(str(root / name))).relative_to(root)
+            source_name = source.as_posix()
+            expected_cache = importlib.util.cache_from_source(str(root / source), optimization="")
+        except (NotImplementedError, ValueError) as exc:
+            raise ProvenanceError("installed source cache is unsupported") from exc
+        if Path(root / name) != Path(expected_cache) or source_name not in sources:
+            raise ProvenanceError("installed source cache is misplaced")
+        validate_source_cache(
+            pyc_bytes=content,
+            source_bytes=sources[source_name],
+            resolved_filename=str(root / source),
+        )
+    metadata_roots = {
+        name.rsplit("/", 1)[0] for name in rows if name.endswith(".dist-info/METADATA")
+    }
+    required = ("METADATA", "WHEEL", "entry_points.txt", "top_level.txt")
+    valid_roots = [
+        candidate
+        for candidate in metadata_roots
+        if all(candidate + "/" + leaf in rows for leaf in required)
+    ]
+    if len(valid_roots) != 1:
+        raise ProvenanceError("installed wheel metadata is not closed")
+    selected = tuple(
+        sorted(
+            (
+                *sources.items(),
+                *(
+                    (valid_roots[0] + "/" + leaf, rows[valid_roots[0] + "/" + leaf])
+                    for leaf in required
+                ),
+            )
+        )
+    )
+    if expected is not None:
+        expected_sources = {name: content for name, content in expected if name.startswith("ea/")}
+        expected_metadata = {
+            name.rsplit("/", 1)[1]: content for name, content in expected if ".dist-info/" in name
+        }
+        actual_metadata = {
+            name.rsplit("/", 1)[1]: content for name, content in selected if ".dist-info/" in name
+        }
+        if sources != expected_sources or actual_metadata != expected_metadata:
+            raise ProvenanceError("installed rows differ from the local wheel")
+    return selected
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,7 +709,7 @@ def _installed_file_rows(
     return tuple(sorted(rows))
 
 
-def collect_installed_runtime_spec_v2() -> InstalledRuntimeSpecV2:
+def collect_installed_runtime_spec_v2(*, require_artifact: bool = True) -> InstalledRuntimeSpecV2:
     """Collect the checkout-independent installed-distribution runtime identity."""
     distributions = tuple(importlib.metadata.distributions())
     pairs = [(_distribution_identity(item), item) for item in distributions]
@@ -533,10 +718,19 @@ def collect_installed_runtime_spec_v2() -> InstalledRuntimeSpecV2:
     if len(ea_pairs) != 1:
         raise ProvenanceError("installed runtime requires exactly one ea-quant distribution")
     identity, distribution = ea_pairs[0]
-    _validate_installed_direct_url(distribution)
+    if type(require_artifact) is not bool:
+        raise ProvenanceError("artifact requirement must be an exact bool")
+    raw_direct_url = distribution.read_text("direct_url.json")
+    if type(raw_direct_url) is not str:
+        raise ProvenanceError("ea-quant direct_url.json is missing")
+    wheel, artifact_sha256 = _local_wheel_artifact(
+        raw_direct_url, require_artifact=require_artifact
+    )
+    owned_rows = _wheel_owned_rows(wheel) if wheel is not None else None
+    installed_rows = _installed_wheel_rows(distribution, owned_rows)
     digest = sha256(_INSTALLED_FILES_DOMAIN)
-    digest.update(identity.name.encode() + b"\0" + identity.version.encode() + b"\0")
-    for name, content in _installed_file_rows(distribution):
+    digest.update(artifact_sha256.encode() + b"\0")
+    for name, content in installed_rows:
         digest.update(name.encode() + b"\0" + len(content).to_bytes(8, "big") + content)
     return InstalledRuntimeSpecV2(
         ea_distribution=identity,
@@ -547,6 +741,7 @@ def collect_installed_runtime_spec_v2() -> InstalledRuntimeSpecV2:
         sys_platform=sys.platform,
         platform_tag=sysconfig.get_platform(),
         distributions=tuple(identity for identity, _ in pairs),
+        provenance_kind="installed_local_wheel_v1",
     )
 
 

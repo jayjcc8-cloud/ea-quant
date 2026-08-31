@@ -1,4 +1,4 @@
-"""Fail-closed funded Phase 1 product boundary."""
+"""Fail-closed funded Phase 1 product boundary with wheel-owned provenance validation."""
 
 from __future__ import annotations
 
@@ -209,10 +209,14 @@ def _retire_phase1_product_kernel(kernel: Phase1ProductKernel) -> None:
 
 
 def _require_product_boundary(
-    spec: LineageSpecV2, execution_policy: ExecutionPolicyRef, risk_policy: Phase1RiskPolicy
+    spec: LineageSpecV2,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+    *,
+    require_artifact: bool,
 ) -> None:
     try:
-        runtime = collect_installed_runtime_spec_v2()
+        runtime = collect_installed_runtime_spec_v2(require_artifact=require_artifact)
     except ProvenanceError as error:
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT,
@@ -328,7 +332,7 @@ def prepare_phase1_product_kernel(
         raise ProductKernelError(
             ProductKernelFailureCode.INTEGRITY_MANIFEST_DRIFT, "invalid product input"
         )
-    _require_product_boundary(spec, execution_policy, risk_policy)
+    _require_product_boundary(spec, execution_policy, risk_policy, require_artifact=True)
     prepared = None
     journal = None
     try:
@@ -390,7 +394,9 @@ def recover_phase1_product_kernel(
             ProductKernelFailureCode.INTEGRITY_UNSUPPORTED_MANIFEST_V1,
             "product recovery requires manifest v2",
         )
-    _require_product_boundary(expected_manifest.spec, execution_policy, risk_policy)
+    _require_product_boundary(
+        expected_manifest.spec, execution_policy, risk_policy, require_artifact=False
+    )
     try:
         verified = store.verify_recovery_attempt(expected_manifest)
     except IncompleteAuditRecoveryError as error:

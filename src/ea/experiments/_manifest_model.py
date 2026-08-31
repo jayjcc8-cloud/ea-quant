@@ -341,7 +341,7 @@ class InstalledRuntimeSpecV2:
     platform_tag: str
     distributions: tuple[DistributionIdentity, ...]
     numeric_policy: str = _NUMERIC_POLICY
-    provenance_kind: str = "installed_distribution"
+    provenance_kind: str = "installed_local_wheel_v1"
 
     def __post_init__(self) -> None:
         if type(self.ea_distribution) is not DistributionIdentity:
@@ -363,7 +363,7 @@ class InstalledRuntimeSpecV2:
             raise ManifestError("installed runtime distribution inventory omits ea-quant")
         if (
             self.numeric_policy != _NUMERIC_POLICY
-            or self.provenance_kind != "installed_distribution"
+            or self.provenance_kind != "installed_local_wheel_v1"
         ):
             raise ManifestError("installed runtime provenance vocabulary is unsupported")
         object.__setattr__(self, "distributions", distributions)
