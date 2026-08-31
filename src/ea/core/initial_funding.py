@@ -16,12 +16,19 @@ from ea.core.economics import (
 )
 from ea.core.execution import InstrumentExecutionSpecSet, InstrumentSpecSetId, SettlementCurrency
 from ea.core.execution_identity import EconomicId, EconomicOwnerKind
-from ea.core.portfolio import CurrencyCommodity, LedgerAccountKind, LedgerPosting
+from ea.core.portfolio import (
+    CurrencyCommodity,
+    LedgerAccountKind,
+    LedgerPosting,
+    PortfolioSnapshot,
+    portfolio_snapshot_digest,
+)
 from ea.core.run import RunContractError, RunId, Sha256Digest
 
 INITIAL_FUNDING_SPEC_CANONICALIZATION = "ea-initial-funding-spec-v1"
 INITIAL_FUNDING_SPEC_DOMAIN = b"ea.initial-funding-spec.v1\0"
 INITIAL_FUNDING_TRANSACTION_DOMAIN = b"ea.initial-funding-transaction.v1\0"
+INITIAL_FUNDING_OUTCOME_DOMAIN = b"ea.initial-funding-outcome.v1\0"
 
 
 class InitialFundingError(RunContractError):
@@ -250,5 +257,98 @@ def initial_funding_transaction_digest(transaction: InitialFundingTransaction) -
         sha256(
             INITIAL_FUNDING_TRANSACTION_DOMAIN
             + canonical_initial_funding_transaction_bytes(transaction)
+        ).hexdigest()
+    )
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class InitialFundingOutcome:
+    """Retained exact replay or conflict evidence for the funding transition."""
+
+    run_id: RunId
+    result: InitialFundingResult
+    manifest_sha256: Sha256Digest
+    submitted_funding_spec_sha256: Sha256Digest
+    prepared_audit_acknowledgement_sha256: Sha256Digest
+    before_snapshot_version: int
+    after_snapshot_version: int
+    snapshot: PortfolioSnapshot
+    transaction: InitialFundingTransaction | None
+    existing_transaction_sha256: Sha256Digest | None
+    conflict_kind: InitialFundingConflictKind | None
+
+    def __post_init__(self) -> None:
+        if type(self.run_id) is not RunId or type(self.result) is not InitialFundingResult:
+            raise _fail("funding outcome identity must be exact")
+        if (
+            any(
+                type(value) is not Sha256Digest
+                for value in (
+                    self.manifest_sha256,
+                    self.submitted_funding_spec_sha256,
+                    self.prepared_audit_acknowledgement_sha256,
+                )
+            )
+            or type(self.snapshot) is not PortfolioSnapshot
+        ):
+            raise _fail("funding outcome bindings must be exact")
+        if (
+            type(self.before_snapshot_version) is not int
+            or type(self.after_snapshot_version) is not int
+            or self.snapshot.run_id != self.run_id
+            or self.before_snapshot_version
+            != self.snapshot.snapshot_version
+            - (1 if self.result is InitialFundingResult.APPLIED else 0)
+            or self.after_snapshot_version != self.snapshot.snapshot_version
+        ):
+            raise _fail("funding outcome snapshot versions conflict")
+        if self.result is InitialFundingResult.APPLIED:
+            if (
+                type(self.transaction) is not InitialFundingTransaction
+                or self.conflict_kind is not None
+                or self.existing_transaction_sha256 is not None
+            ):
+                raise _fail("applied funding outcome fields conflict")
+        elif (
+            self.transaction is not None
+            or type(self.existing_transaction_sha256) is not Sha256Digest
+            or type(self.conflict_kind) is not InitialFundingConflictKind
+        ):
+            raise _fail("conflicting funding outcome fields conflict")
+
+
+def canonical_initial_funding_outcome_bytes(outcome: InitialFundingOutcome) -> bytes:
+    if type(outcome) is not InitialFundingOutcome:
+        raise _fail("funding outcome must be exact")
+    return _canonical_json(
+        {
+            "after_snapshot_version": outcome.after_snapshot_version,
+            "before_snapshot_version": outcome.before_snapshot_version,
+            "canonicalization": "ea.initial-funding-outcome.v1",
+            "conflict_kind": None if outcome.conflict_kind is None else outcome.conflict_kind.value,
+            "existing_transaction_sha256": None
+            if outcome.existing_transaction_sha256 is None
+            else outcome.existing_transaction_sha256.value,
+            "manifest_sha256": outcome.manifest_sha256.value,
+            "prepared_audit_acknowledgement_sha256": (
+                outcome.prepared_audit_acknowledgement_sha256.value
+            ),
+            "result": outcome.result.value,
+            "run_id": outcome.run_id.value,
+            "schema": "ea.initial-funding-outcome.v1",
+            "snapshot_sha256": portfolio_snapshot_digest(outcome.snapshot).value,
+            "submitted_funding_spec_sha256": outcome.submitted_funding_spec_sha256.value,
+            "transaction_sha256": None
+            if outcome.transaction is None
+            else initial_funding_transaction_digest(outcome.transaction).value,
+        }
+    )
+
+
+def initial_funding_outcome_digest(outcome: InitialFundingOutcome) -> Sha256Digest:
+    return Sha256Digest(
+        sha256(
+            INITIAL_FUNDING_OUTCOME_DOMAIN + canonical_initial_funding_outcome_bytes(outcome)
         ).hexdigest()
     )

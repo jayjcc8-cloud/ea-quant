@@ -10,15 +10,19 @@ from ea.core.execution_identity import EconomicId, EconomicOwnerKind
 from ea.core.initial_funding import (
     InitialFundingConflictKind,
     InitialFundingError,
+    InitialFundingOutcome,
     InitialFundingResult,
     InitialFundingSpec,
     InitialFundingTransaction,
+    canonical_initial_funding_outcome_bytes,
     canonical_initial_funding_spec_bytes,
     canonical_initial_funding_transaction_bytes,
     initial_funding_spec_digest,
 )
 from ea.core.portfolio import CurrencyCommodity, LedgerAccountKind, LedgerPosting
 from ea.core.run import RunId, Sha256Digest
+from ea.portfolio import create_portfolio_ledger
+from unit.test_portfolio_ledger import _spec_set
 
 
 def test_initial_funding_spec_has_stable_literal_canonical_bytes() -> None:
@@ -91,3 +95,24 @@ def test_initial_funding_transaction_is_closed_first_ledger_entry() -> None:
     assert InitialFundingResult.APPLIED.value == "applied"
     assert InitialFundingConflictKind.ENTRY_ID_OCCUPIED.value == "entry_id_occupied"
     assert b'"ledger_sequence":1' in canonical_initial_funding_transaction_bytes(transaction)
+
+
+def test_initial_funding_conflict_retains_the_empty_snapshot() -> None:
+    run_id = RunId("123e4567-e89b-42d3-a456-426614174000")
+    snapshot = create_portfolio_ledger(run_id, _spec_set()).snapshot
+    outcome = InitialFundingOutcome(
+        run_id=run_id,
+        result=InitialFundingResult.CONFLICT,
+        manifest_sha256=Sha256Digest("11" * 32),
+        submitted_funding_spec_sha256=Sha256Digest("22" * 32),
+        prepared_audit_acknowledgement_sha256=Sha256Digest("33" * 32),
+        before_snapshot_version=0,
+        after_snapshot_version=0,
+        snapshot=snapshot,
+        transaction=None,
+        existing_transaction_sha256=Sha256Digest("44" * 32),
+        conflict_kind=InitialFundingConflictKind.ENTRY_ID_OCCUPIED,
+    )
+
+    assert outcome.snapshot is snapshot
+    assert b'"result":"conflict"' in canonical_initial_funding_outcome_bytes(outcome)
