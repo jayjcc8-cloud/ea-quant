@@ -199,3 +199,45 @@ def test_ledger_applies_genesis_once_and_retains_exact_replay() -> None:
         replace(applied, transaction=None)
     with pytest.raises(InitialFundingError, match="applied funding outcome"):
         replace(applied, conflict_kind=InitialFundingConflictKind.ENTRY_ID_OCCUPIED)
+
+
+def test_applied_funding_outcome_rejects_transaction_binding_drift() -> None:
+    spec_set = _spec_set()
+    funding = InitialFundingSpec(
+        instrument_spec_set_id=spec_set.identifier,
+        instrument_spec_set_sha256=__import__(
+            "ea.core.execution", fromlist=["instrument_spec_set_digest"]
+        ).instrument_spec_set_digest(spec_set),
+        settlement_currency=SettlementCurrency("USD"),
+        currency_quantum=CanonicalDecimal("0.01"),
+        amount=CanonicalDecimal("1000"),
+    )
+    binding = __import__("ea.core.run", fromlist=["RunBinding", "RunReference"]).RunBinding(
+        __import__("ea.core.run", fromlist=["RunReference"]).RunReference(
+            RUN_ID, Sha256Digest("11" * 32)
+        ),
+        Sha256Digest("22" * 32),
+    )
+    applied = create_portfolio_ledger(RUN_ID, spec_set).apply_initial_funding(
+        funding, binding=binding, prepared_acknowledgement=Sha256Digest("33" * 32)
+    )
+    foreign_run_id = RunId("223e4567-e89b-42d3-a456-426614174000")
+    foreign_binding = __import__("ea.core.run", fromlist=["RunBinding", "RunReference"]).RunBinding(
+        __import__("ea.core.run", fromlist=["RunReference"]).RunReference(
+            foreign_run_id, Sha256Digest("44" * 32)
+        ),
+        Sha256Digest("55" * 32),
+    )
+    foreign = create_portfolio_ledger(foreign_run_id, spec_set).apply_initial_funding(
+        funding, binding=foreign_binding, prepared_acknowledgement=Sha256Digest("66" * 32)
+    )
+
+    assert foreign.transaction is not None
+    with pytest.raises(InitialFundingError, match="applied funding outcome bindings"):
+        replace(applied, transaction=foreign.transaction)
+    with pytest.raises(InitialFundingError, match="applied funding outcome bindings"):
+        replace(applied, manifest_sha256=Sha256Digest("77" * 32))
+    with pytest.raises(InitialFundingError, match="applied funding outcome bindings"):
+        replace(applied, submitted_funding_spec_sha256=Sha256Digest("88" * 32))
+    with pytest.raises(InitialFundingError, match="applied funding outcome bindings"):
+        replace(applied, prepared_audit_acknowledgement_sha256=Sha256Digest("99" * 32))

@@ -310,6 +310,16 @@ class InitialFundingOutcome:
                 or self.existing_transaction_sha256 is not None
             ):
                 raise _fail("applied funding outcome fields conflict")
+            if (
+                self.transaction.run_id != self.run_id
+                or self.transaction.manifest_sha256 != self.manifest_sha256
+                or self.transaction.funding_spec_sha256 != self.submitted_funding_spec_sha256
+                or (
+                    self.transaction.prepared_audit_acknowledgement_sha256
+                    != self.prepared_audit_acknowledgement_sha256
+                )
+            ):
+                raise _fail("applied funding outcome bindings conflict")
         elif (
             self.transaction is not None
             or type(self.existing_transaction_sha256) is not Sha256Digest
