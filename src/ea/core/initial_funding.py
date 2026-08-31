@@ -323,8 +323,7 @@ class InitialFundingOutcome:
             transaction, snapshot = self.transaction, self.snapshot
             cash = snapshot.cash_balances
             if (
-                self.before_snapshot_version != 0
-                or self.after_snapshot_version != 1
+                (self.before_snapshot_version, self.after_snapshot_version) != (0, 1)
                 or snapshot.instrument_spec_set_id != transaction.instrument_spec_set_id
                 or snapshot.instrument_spec_set_sha256 != transaction.instrument_spec_set_sha256
                 or snapshot.last_entry_id != transaction.entry_id

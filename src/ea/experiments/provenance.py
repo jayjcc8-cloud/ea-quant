@@ -127,7 +127,7 @@ def _local_wheel_artifact(
             not path.is_absolute()
             or path.suffix != ".whl"
             or decoded_path != unicodedata.normalize("NFC", decoded_path)
-            or any(ord(char) <= 0x20 or ord(char) == 0x7F or char == "\\" for char in decoded_path)
+            or any(ord(char) < 0x20 or ord(char) == 0x7F or char == "\\" for char in decoded_path)
             or any(part in {"", ".", ".."} for part in decoded_path[1:].split("/"))
             or comparable_url != path.as_uri()
         ):
@@ -152,6 +152,8 @@ def _local_wheel_artifact(
                 dir_fd=parent_fd,
             )
         except FileNotFoundError as exc:
+            if "named" in locals():
+                raise ProvenanceError("local wheel artifact changed before open") from exc
             current_parent = os.stat(parent, follow_symlinks=False)
             if (current_parent.st_dev, current_parent.st_ino) != (
                 parent_stat.st_dev,

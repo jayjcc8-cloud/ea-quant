@@ -102,7 +102,7 @@ def test_wheel_owned_rows_require_closed_record_hashes(tmp_path: Path) -> None:
 def test_direct_url_requires_a_present_matching_local_wheel(tmp_path: Path) -> None:
     from ea.experiments.provenance import _local_wheel_artifact
 
-    wheel = tmp_path / "ea.whl"
+    wheel = tmp_path / "valid wheel.whl"
     wheel.write_bytes(b"wheel")
     document = json.dumps(
         {
@@ -177,7 +177,7 @@ def test_direct_url_accepts_only_pip_archive_hash_encodings(
 ) -> None:
     from ea.experiments.provenance import _local_wheel_artifact
 
-    wheel = tmp_path / "ea.whl"
+    wheel = tmp_path / "missing wheel.whl"
     wheel.write_bytes(b"wheel")
     digest = hashlib.sha256(b"wheel").hexdigest()
     encodings = {
@@ -284,6 +284,7 @@ def test_local_wheel_recovery_rejects_a_missing_nonwheel_artifact(tmp_path: Path
         "file:///tmp/missing.whl?query=yes",
         "file:///tmp/missing.whl#fragment",
         "file:///tmp/missing.txt",
+        "file:///tmp/literal space.whl",
         "file:///tmp/bad\nname.whl",
         "file:///tmp/bad\\name.whl",
         "file:///tmp/%00-invalid.whl",
@@ -304,6 +305,7 @@ def test_optional_wheel_recovery_rejects_noncanonical_urls(url: str) -> None:
         OSError(errno.EIO, "io"),
         OSError(errno.ENAMETOOLONG, "long"),
         OSError(errno.ELOOP, "loop"),
+        FileNotFoundError(errno.ENOENT, "raced"),
     ],
 )
 def test_optional_wheel_recovery_rejects_ambiguous_open_errors(

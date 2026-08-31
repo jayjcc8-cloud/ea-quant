@@ -297,6 +297,7 @@ def test_applied_funding_outcome_rejects_every_non_genesis_snapshot_surface() ->
         {"cash_balances": ()},
         {"cash_balances": cash(SettlementCurrency("EUR"))},
         {"cash_balances": cash(quantum=CanonicalDecimal("0.1"))},
+        {"cash_balances": (replace(cash()[0], amount=CanonicalDecimal("2000")),)},
         {"cash_balances": cash(SettlementCurrency("EUR")) + cash()},
         {
             "position_balances": (
