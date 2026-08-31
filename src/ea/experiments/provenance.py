@@ -98,31 +98,118 @@ def _local_wheel_artifact(
         digest = "sha256=" + hashes_digest
     elif hashes_digest is not None and digest != "sha256=" + hashes_digest:
         raise ProvenanceError("direct URL artifact hashes disagree")
+    if any(ord(char) <= 0x20 or ord(char) >= 0x7F or char == "\\" for char in url):
+        raise ProvenanceError("direct URL must identify a canonical local wheel")
+    for index, char in enumerate(url):
+        if char == "%" and (
+            index + 2 >= len(url)
+            or re.fullmatch(r"[0-9A-Fa-f]{2}", url[index + 1 : index + 3]) is None
+        ):
+            raise ProvenanceError("direct URL has an invalid percent escape")
     try:
         parsed = urllib.parse.urlsplit(url)
-    except ValueError as exc:
+    except (UnicodeError, ValueError) as exc:
         raise ProvenanceError("direct URL must identify a local wheel") from exc
-    if parsed.scheme != "file" or parsed.netloc or parsed.query or parsed.fragment:
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc not in ("", "localhost")
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ProvenanceError("direct URL must identify a local wheel")
     try:
-        path = Path(urllib.parse.unquote_to_bytes(parsed.path).decode("utf-8"))
+        decoded_path = urllib.parse.unquote_to_bytes(parsed.path).decode("utf-8")
+        path = Path(decoded_path)
+        comparable_url = (
+            url if not parsed.netloc else urllib.parse.urlunsplit(("file", "", parsed.path, "", ""))
+        )
         if (
             not path.is_absolute()
             or path.suffix != ".whl"
-            or any(ord(char) <= 0x20 or char == "\\" for char in str(path))
+            or decoded_path != unicodedata.normalize("NFC", decoded_path)
+            or any(ord(char) <= 0x20 or ord(char) == 0x7F or char == "\\" for char in decoded_path)
+            or any(part in {"", ".", ".."} for part in decoded_path[1:].split("/"))
+            or comparable_url != path.as_uri()
         ):
             raise ProvenanceError("direct URL must identify an absolute canonical wheel path")
-        resolved = path.resolve(strict=True)
-    except (OSError, UnicodeError) as exc:
-        if not require_artifact:
-            return None, digest[7:]
-        raise ProvenanceError("local wheel artifact is unavailable") from exc
+    except UnicodeError as exc:
+        raise ProvenanceError("direct URL must identify a canonical local wheel") from exc
+    parent_fd: int | None = None
+    file_fd: int | None = None
     try:
-        if not resolved.is_file() or resolved.suffix != ".whl":
-            raise ProvenanceError("local wheel artifact hash mismatches")
-        snapshot = resolved.read_bytes()
+        parent = path.parent
+        if parent.resolve(strict=True) != parent:
+            raise ProvenanceError("local wheel artifact path contains a link")
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        parent_stat = os.fstat(parent_fd)
+        named_parent = os.stat(parent, follow_symlinks=False)
+        if not stat.S_ISDIR(parent_stat.st_mode) or (parent_stat.st_dev, parent_stat.st_ino) != (
+            named_parent.st_dev,
+            named_parent.st_ino,
+        ):
+            raise ProvenanceError("local wheel artifact parent is ambiguous")
+        try:
+            named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            file_fd = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError as exc:
+            current_parent = os.stat(parent, follow_symlinks=False)
+            if (current_parent.st_dev, current_parent.st_ino) != (
+                parent_stat.st_dev,
+                parent_stat.st_ino,
+            ):
+                raise ProvenanceError("local wheel artifact parent changed") from exc
+            if not require_artifact:
+                return None, digest[7:]
+            raise ProvenanceError("local wheel artifact is unavailable") from exc
+        before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or named.st_nlink != 1
+            or before.st_nlink != 1
+            or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise ProvenanceError("local wheel artifact is not contained regular data")
+        chunks: list[bytes] = []
+        while chunk := os.read(file_fd, 65536):
+            chunks.append(chunk)
+        after = os.fstat(file_fd)
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        current_parent = os.stat(parent, follow_symlinks=False)
+        fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        states = {
+            tuple(getattr(item, field) for field in fields)
+            for item in (named, before, after, current)
+        }
+        if len(states) != 1:
+            raise ProvenanceError("local wheel artifact changed while being read")
+        if (current_parent.st_dev, current_parent.st_ino) != (
+            parent_stat.st_dev,
+            parent_stat.st_ino,
+        ):
+            raise ProvenanceError("local wheel artifact parent changed while being read")
+        snapshot = b"".join(chunks)
     except OSError as exc:
         raise ProvenanceError("local wheel artifact is unavailable") from exc
+    finally:
+        if file_fd is not None:
+            with suppress(OSError):
+                os.close(file_fd)
+        if parent_fd is not None:
+            with suppress(OSError):
+                os.close(parent_fd)
     actual = sha256(snapshot).hexdigest()
     if actual != digest[7:]:
         raise ProvenanceError("local wheel artifact hash mismatches")

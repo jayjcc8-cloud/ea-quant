@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import csv
+import errno
 import hashlib
 import json
+import os
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -261,6 +263,128 @@ def test_local_wheel_recovery_rejects_a_missing_nonwheel_artifact(tmp_path: Path
 
     with pytest.raises(ProvenanceError):
         _local_wheel_artifact(document, require_artifact=False)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///tmp/%-invalid.whl",
+        "file:///tmp/%GG-invalid.whl",
+        "file:///tmp/%FF-invalid.whl",
+        "file:///tmp/\ud800-invalid.whl",
+        "file:///tmp/e\u0301-invalid.whl",
+        "file:///tmp/%65a-invalid.whl",
+        "file:///private%2Ftmp/missing.whl",
+        "file:///tmp/../tmp/missing.whl",
+        "file:///tmp/%2E%2E/tmp/missing.whl",
+        "file:///tmp//missing.whl",
+        "file:relative.whl",
+        "https:///tmp/missing.whl",
+        "file://remote/tmp/missing.whl",
+        "file:///tmp/missing.whl?query=yes",
+        "file:///tmp/missing.whl#fragment",
+        "file:///tmp/missing.txt",
+        "file:///tmp/bad\nname.whl",
+        "file:///tmp/bad\\name.whl",
+        "file:///tmp/%00-invalid.whl",
+    ],
+)
+def test_optional_wheel_recovery_rejects_noncanonical_urls(url: str) -> None:
+    from ea.experiments.provenance import ProvenanceError, _local_wheel_artifact
+
+    document = json.dumps({"url": url, "archive_info": {"hash": "sha256=" + "0" * 64}})
+    with pytest.raises(ProvenanceError):
+        _local_wheel_artifact(document, require_artifact=False)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError(errno.EACCES, "denied"),
+        OSError(errno.EIO, "io"),
+        OSError(errno.ENAMETOOLONG, "long"),
+        OSError(errno.ELOOP, "loop"),
+    ],
+)
+def test_optional_wheel_recovery_rejects_ambiguous_open_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    from ea.experiments.provenance import ProvenanceError, _local_wheel_artifact
+
+    wheel = tmp_path / "present.whl"
+    wheel.write_bytes(b"wheel")
+    document = json.dumps({"url": wheel.as_uri(), "archive_info": {"hash": "sha256=" + "0" * 64}})
+    real_open = os.open
+
+    def fail_leaf(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is not None:
+            raise error
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", fail_leaf)
+    with pytest.raises(ProvenanceError):
+        _local_wheel_artifact(document, require_artifact=False)
+
+
+@pytest.mark.parametrize("kind", ["dangling-symlink", "directory", "hardlink"])
+def test_optional_wheel_recovery_rejects_nonregular_or_linked_artifacts(
+    tmp_path: Path, kind: str
+) -> None:
+    from ea.experiments.provenance import ProvenanceError, _local_wheel_artifact
+
+    wheel = tmp_path / "ambiguous.whl"
+    if kind == "dangling-symlink":
+        wheel.symlink_to(tmp_path / "missing.whl")
+    elif kind == "directory":
+        wheel.mkdir()
+    else:
+        wheel.write_bytes(b"wheel")
+        os.link(wheel, tmp_path / "alias.whl")
+    document = json.dumps({"url": wheel.as_uri(), "archive_info": {"hash": "sha256=" + "0" * 64}})
+    with pytest.raises(ProvenanceError):
+        _local_wheel_artifact(document, require_artifact=False)
+
+
+@pytest.mark.parametrize("race", ["content", "replacement"])
+def test_local_wheel_snapshot_rejects_content_or_replacement_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, race: str
+) -> None:
+    from ea.experiments.provenance import ProvenanceError, _local_wheel_artifact
+
+    original = b"A" * 70_000
+    wheel = tmp_path / "raced.whl"
+    wheel.write_bytes(original)
+    document = json.dumps(
+        {
+            "url": wheel.as_uri(),
+            "archive_info": {"hash": "sha256=" + hashlib.sha256(original).hexdigest()},
+        }
+    )
+    real_read = os.read
+    changed = False
+
+    def race_after_read(fd: int, size: int) -> bytes:
+        nonlocal changed
+        chunk = real_read(fd, size)
+        if chunk and not changed:
+            changed = True
+            if race == "content":
+                wheel.write_bytes(b"B" * 70_001)
+            else:
+                replacement = tmp_path / "replacement.whl"
+                replacement.write_bytes(original)
+                replacement.replace(wheel)
+        return chunk
+
+    monkeypatch.setattr(os, "read", race_after_read)
+    with pytest.raises(ProvenanceError):
+        _local_wheel_artifact(document)
 
 
 def test_wheel_owned_rows_include_all_required_metadata(tmp_path: Path) -> None:
