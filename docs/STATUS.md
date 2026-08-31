@@ -113,7 +113,7 @@ mutable open, closed, Draft, or merged state.
 - Current merged baseline before this convergence candidate is
   `main@67184b1e4f387caf15b88db5529d4194de82cd81`; when this file reaches `main`, the containing
   `main` commit and exact CI replace that pre-candidate reference.
-- R6 / #140 is candidate work until merged. Its Delivery 2 checkpoint is recorded only by this
+- R7 / #143 is candidate work until merged. Its Delivery 2 checkpoint is recorded only by this
   file in the containing `main` commit with that commit's exact CI; no docs-only successor is
   required to replace a candidate SHA.
 - The last independently verified pre-consolidation checkpoint from **2026-08-22** remains
