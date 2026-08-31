@@ -37,6 +37,8 @@ from ea.core.run import (
     validate_stream_label as validate_stream_label,
 )
 from ea.experiments._manifest_codec import read_manifest as read_manifest
+from ea.experiments._manifest_codec import read_manifest_v1 as read_manifest_v1
+from ea.experiments._manifest_codec import read_manifest_v2 as read_manifest_v2
 from ea.experiments._manifest_evidence import (
     verify_manifest_evidence as verify_manifest_evidence,
 )
@@ -59,10 +61,19 @@ from ea.experiments._manifest_model import (
     EvidenceMismatchError as EvidenceMismatchError,
 )
 from ea.experiments._manifest_model import (
+    InstalledRuntimeSpecV2 as InstalledRuntimeSpecV2,
+)
+from ea.experiments._manifest_model import (
     LineageInputs as LineageInputs,
 )
 from ea.experiments._manifest_model import (
+    LineageInputsV2 as LineageInputsV2,
+)
+from ea.experiments._manifest_model import (
     LineageSpec as LineageSpec,
+)
+from ea.experiments._manifest_model import (
+    LineageSpecV2 as LineageSpecV2,
 )
 from ea.experiments._manifest_model import (
     ManifestError as ManifestError,
@@ -83,6 +94,9 @@ from ea.experiments._manifest_model import (
     RunManifest as RunManifest,
 )
 from ea.experiments._manifest_model import (
+    RunManifestV2 as RunManifestV2,
+)
+from ea.experiments._manifest_model import (
     RuntimeEvidence as RuntimeEvidence,
 )
 from ea.experiments._manifest_model import (
@@ -92,7 +106,13 @@ from ea.experiments._manifest_model import (
     build_lineage_spec as build_lineage_spec,
 )
 from ea.experiments._manifest_model import (
+    build_lineage_spec_v2 as build_lineage_spec_v2,
+)
+from ea.experiments._manifest_model import (
     build_manifest as build_manifest,
+)
+from ea.experiments._manifest_model import (
+    build_manifest_v2 as build_manifest_v2,
 )
 from ea.experiments._manifest_model import (
     canonical_lineage_bytes as canonical_lineage_bytes,
@@ -133,17 +153,25 @@ _PUBLIC_MANIFEST_OBJECTS: tuple[object, ...] = (
     ParameterKind,
     EffectiveParameter,
     LineageInputs,
+    LineageInputsV2,
     CodeSpec,
     ConfigurationSpec,
     RuntimeSpec,
+    InstalledRuntimeSpecV2,
     RandomnessSpec,
     LineageSpec,
+    LineageSpecV2,
     RunManifest,
+    RunManifestV2,
     canonical_lineage_bytes,
     canonical_manifest_bytes,
     build_lineage_spec,
+    build_lineage_spec_v2,
     build_manifest,
+    build_manifest_v2,
     read_manifest,
+    read_manifest_v1,
+    read_manifest_v2,
     verify_manifest_evidence,
 )
 for _public_object in _PUBLIC_MANIFEST_OBJECTS:
