@@ -1,5 +1,5 @@
-name: Governed task package
-description: Create one bounded implementation, review, or governance task.
+name: Bounded product task
+description: Define one deliverable with a finite review cycle.
 title: ""
 labels:
   - status:draft
@@ -7,91 +7,66 @@ body:
   - type: markdown
     attributes:
       value: >-
-        Complete every field. Comments are historical evidence; this Issue body is the current
-        task authority until merged code, tests, CI, an Accepted ADR, or STATUS outranks it.
+        Delivery is the objective. Keep this package bounded and classify risk by actual reachable
+        impact. Non-blocking hardening belongs in a linked backlog Issue.
   - type: textarea
     id: objective
     attributes:
       label: Objective
-      description: State the one final outcome this task changes.
+      description: State the one runnable or verifiable outcome that changes.
     validations:
       required: true
   - type: textarea
     id: scope
     attributes:
       label: Scope
-      description: List allowed files, systems, semantic surfaces, and external state.
+      description: List allowed files, behavior, and external state.
     validations:
       required: true
   - type: textarea
     id: non_goals
     attributes:
       label: Non-goals
-      description: State what this task explicitly will not do.
-    validations:
-      required: true
-  - type: textarea
-    id: authoritative_inputs
-    attributes:
-      label: Authoritative Inputs
-      description: Link STATUS, WORKFLOW, relevant ADRs/specifications, code, and evidence.
+      description: State what is deliberately excluded.
     validations:
       required: true
   - type: textarea
     id: acceptance_criteria
     attributes:
       label: Acceptance Criteria
-      description: Provide a verifiable checklist. An Issue without it cannot become Ready.
+      description: Provide the finite, testable completion checklist.
     validations:
       required: true
   - type: dropdown
     id: risk_tier
     attributes:
       label: Risk Tier
-      description: Select the highest applicable semantic trigger; uncertainty raises the tier.
+      description: Choose by actual reachable impact, not keywords or future possibilities.
       options:
-        - Tier 0 — low
-        - Tier 1 — normal
-        - Tier 2 — high
+        - T0 — documentation/tooling
+        - T1 — offline product/simulation
+        - T2 — operational authority
+        - T3 — real-money/irreversible
     validations:
       required: true
   - type: textarea
     id: risk_rationale
     attributes:
-      label: Risk Trigger and Rationale
-      description: Identify the highest applicable trigger and explain why it determines this tier.
+      label: Actual Impact Rationale
+      description: Name the reachable execution path and maximum concrete consequence.
     validations:
       required: true
   - type: textarea
     id: validation
     attributes:
       label: Validation
-      description: List focused tests, quality/full profiles, CI, and required review gates.
+      description: List tests, CI, and the tier-required bounded review.
     validations:
       required: true
   - type: textarea
-    id: expected_outputs
+    id: owner
     attributes:
-      label: Expected Outputs
-      description: List code, tests, ADR, STATUS, reports, or successor Issues.
-    validations:
-      required: true
-  - type: textarea
-    id: reuse_assessment
-    attributes:
-      label: Reuse Assessment
-      description: >-
-        Tier 1/2: record capability, sources/candidates, versions/licenses/security/fit/cost, and
-        reuse/adapter/local-build decision. Tier 0 may record N/A with a reason.
-    validations:
-      required: true
-  - type: textarea
-    id: owners
-    attributes:
-      label: Owners
-      description: >-
-        For Tier 2, name Decision/Design, Implementation, Combined Safety Verification,
-        and Merge Approval actors; also name any required architecture or domain owner.
-        Tier 0 may record N/A for roles not required.
+      label: Owner
+      description: Name the Product Owner and Implementer; name the single Reviewer when required.
     validations:
       required: true

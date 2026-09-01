@@ -1,8 +1,7 @@
 # EA Governance Workflow
 
-This is the complete durable workflow contract for humans, Codex, OpenCode, and other harnesses.
-`AGENTS.md` is the automatically loaded entry point and non-bypassable safety floor. If the two
-conflict, stop with `DRIFT/BLOCKED` and repair the inconsistency before continuing.
+This is the complete delivery workflow. `AGENTS.md` is the short entry point. Governance is a
+constraint on delivery, not the deliverable.
 
 ## Authority Precedence
 
@@ -10,353 +9,167 @@ Interpret repository information in this order:
 
 1. **merged code, test results, and CI** — implemented reality;
 2. **Accepted ADRs and formal specifications** — normative intent;
-3. **docs/STATUS.md** — sole human-readable current project state;
-4. **Issue and pull-request bodies** — task and candidate authority;
-5. **Issue comments, pull-request comments, and chat** — historical evidence only.
+3. **docs/STATUS.md** — current human-readable state;
+4. **Issue and pull-request bodies** — task and candidate scope;
+5. **Issue comments, pull-request comments, and chat** — supporting history.
 
-Comments never silently override an ADR or current task body. Code that conflicts with an ADR is
-not a new decision: record `DRIFT/BLOCKED`, then repair code or accept a superseding ADR. STATUS
-that conflicts with merged code/tests/CI must be corrected.
+Accepted ADRs are immutable. A later Accepted ADR may supersede a process or decision without
+rewriting its history. STATUS records the present; ROADMAP records future phase boundaries.
 
-The control plane separates history, decisions, present, and future:
-
-- old Issues and pull requests preserve history;
-- `docs/adr/` preserves accepted decisions;
-- `docs/STATUS.md` preserves the present;
-- `docs/ROADMAP.md` preserves Phase boundaries and future entry/exit criteria.
-
-The Router is a Classification Evidence Provider, never a Decision Authority or task database.
+The Product Owner owns priority, final tier, residual-risk acceptance, merge/stop decisions, and
+Token budget. Router is advisory and cannot activate actors, create review chains, or approve a
+tier.
 
 ## Issue Lifecycle
 
-The normal delivery state machine is:
+Use the existing labels as lightweight coordination:
 
-`Draft → Ready → In Progress → Review → Verified → Done`
+`Draft → Ready → In Progress → Review → Done`
 
-`blocked` is an orthogonal label, not a lifecycle state. `Done` and `Superseded` are terminal;
-both are terminal states. `Done` means the Issue is closed after its merged-main and CI evidence is
-recorded.
-`Superseded` uses the `status:superseded` label for unfinished work whose objective or authority
-was replaced by a later Accepted ADR or successor task. The final Issue conclusion names the
-replacement authority and any still-owned work before closure. Superseded never means verified,
-never hides an unresolved safety finding, and cannot replace Done for delivered work.
-
-- **Draft:** task package is incomplete or still being decided.
-- **Ready:** every required task-package field and reuse decision is complete.
-- **In Progress:** writer lease, branch/worktree, base SHA, and merge order are recorded.
-- **Review:** the candidate diff and exact HEAD are frozen; implementation editing pauses.
-- **Verified:** all required exact-HEAD tests/reports pass and blocker count is zero.
-- **Done:** merged `main` CI passes; STATUS/ADR/Issue/successors are synchronized and the Issue is
-  closed.
-- **Superseded:** a later Accepted decision or bounded successor owns the remaining objective; the
-  old Issue is closed with `status:superseded` and preserves its implementation/review history.
-
-An Issue without acceptance criteria cannot become Ready. A pull request without exact-HEAD
-evidence cannot become Verified. A critical change with stale STATUS or ADR cannot become Done.
+`status:superseded` closes work replaced by a later Issue or ADR. `blocked` is orthogonal. Labels
+do not create separate model approvals. An Issue is Ready when its objective, scope, non-goals,
+acceptance criteria, tier rationale, validation, and owner are clear enough to implement.
 
 ## Task Package
 
-Every Issue contains:
+Every active Issue states:
 
-- **Objective:** the one outcome that changes.
-- **Scope:** allowed files, systems, and external state.
-- **Non-goals:** work explicitly excluded.
-- **Authoritative Inputs:** STATUS, this WORKFLOW, relevant ADRs/specifications, code, and evidence.
-- **Acceptance Criteria:** verifiable completion conditions.
-- **Risk Tier:** Tier 0, Tier 1, or Tier 2 with the highest trigger and rationale.
-- **Validation:** deterministic tests, static checks, runtime/CI, and required human/model reviews.
-- **Expected Outputs:** code, tests, ADR, status update, report, or successor Issue.
-- **Reuse Assessment:** Tier 1/2 evidence; Tier 0 may record `N/A` with a reason.
-- **Owners:** role/actor assignments and required separation for Tier 1/2.
+- one objective;
+- allowed scope and non-goals;
+- verifiable acceptance criteria;
+- T0/T1/T2/T3 with actual-impact rationale;
+- tests/CI/review required by that tier; and
+- Product Owner and Implementer.
 
-Agents default to STATUS, WORKFLOW, task-linked ADRs, and Issue-selected code/evidence. They inspect
-old comments only to resolve a named dispute or recover provenance.
+Keep the active body under 300 lines. Link evidence instead of copying logs, hashes, or historical
+arguments into multiple state sources.
 
-## Risk Tiers and Model Routing
+## Risk Tiers
 
-Highest trigger wins; uncertainty raises the candidate tier. Issue wording cannot override the
-diff or cumulative change graph.
+Classify by **actual reachable impact**, not keywords, abstract importance, or a hypothetical
+future caller.
 
-| Tier | Triggers | Required route |
+| Tier | Actual impact | Default route |
 |---|---|---|
-| Tier 0 — low | Reversible non-executable docs/comments/metadata with no ADR, CI, dependency, schema, security, governance-authority, or runtime effect | Terra medium implementation; deterministic verification and approval decision |
-| Tier 1 — normal | Executable code/config/dependency/CI, public interface, governance authority, or implementation of an accepted contract | Architecture Owner, Terra high Implementation Owner, Terra high Verification Owner |
-| Tier 2 — high | Data/time/look-ahead, strategy, portfolio/ledger, risk, execution/matching, reconciliation/recovery, state-machine semantics, canonical bytes/digests, credentials/security, or release/live/external writes | Sol xhigh Decision/Design, Terra high Implementation, independent Sol high Combined Safety Verification, independent Sol high Merge Approval, plus a domain expert only when the frozen contract names one |
+| T0 | Docs, developer tools, non-runtime UI, test helpers | Implementer + CI |
+| T1 | Research, backtest, offline simulation, analytics, non-authoritative services | Implementer + one Reviewer + CI |
+| T2 | Operational order, risk, ledger, recovery, reconciliation, or security authority | Implementer + one independent adversarial Reviewer + exact-head CI |
+| T3 | Real-money release, secrets/permissions, irreversible migration | T2 + Human Product Owner approval + staged rollback |
 
-These are minimum classifications. A Human may always raise the confirmed tier in the Issue;
-lowering the Router candidate requires the governed evidence and authorization defined below.
+Offline code does not become T2 merely because it uses words such as risk, ledger, or execution.
+A model may ask to raise the Product Owner's tier only with a reproducible direct execution path.
 
-Route directly to the lowest profile expected to complete the task once. Never use a
-Luna → Terra → Sol rescue chain. Model routing optimizes accepted-task total cost, not price per
-million Tokens.
+Exact-SHA independent review evidence is mandatory only for T2/T3. Legacy Context Bundle/report
+schemas remain available but are not gates for T0/T1.
 
-Required Sol/Terra unavailability, retirement, rate limit, or gate failure returns `HOLD`; silent
-downgrade is forbidden. A temporary substitution requires explicit Human Owner authorization and
-a governance-debt Issue. A Sol-required Tier 2 gate cannot be replaced by Terra or Luna.
+## Writer Isolation
 
-Luna is optional, non-authoritative extraction only when raw evidence exceeds about 80,000 Tokens,
-20 files, or 10,000 lines. Its output must be schema-checked and discardable.
+Before tracked edits, record one Implementer, exact base SHA, branch/worktree, allowed scope, and
+merge order. A checkout has one writer. Preserve unrelated/user-owned changes and stop on unknown
+or conflicting state.
 
-At most two Sol roles may be active for the repository and at most one for a work unit. Excess work
-is `QUEUED`, not downgraded. Tier 2 roles run sequentially. Decision/Design, Implementation,
-Combined Safety Verification, and Merge Approval use distinct actor IDs. The combined safety
-actor performs the adversarial and verification questions once against the exact candidate SHA;
-Merge Approval consumes that report instead of repeating semantic exploration.
+Use test-first development for behavior changes. Create ordinary checkpoint commits when useful;
+they are recovery aids, not new approval gates.
 
-## Classification and Change Graph
+## Blocking Findings
 
-`.governance/router.yaml` provides `minimum_tier_candidate`, evidence, ambiguity, lineage, route,
-and Luna eligibility. It never emits an approved tier or activates an actor.
+A finding blocks only when all four conditions hold:
 
-Classification inspects Issue lineage, related pull requests, branch history, recent merged work,
-changed paths, and cumulative semantic surfaces. Public API, schema, canonical bytes, digest,
-error, ADR, CI, security, release, or external-write changes upgrade the candidate even when split
-across individually small pull requests.
+1. it is reachable from the current diff or its direct execution path;
+2. it is reproducible or has a concrete execution trace;
+3. it violates an explicit acceptance criterion or creates direct data, permission, financial,
+   or irreversible operational risk; and
+4. it can be expressed as a failing test, minimal reproduction, or concrete exploit.
 
-Reclassify the frozen candidate diff. A higher candidate supersedes its Context Bundles and any
-report set missing the newly required roles.
+Speculative future risks, wording inconsistencies, unreachable edge cases, unrelated legacy
+defects, and general hardening go to the **Hardening Backlog**. They do not block the current PR.
+A Reviewer may not block because the change lacks proof that all possible defects are absent.
 
-Default size budgets:
+Severity follows consequence in the current reachable product, not governance metadata. A stale
+STATUS sentence is not P1; bypassing an operational risk limit or corrupting authoritative state
+can be.
 
-| Unit | Production additions | Production deletions | Total additions | Changed files |
-|---|---:|---:|---:|---:|
-| Pull request | 1,200 | 1,000 | 3,000 | 15 |
-| Atomic commit | 400 | 400 | 1,000 | 8 |
+## Review Cycle
 
-A new Python module is limited to 1,500 lines. More than 1,000 deleted production lines creates a
-Tier 2 candidate. An exception binds base SHA, files, maximum budget, rationale, owner, expiry, and
-repair condition before implementation; it never skips semantic review.
+The finite product loop is:
 
-## Reuse Before Build
+`Implement → CI → one primary review → one concentrated repair (if needed) → one verification → merge/owner adjudication`
 
-Tier 1/2 tasks record the capability, inspected sources/dependencies, up to three serious
-candidates, supported/locked version, license, maintenance, supply-chain/security posture,
-technical fit, integration/migration/operational/lock-in cost, and the reuse/adapter/local-build
-decision. Tier 0 may record `N/A` with a reason.
+The one verification checks only the primary blockers and direct regressions. It may not reopen a
+repository-wide audit or introduce new non-catastrophic blockers. New hardening work becomes a
+linked Issue. After this cycle, the Product Owner chooses merge, scope reduction, or closure.
 
-Prefer a maintained existing dependency, current project capability, standard library, or small
-adapter when it is safer than bespoke code. Do not perform an unbounded survey or add a dependency
-only because it is popular. Long-lived dependency/boundary decisions receive Architecture review
-and an ADR when material.
+T0 needs no independent model review. T1 uses one Reviewer. T2/T3 use one fresh independent
+adversarial Reviewer on exact HEAD. Additional domain advice is non-authoritative unless the
+Product Owner explicitly requests it.
 
-## Writer Lease and Agent Concurrency
+## Merge Gates
 
-Before tracked edits, record Implementation Owner, branch, checkout/worktree, base branch/SHA,
-lease start/handoff, isolation, and merge order. A checkout has exactly one writer. Only the
-Implementation Owner may edit tracked files, stage, commit, push, or mutate iteration state.
+- **T0:** scoped diff and required CI pass.
+- **T1:** acceptance tests and CI pass; one primary review has no qualifying blocker, or its one
+  repair verification passes.
+- **T2:** T1 plus exact-head CI and one independent adversarial review on that SHA.
+- **T3:** T2 plus explicit Human Product Owner approval and a stated rollout/rollback plan.
 
-Read-only experts sharing a checkout do not run file-producing commands. Builds/tests/type checks
-run in CI or a dedicated verification worktree. Parallel writers require distinct worktrees,
-branches, leases, and declared merge order. Stop on unknown or unrelated changes.
+Unresolved comments block only when they satisfy the four-condition rule. A commit invalidates a
+review only when it changes the reviewed blocker or relevant direct execution path.
 
-One actor may hold at most **one active task for Tier 1/2**, or **two independent tasks for Tier 0**.
-Do not open a new exploration direction until the current task has a reviewable artifact.
+Direct pushes to `main` are forbidden. Use pull requests and squash merge unless the Product Owner
+explicitly selects another recoverable integration method.
 
-### Focused-green checkpoints
+## Governance Freeze
 
-Long iterations define one atomic file/symbol slice before editing, implement only that slice, and
-run its focused tests and focused static checks. Once focused-green, the Implementation Owner
-creates a clean checkpoint commit, records its checkpoint SHA and evidence in the Issue/PR, and
-pushes it when a branch/remote is available and the platform permits.
-This happens **before the next independent slice** begins.
+Until RESET-001's offline simulated vertical slice merges, do not add governance roles, states,
+manifests, schemas, approval phases, plugins, or repository-wide governance abstractions.
 
-At most one bounded dirty slice may exist. A Git/platform write failure is recorded immediately;
-do not continue accumulating independent slices on the uncheckpointed tree. Never checkpoint
-known failures, unrelated/user-owned changes, secrets, caches, generated output, or ambiguous
-ownership. Commit messages name the atomic contract rather than generic “WIP”.
+A governance change is allowed only when evidence shows that an existing rule:
 
-A checkpoint SHA protects recovery and handoff; it does not authorize Ready or merge, refresh a
-stale report, replace final quality/full/CI, or waive independent exact-HEAD verification. Squash
-merge may still keep public history concise. Context recovery starts from the latest recorded clean
-checkpoint plus at most the one bounded dirty slice.
+1. permits a reproducible real operational risk;
+2. causes a deterministic wrong merge or data damage; or
+3. directly prevents a product PR from reaching a finite decision.
 
-## Context and Review Evidence
+The R9/R10 provenance race is retained as hardening evidence. It does not block an offline T1
+vertical slice with no broker, external write, release, or recovery-support claim.
 
-Every activation receives an actor-specific Context Bundle conforming to
-`.governance/schemas/context-manifest.schema.json`:
+## Evidence and Deferred Work
 
-`CREATED → FROZEN → USED → SUPERSEDED → ARCHIVED`
+Keep evidence once, at its natural authority: tests for behavior, ADRs for durable decisions,
+STATUS for the present, Issues for backlog, and PRs for candidate discussion. Do not copy the same
+CI output or hash into STATUS, Issue, PR, and a second register.
 
-Only FROZEN bundles produce reports. Immutable references store authority identifiers, paths,
-selection references, and hashes, not copied authority content or chat transcripts. Optional
-derived views declare `type: derived`, `authority: none`, and `non_evidentiary: true`.
-
-Source, base/candidate SHA, rules, role question, scope, or required-role drift supersedes the
-bundle. Used/superseded/archived bundles cannot produce new reports.
-
-Reports conform to `.governance/schemas/report.schema.json` and bind role, actor/work unit, base,
-exact reviewed SHA, Context hash, evidence, findings, model/effort/version, Codex version,
-prompt ID/version/hash, Router hash, and skill versions/hashes.
-
-Finding IDs are `<DOMAIN>-<NNN>` per work unit; cross-work-unit references include the work-unit ID.
-States are `OPEN`, `FIXED`, `SUPERSEDED`, and `ACCEPTED_RISK`. A FIXED finding is stale until its
-reviewer confirms the repair SHA. ACCEPTED_RISK requires explicit Human Owner rationale, expiry,
-and a governance-debt Issue.
-
-A new commit or tracked working-tree change invalidates an earlier verdict. Combined Safety
-Verification binds exact candidate HEAD and covers time visibility, audit/ledger, recovery,
-canonical identity, capability confinement, and fail-closed behavior.
-A product PR may freeze at most two frozen candidates. A blocker on the second candidate returns
-the work to Decision/Design; it does not start a third patch/review round under the same contract.
-
-When a Draft pull request becomes Ready for review, every expected automated review must finish
-before merge and bind the exact candidate SHA. A pending, stale, different-SHA, or post-merge
-automated review is not evidence. A PR cannot merge with an open blocker, stale required verdict,
-failing/incomplete exact-head CI, or unresolved review thread.
-
-## Expert Lifecycle
-
-1. Activate at a named gate with question, scope, base/HEAD, evidence, and exit condition.
-2. Review the bounded Context Bundle, not full chat history. Combined Safety Verification answers
-   the complete six-surface Tier 2 question in one activation.
-3. Report once with stable finding IDs and one exact-candidate verdict.
-4. Extract durable knowledge to Issue, ADR, pull request, tests, or documentation.
-5. Release the expert; do not keep a resident panel.
-
-Experts do not spawn agents or expand scope unless the Issue explicitly allows it. At most two
-read-only experts run concurrently with the Implementation Owner, and only for independent work.
-
-## Approval and Merge Gates
-
-Tier 0 uses its deterministic evidence decision. Tier 1/2 use the Approval Owner route unless a
-mandatory Human Owner gate applies. The Approval Owner is read-only and cannot implement, repair,
-reinterpret a design verdict, or mutate Git/GitHub.
-
-Approval has three separately activated and consumed decisions:
-
-1. **Ready:** a pre-implementation task-package decision that authorizes only `draft_to_ready`.
-2. **Merge:** a frozen-candidate decision that authorizes only `squash_merge` after fresh
-   authoritative state.
-3. **Cleanup:** only the enumerated post-merge manifest after the merge commit is reachable from
-   expected `main`.
-
-Ready reviews a complete Draft task package: its objective, scope, non-goals, authoritative inputs,
-acceptance criteria, risk tier/rationale, validation, expected outputs, reuse assessment, and
-owners. It also requires Architecture review is PASS, budget and any exception are approved, and
-dependencies and named blockers are resolved. A Ready decision does not require a PR, candidate SHA,
-implementation diff, writer lease, exact-head tests, or hosted CI. Incomplete acceptance criteria
-produces `HOLD`; unapproved budget produces `HOLD`. Only after Ready may a distinct Implementation
-Owner record a branch, worktree, base SHA, and writer lease before entering In Progress.
-
-Merge reviews the frozen candidate and requires PR and exact candidate SHA, valid writer-lease
-history and complete scoped diff, implementation and acceptance completion, focused and required
-tests under the CI route below, hosted CI SUCCESS at exact candidate HEAD, the current Combined
-Safety Verification verdict, completed exact-SHA automated review, scope and budget PASS, current
-mergeability/reviews, and zero unresolved review threads. Merge Approval verifies freshness and
-completeness but does not repeat the combined report's semantic exploration.
-Missing CI or an unfrozen candidate produces `HOLD`. A Ready decision is not Merge evidence and does
-not authorize `squash_merge`; Cleanup remains separately activated after merge.
-
-Tier 0 uses the existing deterministic gate in these same `ready` and `merge` modes. Its `ready`
-mode evaluates the complete Draft task package without candidate artifacts and, on APPROVE,
-authorizes only `draft_to_ready`. Its `merge` mode retains the PR, exact candidate SHA, hosted CI,
-scope, and budget evidence above and, on APPROVE, authorizes only `squash_merge`.
-
-Immediately before each write, the Implementation Owner re-fetches head/base SHA, state, CI,
-mergeability, reviews, and unresolved threads. Any unexpected change aborts the mutation and
-requires a fresh decision.
-
-For Ready and Merge, Approval returns `HOLD` for missing or contradictory applicable task-package or
-candidate evidence, open blockers, stale applicable verdicts, changes to Approval Owner
-authority/prompt/rules, live/external order writing, credentials/resolved secrets, production
-release/deployment/tag, irreversible/destructive data operations, out-of-repository action, or a
-platform permission prompt. For Merge, Approval returns `HOLD` for non-successful exact-head CI or
-unresolved threads. An absent candidate or CI is not a Ready defect and must not cause Ready HOLD.
-These mandatory cases require explicit Human Owner authorization.
-
-Verification-worktree cleanup requires a pre-enumerated path bound to the Issue/candidate, a clean
-status, and non-force `git worktree remove`. Ambiguous, dirty, shared, unrelated, or forced cleanup
-requires explicit Human approval.
-
-## Governance Debt
-
-GitHub Issues labelled `governance-debt` are the only debt register. IDs are `GOV-DEBT-NNN` and
-record source exception/finding, owner, risk, repair condition, expiry, and status. Size exception,
-tier downgrade, model substitution, accepted risk, and stale rule all create debt.
-
-Default expiry is at most 90 days. Extension requires explicit Human authorization. Permanent
-decisions use an ADR instead of indefinite debt.
-
-## Long-item Compression
-
-An active Issue body is limited to 300 lines. Before it exceeds that limit, replace obsolete detail
-with a current bounded task package and links to immutable ADRs, commits, reports, or successor
-Issues. Do not copy CI logs, temporary hashes, or comment history into the active body.
-
-Pause comment growth and publish a current summary when any threshold is met:
-
-- **30 or more comments**;
-- **two decision reversals**;
-- **three independent problems** in one item;
-- **repeated misreading** of an obsolete conclusion.
-
-The summary contains **Current Decision**, **Implemented**, **Unresolved**, **Superseded
-Statements**, **Evidence**, and **Successor Issues**. Update the Issue/PR body or link the new
-authority, then close or freeze the old item. History remains intact.
+Deferred qualifying work becomes a GitHub Issue. Governance debt may still use the existing
+`governance-debt` label, but ordinary technical hardening needs no new governance taxonomy.
 
 ## Definition of Done
 
-A task is Done only when all are true:
+A task is Done when:
 
-- acceptance criteria are satisfied;
-- required merged code and tests exist on `main`;
-- exact-head and merged-main CI are successful;
-- required ADR updates are accepted;
-- STATUS is current and identifies its checkpoint as the containing `main` commit rather than a
-  guessed future SHA;
-- the Issue contains a final conclusion;
-- the pull request contains validation evidence and current reports;
-- no critical decision exists only in comments;
-- Successor Issues own every deferred item;
-- useful expert knowledge is durable and completed experts are released;
-- the branch/worktrees complete the approved cleanup manifest.
+- acceptance criteria are satisfied by merged code and tests;
+- tier-required CI and bounded review are complete;
+- no four-condition blocker remains;
+- STATUS/ADR is updated if durable state changed;
+- deferred non-blockers have an owner or linked backlog Issue; and
+- the Issue records the final conclusion and closes.
 
-Expected automated review and STATUS synchronization complete before merge. Do not create a
-docs-only successor merely to finish expected review or to replace a candidate SHA in STATUS.
+Do not require an extra docs-only PR, Cleanup approval, or proof of universal correctness.
 
-“Tests pass” alone is not Done. “Handle later” without a successor Issue is not Done.
+## Delivery Metrics
 
-## Weekly Governance Metrics
+Track per merged product PR:
 
-Review only these delivery metrics:
+- Token cost;
+- primary review and repair count;
+- Ready-to-Merge time;
+- escaped qualifying defects; and
+- runnable product capability delivered.
 
-1. accepted pull requests;
-2. first-pass acceptance rate;
-3. average rework rounds;
-4. Ready-to-Merge time;
-5. merge proportion missing evidence or status updates;
-6. Token and human-time cost per accepted pull request;
-7. unresolved decisions existing only in Issue/PR comments.
+Reviewer finding count is not a success metric.
 
-The seventh metric must trend down. Counts without acceptance evidence do not represent progress.
+## Release and Destructive Actions
 
-## Git, Verification, and Release
+Live/paper broker connectivity, external order writes, resolved secrets, release/tag/publication,
+deployment, irreversible migration, destructive data operations, and platform permission prompts
+require explicit Human Product Owner authorization. These controls are not relaxed by tier labels.
 
-One Issue maps to one branch and one Draft pull request. Direct pushes to `main` are forbidden.
-Commits use Conventional Commits and remain logically focused. Pull requests use squash merge.
-
-Canonical verification:
-
-```bash
-uv run --no-project --python 3.12 python scripts/verify.py --profile quality
-uv run --no-project --python 3.12 python scripts/verify.py --profile full
-```
-
-CI selects the minimum sufficient route without weakening required evidence:
-
-- docs-only pull requests run the focused governance checks;
-- Python pull requests run `quality`;
-- each frozen candidate uses one trusted exact-SHA `full` dispatch, subject to the two-candidate
-  limit above;
-- `main` builds and installs the wheel and runs core smoke checks;
-- a release candidate runs the complete `full` release verification; and
-- the Web job runs only when Web files, Node lock files, or CI workflow paths change.
-
-A mixed change takes the union of its applicable routes. A CI workflow change exercises
-governance, Python quality, and Web. A metadata-only change never triggers complete `full`
-verification. The trusted dispatch validates the main-hosted workflow before checking out its
-exact candidate SHA.
-
-Do not change dependencies or locks to bypass a verifier. Tests are deterministic and contain no
-private data or secrets. Phase boundaries increment the pre-1.0 minor version; compatible fixes
-within a Phase increment patch. Release/tag/publication always requires explicit Human approval.
+Cleanup must name the exact worktree/branch/artifact and preserve historical evidence. Never force
+remove ambiguous or dirty state.

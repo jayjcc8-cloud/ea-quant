@@ -1,7 +1,7 @@
 protocol_version: "1.0"
-router_version: "1.0.0"
+router_version: "2.0.0"
 mode: manual
-role: classification_evidence_provider
+role: classification_adviser
 authority: none
 
 authority_references:
@@ -13,313 +13,88 @@ authority_references:
 prohibited_outputs:
   - approved_tier
   - confirmed_tier
+  - merge_decision
+  - blocking_finding
 prohibited_actions:
   - mutate_issue
   - mutate_pull_request
   - mutate_git
   - activate_agent
-  - silently_downgrade_model
+  - create_review_chain
+  - select_model
 
 confirmation:
   authoritative_record: github_issue
-  may_raise_tier:
-    - human_owner
-    - required_architecture_or_decision_owner
-  lower_candidate_requires:
-    - explicit_human_owner_authorization
-    - sol_report_bound_to_base_sha_and_scope
-    - governance_debt_issue
+  owner: human_product_owner
+  model_may_request_raise_only_with:
+    - reproducible_execution_path
+    - concrete_current_consequence
 
-required_inputs:
-  issue:
-    - url
-    - objective
-    - change_kind
-    - domains
-    - planned_files
-    - contract_changes
-    - external_writes
-    - risk_reason
-  candidate:
-    - base_sha
-    - reviewed_sha
-    - changed_files
-    - additions
-    - deletions
-  change_graph:
-    - issue_lineage
-    - related_pull_requests
-    - branch_commits
-    - recent_related_merges
-    - cumulative_contract_change
+risk_tiers:
+  tier0:
+    actual_impact:
+      - documentation
+      - developer_tooling
+      - non_runtime_ui
+      - test_helper
+    route: implementer_ci
+  tier1:
+    actual_impact:
+      - research
+      - backtest
+      - offline_simulation
+      - analytics
+      - non_authoritative_service
+    route: implementer_reviewer_ci
+  tier2:
+    actual_impact:
+      - operational_order_submission
+      - operational_risk_authority
+      - authoritative_ledger
+      - operational_recovery
+      - operational_reconciliation
+      - security_authority
+    route: implementer_independent_adversarial_reviewer_exact_head_ci
+  tier3:
+    actual_impact:
+      - real_money_release
+      - secrets_or_permissions
+      - irreversible_migration
+    route: tier2_human_owner_staged_rollback
+
+blocking_finding_rule:
+  all_required:
+    - reachable_from_current_diff_or_direct_path
+    - reproducible_or_concrete_trace
+    - violates_acceptance_or_direct_operational_risk
+    - failing_test_reproduction_or_exploit
+  otherwise: hardening_backlog
+
+review_limit:
+  primary_reviews: 1
+  concentrated_repairs: 1
+  verification_scope:
+    - original_blockers
+    - direct_regressions
+  next_step: product_owner_adjudication
 
 output_contract:
   classification:
     evidence_id: string
     rules_hash: sha256
     input_hash: sha256
-    minimum_tier_candidate: [tier0, tier1, tier2]
-    confidence: [high, medium, low]
-    evidence_completeness: [complete, partial, unavailable]
-    matched_rules: list
-    semantic_surfaces: list
+    risk_tier_suggestion: [tier0, tier1, tier2, tier3]
+    actual_impact: list
+    concrete_paths: list
     ambiguities: list
-    required_roles: list
-    model_profiles: list
-    luna_eligible: boolean
+    confidence: [high, medium, low]
   example:
     classification:
-      evidence_id: "CLASS-ISSUE-000"
+      evidence_id: CLASS-ISSUE-000
       rules_hash: "0000000000000000000000000000000000000000000000000000000000000000"
       input_hash: "0000000000000000000000000000000000000000000000000000000000000000"
-      minimum_tier_candidate: tier2
-      confidence: high
-      evidence_completeness: complete
-      matched_rules:
-        - id: SEM-RECOVERY
-          evidence: "src/ea/runtime/coordinator.py"
-      semantic_surfaces: [recovery]
+      risk_tier_suggestion: tier1
+      actual_impact: [offline_simulation]
+      concrete_paths: ["ea backtest demo"]
       ambiguities: []
-      required_roles:
-        - sol_decision_owner
-        - implementation_owner
-        - independent_sol_safety_verification_owner
-        - independent_sol_approval_owner
-      model_profiles: [ea-sol, ea-terra]
-      luna_eligible: false
-
-precedence:
-  - uncertainty_floor
-  - semantic_surface
-  - external_write
-  - contract_surface
-  - executable_change
-  - pure_non_authoritative_documentation
-  - keyword_escalation
-
-rules:
-  uncertainty_floor:
-    when:
-      any:
-        - required_input_missing
-        - evidence_conflict
-        - scope_ambiguous
-    candidate: next_higher_tier
-    reason: uncertainty_moves_up
-
-  tier2_semantic_surfaces:
-    candidate: tier2
-    surfaces:
-      - data_time_semantics
-      - look_ahead_visibility
-      - strategy
-      - portfolio
-      - ledger
-      - risk
-      - execution
-      - matching
-      - reconciliation
-      - recovery
-      - state_machine
-      - canonical_serialization
-      - digest_chain
-      - credentials
-      - security
-      - release
-      - live_trading
-      - external_write
-
-  tier1_contract_surfaces:
-    candidate: tier1
-    surfaces:
-      - public_api
-      - ordinary_schema
-      - error_code
-      - dependency
-      - build
-      - ci
-      - adr
-      - governance_authority
-    upgrade_to_tier2_when:
-      - intersects_tier2_semantic_surface
-      - cumulative_contract_change
-
-  tier0_documentation:
-    candidate: tier0
-    all_required:
-      - non_executable_only
-      - reversible_metadata_only
-      - no_adr_change
-      - no_ci_change
-      - no_dependency_change
-      - no_schema_change
-      - no_security_change
-      - no_governance_authority_change
-      - no_runtime_behavior_change
-
-  keyword_escalation:
-    can_only_raise: true
-    terms:
-      - authority
-      - canonical
-      - credential
-      - digest
-      - execution
-      - external write
-      - ledger
-      - live trading
-      - matching
-      - reconciliation
-      - recovery
-      - risk
-      - schema
-      - state machine
-      - time semantics
-
-change_graph:
-  purpose: detect_semantic_accumulation_across_small_changes
-  phase0_evaluation: manual
-  evidence:
-    - issue_parent_and_successor_links
-    - linked_and_predecessor_pull_requests
-    - commits_since_issue_base
-    - recent_merges_touching_same_contract_surface
-  upgrade_when:
-    - cumulative_contract_change
-    - split_changes_jointly_modify_canonical_or_digest_contract
-    - multiple_low_tier_changes_jointly_cross_tier2_surface
-  rule: highest_cumulative_candidate_wins
-
-size_budgets:
-  pull_request:
-    production_additions_max: 1200
-    production_deletions_max: 1000
-    total_additions_max: 3000
-    changed_files_max: 15
-  atomic_commit:
-    production_additions_max: 400
-    production_deletions_max: 400
-    total_additions_max: 1000
-    changed_files_max: 8
-  new_python_module_lines_max: 1500
-  deletion_escalation:
-    production_deletions_over: 1000
-    candidate: tier2
-  exception_requires:
-    - agreement_before_implementation
-    - base_sha
-    - bounded_files
-    - maximum_budget
-    - rationale
-    - sol_review
-
-model_routes:
-  tier0:
-    implementation:
-      profile: ea-terra
-      effort: medium
-      prompt_id: terra-implementation-v1
-    verification:
-      profile: deterministic_tools
-      effort: deterministic
-      prompt_id: deterministic-gate-v1
-    approval:
-      profile: automatic_evidence_gate
-      effort: deterministic
-      prompt_id: deterministic-gate-v1
-      github_mutation: forbidden
-  tier1:
-    implementation:
-      profile: ea-terra
-      effort: high
-      prompt_id: terra-implementation-v1
-    architecture:
-      default_profile: ea-terra
-      effort: high
-      sol_when: [public_boundary, dependency, adr, governance_authority]
-      prompt_id: architecture-v1
-    verification:
-      profile: ea-terra
-      effort: high
-      prompt_id: terra-verification-v1
-    approval:
-      profile: ea-terra
-      effort: high
-      prompt_id: approval-v1
-  tier2:
-    ordered_roles:
-      - sol_decision_owner
-      - implementation_owner
-      - independent_sol_safety_verification_owner
-      - independent_sol_approval_owner
-    decision:
-      profile: ea-sol
-      effort: xhigh
-      prompt_id: sol-decision-v1
-    implementation:
-      profile: ea-terra
-      effort: high
-      prompt_id: terra-implementation-v1
-    safety_verification:
-      profile: ea-sol
-      effort: high
-      prompt_id: sol-verification-v1
-      scope:
-        - time_visibility
-        - audit_ledger
-        - recovery
-        - canonical_identity
-        - capability_confinement
-        - fail_closed
-    approval:
-      profile: ea-sol
-      effort: high
-      prompt_id: approval-v1
-
-actor_separation:
-  forbidden_same_actor:
-    - [decision, implementation]
-    - [decision, safety_verification]
-    - [decision, approval]
-    - [implementation, safety_verification]
-    - [implementation, approval]
-    - [safety_verification, approval]
-
-sol_capacity:
-  repository_max_active: 2
-  work_unit_max_active: 1
-  overflow_state: queued
-  overflow_may_downgrade: false
-
-availability:
-  required_profile_unavailable: hold
-  silent_substitution: forbidden
-  tier2_sol_downward_substitution: forbidden
-  temporary_substitution_requires:
-    - explicit_human_owner_authorization
-    - governance_debt_issue
-  luna_unavailable: skip_extraction
-
-luna_eligibility:
-  any_threshold:
-    estimated_tokens_over: 80000
-    files_over: 20
-    lines_over: 10000
-  allowed_outputs:
-    - candidate_list
-    - classification_index
-    - evidence_index
-    - deterministic_statistics
-  forbidden_outputs:
-    - code_change
-    - architecture_decision
-    - verification_verdict
-    - approval_decision
-  validation_required: true
-  failure_policy: discard_without_rescue
-
-governance_debt:
-  authority: github_issue_with_governance_debt_label
-  id_format: "GOV-DEBT-NNN"
-  default_expiry_days_max: 90
-  permanent_decision_requires_adr: true
+      confidence: high

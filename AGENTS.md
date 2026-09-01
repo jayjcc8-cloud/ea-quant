@@ -1,52 +1,53 @@
 # Agent Entry and Safety Rules
 
 Git history, merged code/tests/CI, ADRs, Issues, and pull requests are the project record. Chat is
-not a current-state authority.
+not current-state authority.
 
-## Required Reading Order
+## Required Reading
 
-Before starting a task, read:
+Before work, read [STATUS](docs/STATUS.md), the complete
+[WORKFLOW](docs/governance/WORKFLOW.md), the current Issue, and only its directly relevant ADRs,
+code, tests, and evidence. Do not reload the full governance history unless resolving a named
+dispute.
 
-1. [Current project status](docs/STATUS.md)
-2. [Complete governance workflow](docs/governance/WORKFLOW.md)
-3. the task Issue body and its linked ADRs/specifications;
-4. only the code and evidence selected by that task package.
+## Primary objective
 
-Read old comments only to resolve a named dispute or recover provenance. When sources conflict,
-apply the authority precedence in WORKFLOW and stop on `DRIFT/BLOCKED` where required.
+Deliver the acceptance criteria of the current product Issue. Governance is a constraint on
+delivery, not the deliverable. Prefer the simplest local, reversible implementation that works;
+do not introduce governance roles, manifests, approval stages, states, or repository-wide
+abstractions unless the Product Owner explicitly requests them.
 
-## Non-bypassable Safety Floor
+## Safety floor
 
-- One checkout has **one writer**. Only the recorded Implementation Owner edits tracked files,
-  stages, commits, pushes, or mutates iteration state.
-- Record a writer lease, exact base SHA, branch/worktree, scope, owners, and merge order before
-  tracked edits. Stop on unknown, unrelated, or conflicting changes.
-- Confirm Tier 0/1/2 in the Issue. Highest semantic trigger wins; Router output is classification
-  evidence only and cannot approve a tier or activate an actor.
-- Tier 2 role separation is mandatory: Decision/Design, Implementation, Combined Safety
-  Verification, and Merge Approval use distinct actor IDs where WORKFLOW requires it.
-- Required-model unavailability is `HOLD`; **silent downgrade is forbidden**. Never use a cheap
-  model → stronger model rescue chain as the default workflow.
-- Every review uses an actor-specific FROZEN Context Bundle and an exact-SHA schema-valid report.
-  A new commit, changed scope/base/rules, or tracked edit makes the affected verdict stale.
-- A blocker, stale required verdict, failing/incomplete exact-head CI, or unresolved review thread
-  forbids Ready and merge.
-- Live trading, external order writes, resolved secrets, release/tag/deployment, destructive data
-  operations, changes to Approval Owner authority, and platform permission prompts require
-  explicit Human Owner authorization.
-- Never rewrite Accepted ADR history. Supersede it with a later ADR. `docs/adr/` is the only ADR
-  directory.
-- Do not create a second plan, task database, state document, governance register, or Router
-  authority. Governance debt exists only as labelled GitHub Issues.
-- Do not weaken tests, evidence, semantic review, or safety contracts merely to satisfy a size,
-  cost, or schedule gate.
+- One checkout has **one writer**. Record the writer, branch/worktree, exact base, scope, and merge
+  order before tracked edits. Stop on unknown or conflicting changes.
+- Classify T0/T1/T2/T3 by actual reachable impact. Router output is advisory. A model may request a
+  higher tier only with a reproducible path; the Product Owner decides.
+- Live trading, broker/external order writes, secrets/permissions, release/tag/deployment,
+  irreversible migration, and destructive data operations require explicit Human Product Owner
+  authorization.
+- Never rewrite Accepted ADR history. Supersede it in `docs/adr/`.
+- Do not create a second plan, task database, state register, or governance control plane.
+- Do not weaken runtime tests or economic safety invariants to satisfy cost or schedule.
 
-## Execution Contract
+## Blocking findings
 
-Follow [WORKFLOW](docs/governance/WORKFLOW.md) for Issue lifecycle, task packages, risk/model routes,
-reuse assessment, budgets, context/report schemas, expert lifecycle, approval gates, Definition of
-Done, weekly metrics, and cleanup.
+A finding blocks only when all four conditions hold: it is reachable from the current diff or
+direct execution path; it is reproducible or has a concrete trace; it violates an explicit
+acceptance criterion or creates direct data, permission, financial, or irreversible risk; and it
+can become a failing test, minimal reproduction, or concrete exploit. Other findings go to the
+Hardening Backlog and do not block.
 
-Use [CONTRIBUTING](CONTRIBUTING.md) for the supported local commands. Update
-[STATUS](docs/STATUS.md) or an ADR whenever a completed change would otherwise leave the control
-plane stale.
+Do not require proof that all possible defects are absent.
+
+## Review limit
+
+T1–T3 receive one primary review. If blockers exist, perform one concentrated repair and one
+verification limited to those blockers and direct regressions. Then the Product Owner chooses
+merge, scope reduction, or closure. Do not open another reviewer chain.
+
+## Completion
+
+When acceptance tests pass, the tier-required CI/review is green, and no qualifying blocker
+remains, report the change as mergeable. Use [CONTRIBUTING](CONTRIBUTING.md) for commands and update
+[STATUS](docs/STATUS.md) or a superseding ADR only when the durable project state changes.

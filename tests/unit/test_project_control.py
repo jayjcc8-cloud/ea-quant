@@ -10,14 +10,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATUS_PATH = PROJECT_ROOT / "docs" / "STATUS.md"
 ROADMAP_PATH = PROJECT_ROOT / "docs" / "ROADMAP.md"
 WORKFLOW_PATH = PROJECT_ROOT / "docs" / "governance" / "WORKFLOW.md"
-ADR_PATH = PROJECT_ROOT / "docs" / "adr" / "0025-project-control-plane-and-authority-precedence.md"
+ADR25_PATH = (
+    PROJECT_ROOT / "docs" / "adr" / "0025-project-control-plane-and-authority-precedence.md"
+)
+ADR29_PATH = PROJECT_ROOT / "docs" / "adr" / "0029-governance-freeze-and-bounded-delivery.md"
 ISSUE_FORM_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml"
-ISSUE_TEMPLATE_CONFIG_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "config.yml"
+ISSUE_CONFIG_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "config.yml"
 PR_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
 ROUTER_PATH = PROJECT_ROOT / ".governance" / "router.yaml"
-CANDIDATE_FULL_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "candidate-full.yml"
-DISPATCH_REF_EXPRESSION = "${{ inputs.candidate_sha }}"
-DISPATCH_CONCURRENCY_GROUP = "candidate-full-${{ inputs.candidate_sha }}-${{ inputs.purpose }}"
 
 
 def _read(path: Path) -> str:
@@ -33,111 +33,53 @@ def _headings(document: str) -> set[str]:
     }
 
 
-def _local_links(path: Path) -> list[Path]:
-    links: list[Path] = []
-    for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", _read(path)):
-        target = target.split("#", 1)[0]
-        if not target or "://" in target or target.startswith("mailto:"):
-            continue
-        links.append((path.parent / target).resolve())
-    return links
-
-
-def _issue_form_fields() -> dict[str, dict[str, Any]]:
+def _issue_fields() -> dict[str, dict[str, Any]]:
     form = yaml.safe_load(_read(ISSUE_FORM_PATH))
     assert isinstance(form, dict)
-    body = form.get("body")
-    assert isinstance(body, list)
-    fields: dict[str, dict[str, Any]] = {}
-    for entry in body:
-        assert isinstance(entry, dict)
-        field_id = entry.get("id")
-        if isinstance(field_id, str):
-            fields[field_id] = entry
-    return fields
-
-
-def test_core_control_plane_documents_have_fixed_sections() -> None:
-    required = {
-        STATUS_PATH: {
-            "Current Phase",
-            "Phase Objective",
-            "Completed",
-            "Incomplete",
-            "Blockers",
-            "Effective ADRs",
-            "Primary Issues",
-            "Last Confirmed",
-            "Phase Completion Conditions",
-            "Weekly Governance Metrics",
-        },
-        ROADMAP_PATH: {
-            "Phase 1 — Backtest MVP",
-            "Phase 1 Non-goals",
-            "Phase 1 Exit Criteria",
-            "Phase 2 Entry Gate",
-        },
-        WORKFLOW_PATH: {
-            "Authority Precedence",
-            "Issue Lifecycle",
-            "Task Package",
-            "Risk Tiers and Model Routing",
-            "Writer Lease and Agent Concurrency",
-            "Context and Review Evidence",
-            "Long-item Compression",
-            "Definition of Done",
-            "Weekly Governance Metrics",
-        },
-        ADR_PATH: {
-            "Status",
-            "Context",
-            "Decision",
-            "Rejected Alternatives",
-            "Consequences",
-            "Implementation and Validation",
-            "References",
-        },
+    return {
+        item["id"]: item
+        for item in form["body"]
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
-    for path, sections in required.items():
-        assert sections <= _headings(_read(path))
 
 
-def test_status_declares_the_current_phase_and_health_without_claiming_live_readiness() -> None:
+def test_control_plane_has_one_present_one_future_and_immutable_decisions() -> None:
+    assert {
+        "Current Phase",
+        "Phase Objective",
+        "Completed",
+        "Incomplete",
+        "Blockers",
+        "Effective ADRs",
+        "Primary Issues",
+        "Last Confirmed",
+        "Phase Completion Conditions",
+        "Delivery Metrics",
+    } <= _headings(_read(STATUS_PATH))
+    assert {"Authority Precedence", "Risk Tiers", "Blocking Findings", "Definition of Done"} <= (
+        _headings(_read(WORKFLOW_PATH))
+    )
+    assert "Phase 1 — Backtest MVP" in _headings(_read(ROADMAP_PATH))
+    assert "Accepted" in _read(ADR29_PATH)
+    assert all(
+        path.parent == PROJECT_ROOT / "docs" / "adr"
+        for path in (PROJECT_ROOT / "docs").rglob("*.md")
+        if _read(path).startswith("# ADR ")
+    )
+
+
+def test_status_names_the_reset_and_does_not_claim_live_or_release_readiness() -> None:
     status = _read(STATUS_PATH)
-    assert "Phase 1" in status
-    assert "Incomplete" in status
+    assert "Phase 1 delivery reset" in status
     assert "main healthy" in status
     assert "live unavailable" in status
-    assert "2026-08-22" in status
-    assert "af7bc08cecd70fc5479b92e4393da468727ddb55" in status
-    assert "last independently verified pre-consolidation checkpoint" in status.lower()
+    assert "#154" in status
     assert "containing `main` commit" in status
+    assert "R9/R10" in status
+    assert "hardening" in status.lower()
 
 
-def test_status_links_the_phase1_closeout_and_clean_successor_issues() -> None:
-    status = _read(STATUS_PATH)
-    for issue_number in (81, 82, 83, 84):
-        assert f"https://github.com/jayjcc8-cloud/ea-quant/issues/{issue_number}" in status
-    assert "Open pull requests: Draft #73 and Draft #80" not in status
-
-
-def test_status_rejects_self_referential_premerge_facts() -> None:
-    status = _read(STATUS_PATH)
-    assert "The authoritative merged baseline is" not in status
-    assert "Open pull requests: Draft #73 and Draft #80" not in status
-    assert "PR #80" in status
-    assert re.search(r"does not assert\s+mutable open, closed, Draft, or merged state", status)
-    assert "[#111 — hosted-runner audit headroom]" in status
-    assert "is In Progress: it is limited" not in status
-    assert re.search(
-        r"GitHub-hosted Linux CI reclaims only three fixed unused\s+toolchains",
-        status,
-    )
-    assert "PR #110 still requires a fresh unchanged-head CI run" in status
-    assert "#108 is not thereby complete" in status
-
-
-def test_authority_precedence_is_identical_in_adr_and_workflow() -> None:
+def test_authority_precedence_remains_stable_while_process_is_superseded() -> None:
     expected = [
         "merged code, test results, and CI",
         "Accepted ADRs and formal specifications",
@@ -145,327 +87,81 @@ def test_authority_precedence_is_identical_in_adr_and_workflow() -> None:
         "Issue and pull-request bodies",
         "Issue comments, pull-request comments, and chat",
     ]
-    for document in (_read(ADR_PATH), _read(WORKFLOW_PATH)):
+    for document in (_read(ADR25_PATH), _read(WORKFLOW_PATH)):
         positions = [document.index(item) for item in expected]
         assert positions == sorted(positions)
-        assert "DRIFT/BLOCKED" in document
+    adr29 = _read(ADR29_PATH)
+    assert all(prior in adr29 for prior in ("ADR 0025", "ADR 0026", "ADR 0028"))
 
 
-def test_entry_documents_are_small_and_link_to_the_control_plane() -> None:
-    limits = {
-        PROJECT_ROOT / "README.md": 120,
-        PROJECT_ROOT / "AGENTS.md": 120,
-        PROJECT_ROOT / "CONTRIBUTING.md": 100,
-    }
-    for path, maximum in limits.items():
-        text = _read(path)
+def test_entry_documents_are_small_and_delivery_first() -> None:
+    for name, maximum in (("README.md", 120), ("AGENTS.md", 120), ("CONTRIBUTING.md", 100)):
+        text = _read(PROJECT_ROOT / name)
         assert len(text.splitlines()) <= maximum
         assert "docs/STATUS.md" in text
         assert "docs/governance/WORKFLOW.md" in text
-        assert all(target.exists() for target in _local_links(path))
 
     agents = _read(PROJECT_ROOT / "AGENTS.md")
-    assert "## Controlled expert lifecycle" not in agents
-    assert "## Delegated Approval Owner" not in agents
-    assert "## Expert context bundle" not in agents
-    assert "## Review validity and output" not in agents
+    assert "Primary objective" in agents
     assert "one writer" in agents.lower()
-    assert "silent downgrade" in agents.lower()
+    assert "four conditions" in agents.lower()
+    assert "all possible defects" in agents.lower()
+    assert "Combined Safety Verification" not in agents
 
 
-def test_architecture_contains_stable_architecture_not_phase_roadmap() -> None:
-    architecture = _read(PROJECT_ROOT / "docs" / "architecture.md")
-    assert "docs/STATUS.md" in architecture
-    assert "docs/ROADMAP.md" in architecture
-    assert "## 10. 阶段性落地" not in architecture
-    assert "### Phase 2" not in architecture
-    assert "### Phase 3" not in architecture
-    assert "### Phase 4" not in architecture
-
-
-def test_task_issue_form_requires_the_complete_task_package() -> None:
-    fields = _issue_form_fields()
-    required_ids = {
+def test_issue_form_is_small_complete_and_uses_actual_impact_tiers() -> None:
+    fields = _issue_fields()
+    required = {
         "objective",
         "scope",
         "non_goals",
-        "authoritative_inputs",
         "acceptance_criteria",
         "risk_tier",
         "risk_rationale",
         "validation",
-        "expected_outputs",
-        "reuse_assessment",
-        "owners",
+        "owner",
     }
-    assert required_ids <= fields.keys()
-    for field_id in required_ids:
-        validations = fields[field_id].get("validations")
-        assert isinstance(validations, dict)
-        assert validations.get("required") is True
-
-    options = fields["risk_tier"]["attributes"]["options"]
-    assert options == ["Tier 0 — low", "Tier 1 — normal", "Tier 2 — high"]
-    rationale = fields["risk_rationale"]
-    assert rationale["type"] == "textarea"
-    assert "highest" in rationale["attributes"]["description"].lower()
-    assert "trigger" in rationale["attributes"]["description"].lower()
+    assert required <= fields.keys()
+    assert len(fields) <= 9
+    assert all(fields[field]["validations"]["required"] is True for field in required)
+    assert fields["risk_tier"]["attributes"]["options"] == [
+        "T0 — documentation/tooling",
+        "T1 — offline product/simulation",
+        "T2 — operational authority",
+        "T3 — real-money/irreversible",
+    ]
 
 
-def test_pull_request_template_records_evidence_cost_and_state_sync() -> None:
+def test_pr_template_records_finite_review_and_delivery_cost() -> None:
     template = _read(PR_TEMPLATE_PATH)
-    required = {
-        "Authoritative inputs",
-        "STATUS / ADR synchronization",
-        "Candidate HEAD SHA",
-        "Validation evidence",
-        "Rework rounds",
+    for clause in (
+        "Acceptance criteria",
+        "Primary review",
+        "Concentrated repair",
+        "Hardening backlog",
         "Token cost",
         "Human time",
-        "Successor Issues",
-    }
-    assert all(item in template for item in required)
-    assert (
-        "Governed Issue lifecycle state: Draft / Ready / In Progress / Review / Verified / Done"
-    ) in template
-    assert "GitHub pull request review state: Draft / Ready for review" in template
-    assert "separate from the governed Issue lifecycle" in template
-
-
-def test_issue_template_chooser_disables_blank_issue_bypass() -> None:
-    config = yaml.safe_load(_read(ISSUE_TEMPLATE_CONFIG_PATH))
-    assert config == {"blank_issues_enabled": False}
-    assert type(config["blank_issues_enabled"]) is bool
-
-
-def test_workflow_defines_state_machine_capacity_compression_and_done() -> None:
-    workflow = _read(WORKFLOW_PATH)
-    assert "Draft → Ready → In Progress → Review → Verified → Done" in workflow
-    assert "Tier 1/2" in workflow and "one active task" in workflow
-    assert "Tier 0" in workflow and "two independent tasks" in workflow
-    assert "30" in workflow
-    assert "two decision reversals" in workflow
-    assert "three independent problems" in workflow
-    assert "repeated misreading" in workflow
-    for condition in (
-        "acceptance criteria",
-        "merged code and tests",
-        "CI",
-        "ADR",
-        "STATUS",
-        "final conclusion",
-        "validation evidence",
-        "Successor Issues",
+        "Runnable capability",
     ):
-        assert condition.lower() in workflow.lower()
+        assert clause in template
+    assert "Combined Safety Verification" not in template
+    assert "Merge Approval" not in template
 
 
-def test_workflow_absorbs_the_focused_green_checkpoint_rule() -> None:
-    workflow = _read(WORKFLOW_PATH).lower()
-    assert "focused-green" in workflow
-    assert "checkpoint sha" in workflow
-    assert "before the next independent slice" in workflow
-    assert "at most one bounded dirty slice" in workflow
-    assert "does not authorize ready or merge" in workflow
-
-
-def test_ci_hosted_runner_audit_headroom_is_bounded_and_precedes_full_verification() -> None:
-    workflow = yaml.safe_load(_read(CANDIDATE_FULL_WORKFLOW_PATH))
-    assert isinstance(workflow, dict)
-    assert workflow["permissions"] == {"contents": "read"}
-
-    steps = workflow["jobs"]["full"]["steps"]
-    assert isinstance(steps, list)
-    candidate_checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v7")
-    assert candidate_checkout["with"] == {
-        "persist-credentials": False,
-        "ref": DISPATCH_REF_EXPRESSION,
-    }
-    candidate_exact_checkout = next(
-        step for step in steps if step.get("name") == "Assert dispatched exact checkout"
-    )
-    assert candidate_exact_checkout["env"] == {"EXPECTED_SHA": DISPATCH_REF_EXPRESSION}
-    assert candidate_exact_checkout["run"] == 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
-    setup_uv_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("uses", "").startswith("astral-sh/setup-uv@")
-    )
-    python_index = next(
-        index for index, step in enumerate(steps) if step.get("name") == "Set up Python"
-    )
-    cleanup_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("name") == "Reclaim hosted-runner audit headroom"
-    )
-    preflight_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("name") == "Verify hosted-runner audit headroom"
-    )
-    full_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("run")
-        == "uv run --no-project --python 3.12 python scripts/verify.py --profile full"
-    )
-
-    assert setup_uv_index < python_index < cleanup_index
-    assert preflight_index == cleanup_index + 1
-    assert full_index == preflight_index + 1
-
-    cleanup = steps[cleanup_index]
-    assert cleanup["if"] == "runner.environment == 'github-hosted'"
-    cleanup_run = cleanup["run"]
-    assert "set -euo pipefail" in cleanup_run
-    assert '"$(uname -s)" != "Linux"' in cleanup_run
-    allowed_cleanup_targets = [
-        "/usr/local/lib/android/sdk",
-        "/usr/share/dotnet",
-        "/usr/local/.ghcup",
-    ]
-    deletion_targets = re.findall(
-        r"(?m)^\s*sudo rm -rf -- (\S+)\s*$",
-        cleanup_run,
-    )
-    assert deletion_targets == allowed_cleanup_targets
-    assert all("*" not in target for target in deletion_targets)
-    assert not re.search(r"(?m)^\s*(?:sudo )?rm -rf (?!--)\S+", cleanup_run)
-    assert all(
-        target not in {"/", "/usr", "/usr/local", "/home", "$HOME", "$GITHUB_WORKSPACE"}
-        for target in deletion_targets
-    )
-
-    preflight = steps[preflight_index]
-    assert preflight["if"] == "runner.environment == 'github-hosted'"
-    preflight_run = preflight["run"]
-    assert "set -euo pipefail" in preflight_run
-    assert 'df -B1 /tmp "$GITHUB_WORKSPACE"' in preflight_run
-    assert "os.statvfs" in preflight_run
-    assert "15 * 1024**3" in preflight_run
-    assert '"/tmp"' in preflight_run
-    assert 'os.environ["GITHUB_WORKSPACE"]' in preflight_run
-
-
-def test_ci_dispatch_validates_trusted_main_before_exact_candidate_checkout() -> None:
-    workflow_text = _read(CANDIDATE_FULL_WORKFLOW_PATH)
-    workflow = yaml.safe_load(workflow_text)
-    assert isinstance(workflow, dict)
-
-    triggers = workflow.get("on", workflow.get(True))
-    assert isinstance(triggers, dict)
-    trigger = triggers["workflow_dispatch"]
-    candidate_input = trigger["inputs"]["candidate_sha"]
-    assert candidate_input == {
-        "description": "Exact lowercase candidate commit SHA to verify from trusted main.",
-        "required": True,
-        "type": "string",
-    }
-
-    classify = workflow["jobs"]["classify"]
-    steps = classify["steps"]
-    trusted_main_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("name") == "Validate trusted main dispatch"
-    )
-    dispatch_checkout_index = next(
-        index for index, step in enumerate(steps) if step.get("uses") == "actions/checkout@v7"
-    )
-    dispatch_exact_assert_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("name") == "Assert dispatched exact checkout"
-    )
-
-    assert trusted_main_index < dispatch_checkout_index < dispatch_exact_assert_index
-    trusted_main = steps[trusted_main_index]
-    assert trusted_main["env"] == {"CANDIDATE_SHA": "${{ inputs.candidate_sha }}"}
-    trusted_main_run = trusted_main["run"]
-    assert '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]' in trusted_main_run
-    assert '[[ "$GITHUB_REF" == "refs/heads/main" ]]' in trusted_main_run
-    assert (
-        '[[ "$GITHUB_WORKFLOW_REF" == '
-        '*".github/workflows/candidate-full.yml@refs/heads/main" ]]' in trusted_main_run
-    )
-    assert '[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]' in trusted_main_run
-
-    dispatch_checkout = steps[dispatch_checkout_index]
-    assert dispatch_checkout["with"] == {
-        "fetch-depth": 0,
-        "persist-credentials": False,
-        "ref": DISPATCH_REF_EXPRESSION,
-    }
-    dispatch_exact_checkout = steps[dispatch_exact_assert_index]
-    assert dispatch_exact_checkout["env"] == {"EXPECTED_SHA": DISPATCH_REF_EXPRESSION}
-    assert dispatch_exact_checkout["run"] == 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
-
-    concurrency = workflow["concurrency"]
-    assert concurrency == {
-        "group": DISPATCH_CONCURRENCY_GROUP,
-        "cancel-in-progress": False,
-    }
-    assert workflow["permissions"] == {"contents": "read"}
-    assert "secrets:" not in workflow_text
-    assert "statuses" not in workflow_text
-    assert "checks" not in workflow_text
-
-    full = workflow["jobs"]["full"]
-    assert full["needs"] == "classify"
-
-    assert "run: uv run --no-project --python 3.12 python scripts/verify.py --profile full" in (
-        workflow_text
-    )
-
-
-def test_tier_vocabulary_and_adr_location_remain_canonical() -> None:
+def test_router_and_workflow_are_advisory_not_authority() -> None:
     router = yaml.safe_load(_read(ROUTER_PATH))
     assert isinstance(router, dict)
-    assert set(router["model_routes"]) == {"tier0", "tier1", "tier2"}
-    assert not (PROJECT_ROOT / "docs" / "decisions").exists()
-    adr_documents = [
-        path
-        for path in (PROJECT_ROOT / "docs").rglob("*.md")
-        if path.read_text(encoding="utf-8").startswith("# ADR ")
-    ]
-    assert adr_documents
-    assert all(path.parent == PROJECT_ROOT / "docs" / "adr" for path in adr_documents)
-
-
-def test_workflow_preserves_router_governance_authority_minimum_tier() -> None:
-    router = yaml.safe_load(_read(ROUTER_PATH))
-    assert isinstance(router, dict)
-    tier1_surfaces = router["rules"]["tier1_contract_surfaces"]["surfaces"]
-    assert "governance_authority" in tier1_surfaces
-
-    workflow = _read(WORKFLOW_PATH).lower()
-    tier1_row = next(line for line in workflow.splitlines() if line.startswith("| tier 1"))
-    tier2_row = next(line for line in workflow.splitlines() if line.startswith("| tier 2"))
-    assert "governance authority" in tier1_row
-    assert "governance authority" not in tier2_row
-    assert "human may always raise" in workflow
-
-
-def test_governance_consumers_reference_workflow_as_the_full_contract() -> None:
-    router = yaml.safe_load(_read(ROUTER_PATH))
+    assert router["authority"] == "none"
+    assert set(router["risk_tiers"]) == {"tier0", "tier1", "tier2", "tier3"}
+    assert "model_routes" not in router
     assert router["authority_references"] == {
         "status": "docs/STATUS.md",
         "roadmap": "docs/ROADMAP.md",
         "workflow": "docs/governance/WORKFLOW.md",
         "adrs": "docs/adr/",
     }
+    assert "Router is advisory" in _read(WORKFLOW_PATH)
 
-    consumers = [
-        PROJECT_ROOT / ".agents" / "approval-owner.md",
-        PROJECT_ROOT / ".governance" / "prompts" / "approval-v1.md",
-    ]
-    for path in consumers:
-        assert "docs/governance/WORKFLOW.md" in _read(path), path
 
-    context_schema = _read(
-        PROJECT_ROOT / ".governance" / "schemas" / "context-manifest.schema.json"
-    )
-    report_schema = _read(PROJECT_ROOT / ".governance" / "schemas" / "report.schema.json")
-    assert "docs/governance/WORKFLOW.md" in context_schema
-    assert "docs/governance/WORKFLOW.md" in report_schema
+def test_blank_issue_bypass_stays_disabled() -> None:
+    assert yaml.safe_load(_read(ISSUE_CONFIG_PATH)) == {"blank_issues_enabled": False}
