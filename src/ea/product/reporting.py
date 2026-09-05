@@ -632,6 +632,8 @@ def _decimal_from_source(text: str) -> CanonicalDecimal:
 def _last_admitted_price(
     scenario: LoadedBacktestScenario,
     records: tuple[AuditRecord, ...],
+    *,
+    expected_source_file_sha256: str,
 ) -> tuple[CanonicalDecimal, dict[str, object]]:
     market_payloads = [
         _payload(record)
@@ -660,6 +662,8 @@ def _last_admitted_price(
     )
     instrument = _exact_keys(root["instrument"], {"symbol", "venue"})
     data_bytes = _read_regular(scenario.data_path)
+    if sha256(data_bytes).hexdigest() != expected_source_file_sha256:
+        raise ValueError("market data source digest conflicts")
     try:
         rows = list(csv.DictReader(StringIO(data_bytes.decode("utf-8"), newline=""), strict=True))
     except (UnicodeError, csv.Error):
@@ -1113,7 +1117,12 @@ def _build_report(
     order_count: int,
     fill_count: int,
 ) -> dict[str, object]:
-    price, valuation = _last_admitted_price(scenario, records)
+    data_manifest = _exact_keys(manifest["data"], {"fingerprint", "path", "source_file_sha256"})
+    price, valuation = _last_admitted_price(
+        scenario,
+        records,
+        expected_source_file_sha256=_text(data_manifest["source_file_sha256"]),
+    )
     ending_cash_entries = result["ending_cash"]
     if type(ending_cash_entries) is not list or len(ending_cash_entries) != 1:
         raise ValueError("ending cash is invalid")

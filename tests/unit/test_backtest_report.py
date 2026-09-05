@@ -63,6 +63,15 @@ def _priced_scenario(tmp_path: Path, *, flat: bool = False) -> Path:
     return scenario_path
 
 
+def _changed_last_price(payload: bytes) -> bytes:
+    original = b",110.0,9.0,fixture.raw,3,0,"
+    changed = b",120.0,9.0,fixture.raw,3,0,"
+    assert payload.count(original) == 1
+    replacement = payload.replace(original, changed)
+    assert len(replacement) == len(payload)
+    return replacement
+
+
 def _report(attempt: Path, output: Path) -> dict[str, object]:
     product.generate_backtest_report(attempt, output)
     value = json.loads((output / "report.json").read_bytes())
@@ -364,6 +373,76 @@ def test_report_rejects_result_economics_not_bound_to_committed_fill(
 
     assert not output.exists()
     assert _evidence_tree(attempt) == before
+
+
+@pytest.mark.parametrize("mutation", ["path-replacement", "in-place-rewrite"])
+def test_report_rejects_ohlcv_changed_after_attempt_validation_before_valuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    scenario = load_backtest_scenario(_priced_scenario(tmp_path / "input"))
+    attempt = run_backtest_scenario(scenario, (tmp_path / "runs").resolve()).output_directory
+    attempt_before = _evidence_tree(attempt)
+    original_validate = reporting_module._validate_result
+
+    def mutate_after_validation(*args: Any, **kwargs: Any) -> tuple[int, int, str]:
+        validated = original_validate(*args, **kwargs)
+        changed = _changed_last_price(scenario.data_path.read_bytes())
+        if mutation == "path-replacement":
+            replacement = scenario.data_path.with_name("replacement.csv")
+            replacement.write_bytes(changed)
+            os.replace(replacement, scenario.data_path)
+        else:
+            inode = scenario.data_path.stat().st_ino
+            with scenario.data_path.open("r+b") as handle:
+                handle.write(changed)
+                handle.truncate()
+            assert scenario.data_path.stat().st_ino == inode
+        return validated
+
+    monkeypatch.setattr(reporting_module, "_validate_result", mutate_after_validation)
+    output = (tmp_path / "report").resolve()
+
+    with pytest.raises(product.BacktestReportError):
+        product.generate_backtest_report(attempt, output)
+
+    assert not output.exists()
+    assert _evidence_tree(attempt) == attempt_before
+
+
+def test_report_consumes_verified_ohlcv_snapshot_when_path_changes_after_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = load_backtest_scenario(_priced_scenario(tmp_path / "input"))
+    attempt = run_backtest_scenario(scenario, (tmp_path / "runs").resolve()).output_directory
+    original_payload = scenario.data_path.read_bytes()
+    original_digest = hashlib.sha256(original_payload).hexdigest()
+    original_read = reporting_module._read_regular
+    snapshot_taken = False
+
+    def read_then_replace(path: Path) -> bytes:
+        nonlocal snapshot_taken
+        payload = original_read(path)
+        if path == scenario.data_path:
+            assert not snapshot_taken
+            snapshot_taken = True
+            replacement = scenario.data_path.with_name("post-snapshot.csv")
+            replacement.write_bytes(_changed_last_price(payload))
+            os.replace(replacement, scenario.data_path)
+        return payload
+
+    monkeypatch.setattr(reporting_module, "_read_regular", read_then_replace)
+
+    report = _report(attempt, (tmp_path / "report").resolve())
+    economics = cast(dict[str, Any], report["economics"])
+    source = cast(dict[str, Any], report["source"])
+
+    assert snapshot_taken
+    assert source["data"]["source_file_sha256"] == original_digest
+    assert hashlib.sha256(scenario.data_path.read_bytes()).hexdigest() != original_digest
+    assert economics["valuation"]["price"] == "110"
+    assert economics["valuation"]["position_value"] == "220"
+    assert economics["equity"]["amount"] == "10017"
+    assert economics["net_pnl"]["amount"] == "17"
 
 
 def test_real_incomplete_and_failed_attempts_cannot_emit_success_report(
