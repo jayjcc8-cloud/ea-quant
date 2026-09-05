@@ -283,7 +283,7 @@ def verify_quality(
     verify_uv(uv, config, env)
     run([uv, "lock", "--check"], env=env)
     run(["git", "diff", "--exit-code", "HEAD", "--", "uv.lock"], env=env)
-    run([uv, "sync", "--locked", "--extra", "dev"], env=env)
+    run([uv, "sync", "--locked", "--extra", "dev", "--extra", "web"], env=env)
 
     python, entrypoint = environment_tools(environment_dir())
     build_tool_smoke = (

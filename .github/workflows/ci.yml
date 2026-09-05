@@ -72,7 +72,12 @@ jobs:
                 web=true
                 docs_only=false
                 ;;
-              src/*|tests/*|scripts/*|pyproject.toml|uv.lock)
+              src/ea/web/*|src/ea/cli/*|src/ea/product/backtest.py|src/ea/product/reporting.py|src/ea/product/scenario.py|tests/unit/test_web*|tests/unit/test_cli_web.py|examples/web-scenarios/*|pyproject.toml|uv.lock)
+                python=true
+                web=true
+                docs_only=false
+                ;;
+              src/*|tests/*|scripts/*)
                 python=true
                 docs_only=false
                 ;;
@@ -221,6 +226,75 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+
+  web_e2e:
+    needs: classify
+    if: needs.classify.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UV_PROJECT_ENVIRONMENT: venv
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert event exact checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version-file: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Reclaim hosted-runner audit headroom
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -s)" != "Linux" ]]; then
+            echo "Refusing hosted-runner cleanup on a non-Linux runner."
+            exit 1
+          fi
+          echo "Filesystem state before bounded hosted-runner cleanup:"
+          df -B1 /tmp "$GITHUB_WORKSPACE"
+          sudo rm -rf -- /usr/local/lib/android/sdk
+          sudo rm -rf -- /usr/share/dotnet
+          sudo rm -rf -- /usr/local/.ghcup
+          echo "Filesystem state after bounded hosted-runner cleanup:"
+          df -B1 /tmp "$GITHUB_WORKSPACE"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install locked Web dependencies and Chromium
+        working-directory: apps/web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Verify hosted-runner audit headroom
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          df -B1 /tmp "$GITHUB_WORKSPACE"
+          python - <<'PY'
+          import os
+
+          required_bytes = 15 * 1024**3
+          for path in ("/tmp", os.environ["GITHUB_WORKSPACE"]):
+              filesystem = os.statvfs(path)
+              available_bytes = filesystem.f_bavail * filesystem.f_frsize
+              print(f"{path}: available_bytes={available_bytes}")
+              if available_bytes < required_bytes:
+                  raise SystemExit(
+                      f"{path} has {available_bytes} bytes available; "
+                      f"requires at least {required_bytes} bytes"
+                  )
+          PY
+      - name: Verify installed local Web backtest loop
+        working-directory: apps/web
+        run: npm run test:e2e
 
   main_smoke:
     needs: classify

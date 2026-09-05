@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
@@ -22,6 +23,20 @@ def test_ci_checks_out_and_asserts_the_event_commit() -> None:
     assert f"ref: {expected_sha}" in workflow
     assert f"EXPECTED_SHA: {expected_sha}" in workflow
     assert 'run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in workflow
+
+
+def test_ci_routes_and_runs_installed_web_e2e() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "examples/web-scenarios/*" in workflow
+    assert "web_e2e:" in workflow
+    assert "npx playwright install --with-deps chromium" in workflow
+    assert "npm run test:e2e" in workflow
+    jobs = yaml.safe_load(workflow)["jobs"]
+    web_steps = "\n".join(step.get("run", "") for step in jobs["web_e2e"]["steps"])
+    assert "Reclaim hosted-runner audit headroom" in workflow
+    assert "sudo rm -rf -- /usr/local/lib/android/sdk" in web_steps
+    assert "required_bytes = 15 * 1024**3" in web_steps
 
 
 def test_project_versions_come_from_pyproject() -> None:
@@ -108,6 +123,7 @@ def test_quality_profile_runs_reproducible_gate_before_static_checks(
     gate = (str(python), "-I", "-B", str(verify.REPRODUCIBLE_RUN_PATH))
     lint = ("uv", "run", "--locked", "ruff", "check", ".")
     pytest_commands = [command for command in commands if "pytest" in command]
+    assert ("uv", "sync", "--locked", "--extra", "dev", "--extra", "web") in commands
     assert gate in commands
     assert commands.index(gate) < commands.index(lint)
     assert pytest_commands == [("uv", "run", "--locked", "pytest", "-q")]

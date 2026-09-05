@@ -32,7 +32,9 @@ app = typer.Typer(
 backtest_app = typer.Typer(
     help=("Strict scenarios support validate, run, resume, and report; the RESET demo is run-only.")
 )
+web_app = typer.Typer(help="Serve the installed offline backtest UI on 127.0.0.1 only.")
 app.add_typer(backtest_app, name="backtest")
+app.add_typer(web_app, name="web")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +219,78 @@ def validate(
         typer.echo("scenario validation internal error", err=True)
         raise typer.Exit(code=1) from None
     typer.echo("scenario valid: BacktestScenario v1")
+
+
+@web_app.command("serve")
+def web_serve(
+    scenario_root: Annotated[
+        Path,
+        typer.Option(
+            "--scenario-root",
+            help="Authorized directory containing strict scenario YAML and local OHLCV.",
+            metavar="DIR",
+        ),
+    ],
+    workspace: Annotated[
+        Path,
+        typer.Option(
+            "--workspace",
+            help="Dedicated local Web job, attempt, and report directory.",
+            metavar="DIR",
+        ),
+    ],
+    ui_dir: Annotated[
+        Path,
+        typer.Option(
+            "--ui-dir",
+            help="Built React dist directory; this is the only static file root.",
+            metavar="DIR",
+        ),
+    ],
+    port: Annotated[
+        int,
+        typer.Option(
+            "--port",
+            min=1024,
+            max=65535,
+            help="Loopback HTTP port on fixed host 127.0.0.1.",
+        ),
+    ] = 8765,
+) -> None:
+    """Serve the real offline Web backtest loop from explicit local roots."""
+    try:
+        resolved_scenarios = scenario_root.expanduser().resolve(strict=True)
+        resolved_ui = ui_dir.expanduser().resolve(strict=True)
+        resolved_workspace = workspace.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        typer.echo("web input error: local roots cannot be resolved", err=True)
+        raise typer.Exit(code=2) from None
+    roots = (resolved_scenarios, resolved_workspace, resolved_ui)
+    if any(
+        left.is_relative_to(right) or right.is_relative_to(left)
+        for index, left in enumerate(roots)
+        for right in roots[index + 1 :]
+    ):
+        typer.echo("web input error: scenario, workspace, and UI roots must not overlap", err=True)
+        raise typer.Exit(code=2)
+    try:
+        from ea.web.app import WebSettings
+        from ea.web.server import WebDependencyError, serve_local_web
+
+        serve_local_web(
+            WebSettings(
+                scenario_root=resolved_scenarios,
+                workspace=resolved_workspace,
+                ui_dir=resolved_ui,
+                port=port,
+            )
+        )
+    except WebDependencyError as error:
+        typer.echo(f"web dependency error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except Exception:
+        typer.echo("web service failed to start", err=True)
+        raise typer.Exit(code=1) from None
 
 
 @backtest_app.command("resume")
