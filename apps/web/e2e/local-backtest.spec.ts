@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
 
 const baseURL = process.env.EA_WEB_BASE_URL ?? 'http://127.0.0.1:8765'
@@ -28,91 +28,134 @@ async function waitForProcessExit(pid: number): Promise<void> {
   throw new Error('installed local Web service did not exit')
 }
 
-async function runScenario(page: import('@playwright/test').Page, name: string): Promise<{ runId: string; url: string }> {
-  await page.goto('/backtests')
-  await page.getByLabel('Scenario').selectOption(name)
+function jobId(page: Page): string {
+  const match = new URL(page.url()).pathname.match(/^\/backtests\/([0-9a-f-]+)$/)
+  if (!match) throw new Error(`current URL is not a backtest detail: ${page.url()}`)
+  return match[1]
+}
+
+async function validateAndRun(page: Page): Promise<{ jobId: string; runId: string; url: string }> {
   await page.getByRole('button', { name: 'Validate input' }).click()
   await expect(page.getByText('Validated input')).toBeVisible()
   await page.getByRole('button', { name: 'Run new backtest' }).click()
   await expect(page).toHaveURL(/\/backtests\/[0-9a-f-]+$/)
   await expect(page.locator('.status')).toHaveText('succeeded', { timeout: 15_000 })
   const runId = await page.locator('dt', { hasText: 'Engine run_id' }).locator('..').locator('dd').innerText()
-  return { runId, url: page.url() }
+  return { jobId: jobId(page), runId, url: page.url() }
 }
 
-test('installed browser completes the bounded local Web backtest loop', async ({ page }, testInfo) => {
-  const flat = await runScenario(page, 'flat.yaml')
-  await expect(page.getByText('10000 USD')).toHaveCount(3)
-  await expect(page.getByText('Orders 0')).toBeVisible()
-  await expect(page.getByText('Fills 0')).toBeVisible()
+async function useParameters(page: Page, sourceJobId: string): Promise<void> {
+  await page.goto('/backtests')
+  await page.getByRole('button', { name: `Use parameters for ${sourceJobId}` }).click()
+  await expect(page.getByLabel('Symbol')).toHaveValue('AAPL')
+  await expect(page.getByLabel('Symbol')).toHaveAttribute('readonly', '')
+}
 
-  const bounded = await runScenario(page, 'bounded-long.yaml')
-  expect(bounded.runId).not.toBe(flat.runId)
+test('installed browser completes the bounded local Web research loop', async ({ page }, testInfo) => {
+  await page.goto('/backtests')
+  await page.getByLabel('Scenario').selectOption('bounded-long.yaml')
+  await expect(page.getByLabel('Initial cash')).toHaveValue('10000')
+  await expect(page.getByLabel('Quantity')).toHaveValue('2')
+  const baseline = await validateAndRun(page)
   await expect(page.getByText('9797 USD', { exact: true })).toBeVisible()
   await expect(page.getByText('10017 USD', { exact: true })).toBeVisible()
   await expect(page.getByText('17 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('0.0017', { exact: true })).toBeVisible()
-  await expect(page.getByText('101.5', { exact: true })).toBeVisible()
-  await expect(page.getByText('110', { exact: true })).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('bounded-long-success.png'), fullPage: true })
 
-  await page.reload()
-  await expect(page.getByText(bounded.runId)).toBeVisible()
-  const reportDownload = page.waitForEvent('download')
-  await page.getByRole('link', { name: 'Download report.json' }).click()
-  expect((await reportDownload).suggestedFilename()).toBe('report.json')
+  const baselineEvidence = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/backtests/${id}`)
+    return response.json()
+  }, baseline.jobId)
+  expect(baselineEvidence.schema).toBe('ea.local-web-job.v2')
+  expect(baselineEvidence.input_snapshot.scenario.funding.initial_cash).toBe('10000')
+  expect(baselineEvidence.input_snapshot.scenario.strategy.target_quantity).toBe('2')
+  expect(baselineEvidence.input_snapshot.scenario.instrument.symbol).toBe('AAPL')
+  expect(baselineEvidence.input_snapshot.identity.scenario_sha256).toMatch(/^[0-9a-f]{64}$/)
+  expect(baselineEvidence.input_sha256).toMatch(/^[0-9a-f]{64}$/)
 
-  const changed = await runScenario(page, 'one.yaml')
-  expect(changed.runId).not.toBe(bounded.runId)
-  await expect(page.getByText('9898.5 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('10008.5 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('8.5 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('0.00085', { exact: true })).toBeVisible()
+  await useParameters(page, baseline.jobId)
+  await expect(page.getByLabel('Initial cash')).toHaveValue('10000')
+  await expect(page.getByLabel('Quantity')).toHaveValue('2')
+  await page.getByLabel('Quantity').fill('4')
+  await expect(page.getByText('Validated input')).toHaveCount(0)
+  const changed = await validateAndRun(page)
+  expect(changed.runId).not.toBe(baseline.runId)
+  await expect(page.getByText('9594 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('10034 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('34 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('0.0034', { exact: true })).toBeVisible()
 
   await page.goto('/backtests')
-  await page.getByLabel('Scenario').selectOption('invalid.yaml')
+  await expect(page.locator('.job-card').first()).toContainText(changed.runId)
+  await page.getByLabel(`Select ${baseline.jobId} for comparison`).check()
+  await page.getByLabel(`Select ${changed.jobId} for comparison`).check()
+  await page.getByRole('button', { name: 'Compare selected runs' }).click()
+  await expect(page).toHaveURL(`/backtests/compare/${baseline.jobId}/${changed.jobId}`)
+  await expect(page.getByRole('row', { name: /Quantity 2 4 Changed/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Net P&L 17 34 \+17/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Return 0.17% 0.34% \+0.17 pp/i })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('success-success-comparison.png'), fullPage: true })
+  const successComparisonURL = page.url()
+  await page.reload()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeVisible()
+
+  await useParameters(page, baseline.jobId)
+  await page.getByLabel('Initial cash').fill('50')
   await page.getByRole('button', { name: 'Validate input' }).click()
-  await expect(page.getByText(/invalid field 'data\.fingerprint\.sha256'/)).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Run new backtest' })).toBeDisabled()
+  await expect(page.getByText('Validated input')).toBeVisible()
+  await page.getByRole('button', { name: 'Run new backtest' }).click()
+  await expect(page).toHaveURL(/\/backtests\/[0-9a-f-]+$/)
+  await expect(page.locator('.page-title .status')).toHaveText('failed', { timeout: 15_000 })
+  const rejectedJobId = jobId(page)
+  await expect(page.getByText('risk.rejected')).toBeVisible()
+  await expect(page.getByText('No success report is available.')).toBeVisible()
+
+  await page.goto(`/backtests/compare/${baseline.jobId}/${rejectedJobId}`)
+  await expect(page.getByText('risk.rejected')).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 No report —/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Net P&L 17 No report —/i })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('success-risk-rejected-comparison.png'), fullPage: true })
 
   const boundary = await page.evaluate(async () => {
     const headers = { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }
-    const jobsBefore = await fetch('/api/backtests').then((response) => response.json())
-    const invalid = await fetch('/api/scenarios/invalid.yaml/validate', { method: 'POST', headers, body: '{}' })
-    const validation = await fetch('/api/scenarios/bounded-long.yaml/validate', { method: 'POST', headers, body: '{}' }).then((response) => response.json())
-    const request = { scenario_id: 'bounded-long.yaml', input_identity: validation.input_identity, request_id: 'playwright-idempotency-0001' }
+    const validation = await fetch('/api/scenarios/bounded-long.yaml/validate', {
+      method: 'POST', headers, body: JSON.stringify({ parameters: { initial_cash: '10000', quantity: '2' } }),
+    }).then((response) => response.json())
+    const freeText = await fetch('/api/backtests', {
+      method: 'POST', headers,
+      body: JSON.stringify({
+        scenario_id: 'bounded-long.yaml', input_identity: validation.input_identity,
+        parameters: { initial_cash: '10000', quantity: '2', symbol: 'MSFT' },
+        request_id: 'playwright-free-text-0001',
+      }),
+    })
+    const request = {
+      scenario_id: 'bounded-long.yaml', input_identity: validation.input_identity,
+      parameters: { initial_cash: '10000', quantity: '2' }, request_id: 'playwright-idempotency-0001',
+    }
     const first = await fetch('/api/backtests', { method: 'POST', headers, body: JSON.stringify(request) })
     const firstBody = await first.json()
     const second = await fetch('/api/backtests', { method: 'POST', headers, body: JSON.stringify(request) })
     const secondBody = await second.json()
-    return { before: jobsBefore.jobs.length, invalidStatus: invalid.status, firstStatus: first.status, secondStatus: second.status, firstJob: firstBody.job_id, secondJob: secondBody.job_id }
+    return { freeTextStatus: freeText.status, firstStatus: first.status, secondStatus: second.status, firstJob: firstBody.job_id, secondJob: secondBody.job_id }
   })
-  expect(boundary.invalidStatus).toBe(422)
+  expect(boundary.freeTextStatus).toBe(422)
   expect(boundary.firstStatus).toBe(202)
   expect(boundary.secondStatus).toBe(200)
   expect(boundary.secondJob).toBe(boundary.firstJob)
-
   await page.goto(`/backtests/${boundary.firstJob}`)
   await expect(page.locator('.status')).toHaveText('succeeded', { timeout: 15_000 })
-  const jobsAfter = await page.evaluate(() => fetch('/api/backtests').then((response) => response.json()))
-  expect(jobsAfter.jobs).toHaveLength(boundary.before + 1)
 
-  await page.goto('/backtests')
-  await page.getByLabel('Scenario').selectOption('low-cash.yaml')
-  await page.getByRole('button', { name: 'Validate input' }).click()
-  await page.getByRole('button', { name: 'Run new backtest' }).click()
-  await expect(page.locator('.status')).toHaveText('failed', { timeout: 15_000 })
-  await expect(page.getByText('No success report is available.')).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('low-cash-failure.png'), fullPage: true })
+  const reportDownload = page.waitForEvent('download')
+  await page.getByRole('link', { name: 'Download report.json' }).click()
+  expect((await reportDownload).suggestedFilename()).toBe('report.json')
 
-  await page.goto(bounded.url)
-  await expect(page.getByText(bounded.runId)).toBeVisible()
+  await page.goto(successComparisonURL)
+  await expect(page.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeVisible()
   const serverPid = Number(process.env.EA_WEB_SERVER_PID)
   expect(Number.isSafeInteger(serverPid)).toBe(true)
   process.kill(serverPid, 'SIGTERM')
   await waitForProcessExit(serverPid)
-  await page.getByRole('button', { name: 'Refresh' }).click()
-  await expect(page.getByText(/Local service is unreachable/)).toBeVisible()
 
   const executable = process.env.EA_WEB_BIN
   const args = JSON.parse(process.env.EA_WEB_ARGS ?? '[]') as string[]
@@ -122,8 +165,7 @@ test('installed browser completes the bounded local Web backtest loop', async ({
     restarted = spawn(executable!, args, { stdio: 'ignore' })
     await waitForHealth()
     await page.reload()
-    await expect(page.getByText(bounded.runId)).toBeVisible()
-    await expect(page.locator('.status')).toHaveText('succeeded')
+    await expect(page.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeVisible()
   } finally {
     if (restarted?.pid) process.kill(restarted.pid, 'SIGTERM')
   }

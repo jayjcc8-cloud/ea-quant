@@ -97,10 +97,12 @@ Omitting `--scenario` runs the fixed compatibility demo at `demo-runs/phase1-dem
 
 The RESET demo is run-only and does not support `resume` or `report`; those commands fail closed
 because the demo intentionally does not create a complete strict-attempt evidence set.
-## Installed Wheel: Local Web Backtest
+## Installed Wheel: Local Web Research Loop
 
-The post-v0.2.0 candidate adds a loopback-only real browser path over the same engine and report.
-See the [Web README](apps/web/README.md) for candidate install/start commands and exclusions.
+The post-v0.2.0 candidate adds a loopback-only real browser path over the same engine and report,
+plus bounded parameter replay, normalized run history, and pairwise comparison. Symbol remains
+bound to registered verified scenario/data input. See the [Web README](apps/web/README.md) for
+candidate install/start commands and exclusions.
 ## Contributor Setup
 
 From a source checkout, use the exact `uv` version declared in `pyproject.toml`:
@@ -115,6 +117,7 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ## Product Boundary
 
 This offline, single-instrument, single-currency product has two strategies, three CLI resume
-frontiers, and one loopback Web loop. Paper/live, brokers, credentials, deployment, registry
-publication, arbitrary Web recovery, and research analytics remain unavailable; see the
-[roadmap](docs/ROADMAP.md) and [Accepted ADRs](docs/adr/).
+frontiers, and one bounded loopback Web research loop. Free symbol/data editing, Experiment
+tracking, research-grade analytics, paper/live, brokers, credentials, deployment, registry
+publication, and arbitrary Web recovery remain unavailable; see the [roadmap](docs/ROADMAP.md)
+and [Accepted ADRs](docs/adr/).
