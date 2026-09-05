@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from hashlib import sha256
 from pathlib import Path
 
@@ -47,6 +49,10 @@ def _tree_digest(root: Path) -> str:
             digest.update(len(payload).to_bytes(8, "big"))
             digest.update(payload)
     return digest.hexdigest()
+
+
+def _trace_fsync_kind(file_descriptor: int) -> str:
+    return "directory" if stat.S_ISDIR(os.fstat(file_descriptor).st_mode) else "file"
 
 
 def _baseline(tmp_path: Path) -> dict[str, object]:
@@ -136,6 +142,94 @@ def test_resume_after_reconciliation_publishes_exactly_one_success(
     assert audit.count('"record_kind":"run.terminal"') == 1
 
 
+def test_funding_is_directory_durable_before_frontier_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    observed: list[str] = []
+    at_interrupt: list[str] = []
+    real_fsync = os.fsync
+
+    def trace_fsync(file_descriptor: int) -> None:
+        observed.append(_trace_fsync_kind(file_descriptor))
+        real_fsync(file_descriptor)
+
+    def interrupt(stage: str) -> None:
+        if stage == "funding_durable":
+            at_interrupt.extend(observed)
+            raise _AbruptInterruption(stage)
+
+    monkeypatch.setattr(os, "fsync", trace_fsync)
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", interrupt)
+
+    with pytest.raises(_AbruptInterruption):
+        run_backtest_scenario(scenario, (tmp_path / "runs").resolve())
+
+    assert at_interrupt[-2:] == ["file", "directory"]
+
+
+def test_failure_evidence_is_directory_durable_before_failure_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    observed: list[str] = []
+    real_fsync = os.fsync
+
+    def trace_fsync(file_descriptor: int) -> None:
+        observed.append(_trace_fsync_kind(file_descriptor))
+        real_fsync(file_descriptor)
+
+    def fail(**_kwargs: object) -> object:
+        raise RuntimeError("injected failure")
+
+    monkeypatch.setattr(os, "fsync", trace_fsync)
+    monkeypatch.setattr(backtest_module, "_execute", fail)
+
+    with pytest.raises(BacktestRunFailure):
+        run_backtest_scenario(scenario, (tmp_path / "runs").resolve())
+
+    assert observed[-2:] == ["file", "directory"]
+
+
+def test_resume_rejects_result_left_by_failed_directory_sync_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    runs = (tmp_path / "runs").resolve()
+    real_fsync = os.fsync
+    failed = False
+
+    def fail_result_directory_sync(file_descriptor: int) -> None:
+        nonlocal failed
+        is_directory = stat.S_ISDIR(os.fstat(file_descriptor).st_mode)
+        result_exists = runs.exists() and any(
+            (child / "result.json").exists() for child in runs.iterdir() if child.is_dir()
+        )
+        if is_directory and result_exists and not failed:
+            failed = True
+            raise OSError("injected result directory sync failure")
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_result_directory_sync)
+    with pytest.raises(BacktestRunFailure, match="atomically published"):
+        run_backtest_scenario(scenario, runs)
+
+    attempt = _attempt(runs)
+    assert failed
+    assert (attempt / "result.json").is_file()
+    assert (attempt / "result.publication.json").is_file()
+    before = _tree_digest(attempt)
+    monkeypatch.setattr(os, "fsync", real_fsync)
+
+    with pytest.raises(BacktestResumeFailure, match="ambiguous"):
+        resume_backtest_attempt(attempt)
+
+    assert _tree_digest(attempt) == before
+
+
 def test_completed_attempt_resume_is_validated_non_mutating_no_op(tmp_path: Path) -> None:
     scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
     completed = run_backtest_scenario(scenario, (tmp_path / "runs").resolve())
@@ -145,6 +239,25 @@ def test_completed_attempt_resume_is_validated_non_mutating_no_op(tmp_path: Path
 
     assert resumed == completed
     assert _tree_digest(completed.output_directory) == before
+
+
+def test_resume_rejects_noncanonical_attempt_directory_name_without_mutation(
+    tmp_path: Path,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    completed = run_backtest_scenario(scenario, (tmp_path / "runs").resolve())
+    canonical = completed.output_directory
+    alias = canonical.parent / f"{{{canonical.name}}}"
+    alias.mkdir()
+    (alias / "manifest.json").write_bytes((canonical / "manifest.json").read_bytes())
+    before_canonical = _tree_digest(canonical)
+    before_alias = _tree_digest(alias)
+
+    with pytest.raises(BacktestResumeFailure, match="directory identity"):
+        resume_backtest_attempt(alias)
+
+    assert _tree_digest(canonical) == before_canonical
+    assert _tree_digest(alias) == before_alias
 
 
 def test_failed_attempt_resume_rejects_without_mutation(tmp_path: Path) -> None:
@@ -260,3 +373,62 @@ def test_handled_internal_failure_retains_classified_durable_evidence(
     assert failure["terminal_state"] == "failed"
     assert "sensitive internal detail" not in (attempt / "failure.json").read_text()
     assert not (attempt / "result.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_frontier"),
+    [
+        ("dispatch_durable", "dispatch_durable"),
+        ("reconciliation_durable", "reconciliation_durable"),
+    ],
+)
+def test_fresh_handled_failure_reports_actual_last_durable_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    expected_frontier: str,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+
+    def fail(selected: str) -> None:
+        if selected == stage:
+            raise RuntimeError("injected handled failure")
+
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", fail)
+    with pytest.raises(BacktestRunFailure):
+        run_backtest_scenario(scenario, (tmp_path / "runs").resolve())
+
+    failure = json.loads((_attempt(tmp_path / "runs") / "failure.json").read_bytes())
+    assert failure["last_durable_frontier"] == expected_frontier
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_frontier"),
+    [
+        ("dispatch_durable", "dispatch_durable"),
+        ("reconciliation_durable", "reconciliation_durable"),
+    ],
+)
+def test_resume_handled_failure_reports_actual_last_durable_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    expected_frontier: str,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    runs = (tmp_path / "runs").resolve()
+    _interrupt_at(monkeypatch, "funding_durable")
+    with pytest.raises(_AbruptInterruption):
+        run_backtest_scenario(scenario, runs)
+    attempt = _attempt(runs)
+
+    def fail(selected: str) -> None:
+        if selected == stage:
+            raise RuntimeError("injected resume failure")
+
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", fail)
+    with pytest.raises(BacktestResumeFailure, match="internal failure"):
+        resume_backtest_attempt(attempt)
+
+    failure = json.loads((attempt / "failure.json").read_bytes())
+    assert failure["last_durable_frontier"] == expected_frontier

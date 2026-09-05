@@ -106,6 +106,7 @@ _RESULT_SCHEMA = "ea.backtest-single-run-result.v1"
 _FAILURE_SCHEMA = "ea.backtest-single-run-failure.v1"
 _ATTEMPT_SCHEMA = "ea.backtest-resumable-attempt.v1"
 _ATTEMPT_CANONICALIZATION = "ea-backtest-resumable-attempt-v1"
+_PUBLICATION_SCHEMA = "ea.backtest-success-publication.v1"
 _TEST_INTERRUPT: Callable[[str], None] | None = None
 
 
@@ -469,6 +470,7 @@ def _execute(
     risk_context: dict[str, object],
     audit: Any | None = None,
     on_funding: Callable[[dict[str, object]], None] | None = None,
+    on_frontier: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, object], bytes, dict[str, object]]:
     audit = _DemoAudit(binding, scenario.spec_set) if audit is None else audit
     prepared = audit.append(
@@ -497,6 +499,8 @@ def _execute(
     funding_document = _funding_document(funding, funding_outcome)
     if on_funding is not None:
         on_funding(funding_document)
+    if on_frontier is not None:
+        on_frontier("funding_durable")
     _interrupt("funding_durable")
     orders = create_phase1_order_authority(
         run_id=run_id,
@@ -603,6 +607,8 @@ def _execute(
         lifecycle.coordinator.complete_active_dispatch(active)
         if lifecycle.fact_authority.fills and not durable_fill_frontier_observed:
             durable_fill_frontier_observed = True
+            if on_frontier is not None:
+                on_frontier("dispatch_durable")
             _interrupt("dispatch_durable")
 
     fills = lifecycle.fact_authority.fills
@@ -656,9 +662,13 @@ def _execute(
             funding_document,
             {"fill": None, "order": None},
         )
+    if on_frontier is not None:
+        on_frontier("reconciliation_durable")
     _interrupt("reconciliation_durable")
     if end_of_run_window is not None:
         lifecycle.coordinator.complete_active_dispatch(end_of_run_window)
+        if on_frontier is not None:
+            on_frontier("terminal_durable")
 
     fill: Fill | None = fills[0] if fills else None
     strategy_document = {
@@ -770,12 +780,21 @@ def _safe_output_root(output_root: Path) -> Path:
     return output_root.resolve(strict=True)
 
 
+def _fsync_directory(path: Path) -> None:
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _write_once(path: Path, payload: bytes) -> None:
     try:
         with path.open("xb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        _fsync_directory(path.parent)
     except OSError:
         raise BacktestRunFailure(
             OutcomeCode.DURABILITY_RESULT_WRITE_FAILED,
@@ -805,26 +824,44 @@ def _write_or_verify(path: Path, payload: bytes) -> None:
 
 def _publish_success(attempt: Path, payload: bytes) -> None:
     result = attempt / "result.json"
+    publication = attempt / "result.publication.json"
     if result.exists():
+        if publication.exists():
+            raise BacktestRunFailure(
+                OutcomeCode.DURABILITY_RESULT_WRITE_FAILED,
+                "backtest success publication is ambiguous",
+                attempt,
+            )
         _write_or_verify(result, payload)
         return
     pending = attempt / "result.pending"
     _write_or_verify(pending, payload)
+    _write_once(publication, _publication_bytes(payload))
     try:
         if result.exists():
             raise OSError("result destination appeared during publication")
         os.rename(pending, result)
-        directory = os.open(attempt, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory(attempt)
+        os.unlink(publication)
+        _fsync_directory(attempt)
     except OSError:
         raise BacktestRunFailure(
             OutcomeCode.DURABILITY_RESULT_WRITE_FAILED,
             "backtest success could not be atomically published",
             attempt,
         ) from None
+
+
+def _publication_bytes(result_payload: bytes) -> bytes:
+    return (
+        _canonical_json(
+            {
+                "result_sha256": sha256(result_payload).hexdigest(),
+                "schema": _PUBLICATION_SCHEMA,
+            }
+        )
+        + b"\n"
+    )
 
 
 def _failure_bytes(
@@ -865,6 +902,8 @@ def _require_attempt_directory(run_dir: Path) -> tuple[Path, RunId]:
         if run_dir.is_symlink() or run_dir.resolve(strict=True) != run_dir or not run_dir.is_dir():
             raise BacktestResumeFailure("resume run directory identity is invalid", run_dir)
         run_id = RunId(str(UUID(run_dir.name)))
+        if run_dir.name != run_id.value:
+            raise BacktestResumeFailure("resume run directory identity is invalid", run_dir)
     except (OSError, ValueError):
         raise BacktestResumeFailure("resume run directory identity is invalid", run_dir) from None
     return run_dir, run_id
@@ -986,9 +1025,11 @@ def run_backtest_scenario(
         journal = create_posix_audit_journal(prepared.audit)
 
         def retain_funding(document: dict[str, object]) -> None:
-            nonlocal last_frontier
             _write_or_verify(attempt / "funding.json", _canonical_json(document) + b"\n")
-            last_frontier = "funding_durable"
+
+        def retain_frontier(frontier: str) -> None:
+            nonlocal last_frontier
+            last_frontier = frontier
 
         report, audit, funding = _execute(
             scenario,
@@ -999,6 +1040,7 @@ def run_backtest_scenario(
             risk_context=risk_context,
             audit=journal,
             on_funding=retain_funding,
+            on_frontier=retain_frontier,
         )
     except _AttemptFailure as failure:
         if journal is not None:
@@ -1059,6 +1101,7 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
     store = LocalResultStore(attempt.parent)
     journal: Any | None = None
     terminal_recovery: Any | None = None
+    last_frontier = "attempt_prepared"
     try:
         try:
             verified = store.verify_recovery_attempt(manifest)
@@ -1085,6 +1128,9 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 raise BacktestResumeFailure("failed attempt evidence is invalid", attempt) from None
             raise BacktestResumeFailure("failed attempt is terminal and cannot resume", attempt)
         result_path = attempt / "result.json"
+        publication_path = attempt / "result.publication.json"
+        if publication_path.exists():
+            raise BacktestResumeFailure("resume success publication evidence is ambiguous", attempt)
         if result_path.exists():
             if type(verified) is not VerifiedTerminalRecoveryBinding:
                 raise BacktestResumeFailure(
@@ -1134,6 +1180,10 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
         def retain_funding(document: dict[str, object]) -> None:
             _write_or_verify(attempt / "funding.json", _canonical_json(document) + b"\n")
 
+        def retain_frontier(frontier: str) -> None:
+            nonlocal last_frontier
+            last_frontier = frontier
+
         if type(verified) is VerifiedTerminalRecoveryBinding:
             terminal_recovery = store.recover_terminal_attempt(verified)
             report, audit, funding = _execute(
@@ -1144,6 +1194,7 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 risk_policy=risk_policy,
                 risk_context=risk_context,
                 on_funding=retain_funding,
+                on_frontier=retain_frontier,
             )
             reconstructed = json.loads(audit.splitlines()[-1])
             if (
@@ -1166,6 +1217,7 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 risk_context=risk_context,
                 audit=journal,
                 on_funding=retain_funding,
+                on_frontier=retain_frontier,
             )
         else:
             raise BacktestResumeFailure("resume frontier classification is unsupported", attempt)
@@ -1186,7 +1238,7 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                     run_id=run_id,
                     lineage=lineage,
                     scenario=scenario,
-                    last_frontier="resume_reconstruction",
+                    last_frontier=last_frontier,
                     audit=journal,
                     code="backtest.internal_failure",
                     message="backtest resume failed because of an unexpected internal error",
