@@ -1,74 +1,117 @@
 # EA Quant Trading System
 
-EA is a long-running quantitative-trading infrastructure project. It builds deterministic,
-auditable, restart-equivalent research and execution contracts before enabling any live trading.
+EA is deterministic, auditable quantitative-trading infrastructure. Live trading remains disabled.
 
 ## Current Phase and Health
 
-- Phase: **Phase 1 — Backtest MVP (Incomplete)**
+- Phase: **Phase 1 bounded offline Backtest MVP**
+- GitHub prerelease: **v0.2.0 published**
 - Merged baseline: **main healthy**
 - Live trading: **unavailable**
-- Active gate: [Phase 1 project status](docs/STATUS.md)
+- Durable state: [STATUS](docs/STATUS.md); contribution rules: [WORKFLOW](docs/governance/WORKFLOW.md)
 
-Do not infer current capability from old Issues, comments, or this short entry page. STATUS is the
-human-readable present; merged code/tests/CI remain evidence of implemented behavior.
+The published v0.2.0 wheel does not provide `ea --version`. This README describes current `main`
+and a candidate wheel built from it; the next version and any later release require a separate
+Product Owner decision.
 
-## Quick Start
+## Installed Wheel: First Strict Report
 
-Requirements: Python 3.12 and the exact uv version declared in `pyproject.toml`.
+Use the `uv` version declared in `pyproject.toml` to provision Python 3.12, plus the candidate wheel
+supplied to you. Start in an empty directory; only `WHEEL` needs to be changed. This path does not
+require a source checkout or editable install.
+
+```bash
+WHEEL=/absolute/path/to/the-candidate-wheel.whl
+uv venv --python 3.12 user-env
+uv pip install --python user-env/bin/python "$WHEEL"
+EA="$PWD/user-env/bin/ea"
+"$EA" --version
+mkdir input runs reports
+```
+
+Create `input/prices.csv` with these exact bytes:
+
+<!-- first-use-prices.csv:start -->
+```csv
+schema_version,venue,symbol,interval_start,interval_end,adjustment,open,high,low,close,volume,source,source_sequence,revision,available_at
+1,XNAS,AAPL,2026-01-02T09:31:00.000000Z,2026-01-02T09:32:00.000000Z,raw,100.5,102.0,100.0,101.5,12.0,user.local,2,0,2026-01-02T09:32:00.000000Z
+1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100.0,101.0,99.0,100.5,10.0,user.local,0,0,2026-01-02T09:31:00.000000Z
+1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100.0,101.5,99.0,101.0,11.0,user.local,1,1,2026-01-02T09:31:30.000000Z
+1,XNAS,AAPL,2026-01-02T09:32:00.000000Z,2026-01-02T09:33:00.000000Z,raw,108.0,111.0,107.0,110.0,9.0,user.local,3,0,2026-01-02T09:33:00.000000Z
+```
+<!-- first-use-prices.csv:end -->
+
+Create `input/scenario.yaml`:
+
+<!-- first-use-scenario.yaml:start -->
+```yaml
+schema_version: 1
+data:
+  path: prices.csv
+  start_utc: '2026-01-02T09:31:00.000000Z'
+  end_utc: '2026-01-02T09:34:00.000000Z'
+  fingerprint:
+    sha256: c95c6182ba68d8c03726336172b5ce089c464fdd87ba28cb4444460fcdbae2fb
+    record_count: 4
+instrument:
+  venue: XNAS
+  symbol: AAPL
+  specification_id: xnas.aapl.v1
+  specification_set_id: scenario.xnas.aapl.v1
+  settlement_currency: USD
+  price_quantum: '0.01'
+  quantity_quantum: '1'
+  currency_quantum: '0.01'
+  contract_multiplier: '1'
+strategy:
+  id: always-flat-v1
+funding: {currency: USD, initial_cash: '10000'}
+risk: {max_order_quantity: '5', max_position_quantity: '5', max_notional: '1000'}
+execution: {policy: phase1.next-bar-close.v1}
+randomness_profile: none
+```
+<!-- first-use-scenario.yaml:end -->
+
+Validate, create one fresh attempt, verify completed-resume behavior, and publish its report:
+
+```bash
+"$EA" backtest validate --scenario "$PWD/input/scenario.yaml"
+"$EA" backtest run --scenario "$PWD/input/scenario.yaml" --output-root "$PWD/runs"
+ATTEMPT_DIR="$(find "$PWD/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+test -n "$ATTEMPT_DIR"
+"$EA" backtest resume --run-dir "$ATTEMPT_DIR"
+"$EA" backtest report --run-dir "$ATTEMPT_DIR" --output-dir "$PWD/reports/first"
+sed -n '1,20p' "$PWD/reports/first/summary.txt"
+```
+
+`--output-root` is the parent. A strict fresh run creates the actual UUID attempt directory below
+it and prints that attempt's `result.json`; `resume` and `report` require the UUID directory.
+
+### RESET Compatibility Demo
+
+Omitting `--scenario` runs the fixed compatibility demo at `demo-runs/phase1-demo-v1`:
+
+```bash
+"$EA" backtest run --output-root "$PWD/demo-runs"
+```
+
+The RESET demo is run-only and does not support `resume` or `report`; those commands fail closed
+because the demo intentionally does not create a complete strict-attempt evidence set.
+
+## Contributor Setup
+
+From a source checkout, use the exact `uv` version declared in `pyproject.toml`:
 
 ```bash
 python3 scripts/bootstrap_local.py
 venv/bin/ea doctor
-```
-
-Run the supported quality or full verification profiles:
-
-```bash
 uv run --no-project --python 3.12 python scripts/verify.py --profile quality
 uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
-Validate and run a strict local `BacktestScenario v1`:
+## Product Boundary
 
-```bash
-venv/bin/ea backtest validate --scenario /absolute/path/to/scenario.yaml
-venv/bin/ea backtest run \
-  --scenario /absolute/path/to/scenario.yaml \
-  --output-root /absolute/path/to/runs
-venv/bin/ea backtest resume \
-  --run-dir /absolute/path/to/runs/<attempt-uuid>
-venv/bin/ea backtest report \
-  --run-dir /absolute/path/to/runs/<attempt-uuid> \
-  --output-dir /absolute/path/to/reports/<report-name>
-```
-
-The scenario is the product configuration authority. It binds a local OHLCV path and fingerprint,
-an explicit UTC replay window, one instrument specification, positive initial cash, order/position/
-cash/notional limits, the deterministic next-bar-close execution policy, and either
-`always-flat-v1` or `bounded-long-v1`. Every run creates a fresh attempt directory and emits
-funding, durable audit, and result evidence. `resume` accepts only that attempt directory, verifies
-its persisted scenario/data/distribution/economic identity, and continues the same RunId from the
-funding, completed-dispatch, or reconciled pre-publication durable frontier. Completed attempts are
-validated no-ops; failed, ambiguous, conflicting, or corrupt attempts fail closed. The fixed RESET
-demo remains available by omitting `--scenario` and is not resumable. `report` consumes only a
-verified completed attempt and publishes canonical `report.json` plus `summary.txt` to a separate
-directory. It does not run or resume trading, and an identical existing report is a verified
-no-op while partial or conflicting output is rejected.
-
-This remains a bounded offline deterministic product. Arbitrary instruction-level recovery,
-multi-instrument or multi-currency analytics, paper/live profiles, broker writes, credentials,
-and release publication are unavailable. Package metadata is prepared as `0.2.0`; no tag,
-release, publication, or deployment is implied.
-
-## Project Navigation
-
-- [Current status](docs/STATUS.md)
-- [Phase roadmap](docs/ROADMAP.md)
-- [Technical architecture](docs/architecture.md)
-- [Accepted architecture decisions](docs/adr/)
-- [Governance workflow](docs/governance/WORKFLOW.md)
-- [Contributor entry point](CONTRIBUTING.md)
-
-History lives in Git, Issues, pull requests, and CI. Decisions live in ADRs. Current state lives in
-STATUS. Future Phase boundaries live in ROADMAP.
+This is an offline, single-instrument, single-currency product with two bundled strategies and
+three supported resume frontiers. It does not provide paper/live profiles, broker writes,
+credentials, deployment, package-registry publication, arbitrary recovery, or research-grade
+analytics. See the [roadmap](docs/ROADMAP.md) and [Accepted ADRs](docs/adr/) for durable boundaries.
