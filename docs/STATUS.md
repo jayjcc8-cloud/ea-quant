@@ -2,7 +2,8 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — offline simulated vertical slice: Incomplete / main healthy / live unavailable.**
+**Phase 1 delivery reset — RESET-001 offline simulated vertical slice delivered / main healthy /
+live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
 authoritative checkpoint. GitHub Issues and pull requests carry mutable coordination state; this
@@ -23,22 +24,26 @@ live capability is part of this objective.
   and risk controls, matching, execution facts, ledger, reconciliation, audit, and recovery
   components.
 - ADR 0027 fixes the offline-only product and fail-closed boundary.
+- ADR 0029 freezes governance expansion and restores bounded T1 product delivery.
+- The installed `ea backtest run --output <path>` command runs outside a Git checkout from a
+  built wheel and produces deterministic report and audit artifacts.
+- The fixed accepted path traverses signal, risk acceptance, simulated order and Fill, portfolio
+  cash/position state, reconciliation, and audit before one successful terminal record.
+- The risk-rejected path creates no order, Fill, cash, or position mutation.
+- A reconciliation mismatch records failure evidence without a success terminal or success
+  report.
 - The Dark Professional Web shell remains a deterministic read-only Mock Adapter.
 
 ## Incomplete
 
-- Issue #154 / RESET-001 first lands the governance freeze and bounded delivery rules in ADR 0029.
-- The same Issue then delivers one thin installed product composition over existing components,
-  with deterministic accepted, rejected, and reconciliation-failure evidence.
-- Quick Start and installed-wheel acceptance must describe and prove the runnable command.
-
-The broader v0.2.0 scenario schema, funding/manifest expansion, resume matrix, sample-strategy
-catalogue, and full reporting surface remain future product work. They are not silently claimed by
-the reset slice.
+RESET-001 is a thin offline demonstration, not the funded Backtest MVP. The broader v0.2.0
+scenario schema, initial funding, Backtest Identity and lineage, seed hierarchy, resume/recovery
+matrix, sample-strategy catalogue, and full reporting surface remain future product work. They are
+not silently claimed by this slice.
 
 ## Blockers
 
-There is no known blocker to the offline T1 product slice.
+There is no known blocker to the delivered RESET-001 offline T1 product slice.
 
 R9/R10 import-provenance findings are retained as hardening evidence. They do not reach a broker,
 external authority, or real-money path and therefore do not block the fixed-input offline slice.
@@ -67,28 +72,28 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 ## Primary Issues
 
 - [#154 — RESET-001: restore bounded product delivery and freeze governance expansion](https://github.com/jayjcc8-cloud/ea-quant/issues/154)
+  is completed by the governance-freeze change and PR #156's installed offline vertical slice.
 - R9/R10 Issues #149, #150, #152, #153 and PR #151 retain provenance as superseded hardening
   history after the reset governance PR merges; they are not an active delivery chain.
 - Phase 1.1 owns automatic reconciliation correction, ancestry repair, and broader recovery work.
 
 ## Last Confirmed
 
-- Date: **2026-09-01** (Asia/Shanghai).
-- Verified pre-reset baseline: `main@969f5f086acd9c28f80e3960a56b83981b1d0e5d`.
-- Current write authority: Issue #154, one isolated writer/worktree per PR.
+- Date: **2026-09-05** (Asia/Shanghai).
+- The containing merged `main` commit and its CI are the authoritative RESET-001 checkpoint.
 - Live capability: unavailable and prohibited.
 - Release/tag/publication authority: not granted.
 
 ## Phase Completion Conditions
 
-- [ ] ADR 0029 and the governance freeze are merged with CI green.
-- [ ] One installed command runs outside a Git checkout from a built wheel.
-- [ ] A fixed deterministic input traverses signal, risk, order, Fill, cash, position,
+- [x] ADR 0029 and the governance freeze are merged with CI green.
+- [x] One installed command runs outside a Git checkout from a built wheel.
+- [x] A fixed deterministic input traverses signal, risk, order, Fill, cash, position,
   reconciliation, and audit.
-- [ ] A risk-rejected input creates no economic mutation.
-- [ ] A reconciliation mismatch fails without a success result.
-- [ ] One primary review, any single concentrated repair verification, and required CI are complete.
-- [ ] Quick Start identifies the supported boundary and known limitations.
+- [x] A risk-rejected input creates no economic mutation.
+- [x] A reconciliation mismatch fails without a success terminal or success report.
+- [x] One primary review, one concentrated repair verification, and required CI are complete.
+- [x] Quick Start identifies the supported boundary and known limitations.
 
 These conditions complete RESET-001, not the full Phase 1 roadmap or a v0.2.0 release.
 

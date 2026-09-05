@@ -73,8 +73,19 @@ def test_bundled_demo_runs_the_existing_economic_path_end_to_end(tmp_path: Path)
     assert kinds[0] == "run.prepared"
     assert "submission.pre_effect_authorization" in kinds
     assert "portfolio.ledger_handoff_outcome" in kinds
-    assert kinds.count("reconciliation.observation_outcome") == 2
-    assert kinds[-1] in {"reconciliation.observation_outcome", "run.terminal"}
+    reconciliation_indices = [
+        index for index, kind in enumerate(kinds) if kind == "reconciliation.observation_outcome"
+    ]
+    terminal_records = [
+        (index, record)
+        for index, record in enumerate(audit)
+        if record["header"]["record_kind"] == "run.terminal"
+    ]
+    assert len(reconciliation_indices) == 2
+    assert len(terminal_records) == 1
+    terminal_index, terminal_record = terminal_records[0]
+    assert terminal_record["payload"]["terminal_kind"] == "success"
+    assert max(reconciliation_indices) < terminal_index
 
 
 def test_accepted_demo_has_one_economic_lineage(
@@ -294,12 +305,9 @@ def test_reconciliation_mismatch_fails_closed_without_success_report(tmp_path: P
     assert failure["run_status"] == "failed"
     assert failure["trade_outcome"] == "reconciliation_failed"
     audit_records = [
-        json.loads(line)
-        for line in (output_directory / "audit.jsonl").read_bytes().splitlines()
+        json.loads(line) for line in (output_directory / "audit.jsonl").read_bytes().splitlines()
     ]
-    assert "run.terminal" not in {
-        record["header"]["record_kind"] for record in audit_records
-    }
+    assert "run.terminal" not in {record["header"]["record_kind"] for record in audit_records}
     assert (output_directory / "audit.jsonl").is_file()
 
 
