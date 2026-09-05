@@ -146,6 +146,32 @@ def test_always_flat_forbids_target_quantity(tmp_path: Path) -> None:
         load_backtest_scenario(scenario_path)
 
 
+def test_scenario_rejects_market_prices_outside_instrument_domain(tmp_path: Path) -> None:
+    scenario_path = _write_valid_scenario(tmp_path)
+    data_path = tmp_path / "prices.csv"
+    lines = data_path.read_text(encoding="utf-8").splitlines()
+    negative_rows = [lines[0]]
+    for line in lines[1:]:
+        fields = line.split(",")
+        fields[6:10] = ["-100", "-99", "-102", "-101"]
+        negative_rows.append(",".join(fields))
+    data_path.write_text("\n".join(negative_rows) + "\n", encoding="utf-8")
+    window = ReplayWindow(
+        datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+        datetime(2026, 1, 2, 9, 33, tzinfo=UTC),
+    )
+    dataset = decode_phase1_ohlcv_csv(data_path.read_bytes(), replay_window=window)
+    document = yaml.safe_load(scenario_path.read_text(encoding="utf-8"))
+    document["data"]["fingerprint"] = {
+        "sha256": dataset.selection.fingerprint.sha256.value,
+        "record_count": dataset.selection.fingerprint.record_count,
+    }
+    scenario_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(BacktestScenarioError, match="price domain"):
+        load_backtest_scenario(scenario_path)
+
+
 def test_duplicate_yaml_key_fails_closed(tmp_path: Path) -> None:
     scenario_path = _write_valid_scenario(tmp_path)
     content = scenario_path.read_text(encoding="utf-8")

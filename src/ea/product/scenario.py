@@ -297,6 +297,23 @@ def _canonical_bytes(
     ).encode("ascii")
 
 
+def _require_market_price_domain(
+    dataset: Phase1HistoricalDataset,
+    domain: PriceDomain,
+) -> None:
+    for event in dataset.selection.events:
+        prices = (
+            event.payload.open,
+            event.payload.high,
+            event.payload.low,
+            event.payload.close,
+        )
+        if domain is PriceDomain.POSITIVE and any(price <= 0 for price in prices):
+            raise BacktestScenarioError("market data price domain conflicts with instrument")
+        if domain is PriceDomain.NON_NEGATIVE and any(price < 0 for price in prices):
+            raise BacktestScenarioError("market data price domain conflicts with instrument")
+
+
 def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
     """Load, capture, and cross-validate one strict BacktestScenario v1."""
     if not isinstance(path, Path):
@@ -370,6 +387,10 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
         raise BacktestScenarioError(f"instrument is invalid ({type(error).__name__})") from None
     if any(event.payload.instrument != instrument for event in dataset.selection.events):
         raise BacktestScenarioError("instrument conflicts with captured market data")
+    _require_market_price_domain(
+        dataset,
+        spec_set.require(instrument).price_domain,
+    )
 
     try:
         funding_currency = SettlementCurrency(model.funding.currency)
