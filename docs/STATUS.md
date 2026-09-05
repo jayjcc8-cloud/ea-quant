@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — v0.2.0 bounded offline GitHub prerelease published.**
+**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web integration.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -13,8 +13,9 @@ file records only durable product state and the next bounded outcome.
 
 From an installed wheel and outside a Git checkout, validate and run one user-supplied strict
 scenario with local OHLCV, deterministic initial funding, bounded risk, simulated execution,
-ledger state, reconciliation, audit, and semantic result evidence. No broker, network, secret,
-external write, or live capability is part of this objective.
+ledger state, reconciliation, audit, and semantic result evidence. The same bounded path is also
+available through a single-user Web UI served on loopback only. No broker, remote network, secret,
+external write, deployment, or live capability is part of this objective.
 
 ## Completed
 
@@ -75,14 +76,26 @@ external write, or live capability is part of this objective.
   [GitHub Release](https://github.com/jayjcc8-cloud/ea-quant/releases/tag/v0.2.0) is published as a
   prerelease with only the accepted wheel and its SHA-256 checksum asset. No package-registry
   publication or deployment was performed.
-- The Dark Professional Web shell remains a deterministic read-only Mock Adapter.
+- ADR 0030 permits a post-v0.2.0, loopback-only Web adapter without changing the released
+  v0.2.0 identity or any engine, economic, risk, recovery, reconciliation, or report authority.
+- The installed candidate's `ea web serve` command fixes the listener to `127.0.0.1`, serves the
+  production React build and same-origin API, and keeps scenario, workspace, and UI roots separate.
+- The real `/backtests` UI lists and validates registered strict scenarios, creates one fresh
+  idempotent job through the existing engine, displays its formal report, survives refresh and
+  completed-job service restart, and downloads only the two report artifacts.
+- The local job index is atomic and separate from attempt evidence. A workspace has one service
+  writer, one active job, no queue, and interrupted jobs are preserved without automatic rerun.
+- Host/origin/header/content-type, identifier, artifact allowlist, and resolved-root checks fail
+  closed at the new HTTP boundary. No CORS relaxation, arbitrary browser path, upload, or CDN is
+  part of the product.
 
 ## Incomplete
 
-The v0.2.0 prerelease is one deterministic single-run/reporting MVP, not the broader research,
-paper, or live roadmap. Arbitrary instruction-level recovery, broader performance analytics,
-stochastic seed hierarchies, strategy plugins, paper/live execution, package-registry publication,
-and deployment remain unavailable. Phase 1.1/#125 and Phase 2 have not been activated.
+The v0.2.0 prerelease and local Web increment are one deterministic single-run/reporting product,
+not the broader research, paper, or live roadmap. Arbitrary instruction-level or Web recovery,
+uploads/editing, broader performance analytics, stochastic seed hierarchies, strategy plugins,
+paper/live execution, package-registry publication, and deployment remain unavailable. Phase
+1.1/#125 and Phase 2 have not been activated.
 
 ## Blockers
 
@@ -108,6 +121,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0025 — Project control plane and authority precedence](adr/0025-project-control-plane-and-authority-precedence.md)
 - [ADR 0027 — Phase 1 offline backtest product boundary](adr/0027-phase1-offline-backtest-product-boundary.md)
 - [ADR 0029 — Governance freeze and bounded product delivery](adr/0029-governance-freeze-and-bounded-delivery.md)
+- [ADR 0030 — Local Web offline backtest integration](adr/0030-local-web-offline-backtest-integration.md)
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
@@ -131,6 +145,8 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
   records the accepted clean-main product and the completed limited GitHub prerelease path.
 - [#125 — Phase 1.1 reconciliation/recovery expansion](https://github.com/jayjcc8-cloud/ea-quant/issues/125)
   remains parked and does not block the Offline Backtest MVP or v0.2.0 unless explicitly promoted.
+- [#167 — Local real Web backtest loop](https://github.com/jayjcc8-cloud/ea-quant/issues/167)
+  adds the bounded browser-to-engine-to-report path without activating Phase 1.1 or Phase 2.
 - R9/R10 Issues #149, #150, #152, #153 and PR #151 retain provenance as superseded hardening
   history after the reset governance PR merges; they are not an active delivery chain.
 
@@ -158,6 +174,8 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [x] Report valuation, exact economics, fee/count semantics, and field sources are independently
   testable and available from the installed wheel outside a checkout.
 - [x] Quick Start identifies the supported boundary and known limitations.
+- [x] An installed candidate wheel and matching Web dist complete the loopback-only real browser
+  path through validation, a fresh attempt, formal report, refresh, restart, and artifact download.
 
 These conditions complete Issues #81, #161, and #83 and the bounded v0.2.0 GitHub prerelease gate
 in #84. They do not activate Phase 1.1/#125, Phase 2, package-registry publication, or deployment.

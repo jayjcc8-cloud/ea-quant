@@ -24,6 +24,15 @@ def test_ci_checks_out_and_asserts_the_event_commit() -> None:
     assert 'run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in workflow
 
 
+def test_ci_routes_and_runs_installed_web_e2e() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "examples/web-scenarios/*" in workflow
+    assert "web_e2e:" in workflow
+    assert "npx playwright install --with-deps chromium" in workflow
+    assert "npm run test:e2e" in workflow
+
+
 def test_project_versions_come_from_pyproject() -> None:
     config = verify.load_project_config()
 
@@ -108,6 +117,7 @@ def test_quality_profile_runs_reproducible_gate_before_static_checks(
     gate = (str(python), "-I", "-B", str(verify.REPRODUCIBLE_RUN_PATH))
     lint = ("uv", "run", "--locked", "ruff", "check", ".")
     pytest_commands = [command for command in commands if "pytest" in command]
+    assert ("uv", "sync", "--locked", "--extra", "dev", "--extra", "web") in commands
     assert gate in commands
     assert commands.index(gate) < commands.index(lint)
     assert pytest_commands == [("uv", "run", "--locked", "pytest", "-q")]

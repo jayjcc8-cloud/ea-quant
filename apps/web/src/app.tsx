@@ -1,155 +1,225 @@
-import { BrowserRouter, NavLink, useLocation } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 
-export type MockState = 'ready' | 'loading' | 'empty' | 'error'
-
-type Metric = {
-  label: string
-  value: string
-  detail: string
-  tone?: 'positive' | 'neutral'
+export type InputIdentity = { scenario_sha256: string; data_sha256: string; record_count: number }
+export type ScenarioSummary = {
+  scenario_id: string; name: string; valid: boolean; input_identity?: InputIdentity
+  summary?: { strategy_id: string; venue: string; symbol: string; initial_cash: string; target_quantity: string | null; record_count: number }
+  error_code?: string; message?: string
+}
+export type BacktestJob = {
+  schema: string; job_id: string; request_id: string; scenario_id: string; input_identity: InputIdentity
+  status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'interrupted'; engine_run_id: string | null
+  report_sha256: string | null; error_code: string | null; message: string | null; report_ready: boolean
+}
+type Money = { amount: string; currency?: string }
+export type BacktestReport = {
+  schema: 'ea.backtest-report.v1'; run_id: string
+  source?: { strategy: { id: string; target_quantity: string | null }; instrument: { venue: string; symbol: string } }
+  scenario?: { strategy_id: string; instrument: { venue: string; symbol: string } }
+  economics: {
+    currency?: string; initial_funding?: Money; ending_cash: Money[]
+    ending_positions: { quantity: string; venue: string; symbol: string }[]
+    valuation: { price: string; position_value: string }; equity: Money; net_pnl: Money
+    total_return: { value: string }; counts: { orders: number; fills: number }
+    execution: { order: { quantity: string; side: string } | null; fill: { quantity: string; price: string; side: string } | null }
+  }
+}
+export type ApiAdapter = {
+  listScenarios(): Promise<ScenarioSummary[]>
+  validateScenario(scenarioId: string): Promise<ScenarioSummary>
+  createBacktest(request: { scenario_id: string; input_identity: InputIdentity; request_id: string }): Promise<BacktestJob>
+  listBacktests(): Promise<BacktestJob[]>
+  getBacktest(jobId: string): Promise<BacktestJob>
+  getReport(jobId: string): Promise<BacktestReport>
+  artifactUrl(jobId: string, name: 'report.json' | 'summary.txt'): string
 }
 
-const pages = [
-  'Orders',
-  'Executions',
-  'Positions',
-  'Cash',
-  'Risk',
-  'Recovery',
-  'Audit',
-  'System Health',
-]
-
-export type OverviewSnapshot = {
-  readonly metrics: readonly Metric[]
-  readonly executions: readonly (readonly string[])[]
+class ApiFailure extends Error {
+  constructor(readonly code: string, message: string) { super(message) }
 }
 
-type MockOverview = {
-  readonly state: MockState
-  readonly snapshot: OverviewSnapshot
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init)
+  const payload = await response.json()
+  if (!response.ok) {
+    const detail = payload?.error
+    throw new ApiFailure(detail?.code ?? 'request_failed', detail?.message ?? 'Request failed')
+  }
+  return payload as T
 }
 
-export type MockAdapter = {
-  readonly kind: 'deterministic-read-only-mock'
-  getOverview(search: string): MockOverview
-}
-
-const deterministicSnapshot: OverviewSnapshot = {
-  metrics: [
-    { label: 'Total Equity', value: '$2,485,320.18', detail: '+2.8% month to date' },
-    { label: 'Daily P&L', value: '+$18,420.64', detail: '+0.75% today', tone: 'positive' },
-    { label: 'Unrealized P&L', value: '+$6,184.22', detail: 'Across 7 positions', tone: 'positive' },
-    { label: 'Available Margin', value: '$1,724,880.00', detail: '69.4% available', tone: 'neutral' },
-  ] satisfies Metric[],
-  executions: [
-    ['09:42:18', 'ESU6', 'BUY', '12', '5,382.25'],
-    ['09:37:04', 'NQU6', 'SELL', '8', '19,624.50'],
-    ['09:31:51', 'CLV6', 'BUY', '15', '74.18'],
-  ],
-}
-
-const deterministicMockAdapter: MockAdapter = {
-  kind: 'deterministic-read-only-mock',
-  getOverview(search) {
-    const requested = new URLSearchParams(search).get('state')
-    const state: MockState = requested === 'loading' || requested === 'empty' || requested === 'error'
-      ? requested
-      : 'ready'
-    return { state, snapshot: deterministicSnapshot }
+const browserApi: ApiAdapter = {
+  async listScenarios() { return (await apiRequest<{ scenarios: ScenarioSummary[] }>('/api/scenarios')).scenarios },
+  validateScenario(scenarioId) {
+    return apiRequest(`/api/scenarios/${encodeURIComponent(scenarioId)}/validate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: '{}',
+    })
   },
+  createBacktest(request) {
+    return apiRequest('/api/backtests', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request),
+    })
+  },
+  async listBacktests() { return (await apiRequest<{ jobs: BacktestJob[] }>('/api/backtests')).jobs },
+  getBacktest(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}`) },
+  getReport(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/report`) },
+  artifactUrl(jobId, name) { return `/api/backtests/${encodeURIComponent(jobId)}/artifacts/${name}` },
 }
 
-function StatePanel({ state }: { state: MockState }) {
-  if (state === 'loading') return <section className="state-panel">Loading mock market workspace…</section>
-  if (state === 'empty') return <section className="state-panel">No mock positions in this workspace</section>
-  if (state === 'error') return <section className="state-panel state-error">Mock data is temporarily unavailable</section>
-  return null
+function PageTitle({ title, subtitle, status }: { title: string; subtitle: string; status?: string }) {
+  return <header className="page-title"><div><h1>{title}</h1><p>{subtitle}</p></div>{status && <span className={`status status-${status}`}>{status}</span>}</header>
 }
 
-function MetricCard({ metric }: { metric: Metric }) {
-  return (
-    <article className="metric-card">
-      <span>{metric.label}</span>
-      <strong className={metric.tone === 'positive' ? 'positive' : ''}>{metric.value}</strong>
-      <small>{metric.detail}</small>
-    </article>
-  )
+function Shell({ api }: { api: ApiAdapter }) {
+  return <div className="app-shell">
+    <aside className="sidebar">
+      <Link className="brand" to="/backtests"><span>EA</span><strong>QUANT</strong></Link>
+      <p className="workspace">LOCAL OFFLINE CONSOLE</p>
+      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink></nav>
+      <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
+    </aside>
+    <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
+      <Routes>
+        <Route path="/backtests" element={<Backtests api={api} />} />
+        <Route path="/backtests/:jobId" element={<BacktestDetail api={api} />} />
+        <Route path="*" element={<Navigate replace to="/backtests" />} />
+      </Routes>
+    </div></main>
+  </div>
 }
 
-function Overview({ overview }: { overview: MockOverview }) {
-  const { state, snapshot } = overview
-  return (
-    <>
-      <PageTitle title="Overview" subtitle="Capital, exposure, and operations at a glance" />
-      <StatePanel state={state} />
-      {state === 'ready' && (
-        <div className="overview-grid">
-          <section className="metrics" aria-label="Mock account metrics">
-            {snapshot.metrics.map((metric) => <MetricCard key={metric.label} metric={metric} />)}
-          </section>
-          <section className="panel curve-panel">
-            <PanelHeading title="Equity Curve" note="Mock · trailing 30 sessions" />
-            <div className="curve" aria-label="Mock equity curve"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div>
-            <div className="curve-labels"><span>Jul 31</span><span>Aug 14</span><span>Aug 29</span></div>
-          </section>
-          <section className="panel allocation-panel">
-            <PanelHeading title="Asset Allocation" note="Mock exposure" />
-            <div className="allocation-ring"><strong>100%</strong><span>Allocated</span></div>
-            <dl className="allocation-list"><div><dt>Equity index</dt><dd>42%</dd></div><div><dt>Rates</dt><dd>28%</dd></div><div><dt>Energy</dt><dd>18%</dd></div><div><dt>FX</dt><dd>12%</dd></div></dl>
-          </section>
-          <section className="panel positions-panel">
-            <PanelHeading title="Open Positions" note="Mock · 7 instruments" />
-            <div className="position-stat"><strong>7</strong><span>Open Positions</span><em>Gross $760,440</em></div>
-          </section>
-          <section className="panel orders-panel">
-            <PanelHeading title="Active Orders" note="Mock · working" />
-            <div className="position-stat"><strong>4</strong><span>Active Orders</span><em>All limits</em></div>
-          </section>
-          <section className="panel executions-panel">
-            <PanelHeading title="Recent Executions" note="Mock · today" />
-            <table><thead><tr><th>Time</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead><tbody>{snapshot.executions.map((row) => <tr key={row.join('-')}>{row.map((cell) => <td key={cell}>{cell}</td>)}</tr>)}</tbody></table>
-          </section>
-          <section className="panel health-panel">
-            <PanelHeading title="System Health" note="Mock · local adapter" />
-            <div className="health-row"><span className="status-dot" />All mock services nominal</div>
-            <dl className="environment"><div><dt>Environment</dt><dd>SIMULATION</dd></div><div><dt>Last Sync</dt><dd>09:45:00 UTC</dd></div></dl>
-          </section>
-        </div>
-      )}
-    </>
-  )
-}
+function Backtests({ api }: { api: ApiAdapter }) {
+  const navigate = useNavigate()
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([])
+  const [jobs, setJobs] = useState<BacktestJob[]>([])
+  const [selected, setSelected] = useState('')
+  const [validated, setValidated] = useState<ScenarioSummary | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [disconnected, setDisconnected] = useState(false)
 
-function PanelHeading({ title, note }: { title: string; note: string }) {
-  return <header className="panel-heading"><h2>{title}</h2><span>{note}</span></header>
-}
+  useEffect(() => {
+    let current = true
+    Promise.all([api.listScenarios(), api.listBacktests()]).then(([nextScenarios, nextJobs]) => {
+      if (!current) return
+      setScenarios(nextScenarios); setJobs(nextJobs); setSelected(nextScenarios.find((item) => item.valid)?.scenario_id ?? '')
+    }).catch(() => { if (current) setDisconnected(true) })
+    return () => { current = false }
+  }, [api])
 
-function PageTitle({ title, subtitle }: { title: string; subtitle: string }) {
-  return <header className="page-title"><div><h1>{title}</h1><p>{subtitle}</p></div><span className="mock-badge">MOCK DATA</span></header>
-}
+  const candidate = useMemo(() => scenarios.find((item) => item.scenario_id === selected), [scenarios, selected])
+  const validate = async () => {
+    setBusy(true); setError(null)
+    try { setValidated(await api.validateScenario(selected)) }
+    catch (caught) { setValidated(null); setError(caught instanceof Error ? caught.message : 'Validation failed') }
+    finally { setBusy(false) }
+  }
+  const run = async () => {
+    if (!validated?.input_identity) return
+    setBusy(true); setError(null)
+    try {
+      const random = globalThis.crypto?.randomUUID?.() ?? `request-${Date.now()}-${Math.random().toString(16).slice(2)}`
+      const accepted = await api.createBacktest({ scenario_id: validated.scenario_id, input_identity: validated.input_identity, request_id: random })
+      navigate(`/backtests/${accepted.job_id}`)
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Run request failed'); setBusy(false) }
+  }
 
-function SkeletonPage({ title }: { title: string }) {
-  return <><PageTitle title={title} subtitle="Operational view prepared for future read-only integration" /><section className="skeleton"><span>Mock workspace · read-only skeleton</span><div /><div /><div /></section></>
-}
-
-function NotFoundPage({ path }: { path: string }) {
-  return <><PageTitle title="Not Found" subtitle="This read-only mock workspace route is not available" /><section className="skeleton"><span>Read-only mock workspace has no route for {path}.</span></section></>
-}
-
-function Shell({ adapter }: { adapter: MockAdapter }) {
-  const location = useLocation()
-  const current = pages.find((page) => location.pathname === `/${page.toLowerCase().replaceAll(' ', '-')}`)
-  const overview = adapter.getOverview(location.search)
-
-  return (
-    <div className="app-shell">
-      <aside className="sidebar"><a className="brand" href="/"><span>EA</span><strong>QUANT</strong></a><p className="workspace">OPERATIONS CONSOLE</p><nav aria-label="Primary navigation"><NavLink end to="/">Overview</NavLink>{pages.map((page) => <NavLink key={page} to={`/${page.toLowerCase().replaceAll(' ', '-')}`}>{page}</NavLink>)}</nav><div className="sidebar-footer"><span className="status-dot" />Mock adapter active</div></aside>
-      <main><header className="topbar"><span>Global Markets · USD</span><span>Read-only workspace</span></header><div className="content">{current ? <SkeletonPage title={current} /> : location.pathname === '/' ? <Overview overview={overview} /> : <NotFoundPage path={location.pathname} />}</div></main>
+  return <>
+    <PageTitle title="Offline Backtests" subtitle="Validate prepared local scenarios and run one real installed-engine attempt." />
+    {disconnected && <section className="notice error">Local service is unreachable</section>}
+    {error && <section className="notice error">{error}</section>}
+    <div className="backtest-grid">
+      <section className="panel control-panel">
+        <header><h2>New backtest</h2><span>One active job</span></header>
+        <label htmlFor="scenario">Scenario</label>
+        <select id="scenario" value={selected} onChange={(event) => { setSelected(event.target.value); setValidated(null); setError(null) }}>
+          <option value="">Select prepared scenario</option>
+          {scenarios.map((item) => <option key={item.scenario_id} value={item.scenario_id} disabled={!item.valid}>{item.name}{item.valid ? '' : ' · invalid'}</option>)}
+        </select>
+        {candidate?.summary && <dl className="summary-list">
+          <div><dt>Strategy</dt><dd>{candidate.summary.strategy_id}</dd></div><div><dt>Instrument</dt><dd>{candidate.summary.venue}:{candidate.summary.symbol}</dd></div>
+          <div><dt>Initial cash</dt><dd>{candidate.summary.initial_cash}</dd></div><div><dt>Records</dt><dd>{candidate.summary.record_count}</dd></div>
+          <div><dt>Target</dt><dd>{candidate.summary.target_quantity ?? 'flat'}</dd></div>
+        </dl>}
+        <div className="actions"><button disabled={!selected || busy} onClick={validate}>Validate input</button><button className="primary" disabled={!validated || busy} onClick={run}>Run new backtest</button></div>
+        {validated?.summary && <div className="validated"><strong>Validated input</strong><span>Target quantity: {validated.summary.target_quantity ?? 'flat'}</span><small>{validated.input_identity?.scenario_sha256.slice(0, 12)}…</small></div>}
+      </section>
+      <section className="panel jobs-panel"><header><h2>Workspace jobs</h2><span>Refresh-safe index</span></header>
+        {jobs.length === 0 ? <p className="muted">No backtests yet.</p> : <ul className="job-list">{jobs.map((item) => <li key={item.job_id}><Link to={`/backtests/${item.job_id}`}><strong>{item.scenario_id}</strong><span>{item.status}</span><small>{item.engine_run_id ?? item.job_id}</small></Link></li>)}</ul>}
+      </section>
     </div>
-  )
+  </>
 }
 
-export function App({ adapter = deterministicMockAdapter }: { readonly adapter?: MockAdapter }) {
-  return <BrowserRouter><Shell adapter={adapter} /></BrowserRouter>
+function BacktestDetail({ api }: { api: ApiAdapter }) {
+  const { jobId = '' } = useParams()
+  const [job, setJob] = useState<BacktestJob | null>(null)
+  const [report, setReport] = useState<BacktestReport | null>(null)
+  const [disconnected, setDisconnected] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      const current = await api.getBacktest(jobId); setJob(current); setDisconnected(false); setError(null)
+      if (current.status === 'succeeded' && current.report_ready) setReport(await api.getReport(jobId))
+      return current.status
+    } catch (caught) {
+      if (caught instanceof ApiFailure) setError(caught.message)
+      else setDisconnected(true)
+      return 'failed'
+    }
+  }, [api, jobId])
+
+  useEffect(() => {
+    let active = true; let timer: number | undefined
+    const poll = async () => {
+      const status = await refresh()
+      if (active && (status === 'accepted' || status === 'running')) timer = window.setTimeout(poll, 150)
+    }
+    void poll()
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer) }
+  }, [refresh])
+
+  if (!job) return <><PageTitle title="Backtest Result" subtitle="Loading the workspace job and formal report." />{disconnected && <section className="notice error">Local service is unreachable</section>}{error && <section className="notice error">{error}</section>}</>
+  const economics = report?.economics
+  const currency = economics?.currency ?? economics?.ending_cash[0]?.currency ?? economics?.initial_funding?.currency ?? 'USD'
+  const strategy = report?.source?.strategy.id ?? report?.scenario?.strategy_id
+  const instrument = report?.source?.instrument ?? report?.scenario?.instrument
+  return <>
+    <PageTitle title="Backtest Result" subtitle={`${job.scenario_id} · job ${job.job_id}`} status={job.status} />
+    {disconnected && <section className="notice error">Local service is unreachable · showing historical loaded result</section>}
+    {job.message && <section className="notice error"><strong>{job.error_code}</strong> · {job.message}</section>}
+    <div className="result-toolbar"><Link to="/backtests">← New or saved backtest</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
+    <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
+      <div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
+    </dl></section>
+    {economics ? <>
+      <section className="metrics">
+        <Metric label="Initial cash" value={economics.initial_funding ? `${economics.initial_funding.amount} ${currency}` : 'not available'} />
+        <Metric label="Ending cash" value={`${economics.ending_cash[0]?.amount ?? '0'} ${currency}`} />
+        <Metric label="Equity" value={`${economics.equity.amount} ${currency}`} />
+        <Metric label="Net P&L" value={`${economics.net_pnl.amount} ${currency}`} />
+        <Metric label="Total return" value={economics.total_return.value} />
+        <Metric label="Position quantity" value={economics.ending_positions[0]?.quantity ?? '0'} />
+      </section>
+      <div className="backtest-grid">
+        <section className="panel"><header><h2>Execution</h2><span>Canonical strings</span></header><dl className="summary-list">
+          <div><dt>Order</dt><dd>{economics.execution.order ? `${economics.execution.order.side} ${economics.execution.order.quantity}` : 'none'}</dd></div>
+          <div><dt>Fill quantity</dt><dd>{economics.execution.fill?.quantity ?? 'none'}</dd></div><div><dt>Fill price</dt><dd>{economics.execution.fill?.price ?? 'none'}</dd></div>
+          <div><dt>Valuation price</dt><dd>{economics.valuation.price}</dd></div><div><dt>Position value</dt><dd>{economics.valuation.position_value}</dd></div>
+          <div><dt>Counts</dt><dd><span>Orders {economics.counts.orders}</span> · <span>Fills {economics.counts.fills}</span></dd></div>
+        </dl></section>
+        <section className="panel"><header><h2>Artifacts</h2><span>Read-only downloads</span></header><div className="downloads"><a href={api.artifactUrl(jobId, 'report.json')}>Download report.json</a><a href={api.artifactUrl(jobId, 'summary.txt')}>Download summary.txt</a></div><p className="muted">Net P&amp;L may include open-position valuation; it is not presented as realized profit.</p></section>
+      </div>
+    </> : <section className="panel"><p className="muted">{job.status === 'failed' || job.status === 'interrupted' ? 'No success report is available.' : 'The installed engine is running. This page will refresh automatically.'}</p></section>}
+  </>
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return <article className="metric-card"><span>{label}</span><strong>{value}</strong></article>
+}
+
+export function App({ api = browserApi }: { readonly api?: ApiAdapter }) {
+  return <BrowserRouter><Shell api={api} /></BrowserRouter>
 }

@@ -134,7 +134,14 @@ def test_task_and_pr_templates_focus_on_delivery_not_role_evidence() -> None:
 
 def test_ci_keeps_path_aware_quality_and_installed_main_smoke() -> None:
     jobs = _workflow_jobs(CI_WORKFLOW_PATH)
-    assert set(jobs) == {"classify", "governance", "quality", "main_smoke", "frontend"}
+    assert set(jobs) == {
+        "classify",
+        "governance",
+        "quality",
+        "main_smoke",
+        "frontend",
+        "web_e2e",
+    }
     assert "needs.classify.outputs.docs_only == 'true'" in jobs["governance"]["if"]
     assert "github.event_name == 'pull_request'" in jobs["quality"]["if"]
     assert jobs["main_smoke"]["if"] == "github.event_name == 'push'"

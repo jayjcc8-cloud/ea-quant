@@ -47,8 +47,9 @@ This is a product dependency order, not a sequence of governance phases or actor
 - Tool migration or governance automation without repeated evidence of manual failure.
 - Automatic reconciliation correction, balance adjustment, ancestry repair, or exhaustive recovery
   across dormant correction combinations.
-- Initial positions, multiple settlement currencies, real Web/runtime integration, or research-grade
-  performance analytics.
+- Initial positions, multiple settlement currencies, network/deployed Web integration, or
+  research-grade performance analytics. ADR 0030 permits only the bounded loopback Web adapter
+  over the existing offline product.
 
 ## Phase 1 Exit Criteria
 

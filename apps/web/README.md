@@ -1,8 +1,10 @@
 # EA Quant Web
 
-This is the UI-001 Dark Professional frontend foundation. It is a deterministic, TypeScript-only
-mock workspace: it has no API, backend, network adapter, database, WebSocket, trading control, or
-recovery command.
+This is the Dark Professional frontend for the real local offline backtest loop defined by ADR
+0030. The production build talks only to the same-origin `/api` served by `ea web serve`; it does
+not fall back to mock business data when the service is unavailable. Component tests inject an
+explicit fake adapter, while the Playwright suite uses an installed candidate wheel, actual
+loopback HTTP, the existing engine, and formal reports.
 
 Run the supported frontend checks from this directory:
 
@@ -12,7 +14,29 @@ npm run lint
 npm run typecheck
 npm test
 npm run build
+npm run test:e2e
 ```
 
-Use `npm run dev` for local visual review. The Overview mock-state fixtures are available at
-`/?state=loading`, `/?state=empty`, and `/?state=error`; normal `/` is the ready state.
+`npm run test:e2e` builds the wheel and UI, creates a repository-outside Python environment,
+installs the wheel non-editably with its Web extra, and runs Chromium against the installed
+service. The supported product entry is `/backtests`; `/backtests/{job_id}` is refreshable.
+
+For direct use, build with `npm run build`, then follow the root README command using separate
+scenario, workspace, and `dist` roots:
+
+```bash
+WHEEL=/absolute/path/to/the-candidate-wheel.whl
+WEB_DIST=/absolute/path/to/apps/web/dist
+SCENARIOS=/absolute/path/to/examples/web-scenarios
+WORKSPACE=/absolute/path/to/an-empty-web-workspace
+uv venv --python 3.12 web-env
+uv pip install --python web-env/bin/python "$WHEEL[web]"
+web-env/bin/ea web serve \
+  --scenario-root "$SCENARIOS" \
+  --workspace "$WORKSPACE" \
+  --ui-dir "$WEB_DIST" \
+  --port 8765
+```
+
+Open `http://127.0.0.1:8765/backtests`; stop the service with `Ctrl-C`. There is no host option and
+Vite development mode is not the delivery entrypoint.

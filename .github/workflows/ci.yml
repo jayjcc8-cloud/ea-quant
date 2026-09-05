@@ -72,7 +72,12 @@ jobs:
                 web=true
                 docs_only=false
                 ;;
-              src/*|tests/*|scripts/*|pyproject.toml|uv.lock)
+              src/ea/web/*|src/ea/cli/*|src/ea/product/backtest.py|src/ea/product/reporting.py|src/ea/product/scenario.py|tests/unit/test_web*|tests/unit/test_cli_web.py|examples/web-scenarios/*|pyproject.toml|uv.lock)
+                python=true
+                web=true
+                docs_only=false
+                ;;
+              src/*|tests/*|scripts/*)
                 python=true
                 docs_only=false
                 ;;
@@ -221,6 +226,41 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+
+  web_e2e:
+    needs: classify
+    if: needs.classify.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UV_PROJECT_ENVIRONMENT: venv
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert event exact checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version-file: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install locked Web dependencies and Chromium
+        working-directory: apps/web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Verify installed local Web backtest loop
+        working-directory: apps/web
+        run: npm run test:e2e
 
   main_smoke:
     needs: classify
