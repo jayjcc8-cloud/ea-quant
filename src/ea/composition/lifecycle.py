@@ -87,6 +87,77 @@ from ea.runtime.matcher import (
 _LIFECYCLE_SEAL = object()
 _READ_VIEW_SEAL = object()
 _COORDINATOR_FACADE_SEAL = object()
+_ECONOMIC_GATE_SEAL = object()
+
+
+@final
+class _Phase1EconomicGate:
+    """Shared authority carrier for one phase-1 economic lineage."""
+
+    __slots__ = (
+        "__ledger",
+        "__ledger_handoff_authority",
+        "__risk_authority",
+        "__risk_refresh_authority",
+        "__frontier",
+    )
+
+    def __init__(
+        self,
+        *,
+        ledger: Any,
+        ledger_handoff_authority: Any,
+        risk_authority: Any,
+        risk_refresh_authority: Any,
+        frontier: Any,
+        seal: object,
+    ) -> None:
+        if seal is not _ECONOMIC_GATE_SEAL:
+            raise TypeError("economic gates are created only by composition")
+        self.__ledger = ledger
+        self.__ledger_handoff_authority = ledger_handoff_authority
+        self.__risk_authority = risk_authority
+        self.__risk_refresh_authority = risk_refresh_authority
+        self.__frontier = frontier
+
+    @property
+    def ledger(self) -> Any:
+        return self.__ledger
+
+    @property
+    def ledger_handoff_authority(self) -> Any:
+        return self.__ledger_handoff_authority
+
+    @property
+    def risk_authority(self) -> Any:
+        return self.__risk_authority
+
+    @property
+    def risk_refresh_authority(self) -> Any:
+        return self.__risk_refresh_authority
+
+    @property
+    def frontier(self) -> Any:
+        return self.__frontier
+
+    def __iter__(self) -> Any:
+        return iter(
+            (
+                self.__ledger_handoff_authority,
+                self.__risk_authority,
+                self.__risk_refresh_authority,
+                self.__frontier,
+            )
+        )
+
+    def __getitem__(self, index: int) -> Any:
+        values = (
+            self.__ledger_handoff_authority,
+            self.__risk_authority,
+            self.__risk_refresh_authority,
+            self.__frontier,
+        )
+        return values[index]
 
 
 class HistoricalLifecycleOrderVerifier(
@@ -448,7 +519,7 @@ def _create_economic_gate(
     spec_set: InstrumentExecutionSpecSet,
     execution_policy: ExecutionPolicyRef,
     risk_policy: Phase1RiskPolicy,
-) -> tuple[Any, Any, Any, Any]:
+) -> _Phase1EconomicGate:
     ledger = portfolio.create_portfolio_ledger(run_id, spec_set)
     ledger_authority = portfolio.create_phase1_ledger_handoff_authority(run_id, spec_set, ledger)
     risk_authority = risk.create_phase1_risk_authority(
@@ -463,7 +534,50 @@ def _create_economic_gate(
     frontier = create_acknowledged_lifecycle_frontier(
         initial_snapshot=ledger.snapshot, initial_risk_state=risk_authority.risk_state
     )
-    return ledger_authority, risk_authority, refresh_authority, frontier
+    return _Phase1EconomicGate(
+        ledger=ledger,
+        ledger_handoff_authority=ledger_authority,
+        risk_authority=risk_authority,
+        risk_refresh_authority=refresh_authority,
+        frontier=frontier,
+        seal=_ECONOMIC_GATE_SEAL,
+    )
+
+
+def create_phase1_historical_economic_gate(
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+) -> _Phase1EconomicGate:
+    """Create one shared gate for phase-1 historical execution composition."""
+    return _create_economic_gate(
+        run_id=run_id,
+        spec_set=spec_set,
+        execution_policy=execution_policy,
+        risk_policy=risk_policy,
+    )
+
+
+def _require_economic_gate(
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+    economic_gate: _Phase1EconomicGate | None,
+) -> _Phase1EconomicGate:
+    if economic_gate is None:
+        return _create_economic_gate(
+            run_id=run_id,
+            spec_set=spec_set,
+            execution_policy=execution_policy,
+            risk_policy=risk_policy,
+        )
+    if type(economic_gate) is not _Phase1EconomicGate:
+        raise TypeError("economic gate must be exact _Phase1EconomicGate")
+    return economic_gate
 
 
 def create_phase1_historical_lifecycle(
@@ -480,13 +594,19 @@ def create_phase1_historical_lifecycle(
     risk_policy: Phase1RiskPolicy,
     global_halt: GlobalHaltFreshnessPort,
     instrument_gate: InstrumentGateFreshnessPort,
+    economic_gate: _Phase1EconomicGate | None = None,
 ) -> Phase1HistoricalLifecycle:
     """Construct dormant authority, matcher, facts, coordinator, then activate once."""
     if type(prepared_acknowledgement) is not AuditAppendAcknowledgement:
         raise TypeError("fresh lifecycle construction requires one prepared acknowledgement")
-    ledger_handoff_authority, risk_authority, risk_refresh_authority, frontier = (
-        _create_economic_gate(binding.reference.run_id, spec_set, execution_policy, risk_policy)
+    economic_gate = _require_economic_gate(
+        run_id=binding.reference.run_id,
+        spec_set=spec_set,
+        execution_policy=execution_policy,
+        risk_policy=risk_policy,
+        economic_gate=economic_gate,
     )
+    ledger_handoff_authority, risk_authority, risk_refresh_authority, frontier = economic_gate
     authorization, preparation_capability, activation_seal = (
         create_dormant_historical_submission_authorization_authority(
             binding=binding,

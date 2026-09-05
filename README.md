@@ -29,6 +29,12 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile quality
 uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
+Run the supported installed offline command:
+
+```bash
+venv/bin/ea backtest run --output-root ./ea-result
+```
+
 The system defaults to bounded backtest mode. Paper/live profiles, real broker writes, and resolved
 credentials are not available.
 

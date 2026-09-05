@@ -349,6 +349,39 @@ def verify_wheel_metadata(wheel: Path) -> None:
         print(archive.read(metadata_files[0]).decode("utf-8"), end="", flush=True)
 
 
+def verify_installed_demo_smoke(
+    entrypoint: Path,
+    python: Path,
+    outside_repository: Path,
+    env: Mapping[str, str],
+) -> None:
+    """Run installed offline demo from repo-outside checkout and assert deterministic success."""
+    demo_output_root = outside_repository / "ea-installed-demo"
+    run(
+        [str(entrypoint), "backtest", "run", "--output-root", str(demo_output_root)],
+        cwd=outside_repository,
+        env=env,
+    )
+    expectation = (
+        "import json\n"
+        "from pathlib import Path\n"
+        f'demo_root = Path({str(demo_output_root)!r})\\n'
+        "result_path = demo_root / 'phase1-demo-v1' / 'result.json'\\n"
+        "summary_path = demo_root / 'phase1-demo-v1' / 'summary.txt'\\n"
+        "audit_path = demo_root / 'phase1-demo-v1' / 'audit.jsonl'\\n"
+        "failure_path = demo_root / 'phase1-demo-v1' / 'failure.json'\\n"
+        "assert result_path.is_file(), str(result_path)\\n"
+        "assert summary_path.is_file(), str(summary_path)\\n"
+        "assert audit_path.is_file(), str(audit_path)\\n"
+        "assert not failure_path.exists(), str(failure_path)\\n"
+        "result = json.loads(result_path.read_text(encoding='utf-8'))\\n"
+        "assert isinstance(result, dict)\\n"
+        "assert result['run_status'] == 'completed'\\n"
+        "assert result['trade_outcome'] == 'filled'\\n"
+    )
+    run([str(python), "-I", "-c", expectation], cwd=outside_repository, env=env)
+
+
 def verify_full(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> None:
     """Run quality plus reproducible-build and clean-wheel verification."""
     verify_quality(uv, config, env, measure_coverage=True)
@@ -405,6 +438,12 @@ def verify_full(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> None:
             env=clean_env,
         )
         run([str(clean_entrypoint), "doctor"], cwd=outside_repository, env=clean_env)
+        verify_installed_demo_smoke(
+            clean_entrypoint,
+            clean_python,
+            outside_repository,
+            clean_env,
+        )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

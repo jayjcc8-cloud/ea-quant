@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, cast
 
 import typer
 
 from ea.config import ConfigurationError, load_configuration
 from ea.config.diagnostics import escape_diagnostic_label
+from ea.product import OfflineDemoFailure, OfflineDemoInputError, run_offline_demo
 
 app = typer.Typer(
     help="EA quantitative trading system CLI.",
     context_settings={"token_normalize_func": escape_diagnostic_label},
 )
+backtest_app = typer.Typer(help="Deterministic offline backtest products.")
+app.add_typer(backtest_app, name="backtest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +97,41 @@ def doctor(context: typer.Context) -> None:
     typer.echo(f"environment: {loaded.snapshot.environment.value}")
     typer.echo(f"run mode: {loaded.snapshot.run.mode.value}")
     typer.echo("live profile: unavailable")
+
+
+@backtest_app.command("run")
+def run(
+    output_root: Annotated[
+        Path,
+        typer.Option(
+            "--output-root",
+            help="New parent directory for the fixed phase1-demo-v1 attempt.",
+            metavar="DIR",
+        ),
+    ],
+) -> None:
+    """Run the installed fixed-input offline vertical slice once."""
+    try:
+        resolved_output = output_root.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        typer.echo("demo input error: output root cannot be resolved", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        completed = run_offline_demo(resolved_output)
+    except OfflineDemoInputError as error:
+        typer.echo(f"demo input error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except OfflineDemoFailure as error:
+        typer.echo(f"demo failed closed: {error.code.value}", err=True)
+        typer.echo(f"evidence: {error.output_directory}", err=True)
+        raise typer.Exit(code=3) from None
+    except Exception:
+        typer.echo("demo internal error", err=True)
+        raise typer.Exit(code=1) from None
+
+    typer.echo(f"offline demo: {completed.status}")
+    typer.echo(f"result: {completed.output_directory / 'result.json'}")
+    typer.echo("live capability: unavailable")
 
 
 if __name__ == "__main__":
