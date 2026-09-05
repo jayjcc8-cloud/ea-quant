@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from click import unstyle
 from typer.testing import CliRunner
 
 from ea.cli.app import app
@@ -10,14 +11,15 @@ from ea.web.app import WebSettings
 
 def test_web_help_exposes_only_explicit_local_roots_and_port() -> None:
     result = CliRunner().invoke(app, ["web", "serve", "--help"], color=False)
+    output = unstyle(result.stdout)
 
     assert result.exit_code == 0
-    assert "--scenario-root" in result.stdout
-    assert "--workspace" in result.stdout
-    assert "--ui-dir" in result.stdout
-    assert "--port" in result.stdout
-    assert "127.0.0.1" in result.stdout
-    assert "--host" not in result.stdout
+    assert "--scenario-root" in output
+    assert "--workspace" in output
+    assert "--ui-dir" in output
+    assert "--port" in output
+    assert "127.0.0.1" in output
+    assert "--host" not in output
 
 
 def test_web_serve_passes_explicit_boundaries_to_local_server(
