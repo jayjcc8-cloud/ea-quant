@@ -7,6 +7,7 @@ from typing import Annotated, cast
 
 import typer
 
+from ea import __version__
 from ea.config import ConfigurationError, load_configuration
 from ea.config.diagnostics import escape_diagnostic_label
 from ea.product import (
@@ -28,7 +29,9 @@ app = typer.Typer(
     help="EA quantitative trading system CLI.",
     context_settings={"token_normalize_func": escape_diagnostic_label},
 )
-backtest_app = typer.Typer(help="Deterministic offline backtest products.")
+backtest_app = typer.Typer(
+    help=("Strict scenarios support validate, run, resume, and report; the RESET demo is run-only.")
+)
 app.add_typer(backtest_app, name="backtest")
 
 
@@ -54,9 +57,24 @@ def _single_cli_option[T](
     return values[0]
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
 @app.callback()
 def main(
     context: typer.Context,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the installed ea-quant version and exit.",
+        ),
+    ] = False,
     config_path: Annotated[
         list[str] | None,
         typer.Option(
@@ -118,7 +136,10 @@ def run(
         Path,
         typer.Option(
             "--output-root",
-            help="New parent directory for the fixed phase1-demo-v1 attempt.",
+            help=(
+                "Parent directory; strict runs create UUID attempt directories, "
+                "while the RESET demo writes phase1-demo-v1."
+            ),
             metavar="DIR",
         ),
     ],
@@ -131,7 +152,7 @@ def run(
         ),
     ] = None,
 ) -> None:
-    """Run one strict scenario, or the compatible fixed RESET demo when omitted."""
+    """Run one strict scenario, or the run-only RESET demo when --scenario is omitted."""
     try:
         resolved_output = output_root.expanduser().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
@@ -204,7 +225,7 @@ def resume(
         Path,
         typer.Option(
             "--run-dir",
-            help="Existing resumable Backtest attempt directory.",
+            help="Existing strict Backtest attempt directory.",
             metavar="ATTEMPT_DIR",
         ),
     ],
@@ -235,7 +256,7 @@ def report(
         Path,
         typer.Option(
             "--run-dir",
-            help="Completed Backtest attempt directory to read without execution.",
+            help="Completed strict Backtest attempt directory to read without execution.",
             metavar="ATTEMPT_DIR",
         ),
     ],
