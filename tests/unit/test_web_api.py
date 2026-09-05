@@ -402,6 +402,31 @@ def test_reporter_failure_retains_successful_engine_run_identity(
     assert not (settings.workspace / "reports" / failed["job_id"] / "report.json").exists()
 
 
+def test_summary_download_rejects_bytes_changed_after_report_generation(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "flat.yaml")
+        response = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "flat.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-summary-tamper-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        job = _wait(client, response.json()["job_id"])
+        summary_path = settings.workspace / "reports" / job["job_id"] / "summary.txt"
+        summary_path.write_text("tampered summary\n", encoding="utf-8")
+
+        report_response = client.get(f"/api/backtests/{job['job_id']}/artifacts/report.json")
+        summary_response = client.get(f"/api/backtests/{job['job_id']}/artifacts/summary.txt")
+
+    assert report_response.status_code == 200
+    assert summary_response.status_code == 409
+    assert summary_response.json()["error"]["code"] == "report_unavailable"
+
+
 def test_workspace_lease_blocks_a_second_service_instance(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
@@ -433,6 +458,7 @@ def test_restart_marks_inflight_job_interrupted_without_rerun(tmp_path: Path) ->
         "message": None,
         "report_ready": False,
         "report_sha256": None,
+        "summary_sha256": None,
         "request_id": "request-interrupted-0001",
         "scenario_id": "bounded-long.yaml",
         "schema": "ea.local-web-job.v1",

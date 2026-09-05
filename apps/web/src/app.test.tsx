@@ -18,7 +18,7 @@ const scenarios = [
 const job: BacktestJob = {
   schema: 'ea.local-web-job.v1', job_id: 'job-1', request_id: 'request-1', scenario_id: 'bounded-long.yaml',
   input_identity: identity, status: 'succeeded', engine_run_id: 'run-1', report_sha256: 'c'.repeat(64),
-  error_code: null, message: null, report_ready: true,
+  summary_sha256: 'd'.repeat(64), error_code: null, message: null, report_ready: true,
 }
 const report: BacktestReport = {
   schema: 'ea.backtest-report.v1', run_id: 'run-1',

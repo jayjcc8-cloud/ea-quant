@@ -205,6 +205,7 @@ class JobRecord:
     status: str
     engine_run_id: str | None = None
     report_sha256: str | None = None
+    summary_sha256: str | None = None
     error_code: str | None = None
     message: str | None = None
 
@@ -218,9 +219,14 @@ class JobRecord:
             "status": self.status,
             "engine_run_id": self.engine_run_id,
             "report_sha256": self.report_sha256,
+            "summary_sha256": self.summary_sha256,
             "error_code": self.error_code,
             "message": self.message,
-            "report_ready": self.status == "succeeded" and self.report_sha256 is not None,
+            "report_ready": (
+                self.status == "succeeded"
+                and self.report_sha256 is not None
+                and self.summary_sha256 is not None
+            ),
         }
 
 
@@ -240,7 +246,13 @@ def _decode_job(payload: bytes) -> JobRecord:
         fields = ("job_id", "request_id", "scenario_id")
         if any(type(document.get(field)) is not str for field in fields):
             raise ValueError
-        optional = ("engine_run_id", "report_sha256", "error_code", "message")
+        optional = (
+            "engine_run_id",
+            "report_sha256",
+            "summary_sha256",
+            "error_code",
+            "message",
+        )
         if any(
             document.get(field) is not None and type(document.get(field)) is not str
             for field in optional
@@ -256,6 +268,7 @@ def _decode_job(payload: bytes) -> JobRecord:
             status=status_value,
             engine_run_id=document.get("engine_run_id"),
             report_sha256=document.get("report_sha256"),
+            summary_sha256=document.get("summary_sha256"),
             error_code=document.get("error_code"),
             message=document.get("message"),
         )
@@ -450,6 +463,7 @@ class WebService:
                 report_dir = self.reports_dir / job_id
                 generated = generate_backtest_report(result.output_directory, report_dir)
                 payload = generated.report.canonical_bytes
+                summary_payload = generated.report.summary_bytes
                 document = json.loads(payload)
                 if (
                     type(document) is not dict
@@ -462,6 +476,7 @@ class WebService:
                     record,
                     status="failed",
                     report_sha256=None,
+                    summary_sha256=None,
                     error_code="report_failed",
                     message="the engine succeeded but the formal report was unavailable",
                 )
@@ -470,6 +485,7 @@ class WebService:
                     record,
                     status="succeeded",
                     report_sha256=sha256(payload).hexdigest(),
+                    summary_sha256=sha256(summary_payload).hexdigest(),
                     error_code=None,
                     message=None,
                 )
@@ -522,14 +538,25 @@ class WebService:
             raise ReportUnavailableError("verified report identity conflicts")
         return payload
 
-    def artifact(self, job_id: str, name: str) -> Path:
+    def artifact(self, job_id: str, name: str) -> bytes:
         if name not in _ARTIFACTS:
             raise JobNotFoundError("artifact was not found")
-        self.report(job_id)
+        report_payload = self.report(job_id)
+        if name == "report.json":
+            return report_payload
+        record = self.get_job(job_id)
+        if record.summary_sha256 is None:
+            raise ReportUnavailableError("verified summary is not available for this job")
         path = self.reports_dir / job_id / name
-        if not path.is_file() or path.is_symlink():
-            raise ReportUnavailableError("verified artifact is unavailable")
-        return path
+        try:
+            if not path.is_file() or path.is_symlink():
+                raise OSError
+            payload = path.read_bytes()
+        except OSError:
+            raise ReportUnavailableError("verified artifact is unavailable") from None
+        if sha256(payload).hexdigest() != record.summary_sha256:
+            raise ReportUnavailableError("verified artifact identity conflicts")
+        return payload
 
 
 __all__ = [

@@ -10,7 +10,7 @@ export type ScenarioSummary = {
 export type BacktestJob = {
   schema: string; job_id: string; request_id: string; scenario_id: string; input_identity: InputIdentity
   status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'interrupted'; engine_run_id: string | null
-  report_sha256: string | null; error_code: string | null; message: string | null; report_ready: boolean
+  report_sha256: string | null; summary_sha256: string | null; error_code: string | null; message: string | null; report_ready: boolean
 }
 type Money = { amount: string; currency?: string }
 export type BacktestReport = {

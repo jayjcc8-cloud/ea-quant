@@ -202,7 +202,12 @@ def create_app(settings: WebSettings) -> Any:
     @app.get("/api/backtests/{job_id}/artifacts/{name}")
     def get_artifact(job_id: str, name: str) -> Response:
         try:
-            return FileResponse(service.artifact(job_id, name), filename=name)
+            media_type = "application/json" if name == "report.json" else "text/plain"
+            return Response(
+                content=service.artifact(job_id, name),
+                media_type=media_type,
+                headers={"content-disposition": f'attachment; filename="{name}"'},
+            )
         except JobNotFoundError as caught:
             return error(404, "artifact_not_found", str(caught))
         except ReportUnavailableError as caught:
