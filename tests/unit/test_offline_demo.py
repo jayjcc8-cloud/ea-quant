@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import pytest
-import ea.product.offline_demo as offline_demo
 
+import ea.product.offline_demo as offline_demo
 from ea.core import OutcomeCode
 from ea.product.offline_demo import (
     DemoMode,
@@ -193,9 +193,15 @@ def test_fixed_demo_is_byte_deterministic_across_fresh_output_roots(tmp_path: Pa
 
 def test_reconciliation_mismatch_output_is_deterministic_for_byte_equality(tmp_path: Path) -> None:
     with pytest.raises(OfflineDemoFailure):
-        run_offline_demo((tmp_path / "mismatch-one").resolve(), mode=DemoMode.RECONCILIATION_MISMATCH)
+        run_offline_demo(
+            (tmp_path / "mismatch-one").resolve(),
+            mode=DemoMode.RECONCILIATION_MISMATCH,
+        )
     with pytest.raises(OfflineDemoFailure):
-        run_offline_demo((tmp_path / "mismatch-two").resolve(), mode=DemoMode.RECONCILIATION_MISMATCH)
+        run_offline_demo(
+            (tmp_path / "mismatch-two").resolve(),
+            mode=DemoMode.RECONCILIATION_MISMATCH,
+        )
 
     first = (tmp_path / "mismatch-one" / "phase1-demo-v1").resolve()
     second = (tmp_path / "mismatch-two" / "phase1-demo-v1").resolve()
@@ -239,7 +245,9 @@ def test_risk_rejection_creates_no_order_fill_cash_or_position_mutation(tmp_path
     }
 
 
-def test_replay_verifier_diverges_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_replay_verifier_diverges_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     original_ledger = offline_demo.create_portfolio_ledger
 
     class _ReplayLedger:
@@ -256,7 +264,9 @@ def test_replay_verifier_diverges_fails_closed(tmp_path: Path, monkeypatch: pyte
             return self._delegate.apply_fill(fill)
 
     monkeypatch.setattr(offline_demo, "create_portfolio_ledger", _ReplayLedger)
-    with pytest.raises(RuntimeError, match="audited internal ledger and public Fill replay diverged"):
+    with pytest.raises(
+        RuntimeError, match="audited internal ledger and public Fill replay diverged"
+    ):
         run_offline_demo((tmp_path / "divergent-replay").resolve())
     monkeypatch.setattr(offline_demo, "create_portfolio_ledger", original_ledger)
 
@@ -281,14 +291,18 @@ def test_reconciliation_mismatch_fails_closed_without_success_report(tmp_path: P
     assert (output_directory / "audit.jsonl").is_file()
 
 
-def test_reconciliation_mismatch_is_detected_by_reconciliation_authority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconciliation_mismatch_is_detected_by_reconciliation_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     accepted = run_offline_demo((tmp_path / "accepted-baseline").resolve())
     accepted_report = _read_json(accepted.output_directory / "result.json")
     expected_snapshot = accepted_report["internal_snapshot_sha256"]
 
     original_observation = offline_demo._observation
 
-    def forced_mismatch_observation(*, spec_set: Any, snapshot: Any, position: bool, mismatch: bool) -> Any:
+    def forced_mismatch_observation(
+        *, spec_set: Any, snapshot: Any, position: bool, mismatch: bool
+    ) -> Any:
         return original_observation(
             spec_set=spec_set,
             snapshot=snapshot,

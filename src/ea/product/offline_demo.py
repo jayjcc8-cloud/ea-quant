@@ -81,7 +81,10 @@ from ea.data import (
 from ea.execution import create_phase1_order_authority
 from ea.portfolio import create_portfolio_ledger, create_portfolio_planning_authority
 from ea.reconciliation import create_phase1_reconciliation_authority
-from ea.runtime import create_active_market_dispatch_verifier, create_phase1_historical_market_runtime
+from ea.runtime import (
+    create_active_market_dispatch_verifier,
+    create_phase1_historical_market_runtime,
+)
 from ea.strategy import create_strategy_signal_authority
 
 _RUN_ID = RunId("123e4567-e89b-42d3-a456-426614174000")
@@ -276,7 +279,9 @@ def _binding(sample: bytes) -> RunBinding:
             "target_quantity": "2",
         }
     )
-    manifest = Sha256Digest(sha256(b"ea.offline-demo.manifest.v1\0" + scenario + sample).hexdigest())
+    manifest = Sha256Digest(
+        sha256(b"ea.offline-demo.manifest.v1\0" + scenario + sample).hexdigest()
+    )
     return RunBinding(RunReference(_RUN_ID, lineage), manifest)
 
 
