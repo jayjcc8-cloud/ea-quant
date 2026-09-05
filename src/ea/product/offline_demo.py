@@ -27,6 +27,7 @@ from ea.core import (
     AuditSubjectKind,
     CanonicalDecimal,
     CashReconciliationBalance,
+    HistoricalDispatchKind,
     EconomicId,
     EconomicOwnerKind,
     ExecutionPolicyId,
@@ -565,9 +566,13 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         )
         lifecycle.coordinator.submit_authorized_order(first_window, order)
     lifecycle.coordinator.complete_active_dispatch(first_window)
+    end_of_run_window = None
 
     while lifecycle.coordinator.terminal_outcome is None:
         active = lifecycle.coordinator.begin_next_dispatch()
+        if active.dispatch_kind is HistoricalDispatchKind.END_OF_RUN:
+            end_of_run_window = active
+            break
         lifecycle.coordinator.complete_active_dispatch(active)
 
     fills = lifecycle.fact_authority.fills
@@ -641,6 +646,9 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         position_outcome_code = position_outcome.outcome_code.value.replace(".", "_")
         cash_outcome_code = cash_outcome.outcome_code.value.replace(".", "_")
         reconciliation_snapshot_sha256 = position_outcome.local_snapshot_sha256.value
+
+    if end_of_run_window is not None:
+        lifecycle.coordinator.complete_active_dispatch(end_of_run_window)
 
     fill: Fill | None = fills[0] if fills else None
     run_outcome = "risk_rejected" if order is None else "filled"

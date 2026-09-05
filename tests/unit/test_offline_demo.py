@@ -74,7 +74,7 @@ def test_bundled_demo_runs_the_existing_economic_path_end_to_end(tmp_path: Path)
     assert "submission.pre_effect_authorization" in kinds
     assert "portfolio.ledger_handoff_outcome" in kinds
     assert kinds.count("reconciliation.observation_outcome") == 2
-    assert kinds[-1] == "reconciliation.observation_outcome"
+    assert kinds[-1] in {"reconciliation.observation_outcome", "run.terminal"}
 
 
 def test_accepted_demo_has_one_economic_lineage(
@@ -293,6 +293,13 @@ def test_reconciliation_mismatch_fails_closed_without_success_report(tmp_path: P
     assert failure["status"] == "failed"
     assert failure["run_status"] == "failed"
     assert failure["trade_outcome"] == "reconciliation_failed"
+    audit_records = [
+        json.loads(line)
+        for line in (output_directory / "audit.jsonl").read_bytes().splitlines()
+    ]
+    assert "run.terminal" not in {
+        record["header"]["record_kind"] for record in audit_records
+    }
     assert (output_directory / "audit.jsonl").is_file()
 
 
@@ -345,8 +352,9 @@ def test_reconciliation_mismatch_is_detected_by_reconciliation_authority(
         record for record in audit if record["header"]["record_kind"] == "run.terminal"
     ]
     assert completion_records
-    assert terminal_records
+    assert not terminal_records
     assert completion_records[-1]["payload"]["final_portfolio_snapshot_sha256"] == expected_snapshot
+    assert completion_records[-1]["payload"]["dispatch_kind"] == "market"
     assert not (output_directory / "result.json").exists()
     assert not (output_directory / "summary.txt").exists()
 
