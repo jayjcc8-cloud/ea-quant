@@ -41,6 +41,9 @@ scenario schema, initial funding, Backtest Identity and lineage, seed hierarchy,
 matrix, sample-strategy catalogue, and full reporting surface remain future product work. They are
 not silently claimed by this slice.
 
+The next bounded product step is the Backtest Identity contract. It requires fresh explicit
+Product Owner authorization; no implementation is active under RESET-001 or this status update.
+
 ## Blockers
 
 There is no known blocker to the delivered RESET-001 offline T1 product slice.
@@ -73,9 +76,18 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 
 - [#154 — RESET-001: restore bounded product delivery and freeze governance expansion](https://github.com/jayjcc8-cloud/ea-quant/issues/154)
   is completed by the governance-freeze change and PR #156's installed offline vertical slice.
+- [#81 — Funded deterministic Backtest single-run MVP](https://github.com/jayjcc8-cloud/ea-quant/issues/81)
+  follows the Backtest Identity contract and owns scenario, funding, limits, strategies, validate,
+  and run.
+- [#83 — BacktestReportV1](https://github.com/jayjcc8-cloud/ea-quant/issues/83) follows the
+  single-run and resume/failure-durability deliveries.
+- [#84 — v0.2.0 product acceptance and release gate](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
+  owns final clean-main acceptance; tag/release/publication still requires a separate Human Product
+  Owner decision.
+- [#125 — Phase 1.1 reconciliation/recovery expansion](https://github.com/jayjcc8-cloud/ea-quant/issues/125)
+  remains parked and does not block the Offline Backtest MVP or v0.2.0 unless explicitly promoted.
 - R9/R10 Issues #149, #150, #152, #153 and PR #151 retain provenance as superseded hardening
   history after the reset governance PR merges; they are not an active delivery chain.
-- Phase 1.1 owns automatic reconciliation correction, ancestry repair, and broader recovery work.
 
 ## Last Confirmed
 

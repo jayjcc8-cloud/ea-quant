@@ -19,6 +19,23 @@ report from an installed distribution.
 
 Entry: Phase 0 is released and `main` is healthy.
 
+## Phase 1 Delivery Order
+
+1. **RESET offline vertical slice — COMPLETE.** The installed deterministic demonstration proves
+   the bounded signal-to-report path without claiming the funded Backtest MVP.
+2. **Backtest Identity contract.** Define run/attempt identity, lineage, semantic comparison, and
+   seed ownership before expanding the product surface.
+3. **Funded deterministic Backtest single-run — #81.** Add strict scenario input, initial funding,
+   limits, strategies, and installed `validate`/`run` commands.
+4. **Resume and failure durability.** Add only the supported recovery boundaries and retained
+   failure evidence needed by the offline product.
+5. **BacktestReportV1 — #83.** Produce canonical JSON/text and semantic outcome comparison from
+   accepted product evidence.
+6. **v0.2.0 product acceptance and release gate — #84.** Verify one clean exact `main`; tag,
+   release, and publication remain a separate Human Product Owner decision.
+
+This is a product dependency order, not a sequence of governance phases or actor chains.
+
 ## Phase 1 Non-goals
 
 - Live trading, broker/exchange writes, credentials, deployment, or production operations.
@@ -45,7 +62,8 @@ Entry: Phase 0 is released and `main` is healthy.
 - `BacktestReportV1` emits canonical JSON and text; exact-run regeneration is byte-identical and
   independent runs expose a stable semantic outcome digest.
 - Required ADRs, STATUS, Issues, tests, and CI agree; no critical decision survives only in comments.
-- Full verification passes on merged `main`; Human Owner approves and publishes `v0.2.0`.
+- Full product acceptance passes on merged `main`; the Human Product Owner separately decides
+  whether to tag, release, or publish `v0.2.0`.
 
 ## Phase 1.1 — Reconciliation and Recovery Expansion
 
