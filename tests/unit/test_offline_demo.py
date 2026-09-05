@@ -87,7 +87,14 @@ def test_accepted_demo_has_one_economic_lineage(
     original_order_authority = offline_demo.create_phase1_order_authority
     original_lifecycle = offline_demo.create_phase1_historical_lifecycle
 
-    def capture_planning_authority(*, run_id, spec_set, policy, execution_policy, ledger):
+    def capture_planning_authority(
+        *,
+        run_id: Any,
+        spec_set: Any,
+        policy: Any,
+        execution_policy: Any,
+        ledger: Any,
+    ) -> Any:
         captured["planning_ledger"] = ledger
         return original_planning_authority(
             run_id=run_id,
@@ -99,12 +106,12 @@ def test_accepted_demo_has_one_economic_lineage(
 
     def capture_order_authority(
         *,
-        run_id,
-        spec_set,
-        execution_policy,
-        risk_policy,
-        risk_result_verifier,
-    ):
+        run_id: Any,
+        spec_set: Any,
+        execution_policy: Any,
+        risk_policy: Any,
+        risk_result_verifier: Any,
+    ) -> Any:
         captured["risk_verifier"] = risk_result_verifier
         return original_order_authority(
             run_id=run_id,

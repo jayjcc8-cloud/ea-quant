@@ -31,6 +31,7 @@ from ea.core import (
     EconomicOwnerKind,
     ExecutionPolicyId,
     ExecutionPolicyRef,
+    Fill,
     FactProvenanceId,
     GlobalHaltSnapshot,
     Instrument,
@@ -99,6 +100,14 @@ _RECONCILIATION_SOURCE = SourceNamespace("reconciliation.demo")
 _LEDGER_WATERMARK = SourceNamespace("ledger.portfolio")
 _FIXED_TIME = datetime(2026, 1, 2, 9, 32, tzinfo=UTC)
 _ATTEMPT_NAME = "phase1-demo-v1"
+
+__all__ = [
+    "create_portfolio_ledger",
+    "create_portfolio_planning_authority",
+    "create_phase1_order_authority",
+    "create_phase1_historical_economic_gate",
+    "create_phase1_historical_lifecycle",
+]
 
 
 class DemoMode(StrEnum):
@@ -341,7 +350,7 @@ def _observation(
         scope = ReconciliationScopeKind.POSITION
         sequence = 1
     else:
-        balances = tuple(
+        balances: tuple[PositionReconciliationBalance | CashReconciliationBalance, ...] = tuple(
             CashReconciliationBalance(balance.currency, balance.amount)
             for balance in snapshot.cash_balances
         )
@@ -632,7 +641,7 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         cash_outcome_code = cash_outcome.outcome_code.value.replace(".", "_")
         reconciliation_snapshot_sha256 = position_outcome.local_snapshot_sha256.value
 
-    fill = fills[0] if fills else None
+    fill: Fill | None = fills[0] if fills else None
     run_outcome = "risk_rejected" if order is None else "filled"
     portfolio = {
         "authoritative_snapshot_sha256": internal_snapshot_sha256,
