@@ -36,16 +36,21 @@ venv/bin/ea backtest validate --scenario /absolute/path/to/scenario.yaml
 venv/bin/ea backtest run \
   --scenario /absolute/path/to/scenario.yaml \
   --output-root /absolute/path/to/runs
+venv/bin/ea backtest resume \
+  --run-dir /absolute/path/to/runs/<attempt-uuid>
 ```
 
 The scenario is the product configuration authority. It binds a local OHLCV path and fingerprint,
 an explicit UTC replay window, one instrument specification, positive initial cash, order/position/
 cash/notional limits, the deterministic next-bar-close execution policy, and either
 `always-flat-v1` or `bounded-long-v1`. Every run creates a fresh attempt directory and emits
-funding, audit, and result evidence. The fixed RESET demo remains available by omitting
-`--scenario`.
+funding, durable audit, and result evidence. `resume` accepts only that attempt directory, verifies
+its persisted scenario/data/distribution/economic identity, and continues the same RunId from the
+funding, completed-dispatch, or reconciled pre-publication durable frontier. Completed attempts are
+validated no-ops; failed, ambiguous, conflicting, or corrupt attempts fail closed. The fixed RESET
+demo remains available by omitting `--scenario` and is not resumable.
 
-This is an offline deterministic single-run product. Resume, generic crash recovery,
+This remains a bounded offline deterministic product. Arbitrary instruction-level recovery,
 BacktestReportV1 analytics, paper/live profiles, broker writes, credentials, and release
 publication are unavailable.
 

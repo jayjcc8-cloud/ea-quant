@@ -5,10 +5,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
+import ea.product.backtest as backtest_module
 from ea.cli.app import app
+from ea.product import load_backtest_scenario, run_backtest_scenario
 from unit.test_backtest_single_run import _scenario
+
+
+class _AbruptInterruption(BaseException):
+    pass
 
 
 def test_backtest_run_uses_accepted_path(tmp_path: Path) -> None:
@@ -131,3 +138,61 @@ def test_backtest_cli_is_reproducible_across_fresh_processes(tmp_path: Path) -> 
     assert reports[0]["run_id"] != reports[1]["run_id"]
     assert reports[0]["lineage_sha256"] == reports[1]["lineage_sha256"]
     assert reports[0]["semantic_outcome_sha256"] == reports[1]["semantic_outcome_sha256"]
+
+
+def test_backtest_resume_cli_continues_same_attempt_without_identity_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    output_root = (tmp_path / "runs").resolve()
+
+    def interrupt(stage: str) -> None:
+        if stage == "funding_durable":
+            raise _AbruptInterruption
+
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", interrupt)
+    with pytest.raises(_AbruptInterruption):
+        run_backtest_scenario(scenario, output_root)
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", None)
+    attempt = next(output_root.iterdir())
+
+    result = CliRunner().invoke(
+        app,
+        ["backtest", "resume", "--run-dir", str(attempt)],
+    )
+
+    assert result.exit_code == 0
+    assert "backtest resume: success" in result.stdout
+    assert f"result: {attempt / 'result.json'}" in result.stdout
+    assert json.loads((attempt / "result.json").read_bytes())["run_id"] == attempt.name
+    assert "Traceback" not in result.output
+
+
+def test_backtest_cli_sanitizes_handled_internal_failure_and_points_to_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _scenario(tmp_path / "input")
+
+    def fail(**_kwargs: object) -> object:
+        raise RuntimeError("sensitive internal detail")
+
+    monkeypatch.setattr(backtest_module, "_execute", fail)
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "run",
+            "--scenario",
+            str(scenario),
+            "--output-root",
+            str((tmp_path / "runs").resolve()),
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert "backtest failed closed" in result.output
+    assert "evidence:" in result.output
+    assert "sensitive internal detail" not in result.output
+    assert "Traceback" not in result.output

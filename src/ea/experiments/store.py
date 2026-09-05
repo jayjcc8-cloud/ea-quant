@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import stat
 from contextlib import suppress
@@ -43,6 +44,40 @@ class StoreError(RuntimeError):
 
 class StoreCollisionError(StoreError):
     """Raised when an attempt path already exists and is never adopted."""
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalAttemptManifest:
+    """Strict canonical manifest bytes already validated by a product owner."""
+
+    reference: RunReference
+    canonical_bytes: bytes
+
+    def __post_init__(self) -> None:
+        if type(self.reference) is not RunReference:
+            raise StoreError("canonical attempt manifest requires one exact run reference")
+        if type(self.canonical_bytes) is not bytes or not 1 <= len(self.canonical_bytes) <= 65_536:
+            raise StoreError("canonical attempt manifest bytes are outside the supported bound")
+        try:
+            document = json.loads(self.canonical_bytes)
+            canonical = json.dumps(
+                document,
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise StoreError("canonical attempt manifest is not canonical JSON") from error
+        if type(document) is not dict or canonical != self.canonical_bytes:
+            raise StoreError("canonical attempt manifest is not one canonical JSON object")
+
+    @property
+    def binding(self) -> RunBinding:
+        return RunBinding(
+            self.reference,
+            Sha256Digest(sha256(self.canonical_bytes).hexdigest()),
+        )
 
 
 class RunIdProvider(Protocol):
@@ -786,13 +821,20 @@ class LocalResultStore:
 
     def verify_recovery_attempt(
         self,
-        expected_manifest: RunManifest,
+        expected_manifest: RunManifest | CanonicalAttemptManifest,
     ) -> VerifiedIncompleteRecoveryBinding | VerifiedTerminalRecoveryBinding:
         """Lock, rebind, scan and classify one exact existing attempt."""
-        if type(expected_manifest) is not RunManifest:
+        if type(expected_manifest) is RunManifest:
+            expected_payload = canonical_manifest_bytes(expected_manifest)
+            expected_reference = expected_manifest.reference
+            require_typed_manifest = True
+        elif type(expected_manifest) is CanonicalAttemptManifest:
+            expected_payload = expected_manifest.canonical_bytes
+            expected_reference = expected_manifest.reference
+            require_typed_manifest = False
+        else:
             raise StoreError("recovery requires one exact expected RunManifest")
-        expected_payload = canonical_manifest_bytes(expected_manifest)
-        run_name = expected_manifest.run_id.value
+        run_name = expected_reference.run_id.value
         root_fd: int | None = None
         run_fd: int | None = None
         audit_fd: int | None = None
@@ -854,11 +896,11 @@ class LocalResultStore:
                 or stat.S_IMODE(manifest_stat.st_mode) != 0o600
                 or manifest_stat.st_nlink != 1
                 or manifest_payload != expected_payload
-                or read_manifest(manifest_payload) != expected_manifest
+                or (require_typed_manifest and read_manifest(manifest_payload) != expected_manifest)
             ):
                 raise StoreError("recovery manifest differs from exact expected evidence")
             binding = RunBinding(
-                reference=expected_manifest.reference,
+                reference=expected_reference,
                 manifest_sha256=Sha256Digest(sha256(manifest_payload).hexdigest()),
             )
             authority = _AttemptAuthority(self._store_id, object(), binding)
@@ -1101,7 +1143,22 @@ class LocalResultStore:
             raise StoreError("run_id_provider did not return a canonical UUID4") from exc
 
         manifest = build_manifest(spec, run_id)
-        payload = canonical_manifest_bytes(manifest)
+        return self._prepare_attempt(
+            reference=manifest.reference,
+            payload=canonical_manifest_bytes(manifest),
+        )
+
+    def prepare_canonical_attempt(self, manifest: CanonicalAttemptManifest) -> PreparedRun:
+        """Durably reserve one product-validated canonical attempt manifest."""
+        if type(manifest) is not CanonicalAttemptManifest:
+            raise StoreError("canonical attempt preparation requires exact manifest evidence")
+        return self._prepare_attempt(
+            reference=manifest.reference,
+            payload=manifest.canonical_bytes,
+        )
+
+    def _prepare_attempt(self, *, reference: RunReference, payload: bytes) -> PreparedRun:
+        run_id = reference.run_id
         run_name = run_id.value
         root_fd: int | None = None
         run_fd: int | None = None
@@ -1206,7 +1263,7 @@ class LocalResultStore:
             root_fd = None
 
             binding = RunBinding(
-                reference=manifest.reference,
+                reference=reference,
                 manifest_sha256=manifest_digest,
             )
             if (
@@ -1231,7 +1288,7 @@ class LocalResultStore:
                 authority,
             )
             prepared = PreparedRun(
-                reference=manifest.reference,
+                reference=reference,
                 manifest_sha256=manifest_digest,
                 manifest_verification=manifest_capability,
                 audit=AuditRunBinding(
@@ -1295,3 +1352,12 @@ class LocalResultStore:
                             os.close(descriptor)
                         else:
                             self._ops.close(descriptor)
+
+    def close(self) -> None:
+        """Release every process-local writer lease owned by this store."""
+        with self._registry_lock:
+            records = tuple(self._attempts.values())
+            self._attempts.clear()
+        for record in records:
+            with suppress(OSError):
+                os.close(record.writer_lock_fd)

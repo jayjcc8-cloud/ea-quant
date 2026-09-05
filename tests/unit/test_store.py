@@ -11,8 +11,9 @@ from uuid import UUID, uuid1
 
 import pytest
 
-from ea.core import DataFingerprint, ReplayWindow, Sha256Digest
+from ea.core import DataFingerprint, ReplayWindow, RunId, RunReference, Sha256Digest
 from ea.experiments import store as store_module
+from ea.experiments.audit import create_posix_audit_journal
 from ea.experiments.manifest import (
     CodeEvidence,
     DistributionIdentity,
@@ -26,6 +27,7 @@ from ea.experiments.manifest import (
 )
 from ea.experiments.store import (
     AuditRunBinding,
+    CanonicalAttemptManifest,
     LocalResultStore,
     StoreCollisionError,
     StoreError,
@@ -90,6 +92,34 @@ def test_store_durably_publishes_before_returning_narrow_context(tmp_path: Path)
     assert not hasattr(prepared, "root")
     assert not hasattr(prepared, "manifest_path")
     assert canonical_manifest_bytes(parsed) == manifest_bytes
+
+
+def test_store_binds_a_canonical_product_manifest_for_fresh_and_recovery_use(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    reference = RunReference(RunId(str(RUN_UUID)), Sha256Digest("2" * 64))
+    payload = (
+        b'{"canonicalization":"ea-backtest-attempt-v1",'
+        b'"run_id":"123e4567-e89b-42d3-a456-426614174000",'
+        b'"schema":"ea.backtest-attempt.v1"}'
+    )
+    manifest = CanonicalAttemptManifest(reference=reference, canonical_bytes=payload)
+
+    original = LocalResultStore(root)
+    prepared = original.prepare_canonical_attempt(manifest)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.close()
+
+    assert prepared.reference == reference
+    assert (root / reference.run_id.value / "manifest.json").read_bytes() == payload
+    original.close()
+
+    recovered = LocalResultStore(root)
+    verified = recovered.verify_recovery_attempt(manifest)
+
+    assert verified.binding.reference == reference
+    recovered.close()
 
 
 def test_capability_registry_rejects_cross_attempt_role_and_store_substitution(

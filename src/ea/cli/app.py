@@ -10,12 +10,14 @@ import typer
 from ea.config import ConfigurationError, load_configuration
 from ea.config.diagnostics import escape_diagnostic_label
 from ea.product import (
+    BacktestResumeFailure,
     BacktestRunError,
     BacktestRunFailure,
     BacktestScenarioError,
     OfflineDemoFailure,
     OfflineDemoInputError,
     load_backtest_scenario,
+    resume_backtest_attempt,
     run_backtest_scenario,
     run_offline_demo,
 )
@@ -192,6 +194,37 @@ def validate(
         typer.echo("scenario validation internal error", err=True)
         raise typer.Exit(code=1) from None
     typer.echo("scenario valid: BacktestScenario v1")
+
+
+@backtest_app.command("resume")
+def resume(
+    run_dir: Annotated[
+        Path,
+        typer.Option(
+            "--run-dir",
+            help="Existing resumable Backtest attempt directory.",
+            metavar="ATTEMPT_DIR",
+        ),
+    ],
+) -> None:
+    """Resume one verified supported frontier of an existing Backtest attempt."""
+    try:
+        resolved = run_dir.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        typer.echo("backtest resume input error: run directory cannot be resolved", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        completed = resume_backtest_attempt(resolved)
+    except BacktestResumeFailure as error:
+        typer.echo("backtest resume failed closed", err=True)
+        typer.echo(f"evidence: {error.output_directory}", err=True)
+        raise typer.Exit(code=3) from None
+    except Exception:
+        typer.echo("backtest resume internal error", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"backtest resume: {completed.status}")
+    typer.echo(f"result: {completed.output_directory / 'result.json'}")
+    typer.echo("live capability: unavailable")
 
 
 if __name__ == "__main__":

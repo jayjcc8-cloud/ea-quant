@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — funded deterministic Backtest single-run delivered / main healthy /
+**Phase 1 delivery reset — funded deterministic Backtest run/resume delivered / main healthy /
 live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -49,14 +49,24 @@ external write, or live capability is part of this objective.
 - The current deterministic demo records `randomness_profile = none` and
   `master_seed = not_applicable`; attempt-bound IDs, paths, audit identities, and non-economic
   timestamps do not enter its semantic outcome projection.
+- The installed `ea backtest resume --run-dir ATTEMPT_DIR` command verifies the attempt's persisted
+  scenario, data, distribution, instrument, funding, risk, execution, randomness, journal, and
+  reconciliation identity before continuing the same RunId and lineage.
+- Supported resume frontiers are funding-durable before trading, a completed durable economic
+  dispatch, and reconciled economics before final success publication. Existing audit logical
+  retries rebuild in-memory authorities without duplicate funding, Order, Fill, or ledger effects.
+- Successful completed attempts are validated non-mutating no-ops. Failed terminals, ambiguous
+  state, committed journal corruption, or identity conflicts reject without a success result.
+- Final success is an atomic `result.json` publication after durable terminal evidence; handled
+  internal failures retain classified evidence without exception detail or false success.
 - The Dark Professional Web shell remains a deterministic read-only Mock Adapter.
 
 ## Incomplete
 
 The funded product is one deterministic single-run MVP, not all of Phase 1 or a v0.2.0 release.
-Resume, generic crash/failure durability, BacktestReportV1, performance analytics, stochastic seed
+Arbitrary instruction-level recovery, BacktestReportV1, performance analytics, stochastic seed
 hierarchies, strategy plugins, paper/live execution, and release publication remain unavailable.
-No successor delivery is authorized by this status update.
+BacktestReportV1 is next in the dependency order but is not authorized by this status update.
 
 ## Blockers
 
@@ -96,6 +106,8 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [#81 — Funded deterministic Backtest single-run MVP](https://github.com/jayjcc8-cloud/ea-quant/issues/81)
   delivers strict scenario validation, funding, bounded limits, flat/bounded-long strategies, and
   the installed validate/run surface.
+- [#161 — Supported Backtest resume and failure durability](https://github.com/jayjcc8-cloud/ea-quant/issues/161)
+  adds same-attempt installed resume across three bounded durable frontiers.
 - [#83 — BacktestReportV1](https://github.com/jayjcc8-cloud/ea-quant/issues/83) follows the
   single-run and resume/failure-durability deliveries.
 - [#84 — v0.2.0 product acceptance and release gate](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
@@ -123,9 +135,13 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [x] Selected direct failures retain evidence without a success result or terminal.
 - [x] Fresh processes use distinct RunIds with equivalent lineage and semantic economics.
 - [x] The installed wheel validates and runs user-supplied scenario/data outside a Git checkout.
+- [x] Supported interruptions resume the same trusted attempt without duplicate economic effects.
+- [x] Completed, failed, conflicting, corrupt, and partial-publication attempts have deterministic
+  fail-closed or idempotent behavior.
 - [x] Quick Start identifies the supported boundary and known limitations.
 
-These conditions complete Issue #81 only, not the full Phase 1 roadmap or a v0.2.0 release.
+These conditions complete Issues #81 and #161 only, not the full Phase 1 roadmap or a v0.2.0
+release.
 
 ## Delivery Metrics
 
