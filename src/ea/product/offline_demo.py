@@ -334,6 +334,7 @@ def _observation(
     position: bool,
     mismatch: bool,
 ) -> Any:
+    balances: tuple[PositionReconciliationBalance | CashReconciliationBalance, ...]
     if position:
         balances = tuple(
             PositionReconciliationBalance(
@@ -350,7 +351,7 @@ def _observation(
         scope = ReconciliationScopeKind.POSITION
         sequence = 1
     else:
-        balances: tuple[PositionReconciliationBalance | CashReconciliationBalance, ...] = tuple(
+        balances = tuple(
             CashReconciliationBalance(balance.currency, balance.amount)
             for balance in snapshot.cash_balances
         )
@@ -571,8 +572,8 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
 
     fills = lifecycle.fact_authority.fills
     replay_ledger = create_portfolio_ledger(_RUN_ID, spec_set)
-    for fill in fills:
-        outcome = replay_ledger.apply_fill(fill)
+    for replay_fill in fills:
+        outcome = replay_ledger.apply_fill(replay_fill)
         if outcome.code is not OutcomeCode.LEDGER_APPLIED:
             raise RuntimeError("demo Fill replay did not apply to the public ledger")
     snapshot = economic_gate.ledger.snapshot
