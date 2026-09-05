@@ -6,11 +6,12 @@ import json
 import os
 import sys
 import sysconfig
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import ea
 from ea.composition.lifecycle import (
@@ -46,6 +47,7 @@ from ea.core import (
     SignalDirection,
     SourceNamespace,
     audit_chain_head,
+    audit_record_digest,
     audit_subject_digest,
     canonical_funding_apply_outcome_bytes,
     canonical_funding_transaction_bytes,
@@ -57,6 +59,7 @@ from ea.core import (
     create_reconciliation_observation,
     funding_apply_outcome_digest,
     funding_transaction_digest,
+    initial_funding_digest,
     instrument_spec_set_digest,
     phase1_risk_policy_digest,
     portfolio_snapshot_digest,
@@ -66,6 +69,14 @@ from ea.data import (
     create_phase1_historical_market_source_bridge,
 )
 from ea.execution import create_phase1_order_authority
+from ea.experiments.audit import create_posix_audit_journal, reopen_posix_audit_journal
+from ea.experiments.store import (
+    CanonicalAttemptManifest,
+    LocalResultStore,
+    StoreCollisionError,
+    VerifiedIncompleteRecoveryBinding,
+    VerifiedTerminalRecoveryBinding,
+)
 from ea.portfolio import create_portfolio_ledger, create_portfolio_planning_authority
 from ea.product.identity import (
     BacktestLineageInputs,
@@ -79,7 +90,7 @@ from ea.product.offline_demo import (
     _InstrumentGateView,
     _package_code_digest,
 )
-from ea.product.scenario import BacktestStrategyId, LoadedBacktestScenario
+from ea.product.scenario import BacktestStrategyId, LoadedBacktestScenario, load_backtest_scenario
 from ea.reconciliation import create_phase1_reconciliation_authority
 from ea.runtime import (
     create_active_market_dispatch_verifier,
@@ -93,6 +104,9 @@ _LEDGER_WATERMARK = SourceNamespace("ledger.portfolio")
 _RISK_POLICY_ID = RiskPolicyId("backtest.scenario.v1")
 _RESULT_SCHEMA = "ea.backtest-single-run-result.v1"
 _FAILURE_SCHEMA = "ea.backtest-single-run-failure.v1"
+_ATTEMPT_SCHEMA = "ea.backtest-resumable-attempt.v1"
+_ATTEMPT_CANONICALIZATION = "ea-backtest-resumable-attempt-v1"
+_TEST_INTERRUPT: Callable[[str], None] | None = None
 
 
 class BacktestRunError(ValueError):
@@ -107,6 +121,16 @@ class BacktestRunFailure(RuntimeError):
 
     def __init__(self, code: OutcomeCode, message: str, output_directory: Path) -> None:
         self.code = code
+        self.output_directory = output_directory
+        super().__init__(message)
+
+
+class BacktestResumeFailure(RuntimeError):
+    """A trusted existing attempt cannot be safely resumed."""
+
+    output_directory: Path
+
+    def __init__(self, message: str, output_directory: Path) -> None:
         self.output_directory = output_directory
         super().__init__(message)
 
@@ -140,16 +164,11 @@ def _component_digest(domain: bytes, document: object) -> Sha256Digest:
     return Sha256Digest(sha256(domain + _canonical_json(document)).hexdigest())
 
 
-def _binding(run_id: RunId, lineage: Sha256Digest) -> RunBinding:
-    attempt = _canonical_json(
-        {
-            "lineage_sha256": lineage.value,
-            "run_id": run_id.value,
-            "schema": "ea.backtest-single-run-attempt.v1",
-        }
+def _binding(run_id: RunId, lineage: Sha256Digest, manifest: bytes) -> RunBinding:
+    return RunBinding(
+        RunReference(run_id, lineage),
+        Sha256Digest(sha256(manifest).hexdigest()),
     )
-    manifest = Sha256Digest(sha256(b"ea.backtest-single-run.manifest.v1\0" + attempt).hexdigest())
-    return RunBinding(RunReference(run_id, lineage), manifest)
 
 
 def _scaled_text(coefficient: int, scale: int) -> str:
@@ -298,6 +317,62 @@ def _lineage(
     )
 
 
+def _attempt_manifest_bytes(
+    scenario: LoadedBacktestScenario,
+    *,
+    run_id: RunId,
+    lineage: Sha256Digest,
+    risk_policy: Any,
+    risk_context: dict[str, object],
+) -> bytes:
+    funding = InitialFunding(run_id, scenario.funding_currency, scenario.initial_cash)
+    document = {
+        "canonicalization": _ATTEMPT_CANONICALIZATION,
+        "code_sha256": _package_code_digest().value,
+        "data": {
+            "fingerprint": {
+                "record_count": scenario.dataset.selection.fingerprint.record_count,
+                "sha256": scenario.dataset.selection.fingerprint.sha256.value,
+            },
+            "path": str(scenario.data_path),
+            "source_file_sha256": sha256(scenario.data_path.read_bytes()).hexdigest(),
+        },
+        "distribution": {"name": "ea-quant", "version": ea.__version__},
+        "execution": {
+            "policy_id": scenario.execution_policy.identifier.value,
+            "policy_sha256": scenario.execution_policy.sha256.value,
+        },
+        "funding": {
+            "amount": scenario.initial_cash.text,
+            "currency": scenario.funding_currency.code,
+            "funding_sha256": initial_funding_digest(funding).value,
+        },
+        "instrument_spec_set_sha256": instrument_spec_set_digest(scenario.spec_set).value,
+        "lineage_sha256": lineage.value,
+        "randomness": scenario.randomness.document(),
+        "risk": {
+            "context": risk_context,
+            "policy_id": risk_policy.policy_id.value,
+            "policy_sha256": phase1_risk_policy_digest(risk_policy).value,
+        },
+        "run_id": run_id.value,
+        "scenario": {
+            "canonical": json.loads(scenario.canonical_bytes),
+            "path": str(scenario.scenario_path),
+            "sha256": scenario.scenario_sha256.value,
+            "source_file_sha256": sha256(scenario.scenario_path.read_bytes()).hexdigest(),
+        },
+        "schema": _ATTEMPT_SCHEMA,
+    }
+    return _canonical_json(document)
+
+
+def _interrupt(stage: str) -> None:
+    callback = _TEST_INTERRUPT
+    if callback is not None:
+        callback(stage)
+
+
 def _funding_document(funding: InitialFunding, outcome: Any) -> dict[str, object]:
     transaction = outcome.transaction
     if transaction is None:
@@ -392,8 +467,10 @@ def _execute(
     lineage: Sha256Digest,
     risk_policy: Any,
     risk_context: dict[str, object],
+    audit: Any | None = None,
+    on_funding: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[dict[str, object], bytes, dict[str, object]]:
-    audit = _DemoAudit(binding, scenario.spec_set)
+    audit = _DemoAudit(binding, scenario.spec_set) if audit is None else audit
     prepared = audit.append(
         record_kind=AuditRecordKind.RUN_PREPARED,
         subject_kind=AuditSubjectKind.RUN_MANIFEST,
@@ -418,6 +495,9 @@ def _execute(
     if funding_outcome is None:
         raise RuntimeError("economic gate omitted initial funding")
     funding_document = _funding_document(funding, funding_outcome)
+    if on_funding is not None:
+        on_funding(funding_document)
+    _interrupt("funding_durable")
     orders = create_phase1_order_authority(
         run_id=run_id,
         spec_set=scenario.spec_set,
@@ -514,12 +594,16 @@ def _execute(
     lifecycle.coordinator.complete_active_dispatch(first_window)
 
     end_of_run_window = None
+    durable_fill_frontier_observed = False
     while lifecycle.coordinator.terminal_outcome is None:
         active = lifecycle.coordinator.begin_next_dispatch()
         if active.dispatch_kind is HistoricalDispatchKind.END_OF_RUN:
             end_of_run_window = active
             break
         lifecycle.coordinator.complete_active_dispatch(active)
+        if lifecycle.fact_authority.fills and not durable_fill_frontier_observed:
+            durable_fill_frontier_observed = True
+            _interrupt("dispatch_durable")
 
     fills = lifecycle.fact_authority.fills
     snapshot = economic_gate.ledger.snapshot
@@ -572,6 +656,7 @@ def _execute(
             funding_document,
             {"fill": None, "order": None},
         )
+    _interrupt("reconciliation_durable")
     if end_of_run_window is not None:
         lifecycle.coordinator.complete_active_dispatch(end_of_run_window)
 
@@ -668,10 +753,10 @@ def _execute(
         "strategy": strategy_document,
         "terminal_state": "completed",
     }
-    return report, _audit_bytes(audit.records), funding_document
+    return report, _audit_bytes(list(audit.records)), funding_document
 
 
-def _safe_attempt_directory(output_root: Path, run_id: RunId) -> Path:
+def _safe_output_root(output_root: Path) -> Path:
     if not isinstance(output_root, Path) or not output_root.is_absolute():
         raise BacktestRunError("output root must be an absolute path")
     if output_root.exists() and output_root.is_symlink():
@@ -682,12 +767,7 @@ def _safe_attempt_directory(output_root: Path, run_id: RunId) -> Path:
         raise BacktestRunError("output root could not be created") from None
     if not output_root.is_dir():
         raise BacktestRunError("output root must be a directory")
-    attempt = output_root / run_id.value
-    try:
-        attempt.mkdir(mode=0o700)
-    except OSError:
-        raise BacktestRunError("fresh attempt directory could not be created") from None
-    return attempt
+    return output_root.resolve(strict=True)
 
 
 def _write_once(path: Path, payload: bytes) -> None:
@@ -704,6 +784,176 @@ def _write_once(path: Path, payload: bytes) -> None:
         ) from None
 
 
+def _write_or_verify(path: Path, payload: bytes) -> None:
+    if path.exists():
+        try:
+            if path.is_symlink() or not path.is_file() or path.read_bytes() != payload:
+                raise BacktestRunFailure(
+                    OutcomeCode.CONFLICTING_ID,
+                    "backtest evidence conflicts with the durable attempt",
+                    path.parent,
+                )
+        except OSError:
+            raise BacktestRunFailure(
+                OutcomeCode.CONFLICTING_ID,
+                "backtest evidence could not be verified",
+                path.parent,
+            ) from None
+        return
+    _write_once(path, payload)
+
+
+def _publish_success(attempt: Path, payload: bytes) -> None:
+    result = attempt / "result.json"
+    if result.exists():
+        _write_or_verify(result, payload)
+        return
+    pending = attempt / "result.pending"
+    _write_or_verify(pending, payload)
+    try:
+        if result.exists():
+            raise OSError("result destination appeared during publication")
+        os.rename(pending, result)
+        directory = os.open(attempt, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        raise BacktestRunFailure(
+            OutcomeCode.DURABILITY_RESULT_WRITE_FAILED,
+            "backtest success could not be atomically published",
+            attempt,
+        ) from None
+
+
+def _failure_bytes(
+    *,
+    classification: str,
+    run_id: RunId,
+    lineage: Sha256Digest,
+    scenario: LoadedBacktestScenario,
+    last_frontier: str,
+    audit: Any,
+    code: str,
+    message: str,
+    details: dict[str, object] | None = None,
+) -> bytes:
+    records = tuple(audit.records)
+    document: dict[str, object] = {
+        "audit_chain_head_sha256": (None if not records else audit_chain_head(records[-1]).value),
+        "classification": classification,
+        "code": code,
+        "last_durable_frontier": last_frontier,
+        "lineage_sha256": lineage.value,
+        "message": message,
+        "run_id": run_id.value,
+        "scenario_sha256": scenario.scenario_sha256.value,
+        "schema": _FAILURE_SCHEMA,
+        "status": "failed",
+        "terminal_state": "failed",
+    }
+    if details:
+        document.update(details)
+    return _canonical_json(document) + b"\n"
+
+
+def _require_attempt_directory(run_dir: Path) -> tuple[Path, RunId]:
+    if not isinstance(run_dir, Path) or not run_dir.is_absolute():
+        raise BacktestResumeFailure("resume run directory must be an absolute path", run_dir)
+    try:
+        if run_dir.is_symlink() or run_dir.resolve(strict=True) != run_dir or not run_dir.is_dir():
+            raise BacktestResumeFailure("resume run directory identity is invalid", run_dir)
+        run_id = RunId(str(UUID(run_dir.name)))
+    except (OSError, ValueError):
+        raise BacktestResumeFailure("resume run directory identity is invalid", run_dir) from None
+    return run_dir, run_id
+
+
+def _load_verified_attempt(
+    run_dir: Path,
+) -> tuple[
+    LoadedBacktestScenario,
+    RunId,
+    Sha256Digest,
+    Any,
+    dict[str, object],
+    CanonicalAttemptManifest,
+]:
+    attempt, run_id = _require_attempt_directory(run_dir)
+    manifest_path = attempt / "manifest.json"
+    try:
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise OSError("manifest is not a regular file")
+        payload = manifest_path.read_bytes()
+        document = json.loads(payload)
+        if _canonical_json(document) != payload or type(document) is not dict:
+            raise ValueError("manifest is not canonical")
+        expected_fields = {
+            "canonicalization",
+            "code_sha256",
+            "data",
+            "distribution",
+            "execution",
+            "funding",
+            "instrument_spec_set_sha256",
+            "lineage_sha256",
+            "randomness",
+            "risk",
+            "run_id",
+            "scenario",
+            "schema",
+        }
+        if set(document) != expected_fields:
+            raise ValueError("manifest fields conflict")
+        scenario_document = document["scenario"]
+        data_document = document["data"]
+        if type(scenario_document) is not dict or type(data_document) is not dict:
+            raise ValueError("manifest input identity is invalid")
+        scenario_path = Path(scenario_document["path"])
+        data_path = Path(data_document["path"])
+        if (
+            sha256(scenario_path.read_bytes()).hexdigest()
+            != scenario_document["source_file_sha256"]
+            or sha256(data_path.read_bytes()).hexdigest() != data_document["source_file_sha256"]
+        ):
+            raise ValueError("external input identity changed")
+        lineage = Sha256Digest(document["lineage_sha256"])
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        raise BacktestResumeFailure("resume identity evidence is invalid", attempt) from None
+    if document["schema"] != _ATTEMPT_SCHEMA or document["run_id"] != run_id.value:
+        raise BacktestResumeFailure("resume identity evidence conflicts", attempt)
+    try:
+        scenario = load_backtest_scenario(scenario_path)
+        risk_policy, risk_context = _risk_context(scenario)
+        recomputed_lineage = _lineage(
+            scenario,
+            risk_policy=risk_policy,
+            risk_context=risk_context,
+        )
+        expected = _attempt_manifest_bytes(
+            scenario,
+            run_id=run_id,
+            lineage=recomputed_lineage,
+            risk_policy=risk_policy,
+            risk_context=risk_context,
+        )
+    except Exception:
+        raise BacktestResumeFailure(
+            "resume identity evidence could not be reconstructed", attempt
+        ) from None
+    if recomputed_lineage != lineage or expected != payload:
+        raise BacktestResumeFailure("resume identity evidence conflicts", attempt)
+    return (
+        scenario,
+        run_id,
+        lineage,
+        risk_policy,
+        risk_context,
+        CanonicalAttemptManifest(RunReference(run_id, lineage), payload),
+    )
+
+
 def run_backtest_scenario(
     scenario: LoadedBacktestScenario,
     output_root: Path,
@@ -711,12 +961,35 @@ def run_backtest_scenario(
     """Run one validated scenario through the existing offline authorities."""
     if type(scenario) is not LoadedBacktestScenario:
         raise BacktestRunError("scenario must be an exact loaded BacktestScenario")
+    output_root = _safe_output_root(output_root)
     run_id = RunId(str(uuid4()))
-    attempt = _safe_attempt_directory(output_root, run_id)
     risk_policy, risk_context = _risk_context(scenario)
     lineage = _lineage(scenario, risk_policy=risk_policy, risk_context=risk_context)
-    binding = _binding(run_id, lineage)
+    manifest_bytes = _attempt_manifest_bytes(
+        scenario,
+        run_id=run_id,
+        lineage=lineage,
+        risk_policy=risk_policy,
+        risk_context=risk_context,
+    )
+    binding = _binding(run_id, lineage, manifest_bytes)
+    manifest = CanonicalAttemptManifest(binding.reference, manifest_bytes)
+    store = LocalResultStore(output_root)
+    journal: Any | None = None
+    attempt = output_root / run_id.value
+    last_frontier = "attempt_prepared"
     try:
+        try:
+            prepared = store.prepare_canonical_attempt(manifest)
+        except StoreCollisionError:
+            raise BacktestRunError("fresh attempt directory could not be created") from None
+        journal = create_posix_audit_journal(prepared.audit)
+
+        def retain_funding(document: dict[str, object]) -> None:
+            nonlocal last_frontier
+            _write_or_verify(attempt / "funding.json", _canonical_json(document) + b"\n")
+            last_frontier = "funding_durable"
+
         report, audit, funding = _execute(
             scenario,
             run_id=run_id,
@@ -724,40 +997,208 @@ def run_backtest_scenario(
             lineage=lineage,
             risk_policy=risk_policy,
             risk_context=risk_context,
+            audit=journal,
+            on_funding=retain_funding,
         )
     except _AttemptFailure as failure:
-        if failure.audit_bytes:
-            _write_once(attempt / "audit.jsonl", failure.audit_bytes)
-        _write_once(attempt / "funding.json", _canonical_json(failure.funding_document) + b"\n")
-        semantic = {
-            "failure": {"code": failure.code.value},
-            "lineage_sha256": lineage.value,
-            "schema": "ea.backtest-semantic-outcome.v1",
-            "terminal_state": "failed",
-        }
-        document = {
-            "code": failure.code.value,
-            **failure.details,
-            "lineage_sha256": lineage.value,
-            "message": failure.message,
-            "run_id": run_id.value,
-            "scenario_sha256": scenario.scenario_sha256.value,
-            "schema": _FAILURE_SCHEMA,
-            "semantic_outcome_sha256": semantic_outcome_sha256(semantic).value,
-            "status": "failed",
-            "terminal_state": "failed",
-        }
-        _write_once(attempt / "failure.json", _canonical_json(document) + b"\n")
+        if journal is not None:
+            _write_or_verify(attempt / "audit.jsonl", _audit_bytes(list(journal.records)))
+            _write_or_verify(
+                attempt / "failure.json",
+                _failure_bytes(
+                    classification="backtest.product_failure",
+                    run_id=run_id,
+                    lineage=lineage,
+                    scenario=scenario,
+                    last_frontier=last_frontier,
+                    audit=journal,
+                    code=failure.code.value,
+                    message=failure.message,
+                    details=failure.details,
+                ),
+            )
         raise BacktestRunFailure(failure.code, failure.message, attempt) from None
-    _write_once(attempt / "audit.jsonl", audit)
-    _write_once(attempt / "funding.json", _canonical_json(funding) + b"\n")
-    _write_once(attempt / "result.json", _canonical_json(report) + b"\n")
+    except BacktestRunError:
+        raise
+    except BacktestRunFailure:
+        raise
+    except Exception:
+        if journal is not None:
+            _write_or_verify(
+                attempt / "failure.json",
+                _failure_bytes(
+                    classification="backtest.internal_failure",
+                    run_id=run_id,
+                    lineage=lineage,
+                    scenario=scenario,
+                    last_frontier=last_frontier,
+                    audit=journal,
+                    code="backtest.internal_failure",
+                    message="backtest failed because of an unexpected internal error",
+                ),
+            )
+        raise BacktestRunFailure(
+            OutcomeCode.DURABILITY_RESULT_WRITE_FAILED,
+            "backtest failed because of an unexpected internal error",
+            attempt,
+        ) from None
+    finally:
+        if journal is not None:
+            journal.close()
+        store.close()
+    _write_or_verify(attempt / "audit.jsonl", audit)
+    _write_or_verify(attempt / "funding.json", _canonical_json(funding) + b"\n")
+    _publish_success(attempt, _canonical_json(report) + b"\n")
     return BacktestRunResult("success", attempt)
+
+
+def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
+    """Verify and continue one supported durable frontier of the same attempt."""
+    scenario, run_id, lineage, risk_policy, risk_context, manifest = _load_verified_attempt(run_dir)
+    attempt = run_dir
+    store = LocalResultStore(attempt.parent)
+    journal: Any | None = None
+    terminal_recovery: Any | None = None
+    try:
+        try:
+            verified = store.verify_recovery_attempt(manifest)
+        except Exception:
+            raise BacktestResumeFailure(
+                "resume audit or identity evidence is invalid",
+                attempt,
+            ) from None
+        failure_path = attempt / "failure.json"
+        if failure_path.exists():
+            try:
+                failure_payload = failure_path.read_bytes()
+                failure = json.loads(failure_payload)
+                if (
+                    _canonical_json(failure) + b"\n" != failure_payload
+                    or type(failure) is not dict
+                    or failure.get("status") != "failed"
+                    or failure.get("terminal_state") != "failed"
+                    or failure.get("run_id") != run_id.value
+                    or failure.get("lineage_sha256") != lineage.value
+                ):
+                    raise ValueError("failed evidence conflicts")
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                raise BacktestResumeFailure("failed attempt evidence is invalid", attempt) from None
+            raise BacktestResumeFailure("failed attempt is terminal and cannot resume", attempt)
+        result_path = attempt / "result.json"
+        if result_path.exists():
+            if type(verified) is not VerifiedTerminalRecoveryBinding:
+                raise BacktestResumeFailure(
+                    "resume success evidence lacks a terminal audit", attempt
+                )
+            terminal_recovery = store.recover_terminal_attempt(verified)
+            try:
+                result = json.loads(result_path.read_bytes())
+            except (OSError, ValueError, json.JSONDecodeError):
+                raise BacktestResumeFailure("resume success evidence is invalid", attempt) from None
+            if (
+                type(result) is not dict
+                or result.get("status") != "success"
+                or result.get("run_id") != run_id.value
+                or result.get("lineage_sha256") != lineage.value
+            ):
+                raise BacktestResumeFailure("resume success identity conflicts", attempt)
+            reconstructed_report, reconstructed_audit, reconstructed_funding = _execute(
+                scenario,
+                run_id=run_id,
+                binding=manifest.binding,
+                lineage=lineage,
+                risk_policy=risk_policy,
+                risk_context=risk_context,
+            )
+            reconstructed_terminal = json.loads(reconstructed_audit.splitlines()[-1])
+            if (
+                reconstructed_terminal["record_sha256"]
+                != audit_record_digest(terminal_recovery.terminal_record).value
+                or result_path.read_bytes() != _canonical_json(reconstructed_report) + b"\n"
+                or (attempt / "audit.jsonl").read_bytes() != reconstructed_audit
+                or (attempt / "funding.json").read_bytes()
+                != _canonical_json(reconstructed_funding) + b"\n"
+            ):
+                raise BacktestResumeFailure("resume completed evidence conflicts", attempt)
+            return BacktestRunResult("success", attempt)
+
+        binding = manifest.binding
+
+        def retain_funding(document: dict[str, object]) -> None:
+            _write_or_verify(attempt / "funding.json", _canonical_json(document) + b"\n")
+
+        if type(verified) is VerifiedTerminalRecoveryBinding:
+            terminal_recovery = store.recover_terminal_attempt(verified)
+            report, audit, funding = _execute(
+                scenario,
+                run_id=run_id,
+                binding=binding,
+                lineage=lineage,
+                risk_policy=risk_policy,
+                risk_context=risk_context,
+                on_funding=retain_funding,
+            )
+            reconstructed = json.loads(audit.splitlines()[-1])
+            if (
+                reconstructed["record_sha256"]
+                != audit_record_digest(terminal_recovery.terminal_record).value
+            ):
+                raise BacktestResumeFailure(
+                    "resume terminal evidence conflicts with deterministic reconstruction",
+                    attempt,
+                )
+        elif type(verified) is VerifiedIncompleteRecoveryBinding:
+            recovered = store.recover_incomplete_attempt(verified)
+            journal = reopen_posix_audit_journal(recovered.audit)
+            report, audit, funding = _execute(
+                scenario,
+                run_id=run_id,
+                binding=binding,
+                lineage=lineage,
+                risk_policy=risk_policy,
+                risk_context=risk_context,
+                audit=journal,
+                on_funding=retain_funding,
+            )
+        else:
+            raise BacktestResumeFailure("resume frontier classification is unsupported", attempt)
+        _write_or_verify(attempt / "audit.jsonl", audit)
+        _write_or_verify(attempt / "funding.json", _canonical_json(funding) + b"\n")
+        _publish_success(attempt, _canonical_json(report) + b"\n")
+        return BacktestRunResult("success", attempt)
+    except BacktestResumeFailure:
+        raise
+    except BacktestRunFailure as error:
+        raise BacktestResumeFailure(str(error), attempt) from None
+    except Exception:
+        if journal is not None:
+            _write_or_verify(
+                attempt / "failure.json",
+                _failure_bytes(
+                    classification="backtest.internal_failure",
+                    run_id=run_id,
+                    lineage=lineage,
+                    scenario=scenario,
+                    last_frontier="resume_reconstruction",
+                    audit=journal,
+                    code="backtest.internal_failure",
+                    message="backtest resume failed because of an unexpected internal error",
+                ),
+            )
+        raise BacktestResumeFailure("backtest resume internal failure", attempt) from None
+    finally:
+        if journal is not None:
+            journal.close()
+        if terminal_recovery is not None:
+            terminal_recovery._finish()
+        store.close()
 
 
 __all__ = [
     "BacktestRunError",
     "BacktestRunFailure",
     "BacktestRunResult",
+    "BacktestResumeFailure",
+    "resume_backtest_attempt",
     "run_backtest_scenario",
 ]

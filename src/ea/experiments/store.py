@@ -896,10 +896,7 @@ class LocalResultStore:
                 or stat.S_IMODE(manifest_stat.st_mode) != 0o600
                 or manifest_stat.st_nlink != 1
                 or manifest_payload != expected_payload
-                or (
-                    require_typed_manifest
-                    and read_manifest(manifest_payload) != expected_manifest
-                )
+                or (require_typed_manifest and read_manifest(manifest_payload) != expected_manifest)
             ):
                 raise StoreError("recovery manifest differs from exact expected evidence")
             binding = RunBinding(

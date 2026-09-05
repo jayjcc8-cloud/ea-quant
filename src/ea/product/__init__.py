@@ -1,9 +1,11 @@
 """Runnable offline product compositions."""
 
 from ea.product.backtest import (
+    BacktestResumeFailure,
     BacktestRunError,
     BacktestRunFailure,
     BacktestRunResult,
+    resume_backtest_attempt,
     run_backtest_scenario,
 )
 from ea.product.identity import (
@@ -33,6 +35,7 @@ __all__ = [
     "BacktestIdentityError",
     "BacktestLineageInputs",
     "BacktestRandomness",
+    "BacktestResumeFailure",
     "BacktestRunError",
     "BacktestRunFailure",
     "BacktestRunResult",
@@ -47,6 +50,7 @@ __all__ = [
     "build_backtest_lineage",
     "canonical_backtest_lineage_bytes",
     "load_backtest_scenario",
+    "resume_backtest_attempt",
     "run_offline_demo",
     "run_backtest_scenario",
     "semantic_outcome_sha256",

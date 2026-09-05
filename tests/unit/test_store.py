@@ -26,8 +26,8 @@ from ea.experiments.manifest import (
     read_manifest,
 )
 from ea.experiments.store import (
-    CanonicalAttemptManifest,
     AuditRunBinding,
+    CanonicalAttemptManifest,
     LocalResultStore,
     StoreCollisionError,
     StoreError,
