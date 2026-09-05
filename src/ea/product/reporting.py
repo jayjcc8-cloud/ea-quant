@@ -22,8 +22,14 @@ from ea.core import (
     AUDIT_FRAME_DIGEST_DOMAIN,
     EMPTY_CHAIN_HEAD_SHA256,
     EMPTY_RECORD_SHA256,
+    FILL_CANONICALIZATION,
+    FILL_DIGEST_DOMAIN,
     FUNDING_APPLY_OUTCOME_DIGEST_DOMAIN,
     FUNDING_TRANSACTION_DIGEST_DOMAIN,
+    MESSAGE_SCHEMA_VERSION,
+    PORTFOLIO_SNAPSHOT_CANONICALIZATION,
+    PORTFOLIO_SNAPSHOT_DIGEST_DOMAIN,
+    PORTFOLIO_SNAPSHOT_SCHEMA_VERSION,
     AuditRecord,
     AuditRecordKind,
     CanonicalDecimal,
@@ -58,7 +64,7 @@ _EQUITY_RULE = "single-settlement-last-price-equity-v1"
 _RETURN_RULE = "initial-funding-total-return-v1"
 _FEE_RULE = "phase1-zero-commission-v1"
 _RETURN_SCALE = 18
-_SUPPORTED_RESULT_SCHEMA = "ea.backtest-single-run-result.v1"
+_SUPPORTED_RESULT_SCHEMA = "ea.backtest-single-run-result.v2"
 _SUPPORTED_ATTEMPT_SCHEMA = "ea.backtest-resumable-attempt.v2"
 _SUPPORTED_EXECUTION_POLICY = "phase1.next-bar-close.v1"
 _SUPPORTED_EXECUTION_POLICY_SHA256 = "1" * 64
@@ -114,9 +120,9 @@ BACKTEST_REPORT_FIELD_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "economics.ending_balances",
-        "result.json + reconciliation audit",
+        "result.json snapshot evidence + reconciliation audit",
         _SUPPORTED_RESULT_SCHEMA,
-        "completed snapshot",
+        "digest-bound completed snapshot",
     ),
     (
         "valuation.last_price",
@@ -140,9 +146,9 @@ BACKTEST_REPORT_FIELD_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "economics.fees",
-        "Phase 1 fill contract + complete fill ids",
+        "result.json canonical Fill evidence + audit",
         "Phase 1 execution v1",
-        _FEE_RULE,
+        "digest-bound " + _FEE_RULE,
     ),
     (
         "completion",
@@ -690,6 +696,152 @@ def _last_admitted_price(
     }
 
 
+def _validate_fill_evidence(
+    evidence: object,
+    *,
+    result_fill: object,
+    result_order: object,
+    scenario: LoadedBacktestScenario,
+    run_id: str,
+    accepted_fills: Mapping[tuple[str, int], str],
+) -> int:
+    if result_fill is None:
+        if evidence is not None or accepted_fills:
+            raise ValueError("fill evidence conflicts")
+        return 0
+    fill = _exact_keys(result_fill, {"fill_id", "price", "quantity", "side"})
+    document = _exact_keys(
+        evidence,
+        {
+            "canonicalization",
+            "causation_id",
+            "client_submission_key",
+            "correlation_id",
+            "dedup_identity",
+            "fact_sha256",
+            "fees",
+            "fill_id",
+            "instrument",
+            "instrument_spec_set_id",
+            "instrument_spec_set_sha256",
+            "instrument_specification_id",
+            "message_type",
+            "occurred_at",
+            "order_id",
+            "price",
+            "provenance",
+            "quantity",
+            "run_id",
+            "schema_version",
+            "side",
+            "source_namespace",
+            "venue_order_id",
+        },
+    )
+    identity = _identity(document["fill_id"], run_id=run_id, owner_kind="execution.fill")
+    expected_digest = accepted_fills.get(identity)
+    actual_digest = sha256(FILL_DIGEST_DOMAIN + _canonical_json(document)).hexdigest()
+    instrument = _exact_keys(document["instrument"], {"symbol", "venue"})
+    if (
+        document["canonicalization"] != FILL_CANONICALIZATION
+        or document["message_type"] != "fill"
+        or document["schema_version"] != MESSAGE_SCHEMA_VERSION
+        or document["run_id"] != run_id
+        or document["fill_id"] != fill["fill_id"]
+        or document["price"] != fill["price"]
+        or document["quantity"] != fill["quantity"]
+        or document["side"] != fill["side"]
+        or instrument
+        != {"symbol": scenario.instrument.symbol, "venue": scenario.instrument.venue.code}
+        or expected_digest is None
+        or actual_digest != expected_digest
+    ):
+        raise ValueError("result fill evidence conflicts")
+    if result_order is None:
+        raise ValueError("fill evidence lacks result order")
+    order = _exact_keys(result_order, {"order_id", "quantity", "side"})
+    if (
+        document["order_id"] != order["order_id"]
+        or document["quantity"] != order["quantity"]
+        or document["side"] != order["side"]
+    ):
+        raise ValueError("fill/order evidence conflicts")
+    fees = document["fees"]
+    if type(fees) is not list or len(fees) != 1:
+        raise ValueError("fill fee evidence is incomplete")
+    fee = _exact_keys(fees[0], {"amount", "currency", "fee_code"})
+    if (
+        fee["amount"] != "0"
+        or fee["currency"] != scenario.funding_currency.code
+        or fee["fee_code"] != "commission"
+    ):
+        raise ValueError("fill fee evidence conflicts")
+    return 1
+
+
+def _validate_snapshot_evidence(
+    evidence: object,
+    *,
+    result: Mapping[str, object],
+    run_id: str,
+    terminal_snapshot_sha256: str,
+) -> None:
+    document = _exact_keys(
+        evidence,
+        {
+            "canonicalization",
+            "cash_balances",
+            "instrument_spec_set_id",
+            "instrument_spec_set_sha256",
+            "last_entry_id",
+            "last_transaction_sha256",
+            "ledger_sequence",
+            "message_type",
+            "open_reconciliation_bindings",
+            "open_reconciliation_refs",
+            "position_balances",
+            "rounding_balances",
+            "run_id",
+            "schema_version",
+            "snapshot_version",
+            "unresolved_fills",
+        },
+    )
+    actual_digest = sha256(PORTFOLIO_SNAPSHOT_DIGEST_DOMAIN + _canonical_json(document)).hexdigest()
+    if (
+        document["canonicalization"] != PORTFOLIO_SNAPSHOT_CANONICALIZATION
+        or document["message_type"] != "portfolio_snapshot"
+        or document["schema_version"] != PORTFOLIO_SNAPSHOT_SCHEMA_VERSION
+        or document["run_id"] != run_id
+        or document["ledger_sequence"] != result["ledger_sequence"]
+        or actual_digest != terminal_snapshot_sha256
+    ):
+        raise ValueError("result snapshot evidence conflicts")
+    snapshot_cash = document["cash_balances"]
+    if type(snapshot_cash) is not list:
+        raise ValueError("snapshot cash evidence is invalid")
+    projected_cash: list[dict[str, object]] = []
+    for item in snapshot_cash:
+        balance = _exact_keys(item, {"amount", "currency", "currency_quantum"})
+        projected_cash.append({key: balance[key] for key in ("amount", "currency")})
+    snapshot_positions = document["position_balances"]
+    if type(snapshot_positions) is not list:
+        raise ValueError("snapshot position evidence is invalid")
+    projected_positions: list[dict[str, object]] = []
+    for item in snapshot_positions:
+        balance = _exact_keys(item, {"instrument", "quantity", "quantity_quantum"})
+        instrument = _exact_keys(balance["instrument"], {"symbol", "venue"})
+        projected_positions.append(
+            {
+                "quantity": balance["quantity"],
+                "symbol": instrument["symbol"],
+                "venue": instrument["venue"],
+            }
+        )
+    if projected_cash != result["ending_cash"] or projected_positions != result["ending_positions"]:
+        raise ValueError("result balances conflict with committed snapshot")
+
+
 def _validate_result(
     result: dict[str, object],
     *,
@@ -707,10 +859,12 @@ def _validate_result(
             "ending_cash",
             "ending_positions",
             "fill",
+            "fill_evidence",
             "initial_funding",
             "ledger_sequence",
             "lineage_sha256",
             "order",
+            "portfolio_snapshot_evidence",
             "randomness",
             "reconciliation",
             "risk",
@@ -769,8 +923,8 @@ def _validate_result(
     if strategy["id"] != scenario.strategy_id.value:
         raise ValueError("result strategy conflicts")
     order_ids: set[tuple[str, int]] = set()
-    fill_ids: set[tuple[str, int]] = set()
-    committed_fill_ids: set[tuple[str, int]] = set()
+    accepted_fills: dict[tuple[str, int], str] = {}
+    committed_fills: dict[tuple[str, int], str] = {}
     reconciliation_payloads: list[dict[str, object]] = []
     terminal: dict[str, object] | None = None
     final_snapshot_sha256: str | None = None
@@ -786,13 +940,16 @@ def _validate_result(
         elif record.record_kind is AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
             if payload.get("action") == "accepted":
                 fill_doc = _exact_keys(payload["fill"], {"fill_id", "fill_sha256"})
-                fill_ids.add(
-                    _identity(fill_doc["fill_id"], run_id=run_id, owner_kind="execution.fill")
+                fill_identity = _identity(
+                    fill_doc["fill_id"], run_id=run_id, owner_kind="execution.fill"
                 )
+                fill_sha256 = _text(fill_doc["fill_sha256"])
+                if accepted_fills.setdefault(fill_identity, fill_sha256) != fill_sha256:
+                    raise ValueError("accepted fill digest conflicts")
         elif record.record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME:
             if payload.get("action") == "effect_committed":
-                committed_fill_ids.add(
-                    _identity(payload["fill_id"], run_id=run_id, owner_kind="execution.fill")
+                fill_identity = _identity(
+                    payload["fill_id"], run_id=run_id, owner_kind="execution.fill"
                 )
                 original = _exact_keys(
                     payload["original_ledger_apply_outcome"],
@@ -819,8 +976,17 @@ def _validate_result(
                 if (
                     original["code"] != "ledger.applied"
                     or payload["before_snapshot_sha256"] != funded_snapshot_sha256
+                    or _identity(
+                        original["submitted_fill_id"],
+                        run_id=run_id,
+                        owner_kind="execution.fill",
+                    )
+                    != fill_identity
                 ):
                     raise ValueError("ledger handoff conflicts")
+                fill_sha256 = _text(original["submitted_fill_sha256"])
+                if committed_fills.setdefault(fill_identity, fill_sha256) != fill_sha256:
+                    raise ValueError("committed fill digest conflicts")
                 final_snapshot_sha256 = _text(payload["after_snapshot_sha256"])
         elif record.record_kind is AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME:
             reconciliation_payloads.append(payload)
@@ -843,7 +1009,7 @@ def _validate_result(
         for item in reconciliation_payloads
     ):
         raise ValueError("reconciliation evidence is incomplete")
-    if fill_ids != committed_fill_ids or len(order_ids) > 1 or len(fill_ids) > 1:
+    if accepted_fills != committed_fills or len(order_ids) > 1 or len(accepted_fills) > 1:
         raise ValueError("economic audit identities conflict")
     if result["order"] is None:
         if order_ids:
@@ -855,15 +1021,33 @@ def _validate_result(
         CanonicalDecimal(_text(order["quantity"]))
         _text(order["side"])
     if result["fill"] is None:
-        if fill_ids:
+        if accepted_fills or result["fill_evidence"] is not None:
             raise ValueError("fill count conflicts")
     else:
         fill = _exact_keys(result["fill"], {"fill_id", "price", "quantity", "side"})
-        if {_identity(fill["fill_id"], run_id=run_id, owner_kind="execution.fill")} != fill_ids:
+        if {_identity(fill["fill_id"], run_id=run_id, owner_kind="execution.fill")} != set(
+            accepted_fills
+        ):
             raise ValueError("result fill identity conflicts")
         CanonicalDecimal(_text(fill["price"]))
         CanonicalDecimal(_text(fill["quantity"]))
         _text(fill["side"])
+    fee_count = _validate_fill_evidence(
+        result["fill_evidence"],
+        result_fill=result["fill"],
+        result_order=result["order"],
+        scenario=scenario,
+        run_id=run_id,
+        accepted_fills=accepted_fills,
+    )
+    if fee_count != len(accepted_fills):
+        raise ValueError("fill fee count conflicts")
+    _validate_snapshot_evidence(
+        result["portfolio_snapshot_evidence"],
+        result=result,
+        run_id=run_id,
+        terminal_snapshot_sha256=terminal_snapshot,
+    )
     reconciliation = _exact_keys(result["reconciliation"], {"cash", "position"})
     expected_position = "match" if positions else "not_required_empty"
     if reconciliation != {"cash": "match", "position": expected_position}:
@@ -876,7 +1060,7 @@ def _validate_result(
     if scenario.strategy_id is BacktestStrategyId.ALWAYS_FLAT:
         if (
             order_ids
-            or fill_ids
+            or accepted_fills
             or result["ledger_sequence"] != 1
             or risk["decision"] != "not_applicable"
             or risk["reason"] is not None
@@ -884,7 +1068,7 @@ def _validate_result(
             raise ValueError("flat result economics conflict")
     elif (
         len(order_ids) != 1
-        or len(fill_ids) != 1
+        or len(accepted_fills) != 1
         or result["ledger_sequence"] != 2
         or risk["decision"] not in {"allow", "resize"}
         or type(risk["reason"]) is not str
@@ -913,7 +1097,7 @@ def _validate_result(
     }
     if result["semantic_outcome_sha256"] != semantic_outcome_sha256(semantic).value:
         raise ValueError("semantic outcome digest conflicts")
-    return len(order_ids), len(fill_ids), terminal_snapshot
+    return len(order_ids), len(accepted_fills), terminal_snapshot
 
 
 def manifest_digest(manifest: Mapping[str, object]) -> str:

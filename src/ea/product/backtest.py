@@ -49,9 +49,11 @@ from ea.core import (
     audit_chain_head,
     audit_record_digest,
     audit_subject_digest,
+    canonical_fill_bytes,
     canonical_funding_apply_outcome_bytes,
     canonical_funding_transaction_bytes,
     canonical_initial_funding_bytes,
+    canonical_portfolio_snapshot_bytes,
     canonical_reconciliation_outcome_bytes,
     canonical_run_prepared_audit_payload,
     create_phase1_portfolio_policy,
@@ -102,7 +104,7 @@ _SOURCE_NAMESPACE = SourceNamespace("backtest.scenario.matcher.v1")
 _RECONCILIATION_SOURCE = SourceNamespace("backtest.scenario.reconciliation.v1")
 _LEDGER_WATERMARK = SourceNamespace("ledger.portfolio")
 _RISK_POLICY_ID = RiskPolicyId("backtest.scenario.v1")
-_RESULT_SCHEMA = "ea.backtest-single-run-result.v1"
+_RESULT_SCHEMA = "ea.backtest-single-run-result.v2"
 _FAILURE_SCHEMA = "ea.backtest-single-run-failure.v1"
 _ATTEMPT_SCHEMA = "ea.backtest-resumable-attempt.v2"
 _ATTEMPT_CANONICALIZATION = "ea-backtest-resumable-attempt-v2"
@@ -710,6 +712,8 @@ def _execute(
             "side": fill.side.value,
         }
     )
+    fill_evidence = None if fill is None else json.loads(canonical_fill_bytes(fill))
+    portfolio_snapshot_evidence = json.loads(canonical_portfolio_snapshot_bytes(snapshot))
     ending_cash = [
         {"amount": balance.amount.text, "currency": balance.currency.code}
         for balance in snapshot.cash_balances
@@ -754,6 +758,7 @@ def _execute(
         "ending_cash": ending_cash,
         "ending_positions": ending_positions,
         "fill": fill_document,
+        "fill_evidence": fill_evidence,
         "initial_funding": {
             "amount": scenario.initial_cash.text,
             "currency": scenario.funding_currency.code,
@@ -763,6 +768,7 @@ def _execute(
         "ledger_sequence": snapshot.ledger_sequence,
         "lineage_sha256": lineage.value,
         "order": order_document,
+        "portfolio_snapshot_evidence": portfolio_snapshot_evidence,
         "randomness": scenario.randomness.document(),
         "reconciliation": reconciliation_document,
         "risk": risk_document,

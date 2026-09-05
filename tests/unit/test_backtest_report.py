@@ -20,6 +20,7 @@ from ea.cli.app import app
 from ea.core import ReplayWindow
 from ea.data import decode_phase1_ohlcv_csv
 from ea.product import load_backtest_scenario, resume_backtest_attempt, run_backtest_scenario
+from ea.product.identity import semantic_outcome_sha256
 from unit.test_backtest_single_run import _scenario
 
 
@@ -74,6 +75,27 @@ def _economic_projection(report: dict[str, object]) -> dict[str, object]:
         "economics": report["economics"],
         "lineage_sha256": report["lineage_sha256"],
         "semantic_outcome_sha256": report["completion"]["semantic_outcome_sha256"],  # type: ignore[index]
+    }
+
+
+def _result_semantic_projection(result: dict[str, object]) -> dict[str, object]:
+    fill = cast(dict[str, object] | None, result["fill"])
+    order = cast(dict[str, object] | None, result["order"])
+    initial = cast(dict[str, object], result["initial_funding"])
+    return {
+        "ending_cash": result["ending_cash"],
+        "ending_positions": result["ending_positions"],
+        "fill": (
+            None if fill is None else {key: fill[key] for key in ("price", "quantity", "side")}
+        ),
+        "initial_funding": {"amount": initial["amount"], "currency": initial["currency"]},
+        "lineage_sha256": result["lineage_sha256"],
+        "order": (None if order is None else {key: order[key] for key in ("quantity", "side")}),
+        "reconciliation": result["reconciliation"],
+        "risk": result["risk"],
+        "schema": "ea.backtest-semantic-outcome.v1",
+        "strategy": result["strategy"],
+        "terminal_state": "completed",
     }
 
 
@@ -306,6 +328,42 @@ def test_invalid_or_ambiguous_source_never_creates_report(tmp_path: Path, mutati
         product.generate_backtest_report(attempt, output)
 
     assert not output.exists()
+
+
+@pytest.mark.parametrize("mutate_fill", [True, False], ids=["fill-and-cash", "cash-only"])
+def test_report_rejects_result_economics_not_bound_to_committed_fill(
+    tmp_path: Path, *, mutate_fill: bool
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    attempt = run_backtest_scenario(scenario, (tmp_path / "runs").resolve()).output_directory
+    result_path = attempt / "result.json"
+    result = cast(dict[str, object], json.loads(result_path.read_bytes()))
+    fill = cast(dict[str, object], result["fill"])
+    cash = cast(list[dict[str, object]], result["ending_cash"])
+    if mutate_fill:
+        fill["price"] = "100"
+    cash[0]["amount"] = "9800"
+    result["semantic_outcome_sha256"] = semantic_outcome_sha256(
+        _result_semantic_projection(result)
+    ).value
+    result_path.write_bytes(
+        json.dumps(
+            result,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
+    before = _evidence_tree(attempt)
+    output = (tmp_path / "report").resolve()
+
+    with pytest.raises(product.BacktestReportError):
+        product.generate_backtest_report(attempt, output)
+
+    assert not output.exists()
+    assert _evidence_tree(attempt) == before
 
 
 def test_real_incomplete_and_failed_attempts_cannot_emit_success_report(
