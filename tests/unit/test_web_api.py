@@ -114,6 +114,7 @@ def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -
             json={
                 "scenario_id": "bounded-long.yaml",
                 "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "4"},
                 "request_id": "request-snapshot-0001",
             },
             headers=WRITE_HEADERS,
@@ -125,14 +126,20 @@ def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -
         assert accepted["schema"] == "ea.local-web-job.v2"
         assert snapshot["schema"] == "ea.local-web-input.v1"
         assert snapshot["scenario_id"] == "bounded-long.yaml"
-        assert snapshot["identity"] == validated["input_identity"]
+        assert snapshot["source_identity"] == validated["input_identity"]
+        assert snapshot["identity"]["data_sha256"] == validated["input_identity"]["data_sha256"]
+        assert snapshot["identity"]["record_count"] == validated["input_identity"]["record_count"]
+        assert (
+            snapshot["identity"]["scenario_sha256"]
+            != validated["input_identity"]["scenario_sha256"]
+        )
         assert snapshot["scenario"]["funding"] == {
             "currency": "USD",
-            "initial_cash": "10000",
+            "initial_cash": "20000",
         }
         assert snapshot["scenario"]["strategy"] == {
             "id": "bounded-long-v1",
-            "target_quantity": "2",
+            "target_quantity": "4",
         }
         assert snapshot["scenario"]["instrument"]["symbol"] == "AAPL"
         assert snapshot["scenario"]["instrument"]["venue"] == "XNAS"
@@ -149,6 +156,48 @@ def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -
         assert persisted["input_snapshot"] == snapshot
         assert persisted["input_sha256"] == accepted["input_sha256"]
         assert persisted["created_at"] == accepted["created_at"]
+        materialized = settings.workspace / "inputs" / f"{accepted['job_id']}.json"
+        assert materialized.is_file()
+        assert materialized.resolve().is_relative_to((settings.workspace / "inputs").resolve())
+
+        completed = _wait(client, accepted["job_id"])
+        report = client.get(f"/api/backtests/{completed['job_id']}/report").json()
+        assert report["economics"]["initial_funding"] == {
+            "amount": "20000",
+            "currency": "USD",
+        }
+        assert report["economics"]["ending_positions"] == [
+            {"quantity": "4", "symbol": "AAPL", "venue": "XNAS"}
+        ]
+        assert report["economics"]["equity"]["amount"] == "20034"
+        assert report["economics"]["net_pnl"]["amount"] == "34"
+        assert report["economics"]["total_return"]["value"] == "0.0017"
+
+        duplicate = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "4"},
+                "request_id": "request-snapshot-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert duplicate.status_code == 200
+        assert duplicate.json()["job_id"] == accepted["job_id"]
+
+        conflict = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "3"},
+                "request_id": "request-snapshot-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "input_conflict"
 
 
 def test_worker_consumes_input_frozen_at_job_acceptance(
@@ -375,6 +424,37 @@ def test_api_fails_closed_for_input_business_and_browser_boundaries(tmp_path: Pa
             ).status_code
             == 415
         )
+
+        bounded = _validate(client, "bounded-long.yaml")
+        free_text_symbol = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": bounded["input_identity"],
+                "parameters": {
+                    "initial_cash": "10000",
+                    "quantity": "2",
+                    "symbol": "MSFT",
+                },
+                "request_id": "request-symbol-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert free_text_symbol.status_code == 422
+        assert free_text_symbol.json()["error"]["code"] == "invalid_request"
+
+        invalid_quantity = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": bounded["input_identity"],
+                "parameters": {"initial_cash": "10000", "quantity": "1.5"},
+                "request_id": "request-quantity-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert invalid_quantity.status_code == 422
+        assert invalid_quantity.json()["error"]["code"] == "scenario_invalid"
 
         low = _validate(client, "low-cash.yaml")
         response = client.post(

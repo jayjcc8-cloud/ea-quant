@@ -22,6 +22,7 @@ from ea.product import (
     LoadedBacktestScenario,
     generate_backtest_report,
     load_backtest_scenario,
+    parameterize_backtest_scenario,
     run_backtest_scenario,
 )
 
@@ -132,10 +133,12 @@ def _scenario_summary(scenario_id: str, scenario: LoadedBacktestScenario) -> dic
 def _input_snapshot(
     scenario_id: str,
     scenario: LoadedBacktestScenario,
+    source_identity: dict[str, object],
 ) -> tuple[bytes, str]:
     snapshot = {
         "schema": "ea.local-web-input.v1",
         "scenario_id": scenario_id,
+        "source_identity": source_identity,
         "identity": _scenario_identity(scenario),
         "scenario": json.loads(scenario.canonical_bytes),
     }
@@ -319,10 +322,12 @@ def _decode_job(payload: bytes) -> JobRecord:
             ):
                 raise ValueError
             if (
-                set(snapshot) != {"schema", "scenario_id", "identity", "scenario"}
+                set(snapshot)
+                != {"schema", "scenario_id", "source_identity", "identity", "scenario"}
                 or snapshot.get("schema") != "ea.local-web-input.v1"
                 or snapshot.get("scenario_id") != document["scenario_id"]
-                or snapshot.get("identity") != identity
+                or snapshot.get("source_identity") != identity
+                or type(snapshot.get("identity")) is not dict
                 or type(snapshot.get("scenario")) is not dict
             ):
                 raise ValueError
@@ -404,10 +409,12 @@ class WebService:
         self.registry = ScenarioRegistry(resolved_scenarios)
         self.workspace = _directory(resolved_workspace, label="workspace", create=True)
         self.jobs_dir = _directory(self.workspace / "jobs", label="job index", create=True)
+        self.inputs_dir = _directory(self.workspace / "inputs", label="input store", create=True)
         self.runs_dir = _directory(self.workspace / "runs", label="attempt root", create=True)
         self.reports_dir = _directory(self.workspace / "reports", label="report root", create=True)
         for directory, label in (
             (self.jobs_dir, "job index"),
+            (self.inputs_dir, "input store"),
             (self.runs_dir, "attempt root"),
             (self.reports_dir, "report root"),
         ):
@@ -434,6 +441,46 @@ class WebService:
 
     def _job_path(self, job_id: str) -> Path:
         return self.jobs_dir / f"{job_id}.json"
+
+    def _materialize_scenario(
+        self,
+        job_id: str,
+        scenario: LoadedBacktestScenario,
+    ) -> LoadedBacktestScenario:
+        document = json.loads(scenario.canonical_bytes)
+        document.pop("canonicalization")
+        document["data"]["path"] = str(scenario.data_path)
+        path = self.inputs_dir / f"{job_id}.json"
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                descriptor = None
+                handle.write(_canonical_json(document))
+                handle.flush()
+                os.fsync(handle.fileno())
+            directory_descriptor = os.open(self.inputs_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+            materialized = load_backtest_scenario(path)
+            if (
+                materialized.canonical_bytes != scenario.canonical_bytes
+                or materialized.scenario_sha256 != scenario.scenario_sha256
+                or materialized.data_path != scenario.data_path
+            ):
+                raise WebBoundaryError("normalized input identity conflicts")
+            return materialized
+        except Exception:
+            if descriptor is not None:
+                os.close(descriptor)
+            path.unlink(missing_ok=True)
+            raise
 
     def _write(self, record: JobRecord) -> None:
         payload = _canonical_json(record.document())
@@ -501,6 +548,7 @@ class WebService:
         *,
         scenario_id: str,
         input_identity: dict[str, object],
+        parameters: dict[str, str | None] | None = None,
         request_id: str,
     ) -> tuple[JobRecord, bool]:
         with self._lock:
@@ -509,15 +557,41 @@ class WebService:
                 existing = self._jobs[existing_id]
                 if existing.scenario_id != scenario_id or existing.input_identity != input_identity:
                     raise RequestConflictError("request_id is already bound to different input")
+                if parameters is not None:
+                    if existing.input_snapshot_bytes is None:
+                        raise RequestConflictError("request_id is already bound to different input")
+                    snapshot = json.loads(existing.input_snapshot_bytes)
+                    scenario_document = snapshot["scenario"]
+                    if scenario_document["funding"]["initial_cash"] != parameters.get(
+                        "initial_cash"
+                    ) or scenario_document["strategy"].get("target_quantity") != parameters.get(
+                        "quantity"
+                    ):
+                        raise RequestConflictError("request_id is already bound to different input")
                 return existing, False
             if self._active is not None:
                 raise ServiceBusyError("one local backtest is already active")
             scenario = self.registry.load(scenario_id)
             if _scenario_identity(scenario) != input_identity:
                 raise InputChangedError("scenario input changed; validate it again")
-            snapshot_bytes, input_sha256 = _input_snapshot(scenario_id, scenario)
+            if parameters is not None:
+                initial_cash = parameters.get("initial_cash")
+                if type(initial_cash) is not str:
+                    raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
+                scenario = parameterize_backtest_scenario(
+                    scenario,
+                    initial_cash=initial_cash,
+                    quantity=parameters.get("quantity"),
+                )
+            job_id = str(uuid4())
+            scenario = self._materialize_scenario(job_id, scenario)
+            snapshot_bytes, input_sha256 = _input_snapshot(
+                scenario_id,
+                scenario,
+                input_identity,
+            )
             record = JobRecord(
-                job_id=str(uuid4()),
+                job_id=job_id,
                 request_id=request_id,
                 scenario_id=scenario_id,
                 input_identity=input_identity,

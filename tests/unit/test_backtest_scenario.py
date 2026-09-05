@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,7 +10,11 @@ import yaml
 
 from ea.core import ReplayWindow
 from ea.data import decode_phase1_ohlcv_csv
-from ea.product import BacktestScenarioError, load_backtest_scenario
+from ea.product import (
+    BacktestScenarioError,
+    load_backtest_scenario,
+    parameterize_backtest_scenario,
+)
 
 
 def _write_valid_scenario(tmp_path: Path) -> Path:
@@ -73,6 +79,74 @@ def test_loads_strict_funded_bounded_long_scenario(tmp_path: Path) -> None:
         "master_seed": "not_applicable",
     }
     assert loaded.dataset.selection.fingerprint.record_count == 3
+
+
+def test_parameterizes_only_cash_and_quantity_with_new_canonical_identity(tmp_path: Path) -> None:
+    source = load_backtest_scenario(_write_valid_scenario(tmp_path))
+
+    parameterized = parameterize_backtest_scenario(
+        source,
+        initial_cash="12000",
+        quantity="4",
+    )
+
+    document = json.loads(parameterized.canonical_bytes)
+    assert parameterized.initial_cash.text == "12000"
+    assert parameterized.target_quantity is not None
+    assert parameterized.target_quantity.text == "4"
+    assert document["funding"]["initial_cash"] == "12000"
+    assert document["strategy"]["target_quantity"] == "4"
+    assert parameterized.instrument == source.instrument
+    assert parameterized.spec_set == source.spec_set
+    assert parameterized.dataset is source.dataset
+    assert parameterized.data_path == source.data_path
+    assert document["instrument"]["symbol"] == "AAPL"
+    assert document["instrument"]["venue"] == "XNAS"
+    assert (
+        parameterized.scenario_sha256.value
+        == hashlib.sha256(b"ea.backtest-scenario.v1\0" + parameterized.canonical_bytes).hexdigest()
+    )
+    assert parameterized.scenario_sha256 != source.scenario_sha256
+    assert source.initial_cash.text == "10000"
+    assert source.target_quantity is not None
+    assert source.target_quantity.text == "2"
+
+
+@pytest.mark.parametrize(
+    ("initial_cash", "quantity", "message"),
+    [
+        ("0", "2", "initial_cash must be strictly positive"),
+        ("10000.00", "2", "initial_cash must be an ea-decimal-v1 string"),
+        ("10000", "1.5", "quantity is not quantized"),
+        ("10000", None, "bounded-long-v1 requires quantity"),
+    ],
+)
+def test_parameter_contract_rejects_invalid_editable_values(
+    tmp_path: Path,
+    initial_cash: str,
+    quantity: str | None,
+    message: str,
+) -> None:
+    source = load_backtest_scenario(_write_valid_scenario(tmp_path))
+
+    with pytest.raises(BacktestScenarioError, match=message):
+        parameterize_backtest_scenario(
+            source,
+            initial_cash=initial_cash,
+            quantity=quantity,
+        )
+
+
+def test_parameter_contract_forbids_quantity_for_registered_flat_strategy(tmp_path: Path) -> None:
+    scenario_path = _change(
+        _change(_write_valid_scenario(tmp_path), "strategy.id", "always-flat-v1"),
+        "strategy.target_quantity",
+        None,
+    )
+    source = load_backtest_scenario(scenario_path)
+
+    with pytest.raises(BacktestScenarioError, match="always-flat-v1 forbids quantity"):
+        parameterize_backtest_scenario(source, initial_cash="10000", quantity="1")
 
 
 def _change(path: Path, dotted: str, value: object) -> Path:

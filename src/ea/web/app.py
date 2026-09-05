@@ -32,11 +32,19 @@ class InputIdentity(BaseModel):
     record_count: int = Field(ge=1)
 
 
+class BacktestParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    initial_cash: str = Field(min_length=1, max_length=64)
+    quantity: str | None = Field(default=None, max_length=64)
+
+
 class BacktestRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     scenario_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.ya?ml$")
     input_identity: InputIdentity
+    parameters: BacktestParameters | None = None
     request_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
 
 
@@ -163,6 +171,7 @@ def create_app(settings: WebSettings) -> Any:
             record, created = service.create_job(
                 scenario_id=request.scenario_id,
                 input_identity=request.input_identity.model_dump(),
+                parameters=None if request.parameters is None else request.parameters.model_dump(),
                 request_id=request.request_id,
             )
             return JSONResponse(status_code=202 if created else 200, content=record.document())
