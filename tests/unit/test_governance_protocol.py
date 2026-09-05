@@ -144,6 +144,14 @@ def test_ci_keeps_path_aware_quality_and_installed_main_smoke() -> None:
     assert "uv build --wheel" in smoke
     assert "uv pip install" in smoke
     assert "ea doctor" in smoke
+    assert "mktemp -d" in smoke
+    assert ".ci-smoke/bin/ea backtest run" in smoke
+    assert "phase1-demo-v1/result.json" in smoke
+    assert "phase1-demo-v1/summary.txt" in smoke
+    assert "phase1-demo-v1/audit.jsonl" in smoke
+    assert "phase1-demo-v1/failure.json" in smoke
+    assert "trade_outcome" in smoke
+    assert "run_status" in smoke
 
 
 def test_exact_candidate_full_remains_available_for_t2_t3_and_release() -> None:

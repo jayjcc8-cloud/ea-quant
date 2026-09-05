@@ -39,6 +39,9 @@ branch-fail-under = 71
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"ea.product" = ["phase1_demo_ohlcv_v1.csv"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
