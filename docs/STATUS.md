@@ -2,8 +2,8 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — funded deterministic Backtest run/resume delivered / live
-unavailable.**
+**Phase 1 delivery reset — funded deterministic Backtest run/resume delivered / main healthy /
+live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
 authoritative checkpoint. GitHub Issues and pull requests carry mutable coordination state; this
