@@ -29,14 +29,25 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile quality
 uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
-Run the supported installed offline command:
+Validate and run a strict local `BacktestScenario v1`:
 
 ```bash
-venv/bin/ea backtest run --output-root ./ea-result
+venv/bin/ea backtest validate --scenario /absolute/path/to/scenario.yaml
+venv/bin/ea backtest run \
+  --scenario /absolute/path/to/scenario.yaml \
+  --output-root /absolute/path/to/runs
 ```
 
-The system defaults to bounded backtest mode. Paper/live profiles, real broker writes, and resolved
-credentials are not available.
+The scenario is the product configuration authority. It binds a local OHLCV path and fingerprint,
+an explicit UTC replay window, one instrument specification, positive initial cash, order/position/
+cash/notional limits, the deterministic next-bar-close execution policy, and either
+`always-flat-v1` or `bounded-long-v1`. Every run creates a fresh attempt directory and emits
+funding, audit, and result evidence. The fixed RESET demo remains available by omitting
+`--scenario`.
+
+This is an offline deterministic single-run product. Resume, generic crash recovery,
+BacktestReportV1 analytics, paper/live profiles, broker writes, credentials, and release
+publication are unavailable.
 
 ## Project Navigation
 

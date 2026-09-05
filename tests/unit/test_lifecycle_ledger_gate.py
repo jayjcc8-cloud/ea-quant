@@ -10,11 +10,13 @@ import pytest
 from ea.core import (
     AuditRecord,
     AuditRecordKind,
+    CanonicalDecimal,
     EconomicId,
     EconomicOwnerKind,
     ExecutionFactAction,
     ExecutionPolicyId,
     ExecutionPolicyRef,
+    InitialFunding,
     InstrumentExecutionSpecSet,
     InstrumentRiskLimit,
     OrderResolutionKeyKind,
@@ -504,6 +506,43 @@ def test_fresh_gate_rejects_seeded_economic_authorities(seed: str) -> None:
             fact_authority=_RetainedOutcomeFacts(matcher, outcome),
             evidence_resolver=_FixedFillEvidence(fill),
             **ports,
+        )
+
+
+def test_fresh_gate_accepts_only_bound_initial_funding() -> None:
+    import ea.runtime.coordinator as coordinator_module
+    from ea.composition.lifecycle import create_phase1_historical_economic_gate
+    from ea.core.lifecycle import LifecycleError
+
+    _fixture, matcher, _orders, _causal, _delayed, _end = _system()
+    policy = _risk_policy(matcher.spec_set)
+    funding = InitialFunding(
+        matcher.run_id,
+        matcher.spec_set.specifications[0].settlement_currency,
+        CanonicalDecimal("1000"),
+    )
+    gate = create_phase1_historical_economic_gate(
+        run_id=matcher.run_id,
+        spec_set=matcher.spec_set,
+        execution_policy=EXECUTION_POLICY,
+        risk_policy=policy,
+        initial_funding=funding,
+    )
+    helper = coordinator_module._require_fresh_economic_authorities
+
+    helper(
+        ledger_handoff_authority=gate.ledger_handoff_authority,
+        risk_authority=gate.risk_authority,
+        frontier=gate.frontier,
+        initial_funding_outcome=gate.funding_outcome,
+    )
+
+    with pytest.raises(LifecycleError, match="fresh-empty"):
+        helper(
+            ledger_handoff_authority=gate.ledger_handoff_authority,
+            risk_authority=gate.risk_authority,
+            frontier=gate.frontier,
+            initial_funding_outcome=None,
         )
 
 

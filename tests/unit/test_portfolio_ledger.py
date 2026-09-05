@@ -19,6 +19,8 @@ from ea.core import (
     FactProvenanceId,
     FeeCode,
     FeeEntry,
+    FundingTransaction,
+    InitialFunding,
     Instrument,
     InstrumentExecutionSpec,
     InstrumentSpecId,
@@ -40,6 +42,7 @@ from ea.core import (
     VenueId,
     VenueOrderId,
     build_instrument_spec_set,
+    canonical_funding_transaction_bytes,
     canonical_ledger_apply_outcome_bytes,
     canonical_ledger_transaction_bytes,
     canonical_portfolio_snapshot_bytes,
@@ -150,9 +153,13 @@ def _state_bytes(ledger: PortfolioLedger) -> tuple[bytes, tuple[bytes, ...]]:
         canonical_portfolio_snapshot_bytes(ledger.snapshot),
         tuple(
             (
-                canonical_reconciliation_transaction_bytes(item)
-                if type(item) is ReconciliationTransaction
-                else canonical_ledger_transaction_bytes(item)
+                canonical_funding_transaction_bytes(item)
+                if type(item) is FundingTransaction
+                else (
+                    canonical_reconciliation_transaction_bytes(item)
+                    if type(item) is ReconciliationTransaction
+                    else canonical_ledger_transaction_bytes(item)
+                )
             )
             for item in ledger.transactions
         ),
@@ -193,6 +200,22 @@ def test_factory_creates_exact_immutable_version_zero_snapshot() -> None:
         ledger.snapshot.snapshot_version = 1  # type: ignore[misc]
     with pytest.raises(TypeError, match="created only"):
         PortfolioLedger()
+
+
+def test_funded_ledger_rejects_fill_that_would_make_cash_negative() -> None:
+    spec_set = _spec_set()
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+    ledger.apply_initial_funding(InitialFunding(RUN_ID, USD, CanonicalDecimal("100")))
+    before = ledger.snapshot
+
+    outcome = ledger.apply_fill(
+        _fill(spec_set, fill_sequence=1, dedup="too-expensive", quantity="2", price="60")
+    )
+
+    assert outcome.code is OutcomeCode.OUT_OF_RANGE
+    assert outcome.failure_stage is LedgerFailureStage.INSUFFICIENT_CASH
+    assert ledger.snapshot is before
+    assert ledger.snapshot.cash_balances[0].amount == CanonicalDecimal("100")
 
 
 def test_factory_rejects_conflicting_currency_quanta_before_state() -> None:

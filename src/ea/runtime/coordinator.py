@@ -101,7 +101,12 @@ from ea.core.lifecycle import (
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
 from ea.core.portfolio import (
+    CurrencyCommodity,
+    FundingApplyOutcome,
+    FundingTransaction,
+    LedgerAccountKind,
     PortfolioSnapshot,
+    funding_transaction_digest,
     open_reconciliation_aggregate_digest,
     portfolio_snapshot_digest,
 )
@@ -2173,6 +2178,7 @@ def create_phase1_lifecycle_coordinator(
     risk_authority: _RiskGatePort | None = None,
     risk_refresh_authority: _RiskRefreshGatePort | None = None,
     frontier: _FrontierGatePort | None = None,
+    initial_funding_outcome: FundingApplyOutcome | None = None,
 ) -> Phase1HistoricalLifecycleCoordinator:
     if type(binding) is not RunBinding:
         raise LifecycleError(OutcomeCode.INVALID_TYPE, "binding must be exact")
@@ -2227,6 +2233,7 @@ def create_phase1_lifecycle_coordinator(
             ledger_handoff_authority=ledger_handoff_authority,
             risk_authority=risk_authority,
             frontier=frontier,
+            initial_funding_outcome=initial_funding_outcome,
         )
     value = _allocate_coordinator(
         binding=binding,
@@ -2287,11 +2294,12 @@ def _require_fresh_economic_authorities(
     ledger_handoff_authority: _LedgerHandoffGatePort,
     risk_authority: _RiskGatePort,
     frontier: _FrontierGatePort,
+    initial_funding_outcome: FundingApplyOutcome | None = None,
 ) -> None:
     snapshot = ledger_handoff_authority.snapshot
     risk_state = risk_authority.risk_state
     if (
-        snapshot.snapshot_version != 0
+        not _is_admissible_initial_snapshot(snapshot, initial_funding_outcome)
         or ledger_handoff_authority.retained_handoff_count != 0
         or risk_state.risk_state_version != 0
         or risk_state.halted
@@ -2309,6 +2317,66 @@ def _require_fresh_economic_authorities(
             OutcomeCode.CONFLICTING_ID,
             "coordinator requires fresh-empty economic authorities",
         )
+
+
+def _is_admissible_initial_snapshot(
+    snapshot: PortfolioSnapshot,
+    funding_outcome: FundingApplyOutcome | None,
+) -> bool:
+    if funding_outcome is None:
+        return snapshot.snapshot_version == 0
+    if type(funding_outcome) is not FundingApplyOutcome:
+        return False
+    transaction = funding_outcome.transaction
+    if type(transaction) is not FundingTransaction:
+        return False
+    try:
+        snapshot_matches = portfolio_snapshot_digest(funding_outcome.snapshot) == (
+            portfolio_snapshot_digest(snapshot)
+        )
+        transaction_matches = funding_transaction_digest(transaction) == (
+            snapshot.last_transaction_sha256
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    cash_balances = snapshot.cash_balances
+    postings = transaction.postings
+    return bool(
+        funding_outcome.code is OutcomeCode.LEDGER_APPLIED
+        and funding_outcome.before_snapshot_version == 0
+        and funding_outcome.after_snapshot_version == 1
+        and funding_outcome.run_id == snapshot.run_id
+        and funding_outcome.existing_funding_sha256 is None
+        and funding_outcome.submitted_funding_sha256 == transaction.funding_sha256
+        and snapshot_matches
+        and snapshot.snapshot_version == 1
+        and snapshot.ledger_sequence == 1
+        and snapshot.last_entry_id == transaction.entry_id
+        and transaction_matches
+        and transaction.run_id == snapshot.run_id
+        and transaction.ledger_sequence == 1
+        and transaction.previous_transaction_sha256 is None
+        and transaction.instrument_spec_set_id == snapshot.instrument_spec_set_id
+        and transaction.instrument_spec_set_sha256 == snapshot.instrument_spec_set_sha256
+        and len(cash_balances) == 1
+        and cash_balances[0].currency == transaction.currency
+        and cash_balances[0].amount == transaction.amount
+        and not snapshot.position_balances
+        and not snapshot.rounding_balances
+        and not snapshot.unresolved_fills
+        and not snapshot.open_reconciliation_bindings
+        and not snapshot.open_reconciliation_refs
+        and len(postings) == 2
+        and postings[0].account is LedgerAccountKind.PORTFOLIO_CASH
+        and postings[1].account is LedgerAccountKind.EXTERNAL_SETTLEMENT
+        and type(postings[0].commodity) is CurrencyCommodity
+        and type(postings[1].commodity) is CurrencyCommodity
+        and postings[0].commodity.currency == transaction.currency
+        and postings[1].commodity.currency == transaction.currency
+        and postings[0].amount == transaction.amount
+        and postings[1].amount.coefficient == -transaction.amount.coefficient
+        and postings[1].amount.scale == transaction.amount.scale
+    )
 
 
 def recover_phase1_lifecycle_coordinator(

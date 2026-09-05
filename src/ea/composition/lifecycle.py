@@ -53,6 +53,7 @@ from ea.core.lifecycle import (
 )
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.outcomes import OutcomeCode
+from ea.core.portfolio import FundingApplyOutcome, InitialFunding
 from ea.core.risk import Phase1RiskPolicy, phase1_risk_policy_digest
 from ea.core.run import RunBinding, RunId, Sha256Digest
 from ea.execution.fact_authority import (
@@ -100,6 +101,7 @@ class _Phase1EconomicGate:
         "__risk_authority",
         "__risk_refresh_authority",
         "__frontier",
+        "__funding_outcome",
     )
 
     def __init__(
@@ -110,6 +112,7 @@ class _Phase1EconomicGate:
         risk_authority: Any,
         risk_refresh_authority: Any,
         frontier: Any,
+        funding_outcome: FundingApplyOutcome | None,
         seal: object,
     ) -> None:
         if seal is not _ECONOMIC_GATE_SEAL:
@@ -119,6 +122,7 @@ class _Phase1EconomicGate:
         self.__risk_authority = risk_authority
         self.__risk_refresh_authority = risk_refresh_authority
         self.__frontier = frontier
+        self.__funding_outcome = funding_outcome
 
     @property
     def ledger(self) -> Any:
@@ -139,6 +143,10 @@ class _Phase1EconomicGate:
     @property
     def frontier(self) -> Any:
         return self.__frontier
+
+    @property
+    def funding_outcome(self) -> FundingApplyOutcome | None:
+        return self.__funding_outcome
 
     def __iter__(self) -> Any:
         return iter(
@@ -519,8 +527,14 @@ def _create_economic_gate(
     spec_set: InstrumentExecutionSpecSet,
     execution_policy: ExecutionPolicyRef,
     risk_policy: Phase1RiskPolicy,
+    initial_funding: InitialFunding | None = None,
 ) -> _Phase1EconomicGate:
     ledger = portfolio.create_portfolio_ledger(run_id, spec_set)
+    funding_outcome = (
+        None if initial_funding is None else ledger.apply_initial_funding(initial_funding)
+    )
+    if funding_outcome is not None and funding_outcome.code is not OutcomeCode.LEDGER_APPLIED:
+        raise LifecycleError(OutcomeCode.CONFLICTING_ID, "initial funding failed closed")
     ledger_authority = portfolio.create_phase1_ledger_handoff_authority(run_id, spec_set, ledger)
     risk_authority = risk.create_phase1_risk_authority(
         run_id=run_id, spec_set=spec_set, execution_policy=execution_policy, policy=risk_policy
@@ -540,6 +554,7 @@ def _create_economic_gate(
         risk_authority=risk_authority,
         risk_refresh_authority=refresh_authority,
         frontier=frontier,
+        funding_outcome=funding_outcome,
         seal=_ECONOMIC_GATE_SEAL,
     )
 
@@ -550,6 +565,7 @@ def create_phase1_historical_economic_gate(
     spec_set: InstrumentExecutionSpecSet,
     execution_policy: ExecutionPolicyRef,
     risk_policy: Phase1RiskPolicy,
+    initial_funding: InitialFunding | None = None,
 ) -> _Phase1EconomicGate:
     """Create one shared gate for phase-1 historical execution composition."""
     return _create_economic_gate(
@@ -557,6 +573,7 @@ def create_phase1_historical_economic_gate(
         spec_set=spec_set,
         execution_policy=execution_policy,
         risk_policy=risk_policy,
+        initial_funding=initial_funding,
     )
 
 
@@ -655,6 +672,7 @@ def create_phase1_historical_lifecycle(
         risk_authority=risk_authority,
         risk_refresh_authority=risk_refresh_authority,
         frontier=frontier,
+        initial_funding_outcome=economic_gate.funding_outcome,
     )
     try:
         authorization.activate(coordinator, seal=activation_seal)
