@@ -3,17 +3,29 @@ import { spawn, type ChildProcess } from 'node:child_process'
 
 const baseURL = process.env.EA_WEB_BASE_URL ?? 'http://127.0.0.1:8765'
 
-async function waitForHealth(available: boolean): Promise<void> {
+async function waitForHealth(): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const response = await fetch(`${baseURL}/api/health`)
-      if (available && response.ok) return
+      if (response.ok) return
     } catch {
-      if (!available) return
+      // The installed server may still be starting; retry within the bounded loop.
     }
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
-  throw new Error(`service did not become ${available ? 'available' : 'unavailable'}`)
+  throw new Error('service did not become available')
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error('installed local Web service did not exit')
 }
 
 async function runScenario(page: import('@playwright/test').Page, name: string): Promise<{ runId: string; url: string }> {
@@ -92,7 +104,7 @@ test('installed browser completes the bounded local Web backtest loop', async ({
   const serverPid = Number(process.env.EA_WEB_SERVER_PID)
   expect(Number.isSafeInteger(serverPid)).toBe(true)
   process.kill(serverPid, 'SIGTERM')
-  await waitForHealth(false)
+  await waitForProcessExit(serverPid)
   await page.getByRole('button', { name: 'Refresh' }).click()
   await expect(page.getByText(/Local service is unreachable/)).toBeVisible()
 
@@ -102,7 +114,7 @@ test('installed browser completes the bounded local Web backtest loop', async ({
   let restarted: ChildProcess | undefined
   try {
     restarted = spawn(executable!, args, { stdio: 'ignore' })
-    await waitForHealth(true)
+    await waitForHealth()
     await page.reload()
     await expect(page.getByText(bounded.runId)).toBeVisible()
     await expect(page.locator('.status')).toHaveText('succeeded')
