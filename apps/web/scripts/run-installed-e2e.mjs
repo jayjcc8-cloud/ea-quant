@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -33,6 +33,20 @@ function files(root, prefix = '') {
     const relative = join(prefix, entry.name)
     return entry.isDirectory() ? files(root, relative) : [relative]
   }).sort()
+}
+
+function printFailureEvidence() {
+  const jobs = join(workspace, 'jobs')
+  if (!existsSync(jobs)) return
+  for (const name of readdirSync(jobs).filter((item) => item.endsWith('.json')).sort()) {
+    const payload = readFileSync(join(jobs, name), 'utf8')
+    console.error(`e2e-job=${payload.trim()}`)
+    const job = JSON.parse(payload)
+    if (job.engine_run_id) {
+      const failure = join(workspace, 'runs', job.engine_run_id, 'failure.json')
+      if (existsSync(failure)) console.error(`e2e-engine-failure=${readFileSync(failure, 'utf8').trim()}`)
+    }
+  }
 }
 
 async function waitForHealth() {
@@ -84,7 +98,10 @@ try {
     stdio: 'inherit',
   })
   const code = await new Promise((resolveExit) => completed.on('exit', resolveExit))
-  if (code !== 0) process.exitCode = typeof code === 'number' ? code : 1
+  if (code !== 0) {
+    printFailureEvidence()
+    process.exitCode = typeof code === 'number' ? code : 1
+  }
 } finally {
   if (server?.pid) {
     try { process.kill(server.pid, 'SIGTERM') } catch {}

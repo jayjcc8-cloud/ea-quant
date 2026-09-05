@@ -9,7 +9,7 @@ from ea.web.app import WebSettings
 
 
 def test_web_help_exposes_only_explicit_local_roots_and_port() -> None:
-    result = CliRunner().invoke(app, ["web", "serve", "--help"])
+    result = CliRunner().invoke(app, ["web", "serve", "--help"], color=False)
 
     assert result.exit_code == 0
     assert "--scenario-root" in result.stdout
