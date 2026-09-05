@@ -38,6 +38,9 @@ venv/bin/ea backtest run \
   --output-root /absolute/path/to/runs
 venv/bin/ea backtest resume \
   --run-dir /absolute/path/to/runs/<attempt-uuid>
+venv/bin/ea backtest report \
+  --run-dir /absolute/path/to/runs/<attempt-uuid> \
+  --output-dir /absolute/path/to/reports/<report-name>
 ```
 
 The scenario is the product configuration authority. It binds a local OHLCV path and fingerprint,
@@ -48,11 +51,15 @@ funding, durable audit, and result evidence. `resume` accepts only that attempt 
 its persisted scenario/data/distribution/economic identity, and continues the same RunId from the
 funding, completed-dispatch, or reconciled pre-publication durable frontier. Completed attempts are
 validated no-ops; failed, ambiguous, conflicting, or corrupt attempts fail closed. The fixed RESET
-demo remains available by omitting `--scenario` and is not resumable.
+demo remains available by omitting `--scenario` and is not resumable. `report` consumes only a
+verified completed attempt and publishes canonical `report.json` plus `summary.txt` to a separate
+directory. It does not run or resume trading, and an identical existing report is a verified
+no-op while partial or conflicting output is rejected.
 
 This remains a bounded offline deterministic product. Arbitrary instruction-level recovery,
-BacktestReportV1 analytics, paper/live profiles, broker writes, credentials, and release
-publication are unavailable.
+multi-instrument or multi-currency analytics, paper/live profiles, broker writes, credentials,
+and release publication are unavailable. Package metadata is prepared as `0.2.0`; no tag,
+release, publication, or deployment is implied.
 
 ## Project Navigation
 

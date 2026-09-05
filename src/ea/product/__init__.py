@@ -24,6 +24,13 @@ from ea.product.offline_demo import (
     OfflineDemoResult,
     run_offline_demo,
 )
+from ea.product.reporting import (
+    BACKTEST_REPORT_FIELD_SOURCES,
+    BacktestReportError,
+    BacktestReportResult,
+    BacktestReportV1,
+    generate_backtest_report,
+)
 from ea.product.scenario import (
     BacktestScenarioError,
     BacktestStrategyId,
@@ -32,10 +39,14 @@ from ea.product.scenario import (
 )
 
 __all__ = [
+    "BACKTEST_REPORT_FIELD_SOURCES",
     "BacktestIdentityError",
     "BacktestLineageInputs",
     "BacktestRandomness",
     "BacktestResumeFailure",
+    "BacktestReportError",
+    "BacktestReportResult",
+    "BacktestReportV1",
     "BacktestRunError",
     "BacktestRunFailure",
     "BacktestRunResult",
@@ -49,6 +60,7 @@ __all__ = [
     "RandomnessProfile",
     "build_backtest_lineage",
     "canonical_backtest_lineage_bytes",
+    "generate_backtest_report",
     "load_backtest_scenario",
     "resume_backtest_attempt",
     "run_offline_demo",

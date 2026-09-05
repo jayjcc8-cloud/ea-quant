@@ -406,7 +406,7 @@ def test_runtime_inventory_scopes_active_distributions_exactly_once(
 
     class FakeDistribution:
         metadata = {"Name": "ea-quant"}
-        version = "0.1.1"
+        version = "0.2.0"
 
         def locate_file(self, path: str) -> Path:
             assert path == ""
@@ -428,13 +428,13 @@ def test_runtime_inventory_scopes_active_distributions_exactly_once(
     monkeypatch.setattr(provenance_module, "_parse_direct_url", lambda *args: None)
     monkeypatch.setattr(provenance_module, "_validate_loaded_ea_modules", lambda root: None)
     monkeypatch.setattr(importlib.metadata, "distributions", distributions)
-    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.1")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.2.0")
 
     evidence = _collect_runtime_evidence(snapshot, uv_lock_path=repository / "uv.lock")
 
     assert calls.count((str(active_root),)) == 1
     assert calls.count(None) == 1
-    assert evidence.distributions == (DistributionIdentity("ea-quant", "0.1.1"),)
+    assert evidence.distributions == (DistributionIdentity("ea-quant", "0.2.0"),)
 
 
 def test_sys_path_and_loaded_module_origins_fail_closed(
