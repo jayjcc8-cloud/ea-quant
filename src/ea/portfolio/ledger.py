@@ -35,6 +35,9 @@ from ea.core.portfolio import (
     CashBalance,
     CurrencyCommodity,
     ExistingLedgerBinding,
+    FundingApplyOutcome,
+    FundingTransaction,
+    InitialFunding,
     InstrumentCommodity,
     LedgerAccountKind,
     LedgerApplyOutcome,
@@ -48,10 +51,18 @@ from ea.core.portfolio import (
     PositionBalance,
     RoundingBalance,
     UnresolvedFillRef,
+    _create_funding_apply_outcome,
+    _create_funding_transaction,
     _create_ledger_apply_outcome,
+    canonical_funding_apply_outcome_bytes,
+    canonical_funding_transaction_bytes,
+    canonical_initial_funding_bytes,
     canonical_ledger_apply_outcome_bytes,
     canonical_ledger_transaction_bytes,
     canonical_portfolio_snapshot_bytes,
+    funding_apply_outcome_digest,
+    funding_transaction_digest,
+    initial_funding_digest,
     ledger_apply_outcome_digest,
     ledger_transaction_digest,
     portfolio_snapshot_digest,
@@ -100,6 +111,12 @@ class _HandoffBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class _FundingBinding:
+    funding_bytes: bytes
+    outcome: FundingApplyOutcome
+
+
+@dataclass(frozen=True, slots=True)
 class _LedgerState:
     cash: Mapping[SettlementCurrency, CanonicalDecimal]
     positions: Mapping[Instrument, CanonicalDecimal]
@@ -109,6 +126,7 @@ class _LedgerState:
     fact_index: Mapping[FactDedupKey, ExistingLedgerBinding]
     entry_index: Mapping[EconomicId, CanonicalPortfolioTransaction]
     transactions: tuple[CanonicalPortfolioTransaction, ...]
+    funding: _FundingBinding | None
     open_reconciliation_bindings: Mapping[EconomicId, ExistingLedgerBinding]
     open_reconciliation_refs: Mapping[EconomicId, OpenReconciliationRef]
     handoff_index: Mapping[Sha256Digest, _HandoffBinding]
@@ -150,6 +168,117 @@ class PortfolioLedger:
     @property
     def transactions(self) -> tuple[CanonicalPortfolioTransaction, ...]:
         return self._state.transactions
+
+    def apply_initial_funding(self, funding: InitialFunding) -> FundingApplyOutcome:
+        """Apply the unique run-bound initial cash transaction exactly once."""
+        if type(funding) is not InitialFunding:
+            raise PortfolioLedgerError(OutcomeCode.INVALID_TYPE, "initial funding must be exact")
+        if funding.run_id != self._run_id:
+            raise PortfolioLedgerError(
+                OutcomeCode.CONFLICTING_ID,
+                "initial funding run conflicts with ledger",
+            )
+        quantum = self._currency_quanta.get(funding.currency)
+        if quantum is None:
+            raise PortfolioLedgerError(
+                OutcomeCode.CONFLICTING_ID,
+                "initial funding currency is absent from the specification set",
+            )
+        try:
+            require_quantized(funding.amount, quantum, field_name="initial_funding")
+        except EconomicValidationError as error:
+            raise _structural_error(error) from error
+
+        submitted_bytes = canonical_initial_funding_bytes(funding)
+        submitted_sha256 = initial_funding_digest(funding)
+        existing = self._state.funding
+        if existing is not None:
+            if existing.funding_bytes == submitted_bytes:
+                return existing.outcome
+            version = self._state.snapshot.snapshot_version
+            return _create_funding_apply_outcome(
+                funding=funding,
+                code=OutcomeCode.LEDGER_CONFLICT,
+                before_snapshot_version=version,
+                after_snapshot_version=version,
+                snapshot=self._state.snapshot,
+                transaction=None,
+                existing_funding_sha256=existing.outcome.submitted_funding_sha256,
+            )
+        if self._state.snapshot.ledger_sequence != 0:
+            version = self._state.snapshot.snapshot_version
+            return _create_funding_apply_outcome(
+                funding=funding,
+                code=OutcomeCode.LEDGER_CONFLICT,
+                before_snapshot_version=version,
+                after_snapshot_version=version,
+                snapshot=self._state.snapshot,
+                transaction=None,
+            )
+
+        entry_id = EconomicId(self._run_id, EconomicOwnerKind.LEDGER_ENTRY, 1)
+        commodity = CurrencyCommodity(funding.currency)
+        postings = (
+            LedgerPosting(LedgerAccountKind.PORTFOLIO_CASH, commodity, funding.amount),
+            LedgerPosting(
+                LedgerAccountKind.EXTERNAL_SETTLEMENT,
+                commodity,
+                _signed(funding.amount, -1),
+            ),
+        )
+        transaction = _create_funding_transaction(
+            funding=funding,
+            entry_id=entry_id,
+            spec_set_id=self._spec_set.identifier,
+            spec_set_sha256=self._spec_set_sha256,
+            postings=postings,
+        )
+        transaction_sha256 = funding_transaction_digest(transaction)
+        cash = {funding.currency: funding.amount}
+        snapshot = _snapshot(
+            ledger=self,
+            sequence=1,
+            last_entry_id=entry_id,
+            last_transaction_sha256=transaction_sha256,
+            cash=cash,
+            positions={},
+            rounding={},
+            unresolved={},
+            open_reconciliation_bindings={},
+            open_reconciliation_refs={},
+        )
+        outcome = _create_funding_apply_outcome(
+            funding=funding,
+            code=OutcomeCode.LEDGER_APPLIED,
+            before_snapshot_version=0,
+            after_snapshot_version=1,
+            snapshot=snapshot,
+            transaction=transaction,
+        )
+        _preflight_funding_evidence(transaction=transaction, snapshot=snapshot, outcome=outcome)
+        self._state = _freeze_state(
+            cash=cash,
+            positions={},
+            rounding={},
+            unresolved={},
+            fill_index={},
+            fact_index={},
+            entry_index={entry_id: transaction},
+            transactions=(transaction,),
+            funding=_FundingBinding(submitted_bytes, outcome),
+            open_reconciliation_bindings={},
+            open_reconciliation_refs={},
+            handoff_index={},
+            authorization_index={},
+            adjustment_index={},
+            observation_index={},
+            command_index={},
+            adjustment_outcomes={},
+            snapshot=snapshot,
+        )
+        if submitted_sha256 != outcome.submitted_funding_sha256:
+            raise AssertionError("funding digest changed during application")
+        return outcome
 
     def _resolve_handoff_binding(
         self, audited_handoff_sha256: Sha256Digest
@@ -410,6 +539,7 @@ class PortfolioLedger:
             fact_index=self._state.fact_index,
             entry_index=derived.next_entry_index,
             transactions=derived.next_transactions,
+            funding=self._state.funding,
             open_reconciliation_bindings=derived.next_open_bindings,
             open_reconciliation_refs=derived.next_open_refs,
             handoff_index=self._state.handoff_index,
@@ -788,6 +918,13 @@ class PortfolioLedger:
                 code=OutcomeCode.ARITHMETIC_OVERFLOW,
                 stage=LedgerFailureStage.CASH_BALANCE_OVERFLOW,
             )
+        if self._state.funding is not None and next_cash.coefficient < 0:
+            return self._failure(
+                fill=fill,
+                fill_sha256=submitted_digest,
+                code=OutcomeCode.OUT_OF_RANGE,
+                stage=LedgerFailureStage.INSUFFICIENT_CASH,
+            )
         try:
             next_position = _next_balance(
                 self._state.positions.get(fill.instrument),
@@ -947,6 +1084,7 @@ class PortfolioLedger:
             fact_index=next_fact_index,
             entry_index=next_entry_index,
             transactions=next_transactions,
+            funding=self._state.funding,
             open_reconciliation_bindings=next_open_bindings,
             open_reconciliation_refs=next_open_refs,
             handoff_index=next_handoff_index,
@@ -1201,6 +1339,7 @@ def create_portfolio_ledger(
         fact_index={},
         entry_index={},
         transactions=(),
+        funding=None,
         open_reconciliation_bindings={},
         open_reconciliation_refs={},
         handoff_index={},
@@ -1224,6 +1363,7 @@ def _freeze_state(
     fact_index: Mapping[FactDedupKey, ExistingLedgerBinding],
     entry_index: Mapping[EconomicId, CanonicalPortfolioTransaction],
     transactions: tuple[CanonicalPortfolioTransaction, ...],
+    funding: _FundingBinding | None,
     open_reconciliation_bindings: Mapping[EconomicId, ExistingLedgerBinding],
     open_reconciliation_refs: Mapping[EconomicId, OpenReconciliationRef],
     handoff_index: Mapping[Sha256Digest, _HandoffBinding],
@@ -1243,6 +1383,7 @@ def _freeze_state(
         fact_index=MappingProxyType(dict(fact_index)),
         entry_index=MappingProxyType(dict(entry_index)),
         transactions=transactions,
+        funding=funding,
         open_reconciliation_bindings=MappingProxyType(dict(open_reconciliation_bindings)),
         open_reconciliation_refs=MappingProxyType(dict(open_reconciliation_refs)),
         handoff_index=MappingProxyType(dict(handoff_index)),
@@ -1267,6 +1408,20 @@ def _preflight_canonical_evidence(
     portfolio_snapshot_digest(snapshot)
     canonical_ledger_apply_outcome_bytes(outcome)
     ledger_apply_outcome_digest(outcome)
+
+
+def _preflight_funding_evidence(
+    *,
+    transaction: FundingTransaction,
+    snapshot: PortfolioSnapshot,
+    outcome: FundingApplyOutcome,
+) -> None:
+    canonical_funding_transaction_bytes(transaction)
+    funding_transaction_digest(transaction)
+    canonical_portfolio_snapshot_bytes(snapshot)
+    portfolio_snapshot_digest(snapshot)
+    canonical_funding_apply_outcome_bytes(outcome)
+    funding_apply_outcome_digest(outcome)
 
 
 def _snapshot(
@@ -1421,6 +1576,8 @@ def _postings_balance(postings: tuple[LedgerPosting, ...]) -> bool:
 
 
 def _transaction_digest(transaction: CanonicalPortfolioTransaction) -> Sha256Digest:
+    if type(transaction) is FundingTransaction:
+        return funding_transaction_digest(transaction)
     if type(transaction) is LedgerTransaction:
         return ledger_transaction_digest(transaction)
     if type(transaction) is ReconciliationTransaction:

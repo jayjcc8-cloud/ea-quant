@@ -45,6 +45,16 @@ LEDGER_APPLY_OUTCOME_SCHEMA_VERSION = 1
 LEDGER_APPLY_OUTCOME_CANONICALIZATION = "ea-ledger-apply-outcome-v1"
 LEDGER_APPLY_OUTCOME_DIGEST_DOMAIN = b"ea.ledger-apply-outcome.v1\0"
 
+INITIAL_FUNDING_SCHEMA_VERSION = 1
+INITIAL_FUNDING_CANONICALIZATION = "ea-initial-funding-v1"
+INITIAL_FUNDING_DIGEST_DOMAIN = b"ea.initial-funding.v1\0"
+FUNDING_TRANSACTION_SCHEMA_VERSION = 1
+FUNDING_TRANSACTION_CANONICALIZATION = "ea-funding-transaction-v1"
+FUNDING_TRANSACTION_DIGEST_DOMAIN = b"ea.funding-transaction.v1\0"
+FUNDING_APPLY_OUTCOME_SCHEMA_VERSION = 1
+FUNDING_APPLY_OUTCOME_CANONICALIZATION = "ea-funding-apply-outcome-v1"
+FUNDING_APPLY_OUTCOME_DIGEST_DOMAIN = b"ea.funding-apply-outcome.v1\0"
+
 _LEDGER_ERROR_CODES = frozenset(
     {
         OutcomeCode.INVALID_TYPE,
@@ -119,9 +129,29 @@ class LedgerFailureStage(StrEnum):
     SETTLEMENT_ROUNDING_UNREPRESENTABLE = "settlement_rounding_unrepresentable"
     EXACT_NOTIONAL_OVERFLOW = "exact_notional_overflow"
     CASH_BALANCE_OVERFLOW = "cash_balance_overflow"
+    INSUFFICIENT_CASH = "insufficient_cash"
     POSITION_BALANCE_OVERFLOW = "position_balance_overflow"
     ROUNDING_BALANCE_OVERFLOW = "rounding_balance_overflow"
     COMMODITY_UNBALANCED = "commodity_unbalanced"
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class InitialFunding:
+    """One run-bound, positive initial cash instruction."""
+
+    run_id: RunId
+    currency: SettlementCurrency
+    amount: CanonicalDecimal
+
+    def __post_init__(self) -> None:
+        _require_run(self.run_id)
+        if type(self.currency) is not SettlementCurrency:
+            raise _fail(OutcomeCode.INVALID_TYPE, "funding currency must be exact")
+        try:
+            require_positive(self.amount, field_name="initial_funding")
+        except EconomicValidationError as error:
+            raise _translate_economic_error(error) from error
 
 
 @final
@@ -401,6 +431,26 @@ class LedgerTransaction:
 
 
 @final
+@dataclass(frozen=True, slots=True, init=False)
+class FundingTransaction:
+    """The unique first ledger transaction for deterministic initial cash."""
+
+    run_id: RunId
+    entry_id: EconomicId
+    ledger_sequence: int
+    funding_sha256: Sha256Digest
+    currency: SettlementCurrency
+    amount: CanonicalDecimal
+    instrument_spec_set_id: InstrumentSpecSetId
+    instrument_spec_set_sha256: Sha256Digest
+    previous_transaction_sha256: None
+    postings: tuple[LedgerPosting, ...]
+
+    def __init__(self) -> None:
+        raise TypeError("funding transactions are issued only by the portfolio ledger")
+
+
+@final
 @dataclass(frozen=True, slots=True)
 class PortfolioSnapshot:
     run_id: RunId
@@ -486,6 +536,186 @@ class LedgerApplyOutcome:
     @property
     def transaction_sha256(self) -> Sha256Digest | None:
         return None if self.transaction is None else ledger_transaction_digest(self.transaction)
+
+
+@final
+@dataclass(frozen=True, slots=True, init=False)
+class FundingApplyOutcome:
+    """Applied, replayed, or conflicting exactly-once funding evidence."""
+
+    run_id: RunId
+    code: OutcomeCode
+    before_snapshot_version: int
+    after_snapshot_version: int
+    snapshot: PortfolioSnapshot
+    transaction: FundingTransaction | None
+    submitted_funding_sha256: Sha256Digest
+    existing_funding_sha256: Sha256Digest | None
+
+    def __init__(self) -> None:
+        raise TypeError("funding outcomes are issued only by the portfolio ledger")
+
+    @property
+    def snapshot_sha256(self) -> Sha256Digest:
+        return portfolio_snapshot_digest(self.snapshot)
+
+    @property
+    def transaction_sha256(self) -> Sha256Digest | None:
+        return None if self.transaction is None else funding_transaction_digest(self.transaction)
+
+
+def canonical_initial_funding_bytes(funding: InitialFunding) -> bytes:
+    if type(funding) is not InitialFunding:
+        raise _fail(OutcomeCode.INVALID_TYPE, "funding must be exact")
+    return _encode_json(
+        {
+            "amount": funding.amount.text,
+            "canonicalization": INITIAL_FUNDING_CANONICALIZATION,
+            "currency": funding.currency.code,
+            "message_type": "initial_funding",
+            "run_id": funding.run_id.value,
+            "schema_version": INITIAL_FUNDING_SCHEMA_VERSION,
+        }
+    )
+
+
+def initial_funding_digest(funding: InitialFunding) -> Sha256Digest:
+    return _digest(INITIAL_FUNDING_DIGEST_DOMAIN, canonical_initial_funding_bytes(funding))
+
+
+def canonical_funding_transaction_bytes(transaction: FundingTransaction) -> bytes:
+    if type(transaction) is not FundingTransaction:
+        raise _fail(OutcomeCode.INVALID_TYPE, "funding transaction must be exact")
+    return _encode_json(_funding_transaction_document(transaction))
+
+
+def funding_transaction_digest(transaction: FundingTransaction) -> Sha256Digest:
+    return _digest(
+        FUNDING_TRANSACTION_DIGEST_DOMAIN,
+        canonical_funding_transaction_bytes(transaction),
+    )
+
+
+def canonical_funding_apply_outcome_bytes(outcome: FundingApplyOutcome) -> bytes:
+    if type(outcome) is not FundingApplyOutcome:
+        raise _fail(OutcomeCode.INVALID_TYPE, "funding outcome must be exact")
+    return _encode_json(
+        {
+            "after_snapshot_version": outcome.after_snapshot_version,
+            "before_snapshot_version": outcome.before_snapshot_version,
+            "canonicalization": FUNDING_APPLY_OUTCOME_CANONICALIZATION,
+            "code": outcome.code.value,
+            "existing_funding_sha256": (
+                None
+                if outcome.existing_funding_sha256 is None
+                else outcome.existing_funding_sha256.value
+            ),
+            "message_type": "funding_apply_outcome",
+            "run_id": outcome.run_id.value,
+            "schema_version": FUNDING_APPLY_OUTCOME_SCHEMA_VERSION,
+            "snapshot_sha256": outcome.snapshot_sha256.value,
+            "submitted_funding_sha256": outcome.submitted_funding_sha256.value,
+            "transaction_sha256": (
+                None if outcome.transaction_sha256 is None else outcome.transaction_sha256.value
+            ),
+        }
+    )
+
+
+def funding_apply_outcome_digest(outcome: FundingApplyOutcome) -> Sha256Digest:
+    return _digest(
+        FUNDING_APPLY_OUTCOME_DIGEST_DOMAIN,
+        canonical_funding_apply_outcome_bytes(outcome),
+    )
+
+
+def _create_funding_transaction(
+    *,
+    funding: InitialFunding,
+    entry_id: EconomicId,
+    spec_set_id: InstrumentSpecSetId,
+    spec_set_sha256: Sha256Digest,
+    postings: tuple[LedgerPosting, ...],
+) -> FundingTransaction:
+    if (
+        type(funding) is not InitialFunding
+        or type(entry_id) is not EconomicId
+        or entry_id.run_id != funding.run_id
+        or entry_id.owner_kind is not EconomicOwnerKind.LEDGER_ENTRY
+        or entry_id.owner_sequence != 1
+        or type(spec_set_id) is not InstrumentSpecSetId
+        or type(spec_set_sha256) is not Sha256Digest
+    ):
+        raise AssertionError("internal funding transaction inputs must be canonical")
+    if type(postings) is not tuple or len(postings) != 2:
+        raise AssertionError("funding transaction requires one balanced currency pair")
+    first, second = postings
+    if (
+        type(first) is not LedgerPosting
+        or type(second) is not LedgerPosting
+        or first.account is not LedgerAccountKind.PORTFOLIO_CASH
+        or second.account is not LedgerAccountKind.EXTERNAL_SETTLEMENT
+        or first.commodity != second.commodity
+        or first.amount.scale != second.amount.scale
+        or first.amount.coefficient != -second.amount.coefficient
+    ):
+        raise AssertionError("funding postings are not balanced")
+    value = object.__new__(FundingTransaction)
+    for name, item in (
+        ("run_id", funding.run_id),
+        ("entry_id", entry_id),
+        ("ledger_sequence", 1),
+        ("funding_sha256", initial_funding_digest(funding)),
+        ("currency", funding.currency),
+        ("amount", funding.amount),
+        ("instrument_spec_set_id", spec_set_id),
+        ("instrument_spec_set_sha256", spec_set_sha256),
+        ("previous_transaction_sha256", None),
+        ("postings", postings),
+    ):
+        object.__setattr__(value, name, item)
+    canonical_funding_transaction_bytes(value)
+    return value
+
+
+def _create_funding_apply_outcome(
+    *,
+    funding: InitialFunding,
+    code: OutcomeCode,
+    before_snapshot_version: int,
+    after_snapshot_version: int,
+    snapshot: PortfolioSnapshot,
+    transaction: FundingTransaction | None,
+    existing_funding_sha256: Sha256Digest | None = None,
+) -> FundingApplyOutcome:
+    if type(funding) is not InitialFunding or code not in {
+        OutcomeCode.LEDGER_APPLIED,
+        OutcomeCode.LEDGER_CONFLICT,
+    }:
+        raise AssertionError("internal funding outcome inputs are invalid")
+    if snapshot.run_id != funding.run_id or snapshot.snapshot_version != after_snapshot_version:
+        raise AssertionError("funding outcome snapshot conflicts")
+    if code is OutcomeCode.LEDGER_APPLIED:
+        if transaction is None or after_snapshot_version != before_snapshot_version + 1:
+            raise AssertionError("applied funding outcome is inconsistent")
+        if existing_funding_sha256 is not None:
+            raise AssertionError("applied funding cannot carry conflict evidence")
+    elif transaction is not None or after_snapshot_version != before_snapshot_version:
+        raise AssertionError("conflicting funding outcome is inconsistent")
+    value = object.__new__(FundingApplyOutcome)
+    for name, item in (
+        ("run_id", funding.run_id),
+        ("code", code),
+        ("before_snapshot_version", before_snapshot_version),
+        ("after_snapshot_version", after_snapshot_version),
+        ("snapshot", snapshot),
+        ("transaction", transaction),
+        ("submitted_funding_sha256", initial_funding_digest(funding)),
+        ("existing_funding_sha256", existing_funding_sha256),
+    ):
+        object.__setattr__(value, name, item)
+    canonical_funding_apply_outcome_bytes(value)
+    return value
 
 
 def canonical_ledger_transaction_bytes(transaction: LedgerTransaction) -> bytes:
@@ -966,6 +1196,24 @@ def _transaction_document(transaction: LedgerTransaction) -> dict[str, object]:
         "venue_order_id": (
             None if transaction.venue_order_id is None else transaction.venue_order_id.value
         ),
+    }
+
+
+def _funding_transaction_document(transaction: FundingTransaction) -> dict[str, object]:
+    return {
+        "amount": transaction.amount.text,
+        "canonicalization": FUNDING_TRANSACTION_CANONICALIZATION,
+        "currency": transaction.currency.code,
+        "entry_id": _economic_id_document(transaction.entry_id),
+        "funding_sha256": transaction.funding_sha256.value,
+        "instrument_spec_set_id": transaction.instrument_spec_set_id.value,
+        "instrument_spec_set_sha256": transaction.instrument_spec_set_sha256.value,
+        "ledger_sequence": transaction.ledger_sequence,
+        "message_type": "funding_transaction",
+        "postings": [_posting_document(posting) for posting in transaction.postings],
+        "previous_transaction_sha256": None,
+        "run_id": transaction.run_id.value,
+        "schema_version": FUNDING_TRANSACTION_SCHEMA_VERSION,
     }
 
 

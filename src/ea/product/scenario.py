@@ -1,0 +1,451 @@
+"""Strict BacktestScenario v1 loading and semantic identity."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from hashlib import sha256
+from pathlib import Path
+from typing import Any, Literal, Self
+
+import yaml
+from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, ValidationError, model_validator
+from pydantic_core import PydanticCustomError
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode
+from yaml.resolver import BaseResolver
+
+from ea.config.diagnostics import escape_diagnostic_label
+from ea.core import (
+    CanonicalDecimal,
+    ExecutionPolicyId,
+    ExecutionPolicyRef,
+    Instrument,
+    InstrumentExecutionSpec,
+    InstrumentExecutionSpecSet,
+    InstrumentSpecId,
+    InstrumentSpecSetId,
+    PriceDomain,
+    ReplayWindow,
+    SettlementCurrency,
+    Sha256Digest,
+    VenueId,
+    build_instrument_spec_set,
+    require_positive,
+    require_quantized,
+)
+from ea.core.economics import EconomicValidationError
+from ea.core.run import RunContractError
+from ea.data import HistoricalMarketDataError, Phase1HistoricalDataset, read_phase1_ohlcv_csv
+from ea.product.identity import BacktestRandomness
+
+_SCENARIO_DIGEST_DOMAIN = b"ea.backtest-scenario.v1\0"
+_CANONICALIZATION = "ea-backtest-scenario-v1"
+_ACCEPTED_EXECUTION_POLICY = ExecutionPolicyRef(
+    ExecutionPolicyId("phase1.next-bar-close.v1"),
+    Sha256Digest("1" * 64),
+)
+
+
+class BacktestScenarioError(ValueError):
+    """Safe validation failure for a selected BacktestScenario."""
+
+
+class BacktestStrategyId(StrEnum):
+    ALWAYS_FLAT = "always-flat-v1"
+    BOUNDED_LONG = "bounded-long-v1"
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _FingerprintInput(_StrictModel):
+    sha256: StrictStr
+    record_count: StrictInt
+
+
+class _DataInput(_StrictModel):
+    path: StrictStr
+    start_utc: StrictStr
+    end_utc: StrictStr
+    fingerprint: _FingerprintInput
+
+
+class _InstrumentInput(_StrictModel):
+    venue: StrictStr
+    symbol: StrictStr
+    specification_id: StrictStr
+    specification_set_id: StrictStr
+    settlement_currency: StrictStr
+    price_quantum: StrictStr
+    quantity_quantum: StrictStr
+    currency_quantum: StrictStr
+    contract_multiplier: StrictStr
+
+
+class _StrategyInput(_StrictModel):
+    id: BacktestStrategyId
+    target_quantity: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def validate_parameters(self) -> Self:
+        if self.id is BacktestStrategyId.ALWAYS_FLAT and self.target_quantity is not None:
+            raise PydanticCustomError(
+                "incompatible_strategy_parameters",
+                "always-flat-v1 forbids target_quantity",
+            )
+        if self.id is BacktestStrategyId.BOUNDED_LONG and self.target_quantity is None:
+            raise PydanticCustomError(
+                "incompatible_strategy_parameters",
+                "bounded-long-v1 requires target_quantity",
+            )
+        return self
+
+
+class _FundingInput(_StrictModel):
+    currency: StrictStr
+    initial_cash: StrictStr
+
+
+class _RiskInput(_StrictModel):
+    max_order_quantity: StrictStr
+    max_position_quantity: StrictStr
+    max_notional: StrictStr
+
+
+class _ExecutionInput(_StrictModel):
+    policy: Literal["phase1.next-bar-close.v1"]
+
+
+class _ScenarioInput(_StrictModel):
+    schema_version: StrictInt
+    data: _DataInput
+    instrument: _InstrumentInput
+    strategy: _StrategyInput
+    funding: _FundingInput
+    risk: _RiskInput
+    execution: _ExecutionInput
+    randomness_profile: Literal["none"]
+
+    @model_validator(mode="after")
+    def require_v1(self) -> Self:
+        if self.schema_version != 1:
+            raise PydanticCustomError(
+                "unsupported_schema_version",
+                "only BacktestScenario schema version 1 is supported",
+            )
+        return self
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable mapping key",
+                key_node.start_mark,
+            ) from error
+        if duplicate:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found a duplicate mapping key",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedBacktestScenario:
+    """Validated typed scenario and captured local data evidence."""
+
+    scenario_path: Path
+    data_path: Path
+    dataset: Phase1HistoricalDataset
+    replay_window: ReplayWindow
+    instrument: Instrument
+    spec_set: InstrumentExecutionSpecSet
+    strategy_id: BacktestStrategyId
+    target_quantity: CanonicalDecimal | None
+    funding_currency: SettlementCurrency
+    initial_cash: CanonicalDecimal
+    max_order_quantity: CanonicalDecimal
+    max_position_quantity: CanonicalDecimal
+    max_notional: CanonicalDecimal
+    execution_policy: ExecutionPolicyRef
+    randomness: BacktestRandomness
+    canonical_bytes: bytes
+    scenario_sha256: Sha256Digest
+
+
+def _safe_validation_message(error: ValidationError) -> str:
+    problems: list[str] = []
+    for item in error.errors(include_url=False):
+        location = ".".join(escape_diagnostic_label(part) for part in item["loc"]) or "<root>"
+        if item["type"] == "extra_forbidden":
+            problems.append(f"unknown field '{location}'")
+        else:
+            problems.append(f"invalid field '{location}' ({item['type']})")
+    return "; ".join(problems)
+
+
+def _resolve_file(path: Path, *, label: str) -> Path:
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+        is_file = resolved.is_file()
+    except (OSError, RuntimeError, ValueError):
+        raise BacktestScenarioError(f"{label} cannot be resolved") from None
+    if not is_file:
+        raise BacktestScenarioError(f"{label} must be a regular file")
+    return resolved
+
+
+def _load_document(path: Path) -> dict[str, Any]:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise BacktestScenarioError("scenario file cannot be read") from None
+    try:
+        document = yaml.load(content, Loader=_UniqueKeySafeLoader)
+    except (yaml.YAMLError, ValueError, RecursionError) as error:
+        mark = getattr(error, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise BacktestScenarioError(f"scenario contains invalid YAML{location}") from None
+    if document is None:
+        raise BacktestScenarioError("scenario file is empty")
+    if not isinstance(document, dict):
+        raise BacktestScenarioError("scenario root must be a mapping")
+    return document
+
+
+def _utc(value: str, *, field: str) -> datetime:
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        raise BacktestScenarioError(f"{field} must be canonical UTC") from None
+    if parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != value:
+        raise BacktestScenarioError(f"{field} must be canonical UTC")
+    return parsed
+
+
+def _decimal(value: str, *, field: str) -> CanonicalDecimal:
+    try:
+        return CanonicalDecimal(value)
+    except EconomicValidationError:
+        raise BacktestScenarioError(f"{field} must be an ea-decimal-v1 string") from None
+
+
+def _positive(value: CanonicalDecimal, *, field: str) -> CanonicalDecimal:
+    try:
+        return require_positive(value, field_name=field)
+    except EconomicValidationError:
+        raise BacktestScenarioError(f"{field} must be strictly positive") from None
+
+
+def _quantized(
+    value: CanonicalDecimal,
+    quantum: CanonicalDecimal,
+    *,
+    field: str,
+) -> CanonicalDecimal:
+    try:
+        return require_quantized(value, quantum, field_name=field)
+    except EconomicValidationError:
+        raise BacktestScenarioError(f"{field} is not quantized") from None
+
+
+def _canonical_bytes(
+    model: _ScenarioInput,
+    *,
+    dataset: Phase1HistoricalDataset,
+) -> bytes:
+    document = model.model_dump(mode="json")
+    data = dict(document["data"])
+    data.pop("path")
+    document["data"] = data
+    document["canonicalization"] = _CANONICALIZATION
+    document["data"]["fingerprint"] = {
+        "record_count": dataset.selection.fingerprint.record_count,
+        "sha256": dataset.selection.fingerprint.sha256.value,
+    }
+    return json.dumps(
+        document,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
+    """Load, capture, and cross-validate one strict BacktestScenario v1."""
+    if not isinstance(path, Path):
+        raise BacktestScenarioError("scenario path must be a pathlib.Path")
+    scenario_path = _resolve_file(path, label="scenario path")
+    document = _load_document(scenario_path)
+    try:
+        model = _ScenarioInput.model_validate(document)
+    except ValidationError as error:
+        raise BacktestScenarioError(_safe_validation_message(error)) from None
+
+    try:
+        replay_window = ReplayWindow(
+            _utc(model.data.start_utc, field="data.start_utc"),
+            _utc(model.data.end_utc, field="data.end_utc"),
+        )
+    except RunContractError as error:
+        raise BacktestScenarioError(str(error)) from None
+    data_path = _resolve_file(scenario_path.parent / model.data.path, label="data.path")
+    try:
+        dataset = read_phase1_ohlcv_csv(data_path, replay_window=replay_window)
+    except HistoricalMarketDataError as error:
+        raise BacktestScenarioError(f"data.path failed validation ({error.code.value})") from None
+    try:
+        expected_sha256 = Sha256Digest(model.data.fingerprint.sha256)
+    except RunContractError:
+        raise BacktestScenarioError("data.fingerprint.sha256 must be canonical SHA-256") from None
+    expected_fingerprint = (expected_sha256, model.data.fingerprint.record_count)
+    actual_fingerprint = (
+        dataset.selection.fingerprint.sha256,
+        dataset.selection.fingerprint.record_count,
+    )
+    if expected_fingerprint != actual_fingerprint:
+        raise BacktestScenarioError("data fingerprint conflicts with captured replay selection")
+
+    try:
+        instrument = Instrument(VenueId(model.instrument.venue), model.instrument.symbol)
+        currency = SettlementCurrency(model.instrument.settlement_currency)
+        price_quantum = _positive(
+            _decimal(model.instrument.price_quantum, field="instrument.price_quantum"),
+            field="instrument.price_quantum",
+        )
+        quantity_quantum = _positive(
+            _decimal(model.instrument.quantity_quantum, field="instrument.quantity_quantum"),
+            field="instrument.quantity_quantum",
+        )
+        currency_quantum = _positive(
+            _decimal(model.instrument.currency_quantum, field="instrument.currency_quantum"),
+            field="instrument.currency_quantum",
+        )
+        contract_multiplier = _positive(
+            _decimal(model.instrument.contract_multiplier, field="instrument.contract_multiplier"),
+            field="instrument.contract_multiplier",
+        )
+        spec_set = build_instrument_spec_set(
+            InstrumentSpecSetId(model.instrument.specification_set_id),
+            (
+                InstrumentExecutionSpec(
+                    instrument=instrument,
+                    specification_id=InstrumentSpecId(model.instrument.specification_id),
+                    price_quantum=price_quantum,
+                    quantity_quantum=quantity_quantum,
+                    settlement_currency=currency,
+                    currency_quantum=currency_quantum,
+                    contract_multiplier=contract_multiplier,
+                    price_domain=PriceDomain.POSITIVE,
+                ),
+            ),
+        )
+    except (EconomicValidationError, ValueError) as error:
+        raise BacktestScenarioError(f"instrument is invalid ({type(error).__name__})") from None
+    if any(event.payload.instrument != instrument for event in dataset.selection.events):
+        raise BacktestScenarioError("instrument conflicts with captured market data")
+
+    try:
+        funding_currency = SettlementCurrency(model.funding.currency)
+    except EconomicValidationError:
+        raise BacktestScenarioError("funding.currency is invalid") from None
+    if funding_currency != currency:
+        raise BacktestScenarioError(
+            "funding currency conflicts with instrument settlement currency"
+        )
+    initial_cash = _quantized(
+        _positive(
+            _decimal(model.funding.initial_cash, field="funding.initial_cash"),
+            field="funding.initial_cash",
+        ),
+        currency_quantum,
+        field="funding.initial_cash",
+    )
+    max_order = _quantized(
+        _positive(
+            _decimal(model.risk.max_order_quantity, field="risk.max_order_quantity"),
+            field="risk.max_order_quantity",
+        ),
+        quantity_quantum,
+        field="risk.max_order_quantity",
+    )
+    max_position = _quantized(
+        _positive(
+            _decimal(model.risk.max_position_quantity, field="risk.max_position_quantity"),
+            field="risk.max_position_quantity",
+        ),
+        quantity_quantum,
+        field="risk.max_position_quantity",
+    )
+    max_notional = _quantized(
+        _positive(
+            _decimal(model.risk.max_notional, field="risk.max_notional"),
+            field="risk.max_notional",
+        ),
+        currency_quantum,
+        field="risk.max_notional",
+    )
+    target = None
+    if model.strategy.target_quantity is not None:
+        target = _quantized(
+            _positive(
+                _decimal(model.strategy.target_quantity, field="strategy.target_quantity"),
+                field="strategy.target_quantity",
+            ),
+            quantity_quantum,
+            field="strategy.target_quantity",
+        )
+    canonical = _canonical_bytes(model, dataset=dataset)
+    return LoadedBacktestScenario(
+        scenario_path=scenario_path,
+        data_path=data_path,
+        dataset=dataset,
+        replay_window=replay_window,
+        instrument=instrument,
+        spec_set=spec_set,
+        strategy_id=model.strategy.id,
+        target_quantity=target,
+        funding_currency=funding_currency,
+        initial_cash=initial_cash,
+        max_order_quantity=max_order,
+        max_position_quantity=max_position,
+        max_notional=max_notional,
+        execution_policy=_ACCEPTED_EXECUTION_POLICY,
+        randomness=BacktestRandomness(),
+        canonical_bytes=canonical,
+        scenario_sha256=Sha256Digest(sha256(_SCENARIO_DIGEST_DOMAIN + canonical).hexdigest()),
+    )
+
+
+__all__ = [
+    "BacktestScenarioError",
+    "BacktestStrategyId",
+    "LoadedBacktestScenario",
+    "load_backtest_scenario",
+]

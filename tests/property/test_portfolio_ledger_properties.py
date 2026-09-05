@@ -12,6 +12,7 @@ from ea.core import (
     ExternalFactId,
     FactProvenance,
     FactProvenanceId,
+    FundingTransaction,
     Instrument,
     InstrumentExecutionSpec,
     InstrumentSpecId,
@@ -26,8 +27,10 @@ from ea.core import (
     SourceNamespace,
     VenueId,
     build_instrument_spec_set,
+    canonical_funding_transaction_bytes,
     canonical_ledger_transaction_bytes,
     canonical_portfolio_snapshot_bytes,
+    canonical_reconciliation_transaction_bytes,
     create_fill,
     create_trade_execution_fact,
 )
@@ -199,7 +202,11 @@ def test_replay_after_any_bounded_later_history_never_mutates(
 
 
 def _ledger_transaction_bytes(
-    item: LedgerTransaction | ReconciliationTransaction,
+    item: FundingTransaction | LedgerTransaction | ReconciliationTransaction,
 ) -> bytes:
+    if type(item) is FundingTransaction:
+        return canonical_funding_transaction_bytes(item)
+    if type(item) is ReconciliationTransaction:
+        return canonical_reconciliation_transaction_bytes(item)
     assert type(item) is LedgerTransaction
     return canonical_ledger_transaction_bytes(item)

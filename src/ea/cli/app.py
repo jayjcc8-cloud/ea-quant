@@ -9,7 +9,16 @@ import typer
 
 from ea.config import ConfigurationError, load_configuration
 from ea.config.diagnostics import escape_diagnostic_label
-from ea.product import OfflineDemoFailure, OfflineDemoInputError, run_offline_demo
+from ea.product import (
+    BacktestRunError,
+    BacktestRunFailure,
+    BacktestScenarioError,
+    OfflineDemoFailure,
+    OfflineDemoInputError,
+    load_backtest_scenario,
+    run_backtest_scenario,
+    run_offline_demo,
+)
 
 app = typer.Typer(
     help="EA quantitative trading system CLI.",
@@ -109,29 +118,80 @@ def run(
             metavar="DIR",
         ),
     ],
+    scenario: Annotated[
+        Path | None,
+        typer.Option(
+            "--scenario",
+            help="Strict BacktestScenario v1 YAML file.",
+            metavar="FILE",
+        ),
+    ] = None,
 ) -> None:
-    """Run the installed fixed-input offline vertical slice once."""
+    """Run one strict scenario, or the compatible fixed RESET demo when omitted."""
     try:
         resolved_output = output_root.expanduser().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         typer.echo("demo input error: output root cannot be resolved", err=True)
         raise typer.Exit(code=2) from None
-    try:
-        completed = run_offline_demo(resolved_output)
-    except OfflineDemoInputError as error:
-        typer.echo(f"demo input error: {error}", err=True)
-        raise typer.Exit(code=2) from None
-    except OfflineDemoFailure as error:
-        typer.echo(f"demo failed closed: {error.code.value}", err=True)
-        typer.echo(f"evidence: {error.output_directory}", err=True)
-        raise typer.Exit(code=3) from None
-    except Exception:
-        typer.echo("demo internal error", err=True)
-        raise typer.Exit(code=1) from None
-
-    typer.echo(f"offline demo: {completed.status}")
-    typer.echo(f"result: {completed.output_directory / 'result.json'}")
+    if scenario is None:
+        try:
+            demo_completed = run_offline_demo(resolved_output)
+        except OfflineDemoInputError as error:
+            typer.echo(f"demo input error: {error}", err=True)
+            raise typer.Exit(code=2) from None
+        except OfflineDemoFailure as error:
+            typer.echo(f"demo failed closed: {error.code.value}", err=True)
+            typer.echo(f"evidence: {error.output_directory}", err=True)
+            raise typer.Exit(code=3) from None
+        except Exception:
+            typer.echo("demo internal error", err=True)
+            raise typer.Exit(code=1) from None
+        typer.echo(f"offline demo: {demo_completed.status}")
+        result_path = demo_completed.output_directory / "result.json"
+    else:
+        try:
+            loaded = load_backtest_scenario(scenario)
+            backtest_completed = run_backtest_scenario(loaded, resolved_output)
+        except BacktestScenarioError as error:
+            typer.echo(f"scenario validation error: {error}", err=True)
+            raise typer.Exit(code=2) from None
+        except BacktestRunError as error:
+            typer.echo(f"backtest input error: {error}", err=True)
+            raise typer.Exit(code=2) from None
+        except BacktestRunFailure as error:
+            typer.echo(f"backtest failed closed: {error.code.value}", err=True)
+            typer.echo(f"evidence: {error.output_directory}", err=True)
+            raise typer.Exit(code=3) from None
+        except Exception:
+            typer.echo("backtest internal error", err=True)
+            raise typer.Exit(code=1) from None
+        typer.echo(f"backtest: {backtest_completed.status}")
+        result_path = backtest_completed.output_directory / "result.json"
+    typer.echo(f"result: {result_path}")
     typer.echo("live capability: unavailable")
+
+
+@backtest_app.command("validate")
+def validate(
+    scenario: Annotated[
+        Path,
+        typer.Option(
+            "--scenario",
+            help="Strict BacktestScenario v1 YAML file.",
+            metavar="FILE",
+        ),
+    ],
+) -> None:
+    """Validate one scenario and its selected local OHLCV without executing it."""
+    try:
+        load_backtest_scenario(scenario)
+    except BacktestScenarioError as error:
+        typer.echo(f"scenario validation error: {error}", err=True)
+        raise typer.Exit(code=2) from None
+    except Exception:
+        typer.echo("scenario validation internal error", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo("scenario valid: BacktestScenario v1")
 
 
 if __name__ == "__main__":
