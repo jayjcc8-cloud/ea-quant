@@ -167,3 +167,32 @@ def test_backtest_resume_cli_continues_same_attempt_without_identity_input(
     assert f"result: {attempt / 'result.json'}" in result.stdout
     assert json.loads((attempt / "result.json").read_bytes())["run_id"] == attempt.name
     assert "Traceback" not in result.output
+
+
+def test_backtest_cli_sanitizes_handled_internal_failure_and_points_to_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _scenario(tmp_path / "input")
+
+    def fail(**_kwargs: object) -> object:
+        raise RuntimeError("sensitive internal detail")
+
+    monkeypatch.setattr(backtest_module, "_execute", fail)
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "run",
+            "--scenario",
+            str(scenario),
+            "--output-root",
+            str((tmp_path / "runs").resolve()),
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert "backtest failed closed" in result.output
+    assert "evidence:" in result.output
+    assert "sensitive internal detail" not in result.output
+    assert "Traceback" not in result.output

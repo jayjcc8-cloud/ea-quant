@@ -27,8 +27,9 @@ Entry: Phase 0 is released and `main` is healthy.
    seed ownership before expanding the product surface.
 3. **Funded deterministic Backtest single-run — #81.** Add strict scenario input, initial funding,
    limits, strategies, and installed `validate`/`run` commands.
-4. **Resume and failure durability.** Add only the supported recovery boundaries and retained
-   failure evidence needed by the offline product.
+4. **Resume and failure durability — COMPLETE.** The installed product resumes the same trusted
+   attempt from the funded, completed-dispatch, and reconciled pre-publication durable frontiers,
+   preserving exactly-once economics and failing closed on ambiguous or conflicting evidence.
 5. **BacktestReportV1 — #83.** Produce canonical JSON/text and semantic outcome comparison from
    accepted product evidence.
 6. **v0.2.0 product acceptance and release gate — #84.** Verify one clean exact `main`; tag,

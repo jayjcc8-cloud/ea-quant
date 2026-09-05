@@ -216,6 +216,27 @@ def test_resume_rejects_committed_journal_corruption_without_success(
     assert not (attempt / "result.json").exists()
 
 
+def test_resume_rejects_partial_success_artifact_before_terminal_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    runs = (tmp_path / "runs").resolve()
+    _interrupt_at(monkeypatch, "funding_durable")
+    with pytest.raises(_AbruptInterruption):
+        run_backtest_scenario(scenario, runs)
+    attempt = _attempt(runs)
+    (attempt / "result.pending").write_bytes(b'{"status":"success"}\n')
+    before = _tree_digest(attempt)
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", None)
+
+    with pytest.raises(BacktestResumeFailure, match="ambiguous"):
+        resume_backtest_attempt(attempt)
+
+    assert _tree_digest(attempt) == before
+    assert not (attempt / "result.json").exists()
+
+
 def test_handled_internal_failure_retains_classified_durable_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

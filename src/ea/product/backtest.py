@@ -1122,6 +1122,13 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 raise BacktestResumeFailure("resume completed evidence conflicts", attempt)
             return BacktestRunResult("success", attempt)
 
+        pending_result = attempt / "result.pending"
+        if pending_result.exists() and type(verified) is VerifiedIncompleteRecoveryBinding:
+            raise BacktestResumeFailure(
+                "resume frontier is ambiguous because success staging precedes terminal evidence",
+                attempt,
+            )
+
         binding = manifest.binding
 
         def retain_funding(document: dict[str, object]) -> None:
