@@ -365,7 +365,7 @@ def verify_installed_demo_smoke(
     expectation = (
         "import json\n"
         "from pathlib import Path\n"
-        f'demo_root = Path({str(demo_output_root)!r})\\n'
+        f"demo_root = Path({str(demo_output_root)!r})\\n"
         "result_path = demo_root / 'phase1-demo-v1' / 'result.json'\\n"
         "summary_path = demo_root / 'phase1-demo-v1' / 'summary.txt'\\n"
         "audit_path = demo_root / 'phase1-demo-v1' / 'audit.jsonl'\\n"

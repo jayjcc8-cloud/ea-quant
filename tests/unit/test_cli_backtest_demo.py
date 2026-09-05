@@ -46,10 +46,13 @@ def test_backtest_run_rejects_hidden_mode_override(tmp_path: Path) -> None:
 def test_backtest_run_refuses_an_existing_attempt_without_traceback(tmp_path: Path) -> None:
     output_root = (tmp_path / "results").resolve()
     runner = CliRunner()
-    assert runner.invoke(
-        app,
-        ["backtest", "run", "--output-root", str(output_root)],
-    ).exit_code == 0
+    assert (
+        runner.invoke(
+            app,
+            ["backtest", "run", "--output-root", str(output_root)],
+        ).exit_code
+        == 0
+    )
 
     repeated = runner.invoke(
         app,

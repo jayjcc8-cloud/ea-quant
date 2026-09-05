@@ -50,9 +50,7 @@ def test_bundled_demo_runs_the_existing_economic_path_end_to_end(tmp_path: Path)
     assert report["order_detail"]["side"] == "buy"  # type: ignore[index]
     assert report["fill_detail"]["quantity"] == "2"  # type: ignore[index]
     assert report["cash_snapshot"] == [{"amount": "-203", "currency": "USD"}]
-    assert report["position_snapshot"] == [
-        {"quantity": "2", "symbol": "AAPL", "venue": "XNAS"}
-    ]
+    assert report["position_snapshot"] == [{"quantity": "2", "symbol": "AAPL", "venue": "XNAS"}]
     assert report["reconciliation"] == {
         "cash": "reconciliation_match",
         "position": "reconciliation_match",
@@ -234,9 +232,9 @@ def test_risk_rejection_creates_no_order_fill_cash_or_position_mutation(tmp_path
     assert report["trade_outcome"] == "risk_rejected"
     portfolio = report["portfolio"]
     assert isinstance(portfolio, dict)
-    assert portfolio["authoritative_snapshot_ledger_sequence"] == portfolio[
-        "pre_fill_ledger_sequence"
-    ]
+    assert (
+        portfolio["authoritative_snapshot_ledger_sequence"] == portfolio["pre_fill_ledger_sequence"]
+    )
     assert report["pre_fill_ledger_snapshot_sha256"] == report["internal_snapshot_sha256"]
     assert report["internal_snapshot_sha256"] == report["replayed_snapshot_sha256"]
     assert report["reconciliation"] == {
@@ -337,16 +335,11 @@ def test_reconciliation_mismatch_is_detected_by_reconciliation_authority(
         if record["header"]["record_kind"] == "runtime.dispatch_completed"
     ]
     terminal_records = [
-        record
-        for record in audit
-        if record["header"]["record_kind"] == "run.terminal"
+        record for record in audit if record["header"]["record_kind"] == "run.terminal"
     ]
     assert completion_records
     assert terminal_records
-    assert (
-        completion_records[-1]["payload"]["final_portfolio_snapshot_sha256"]
-        == expected_snapshot
-    )
+    assert completion_records[-1]["payload"]["final_portfolio_snapshot_sha256"] == expected_snapshot
     assert not (output_directory / "result.json").exists()
     assert not (output_directory / "summary.txt").exists()
 
