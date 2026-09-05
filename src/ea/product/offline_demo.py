@@ -904,14 +904,11 @@ def run_offline_demo(
     output_root: Path,
     *,
     mode: DemoMode = DemoMode.ACCEPT,
-    attempt_run_id: RunId | None = None,
 ) -> OfflineDemoResult:
     """Run the fixed offline slice once and preserve success or failure evidence."""
     if type(mode) is not DemoMode:
         raise OfflineDemoInputError("demo mode must be exact")
-    if attempt_run_id is not None and type(attempt_run_id) is not RunId:
-        raise OfflineDemoInputError("attempt_run_id must be an exact RunId")
-    run_id = attempt_run_id if attempt_run_id is not None else RunId(str(uuid4()))
+    run_id = RunId(str(uuid4()))
     prepared_attempt = _prepare_attempt(mode, run_id)
     attempt = _safe_attempt_directory(output_root)
     try:

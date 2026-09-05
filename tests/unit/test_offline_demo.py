@@ -214,15 +214,12 @@ def test_equivalent_fresh_attempt_evidence_remains_distinguishable(tmp_path: Pat
     )
 
 
-def test_same_attempt_regeneration_is_byte_stable(tmp_path: Path) -> None:
+def test_fresh_runner_does_not_accept_caller_supplied_attempt_identity(tmp_path: Path) -> None:
     run_id = RunId("123e4567-e89b-42d3-a456-426614174000")
-    first = run_offline_demo((tmp_path / "one").resolve(), attempt_run_id=run_id)
-    second = run_offline_demo((tmp_path / "two").resolve(), attempt_run_id=run_id)
-
-    for name in ("result.json", "summary.txt", "audit.jsonl"):
-        assert (first.output_directory / name).read_bytes() == (
-            second.output_directory / name
-        ).read_bytes()
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        run_offline_demo(  # type: ignore[call-arg]
+            (tmp_path / "one").resolve(), attempt_run_id=run_id
+        )
 
 
 def test_lineage_records_explicit_non_random_profile(tmp_path: Path) -> None:

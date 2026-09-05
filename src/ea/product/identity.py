@@ -203,7 +203,7 @@ def build_backtest_lineage(inputs: BacktestLineageInputs) -> Sha256Digest:
 
 
 def _reject_attempt_only_fields(value: object) -> None:
-    if type(value) is dict:
+    if isinstance(value, Mapping):
         for key, nested in value.items():
             if type(key) is not str:
                 raise BacktestIdentityError("semantic outcome keys must be strings")
@@ -212,7 +212,7 @@ def _reject_attempt_only_fields(value: object) -> None:
                     f"attempt-only field {key!r} cannot enter semantic outcome"
                 )
             _reject_attempt_only_fields(nested)
-    elif type(value) is list:
+    elif isinstance(value, (list, tuple)):
         for nested in value:
             _reject_attempt_only_fields(nested)
 
