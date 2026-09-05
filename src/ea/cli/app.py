@@ -10,12 +10,14 @@ import typer
 from ea.config import ConfigurationError, load_configuration
 from ea.config.diagnostics import escape_diagnostic_label
 from ea.product import (
+    BacktestReportError,
     BacktestResumeFailure,
     BacktestRunError,
     BacktestRunFailure,
     BacktestScenarioError,
     OfflineDemoFailure,
     OfflineDemoInputError,
+    generate_backtest_report,
     load_backtest_scenario,
     resume_backtest_attempt,
     run_backtest_scenario,
@@ -225,6 +227,46 @@ def resume(
     typer.echo(f"backtest resume: {completed.status}")
     typer.echo(f"result: {completed.output_directory / 'result.json'}")
     typer.echo("live capability: unavailable")
+
+
+@backtest_app.command("report")
+def report(
+    run_dir: Annotated[
+        Path,
+        typer.Option(
+            "--run-dir",
+            help="Completed Backtest attempt directory to read without execution.",
+            metavar="ATTEMPT_DIR",
+        ),
+    ],
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir",
+            help="Separate directory for canonical report.json and summary.txt.",
+            metavar="REPORT_DIR",
+        ),
+    ],
+) -> None:
+    """Generate one deterministic report from verified completed evidence."""
+    try:
+        resolved_run = run_dir.expanduser().resolve(strict=True)
+        resolved_output = output_dir.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        typer.echo("backtest report input error", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        completed = generate_backtest_report(resolved_run, resolved_output)
+    except BacktestReportError:
+        typer.echo("backtest report failed closed", err=True)
+        raise typer.Exit(code=3) from None
+    except Exception:
+        typer.echo("backtest report internal error", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"backtest report: {completed.status}")
+    typer.echo(f"report: {completed.output_directory / 'report.json'}")
+    typer.echo(f"summary: {completed.output_directory / 'summary.txt'}")
+    typer.echo("source attempt: read-only")
 
 
 if __name__ == "__main__":

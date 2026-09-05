@@ -2,8 +2,8 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — funded deterministic Backtest run/resume delivered / main healthy /
-live unavailable.**
+**Phase 1 delivery reset — funded deterministic Backtest run/resume/report delivered.**
+**main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
 authoritative checkpoint. GitHub Issues and pull requests carry mutable coordination state; this
@@ -59,14 +59,23 @@ external write, or live capability is part of this objective.
   state, committed journal corruption, or identity conflicts reject without a success result.
 - Final success is an atomic `result.json` publication after durable terminal evidence; handled
   internal failures retain classified evidence without exception detail or false success.
+- The installed `ea backtest report --run-dir ATTEMPT_DIR --output-dir REPORT_DIR` command reads
+  only a verified completed attempt and atomically publishes canonical `report.json` and
+  `summary.txt` in a separate directory without running or resuming trading.
+- `BacktestReportV1` binds its field sources to manifest, funding, journal/exported audit, result,
+  and admitted OHLCV evidence. It reports last-price equity, net P&L, total return, unique
+  Order/Fill counts, and policy-proved Phase 1 zero commission using exact decimal arithmetic.
+- Repeated reporting of one attempt is byte-stable; equivalent independent attempts retain
+  distinct RunIds while their accepted semantic and economic report projection remains equal.
+- Package and wheel metadata are consistently prepared as `0.2.0`. No tag, Release, package
+  publication, or deployment has been performed or authorized by #83.
 - The Dark Professional Web shell remains a deterministic read-only Mock Adapter.
 
 ## Incomplete
 
-The funded product is one deterministic single-run MVP, not all of Phase 1 or a v0.2.0 release.
-Arbitrary instruction-level recovery, BacktestReportV1, performance analytics, stochastic seed
+The funded product is one deterministic single-run/reporting MVP, not all of Phase 1 or a v0.2.0
+release. Arbitrary instruction-level recovery, broader performance analytics, stochastic seed
 hierarchies, strategy plugins, paper/live execution, and release publication remain unavailable.
-BacktestReportV1 is next in the dependency order but is not authorized by this status update.
 
 ## Blockers
 
@@ -108,8 +117,8 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
   the installed validate/run surface.
 - [#161 — Supported Backtest resume and failure durability](https://github.com/jayjcc8-cloud/ea-quant/issues/161)
   adds same-attempt installed resume across three bounded durable frontiers.
-- [#83 — BacktestReportV1](https://github.com/jayjcc8-cloud/ea-quant/issues/83) follows the
-  single-run and resume/failure-durability deliveries.
+- [#83 — BacktestReportV1](https://github.com/jayjcc8-cloud/ea-quant/issues/83) adds deterministic,
+  read-only reports over completed single-run and resumed attempts.
 - [#84 — v0.2.0 product acceptance and release gate](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
   owns final clean-main acceptance; tag/release/publication still requires a separate Human Product
   Owner decision.
@@ -138,10 +147,13 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [x] Supported interruptions resume the same trusted attempt without duplicate economic effects.
 - [x] Completed, failed, conflicting, corrupt, and partial-publication attempts have deterministic
   fail-closed or idempotent behavior.
+- [x] Completed attempts produce byte-stable canonical reports without modifying source evidence.
+- [x] Report valuation, exact economics, fee/count semantics, and field sources are independently
+  testable and available from the installed wheel outside a checkout.
 - [x] Quick Start identifies the supported boundary and known limitations.
 
-These conditions complete Issues #81 and #161 only, not the full Phase 1 roadmap or a v0.2.0
-release.
+These conditions complete Issues #81, #161, and #83 only, not the full Phase 1 roadmap or a
+v0.2.0 release.
 
 ## Delivery Metrics
 

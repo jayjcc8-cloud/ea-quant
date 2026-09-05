@@ -104,8 +104,8 @@ _LEDGER_WATERMARK = SourceNamespace("ledger.portfolio")
 _RISK_POLICY_ID = RiskPolicyId("backtest.scenario.v1")
 _RESULT_SCHEMA = "ea.backtest-single-run-result.v1"
 _FAILURE_SCHEMA = "ea.backtest-single-run-failure.v1"
-_ATTEMPT_SCHEMA = "ea.backtest-resumable-attempt.v1"
-_ATTEMPT_CANONICALIZATION = "ea-backtest-resumable-attempt-v1"
+_ATTEMPT_SCHEMA = "ea.backtest-resumable-attempt.v2"
+_ATTEMPT_CANONICALIZATION = "ea-backtest-resumable-attempt-v2"
 _PUBLICATION_SCHEMA = "ea.backtest-success-publication.v1"
 _TEST_INTERRUPT: Callable[[str], None] | None = None
 
@@ -270,16 +270,26 @@ def _risk_context(scenario: LoadedBacktestScenario) -> tuple[Any, dict[str, obje
     }
 
 
+def _runtime_document() -> dict[str, str]:
+    cache_tag = sys.implementation.cache_tag
+    if cache_tag is None:
+        raise RuntimeError("runtime has no Python cache tag")
+    return {
+        "platform_tag": sysconfig.get_platform(),
+        "python_cache_tag": cache_tag,
+        "python_implementation": sys.implementation.name,
+        "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+        "sys_platform": sys.platform,
+    }
+
+
 def _lineage(
     scenario: LoadedBacktestScenario,
     *,
     risk_policy: Any,
     risk_context: dict[str, object],
 ) -> Sha256Digest:
-    version = ".".join(str(part) for part in sys.version_info[:3])
-    cache_tag = sys.implementation.cache_tag
-    if cache_tag is None:
-        raise RuntimeError("runtime has no Python cache tag")
+    runtime = _runtime_document()
     strategy_parameters = {
         "target_quantity": (
             None if scenario.target_quantity is None else scenario.target_quantity.text
@@ -308,11 +318,11 @@ def _lineage(
             code_sha256=_package_code_digest(),
             distribution_name="ea-quant",
             distribution_version=ea.__version__,
-            python_implementation=sys.implementation.name,
-            python_version=version,
-            python_cache_tag=cache_tag,
-            sys_platform=sys.platform,
-            platform_tag=sysconfig.get_platform(),
+            python_implementation=runtime["python_implementation"],
+            python_version=runtime["python_version"],
+            python_cache_tag=runtime["python_cache_tag"],
+            sys_platform=runtime["sys_platform"],
+            platform_tag=runtime["platform_tag"],
             randomness=scenario.randomness,
         )
     )
@@ -356,6 +366,7 @@ def _attempt_manifest_bytes(
             "policy_id": risk_policy.policy_id.value,
             "policy_sha256": phase1_risk_policy_digest(risk_policy).value,
         },
+        "runtime": _runtime_document(),
         "run_id": run_id.value,
         "scenario": {
             "canonical": json.loads(scenario.canonical_bytes),
@@ -1022,6 +1033,7 @@ def _load_verified_attempt(
             "lineage_sha256",
             "randomness",
             "risk",
+            "runtime",
             "run_id",
             "scenario",
             "schema",

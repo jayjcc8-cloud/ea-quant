@@ -252,7 +252,7 @@ def test_subprocess_environment_removes_ambient_configuration(
 
 
 def test_source_and_distribution_versions_match() -> None:
-    assert metadata.version("ea-quant") == ea.__version__ == "0.1.1"
+    assert metadata.version("ea-quant") == ea.__version__ == "0.2.0"
 
 
 def test_doctor_runs_as_installed_python_module(tmp_path: Path) -> None:
