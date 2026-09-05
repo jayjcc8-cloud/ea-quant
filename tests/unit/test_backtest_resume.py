@@ -432,3 +432,141 @@ def test_resume_handled_failure_reports_actual_last_durable_frontier(
 
     failure = json.loads((attempt / "failure.json").read_bytes())
     assert failure["last_durable_frontier"] == expected_frontier
+
+
+def _assert_failed_resume_preserved_existing_evidence(
+    attempt: Path,
+    *,
+    expected_frontier: str,
+    manifest: dict[str, object],
+    funding_bytes: bytes,
+    journal_bytes: bytes,
+) -> None:
+    failure = json.loads((attempt / "failure.json").read_bytes())
+    assert failure["last_durable_frontier"] == expected_frontier
+    assert failure["run_id"] == manifest["run_id"] == attempt.name
+    assert failure["lineage_sha256"] == manifest["lineage_sha256"]
+    assert (attempt / "funding.json").read_bytes() == funding_bytes
+    assert (attempt / "audit" / "audit-v1.journal").read_bytes() == journal_bytes
+    assert not (attempt / "result.json").exists()
+    assert not (attempt / "result.publication.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("existing_frontier", "failing_replay_stage", "expected_frontier"),
+    [
+        ("reconciliation_durable", "funding_durable", "reconciliation_durable"),
+        ("reconciliation_durable", "dispatch_durable", "reconciliation_durable"),
+        ("dispatch_durable", "funding_durable", "dispatch_durable"),
+    ],
+)
+def test_resume_failure_never_regresses_already_verified_durable_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_frontier: str,
+    failing_replay_stage: str,
+    expected_frontier: str,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    runs = (tmp_path / "runs").resolve()
+    _interrupt_at(monkeypatch, existing_frontier)
+    with pytest.raises(_AbruptInterruption):
+        run_backtest_scenario(scenario, runs)
+    attempt = _attempt(runs)
+    manifest = json.loads((attempt / "manifest.json").read_bytes())
+    funding_bytes = (attempt / "funding.json").read_bytes()
+    journal_bytes = (attempt / "audit" / "audit-v1.journal").read_bytes()
+
+    def fail(stage: str) -> None:
+        if stage == failing_replay_stage:
+            raise RuntimeError("injected earlier replay failure")
+
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", fail)
+    with pytest.raises(BacktestResumeFailure, match="internal failure"):
+        resume_backtest_attempt(attempt)
+
+    _assert_failed_resume_preserved_existing_evidence(
+        attempt,
+        expected_frontier=expected_frontier,
+        manifest=manifest,
+        funding_bytes=funding_bytes,
+        journal_bytes=journal_bytes,
+    )
+
+
+def test_resume_failure_after_reopen_retains_verified_frontier_before_replay_callbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    runs = (tmp_path / "runs").resolve()
+    _interrupt_at(monkeypatch, "reconciliation_durable")
+    with pytest.raises(_AbruptInterruption):
+        run_backtest_scenario(scenario, runs)
+    attempt = _attempt(runs)
+    manifest = json.loads((attempt / "manifest.json").read_bytes())
+    funding_bytes = (attempt / "funding.json").read_bytes()
+    journal_bytes = (attempt / "audit" / "audit-v1.journal").read_bytes()
+
+    def fail_before_replay_callback(**_kwargs: object) -> object:
+        raise RuntimeError("injected failure before replay callback")
+
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", None)
+    monkeypatch.setattr(backtest_module, "_execute", fail_before_replay_callback)
+    with pytest.raises(BacktestResumeFailure, match="internal failure"):
+        resume_backtest_attempt(attempt)
+
+    _assert_failed_resume_preserved_existing_evidence(
+        attempt,
+        expected_frontier="reconciliation_durable",
+        manifest=manifest,
+        funding_bytes=funding_bytes,
+        journal_bytes=journal_bytes,
+    )
+
+
+def test_partial_reconciliation_evidence_does_not_promote_persisted_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    runs = (tmp_path / "runs").resolve()
+    real_append = vars(backtest_module)["_append_reconciliation"]
+    appended = 0
+
+    def interrupt_after_first_reconciliation(audit: object, outcome: object) -> None:
+        nonlocal appended
+        real_append(audit, outcome)
+        appended += 1
+        if appended == 1:
+            raise _AbruptInterruption("partial reconciliation")
+
+    monkeypatch.setattr(
+        backtest_module,
+        "_append_reconciliation",
+        interrupt_after_first_reconciliation,
+    )
+    with pytest.raises(_AbruptInterruption):
+        run_backtest_scenario(scenario, runs)
+    attempt = _attempt(runs)
+    manifest = json.loads((attempt / "manifest.json").read_bytes())
+    funding_bytes = (attempt / "funding.json").read_bytes()
+    journal_bytes = (attempt / "audit" / "audit-v1.journal").read_bytes()
+
+    monkeypatch.setattr(backtest_module, "_append_reconciliation", real_append)
+
+    def fail_at_funding(stage: str) -> None:
+        if stage == "funding_durable":
+            raise RuntimeError("injected earlier replay failure")
+
+    monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", fail_at_funding)
+    with pytest.raises(BacktestResumeFailure, match="internal failure"):
+        resume_backtest_attempt(attempt)
+
+    _assert_failed_resume_preserved_existing_evidence(
+        attempt,
+        expected_frontier="dispatch_durable",
+        manifest=manifest,
+        funding_bytes=funding_bytes,
+        journal_bytes=journal_bytes,
+    )

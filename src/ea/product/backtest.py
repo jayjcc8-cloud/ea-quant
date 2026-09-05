@@ -895,6 +895,89 @@ def _failure_bytes(
     return _canonical_json(document) + b"\n"
 
 
+def _expected_funding_bytes(
+    scenario: LoadedBacktestScenario,
+    run_id: RunId,
+) -> bytes:
+    funding = InitialFunding(run_id, scenario.funding_currency, scenario.initial_cash)
+    ledger = create_portfolio_ledger(run_id, scenario.spec_set)
+    outcome = ledger.apply_initial_funding(funding)
+    if outcome.code is not OutcomeCode.LEDGER_APPLIED:
+        raise RuntimeError("persisted funding could not be reconstructed")
+    return _canonical_json(_funding_document(funding, outcome)) + b"\n"
+
+
+def _verified_persisted_frontier(
+    *,
+    scenario: LoadedBacktestScenario,
+    run_id: RunId,
+    attempt: Path,
+    records: tuple[Any, ...],
+) -> str:
+    funding_path = attempt / "funding.json"
+    try:
+        if (
+            funding_path.is_symlink()
+            or not funding_path.is_file()
+            or funding_path.read_bytes() != _expected_funding_bytes(scenario, run_id)
+        ):
+            raise ValueError("funding evidence conflicts")
+    except (OSError, RuntimeError, ValueError):
+        raise BacktestResumeFailure("resume funding evidence is invalid", attempt) from None
+
+    accepted_fact_dispatches: set[int] = set()
+    applied_handoff_dispatches: set[int] = set()
+    completed_economic_dispatches: set[int] = set()
+    reconciliations: list[dict[str, object]] = []
+    try:
+        for record in records:
+            document = json.loads(record.canonical_payload)
+            if type(document) is not dict:
+                raise ValueError("audit payload is not an object")
+            if record.record_kind is AuditRecordKind.EXECUTION_FACT_PROCESSING_OUTCOME:
+                if document.get("action") == "accepted" and type(document.get("fill")) is dict:
+                    accepted_fact_dispatches.add(document["runtime_dispatch_sequence"])
+            elif record.record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME:
+                original = document.get("original_ledger_apply_outcome")
+                if (
+                    document.get("action") == "effect_committed"
+                    and type(original) is dict
+                    and original.get("code") == OutcomeCode.LEDGER_APPLIED.value
+                ):
+                    applied_handoff_dispatches.add(document["dispatch_sequence"])
+            elif record.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
+                if document.get("ledger_outcome_count") == 1 and document.get("outcome_count") == 1:
+                    completed_economic_dispatches.add(document["dispatch_sequence"])
+            elif record.record_kind is AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME:
+                reconciliations.append(document)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise BacktestResumeFailure(
+            "resume durable frontier evidence is invalid", attempt
+        ) from None
+
+    durable_economic_dispatches = (
+        accepted_fact_dispatches & applied_handoff_dispatches & completed_economic_dispatches
+    )
+    frontier = "funding_durable"
+    if durable_economic_dispatches:
+        frontier = "dispatch_durable"
+
+    required_reconciliations = 2 if scenario.strategy_id is BacktestStrategyId.BOUNDED_LONG else 1
+    expected_ledger_sequence = 2 if scenario.strategy_id is BacktestStrategyId.BOUNDED_LONG else 1
+    complete_reconciliation = len(reconciliations) == required_reconciliations and all(
+        document.get("run_id") == run_id.value
+        and document.get("outcome_code") == OutcomeCode.RECONCILIATION_MATCH.value
+        and document.get("requested_action") == "none"
+        and document.get("ledger_sequence") == expected_ledger_sequence
+        for document in reconciliations
+    )
+    if complete_reconciliation and (
+        scenario.strategy_id is BacktestStrategyId.ALWAYS_FLAT or durable_economic_dispatches
+    ):
+        frontier = "reconciliation_durable"
+    return frontier
+
+
 def _require_attempt_directory(run_dir: Path) -> tuple[Path, RunId]:
     if not isinstance(run_dir, Path) or not run_dir.is_absolute():
         raise BacktestResumeFailure("resume run directory must be an absolute path", run_dir)
@@ -1102,6 +1185,7 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
     journal: Any | None = None
     terminal_recovery: Any | None = None
     last_frontier = "attempt_prepared"
+    replay_record_count: int | None = None
     try:
         try:
             verified = store.verify_recovery_attempt(manifest)
@@ -1181,8 +1265,13 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
             _write_or_verify(attempt / "funding.json", _canonical_json(document) + b"\n")
 
         def retain_frontier(frontier: str) -> None:
-            nonlocal last_frontier
-            last_frontier = frontier
+            nonlocal last_frontier, replay_record_count
+            if journal is None or replay_record_count is None:
+                return
+            current_record_count = len(journal.records)
+            if current_record_count > replay_record_count:
+                last_frontier = frontier
+                replay_record_count = current_record_count
 
         if type(verified) is VerifiedTerminalRecoveryBinding:
             terminal_recovery = store.recover_terminal_attempt(verified)
@@ -1208,6 +1297,14 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
         elif type(verified) is VerifiedIncompleteRecoveryBinding:
             recovered = store.recover_incomplete_attempt(verified)
             journal = reopen_posix_audit_journal(recovered.audit)
+            persisted_records = tuple(journal.records)
+            last_frontier = _verified_persisted_frontier(
+                scenario=scenario,
+                run_id=run_id,
+                attempt=attempt,
+                records=persisted_records,
+            )
+            replay_record_count = len(persisted_records)
             report, audit, funding = _execute(
                 scenario,
                 run_id=run_id,
