@@ -248,6 +248,21 @@ jobs:
           version-file: pyproject.toml
       - name: Set up Python
         run: uv python install 3.12
+      - name: Reclaim hosted-runner audit headroom
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -s)" != "Linux" ]]; then
+            echo "Refusing hosted-runner cleanup on a non-Linux runner."
+            exit 1
+          fi
+          echo "Filesystem state before bounded hosted-runner cleanup:"
+          df -B1 /tmp "$GITHUB_WORKSPACE"
+          sudo rm -rf -- /usr/local/lib/android/sdk
+          sudo rm -rf -- /usr/share/dotnet
+          sudo rm -rf -- /usr/local/.ghcup
+          echo "Filesystem state after bounded hosted-runner cleanup:"
+          df -B1 /tmp "$GITHUB_WORKSPACE"
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -258,6 +273,25 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
+      - name: Verify hosted-runner audit headroom
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          df -B1 /tmp "$GITHUB_WORKSPACE"
+          python - <<'PY'
+          import os
+
+          required_bytes = 15 * 1024**3
+          for path in ("/tmp", os.environ["GITHUB_WORKSPACE"]):
+              filesystem = os.statvfs(path)
+              available_bytes = filesystem.f_bavail * filesystem.f_frsize
+              print(f"{path}: available_bytes={available_bytes}")
+              if available_bytes < required_bytes:
+                  raise SystemExit(
+                      f"{path} has {available_bytes} bytes available; "
+                      f"requires at least {required_bytes} bytes"
+                  )
+          PY
       - name: Verify installed local Web backtest loop
         working-directory: apps/web
         run: npm run test:e2e

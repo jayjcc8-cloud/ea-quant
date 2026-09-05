@@ -69,6 +69,12 @@ test('installed browser completes the bounded local Web backtest loop', async ({
   await expect(page.getByText('8.5 USD', { exact: true })).toBeVisible()
   await expect(page.getByText('0.00085', { exact: true })).toBeVisible()
 
+  await page.goto('/backtests')
+  await page.getByLabel('Scenario').selectOption('invalid.yaml')
+  await page.getByRole('button', { name: 'Validate input' }).click()
+  await expect(page.getByText(/invalid field 'data\.fingerprint\.sha256'/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Run new backtest' })).toBeDisabled()
+
   const boundary = await page.evaluate(async () => {
     const headers = { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }
     const jobsBefore = await fetch('/api/backtests').then((response) => response.json())

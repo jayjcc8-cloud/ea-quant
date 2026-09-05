@@ -20,6 +20,7 @@ from ea.web.service import (
     ServiceBusyError,
     WebBoundaryError,
     WebService,
+    roots_overlap,
 )
 
 
@@ -59,7 +60,14 @@ def create_app(settings: WebSettings) -> Any:
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import FileResponse, JSONResponse, Response
 
-    ui_root = settings.ui_dir.resolve(strict=True)
+    try:
+        scenario_root = settings.scenario_root.resolve(strict=True)
+        workspace_root = settings.workspace.resolve(strict=False)
+        ui_root = settings.ui_dir.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        raise WebBoundaryError("local Web roots cannot be resolved") from None
+    if roots_overlap(scenario_root, workspace_root, ui_root):
+        raise WebBoundaryError("scenario, workspace, and UI roots must not overlap")
     index_candidate = ui_root / "index.html"
     try:
         index_path = index_candidate.resolve(strict=True)
@@ -72,7 +80,7 @@ def create_app(settings: WebSettings) -> Any:
         or not index_path.is_file()
     ):
         raise WebBoundaryError("ui directory must contain index.html")
-    service = WebService(settings.scenario_root, settings.workspace)
+    service = WebService(scenario_root, workspace_root)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:

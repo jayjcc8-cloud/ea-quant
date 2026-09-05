@@ -266,8 +266,12 @@ def web_serve(
         typer.echo("web input error: local roots cannot be resolved", err=True)
         raise typer.Exit(code=2) from None
     roots = (resolved_scenarios, resolved_workspace, resolved_ui)
-    if len(set(roots)) != len(roots):
-        typer.echo("web input error: scenario, workspace, and UI roots must be separate", err=True)
+    if any(
+        left.is_relative_to(right) or right.is_relative_to(left)
+        for index, left in enumerate(roots)
+        for right in roots[index + 1 :]
+    ):
+        typer.echo("web input error: scenario, workspace, and UI roots must not overlap", err=True)
         raise typer.Exit(code=2)
     try:
         from ea.web.app import WebSettings

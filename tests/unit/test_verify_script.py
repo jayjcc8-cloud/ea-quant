@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
@@ -31,6 +32,11 @@ def test_ci_routes_and_runs_installed_web_e2e() -> None:
     assert "web_e2e:" in workflow
     assert "npx playwright install --with-deps chromium" in workflow
     assert "npm run test:e2e" in workflow
+    jobs = yaml.safe_load(workflow)["jobs"]
+    web_steps = "\n".join(step.get("run", "") for step in jobs["web_e2e"]["steps"])
+    assert "Reclaim hosted-runner audit headroom" in workflow
+    assert "sudo rm -rf -- /usr/local/lib/android/sdk" in web_steps
+    assert "required_bytes = 15 * 1024**3" in web_steps
 
 
 def test_project_versions_come_from_pyproject() -> None:

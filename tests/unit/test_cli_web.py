@@ -64,3 +64,28 @@ def test_web_serve_passes_explicit_boundaries_to_local_server(
     assert settings.workspace == workspace.resolve()
     assert settings.ui_dir == ui_dir.resolve()
     assert settings.port == 9123
+
+
+def test_web_serve_rejects_nested_roots_before_starting(tmp_path: Path) -> None:
+    scenario_root = tmp_path / "shared" / "scenarios"
+    scenario_root.mkdir(parents=True)
+    ui_dir = tmp_path / "ui"
+    ui_dir.mkdir()
+    (ui_dir / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "web",
+            "serve",
+            "--scenario-root",
+            str(scenario_root),
+            "--workspace",
+            str(tmp_path / "shared"),
+            "--ui-dir",
+            str(ui_dir),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "must not overlap" in result.stderr

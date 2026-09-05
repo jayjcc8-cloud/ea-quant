@@ -12,7 +12,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from ea.web.app import WebSettings, create_app
-from ea.web.service import WebBoundaryError
+from ea.web.service import WebBoundaryError, WebService
 from unit.test_backtest_report import _priced_scenario
 
 ORIGIN = "http://127.0.0.1:8765"
@@ -296,6 +296,17 @@ def test_scenario_registry_rejects_symlink_escapes(tmp_path: Path) -> None:
         assert escaped.json()["error"]["code"] == "scenario_invalid"
 
 
+def test_scenario_registry_rejects_oversized_yaml(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    (settings.scenario_root / "oversized.yaml").write_bytes(b"#" * (64 * 1024 + 1))
+
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        response = client.post("/api/scenarios/oversized.yaml/validate", headers=WRITE_HEADERS)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "scenario_not_found"
+
+
 def test_app_rejects_ui_and_workspace_symlink_escapes(tmp_path: Path) -> None:
     ui_case = tmp_path / "ui-case"
     ui_case.mkdir()
@@ -318,6 +329,77 @@ def test_app_rejects_ui_and_workspace_symlink_escapes(tmp_path: Path) -> None:
 
     with pytest.raises(WebBoundaryError, match="job index resolves outside workspace"):
         create_app(workspace_settings)
+
+
+@pytest.mark.parametrize(
+    ("scenario_relative", "workspace_relative", "ui_relative"),
+    [
+        ("shared/scenarios", "shared", "ui"),
+        ("scenarios", "shared/workspace", "shared"),
+        ("shared", "workspace", "shared/ui"),
+    ],
+)
+def test_app_rejects_overlapping_authorized_roots(
+    tmp_path: Path,
+    scenario_relative: str,
+    workspace_relative: str,
+    ui_relative: str,
+) -> None:
+    scenario_root = tmp_path / scenario_relative
+    ui_dir = tmp_path / ui_relative
+    scenario_root.mkdir(parents=True)
+    ui_dir.mkdir(parents=True, exist_ok=True)
+    (ui_dir / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+    with pytest.raises(WebBoundaryError, match="must not overlap"):
+        create_app(
+            WebSettings(
+                scenario_root=scenario_root,
+                workspace=tmp_path / workspace_relative,
+                ui_dir=ui_dir,
+                port=8765,
+            )
+        )
+
+
+def test_service_rejects_overlapping_input_and_workspace_roots(tmp_path: Path) -> None:
+    scenario_root = tmp_path / "shared" / "scenarios"
+    scenario_root.mkdir(parents=True)
+
+    with pytest.raises(WebBoundaryError, match="must not overlap"):
+        WebService(scenario_root, tmp_path / "shared")
+
+
+def test_reporter_failure_retains_successful_engine_run_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+
+    def fail_report(_run_dir: Path, _output_dir: Path) -> object:
+        raise RuntimeError("reporter diagnostic must not escape")
+
+    monkeypatch.setattr("ea.web.service.generate_backtest_report", fail_report)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "flat.yaml")
+        response = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "flat.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-report-failure-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        failed = _wait(client, response.json()["job_id"])
+
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "report_failed"
+    assert failed["message"] == "the engine succeeded but the formal report was unavailable"
+    assert failed["engine_run_id"]
+    assert failed["report_ready"] is False
+    run_dir = settings.workspace / "runs" / failed["engine_run_id"]
+    assert (run_dir / "result.json").is_file()
+    assert not (settings.workspace / "reports" / failed["job_id"] / "report.json").exists()
 
 
 def test_workspace_lease_blocks_a_second_service_instance(tmp_path: Path) -> None:

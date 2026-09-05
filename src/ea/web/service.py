@@ -27,6 +27,7 @@ from ea.product import (
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 _JOB_STATES = frozenset({"accepted", "running", "succeeded", "failed", "interrupted"})
 _ARTIFACTS = frozenset({"report.json", "summary.txt"})
+_MAX_SCENARIO_BYTES = 64 * 1024
 
 
 class WebBoundaryError(ValueError):
@@ -90,6 +91,15 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
+def roots_overlap(*roots: Path) -> bool:
+    """Return whether any two resolved authorization roots contain one another."""
+    return any(
+        left.is_relative_to(right) or right.is_relative_to(left)
+        for index, left in enumerate(roots)
+        for right in roots[index + 1 :]
+    )
+
+
 def _scenario_identity(scenario: LoadedBacktestScenario) -> dict[str, object]:
     fingerprint = scenario.dataset.selection.fingerprint
     return {
@@ -133,9 +143,14 @@ class ScenarioRegistry:
         candidate = self.root / scenario_id
         try:
             resolved = candidate.resolve(strict=True)
+            value = resolved.stat()
         except (OSError, RuntimeError, ValueError):
             raise ScenarioNotFoundError("scenario is not registered") from None
-        if not _contained(resolved, self.root) or not resolved.is_file():
+        if (
+            not _contained(resolved, self.root)
+            or not stat.S_ISREG(value.st_mode)
+            or value.st_size > _MAX_SCENARIO_BYTES
+        ):
             raise ScenarioNotFoundError("scenario is not registered")
         return resolved
 
@@ -285,8 +300,15 @@ class WebService:
     """Persistent, single-active-job adapter over the existing product functions."""
 
     def __init__(self, scenario_root: Path, workspace: Path) -> None:
-        self.registry = ScenarioRegistry(scenario_root)
-        self.workspace = _directory(workspace, label="workspace", create=True)
+        resolved_scenarios = _directory(scenario_root, label="scenario root", create=False)
+        try:
+            resolved_workspace = workspace.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            raise WebBoundaryError("workspace is unavailable") from None
+        if roots_overlap(resolved_scenarios, resolved_workspace):
+            raise WebBoundaryError("scenario and workspace roots must not overlap")
+        self.registry = ScenarioRegistry(resolved_scenarios)
+        self.workspace = _directory(resolved_workspace, label="workspace", create=True)
         self.jobs_dir = _directory(self.workspace / "jobs", label="job index", create=True)
         self.runs_dir = _directory(self.workspace / "runs", label="attempt root", create=True)
         self.reports_dir = _directory(self.workspace / "reports", label="report root", create=True)
@@ -421,24 +443,36 @@ class WebService:
                 raise InputChangedError("scenario input changed; validate it again")
             result = run_backtest_scenario(scenario, self.runs_dir)
             run_id = result.output_directory.name
-            report_dir = self.reports_dir / job_id
-            generated = generate_backtest_report(result.output_directory, report_dir)
-            payload = generated.report.canonical_bytes
-            document = json.loads(payload)
-            if (
-                type(document) is not dict
-                or document.get("schema") != "ea.backtest-report.v1"
-                or document.get("run_id") != run_id
-            ):
-                raise ReportUnavailableError("generated report identity conflicts")
-            completed = replace(
-                record,
-                status="succeeded",
-                engine_run_id=run_id,
-                report_sha256=sha256(payload).hexdigest(),
-                error_code=None,
-                message=None,
-            )
+            record = replace(record, engine_run_id=run_id)
+            with self._lock:
+                self._store(record)
+            try:
+                report_dir = self.reports_dir / job_id
+                generated = generate_backtest_report(result.output_directory, report_dir)
+                payload = generated.report.canonical_bytes
+                document = json.loads(payload)
+                if (
+                    type(document) is not dict
+                    or document.get("schema") != "ea.backtest-report.v1"
+                    or document.get("run_id") != run_id
+                ):
+                    raise ReportUnavailableError("generated report identity conflicts")
+            except Exception:
+                completed = replace(
+                    record,
+                    status="failed",
+                    report_sha256=None,
+                    error_code="report_failed",
+                    message="the engine succeeded but the formal report was unavailable",
+                )
+            else:
+                completed = replace(
+                    record,
+                    status="succeeded",
+                    report_sha256=sha256(payload).hexdigest(),
+                    error_code=None,
+                    message=None,
+                )
         except BacktestRunFailure as error:
             completed = replace(
                 record,

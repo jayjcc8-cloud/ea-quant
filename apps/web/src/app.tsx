@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 
 export type InputIdentity = { scenario_sha256: string; data_sha256: string; record_count: number }
@@ -82,7 +82,7 @@ function Shell({ api }: { api: ApiAdapter }) {
     <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
       <Routes>
         <Route path="/backtests" element={<Backtests api={api} />} />
-        <Route path="/backtests/:jobId" element={<BacktestDetail api={api} />} />
+        <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
         <Route path="*" element={<Navigate replace to="/backtests" />} />
       </Routes>
     </div></main>
@@ -135,7 +135,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
         <label htmlFor="scenario">Scenario</label>
         <select id="scenario" value={selected} onChange={(event) => { setSelected(event.target.value); setValidated(null); setError(null) }}>
           <option value="">Select prepared scenario</option>
-          {scenarios.map((item) => <option key={item.scenario_id} value={item.scenario_id} disabled={!item.valid}>{item.name}{item.valid ? '' : ' · invalid'}</option>)}
+          {scenarios.map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}{item.valid ? '' : ' · invalid'}</option>)}
         </select>
         {candidate?.summary && <dl className="summary-list">
           <div><dt>Strategy</dt><dd>{candidate.summary.strategy_id}</dd></div><div><dt>Instrument</dt><dd>{candidate.summary.venue}:{candidate.summary.symbol}</dd></div>
@@ -152,21 +152,40 @@ function Backtests({ api }: { api: ApiAdapter }) {
   </>
 }
 
-function BacktestDetail({ api }: { api: ApiAdapter }) {
+function BacktestDetailRoute({ api }: { api: ApiAdapter }) {
   const { jobId = '' } = useParams()
+  return <BacktestDetail key={jobId} api={api} jobId={jobId} />
+}
+
+function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   const [job, setJob] = useState<BacktestJob | null>(null)
   const [report, setReport] = useState<BacktestReport | null>(null)
   const [disconnected, setDisconnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const refreshGeneration = useRef(0)
 
   const refresh = useCallback(async () => {
+    const generation = ++refreshGeneration.current
+    setReport(null)
+    setError(null)
     try {
-      const current = await api.getBacktest(jobId); setJob(current); setDisconnected(false); setError(null)
-      if (current.status === 'succeeded' && current.report_ready) setReport(await api.getReport(jobId))
+      const current = await api.getBacktest(jobId)
+      if (generation !== refreshGeneration.current) return null
+      setJob(current); setDisconnected(false)
+      if (current.status === 'succeeded' && current.report_ready) {
+        const currentReport = await api.getReport(jobId)
+        if (generation !== refreshGeneration.current) return null
+        if (!current.engine_run_id || currentReport.run_id !== current.engine_run_id) {
+          throw new ApiFailure('report_identity_conflict', 'Verified report identity does not match this job')
+        }
+        setReport(currentReport)
+      }
       return current.status
     } catch (caught) {
-      if (caught instanceof ApiFailure) setError(caught.message)
-      else setDisconnected(true)
+      if (generation !== refreshGeneration.current) return null
+      setReport(null)
+      if (caught instanceof Error) setError(caught.message)
+      if (!(caught instanceof ApiFailure)) setDisconnected(true)
       return 'failed'
     }
   }, [api, jobId])
@@ -178,7 +197,7 @@ function BacktestDetail({ api }: { api: ApiAdapter }) {
       if (active && (status === 'accepted' || status === 'running')) timer = window.setTimeout(poll, 150)
     }
     void poll()
-    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer) }
+    return () => { active = false; refreshGeneration.current += 1; if (timer !== undefined) window.clearTimeout(timer) }
   }, [refresh])
 
   if (!job) return <><PageTitle title="Backtest Result" subtitle="Loading the workspace job and formal report." />{disconnected && <section className="notice error">Local service is unreachable</section>}{error && <section className="notice error">{error}</section>}</>
@@ -188,7 +207,8 @@ function BacktestDetail({ api }: { api: ApiAdapter }) {
   const instrument = report?.source?.instrument ?? report?.scenario?.instrument
   return <>
     <PageTitle title="Backtest Result" subtitle={`${job.scenario_id} · job ${job.job_id}`} status={job.status} />
-    {disconnected && <section className="notice error">Local service is unreachable · showing historical loaded result</section>}
+    {disconnected && <section className="notice error">Local service is unreachable · loaded job status may be historical</section>}
+    {error && <section className="notice error">{error}</section>}
     {job.message && <section className="notice error"><strong>{job.error_code}</strong> · {job.message}</section>}
     <div className="result-toolbar"><Link to="/backtests">← New or saved backtest</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
     <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
@@ -212,7 +232,13 @@ function BacktestDetail({ api }: { api: ApiAdapter }) {
         </dl></section>
         <section className="panel"><header><h2>Artifacts</h2><span>Read-only downloads</span></header><div className="downloads"><a href={api.artifactUrl(jobId, 'report.json')}>Download report.json</a><a href={api.artifactUrl(jobId, 'summary.txt')}>Download summary.txt</a></div><p className="muted">Net P&amp;L may include open-position valuation; it is not presented as realized profit.</p></section>
       </div>
-    </> : <section className="panel"><p className="muted">{job.status === 'failed' || job.status === 'interrupted' ? 'No success report is available.' : 'The installed engine is running. This page will refresh automatically.'}</p></section>}
+    </> : <section className="panel"><p className="muted">{
+      job.status === 'failed' || job.status === 'interrupted'
+        ? 'No success report is available.'
+        : job.status === 'succeeded'
+          ? error ? 'No current verified report is available.' : 'Loading the formal report.'
+          : 'The installed engine is running. This page will refresh automatically.'
+    }</p></section>}
   </>
 }
 
