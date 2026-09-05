@@ -4,11 +4,12 @@ import json
 from importlib import resources
 from pathlib import Path
 from typing import Any
+from uuid import RFC_4122, UUID
 
 import pytest
 
 import ea.product.offline_demo as offline_demo
-from ea.core import OutcomeCode
+from ea.core import ExecutionPolicyId, ExecutionPolicyRef, OutcomeCode, RunId, Sha256Digest
 from ea.product.offline_demo import (
     DemoMode,
     OfflineDemoFailure,
@@ -24,7 +25,7 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _assert_stable_artifacts(payloads: list[bytes], *, output_root: Path) -> None:
-    forbidden = ("/tmp/", "hostname", "pid", "traceback", "random", "uuid")
+    forbidden = ("/tmp/", "hostname", "pid", "traceback", "uuid")
     root_value = str(output_root)
     for payload in payloads:
         text = payload.decode("utf-8")
@@ -169,14 +170,40 @@ def test_accepted_demo_has_one_economic_lineage(
     )
 
 
-def test_fixed_demo_is_byte_deterministic_across_fresh_output_roots(tmp_path: Path) -> None:
+def test_fresh_attempts_have_distinct_uuid4_run_ids(tmp_path: Path) -> None:
+    first = run_offline_demo((tmp_path / "one").resolve())
+    second = run_offline_demo((tmp_path / "two").resolve())
+    first_report = _read_json(first.output_directory / "result.json")
+    second_report = _read_json(second.output_directory / "result.json")
+
+    first_run_id = UUID(str(first_report["run_id"]))
+    second_run_id = UUID(str(second_report["run_id"]))
+    assert first_run_id != second_run_id
+    assert first_run_id.version == second_run_id.version == 4
+    assert first_run_id.variant == second_run_id.variant == RFC_4122
+
+
+def test_equivalent_fresh_attempts_share_lineage_and_semantic_outcome(tmp_path: Path) -> None:
+    first = run_offline_demo((tmp_path / "one").resolve())
+    second = run_offline_demo((tmp_path / "two").resolve())
+    first_report = _read_json(first.output_directory / "result.json")
+    second_report = _read_json(second.output_directory / "result.json")
+
+    assert first_report["run_id"] != second_report["run_id"]
+    assert first_report["lineage_sha256"] == second_report["lineage_sha256"]
+    assert first_report["semantic_outcome_sha256"] == second_report["semantic_outcome_sha256"]
+
+
+def test_equivalent_fresh_attempt_evidence_remains_distinguishable(tmp_path: Path) -> None:
     first = run_offline_demo((tmp_path / "one").resolve())
     second = run_offline_demo((tmp_path / "two").resolve())
 
-    for name in ("result.json", "summary.txt", "audit.jsonl"):
-        assert (first.output_directory / name).read_bytes() == (
-            second.output_directory / name
-        ).read_bytes()
+    assert (first.output_directory / "result.json").read_bytes() != (
+        second.output_directory / "result.json"
+    ).read_bytes()
+    assert (first.output_directory / "audit.jsonl").read_bytes() != (
+        second.output_directory / "audit.jsonl"
+    ).read_bytes()
     _assert_stable_artifacts(
         [
             (first.output_directory / "result.json").read_bytes(),
@@ -185,18 +212,66 @@ def test_fixed_demo_is_byte_deterministic_across_fresh_output_roots(tmp_path: Pa
         ],
         output_root=(tmp_path / "one").resolve(),
     )
+
+
+def test_same_attempt_regeneration_is_byte_stable(tmp_path: Path) -> None:
+    run_id = RunId("123e4567-e89b-42d3-a456-426614174000")
+    first = run_offline_demo((tmp_path / "one").resolve(), attempt_run_id=run_id)
+    second = run_offline_demo((tmp_path / "two").resolve(), attempt_run_id=run_id)
+
+    for name in ("result.json", "summary.txt", "audit.jsonl"):
+        assert (first.output_directory / name).read_bytes() == (
+            second.output_directory / name
+        ).read_bytes()
+
+
+def test_lineage_records_explicit_non_random_profile(tmp_path: Path) -> None:
+    completed = run_offline_demo((tmp_path / "results").resolve())
+    report = _read_json(completed.output_directory / "result.json")
+
+    assert report["randomness"] == {
+        "master_seed": "not_applicable",
+        "profile": "none",
+    }
+
+
+def test_true_execution_policy_change_changes_lineage_and_semantic_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = run_offline_demo((tmp_path / "baseline").resolve())
+    baseline_report = _read_json(baseline.output_directory / "result.json")
+    monkeypatch.setattr(
+        offline_demo,
+        "_EXECUTION_POLICY",
+        ExecutionPolicyRef(
+            ExecutionPolicyId("phase1.next-bar-close.changed.v1"),
+            Sha256Digest("2" * 64),
+        ),
+    )
+    changed = run_offline_demo((tmp_path / "changed").resolve())
+    changed_report = _read_json(changed.output_directory / "result.json")
+
+    assert baseline_report["lineage_sha256"] != changed_report["lineage_sha256"]
+    assert baseline_report["semantic_outcome_sha256"] != changed_report["semantic_outcome_sha256"]
+
+
+def test_equivalent_rejected_attempts_share_semantics_but_not_evidence(tmp_path: Path) -> None:
     first_rejected = run_offline_demo(
-        (tmp_path / "one-rejected").resolve(),
-        mode=DemoMode.RISK_REJECT,
+        (tmp_path / "one-rejected").resolve(), mode=DemoMode.RISK_REJECT
     )
     second_rejected = run_offline_demo(
-        (tmp_path / "two-rejected").resolve(),
-        mode=DemoMode.RISK_REJECT,
+        (tmp_path / "two-rejected").resolve(), mode=DemoMode.RISK_REJECT
     )
-    for name in ("result.json", "summary.txt", "audit.jsonl"):
-        assert (first_rejected.output_directory / name).read_bytes() == (
-            second_rejected.output_directory / name
-        ).read_bytes()
+    first_report = _read_json(first_rejected.output_directory / "result.json")
+    second_report = _read_json(second_rejected.output_directory / "result.json")
+
+    assert first_report["run_id"] != second_report["run_id"]
+    assert first_report["lineage_sha256"] == second_report["lineage_sha256"]
+    assert first_report["semantic_outcome_sha256"] == second_report["semantic_outcome_sha256"]
+    assert (first_rejected.output_directory / "audit.jsonl").read_bytes() != (
+        second_rejected.output_directory / "audit.jsonl"
+    ).read_bytes()
     _assert_stable_artifacts(
         [
             (first_rejected.output_directory / "result.json").read_bytes(),
@@ -207,7 +282,7 @@ def test_fixed_demo_is_byte_deterministic_across_fresh_output_roots(tmp_path: Pa
     )
 
 
-def test_reconciliation_mismatch_output_is_deterministic_for_byte_equality(tmp_path: Path) -> None:
+def test_reconciliation_mismatch_output_retains_attempt_identity(tmp_path: Path) -> None:
     with pytest.raises(OfflineDemoFailure):
         run_offline_demo(
             (tmp_path / "mismatch-one").resolve(),
@@ -221,8 +296,12 @@ def test_reconciliation_mismatch_output_is_deterministic_for_byte_equality(tmp_p
 
     first = (tmp_path / "mismatch-one" / "phase1-demo-v1").resolve()
     second = (tmp_path / "mismatch-two" / "phase1-demo-v1").resolve()
-    assert (first / "failure.json").read_bytes() == (second / "failure.json").read_bytes()
-    assert (first / "audit.jsonl").read_bytes() == (second / "audit.jsonl").read_bytes()
+    first_failure = _read_json(first / "failure.json")
+    second_failure = _read_json(second / "failure.json")
+    assert first_failure["run_id"] != second_failure["run_id"]
+    assert first_failure["lineage_sha256"] == second_failure["lineage_sha256"]
+    assert first_failure["semantic_outcome_sha256"] == second_failure["semantic_outcome_sha256"]
+    assert (first / "audit.jsonl").read_bytes() != (second / "audit.jsonl").read_bytes()
     _assert_stable_artifacts(
         [
             (first / "failure.json").read_bytes(),
@@ -315,15 +394,15 @@ def test_reconciliation_mismatch_is_detected_by_reconciliation_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     accepted = run_offline_demo((tmp_path / "accepted-baseline").resolve())
-    accepted_report = _read_json(accepted.output_directory / "result.json")
-    expected_snapshot = accepted_report["internal_snapshot_sha256"]
+    _read_json(accepted.output_directory / "result.json")
 
     original_observation = offline_demo._observation
 
     def forced_mismatch_observation(
-        *, spec_set: Any, snapshot: Any, position: bool, mismatch: bool
+        *, run_id: Any, spec_set: Any, snapshot: Any, position: bool, mismatch: bool
     ) -> Any:
         return original_observation(
+            run_id=run_id,
             spec_set=spec_set,
             snapshot=snapshot,
             position=position,
@@ -361,7 +440,7 @@ def test_reconciliation_mismatch_is_detected_by_reconciliation_authority(
     ]
     assert completion_records
     assert not terminal_records
-    assert completion_records[-1]["payload"]["final_portfolio_snapshot_sha256"] == expected_snapshot
+    assert len(completion_records[-1]["payload"]["final_portfolio_snapshot_sha256"]) == 64
     assert completion_records[-1]["payload"]["dispatch_kind"] == "market"
     assert not (output_directory / "result.json").exists()
     assert not (output_directory / "summary.txt").exists()
