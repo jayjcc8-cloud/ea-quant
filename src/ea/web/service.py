@@ -10,6 +10,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01
 _JOB_STATES = frozenset({"accepted", "running", "succeeded", "failed", "interrupted"})
 _ARTIFACTS = frozenset({"report.json", "summary.txt"})
 _MAX_SCENARIO_BYTES = 64 * 1024
+_INPUT_DIGEST_DOMAIN = b"ea.local-web-input.v1\0"
 
 
 class WebBoundaryError(ValueError):
@@ -127,6 +129,24 @@ def _scenario_summary(scenario_id: str, scenario: LoadedBacktestScenario) -> dic
     }
 
 
+def _input_snapshot(
+    scenario_id: str,
+    scenario: LoadedBacktestScenario,
+) -> tuple[bytes, str]:
+    snapshot = {
+        "schema": "ea.local-web-input.v1",
+        "scenario_id": scenario_id,
+        "identity": _scenario_identity(scenario),
+        "scenario": json.loads(scenario.canonical_bytes),
+    }
+    payload = _canonical_json(snapshot)
+    return payload, sha256(_INPUT_DIGEST_DOMAIN + payload).hexdigest()
+
+
+def _created_at() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 class ScenarioRegistry:
     """Resolve only immediate YAML files registered under one authorized root."""
 
@@ -203,6 +223,11 @@ class JobRecord:
     scenario_id: str
     input_identity: dict[str, object]
     status: str
+    schema: str = "ea.local-web-job.v2"
+    created_at: str | None = None
+    input_snapshot_bytes: bytes | None = None
+    input_sha256: str | None = None
+    attempt_id: str | None = None
     engine_run_id: str | None = None
     report_sha256: str | None = None
     summary_sha256: str | None = None
@@ -210,8 +235,8 @@ class JobRecord:
     message: str | None = None
 
     def document(self) -> dict[str, object]:
-        return {
-            "schema": "ea.local-web-job.v1",
+        document: dict[str, object] = {
+            "schema": self.schema,
             "job_id": self.job_id,
             "request_id": self.request_id,
             "scenario_id": self.scenario_id,
@@ -228,6 +253,22 @@ class JobRecord:
                 and self.summary_sha256 is not None
             ),
         }
+        if self.schema == "ea.local-web-job.v2":
+            if (
+                self.created_at is None
+                or self.input_snapshot_bytes is None
+                or self.input_sha256 is None
+            ):
+                raise RuntimeError("v2 Web job is missing immutable input evidence")
+            document.update(
+                {
+                    "created_at": self.created_at,
+                    "input_snapshot": json.loads(self.input_snapshot_bytes),
+                    "input_sha256": self.input_sha256,
+                    "attempt_id": self.attempt_id,
+                }
+            )
+        return document
 
 
 def _decode_job(payload: bytes) -> JobRecord:
@@ -235,7 +276,8 @@ def _decode_job(payload: bytes) -> JobRecord:
         document = json.loads(payload)
         if type(document) is not dict or _canonical_json(document) != payload:
             raise ValueError
-        if document.get("schema") != "ea.local-web-job.v1":
+        schema = document.get("schema")
+        if schema not in {"ea.local-web-job.v1", "ea.local-web-job.v2"}:
             raise ValueError
         status_value = document.get("status")
         identity = document.get("input_identity")
@@ -260,12 +302,51 @@ def _decode_job(payload: bytes) -> JobRecord:
             raise ValueError
         if type(document.get("report_ready")) is not bool:
             raise ValueError
+        created_at: str | None = None
+        input_snapshot_bytes: bytes | None = None
+        input_sha256: str | None = None
+        attempt_id: str | None = None
+        if schema == "ea.local-web-job.v2":
+            created_at_value = document.get("created_at")
+            snapshot = document.get("input_snapshot")
+            input_sha256_value = document.get("input_sha256")
+            attempt_id_value = document.get("attempt_id")
+            if (
+                type(created_at_value) is not str
+                or type(snapshot) is not dict
+                or type(input_sha256_value) is not str
+                or (attempt_id_value is not None and type(attempt_id_value) is not str)
+            ):
+                raise ValueError
+            if (
+                set(snapshot) != {"schema", "scenario_id", "identity", "scenario"}
+                or snapshot.get("schema") != "ea.local-web-input.v1"
+                or snapshot.get("scenario_id") != document["scenario_id"]
+                or snapshot.get("identity") != identity
+                or type(snapshot.get("scenario")) is not dict
+            ):
+                raise ValueError
+            datetime.strptime(created_at_value, "%Y-%m-%dT%H:%M:%S.%fZ")
+            input_snapshot_bytes = _canonical_json(snapshot)
+            if (
+                sha256(_INPUT_DIGEST_DOMAIN + input_snapshot_bytes).hexdigest()
+                != input_sha256_value
+            ):
+                raise ValueError
+            created_at = created_at_value
+            input_sha256 = input_sha256_value
+            attempt_id = attempt_id_value
         return JobRecord(
             job_id=document["job_id"],
             request_id=document["request_id"],
             scenario_id=document["scenario_id"],
             input_identity=identity,
             status=status_value,
+            schema=schema,
+            created_at=created_at,
+            input_snapshot_bytes=input_snapshot_bytes,
+            input_sha256=input_sha256,
+            attempt_id=attempt_id,
             engine_run_id=document.get("engine_run_id"),
             report_sha256=document.get("report_sha256"),
             summary_sha256=document.get("summary_sha256"),
@@ -434,29 +515,30 @@ class WebService:
             scenario = self.registry.load(scenario_id)
             if _scenario_identity(scenario) != input_identity:
                 raise InputChangedError("scenario input changed; validate it again")
+            snapshot_bytes, input_sha256 = _input_snapshot(scenario_id, scenario)
             record = JobRecord(
                 job_id=str(uuid4()),
                 request_id=request_id,
                 scenario_id=scenario_id,
                 input_identity=input_identity,
                 status="accepted",
+                created_at=_created_at(),
+                input_snapshot_bytes=snapshot_bytes,
+                input_sha256=input_sha256,
             )
             self._store(record)
             self._active = record.job_id
-            self._executor.submit(self._run, record.job_id)
+            self._executor.submit(self._run, record.job_id, scenario)
             return record, True
 
-    def _run(self, job_id: str) -> None:
+    def _run(self, job_id: str, scenario: LoadedBacktestScenario) -> None:
         with self._lock:
             record = replace(self._jobs[job_id], status="running")
             self._store(record)
         try:
-            scenario = self.registry.load(record.scenario_id)
-            if _scenario_identity(scenario) != record.input_identity:
-                raise InputChangedError("scenario input changed; validate it again")
             result = run_backtest_scenario(scenario, self.runs_dir)
             run_id = result.output_directory.name
-            record = replace(record, engine_run_id=run_id)
+            record = replace(record, attempt_id=run_id, engine_run_id=run_id)
             with self._lock:
                 self._store(record)
             try:
@@ -493,6 +575,7 @@ class WebService:
             completed = replace(
                 record,
                 status="failed",
+                attempt_id=error.output_directory.name,
                 engine_run_id=error.output_directory.name,
                 error_code=error.code.value,
                 message=str(error),

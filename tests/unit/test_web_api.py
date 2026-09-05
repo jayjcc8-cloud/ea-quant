@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -88,6 +89,139 @@ def _tree_digest(path: Path) -> dict[str, str]:
         for item in sorted(path.rglob("*"))
         if item.is_file()
     }
+
+
+def _input_sha256(snapshot: dict[str, object]) -> str:
+    payload = (
+        json.dumps(
+            snapshot,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
+    return hashlib.sha256(b"ea.local-web-input.v1\0" + payload).hexdigest()
+
+
+def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        response = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-snapshot-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert response.status_code == 202, response.text
+        accepted = response.json()
+
+        snapshot = accepted["input_snapshot"]
+        assert accepted["schema"] == "ea.local-web-job.v2"
+        assert snapshot["schema"] == "ea.local-web-input.v1"
+        assert snapshot["scenario_id"] == "bounded-long.yaml"
+        assert snapshot["identity"] == validated["input_identity"]
+        assert snapshot["scenario"]["funding"] == {
+            "currency": "USD",
+            "initial_cash": "10000",
+        }
+        assert snapshot["scenario"]["strategy"] == {
+            "id": "bounded-long-v1",
+            "target_quantity": "2",
+        }
+        assert snapshot["scenario"]["instrument"]["symbol"] == "AAPL"
+        assert snapshot["scenario"]["instrument"]["venue"] == "XNAS"
+        assert snapshot["scenario"]["data"]["fingerprint"] == {
+            "record_count": 4,
+            "sha256": validated["input_identity"]["data_sha256"],
+        }
+        assert accepted["input_sha256"] == _input_sha256(snapshot)
+        assert datetime.strptime(accepted["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+
+        persisted = json.loads(
+            (settings.workspace / "jobs" / f"{accepted['job_id']}.json").read_text(encoding="ascii")
+        )
+        assert persisted["input_snapshot"] == snapshot
+        assert persisted["input_sha256"] == accepted["input_sha256"]
+        assert persisted["created_at"] == accepted["created_at"]
+
+
+def test_worker_consumes_input_frozen_at_job_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    service = WebService(settings.scenario_root, settings.workspace)
+    service.start()
+    try:
+        validated = service.registry.validate("bounded-long.yaml")
+        original_load = service.registry.load
+        load_count = 0
+
+        def load_only_for_acceptance(scenario_id: str) -> object:
+            nonlocal load_count
+            load_count += 1
+            if load_count > 1:
+                raise AssertionError("worker reloaded mutable registry input")
+            return original_load(scenario_id)
+
+        monkeypatch.setattr(service.registry, "load", load_only_for_acceptance)
+        accepted, created = service.create_job(
+            scenario_id="bounded-long.yaml",
+            input_identity=cast(dict[str, object], validated["input_identity"]),
+            request_id="request-frozen-input-0001",
+        )
+        assert created is True
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            completed = service.get_job(accepted.job_id)
+            if completed.status not in {"accepted", "running"}:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("frozen-input job did not finish")
+
+        assert completed.status == "succeeded"
+        assert completed.engine_run_id
+        assert completed.document()["attempt_id"] == completed.engine_run_id
+        assert load_count == 1
+    finally:
+        service.stop()
+
+
+def test_restart_rejects_v2_job_when_snapshot_conflicts_with_outer_identity(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "flat.yaml")
+        response = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "flat.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-snapshot-conflict-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        job = _wait(client, response.json()["job_id"])
+
+    path = settings.workspace / "jobs" / f"{job['job_id']}.json"
+    document = json.loads(path.read_text(encoding="ascii"))
+    document["scenario_id"] = "different.yaml"
+    path.write_text(
+        json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="ascii",
+    )
+
+    with (
+        pytest.raises(WebBoundaryError, match="workspace job index is invalid"),
+        TestClient(create_app(settings), base_url=ORIGIN),
+    ):
+        pass
 
 
 def test_real_api_runs_reports_is_idempotent_and_survives_restart(tmp_path: Path) -> None:
