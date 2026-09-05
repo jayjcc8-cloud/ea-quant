@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — funded deterministic Backtest run/resume/report delivered.**
+**Phase 1 delivery reset — v0.2.0 bounded offline GitHub prerelease published.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -67,15 +67,22 @@ external write, or live capability is part of this objective.
   Order/Fill counts, and policy-proved Phase 1 zero commission using exact decimal arithmetic.
 - Repeated reporting of one attempt is byte-stable; equivalent independent attempts retain
   distinct RunIds while their accepted semantic and economic report projection remains equal.
-- Package and wheel metadata are consistently prepared as `0.2.0`. No tag, Release, package
-  publication, or deployment has been performed or authorized by #83.
+- The Product Owner accepted #84 for commit
+  `ebd509e25bca86c00eaa09de7746445ccc891914` and the retained
+  `ea_quant-0.2.0-py3-none-any.whl` with SHA-256
+  `04fc44fbbceab47854291e9ef073d15378f496c482df9cd998e8081f525694d6`.
+- Annotated tag `v0.2.0` resolves to that accepted commit. The corresponding
+  [GitHub Release](https://github.com/jayjcc8-cloud/ea-quant/releases/tag/v0.2.0) is published as a
+  prerelease with only the accepted wheel and its SHA-256 checksum asset. No package-registry
+  publication or deployment was performed.
 - The Dark Professional Web shell remains a deterministic read-only Mock Adapter.
 
 ## Incomplete
 
-The funded product is one deterministic single-run/reporting MVP, not all of Phase 1 or a v0.2.0
-release. Arbitrary instruction-level recovery, broader performance analytics, stochastic seed
-hierarchies, strategy plugins, paper/live execution, and release publication remain unavailable.
+The v0.2.0 prerelease is one deterministic single-run/reporting MVP, not the broader research,
+paper, or live roadmap. Arbitrary instruction-level recovery, broader performance analytics,
+stochastic seed hierarchies, strategy plugins, paper/live execution, package-registry publication,
+and deployment remain unavailable. Phase 1.1/#125 and Phase 2 have not been activated.
 
 ## Blockers
 
@@ -87,8 +94,9 @@ A new finding blocks only if it satisfies all four conditions in WORKFLOW. Unres
 ledger, audit, storage, or reconciliation mismatch on the demonstrated path must fail closed and
 cannot produce a success result.
 
-Live trading, external order writes, secrets, deployment, tag, release, and publication remain
-unavailable and require explicit Human Product Owner authorization.
+Live trading, external order writes, secrets, deployment, and package-registry publication remain
+unavailable and require separate explicit Human Product Owner authorization. The authorization
+used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded above.
 
 ## Effective ADRs
 
@@ -120,8 +128,7 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [#83 — BacktestReportV1](https://github.com/jayjcc8-cloud/ea-quant/issues/83) adds deterministic,
   read-only reports over completed single-run and resumed attempts.
 - [#84 — v0.2.0 product acceptance and release gate](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
-  owns final clean-main acceptance; tag/release/publication still requires a separate Human Product
-  Owner decision.
+  records the accepted clean-main product and the completed limited GitHub prerelease path.
 - [#125 — Phase 1.1 reconciliation/recovery expansion](https://github.com/jayjcc8-cloud/ea-quant/issues/125)
   remains parked and does not block the Offline Backtest MVP or v0.2.0 unless explicitly promoted.
 - R9/R10 Issues #149, #150, #152, #153 and PR #151 retain provenance as superseded hardening
@@ -130,10 +137,10 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 ## Last Confirmed
 
 - Date: **2026-09-05** (Asia/Shanghai).
-- The containing merged `main` commit and its CI are the authoritative funded single-run
-  checkpoint.
+- The containing merged `main` commit and its CI are the authoritative durable-state checkpoint;
+  the released product identity remains the exact commit and wheel recorded above.
 - Live capability: unavailable and prohibited.
-- Release/tag/publication authority: not granted.
+- GitHub prerelease: `v0.2.0` published; package registry: not published; deployment: not performed.
 
 ## Phase Completion Conditions
 
@@ -152,8 +159,8 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
   testable and available from the installed wheel outside a checkout.
 - [x] Quick Start identifies the supported boundary and known limitations.
 
-These conditions complete Issues #81, #161, and #83 only, not the full Phase 1 roadmap or a
-v0.2.0 release.
+These conditions complete Issues #81, #161, and #83 and the bounded v0.2.0 GitHub prerelease gate
+in #84. They do not activate Phase 1.1/#125, Phase 2, package-registry publication, or deployment.
 
 ## Delivery Metrics
 

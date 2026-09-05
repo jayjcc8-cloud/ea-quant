@@ -23,17 +23,18 @@ Entry: Phase 0 is released and `main` is healthy.
 
 1. **RESET offline vertical slice — COMPLETE.** The installed deterministic demonstration proves
    the bounded signal-to-report path without claiming the funded Backtest MVP.
-2. **Backtest Identity contract.** Define run/attempt identity, lineage, semantic comparison, and
-   seed ownership before expanding the product surface.
-3. **Funded deterministic Backtest single-run — #81.** Add strict scenario input, initial funding,
-   limits, strategies, and installed `validate`/`run` commands.
+2. **Backtest Identity contract — COMPLETE.** Run/attempt identity, lineage, semantic comparison,
+   and seed ownership are defined for the accepted product surface.
+3. **Funded deterministic Backtest single-run — #81 — COMPLETE.** Strict scenario input, initial
+   funding, limits, strategies, and installed `validate`/`run` commands are delivered.
 4. **Resume and failure durability — COMPLETE.** The installed product resumes the same trusted
    attempt from the funded, completed-dispatch, and reconciled pre-publication durable frontiers,
    preserving exactly-once economics and failing closed on ambiguous or conflicting evidence.
-5. **BacktestReportV1 — #83.** Produce canonical JSON/text and semantic outcome comparison from
-   accepted product evidence.
-6. **v0.2.0 product acceptance and release gate — #84.** Verify one clean exact `main`; tag,
-   release, and publication remain a separate Human Product Owner decision.
+5. **BacktestReportV1 — #83 — COMPLETE.** Canonical JSON/text and semantic outcome comparison are
+   delivered from accepted product evidence.
+6. **v0.2.0 product acceptance and release gate — #84 — COMPLETE.** The Product Owner accepted one
+   exact clean `main` product and published its fixed tag, wheel, and checksum as a GitHub
+   prerelease. No package-registry publication or deployment was performed.
 
 This is a product dependency order, not a sequence of governance phases or actor chains.
 
@@ -63,20 +64,25 @@ This is a product dependency order, not a sequence of governance phases or actor
 - `BacktestReportV1` emits canonical JSON and text; exact-run regeneration is byte-identical and
   independent runs expose a stable semantic outcome digest.
 - Required ADRs, STATUS, Issues, tests, and CI agree; no critical decision survives only in comments.
-- Full product acceptance passes on merged `main`; the Human Product Owner separately decides
-  whether to tag, release, or publish `v0.2.0`.
+- Full product acceptance passes on merged `main`; the Human Product Owner has published the fixed
+  accepted artifact as the `v0.2.0` GitHub prerelease while retaining the package-registry and
+  deployment prohibitions.
 
 ## Phase 1.1 — Reconciliation and Recovery Expansion
 
 Phase 1.1 may begin after the offline v0.2.0 product is accepted. It owns the superseded
 #76/#97/#98/#99 product scope: explicit reconciliation adjustment authorization, ancestry repair,
 additional observation/fact combinations, and broader recovery matrices. It may not weaken the
-Phase 1 fail-closed product boundary or expose live/external writes.
+Phase 1 fail-closed product boundary or expose live/external writes. It remains unactivated and
+requires a separate Product Owner decision.
 
 ## Phase 2 Entry Gate
 
 Phase 2 may start only after every Phase 1 Exit Criterion is true and `v0.2.0` exists. Open Phase 1
 debt cannot be relabelled as Phase 2 work to bypass this gate.
+
+The existence of the `v0.2.0` prerelease does not itself activate Phase 2; no Phase 2 work is
+authorized by the release decision.
 
 Phase 2 adds serious backtest research capabilities: realistic fees/slippage/latency, out-of-sample
 validation, walk-forward evaluation, experiment tracking, and richer data/version evidence.
