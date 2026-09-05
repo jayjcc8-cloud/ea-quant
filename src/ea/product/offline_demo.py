@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import sysconfig
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
 from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+import ea
 from ea.composition.lifecycle import (
     create_phase1_historical_economic_gate,
     create_phase1_historical_lifecycle,
@@ -73,6 +78,7 @@ from ea.core import (
     create_phase1_portfolio_policy,
     create_phase1_risk_policy,
     create_reconciliation_observation,
+    instrument_spec_set_digest,
     portfolio_snapshot_digest,
 )
 from ea.data import (
@@ -82,6 +88,12 @@ from ea.data import (
 )
 from ea.execution import create_phase1_order_authority
 from ea.portfolio import create_portfolio_ledger, create_portfolio_planning_authority
+from ea.product.identity import (
+    BacktestLineageInputs,
+    BacktestRandomness,
+    build_backtest_lineage,
+    semantic_outcome_sha256,
+)
 from ea.reconciliation import create_phase1_reconciliation_authority
 from ea.runtime import (
     create_active_market_dispatch_verifier,
@@ -89,7 +101,6 @@ from ea.runtime import (
 )
 from ea.strategy import create_strategy_signal_authority
 
-_RUN_ID = RunId("123e4567-e89b-42d3-a456-426614174000")
 _INSTRUMENT = Instrument(VenueId("XNAS"), "AAPL")
 _USD = SettlementCurrency("USD")
 _EXECUTION_POLICY = ExecutionPolicyRef(
@@ -101,6 +112,11 @@ _RECONCILIATION_SOURCE = SourceNamespace("reconciliation.demo")
 _LEDGER_WATERMARK = SourceNamespace("ledger.portfolio")
 _FIXED_TIME = datetime(2026, 1, 2, 9, 32, tzinfo=UTC)
 _ATTEMPT_NAME = "phase1-demo-v1"
+_STRATEGY_ID = "bounded-long-v1"
+_TARGET_QUANTITY = "2"
+_RISK_POLICY_ID = RiskPolicyId("phase1.demo.v1")
+_MAX_ORDER_QUANTITY = "5"
+_MAX_ABSOLUTE_POSITION = "5"
 
 __all__ = [
     "create_portfolio_ledger",
@@ -150,6 +166,16 @@ class OfflineDemoResult:
 
     status: str
     output_directory: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedDemoAttempt:
+    run_id: RunId
+    binding: RunBinding
+    lineage_sha256: Sha256Digest
+    randomness: BacktestRandomness
+    spec_set: Any
+    dataset: Any
 
 
 class _DemoAudit:
@@ -260,6 +286,34 @@ def _sample_bytes() -> bytes:
     return resources.files("ea.product").joinpath("phase1_demo_ohlcv_v1.csv").read_bytes()
 
 
+def _component_digest(domain: bytes, document: object) -> Sha256Digest:
+    return Sha256Digest(sha256(domain + _canonical_json(document)).hexdigest())
+
+
+def _package_code_digest() -> Sha256Digest:
+    """Hash installed EA package source/resources without using host-local paths."""
+    selected: list[tuple[str, bytes]] = []
+
+    def visit(node: Traversable, prefix: str) -> None:
+        for child in sorted(node.iterdir(), key=lambda entry: entry.name):
+            relative = f"{prefix}/{child.name}" if prefix else child.name
+            if child.is_dir():
+                if child.name != "__pycache__":
+                    visit(child, relative)
+            elif child.is_file() and child.name.endswith((".py", ".csv")):
+                selected.append((relative, child.read_bytes()))
+
+    visit(resources.files("ea"), "")
+    digest = sha256(b"ea.installed-package-code.v1\0")
+    for relative, payload in selected:
+        encoded_relative = relative.encode("utf-8")
+        digest.update(len(encoded_relative).to_bytes(8, "big"))
+        digest.update(encoded_relative)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return Sha256Digest(digest.hexdigest())
+
+
 def _spec_set() -> Any:
     return build_instrument_spec_set(
         InstrumentSpecSetId("phase1.demo.v1"),
@@ -278,21 +332,81 @@ def _spec_set() -> Any:
     )
 
 
-def _binding(sample: bytes) -> RunBinding:
-    lineage = Sha256Digest(sha256(b"ea.offline-demo.lineage.v1\0" + sample).hexdigest())
-    scenario = _canonical_json(
+def _binding(run_id: RunId, lineage: Sha256Digest) -> RunBinding:
+    attempt = _canonical_json(
         {
-            "execution_policy": _EXECUTION_POLICY.identifier.value,
-            "run_id": _RUN_ID.value,
-            "schema": "ea.offline-demo-input.v1",
-            "strategy": "bounded-long-v1",
-            "target_quantity": "2",
+            "lineage_sha256": lineage.value,
+            "run_id": run_id.value,
+            "schema": "ea.offline-demo-attempt.v1",
         }
     )
-    manifest = Sha256Digest(
-        sha256(b"ea.offline-demo.manifest.v1\0" + scenario + sample).hexdigest()
+    manifest = Sha256Digest(sha256(b"ea.offline-demo.manifest.v1\0" + attempt).hexdigest())
+    return RunBinding(RunReference(run_id, lineage), manifest)
+
+
+def _prepare_attempt(mode: DemoMode, run_id: RunId) -> _PreparedDemoAttempt:
+    sample = _sample_bytes()
+    spec_set = _spec_set()
+    window = ReplayWindow(
+        datetime(2026, 1, 2, 9, 0, tzinfo=UTC),
+        datetime(2026, 1, 2, 10, 0, tzinfo=UTC),
     )
-    return RunBinding(RunReference(_RUN_ID, lineage), manifest)
+    dataset = decode_phase1_ohlcv_csv(sample, replay_window=window)
+    scenario = {
+        "instrument": {"symbol": _INSTRUMENT.symbol, "venue": _INSTRUMENT.venue.code},
+        "schema": "ea.offline-demo-input.v1",
+        "strategy": _STRATEGY_ID,
+        "target_quantity": _TARGET_QUANTITY,
+    }
+    strategy_parameters = {"target_quantity": _TARGET_QUANTITY}
+    risk_limits: list[dict[str, object]] = []
+    if mode is not DemoMode.RISK_REJECT:
+        risk_limits.append(
+            {
+                "maximum_absolute_position": _MAX_ABSOLUTE_POSITION,
+                "maximum_order_quantity": _MAX_ORDER_QUANTITY,
+                "symbol": _INSTRUMENT.symbol,
+                "venue": _INSTRUMENT.venue.code,
+            }
+        )
+    randomness = BacktestRandomness()
+    version = ".".join(str(part) for part in sys.version_info[:3])
+    cache_tag = sys.implementation.cache_tag
+    if cache_tag is None:
+        raise RuntimeError("demo runtime has no Python cache tag")
+    lineage = build_backtest_lineage(
+        BacktestLineageInputs(
+            data=dataset.selection.fingerprint,
+            replay_window=window,
+            scenario_sha256=_component_digest(b"ea.backtest-scenario.v1\0", scenario),
+            instrument_spec_set_sha256=instrument_spec_set_digest(spec_set),
+            strategy_id=_STRATEGY_ID,
+            strategy_parameters_sha256=_component_digest(
+                b"ea.backtest-strategy-parameters.v1\0", strategy_parameters
+            ),
+            risk_policy_id=_RISK_POLICY_ID.value,
+            risk_limits_sha256=_component_digest(b"ea.backtest-risk-limits.v1\0", risk_limits),
+            execution_policy_id=_EXECUTION_POLICY.identifier.value,
+            execution_policy_sha256=_EXECUTION_POLICY.sha256,
+            code_sha256=_package_code_digest(),
+            distribution_name="ea-quant",
+            distribution_version=ea.__version__,
+            python_implementation=sys.implementation.name,
+            python_version=version,
+            python_cache_tag=cache_tag,
+            sys_platform=sys.platform,
+            platform_tag=sysconfig.get_platform(),
+            randomness=randomness,
+        )
+    )
+    return _PreparedDemoAttempt(
+        run_id=run_id,
+        binding=_binding(run_id, lineage),
+        lineage_sha256=lineage,
+        randomness=randomness,
+        spec_set=spec_set,
+        dataset=dataset,
+    )
 
 
 def _risk_policy(spec_set: Any, mode: DemoMode) -> Any:
@@ -302,13 +416,13 @@ def _risk_policy(spec_set: Any, mode: DemoMode) -> Any:
         else (
             InstrumentRiskLimit(
                 instrument=_INSTRUMENT,
-                maximum_order_quantity=CanonicalDecimal("5"),
-                maximum_absolute_position=CanonicalDecimal("5"),
+                maximum_order_quantity=CanonicalDecimal(_MAX_ORDER_QUANTITY),
+                maximum_absolute_position=CanonicalDecimal(_MAX_ABSOLUTE_POSITION),
             ),
         )
     )
     return create_phase1_risk_policy(
-        policy_id=RiskPolicyId("phase1.demo.v1"),
+        policy_id=_RISK_POLICY_ID,
         spec_set=spec_set,
         execution_policy=_EXECUTION_POLICY,
         instrument_limits=limits,
@@ -330,6 +444,7 @@ def _append_reconciliation(audit: _DemoAudit, outcome: Any) -> None:
 
 def _observation(
     *,
+    run_id: RunId,
     spec_set: Any,
     snapshot: Any,
     position: bool,
@@ -360,10 +475,10 @@ def _observation(
         scope = ReconciliationScopeKind.CASH
         sequence = 2
     return create_reconciliation_observation(
-        run_id=_RUN_ID,
+        run_id=run_id,
         spec_set=spec_set,
         observation_id=EconomicId(
-            _RUN_ID,
+            run_id,
             EconomicOwnerKind.RECONCILIATION_OBSERVATION,
             sequence,
         ),
@@ -437,12 +552,16 @@ def _failure_document(
     code: OutcomeCode,
     message: str,
     *,
+    run_id: RunId,
+    lineage_sha256: Sha256Digest,
     run_status: str = "failed",
     trade_outcome: str | None = None,
 ) -> bytes:
     document: dict[str, object] = {
         "code": code.value,
+        "lineage_sha256": lineage_sha256.value,
         "message": message,
+        "run_id": run_id.value,
         "schema": "ea.offline-demo-failure.v1",
         "status": run_status,
     }
@@ -450,6 +569,14 @@ def _failure_document(
     document["failure"] = {"code": code.value}
     if trade_outcome is not None:
         document["trade_outcome"] = trade_outcome
+    semantic = {
+        "failure": {"code": code.value},
+        "lineage_sha256": lineage_sha256.value,
+        "run_status": run_status,
+        "schema": "ea.backtest-semantic-outcome.v1",
+        "trade_outcome": trade_outcome,
+    }
+    document["semantic_outcome_sha256"] = semantic_outcome_sha256(semantic).value
     return _canonical_json(document) + b"\n"
 
 
@@ -461,10 +588,13 @@ def _id_document(identity: EconomicId) -> dict[str, object]:
     }
 
 
-def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
-    sample = _sample_bytes()
-    spec_set = _spec_set()
-    binding = _binding(sample)
+def _execute(
+    mode: DemoMode,
+    prepared_attempt: _PreparedDemoAttempt,
+) -> tuple[dict[str, object], bytes]:
+    run_id = prepared_attempt.run_id
+    spec_set = prepared_attempt.spec_set
+    binding = prepared_attempt.binding
     audit = _DemoAudit(binding, spec_set)
     prepared = audit.append(
         record_kind=AuditRecordKind.RUN_PREPARED,
@@ -472,14 +602,10 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         subject_sha256=binding.manifest_sha256,
         canonical_payload=canonical_run_prepared_audit_payload(binding),
     )
-    window = ReplayWindow(
-        datetime(2026, 1, 2, 9, 0, tzinfo=UTC),
-        datetime(2026, 1, 2, 10, 0, tzinfo=UTC),
-    )
-    dataset = decode_phase1_ohlcv_csv(sample, replay_window=window)
+    dataset = prepared_attempt.dataset
     source = create_phase1_historical_market_data_source(dataset)
     runtime = create_phase1_historical_market_runtime(
-        run_id=_RUN_ID,
+        run_id=run_id,
         spec_set=spec_set,
         source=create_phase1_historical_market_source_bridge(source),
     )
@@ -488,20 +614,20 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         entries=(
             Phase1PortfolioPolicyEntry(
                 instrument=_INSTRUMENT,
-                target_quantity=CanonicalDecimal("2"),
+                target_quantity=CanonicalDecimal(_TARGET_QUANTITY),
             ),
         ),
         spec_set=spec_set,
     )
     risk_policy = _risk_policy(spec_set, mode)
     economic_gate = create_phase1_historical_economic_gate(
-        run_id=_RUN_ID,
+        run_id=run_id,
         spec_set=spec_set,
         execution_policy=_EXECUTION_POLICY,
         risk_policy=risk_policy,
     )
     planner = create_portfolio_planning_authority(
-        run_id=_RUN_ID,
+        run_id=run_id,
         ledger=economic_gate.ledger,
         spec_set=spec_set,
         policy=portfolio_policy,
@@ -509,13 +635,13 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
     )
     risk = economic_gate.risk_authority
     orders = create_phase1_order_authority(
-        run_id=_RUN_ID,
+        run_id=run_id,
         spec_set=spec_set,
         execution_policy=_EXECUTION_POLICY,
         risk_policy=risk_policy,
         risk_result_verifier=risk,
     )
-    gate = _InstrumentGateView(_RUN_ID, _INSTRUMENT)
+    gate = _InstrumentGateView(run_id, _INSTRUMENT)
     lifecycle = create_phase1_historical_lifecycle(
         binding=binding,
         prepared_acknowledgement=prepared,
@@ -527,12 +653,12 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         provenance_id=FactProvenanceId("phase1.simulator.v1"),
         order_issuance_verifier=orders,
         risk_policy=risk_policy,
-        global_halt=_GlobalHaltView(_RUN_ID),
+        global_halt=_GlobalHaltView(run_id),
         instrument_gate=gate,
         economic_gate=economic_gate,
     )
     signal_authority = create_strategy_signal_authority(
-        run_id=_RUN_ID,
+        run_id=run_id,
         verifier=create_active_market_dispatch_verifier(runtime),
     )
 
@@ -576,7 +702,7 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         lifecycle.coordinator.complete_active_dispatch(active)
 
     fills = lifecycle.fact_authority.fills
-    replay_ledger = create_portfolio_ledger(_RUN_ID, spec_set)
+    replay_ledger = create_portfolio_ledger(run_id, spec_set)
     for replay_fill in fills:
         outcome = replay_ledger.apply_fill(replay_fill)
         if outcome.code is not OutcomeCode.LEDGER_APPLIED:
@@ -596,7 +722,7 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         raise RuntimeError("audited internal ledger and public Fill replay diverged")
 
     reconciliation = create_phase1_reconciliation_authority(
-        run_id=_RUN_ID,
+        run_id=run_id,
         spec_set=spec_set,
         snapshot_view=lambda: snapshot,
     )
@@ -611,6 +737,7 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
     else:
         position_outcome = reconciliation.admit_observation(
             _observation(
+                run_id=run_id,
                 spec_set=spec_set,
                 snapshot=snapshot,
                 position=True,
@@ -628,6 +755,7 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
             )
         cash_outcome = reconciliation.admit_observation(
             _observation(
+                run_id=run_id,
                 spec_set=spec_set,
                 snapshot=snapshot,
                 position=False,
@@ -652,6 +780,18 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
 
     fill: Fill | None = fills[0] if fills else None
     run_outcome = "risk_rejected" if order is None else "filled"
+    fill_fees = (
+        []
+        if fill is None
+        else [
+            {
+                "amount": fee.amount.text,
+                "currency": fee.currency.code,
+                "fee_code": fee.fee_code.value,
+            }
+            for fee in fill.fees
+        ]
+    )
     portfolio = {
         "authoritative_snapshot_sha256": internal_snapshot_sha256,
         "authoritative_snapshot_ledger_sequence": snapshot.ledger_sequence,
@@ -661,7 +801,7 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
             "snapshot_sha256": replayed_snapshot_sha256.value,
         },
     }
-    semantic: dict[str, object] = {
+    report_body: dict[str, object] = {
         "audit_chain_head_sha256": audit_chain_head(audit.records[-1]).value,
         "cash_snapshot": [
             {"amount": balance.amount.text, "currency": balance.currency.code}
@@ -674,6 +814,7 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
             if fill is None
             else {
                 "fill_id": _id_document(fill.fill_id),
+                "fees": fill_fees,
                 "price": fill.price.text,
                 "quantity": fill.quantity.text,
             }
@@ -707,11 +848,13 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         "report_snapshot_sha256": internal_snapshot_sha256,
         "risk_snapshot_sha256": risk_snapshot_sha256,
         "replayed_snapshot_sha256": replayed_snapshot_sha256.value,
+        "lineage_sha256": prepared_attempt.lineage_sha256.value,
+        "randomness": prepared_attempt.randomness.document(),
         "risk": {
             "decision": risk_result.decision.kind.value,
             "reason": risk_result.evidence.reason_code.value,
         },
-        "run_id": _RUN_ID.value,
+        "run_id": run_id.value,
         "run_outcome": run_outcome,
         "run_status": "completed",
         "trade_outcome": run_outcome,
@@ -722,8 +865,38 @@ def _execute(mode: DemoMode) -> tuple[dict[str, object], bytes]:
         },
         "status": "success",
     }
-    digest = sha256(b"ea.offline-demo.semantic.v1\0" + _canonical_json(semantic)).hexdigest()
-    report = {**semantic, "semantic_outcome_sha256": digest}
+    semantic_projection: dict[str, object] = {
+        "ending_cash": report_body["cash_snapshot"],
+        "ending_positions": report_body["position_snapshot"],
+        "fills": (
+            []
+            if fill is None
+            else [
+                {
+                    "fees": fill_fees,
+                    "price": fill.price.text,
+                    "quantity": fill.quantity.text,
+                    "side": fill.side.value,
+                }
+            ]
+        ),
+        "lineage_sha256": prepared_attempt.lineage_sha256.value,
+        "market_event_count": len(dataset.selection.events),
+        "order": (
+            None if order is None else {"quantity": order.quantity.text, "side": order.side.value}
+        ),
+        "reconciliation": report_body["reconciliation"],
+        "risk": report_body["risk"],
+        "run_outcome": run_outcome,
+        "run_status": "completed",
+        "schema": "ea.backtest-semantic-outcome.v1",
+        "signal": {"direction": signal.direction.value},
+        "trade_outcome": run_outcome,
+    }
+    report = {
+        **report_body,
+        "semantic_outcome_sha256": semantic_outcome_sha256(semantic_projection).value,
+    }
     return report, _audit_bytes(audit.records)
 
 
@@ -735,9 +908,11 @@ def run_offline_demo(
     """Run the fixed offline slice once and preserve success or failure evidence."""
     if type(mode) is not DemoMode:
         raise OfflineDemoInputError("demo mode must be exact")
+    run_id = RunId(str(uuid4()))
+    prepared_attempt = _prepare_attempt(mode, run_id)
     attempt = _safe_attempt_directory(output_root)
     try:
-        report, audit = _execute(mode)
+        report, audit = _execute(mode, prepared_attempt)
     except OfflineDemoFailure as error:
         code = error.code
         message = str(error)
@@ -751,6 +926,8 @@ def run_offline_demo(
             _failure_document(
                 code,
                 message,
+                run_id=run_id,
+                lineage_sha256=prepared_attempt.lineage_sha256,
                 trade_outcome=trade_outcome,
             ),
         )

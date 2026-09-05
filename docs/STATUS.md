@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — RESET-001 offline simulated vertical slice delivered / main healthy /
+**Phase 1 delivery reset — RESET-001 and Backtest Identity contract delivered / main healthy /
 live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -32,17 +32,23 @@ live capability is part of this objective.
 - The risk-rejected path creates no order, Fill, cash, or position mutation.
 - A reconciliation mismatch records failure evidence without a success terminal or success
   report.
+- Every fresh offline demo attempt now receives a distinct UUID4 `RunId`; equivalent attempts
+  retain the same canonical reproducibility lineage and semantic/economic outcome digest.
+- The current deterministic demo records `randomness_profile = none` and
+  `master_seed = not_applicable`; attempt-bound IDs, paths, audit identities, and non-economic
+  timestamps do not enter its semantic outcome projection.
 - The Dark Professional Web shell remains a deterministic read-only Mock Adapter.
 
 ## Incomplete
 
 RESET-001 is a thin offline demonstration, not the funded Backtest MVP. The broader v0.2.0
-scenario schema, initial funding, Backtest Identity and lineage, seed hierarchy, resume/recovery
-matrix, sample-strategy catalogue, and full reporting surface remain future product work. They are
-not silently claimed by this slice.
+scenario schema, initial funding, stochastic seed hierarchy, resume/recovery matrix,
+sample-strategy catalogue, and full reporting surface remain future product work. They are not
+silently claimed by this slice or the Backtest Identity contract.
 
-The next bounded product step is the Backtest Identity contract. It requires fresh explicit
-Product Owner authorization; no implementation is active under RESET-001 or this status update.
+The next authorized candidate is #81, the funded deterministic Backtest single-run MVP. It still
+requires fresh explicit Product Owner authorization; no #81 implementation is active under this
+status update.
 
 ## Blockers
 
@@ -74,6 +80,9 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 
 ## Primary Issues
 
+- [#158 — Backtest attempt identity and semantic outcome contract](https://github.com/jayjcc8-cloud/ea-quant/issues/158)
+  separates attempt identity, reproducibility lineage, and semantic/economic comparison for the
+  installed offline path.
 - [#154 — RESET-001: restore bounded product delivery and freeze governance expansion](https://github.com/jayjcc8-cloud/ea-quant/issues/154)
   is completed by the governance-freeze change and PR #156's installed offline vertical slice.
 - [#81 — Funded deterministic Backtest single-run MVP](https://github.com/jayjcc8-cloud/ea-quant/issues/81)
