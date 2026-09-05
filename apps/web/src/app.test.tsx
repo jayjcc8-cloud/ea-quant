@@ -1,7 +1,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
-import { App, type ApiAdapter, type BacktestJob, type BacktestReport } from './app'
+import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type InputSnapshot } from './app'
 
 const identity = { scenario_sha256: 'a'.repeat(64), data_sha256: 'b'.repeat(64), record_count: 4 }
 const scenarios = [
@@ -15,10 +15,24 @@ const scenarios = [
   },
   { scenario_id: 'invalid.yaml', name: 'invalid', valid: false as const, error_code: 'scenario_invalid', message: 'fingerprint conflicts' },
 ]
+function snapshot(initialCash: string, quantity: string): InputSnapshot {
+  return {
+    schema: 'ea.local-web-input.v1', scenario_id: 'bounded-long.yaml', source_identity: identity,
+    identity: { ...identity, scenario_sha256: `${quantity.at(0) ?? 'f'}`.repeat(64) },
+    scenario: {
+      funding: { currency: 'USD', initial_cash: initialCash },
+      strategy: { id: 'bounded-long-v1', target_quantity: quantity },
+      instrument: { venue: 'XNAS', symbol: 'AAPL' },
+    },
+  }
+}
+
 const job: BacktestJob = {
-  schema: 'ea.local-web-job.v1', job_id: 'job-1', request_id: 'request-1', scenario_id: 'bounded-long.yaml',
+  schema: 'ea.local-web-job.v2', job_id: 'job-1', request_id: 'request-1', scenario_id: 'bounded-long.yaml',
   input_identity: identity, status: 'succeeded', engine_run_id: 'run-1', report_sha256: 'c'.repeat(64),
   summary_sha256: 'd'.repeat(64), error_code: null, message: null, report_ready: true,
+  created_at: '2026-09-05T15:00:00.000000Z', input_snapshot: snapshot('10000', '2'),
+  input_sha256: 'e'.repeat(64), attempt_id: 'run-1',
 }
 const report: BacktestReport = {
   schema: 'ea.backtest-report.v1', run_id: 'run-1',
@@ -32,6 +46,29 @@ const report: BacktestReport = {
     total_return: { value: '0.0017' }, counts: { orders: 1, fills: 1 },
     execution: { order: { quantity: '2', side: 'buy' }, fill: { quantity: '2', price: '101.5', side: 'buy' } },
   },
+}
+const secondJob: BacktestJob = {
+  ...job, job_id: 'job-2', request_id: 'request-2', engine_run_id: 'run-2', attempt_id: 'run-2',
+  created_at: '2026-09-05T15:10:00.000000Z', input_snapshot: snapshot('10000', '4'), input_sha256: 'f'.repeat(64),
+}
+const secondReport: BacktestReport = {
+  ...report, run_id: 'run-2',
+  economics: {
+    ...report.economics,
+    ending_cash: [{ amount: '9594', currency: 'USD' }],
+    ending_positions: [{ quantity: '4', venue: 'XNAS', symbol: 'AAPL' }],
+    valuation: { price: '110', position_value: '440' },
+    equity: { amount: '10034', currency: 'USD' },
+    net_pnl: { amount: '34', currency: 'USD' },
+    total_return: { value: '0.0034' },
+    execution: { order: { quantity: '4', side: 'buy' }, fill: { quantity: '4', price: '101.5', side: 'buy' } },
+  },
+}
+const rejectedJob: BacktestJob = {
+  ...job, job_id: 'job-risk', request_id: 'request-risk', status: 'failed', engine_run_id: 'run-risk',
+  attempt_id: 'run-risk', report_sha256: null, summary_sha256: null, report_ready: false,
+  error_code: 'risk.rejected', message: 'scenario order was rejected by risk',
+  created_at: '2026-09-05T15:20:00.000000Z', input_snapshot: snapshot('50', '2'), input_sha256: '9'.repeat(64),
 }
 
 function adapter(overrides: Partial<ApiAdapter> = {}): ApiAdapter {
@@ -71,6 +108,74 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByRole('heading', { name: 'Backtest Result' })).toBeTruthy()
     expect(screen.getByText('run-1')).toBeTruthy()
+  })
+
+  it('restores immutable parameters, revalidates edits, and submits a new run', async () => {
+    const user = userEvent.setup()
+    const validations: { scenarioId: string; initial_cash: string; quantity: string | null }[] = []
+    const creations: { parameters: { initial_cash: string; quantity: string | null } }[] = []
+    window.history.pushState({}, '', '/backtests')
+    render(<App api={adapter({
+      listBacktests: async () => [job],
+      validateScenario: async (scenarioId, parameters) => {
+        validations.push({ scenarioId, ...parameters })
+        return scenarios[0]
+      },
+      createBacktest: async (request) => {
+        creations.push({ parameters: request.parameters })
+        return secondJob
+      },
+      getBacktest: async () => secondJob,
+      getReport: async () => secondReport,
+    })} />)
+
+    await user.click(await screen.findByRole('button', { name: 'Use parameters for job-1' }))
+    expect((screen.getByLabelText('Initial cash') as HTMLInputElement).value).toBe('10000')
+    expect((screen.getByLabelText('Quantity') as HTMLInputElement).value).toBe('2')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('AAPL')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).readOnly).toBe(true)
+
+    await user.click(screen.getByRole('button', { name: 'Validate input' }))
+    expect(await screen.findByText('Validated input')).toBeTruthy()
+    await user.clear(screen.getByLabelText('Quantity'))
+    await user.type(screen.getByLabelText('Quantity'), '4')
+    expect(screen.queryByText('Validated input')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Validate input' }))
+    await user.click(await screen.findByRole('button', { name: 'Run new backtest' }))
+
+    expect(validations.at(-1)).toEqual({ scenarioId: 'bounded-long.yaml', initial_cash: '10000', quantity: '4' })
+    expect(creations).toEqual([{ parameters: { initial_cash: '10000', quantity: '4' } }])
+    expect(await screen.findByText('run-2')).toBeTruthy()
+  })
+
+  it('compares two successful persisted runs with exact input and result deltas', async () => {
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={adapter({
+      getBacktest: async (jobId) => jobId === 'job-1' ? job : secondJob,
+      getReport: async (jobId) => jobId === 'job-1' ? report : secondReport,
+    })} />)
+
+    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Quantity 2 4 Changed/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Net P&L 17 34 \+17/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Return 0.17% 0.34% \+0.17 pp/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Orders 1 1 0/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Fills 1 1 0/i })).toBeTruthy()
+  })
+
+  it('compares success with risk rejection without fabricating metrics or deltas', async () => {
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-risk')
+    let reportRequests = 0
+    render(<App api={adapter({
+      getBacktest: async (jobId) => jobId === 'job-1' ? job : rejectedJob,
+      getReport: async () => { reportRequests += 1; return report },
+    })} />)
+
+    expect(await screen.findByText('risk.rejected')).toBeTruthy()
+    expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
+    expect(screen.getByRole('row', { name: /Final Equity 10017 No report —/i })).toBeTruthy()
+    expect(reportRequests).toBe(1)
   })
 
   it('shows formal report values without browser-side economic recomputation', async () => {

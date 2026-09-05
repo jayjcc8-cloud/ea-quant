@@ -12,6 +12,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+import ea.web.service as web_service
 from ea.web.app import WebSettings, create_app
 from ea.web.service import WebBoundaryError, WebService
 from unit.test_backtest_report import _priced_scenario
@@ -81,6 +82,68 @@ def _wait(client: TestClient, job_id: str) -> dict[str, Any]:
             return job
         time.sleep(0.01)
     raise AssertionError(f"job {job_id} did not finish")
+
+
+def test_history_is_newest_first_by_persisted_creation_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_ids = iter(["ffffffff-ffff-4fff-8fff-ffffffffffff", "00000000-0000-4000-8000-000000000000"])
+    created_at = iter(["2026-09-05T15:00:00.000000Z", "2026-09-05T15:10:00.000000Z"])
+    monkeypatch.setattr(web_service, "uuid4", lambda: next(job_ids))
+    monkeypatch.setattr(web_service, "_created_at", lambda: next(created_at))
+    settings = _settings(tmp_path)
+
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        accepted_ids: list[str] = []
+        for request_id in ("request-history-0001", "request-history-0002"):
+            response = client.post(
+                "/api/backtests",
+                json={
+                    "scenario_id": "bounded-long.yaml",
+                    "input_identity": validated["input_identity"],
+                    "request_id": request_id,
+                },
+                headers=WRITE_HEADERS,
+            )
+            assert response.status_code == 202, response.text
+            accepted = response.json()
+            accepted_ids.append(accepted["job_id"])
+            assert _wait(client, accepted["job_id"])["status"] == "succeeded"
+
+        history = client.get("/api/backtests").json()["jobs"]
+        assert [item["job_id"] for item in history] == list(reversed(accepted_ids))
+        assert [item["created_at"] for item in history] == [
+            "2026-09-05T15:10:00.000000Z",
+            "2026-09-05T15:00:00.000000Z",
+        ]
+
+
+def test_validation_normalizes_editable_parameters_without_changing_registered_symbol(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        response = client.post(
+            "/api/scenarios/bounded-long.yaml/validate",
+            json={"parameters": {"initial_cash": "20000", "quantity": "4"}},
+            headers=WRITE_HEADERS,
+        )
+
+    assert response.status_code == 200, response.text
+    validated = response.json()
+    assert validated["summary"]["initial_cash"] == "20000"
+    assert validated["summary"]["target_quantity"] == "4"
+    assert validated["summary"]["symbol"] == "AAPL"
+    assert validated["summary"]["venue"] == "XNAS"
+    assert (
+        validated["normalized_input_identity"]["scenario_sha256"]
+        != validated["input_identity"]["scenario_sha256"]
+    )
+    assert (
+        validated["normalized_input_identity"]["data_sha256"]
+        == validated["input_identity"]["data_sha256"]
+    )
 
 
 def _tree_digest(path: Path) -> dict[str, str]:

@@ -534,7 +534,39 @@ class WebService:
 
     def list_jobs(self) -> list[dict[str, object]]:
         with self._lock:
-            return [self._jobs[key].document() for key in sorted(self._jobs, reverse=True)]
+            records = sorted(
+                self._jobs.values(),
+                key=lambda record: (
+                    record.created_at is not None,
+                    record.created_at or "",
+                    record.job_id,
+                ),
+                reverse=True,
+            )
+            return [record.document() for record in records]
+
+    def validate_scenario(
+        self,
+        scenario_id: str,
+        *,
+        parameters: dict[str, str | None] | None = None,
+    ) -> dict[str, object]:
+        scenario = self.registry.load(scenario_id)
+        source_summary = _scenario_summary(scenario_id, scenario)
+        if parameters is None:
+            return source_summary
+        initial_cash = parameters.get("initial_cash")
+        if type(initial_cash) is not str:
+            raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
+        normalized = parameterize_backtest_scenario(
+            scenario,
+            initial_cash=initial_cash,
+            quantity=parameters.get("quantity"),
+        )
+        normalized_summary = _scenario_summary(scenario_id, normalized)
+        source_summary["summary"] = normalized_summary["summary"]
+        source_summary["normalized_input_identity"] = normalized_summary["input_identity"]
+        return source_summary
 
     def get_job(self, job_id: str) -> JobRecord:
         with self._lock:

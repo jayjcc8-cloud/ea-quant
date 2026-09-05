@@ -1,16 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
+import { exactDelta } from './decimal'
 
 export type InputIdentity = { scenario_sha256: string; data_sha256: string; record_count: number }
+export type BacktestParameters = { initial_cash: string; quantity: string | null }
+export type InputSnapshot = {
+  schema: 'ea.local-web-input.v1'; scenario_id: string; source_identity: InputIdentity; identity: InputIdentity
+  scenario: {
+    funding: { currency: string; initial_cash: string }
+    strategy: { id: string; target_quantity: string | null }
+    instrument: { venue: string; symbol: string }
+  }
+}
 export type ScenarioSummary = {
   scenario_id: string; name: string; valid: boolean; input_identity?: InputIdentity
   summary?: { strategy_id: string; venue: string; symbol: string; initial_cash: string; target_quantity: string | null; record_count: number }
+  normalized_input_identity?: InputIdentity
   error_code?: string; message?: string
 }
 export type BacktestJob = {
   schema: string; job_id: string; request_id: string; scenario_id: string; input_identity: InputIdentity
   status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'interrupted'; engine_run_id: string | null
   report_sha256: string | null; summary_sha256: string | null; error_code: string | null; message: string | null; report_ready: boolean
+  created_at?: string; input_snapshot?: InputSnapshot; input_sha256?: string; attempt_id?: string | null
 }
 type Money = { amount: string; currency?: string }
 export type BacktestReport = {
@@ -27,8 +39,8 @@ export type BacktestReport = {
 }
 export type ApiAdapter = {
   listScenarios(): Promise<ScenarioSummary[]>
-  validateScenario(scenarioId: string): Promise<ScenarioSummary>
-  createBacktest(request: { scenario_id: string; input_identity: InputIdentity; request_id: string }): Promise<BacktestJob>
+  validateScenario(scenarioId: string, parameters: BacktestParameters): Promise<ScenarioSummary>
+  createBacktest(request: { scenario_id: string; input_identity: InputIdentity; parameters: BacktestParameters; request_id: string }): Promise<BacktestJob>
   listBacktests(): Promise<BacktestJob[]>
   getBacktest(jobId: string): Promise<BacktestJob>
   getReport(jobId: string): Promise<BacktestReport>
@@ -51,9 +63,9 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 const browserApi: ApiAdapter = {
   async listScenarios() { return (await apiRequest<{ scenarios: ScenarioSummary[] }>('/api/scenarios')).scenarios },
-  validateScenario(scenarioId) {
+  validateScenario(scenarioId, parameters) {
     return apiRequest(`/api/scenarios/${encodeURIComponent(scenarioId)}/validate`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: '{}',
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ parameters }),
     })
   },
   createBacktest(request) {
@@ -82,6 +94,7 @@ function Shell({ api }: { api: ApiAdapter }) {
     <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
       <Routes>
         <Route path="/backtests" element={<Backtests api={api} />} />
+        <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
         <Route path="*" element={<Navigate replace to="/backtests" />} />
       </Routes>
@@ -94,6 +107,9 @@ function Backtests({ api }: { api: ApiAdapter }) {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([])
   const [jobs, setJobs] = useState<BacktestJob[]>([])
   const [selected, setSelected] = useState('')
+  const [initialCash, setInitialCash] = useState('')
+  const [quantity, setQuantity] = useState('')
+  const [comparison, setComparison] = useState<string[]>([])
   const [validated, setValidated] = useState<ScenarioSummary | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -103,15 +119,29 @@ function Backtests({ api }: { api: ApiAdapter }) {
     let current = true
     Promise.all([api.listScenarios(), api.listBacktests()]).then(([nextScenarios, nextJobs]) => {
       if (!current) return
-      setScenarios(nextScenarios); setJobs(nextJobs); setSelected(nextScenarios.find((item) => item.valid)?.scenario_id ?? '')
+      const first = nextScenarios.find((item) => item.valid)
+      setScenarios(nextScenarios); setJobs(nextJobs); setSelected(first?.scenario_id ?? '')
+      setInitialCash(first?.summary?.initial_cash ?? ''); setQuantity(first?.summary?.target_quantity ?? '')
     }).catch(() => { if (current) setDisconnected(true) })
     return () => { current = false }
   }, [api])
 
   const candidate = useMemo(() => scenarios.find((item) => item.scenario_id === selected), [scenarios, selected])
+  const parameters = (): BacktestParameters => ({
+    initial_cash: initialCash,
+    quantity: candidate?.summary?.strategy_id === 'always-flat-v1' ? null : quantity,
+  })
+  const changeScenario = (scenarioId: string) => {
+    const next = scenarios.find((item) => item.scenario_id === scenarioId)
+    setSelected(scenarioId); setInitialCash(next?.summary?.initial_cash ?? '')
+    setQuantity(next?.summary?.target_quantity ?? ''); setValidated(null); setError(null)
+  }
+  const changeParameter = (setter: (value: string) => void, value: string) => {
+    setter(value); setValidated(null); setError(null)
+  }
   const validate = async () => {
     setBusy(true); setError(null)
-    try { setValidated(await api.validateScenario(selected)) }
+    try { setValidated(await api.validateScenario(selected, parameters())) }
     catch (caught) { setValidated(null); setError(caught instanceof Error ? caught.message : 'Validation failed') }
     finally { setBusy(false) }
   }
@@ -120,20 +150,31 @@ function Backtests({ api }: { api: ApiAdapter }) {
     setBusy(true); setError(null)
     try {
       const random = globalThis.crypto?.randomUUID?.() ?? `request-${Date.now()}-${Math.random().toString(16).slice(2)}`
-      const accepted = await api.createBacktest({ scenario_id: validated.scenario_id, input_identity: validated.input_identity, request_id: random })
+      const accepted = await api.createBacktest({ scenario_id: validated.scenario_id, input_identity: validated.input_identity, parameters: parameters(), request_id: random })
       navigate(`/backtests/${accepted.job_id}`)
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'Run request failed'); setBusy(false) }
   }
+  const restoreParameters = (item: BacktestJob) => {
+    const snapshot = item.input_snapshot?.scenario
+    if (!snapshot) return
+    setSelected(item.scenario_id); setInitialCash(snapshot.funding.initial_cash)
+    setQuantity(snapshot.strategy.target_quantity ?? ''); setValidated(null); setError(null)
+  }
+  const toggleComparison = (jobId: string) => {
+    setComparison((current) => current.includes(jobId)
+      ? current.filter((value) => value !== jobId)
+      : current.length < 2 ? [...current, jobId] : [current[1], jobId])
+  }
 
   return <>
-    <PageTitle title="Offline Backtests" subtitle="Validate prepared local scenarios and run one real installed-engine attempt." />
+    <PageTitle title="Offline Backtests" subtitle="Run, replay, and compare real installed-engine attempts." />
     {disconnected && <section className="notice error">Local service is unreachable</section>}
     {error && <section className="notice error">{error}</section>}
     <div className="backtest-grid">
       <section className="panel control-panel">
         <header><h2>New backtest</h2><span>One active job</span></header>
         <label htmlFor="scenario">Scenario</label>
-        <select id="scenario" value={selected} onChange={(event) => { setSelected(event.target.value); setValidated(null); setError(null) }}>
+        <select id="scenario" value={selected} onChange={(event) => changeScenario(event.target.value)}>
           <option value="">Select prepared scenario</option>
           {scenarios.map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}{item.valid ? '' : ' · invalid'}</option>)}
         </select>
@@ -142,11 +183,26 @@ function Backtests({ api }: { api: ApiAdapter }) {
           <div><dt>Initial cash</dt><dd>{candidate.summary.initial_cash}</dd></div><div><dt>Records</dt><dd>{candidate.summary.record_count}</dd></div>
           <div><dt>Target</dt><dd>{candidate.summary.target_quantity ?? 'flat'}</dd></div>
         </dl>}
+        <div className="parameter-grid">
+          <div><label htmlFor="initial-cash">Initial cash</label><input id="initial-cash" value={initialCash} onChange={(event) => changeParameter(setInitialCash, event.target.value)} /></div>
+          <div><label htmlFor="quantity">Quantity</label><input id="quantity" value={quantity} disabled={candidate?.summary?.strategy_id === 'always-flat-v1'} onChange={(event) => changeParameter(setQuantity, event.target.value)} /></div>
+          <div><label htmlFor="symbol">Symbol</label><input id="symbol" value={candidate?.summary?.symbol ?? ''} readOnly aria-describedby="symbol-source" /><small id="symbol-source">Registered scenario/data only</small></div>
+        </div>
         <div className="actions"><button disabled={!selected || busy} onClick={validate}>Validate input</button><button className="primary" disabled={!validated || busy} onClick={run}>Run new backtest</button></div>
-        {validated?.summary && <div className="validated"><strong>Validated input</strong><span>Target quantity: {validated.summary.target_quantity ?? 'flat'}</span><small>{validated.input_identity?.scenario_sha256.slice(0, 12)}…</small></div>}
+        {validated?.summary && <div className="validated"><strong>Validated input</strong><span>Target quantity: {validated.summary.target_quantity ?? 'flat'}</span><small>{validated.normalized_input_identity?.scenario_sha256.slice(0, 12) ?? validated.input_identity?.scenario_sha256.slice(0, 12)}…</small></div>}
       </section>
-      <section className="panel jobs-panel"><header><h2>Workspace jobs</h2><span>Refresh-safe index</span></header>
-        {jobs.length === 0 ? <p className="muted">No backtests yet.</p> : <ul className="job-list">{jobs.map((item) => <li key={item.job_id}><Link to={`/backtests/${item.job_id}`}><strong>{item.scenario_id}</strong><span>{item.status}</span><small>{item.engine_run_id ?? item.job_id}</small></Link></li>)}</ul>}
+      <section className="panel jobs-panel"><header><h2>Recent Runs</h2><span>Refresh-safe history</span></header>
+        {jobs.length === 0 ? <p className="muted">No backtests yet.</p> : <ul className="job-list">{jobs.map((item) => {
+          const input = item.input_snapshot?.scenario
+          return <li key={item.job_id} className="job-card">
+            <div className="job-card-title"><Link to={`/backtests/${item.job_id}`}><strong>{item.scenario_id}</strong></Link><span className={`status status-${item.status}`}>{item.status}</span></div>
+            {item.created_at && <time>{item.created_at}</time>}
+            <small>{input ? `${input.instrument.symbol} · Cash ${input.funding.initial_cash} · Quantity ${input.strategy.target_quantity ?? 'flat'}` : 'Legacy run · input snapshot unavailable'}</small>
+            <small>{item.engine_run_id ?? item.job_id}</small>
+            <div className="job-actions"><Link to={`/backtests/${item.job_id}`}>View</Link><button disabled={!input} aria-label={`Use parameters for ${item.job_id}`} onClick={() => restoreParameters(item)}>Use parameters</button><label><input type="checkbox" aria-label={`Select ${item.job_id} for comparison`} checked={comparison.includes(item.job_id)} onChange={() => toggleComparison(item.job_id)} /> Compare</label></div>
+          </li>
+        })}</ul>}
+        <button className="primary compare-button" disabled={comparison.length !== 2} onClick={() => navigate(`/backtests/compare/${comparison[0]}/${comparison[1]}`)}>Compare selected runs</button>
       </section>
     </div>
   </>
@@ -155,6 +211,66 @@ function Backtests({ api }: { api: ApiAdapter }) {
 function BacktestDetailRoute({ api }: { api: ApiAdapter }) {
   const { jobId = '' } = useParams()
   return <BacktestDetail key={jobId} api={api} jobId={jobId} />
+}
+
+type ComparedRun = { job: BacktestJob; report: BacktestReport | null }
+
+function percent(value: string): string {
+  return `${exactDelta('0', value, 2).replace(/^\+/, '')}%`
+}
+
+function CompareBacktests({ api }: { api: ApiAdapter }) {
+  const { leftId = '', rightId = '' } = useParams()
+  const [runs, setRuns] = useState<[ComparedRun, ComparedRun] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const load = async (jobId: string): Promise<ComparedRun> => {
+      const job = await api.getBacktest(jobId)
+      if (job.status !== 'succeeded' || !job.report_ready) return { job, report: null }
+      const report = await api.getReport(jobId)
+      if (!job.engine_run_id || report.run_id !== job.engine_run_id) {
+        throw new ApiFailure('report_identity_conflict', 'Verified report identity does not match this job')
+      }
+      return { job, report }
+    }
+    Promise.all([load(leftId), load(rightId)])
+      .then(([left, right]) => { if (active) setRuns([left, right]) })
+      .catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : 'Comparison failed') })
+    return () => { active = false }
+  }, [api, leftId, rightId])
+
+  if (!runs) return <><PageTitle title="Compare Backtests" subtitle="Loading two persisted runs and verified reports." />{error && <section className="notice error">{error}</section>}</>
+  const [left, right] = runs
+  const leftInput = left.job.input_snapshot?.scenario
+  const rightInput = right.job.input_snapshot?.scenario
+  if (!leftInput || !rightInput) return <><PageTitle title="Compare Backtests" subtitle="Pairwise comparison requires v2 input snapshots." /><section className="notice error">Input snapshot unavailable</section></>
+  const inputRows = [
+    ['Initial Cash', leftInput.funding.initial_cash, rightInput.funding.initial_cash],
+    ['Symbol', leftInput.instrument.symbol, rightInput.instrument.symbol],
+    ['Quantity', leftInput.strategy.target_quantity ?? 'flat', rightInput.strategy.target_quantity ?? 'flat'],
+  ]
+  const metricRows = [
+    ['Final Equity', left.report?.economics.equity.amount, right.report?.economics.equity.amount, 0, ''],
+    ['Net P&L', left.report?.economics.net_pnl.amount, right.report?.economics.net_pnl.amount, 0, ''],
+    ['Return', left.report?.economics.total_return.value, right.report?.economics.total_return.value, 2, ' pp'],
+    ['Orders', left.report ? String(left.report.economics.counts.orders) : undefined, right.report ? String(right.report.economics.counts.orders) : undefined, 0, ''],
+    ['Fills', left.report ? String(left.report.economics.counts.fills) : undefined, right.report ? String(right.report.economics.counts.fills) : undefined, 0, ''],
+  ] as const
+  return <>
+    <PageTitle title="Compare Backtests" subtitle="Derived read-only view over two persisted jobs and their formal reports." />
+    <div className="result-toolbar"><Link to="/backtests">← Recent Runs</Link><span>No comparison artifact is stored</span></div>
+    <section className="compare-identities">
+      {[left, right].map((run, index) => <article className="panel" key={run.job.job_id}><header><h2>Run {index === 0 ? 'A' : 'B'}</h2><span className={`status status-${run.job.status}`}>{run.job.status}</span></header><dl className="summary-list"><div><dt>Web job</dt><dd>{run.job.job_id}</dd></div><div><dt>Engine run</dt><dd>{run.job.engine_run_id ?? 'not available'}</dd></div><div><dt>Input SHA-256</dt><dd>{run.job.input_sha256 ?? 'not available'}</dd></div><div><dt>Outcome</dt><dd>{run.report ? 'Formal report' : run.job.error_code ?? 'No report'}</dd></div></dl>{!run.report && <p className="no-report">No report</p>}</article>)}
+    </section>
+    <section className="panel comparison-panel"><header><h2>Input Diff</h2><span>Normalized snapshots</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{inputRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{before === after ? 'Unchanged' : 'Changed'}</td></tr>)}</tbody></table></section>
+    <section className="panel comparison-panel"><header><h2>Result Diff</h2><span>Formal reports only</span></header><table><thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Δ</th></tr></thead><tbody>{metricRows.map(([label, before, after, shift, suffix]) => {
+      const leftValue = before === undefined ? 'No report' : label === 'Return' ? percent(before) : before
+      const rightValue = after === undefined ? 'No report' : label === 'Return' ? percent(after) : after
+      return <tr key={label}><th>{label}</th><td>{leftValue}</td><td>{rightValue}</td><td>{before !== undefined && after !== undefined ? `${exactDelta(before, after, shift)}${suffix}` : '—'}</td></tr>
+    })}</tbody></table></section>
+  </>
 }
 
 function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {

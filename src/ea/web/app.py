@@ -48,6 +48,12 @@ class BacktestRequest(BaseModel):
     request_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
 
 
+class ScenarioValidationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    parameters: BacktestParameters | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class WebSettings:
     """Explicit filesystem and loopback boundaries for one local service."""
@@ -149,9 +155,19 @@ def create_app(settings: WebSettings) -> Any:
             return error(500, "scenario_root_unavailable", str(caught))
 
     @app.post("/api/scenarios/{scenario_id}/validate")
-    def validate_scenario(scenario_id: str) -> object:
+    def validate_scenario(
+        scenario_id: str,
+        request: ScenarioValidationRequest | None = None,
+    ) -> object:
         try:
-            return service.registry.validate(scenario_id)
+            return service.validate_scenario(
+                scenario_id,
+                parameters=(
+                    None
+                    if request is None or request.parameters is None
+                    else request.parameters.model_dump()
+                ),
+            )
         except ScenarioNotFoundError as caught:
             return error(404, "scenario_not_found", str(caught))
         except WebBoundaryError as caught:
