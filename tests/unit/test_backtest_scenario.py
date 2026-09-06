@@ -114,6 +114,36 @@ def test_entry_delay_maximum_uses_next_bar_eligibility_not_record_count(
     assert loaded.entry_delay_bars_maximum == 0
 
 
+def test_bounded_long_rejects_when_only_later_root_is_not_matcher_eligible(
+    tmp_path: Path,
+) -> None:
+    scenario_path = _write_valid_scenario(tmp_path)
+    data_path = tmp_path / "prices.csv"
+    data_path.write_text(
+        "schema_version,venue,symbol,interval_start,interval_end,adjustment,open,high,low,close,volume,source,source_sequence,revision,available_at\n"
+        "1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100,101,99,100.5,10,fixture.raw,0,0,2026-01-02T09:31:00.000000Z\n"
+        "1,XNAS,AAPL,2026-01-02T09:31:00.000000Z,2026-01-02T09:32:00.000000Z,raw,101,103,100,102,12,fixture.raw,1,1,2026-01-02T09:32:30.000000Z\n",
+        encoding="utf-8",
+    )
+    window = ReplayWindow(
+        datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+        datetime(2026, 1, 2, 9, 33, tzinfo=UTC),
+    )
+    dataset = decode_phase1_ohlcv_csv(data_path.read_bytes(), replay_window=window)
+    document = yaml.safe_load(scenario_path.read_text(encoding="utf-8"))
+    document["data"]["fingerprint"] = {
+        "sha256": dataset.selection.fingerprint.sha256.value,
+        "record_count": dataset.selection.fingerprint.record_count,
+    }
+    scenario_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(
+        BacktestScenarioError,
+        match="bounded-long-v1 requires a market bar with an executable next bar",
+    ):
+        load_backtest_scenario(scenario_path)
+
+
 def test_parameterizes_cash_and_strategy_parameters_with_new_canonical_identity(
     tmp_path: Path,
 ) -> None:

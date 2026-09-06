@@ -19,6 +19,7 @@ from yaml.resolver import BaseResolver
 
 from ea.config.diagnostics import escape_diagnostic_label
 from ea.core import (
+    Adjustment,
     CanonicalDecimal,
     ExecutionPolicyId,
     ExecutionPolicyRef,
@@ -332,12 +333,18 @@ def _next_bar_entry_delay_maximum(dataset: Phase1HistoricalDataset) -> int | Non
     events = dataset.selection.events
     if len(events) < 2:
         return None
-    latest_future_event_time = events[-1].event_time
-    for index in range(len(events) - 2, -1, -1):
+    latest_eligible_event_time: dict[Instrument, datetime] = {}
+    for index in range(len(events) - 1, -1, -1):
         event = events[index]
-        if latest_future_event_time > event.available_at:
+        future_event_time = latest_eligible_event_time.get(event.payload.instrument)
+        if future_event_time is not None and future_event_time > event.available_at:
             return index
-        latest_future_event_time = max(latest_future_event_time, event.event_time)
+        if event.payload.adjustment is Adjustment.RAW and event.revision == 0:
+            latest = latest_eligible_event_time.get(event.payload.instrument)
+            latest_eligible_event_time[event.payload.instrument] = max(
+                event.event_time,
+                latest or event.event_time,
+            )
     return None
 
 
