@@ -7,21 +7,26 @@ const identity = { scenario_sha256: 'a'.repeat(64), data_sha256: 'b'.repeat(64),
 const scenarios = [
   {
     scenario_id: 'bounded-long.yaml', name: 'bounded-long', valid: true as const, input_identity: identity,
-    summary: { strategy_id: 'bounded-long-v1', venue: 'XNAS', symbol: 'AAPL', initial_cash: '10000', target_quantity: '2', record_count: 4 },
+    summary: { strategy_id: 'bounded-long-v1', venue: 'XNAS', symbol: 'AAPL', initial_cash: '10000', target_quantity: '2', entry_delay_bars: 0, record_count: 4 },
+    strategy_parameters: [
+      { name: 'target_quantity' as const, type: 'decimal' as const, default: '2', current_value: '2', minimum: '1', maximum: null },
+      { name: 'entry_delay_bars' as const, type: 'integer' as const, default: 0, current_value: 0, minimum: 0, maximum: 2 },
+    ],
   },
   {
     scenario_id: 'flat.yaml', name: 'flat', valid: true as const, input_identity: identity,
-    summary: { strategy_id: 'always-flat-v1', venue: 'XNAS', symbol: 'AAPL', initial_cash: '10000', target_quantity: null, record_count: 4 },
+    summary: { strategy_id: 'always-flat-v1', venue: 'XNAS', symbol: 'AAPL', initial_cash: '10000', target_quantity: null, entry_delay_bars: 0, record_count: 4 },
+    strategy_parameters: [],
   },
   { scenario_id: 'invalid.yaml', name: 'invalid', valid: false as const, error_code: 'scenario_invalid', message: 'fingerprint conflicts' },
 ]
-function snapshot(initialCash: string, quantity: string): InputSnapshot {
+function snapshot(initialCash: string, quantity: string, entryDelayBars = 0): InputSnapshot {
   return {
     schema: 'ea.local-web-input.v1', scenario_id: 'bounded-long.yaml', source_identity: identity,
     identity: { ...identity, scenario_sha256: `${quantity.at(0) ?? 'f'}`.repeat(64) },
     scenario: {
       funding: { currency: 'USD', initial_cash: initialCash },
-      strategy: { id: 'bounded-long-v1', target_quantity: quantity },
+      strategy: { id: 'bounded-long-v1', target_quantity: quantity, entry_delay_bars: entryDelayBars },
       instrument: { venue: 'XNAS', symbol: 'AAPL' },
     },
   }
@@ -49,7 +54,7 @@ const report: BacktestReport = {
 }
 const secondJob: BacktestJob = {
   ...job, job_id: 'job-2', request_id: 'request-2', engine_run_id: 'run-2', attempt_id: 'run-2',
-  created_at: '2026-09-05T15:10:00.000000Z', input_snapshot: snapshot('10000', '4'), input_sha256: 'f'.repeat(64),
+  created_at: '2026-09-05T15:10:00.000000Z', input_snapshot: snapshot('10000', '4', 2), input_sha256: 'f'.repeat(64),
 }
 const secondReport: BacktestReport = {
   ...report, run_id: 'run-2',
@@ -99,7 +104,7 @@ describe('EA Quant local Web backtests', () => {
     await user.selectOptions(screen.getByLabelText('Scenario'), 'bounded-long.yaml')
     await user.click(screen.getByRole('button', { name: 'Validate input' }))
     expect(await screen.findByText('Validated input')).toBeTruthy()
-    expect(screen.getByText('Target quantity: 2')).toBeTruthy()
+    expect(screen.getByText(/Target quantity: 2 · Entry delay bars: 0/)).toBeTruthy()
 
     await user.selectOptions(screen.getByLabelText('Scenario'), 'flat.yaml')
     expect(screen.queryByText('Validated input')).toBeNull()
@@ -112,8 +117,8 @@ describe('EA Quant local Web backtests', () => {
 
   it('restores immutable parameters, revalidates edits, and submits a new run', async () => {
     const user = userEvent.setup()
-    const validations: { scenarioId: string; initial_cash: string; quantity: string | null }[] = []
-    const creations: { parameters: { initial_cash: string; quantity: string | null } }[] = []
+    const validations: { scenarioId: string; initial_cash: string; strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } | null }[] = []
+    const creations: { parameters: { initial_cash: string; strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } | null } }[] = []
     window.history.pushState({}, '', '/backtests')
     render(<App api={adapter({
       listBacktests: async () => [job],
@@ -132,6 +137,8 @@ describe('EA Quant local Web backtests', () => {
     await user.click(await screen.findByRole('button', { name: 'Use parameters for job-1' }))
     expect((screen.getByLabelText('Initial cash') as HTMLInputElement).value).toBe('10000')
     expect((screen.getByLabelText('Quantity') as HTMLInputElement).value).toBe('2')
+    expect((screen.getByLabelText('Entry delay bars') as HTMLInputElement).value).toBe('0')
+    expect(screen.getByLabelText('Entry delay bars').getAttribute('max')).toBe('2')
     expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('AAPL')
     expect((screen.getByLabelText('Symbol') as HTMLInputElement).readOnly).toBe(true)
 
@@ -139,12 +146,19 @@ describe('EA Quant local Web backtests', () => {
     expect(await screen.findByText('Validated input')).toBeTruthy()
     await user.clear(screen.getByLabelText('Quantity'))
     await user.type(screen.getByLabelText('Quantity'), '4')
+    await user.clear(screen.getByLabelText('Entry delay bars'))
+    await user.type(screen.getByLabelText('Entry delay bars'), '2')
     expect(screen.queryByText('Validated input')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Validate input' }))
     await user.click(await screen.findByRole('button', { name: 'Run new backtest' }))
 
-    expect(validations.at(-1)).toEqual({ scenarioId: 'bounded-long.yaml', initial_cash: '10000', quantity: '4' })
-    expect(creations).toEqual([{ parameters: { initial_cash: '10000', quantity: '4' } }])
+    expect(validations.at(-1)).toEqual({
+      scenarioId: 'bounded-long.yaml', initial_cash: '10000',
+      strategy_parameters: { target_quantity: '4', entry_delay_bars: 2 },
+    })
+    expect(creations).toEqual([{ parameters: {
+      initial_cash: '10000', strategy_parameters: { target_quantity: '4', entry_delay_bars: 2 },
+    } }])
     expect(await screen.findByText('run-2')).toBeTruthy()
   })
 
@@ -156,7 +170,9 @@ describe('EA Quant local Web backtests', () => {
     })} />)
 
     expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Quantity 2 4 Changed/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Parameter Delta' })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /target_quantity 2 4 Changed/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Net P&L 17 USD 34 USD \+17 USD/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Return 0.17% 0.34% \+0.17 pp/i })).toBeTruthy()
@@ -242,7 +258,8 @@ describe('EA Quant local Web backtests', () => {
     })} />)
 
     expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Quantity 2 4 Changed/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /target_quantity 2 4 Changed/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeTruthy()
     expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
     expect(screen.getByRole('row', { name: /Final Equity No report 10034 USD —/i })).toBeTruthy()
     expect(screen.queryByText('verified report is unavailable')).toBeNull()

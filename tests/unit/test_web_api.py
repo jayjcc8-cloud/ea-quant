@@ -156,6 +156,71 @@ def test_validation_normalizes_editable_parameters_without_changing_registered_s
     )
 
 
+def test_backend_publishes_and_validates_the_two_strategy_parameters(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        registered = _validate(client, "bounded-long.yaml")
+        contracts = {item["name"]: item for item in registered["strategy_parameters"]}
+        assert set(contracts) == {"target_quantity", "entry_delay_bars"}
+        assert contracts["entry_delay_bars"] == {
+            "name": "entry_delay_bars",
+            "type": "integer",
+            "default": 0,
+            "current_value": 0,
+            "minimum": 0,
+            "maximum": 2,
+        }
+
+        response = client.post(
+            "/api/scenarios/bounded-long.yaml/validate",
+            json={
+                "parameters": {
+                    "initial_cash": "20000",
+                    "strategy_parameters": {
+                        "target_quantity": "4",
+                        "entry_delay_bars": 2,
+                    },
+                }
+            },
+            headers=WRITE_HEADERS,
+        )
+
+    assert response.status_code == 200, response.text
+    validated = response.json()
+    assert validated["summary"]["target_quantity"] == "4"
+    assert validated["summary"]["entry_delay_bars"] == 2
+    normalized_contracts = {item["name"]: item for item in validated["strategy_parameters"]}
+    assert normalized_contracts["entry_delay_bars"]["current_value"] == 2
+
+
+@pytest.mark.parametrize(
+    "strategy_parameters",
+    [
+        {"target_quantity": "2", "entry_delay_bars": 3},
+        {"target_quantity": "2", "entry_delay_bars": "1"},
+        {"target_quantity": "2", "entry_delay_bars": 0, "unknown": 1},
+    ],
+)
+def test_api_rejects_invalid_or_unknown_strategy_parameters(
+    tmp_path: Path,
+    strategy_parameters: dict[str, object],
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        response = client.post(
+            "/api/scenarios/bounded-long.yaml/validate",
+            json={
+                "parameters": {
+                    "initial_cash": "10000",
+                    "strategy_parameters": strategy_parameters,
+                }
+            },
+            headers=WRITE_HEADERS,
+        )
+
+    assert response.status_code == 422
+
+
 def _tree_digest(path: Path) -> dict[str, str]:
     return {
         str(item.relative_to(path)): hashlib.sha256(item.read_bytes()).hexdigest()
@@ -213,6 +278,7 @@ def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -
         assert snapshot["scenario"]["strategy"] == {
             "id": "bounded-long-v1",
             "target_quantity": "4",
+            "entry_delay_bars": 0,
         }
         assert snapshot["scenario"]["instrument"]["symbol"] == "AAPL"
         assert snapshot["scenario"]["instrument"]["venue"] == "XNAS"
@@ -271,6 +337,62 @@ def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -
         )
         assert conflict.status_code == 409
         assert conflict.json()["error"]["code"] == "input_conflict"
+
+
+def test_nested_strategy_parameters_persist_reload_and_reach_the_real_engine(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        registered = _validate(client, "bounded-long.yaml")
+        response = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": registered["input_identity"],
+                "parameters": {
+                    "initial_cash": "10000",
+                    "strategy_parameters": {
+                        "target_quantity": "2",
+                        "entry_delay_bars": 2,
+                    },
+                },
+                "request_id": "request-delayed-entry-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert response.status_code == 202, response.text
+        accepted = response.json()
+        assert accepted["input_snapshot"]["scenario"]["strategy"] == {
+            "id": "bounded-long-v1",
+            "target_quantity": "2",
+            "entry_delay_bars": 2,
+        }
+        completed = _wait(client, accepted["job_id"])
+        assert completed["status"] == "succeeded"
+        report = client.get(f"/api/backtests/{accepted['job_id']}/report").json()
+        assert report["source"]["strategy"] == {
+            "id": "bounded-long-v1",
+            "target_quantity": "2",
+            "entry_delay_bars": 2,
+        }
+        assert report["economics"]["execution"]["fill"] == {
+            "price": "110",
+            "quantity": "2",
+            "side": "buy",
+        }
+        assert report["economics"]["ending_cash"] == [{"amount": "9780", "currency": "USD"}]
+        assert report["economics"]["net_pnl"]["amount"] == "0"
+
+    with TestClient(create_app(settings), base_url=ORIGIN) as restarted:
+        recovered = restarted.get(f"/api/backtests/{accepted['job_id']}")
+        assert recovered.status_code == 200
+        assert recovered.json()["input_snapshot"]["scenario"]["strategy"] == {
+            "id": "bounded-long-v1",
+            "target_quantity": "2",
+            "entry_delay_bars": 2,
+        }
+        assert restarted.get(f"/api/backtests/{accepted['job_id']}/report").json() == report
 
 
 def test_idempotency_compares_effective_normalized_input_when_parameters_are_omitted(

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web research loop.**
+**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web parameter research.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -96,6 +96,15 @@ external write, deployment, or live capability is part of this objective.
   “Use parameters” starts a fresh validation/run rather than mutating or resuming prior evidence.
 - Pairwise comparison reads two persisted snapshots and verified formal reports, computes exact
   decimal deltas, and leaves failed or unavailable reports without fabricated metrics or deltas.
+- The existing `bounded-long-v1` Web surface exposes exactly two backend-defined strategy
+  parameters: `target_quantity` and integer `entry_delay_bars`. Delay zero preserves the original
+  entry behavior; a positive delay skips canonical market roots actually delivered to the strategy.
+- The backend derives the delay maximum from the loaded scenario and next-bar execution
+  eligibility, rejects invalid or unknown strategy parameters with HTTP 422, and persists the
+  normalized integer in canonical scenario identity and the existing input snapshot.
+- History reuse restores both strategy parameters from persisted snapshots. Pairwise comparison
+  presents their A-to-B values as Parameter Delta beside formal-report Result Delta without causal
+  interpretation, recommendation, or a new experiment model.
 
 ## Incomplete
 
@@ -160,12 +169,15 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [#169 — Local Web Research Loop V1](https://github.com/jayjcc8-cloud/ea-quant/issues/169)
   adds bounded parameter replay, normalized input history, and pairwise comparison without
   activating a symbol/data editor, Experiment model, Phase 1.1, or Phase 2.
+- [#171 — Web Strategy Parameter Experiment V1](https://github.com/jayjcc8-cloud/ea-quant/issues/171)
+  adds one real delayed-entry parameter to the existing bounded-long strategy and carries exactly
+  two strategy inputs through backend contract, engine, snapshot, reuse, and comparison.
 - R9/R10 Issues #149, #150, #152, #153 and PR #151 retain provenance as superseded hardening
   history after the reset governance PR merges; they are not an active delivery chain.
 
 ## Last Confirmed
 
-- Date: **2026-09-05** (Asia/Shanghai).
+- Date: **2026-09-06** (Asia/Shanghai).
 - The containing merged `main` commit and its CI are the authoritative durable-state checkpoint;
   the released product identity remains the exact commit and wheel recorded above.
 - Live capability: unavailable and prohibited.

@@ -113,7 +113,43 @@ def _scenario_identity(scenario: LoadedBacktestScenario) -> dict[str, object]:
     }
 
 
-def _scenario_summary(scenario_id: str, scenario: LoadedBacktestScenario) -> dict[str, object]:
+def _strategy_parameter_contracts(
+    scenario: LoadedBacktestScenario,
+    *,
+    defaults: LoadedBacktestScenario | None = None,
+) -> list[dict[str, object]]:
+    if scenario.strategy_id.value != "bounded-long-v1":
+        return []
+    source = scenario if defaults is None else defaults
+    specification = scenario.spec_set.require(scenario.instrument)
+    target = scenario.target_quantity
+    default_target = source.target_quantity
+    return [
+        {
+            "name": "target_quantity",
+            "type": "decimal",
+            "default": None if default_target is None else default_target.text,
+            "current_value": None if target is None else target.text,
+            "minimum": specification.quantity_quantum.text,
+            "maximum": None,
+        },
+        {
+            "name": "entry_delay_bars",
+            "type": "integer",
+            "default": 0,
+            "current_value": scenario.entry_delay_bars,
+            "minimum": 0,
+            "maximum": scenario.entry_delay_bars_maximum,
+        },
+    ]
+
+
+def _scenario_summary(
+    scenario_id: str,
+    scenario: LoadedBacktestScenario,
+    *,
+    defaults: LoadedBacktestScenario | None = None,
+) -> dict[str, object]:
     target = scenario.target_quantity
     return {
         "scenario_id": scenario_id,
@@ -126,9 +162,36 @@ def _scenario_summary(scenario_id: str, scenario: LoadedBacktestScenario) -> dic
             "symbol": scenario.instrument.symbol,
             "initial_cash": scenario.initial_cash.text,
             "target_quantity": None if target is None else target.text,
+            "entry_delay_bars": scenario.entry_delay_bars,
             "record_count": scenario.dataset.selection.fingerprint.record_count,
         },
+        "strategy_parameters": _strategy_parameter_contracts(scenario, defaults=defaults),
     }
+
+
+def _parameter_values(
+    parameters: dict[str, object],
+) -> tuple[str, str | None, int | None]:
+    initial_cash = parameters.get("initial_cash")
+    if type(initial_cash) is not str:
+        raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
+    strategy_parameters = parameters.get("strategy_parameters")
+    legacy_quantity = parameters.get("quantity")
+    if strategy_parameters is None:
+        if legacy_quantity is not None and type(legacy_quantity) is not str:
+            raise BacktestScenarioError("quantity must be an ea-decimal-v1 string")
+        return initial_cash, legacy_quantity, None
+    if type(strategy_parameters) is not dict:
+        raise BacktestScenarioError("strategy_parameters must be a mapping")
+    if legacy_quantity is not None:
+        raise BacktestScenarioError("quantity conflicts with strategy_parameters")
+    target_quantity = strategy_parameters.get("target_quantity")
+    entry_delay_bars = strategy_parameters.get("entry_delay_bars")
+    if target_quantity is not None and type(target_quantity) is not str:
+        raise BacktestScenarioError("target_quantity must be an ea-decimal-v1 string")
+    if type(entry_delay_bars) is not int:
+        raise BacktestScenarioError("entry_delay_bars must be an integer")
+    return initial_cash, target_quantity, entry_delay_bars
 
 
 def _input_snapshot(
@@ -550,22 +613,22 @@ class WebService:
         self,
         scenario_id: str,
         *,
-        parameters: dict[str, str | None] | None = None,
+        parameters: dict[str, object] | None = None,
     ) -> dict[str, object]:
         scenario = self.registry.load(scenario_id)
         source_summary = _scenario_summary(scenario_id, scenario)
         if parameters is None:
             return source_summary
-        initial_cash = parameters.get("initial_cash")
-        if type(initial_cash) is not str:
-            raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
+        initial_cash, quantity, entry_delay_bars = _parameter_values(parameters)
         normalized = parameterize_backtest_scenario(
             scenario,
             initial_cash=initial_cash,
-            quantity=parameters.get("quantity"),
+            quantity=quantity,
+            entry_delay_bars=entry_delay_bars,
         )
-        normalized_summary = _scenario_summary(scenario_id, normalized)
+        normalized_summary = _scenario_summary(scenario_id, normalized, defaults=scenario)
         source_summary["summary"] = normalized_summary["summary"]
+        source_summary["strategy_parameters"] = normalized_summary["strategy_parameters"]
         source_summary["normalized_input_identity"] = normalized_summary["input_identity"]
         return source_summary
 
@@ -581,7 +644,7 @@ class WebService:
         *,
         scenario_id: str,
         input_identity: dict[str, object],
-        parameters: dict[str, str | None] | None = None,
+        parameters: dict[str, object] | None = None,
         request_id: str,
     ) -> tuple[JobRecord, bool]:
         with self._lock:
@@ -589,13 +652,12 @@ class WebService:
             if _scenario_identity(scenario) != input_identity:
                 raise InputChangedError("scenario input changed; validate it again")
             if parameters is not None:
-                initial_cash = parameters.get("initial_cash")
-                if type(initial_cash) is not str:
-                    raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
+                initial_cash, quantity, entry_delay_bars = _parameter_values(parameters)
                 scenario = parameterize_backtest_scenario(
                     scenario,
                     initial_cash=initial_cash,
-                    quantity=parameters.get("quantity"),
+                    quantity=quantity,
+                    entry_delay_bars=entry_delay_bars,
                 )
             snapshot_bytes, input_sha256 = _input_snapshot(
                 scenario_id,

@@ -69,6 +69,8 @@ select, input { width: 100%; padding: 11px 12px; border: 1px solid #304158; bord
 input[readonly] { color: #8f9eaf; background: #101925; }
 .parameter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
 .parameter-grid small { color: #718096; font-size: 10px; }
+.strategy-parameters { margin-top: 18px; padding-top: 14px; border-top: 1px solid #263549; }
+.strategy-parameters h3 { margin: 0; color: #c9d4df; font-size: 12px; }
 button, .downloads a { padding: 9px 13px; border: 1px solid #3b4c61; border-radius: 4px; color: #dbe5ee; background: #162231; font: inherit; cursor: pointer; }
 button:hover, .downloads a:hover { border-color: #53c7a0; }
 button:disabled { cursor: not-allowed; opacity: .45; }

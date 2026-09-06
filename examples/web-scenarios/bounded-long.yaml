@@ -14,7 +14,7 @@ instrument:
   quantity_quantum: '1'
   currency_quantum: '0.01'
   contract_multiplier: '1'
-strategy: {id: bounded-long-v1, target_quantity: '2'}
+strategy: {id: bounded-long-v1, target_quantity: '2', entry_delay_bars: 0}
 funding: {currency: USD, initial_cash: '10000'}
 risk: {max_order_quantity: '5', max_position_quantity: '5', max_notional: '1000'}
 execution: {policy: phase1.next-bar-close.v1}

@@ -73,6 +73,9 @@ def test_loads_strict_funded_bounded_long_scenario(tmp_path: Path) -> None:
     assert loaded.strategy_id.value == "bounded-long-v1"
     assert loaded.target_quantity is not None
     assert loaded.target_quantity.text == "2"
+    assert loaded.entry_delay_bars == 0
+    assert loaded.entry_delay_bars_maximum == 1
+    assert json.loads(loaded.canonical_bytes)["strategy"]["entry_delay_bars"] == 0
     assert loaded.initial_cash.text == "10000"
     assert loaded.randomness.document() == {
         "profile": "none",
@@ -81,21 +84,86 @@ def test_loads_strict_funded_bounded_long_scenario(tmp_path: Path) -> None:
     assert loaded.dataset.selection.fingerprint.record_count == 3
 
 
-def test_parameterizes_only_cash_and_quantity_with_new_canonical_identity(tmp_path: Path) -> None:
+def test_entry_delay_maximum_uses_next_bar_eligibility_not_record_count(
+    tmp_path: Path,
+) -> None:
+    scenario_path = _write_valid_scenario(tmp_path)
+    data_path = tmp_path / "prices.csv"
+    data_path.write_text(
+        "schema_version,venue,symbol,interval_start,interval_end,adjustment,open,high,low,close,volume,source,source_sequence,revision,available_at\n"
+        "1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100,101,99,100.5,10,fixture.raw,0,0,2026-01-02T09:31:00.000000Z\n"
+        "1,XNAS,AAPL,2026-01-02T09:31:00.000000Z,2026-01-02T09:32:00.000000Z,raw,101,102,100,101.5,11,fixture.raw,1,0,2026-01-02T09:32:00.000000Z\n"
+        "1,XNAS,AAPL,2026-01-02T09:31:00.000000Z,2026-01-02T09:32:00.000000Z,raw,101,103,100,102,12,fixture.raw,2,1,2026-01-02T09:32:30.000000Z\n",
+        encoding="utf-8",
+    )
+    window = ReplayWindow(
+        datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+        datetime(2026, 1, 2, 9, 33, tzinfo=UTC),
+    )
+    dataset = decode_phase1_ohlcv_csv(data_path.read_bytes(), replay_window=window)
+    document = yaml.safe_load(scenario_path.read_text(encoding="utf-8"))
+    document["data"]["fingerprint"] = {
+        "sha256": dataset.selection.fingerprint.sha256.value,
+        "record_count": dataset.selection.fingerprint.record_count,
+    }
+    scenario_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    loaded = load_backtest_scenario(scenario_path)
+
+    assert loaded.dataset.selection.fingerprint.record_count == 3
+    assert loaded.entry_delay_bars_maximum == 0
+
+
+def test_bounded_long_rejects_when_only_later_root_is_not_matcher_eligible(
+    tmp_path: Path,
+) -> None:
+    scenario_path = _write_valid_scenario(tmp_path)
+    data_path = tmp_path / "prices.csv"
+    data_path.write_text(
+        "schema_version,venue,symbol,interval_start,interval_end,adjustment,open,high,low,close,volume,source,source_sequence,revision,available_at\n"
+        "1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100,101,99,100.5,10,fixture.raw,0,0,2026-01-02T09:31:00.000000Z\n"
+        "1,XNAS,AAPL,2026-01-02T09:31:00.000000Z,2026-01-02T09:32:00.000000Z,raw,101,103,100,102,12,fixture.raw,1,1,2026-01-02T09:32:30.000000Z\n",
+        encoding="utf-8",
+    )
+    window = ReplayWindow(
+        datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+        datetime(2026, 1, 2, 9, 33, tzinfo=UTC),
+    )
+    dataset = decode_phase1_ohlcv_csv(data_path.read_bytes(), replay_window=window)
+    document = yaml.safe_load(scenario_path.read_text(encoding="utf-8"))
+    document["data"]["fingerprint"] = {
+        "sha256": dataset.selection.fingerprint.sha256.value,
+        "record_count": dataset.selection.fingerprint.record_count,
+    }
+    scenario_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(
+        BacktestScenarioError,
+        match="bounded-long-v1 requires a market bar with an executable next bar",
+    ):
+        load_backtest_scenario(scenario_path)
+
+
+def test_parameterizes_cash_and_strategy_parameters_with_new_canonical_identity(
+    tmp_path: Path,
+) -> None:
     source = load_backtest_scenario(_write_valid_scenario(tmp_path))
 
     parameterized = parameterize_backtest_scenario(
         source,
         initial_cash="12000",
         quantity="4",
+        entry_delay_bars=1,
     )
 
     document = json.loads(parameterized.canonical_bytes)
     assert parameterized.initial_cash.text == "12000"
     assert parameterized.target_quantity is not None
     assert parameterized.target_quantity.text == "4"
+    assert parameterized.entry_delay_bars == 1
     assert document["funding"]["initial_cash"] == "12000"
     assert document["strategy"]["target_quantity"] == "4"
+    assert document["strategy"]["entry_delay_bars"] == 1
     assert parameterized.instrument == source.instrument
     assert parameterized.spec_set == source.spec_set
     assert parameterized.dataset is source.dataset
@@ -110,6 +178,23 @@ def test_parameterizes_only_cash_and_quantity_with_new_canonical_identity(tmp_pa
     assert source.initial_cash.text == "10000"
     assert source.target_quantity is not None
     assert source.target_quantity.text == "2"
+    assert source.entry_delay_bars == 0
+
+
+@pytest.mark.parametrize("entry_delay_bars", [-1, 2])
+def test_parameter_contract_rejects_entry_delay_outside_dynamic_bounds(
+    tmp_path: Path,
+    entry_delay_bars: int,
+) -> None:
+    source = load_backtest_scenario(_write_valid_scenario(tmp_path))
+
+    with pytest.raises(BacktestScenarioError, match="entry_delay_bars"):
+        parameterize_backtest_scenario(
+            source,
+            initial_cash="10000",
+            quantity="2",
+            entry_delay_bars=entry_delay_bars,
+        )
 
 
 @pytest.mark.parametrize(
