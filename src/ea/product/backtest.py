@@ -1097,12 +1097,17 @@ def _load_verified_attempt(
 def run_backtest_scenario(
     scenario: LoadedBacktestScenario,
     output_root: Path,
+    *,
+    run_id: RunId | None = None,
 ) -> BacktestRunResult:
     """Run one validated scenario through the existing offline authorities."""
     if type(scenario) is not LoadedBacktestScenario:
         raise BacktestRunError("scenario must be an exact loaded BacktestScenario")
+    if run_id is None:
+        run_id = RunId(str(uuid4()))
+    elif type(run_id) is not RunId:
+        raise BacktestRunError("run_id must be an exact RunId")
     output_root = _safe_output_root(output_root)
-    run_id = RunId(str(uuid4()))
     risk_policy, risk_context = _risk_context(scenario)
     lineage = _lineage(scenario, risk_policy=risk_policy, risk_context=risk_context)
     manifest_bytes = _attempt_manifest_bytes(

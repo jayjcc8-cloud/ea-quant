@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import time
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 
 import pytest
@@ -13,6 +15,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 import ea.web.service as web_service
+from ea.product import run_backtest_scenario as run_product_backtest
 from ea.web.app import WebSettings, create_app
 from ea.web.service import WebBoundaryError, WebService
 from unit.test_backtest_report import _priced_scenario
@@ -87,9 +90,16 @@ def _wait(client: TestClient, job_id: str) -> dict[str, Any]:
 def test_history_is_newest_first_by_persisted_creation_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    job_ids = iter(["ffffffff-ffff-4fff-8fff-ffffffffffff", "00000000-0000-4000-8000-000000000000"])
+    generated_ids = iter(
+        [
+            "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000000",
+            "00000000-0000-4000-8000-000000000002",
+        ]
+    )
     created_at = iter(["2026-09-05T15:00:00.000000Z", "2026-09-05T15:10:00.000000Z"])
-    monkeypatch.setattr(web_service, "uuid4", lambda: next(job_ids))
+    monkeypatch.setattr(web_service, "uuid4", lambda: next(generated_ids))
     monkeypatch.setattr(web_service, "_created_at", lambda: next(created_at))
     settings = _settings(tmp_path)
 
@@ -261,6 +271,63 @@ def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -
         )
         assert conflict.status_code == 409
         assert conflict.json()["error"]["code"] == "input_conflict"
+
+
+def test_idempotency_compares_effective_normalized_input_when_parameters_are_omitted(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        explicit = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "4"},
+                "request_id": "request-explicit-then-omitted-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert explicit.status_code == 202, explicit.text
+        assert _wait(client, explicit.json()["job_id"])["status"] == "succeeded"
+
+        omitted_retry = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-explicit-then-omitted-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert omitted_retry.status_code == 409
+        assert omitted_retry.json()["error"]["code"] == "input_conflict"
+
+        omitted = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-omitted-then-explicit-0002",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert omitted.status_code == 202, omitted.text
+        assert _wait(client, omitted.json()["job_id"])["status"] == "succeeded"
+
+        explicit_retry = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "4"},
+                "request_id": "request-omitted-then-explicit-0002",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert explicit_retry.status_code == 409
+        assert explicit_retry.json()["error"]["code"] == "input_conflict"
 
 
 def test_worker_consumes_input_frozen_at_job_acceptance(
@@ -755,3 +822,57 @@ def test_restart_marks_inflight_job_interrupted_without_rerun(tmp_path: Path) ->
         }
         assert list((settings.workspace / "runs").iterdir()) == []
         assert list((settings.workspace / "reports").iterdir()) == []
+
+
+def test_restart_retains_reserved_attempt_identity_after_real_engine_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    engine_finished = Event()
+    release_worker = Event()
+
+    def pause_after_engine(*args: object, **kwargs: object) -> object:
+        result = run_product_backtest(*args, **kwargs)  # type: ignore[arg-type]
+        engine_finished.set()
+        assert release_worker.wait(10)
+        return result
+
+    monkeypatch.setattr(web_service, "run_backtest_scenario", pause_after_engine)
+    service = WebService(settings.scenario_root, settings.workspace)
+    service.start()
+    recovered: WebService | None = None
+    try:
+        validated = service.registry.validate("bounded-long.yaml")
+        accepted, created = service.create_job(
+            scenario_id="bounded-long.yaml",
+            input_identity=cast(dict[str, object], validated["input_identity"]),
+            request_id="request-interrupted-attempt-0002",
+        )
+        assert created is True
+        assert engine_finished.wait(10)
+
+        persisted = service.get_job(accepted.job_id)
+        assert persisted.status == "running"
+        assert persisted.attempt_id is not None
+        assert persisted.engine_run_id is None
+        attempt = settings.workspace / "runs" / persisted.attempt_id
+        assert (attempt / "result.json").is_file()
+
+        recovered_workspace = tmp_path / "recovered-workspace"
+        shutil.copytree(settings.workspace, recovered_workspace)
+        recovered = WebService(settings.scenario_root, recovered_workspace)
+        recovered.start()
+
+        interrupted = recovered.get_job(accepted.job_id)
+        assert interrupted.status == "interrupted"
+        assert interrupted.attempt_id == persisted.attempt_id
+        assert interrupted.engine_run_id is None
+        assert interrupted.report_sha256 is None
+        assert interrupted.summary_sha256 is None
+        assert len(list((recovered_workspace / "runs").iterdir())) == 1
+        assert not (recovered_workspace / "reports" / accepted.job_id).exists()
+    finally:
+        if recovered is not None:
+            recovered.stop()
+        release_worker.set()
+        service.stop()

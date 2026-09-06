@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ea.core import RunId
 from ea.product import (
     BacktestRunFailure,
     BacktestScenarioError,
@@ -584,25 +585,6 @@ class WebService:
         request_id: str,
     ) -> tuple[JobRecord, bool]:
         with self._lock:
-            existing_id = self._requests.get(request_id)
-            if existing_id is not None:
-                existing = self._jobs[existing_id]
-                if existing.scenario_id != scenario_id or existing.input_identity != input_identity:
-                    raise RequestConflictError("request_id is already bound to different input")
-                if parameters is not None:
-                    if existing.input_snapshot_bytes is None:
-                        raise RequestConflictError("request_id is already bound to different input")
-                    snapshot = json.loads(existing.input_snapshot_bytes)
-                    scenario_document = snapshot["scenario"]
-                    if scenario_document["funding"]["initial_cash"] != parameters.get(
-                        "initial_cash"
-                    ) or scenario_document["strategy"].get("target_quantity") != parameters.get(
-                        "quantity"
-                    ):
-                        raise RequestConflictError("request_id is already bound to different input")
-                return existing, False
-            if self._active is not None:
-                raise ServiceBusyError("one local backtest is already active")
             scenario = self.registry.load(scenario_id)
             if _scenario_identity(scenario) != input_identity:
                 raise InputChangedError("scenario input changed; validate it again")
@@ -615,13 +597,26 @@ class WebService:
                     initial_cash=initial_cash,
                     quantity=parameters.get("quantity"),
                 )
-            job_id = str(uuid4())
-            scenario = self._materialize_scenario(job_id, scenario)
             snapshot_bytes, input_sha256 = _input_snapshot(
                 scenario_id,
                 scenario,
                 input_identity,
             )
+            existing_id = self._requests.get(request_id)
+            if existing_id is not None:
+                existing = self._jobs[existing_id]
+                if (
+                    existing.scenario_id != scenario_id
+                    or existing.input_identity != input_identity
+                    or existing.input_snapshot_bytes != snapshot_bytes
+                ):
+                    raise RequestConflictError("request_id is already bound to different input")
+                return existing, False
+            if self._active is not None:
+                raise ServiceBusyError("one local backtest is already active")
+            job_id = str(uuid4())
+            attempt_id = RunId(str(uuid4()))
+            scenario = self._materialize_scenario(job_id, scenario)
             record = JobRecord(
                 job_id=job_id,
                 request_id=request_id,
@@ -631,6 +626,7 @@ class WebService:
                 created_at=_created_at(),
                 input_snapshot_bytes=snapshot_bytes,
                 input_sha256=input_sha256,
+                attempt_id=attempt_id.value,
             )
             self._store(record)
             self._active = record.job_id
@@ -642,9 +638,17 @@ class WebService:
             record = replace(self._jobs[job_id], status="running")
             self._store(record)
         try:
-            result = run_backtest_scenario(scenario, self.runs_dir)
+            if record.attempt_id is None:
+                raise RuntimeError("accepted Web job has no reserved attempt identity")
+            result = run_backtest_scenario(
+                scenario,
+                self.runs_dir,
+                run_id=RunId(record.attempt_id),
+            )
             run_id = result.output_directory.name
-            record = replace(record, attempt_id=run_id, engine_run_id=run_id)
+            if run_id != record.attempt_id:
+                raise RuntimeError("engine attempt identity conflicts with accepted Web job")
+            record = replace(record, engine_run_id=run_id)
             with self._lock:
                 self._store(record)
             try:
@@ -678,14 +682,21 @@ class WebService:
                     message=None,
                 )
         except BacktestRunFailure as error:
-            completed = replace(
-                record,
-                status="failed",
-                attempt_id=error.output_directory.name,
-                engine_run_id=error.output_directory.name,
-                error_code=error.code.value,
-                message=str(error),
-            )
+            if error.output_directory.name != record.attempt_id:
+                completed = replace(
+                    record,
+                    status="failed",
+                    error_code="web.internal_failure",
+                    message="the local backtest failed unexpectedly",
+                )
+            else:
+                completed = replace(
+                    record,
+                    status="failed",
+                    engine_run_id=error.output_directory.name,
+                    error_code=error.code.value,
+                    message=str(error),
+                )
         except (BacktestScenarioError, InputChangedError):
             completed = replace(
                 record,

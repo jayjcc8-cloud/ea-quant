@@ -248,6 +248,21 @@ def test_equivalent_fresh_attempts_have_distinct_run_ids_and_same_semantics(
     assert first["semantic_outcome_sha256"] == second["semantic_outcome_sha256"]
 
 
+def test_run_uses_caller_reserved_attempt_identity(tmp_path: Path) -> None:
+    scenario = load_backtest_scenario(_scenario(tmp_path / "input"))
+    reserved = RunId("00000000-0000-4000-8000-000000000170")
+
+    completed = run_backtest_scenario(
+        scenario,
+        (tmp_path / "runs").resolve(),
+        run_id=reserved,
+    )
+    report = _report(completed.output_directory)
+
+    assert completed.output_directory.name == reserved.value
+    assert report["run_id"] == reserved.value
+
+
 def test_reconciliation_mismatch_retains_failure_without_success_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
