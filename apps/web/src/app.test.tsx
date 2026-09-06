@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type InputSnapshot } from './app'
@@ -69,6 +69,11 @@ const secondReport: BacktestReport = {
     execution: { order: { quantity: '4', side: 'buy' }, fill: { quantity: '4', price: '101.5', side: 'buy' } },
   },
 }
+const thirdJob: BacktestJob = {
+  ...secondJob, job_id: 'job-3', request_id: 'request-3', engine_run_id: 'run-3', attempt_id: 'run-3',
+  created_at: '2026-09-05T15:15:00.000000Z', input_snapshot: snapshot('10000', '3', 1), input_sha256: '8'.repeat(64),
+}
+const thirdReport: BacktestReport = { ...secondReport, run_id: 'run-3' }
 const rejectedJob: BacktestJob = {
   ...job, job_id: 'job-risk', request_id: 'request-risk', status: 'failed', engine_run_id: 'run-risk',
   attempt_id: 'run-risk', report_sha256: null, summary_sha256: null, report_ready: false,
@@ -158,7 +163,7 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByRole('heading', { name: 'Experiment Batch' })).toBeTruthy()
     expect(screen.getByText('risk.rejected')).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 1 2 0 succeeded 17 USD .*0.17% View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% View/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Run 2 2 0 risk.rejected No report View/i })).toBeTruthy()
     await user.click(screen.getByLabelText('Select job-1 for comparison'))
     await user.click(screen.getByLabelText('Select job-risk for comparison'))
@@ -167,6 +172,182 @@ describe('EA Quant local Web backtests', () => {
     expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Parameter Delta' })).toBeTruthy()
     expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
+  })
+
+  it('sorts report values exactly with stable ties and missing values last in both directions', async () => {
+    const user = userEvent.setup()
+    const analysisBatch = {
+      ...batch,
+      member_job_ids: ['job-1', 'job-2', 'job-3', 'job-risk'],
+      member_count: 4,
+      members: [
+        { ...job, presentation_status: 'succeeded' },
+        { ...secondJob, presentation_status: 'succeeded' },
+        { ...thirdJob, presentation_status: 'succeeded' },
+        { ...rejectedJob, presentation_status: 'risk.rejected' },
+      ],
+    }
+    window.history.pushState({}, '', '/batches/batch-1')
+    render(<App api={adapter({
+      getBatch: async () => analysisBatch,
+      getReport: async (jobId) => jobId === 'job-1' ? report : jobId === 'job-2' ? secondReport : thirdReport,
+    })} />)
+
+    await screen.findByRole('row', { name: /Run 3 3 1 succeeded/i })
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'net_pnl')
+    await user.selectOptions(screen.getByLabelText('Direction'), 'descending')
+    await waitFor(() => expect(screen.getAllByRole('row').slice(1).map((row) => row.textContent)).toEqual([
+      expect.stringContaining('Run 2'),
+      expect.stringContaining('Run 3'),
+      expect.stringContaining('Run 1'),
+      expect.stringContaining('Run 4'),
+    ]))
+
+    await user.selectOptions(screen.getByLabelText('Direction'), 'ascending')
+    await waitFor(() => expect(screen.getAllByRole('row').slice(1).map((row) => row.textContent)).toEqual([
+      expect.stringContaining('Run 1'),
+      expect.stringContaining('Run 2'),
+      expect.stringContaining('Run 3'),
+      expect.stringContaining('Run 4'),
+    ]))
+  })
+
+  it('sorts canonical parameter values ascending and descending', async () => {
+    const user = userEvent.setup()
+    const analysisBatch = {
+      ...batch,
+      member_job_ids: ['job-2', 'job-1', 'job-3'],
+      member_count: 3,
+      members: [
+        { ...secondJob, presentation_status: 'succeeded' },
+        { ...job, presentation_status: 'succeeded' },
+        { ...thirdJob, presentation_status: 'succeeded' },
+      ],
+    }
+    window.history.pushState({}, '', '/batches/batch-1')
+    render(<App api={adapter({
+      getBatch: async () => analysisBatch,
+      getReport: async (jobId) => jobId === 'job-1' ? report : jobId === 'job-2' ? secondReport : thirdReport,
+    })} />)
+
+    await screen.findByRole('row', { name: /Run 3 3 1 succeeded/i })
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'target_quantity')
+    await waitFor(() => expect(screen.getAllByRole('row').slice(1).map((row) => row.textContent)).toEqual([
+      expect.stringContaining('Run 2'),
+      expect.stringContaining('Run 3'),
+      expect.stringContaining('Run 1'),
+    ]))
+
+    await user.selectOptions(screen.getByLabelText('Direction'), 'descending')
+    await waitFor(() => expect(screen.getAllByRole('row').slice(1).map((row) => row.textContent)).toEqual([
+      expect.stringContaining('Run 1'),
+      expect.stringContaining('Run 3'),
+      expect.stringContaining('Run 2'),
+    ]))
+  })
+
+  it('filters every mixed presentation state and restores all members', async () => {
+    const user = userEvent.setup()
+    const failedJob: BacktestJob = {
+      ...thirdJob, job_id: 'job-failed', request_id: 'request-failed', status: 'failed',
+      report_ready: false, report_sha256: null, summary_sha256: null, error_code: 'execution.failed',
+    }
+    const runningJob: BacktestJob = {
+      ...thirdJob, job_id: 'job-running', request_id: 'request-running', status: 'running',
+      report_ready: false, report_sha256: null, summary_sha256: null,
+    }
+    const queuedJob: BacktestJob = {
+      ...thirdJob, job_id: 'job-queued', request_id: 'request-queued', status: 'accepted',
+      report_ready: false, report_sha256: null, summary_sha256: null,
+    }
+    const mixedBatch = {
+      ...batch,
+      member_job_ids: ['job-1', 'job-risk', 'job-failed', 'job-running', 'job-queued'],
+      member_count: 5,
+      status: 'running' as const,
+      members: [
+        { ...job, presentation_status: 'succeeded' },
+        { ...rejectedJob, presentation_status: 'risk.rejected' },
+        { ...failedJob, presentation_status: 'failed' },
+        { ...runningJob, presentation_status: 'running' },
+        { ...queuedJob, presentation_status: 'queued' },
+      ],
+    }
+    window.history.pushState({}, '', '/batches/batch-1')
+    render(<App api={adapter({ getBatch: async () => mixedBatch })} />)
+
+    await screen.findByLabelText('Select job-queued for comparison')
+    for (const [filter, visibleJob] of [
+      ['succeeded', 'job-1'],
+      ['risk.rejected', 'job-risk'],
+      ['failed', 'job-failed'],
+      ['running', 'job-running'],
+      ['queued', 'job-queued'],
+    ]) {
+      await user.selectOptions(screen.getByLabelText('Status filter'), filter)
+      expect(screen.getAllByRole('row')).toHaveLength(2)
+      expect(screen.getByLabelText(`Select ${visibleJob} for comparison`)).toBeTruthy()
+      if (filter !== 'succeeded') expect(screen.getByText('No report')).toBeTruthy()
+    }
+
+    await user.selectOptions(screen.getByLabelText('Status filter'), 'all')
+    expect(screen.getAllByRole('row')).toHaveLength(6)
+  })
+
+  it('shows the three existing report metrics with currencies and a derived analysis summary', async () => {
+    const euroReport: BacktestReport = {
+      ...secondReport,
+      economics: {
+        ...secondReport.economics,
+        currency: 'EUR',
+        equity: { amount: '10034', currency: 'EUR' },
+        net_pnl: { amount: '34', currency: 'EUR' },
+      },
+    }
+    const analysisBatch = {
+      ...batch,
+      member_job_ids: ['job-1', 'job-2', 'job-risk'],
+      member_count: 3,
+      members: [
+        { ...job, presentation_status: 'succeeded' },
+        { ...secondJob, presentation_status: 'succeeded' },
+        { ...rejectedJob, presentation_status: 'risk.rejected' },
+      ],
+    }
+    window.history.pushState({}, '', '/batches/batch-1')
+    render(<App api={adapter({
+      getBatch: async () => analysisBatch,
+      getReport: async (jobId) => jobId === 'job-1' ? report : euroReport,
+    })} />)
+
+    expect(await screen.findByRole('columnheader', { name: 'Final equity' })).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: 'Net P&L' })).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: 'Total return' })).toBeTruthy()
+    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 2 4 2 succeeded 10034 EUR 34 EUR 0.34% View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 3 2 0 risk.rejected No report View/i })).toBeTruthy()
+    const summary = within(screen.getByRole('region', { name: 'Analysis summary' }))
+    expect(summary.getByText('3', { selector: 'dd[data-summary="total"]' })).toBeTruthy()
+    expect(summary.getByText('2', { selector: 'dd[data-summary="succeeded"]' })).toBeTruthy()
+    expect(summary.getByText('1', { selector: 'dd[data-summary="risk.rejected"]' })).toBeTruthy()
+    expect(summary.getByText('2', { selector: 'dd[data-summary="reports"]' })).toBeTruthy()
+  })
+
+  it('keeps a succeeded member readable when its verified report is unavailable', async () => {
+    window.history.pushState({}, '', '/batches/batch-1')
+    render(<App api={adapter({
+      getBatch: async () => ({
+        ...batch,
+        member_job_ids: ['job-1'],
+        member_count: 1,
+        members: [{ ...job, presentation_status: 'succeeded' }],
+      }),
+      getReport: async () => { throw Object.assign(new Error('verified report is unavailable'), { code: 'report_unavailable' }) },
+    })} />)
+
+    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded No report View/i })).toBeTruthy()
+    expect(screen.queryByText('verified report is unavailable')).toBeNull()
+    expect(screen.getByText('0', { selector: 'dd[data-summary="reports"]' })).toBeTruthy()
   })
 
   it('validates selected real input, clears stale validation, and opens the accepted job', async () => {

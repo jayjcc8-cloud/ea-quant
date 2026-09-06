@@ -94,7 +94,7 @@ try {
   const playwright = join(webRoot, 'node_modules', '.bin', 'playwright')
   const completed = spawn(playwright, ['test', '--config', 'playwright.config.ts'], {
     cwd: webRoot,
-    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args) },
+    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace },
     stdio: 'inherit',
   })
   const code = await new Promise((resolveExit) => completed.on('exit', resolveExit))

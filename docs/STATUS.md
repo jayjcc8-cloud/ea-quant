@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web parameter experiments.**
+**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web experiment analysis.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -110,13 +110,17 @@ external write, deployment, or live capability is part of this objective.
   normal jobs serially through the existing engine, and persists only batch-to-job membership.
 - Batch detail derives presentation state from member jobs, keeps mixed failures readable, reuses
   formal-report summaries and pair comparison, and survives restart without React-state authority.
+- ADR 0033 derives a bounded Analysis V1 directly on batch detail: all members retain canonical
+  parameters and status, while verified reports expose equity, net P&L, and total return with
+  currency. Explicit exact-decimal sorting, status filtering, stable missing-last behavior, and
+  the existing pair comparison support human judgment without ranking or recommendation.
 
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
 backtest/reporting product, not the broader Phase 2 research, paper, or live roadmap. Arbitrary
 instruction-level or Web recovery, symbol/data editing, uploads, broader experiment tracking,
-automatic optimization, performance analytics, strategy plugins, paper/live execution,
+automatic optimization, broader performance analytics, strategy plugins, paper/live execution,
 package-registry publication, and deployment remain unavailable. Phase 1.1/#125 and Phase 2 have
 not been activated.
 
@@ -147,6 +151,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0030 — Local Web offline backtest integration](adr/0030-local-web-offline-backtest-integration.md)
 - [ADR 0031 — Local Web Research Loop V1](adr/0031-local-web-research-loop-v1.md)
 - [ADR 0032 — Web Bounded Experiment Batch V1](adr/0032-web-bounded-experiment-batch-v1.md)
+- [ADR 0033 — Web Experiment Analysis V1](adr/0033-web-experiment-analysis-v1.md)
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
@@ -181,6 +186,9 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [#174 — Web Bounded Experiment Batch V1](https://github.com/jayjcc8-cloud/ea-quant/issues/174)
   groups 2-10 explicit parameter combinations into normal persisted Web jobs with whole-batch
   validation, serial execution, restart recovery, mixed-state detail, and comparison reuse.
+- [#176 — Web Experiment Analysis V1](https://github.com/jayjcc8-cloud/ea-quant/issues/176)
+  derives sortable and filterable batch analysis from existing jobs, snapshots, and reports while
+  preserving currency, missing-report, restart, and human-judgment boundaries.
 - R9/R10 Issues #149, #150, #152, #153 and PR #151 retain provenance as superseded hardening
   history after the reset governance PR merges; they are not an active delivery chain.
 
@@ -214,6 +222,8 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
   a success with risk rejection, persists across restart, and rejects free-text symbol input.
 - [x] The local Web path creates a bounded 2-10 member experiment set, executes normal jobs,
   persists grouping and member evidence across restart, and pair-compares any two members.
+- [x] Batch analysis displays canonical inputs beside selected formal results, sorts and filters
+  the derived read model, preserves missing values and currencies, and rebuilds after restart.
 
 These conditions complete Issues #81, #161, and #83 and the bounded v0.2.0 GitHub prerelease gate
 in #84. They do not activate Phase 1.1/#125, Phase 2, package-registry publication, or deployment.
