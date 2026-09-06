@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
-import { exactDelta } from './decimal'
+import { compareCanonicalDecimal, exactDelta } from './decimal'
 
 export type InputIdentity = { scenario_sha256: string; data_sha256: string; record_count: number }
 export type StrategyParameterContract = {
@@ -132,6 +132,9 @@ function Shell({ api }: { api: ApiAdapter }) {
 }
 
 type BatchConfiguration = { target_quantity: string; entry_delay_bars: number }
+type BatchStatusFilter = 'all' | 'succeeded' | 'risk.rejected' | 'failed' | 'running' | 'queued'
+type BatchSortField = 'member' | 'target_quantity' | 'entry_delay_bars' | 'equity' | 'net_pnl' | 'total_return'
+type SortDirection = 'ascending' | 'descending'
 
 function BatchCreator({ api }: { api: ApiAdapter }) {
   const navigate = useNavigate()
@@ -220,6 +223,9 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
   const [batch, setBatch] = useState<ExperimentBatch | null>(null)
   const [reports, setReports] = useState<Record<string, BacktestReport | null>>({})
   const [comparison, setComparison] = useState<string[]>([])
+  const [statusFilter, setStatusFilter] = useState<BatchStatusFilter>('all')
+  const [sortField, setSortField] = useState<BatchSortField>('member')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('ascending')
   const [error, setError] = useState<string | null>(null)
   const generation = useRef(0)
 
@@ -261,18 +267,57 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
   const toggle = (jobId: string) => setComparison((current) => current.includes(jobId)
     ? current.filter((value) => value !== jobId)
     : current.length < 2 ? [...current, jobId] : [current[1], jobId])
+  const rows = useMemo(() => {
+    if (!batch) return []
+    const result = batch.members
+      .map((member, index) => ({ member, ordinal: index + 1, report: reports[member.job_id] }))
+      .filter(({ member }) => statusFilter === 'all' || member.presentation_status === statusFilter)
+    const value = (row: typeof result[number]): string | undefined => {
+      const strategy = row.member.input_snapshot?.scenario.strategy
+      if (sortField === 'target_quantity') return strategy?.target_quantity ?? undefined
+      if (sortField === 'entry_delay_bars') return String(strategy?.entry_delay_bars ?? 0)
+      if (sortField === 'equity') return row.report?.economics.equity.amount
+      if (sortField === 'net_pnl') return row.report?.economics.net_pnl.amount
+      if (sortField === 'total_return') return row.report?.economics.total_return.value
+      return String(row.ordinal)
+    }
+    return result.sort((left, right) => {
+      const leftValue = value(left)
+      const rightValue = value(right)
+      if (leftValue === undefined || rightValue === undefined) {
+        if (leftValue === rightValue) return left.ordinal - right.ordinal
+        return leftValue === undefined ? 1 : -1
+      }
+      const compared = compareCanonicalDecimal(leftValue, rightValue)
+      return compared === 0 ? left.ordinal - right.ordinal : compared * (sortDirection === 'ascending' ? 1 : -1)
+    })
+  }, [batch, reports, sortDirection, sortField, statusFilter])
+  const analysisSummary = useMemo(() => {
+    const members = batch?.members ?? []
+    const count = (status: string) => members.filter((member) => member.presentation_status === status).length
+    return {
+      total: members.length,
+      succeeded: count('succeeded'),
+      riskRejected: count('risk.rejected'),
+      failed: count('failed'),
+      running: count('running'),
+      queued: count('queued'),
+      reports: Object.values(reports).filter((report) => report !== null).length,
+    }
+  }, [batch, reports])
   if (!batch) return <><PageTitle title="Experiment Batch" subtitle="Loading persisted batch members." />{error && <section className="notice error">{error}</section>}</>
   return <>
     <PageTitle title="Experiment Batch" subtitle={`${batch.scenario_id} · batch ${batch.batch_id}`} status={batch.status} />
     {error && <section className="notice error">{error}</section>}
     <div className="result-toolbar"><Link to="/batches/new">← Run another batch</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
     <section className="panel identity-panel"><header><h2>Batch identity</h2><span>Persisted grouping only</span></header><dl className="summary-list"><div><dt>Created</dt><dd>{batch.created_at}</dd></div><div><dt>Scenario</dt><dd>{batch.scenario_id}</dd></div><div><dt>Members</dt><dd>{batch.member_count}</dd></div></dl></section>
-    <section className="panel comparison-panel"><header><h2>Member runs</h2><span>Real jobs and formal reports</span></header><table><thead><tr><th>Run</th><th>target_quantity</th><th>entry_delay_bars</th><th>Status</th><th>Key result</th><th>Action</th><th>Compare</th></tr></thead><tbody>{batch.members.map((member, index) => {
+    <section className="panel analysis-summary" aria-label="Analysis summary"><header><h2>Analysis summary</h2><span>Derived from current jobs and verified reports</span></header><dl className="summary-list"><div><dt>Total members</dt><dd data-summary="total">{analysisSummary.total}</dd></div><div><dt>Succeeded</dt><dd data-summary="succeeded">{analysisSummary.succeeded}</dd></div><div><dt>Risk rejected</dt><dd data-summary="risk.rejected">{analysisSummary.riskRejected}</dd></div><div><dt>Failed</dt><dd data-summary="failed">{analysisSummary.failed}</dd></div><div><dt>Running</dt><dd data-summary="running">{analysisSummary.running}</dd></div><div><dt>Queued</dt><dd data-summary="queued">{analysisSummary.queued}</dd></div><div><dt>Reports available</dt><dd data-summary="reports">{analysisSummary.reports}</dd></div></dl></section>
+    <section className="panel comparison-panel"><header><h2>Member runs</h2><span>Real jobs and formal reports</span></header><div className="analysis-controls"><div><label htmlFor="batch-status-filter">Status filter</label><select id="batch-status-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as BatchStatusFilter)}><option value="all">All</option><option value="succeeded">Succeeded</option><option value="risk.rejected">Risk Rejected</option><option value="failed">Failed</option><option value="running">Running</option><option value="queued">Queued</option></select></div><div><label htmlFor="batch-sort">Sort by</label><select id="batch-sort" value={sortField} onChange={(event) => setSortField(event.target.value as BatchSortField)}><option value="member">Member order</option><option value="target_quantity">target_quantity</option><option value="entry_delay_bars">entry_delay_bars</option><option value="equity">Final equity</option><option value="net_pnl">Net P&amp;L</option><option value="total_return">Total return</option></select></div><div><label htmlFor="batch-sort-direction">Direction</label><select id="batch-sort-direction" value={sortDirection} onChange={(event) => setSortDirection(event.target.value as SortDirection)}><option value="ascending">Ascending</option><option value="descending">Descending</option></select></div></div><table><thead><tr><th>Run</th><th>target_quantity</th><th>entry_delay_bars</th><th>Status</th><th>Final equity</th><th>Net P&amp;L</th><th>Total return</th><th>Action</th><th>Compare</th></tr></thead><tbody>{rows.map(({ member, ordinal, report }) => {
       const strategy = member.input_snapshot?.scenario.strategy
-      const report = reports[member.job_id]
-      const currency = report?.economics.net_pnl.currency ?? report?.economics.currency ?? ''
-      const result = report ? `${report.economics.net_pnl.amount}${currency ? ` ${currency}` : ''} · ${percent(report.economics.total_return.value)}` : 'No report'
-      return <tr key={member.job_id}><th>Run {index + 1}</th><td>{strategy?.target_quantity ?? 'flat'}</td><td>{strategy?.entry_delay_bars ?? 0}</td><td><span className={`status status-${member.presentation_status}`}>{member.presentation_status}</span></td><td>{result}</td><td><Link to={`/backtests/${member.job_id}`}>View</Link></td><td><input type="checkbox" aria-label={`Select ${member.job_id} for comparison`} checked={comparison.includes(member.job_id)} onChange={() => toggle(member.job_id)} /></td></tr>
+      const equityCurrency = report?.economics.equity.currency ?? report?.economics.currency
+      const pnlCurrency = report?.economics.net_pnl.currency ?? report?.economics.currency
+      const money = (amount: string, currency: string | undefined) => `${amount} ${currency ?? 'Currency unavailable'}`
+      return <tr key={member.job_id}><th>Run {ordinal}</th><td>{strategy?.target_quantity ?? 'flat'}</td><td>{strategy?.entry_delay_bars ?? 0}</td><td><span className={`status status-${member.presentation_status}`}>{member.presentation_status}</span></td>{report ? <><td>{money(report.economics.equity.amount, equityCurrency)}</td><td>{money(report.economics.net_pnl.amount, pnlCurrency)}</td><td>{percent(report.economics.total_return.value)}</td></> : <td colSpan={3}>No report</td>}<td><Link to={`/backtests/${member.job_id}`}>View</Link></td><td><input type="checkbox" aria-label={`Select ${member.job_id} for comparison`} checked={comparison.includes(member.job_id)} onChange={() => toggle(member.job_id)} /></td></tr>
     })}</tbody></table><button className="primary compare-button" disabled={comparison.length !== 2} onClick={() => navigate(`/backtests/compare/${comparison[0]}/${comparison[1]}`)}>Compare selected runs</button></section>
   </>
 }

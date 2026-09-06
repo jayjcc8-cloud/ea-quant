@@ -1,7 +1,7 @@
 # EA Quant Web
 
 This is the Dark Professional frontend for the real local offline backtest and bounded research
-loop defined by ADRs 0030-0032. The production build talks only to the same-origin `/api`
+loop defined by ADRs 0030-0033. The production build talks only to the same-origin `/api`
 served by `ea web serve`; it does not fall back to mock business data when the service is
 unavailable. Component tests inject an explicit fake adapter, while the Playwright suite uses an
 installed candidate wheel, actual loopback HTTP, the existing engine, and formal reports.
@@ -16,8 +16,10 @@ a new comparison artifact or making causal claims.
 
 `/batches/new` creates one explicit 2-10 member parameter set for a single scenario. The backend
 validates the complete set before creating normal jobs, executes them serially, and persists only
-the batch-to-job relationship. `/batches/{batch_id}` derives member states and stable report
-summaries after refresh or restart, and any two members reuse the existing comparison.
+the batch-to-job relationship. `/batches/{batch_id}` derives member states, canonical parameters,
+equity, net P&L, and total return after refresh or restart. Its ephemeral controls filter by state
+and sort exact decimal values with stable missing-last behavior; any two members reuse the existing
+currency-safe comparison. The UI never names a best or recommended run.
 
 Run the supported frontend checks from this directory:
 

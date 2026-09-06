@@ -43,3 +43,12 @@ export function exactDelta(before: string, after: string, decimalShift = 0): str
   }
   return format(difference, scale)
 }
+
+export function compareCanonicalDecimal(leftValue: string, rightValue: string): number {
+  const left = parse(leftValue)
+  const right = parse(rightValue)
+  const scale = Math.max(left.scale, right.scale)
+  const leftCoefficient = left.coefficient * power10(scale - left.scale)
+  const rightCoefficient = right.coefficient * power10(scale - right.scale)
+  return leftCoefficient < rightCoefficient ? -1 : leftCoefficient > rightCoefficient ? 1 : 0
+}

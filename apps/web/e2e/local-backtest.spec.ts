@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 
 const baseURL = process.env.EA_WEB_BASE_URL ?? 'http://127.0.0.1:8765'
 
@@ -109,23 +111,43 @@ test('installed browser completes the bounded local Web research loop', async ({
   await expect(page.getByLabel('Run 1 entry delay bars')).toHaveAttribute('max', '2')
   await page.getByLabel('Run 2 quantity').fill('4')
   await page.getByLabel('Run 2 entry delay bars').fill('2')
+  await page.getByRole('button', { name: 'Add configuration' }).click()
+  await page.getByLabel('Run 3 quantity').fill('100')
   await page.getByRole('button', { name: 'Run batch' }).click()
   await expect(page).toHaveURL(/\/batches\/[0-9a-f-]+$/)
   const batchURL = page.url()
   await expect(page.locator('.page-title .status')).toHaveText('complete', { timeout: 20_000 })
-  await expect(page.getByRole('row', { name: /Run 1 2 0 succeeded 17 USD .*0.17% View/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 0 USD .*0% View/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% View/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 10000 USD 0 USD 0% View/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Run 3 100 0 succeeded/i })).toBeVisible()
   const batchEvidence = await page.evaluate(async () => {
     const response = await fetch(new URL(window.location.href).pathname.replace('/batches/', '/api/batches/'))
     return response.json()
   })
   expect(batchEvidence.schema).toBe('ea.local-web-batch.v1')
-  expect(batchEvidence.member_count).toBe(2)
-  expect(batchEvidence.members.map((member: { status: string }) => member.status)).toEqual(['succeeded', 'succeeded'])
+  expect(batchEvidence.member_count).toBe(3)
+  expect(batchEvidence.members.map((member: { status: string }) => member.status)).toEqual(['succeeded', 'succeeded', 'succeeded'])
   expect(batchEvidence.members.map((member: { input_snapshot: { scenario: { strategy: unknown } } }) => member.input_snapshot.scenario.strategy)).toEqual([
     { id: 'bounded-long-v1', target_quantity: '2', entry_delay_bars: 0 },
     { id: 'bounded-long-v1', target_quantity: '4', entry_delay_bars: 2 },
+    { id: 'bounded-long-v1', target_quantity: '100', entry_delay_bars: 0 },
   ])
+  const workspace = process.env.EA_WEB_WORKSPACE
+  expect(workspace).toBeTruthy()
+  rmSync(join(workspace!, 'reports', batchEvidence.member_job_ids[2], 'report.json'))
+  await page.reload()
+  await expect(page.getByRole('row', { name: /Run 3 100 0 succeeded No report View/i })).toBeVisible()
+  await expect(page.locator('dd[data-summary="reports"]')).toHaveText('2')
+  await page.getByLabel('Sort by').selectOption('net_pnl')
+  await page.getByLabel('Direction').selectOption('ascending')
+  await expect(page.locator('tbody tr')).toHaveText([/Run 2/, /Run 1/, /Run 3/])
+  await page.getByLabel('Direction').selectOption('descending')
+  await expect(page.locator('tbody tr')).toHaveText([/Run 1/, /Run 2/, /Run 3/])
+  await page.getByLabel('Status filter').selectOption('failed')
+  await expect(page.locator('tbody tr')).toHaveCount(0)
+  await page.getByLabel('Status filter').selectOption('succeeded')
+  await expect(page.locator('tbody tr')).toHaveCount(3)
+  await page.getByLabel('Status filter').selectOption('all')
   await page.getByLabel(`Select ${batchEvidence.member_job_ids[0]} for comparison`).check()
   await page.getByLabel(`Select ${batchEvidence.member_job_ids[1]} for comparison`).check()
   await page.getByRole('button', { name: 'Compare selected runs' }).click()
@@ -197,7 +219,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   expect((await reportDownload).suggestedFilename()).toBe('report.json')
 
   await page.goto(batchURL)
-  await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 0 USD .*0% View/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 10000 USD 0 USD 0% View/i })).toBeVisible()
   const serverPid = Number(process.env.EA_WEB_SERVER_PID)
   expect(Number.isSafeInteger(serverPid)).toBe(true)
   process.kill(serverPid, 'SIGTERM')
@@ -213,8 +235,10 @@ test('installed browser completes the bounded local Web research loop', async ({
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Experiment Batch' })).toBeVisible()
     await expect(page.locator('.page-title .status')).toHaveText('complete')
-    await expect(page.getByRole('row', { name: /Run 1 2 0 succeeded 17 USD .*0.17% View/i })).toBeVisible()
-    await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 0 USD .*0% View/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% View/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 10000 USD 0 USD 0% View/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /Run 3 100 0 succeeded No report View/i })).toBeVisible()
+    await expect(page.locator('dd[data-summary="reports"]')).toHaveText('2')
     await page.goto(successComparisonURL)
     await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
   } finally {
