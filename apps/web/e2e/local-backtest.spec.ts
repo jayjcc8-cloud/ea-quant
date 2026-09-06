@@ -91,13 +91,13 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.getByRole('button', { name: 'Compare selected runs' }).click()
   await expect(page).toHaveURL(`/backtests/compare/${baseline.jobId}/${changed.jobId}`)
   await expect(page.getByRole('row', { name: /Quantity 2 4 Changed/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Net P&L 17 34 \+17/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Net P&L 17 USD 34 USD \+17 USD/i })).toBeVisible()
   await expect(page.getByRole('row', { name: /Return 0.17% 0.34% \+0.17 pp/i })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('success-success-comparison.png'), fullPage: true })
   const successComparisonURL = page.url()
   await page.reload()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeVisible()
 
   await useParameters(page, baseline.jobId)
   await page.getByLabel('Initial cash').fill('50')
@@ -112,8 +112,8 @@ test('installed browser completes the bounded local Web research loop', async ({
 
   await page.goto(`/backtests/compare/${baseline.jobId}/${rejectedJobId}`)
   await expect(page.getByText('risk.rejected')).toBeVisible()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 No report —/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Net P&L 17 No report —/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 USD No report —/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Net P&L 17 USD No report —/i })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('success-risk-rejected-comparison.png'), fullPage: true })
 
   const boundary = await page.evaluate(async () => {
@@ -151,7 +151,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   expect((await reportDownload).suggestedFilename()).toBe('report.json')
 
   await page.goto(successComparisonURL)
-  await expect(page.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeVisible()
   const serverPid = Number(process.env.EA_WEB_SERVER_PID)
   expect(Number.isSafeInteger(serverPid)).toBe(true)
   process.kill(serverPid, 'SIGTERM')
@@ -165,7 +165,7 @@ test('installed browser completes the bounded local Web research loop', async ({
     restarted = spawn(executable!, args, { stdio: 'ignore' })
     await waitForHealth()
     await page.reload()
-    await expect(page.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeVisible()
   } finally {
     if (restarted?.pid) process.kill(restarted.pid, 'SIGTERM')
   }

@@ -157,11 +157,44 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Quantity 2 4 Changed/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Final Equity 10017 10034 \+17/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Net P&L 17 34 \+17/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Net P&L 17 USD 34 USD \+17 USD/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Return 0.17% 0.34% \+0.17 pp/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Orders 1 1 0/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Fills 1 1 0/i })).toBeTruthy()
+  })
+
+  it('does not subtract monetary results with different settlement currencies', async () => {
+    const euroJob: BacktestJob = {
+      ...secondJob,
+      input_snapshot: {
+        ...secondJob.input_snapshot!,
+        scenario: {
+          ...secondJob.input_snapshot!.scenario,
+          funding: { ...secondJob.input_snapshot!.scenario.funding, currency: 'EUR' },
+        },
+      },
+    }
+    const euroReport: BacktestReport = {
+      ...secondReport,
+      economics: {
+        ...secondReport.economics,
+        currency: 'EUR',
+        initial_funding: { amount: '10000', currency: 'EUR' },
+        ending_cash: [{ amount: '9594', currency: 'EUR' }],
+        equity: { amount: '10034', currency: 'EUR' },
+        net_pnl: { amount: '34', currency: 'EUR' },
+      },
+    }
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={adapter({
+      getBacktest: async (jobId) => jobId === 'job-1' ? job : euroJob,
+      getReport: async (jobId) => jobId === 'job-1' ? report : euroReport,
+    })} />)
+
+    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Final Equity 10017 USD 10034 EUR Different currencies/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Net P&L 17 USD 34 EUR Different currencies/i })).toBeTruthy()
   })
 
   it('compares success with risk rejection without fabricating metrics or deltas', async () => {
@@ -174,8 +207,25 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByText('risk.rejected')).toBeTruthy()
     expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
-    expect(screen.getByRole('row', { name: /Final Equity 10017 No report —/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Final Equity 10017 USD No report —/i })).toBeTruthy()
     expect(reportRequests).toBe(1)
+  })
+
+  it('keeps comparison available when one persisted report is unavailable', async () => {
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={adapter({
+      getBacktest: async (jobId) => jobId === 'job-1' ? job : secondJob,
+      getReport: async (jobId) => {
+        if (jobId === 'job-1') throw Object.assign(new Error('verified report is unavailable'), { code: 'report_unavailable' })
+        return secondReport
+      },
+    })} />)
+
+    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Quantity 2 4 Changed/i })).toBeTruthy()
+    expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
+    expect(screen.getByRole('row', { name: /Final Equity No report 10034 USD —/i })).toBeTruthy()
+    expect(screen.queryByText('verified report is unavailable')).toBeNull()
   })
 
   it('shows formal report values without browser-side economic recomputation', async () => {
