@@ -260,17 +260,19 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
   const metricRows = [
     {
       label: 'Final Equity', before: left.report?.economics.equity.amount, after: right.report?.economics.equity.amount, shift: 0, suffix: '',
+      monetary: true,
       leftCurrency: left.report?.economics.equity.currency ?? left.report?.economics.currency,
       rightCurrency: right.report?.economics.equity.currency ?? right.report?.economics.currency,
     },
     {
       label: 'Net P&L', before: left.report?.economics.net_pnl.amount, after: right.report?.economics.net_pnl.amount, shift: 0, suffix: '',
+      monetary: true,
       leftCurrency: left.report?.economics.net_pnl.currency ?? left.report?.economics.currency,
       rightCurrency: right.report?.economics.net_pnl.currency ?? right.report?.economics.currency,
     },
-    { label: 'Return', before: left.report?.economics.total_return.value, after: right.report?.economics.total_return.value, shift: 2, suffix: ' pp' },
-    { label: 'Orders', before: left.report ? String(left.report.economics.counts.orders) : undefined, after: right.report ? String(right.report.economics.counts.orders) : undefined, shift: 0, suffix: '' },
-    { label: 'Fills', before: left.report ? String(left.report.economics.counts.fills) : undefined, after: right.report ? String(right.report.economics.counts.fills) : undefined, shift: 0, suffix: '' },
+    { label: 'Return', before: left.report?.economics.total_return.value, after: right.report?.economics.total_return.value, shift: 2, suffix: ' pp', monetary: false },
+    { label: 'Orders', before: left.report ? String(left.report.economics.counts.orders) : undefined, after: right.report ? String(right.report.economics.counts.orders) : undefined, shift: 0, suffix: '', monetary: false },
+    { label: 'Fills', before: left.report ? String(left.report.economics.counts.fills) : undefined, after: right.report ? String(right.report.economics.counts.fills) : undefined, shift: 0, suffix: '', monetary: false },
   ]
   return <>
     <PageTitle title="Compare Backtests" subtitle="Derived read-only view over two persisted jobs and their formal reports." />
@@ -279,8 +281,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
       {[left, right].map((run, index) => <article className="panel" key={run.job.job_id}><header><h2>Run {index === 0 ? 'A' : 'B'}</h2><span className={`status status-${run.job.status}`}>{run.job.status}</span></header><dl className="summary-list"><div><dt>Web job</dt><dd>{run.job.job_id}</dd></div><div><dt>Engine run</dt><dd>{run.job.engine_run_id ?? 'not available'}</dd></div><div><dt>Input SHA-256</dt><dd>{run.job.input_sha256 ?? 'not available'}</dd></div><div><dt>Outcome</dt><dd>{run.report ? 'Formal report' : run.job.error_code ?? 'No report'}</dd></div></dl>{!run.report && <p className="no-report">No report</p>}</article>)}
     </section>
     <section className="panel comparison-panel"><header><h2>Input Diff</h2><span>Normalized snapshots</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{inputRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{before === after ? 'Unchanged' : 'Changed'}</td></tr>)}</tbody></table></section>
-    <section className="panel comparison-panel"><header><h2>Result Diff</h2><span>Formal reports only</span></header><table><thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Δ</th></tr></thead><tbody>{metricRows.map(({ label, before, after, shift, suffix, leftCurrency, rightCurrency }) => {
-      const monetary = leftCurrency !== undefined || rightCurrency !== undefined
+    <section className="panel comparison-panel"><header><h2>Result Diff</h2><span>Formal reports only</span></header><table><thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Δ</th></tr></thead><tbody>{metricRows.map(({ label, before, after, shift, suffix, monetary, leftCurrency, rightCurrency }) => {
       const leftValue = before === undefined ? 'No report' : label === 'Return' ? percent(before) : `${before}${leftCurrency ? ` ${leftCurrency}` : ''}`
       const rightValue = after === undefined ? 'No report' : label === 'Return' ? percent(after) : `${after}${rightCurrency ? ` ${rightCurrency}` : ''}`
       let delta = '—'

@@ -197,6 +197,26 @@ describe('EA Quant local Web backtests', () => {
     expect(screen.getByRole('row', { name: /Net P&L 17 USD 34 EUR Different currencies/i })).toBeTruthy()
   })
 
+  it('does not subtract monetary results when settlement currencies are unavailable', async () => {
+    const leftReport = structuredClone(report)
+    const rightReport = structuredClone(secondReport)
+    delete leftReport.economics.currency
+    delete leftReport.economics.equity.currency
+    delete leftReport.economics.net_pnl.currency
+    delete rightReport.economics.currency
+    delete rightReport.economics.equity.currency
+    delete rightReport.economics.net_pnl.currency
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={adapter({
+      getBacktest: async (jobId) => jobId === 'job-1' ? job : secondJob,
+      getReport: async (jobId) => jobId === 'job-1' ? leftReport : rightReport,
+    })} />)
+
+    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Final Equity 10017 10034 Currency unavailable/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Net P&L 17 34 Currency unavailable/i })).toBeTruthy()
+  })
+
   it('compares success with risk rejection without fabricating metrics or deltas', async () => {
     window.history.pushState({}, '', '/backtests/compare/job-1/job-risk')
     let reportRequests = 0
