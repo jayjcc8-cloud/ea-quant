@@ -15,6 +15,8 @@ import yaml
 from fastapi.testclient import TestClient
 
 import ea.web.service as web_service
+from ea.core import RunId
+from ea.product import LoadedBacktestScenario
 from ea.product import run_backtest_scenario as run_product_backtest
 from ea.web.app import WebSettings, create_app
 from ea.web.service import WebBoundaryError, WebService
@@ -85,6 +87,212 @@ def _wait(client: TestClient, job_id: str) -> dict[str, Any]:
             return job
         time.sleep(0.01)
     raise AssertionError(f"job {job_id} did not finish")
+
+
+def _batch_request(
+    identity: dict[str, object],
+    runs: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "scenario_id": "bounded-long.yaml",
+        "input_identity": identity,
+        "initial_cash": "10000",
+        "runs": [{"strategy_parameters": run} for run in runs],
+    }
+
+
+def test_batch_api_creates_two_real_jobs_and_recovers_them_after_restart(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        response = client.post(
+            "/api/batches",
+            json=_batch_request(
+                validated["input_identity"],
+                [
+                    {"target_quantity": "2", "entry_delay_bars": 0},
+                    {"target_quantity": "2", "entry_delay_bars": 2},
+                ],
+            ),
+            headers=WRITE_HEADERS,
+        )
+        assert response.status_code == 202, response.text
+        accepted = response.json()
+        assert accepted["schema"] == "ea.local-web-batch.v1"
+        assert accepted["scenario_id"] == "bounded-long.yaml"
+        assert accepted["member_count"] == 2
+        assert accepted["status"] == "running"
+        assert len(accepted["members"]) == 2
+        assert [member["presentation_status"] for member in accepted["members"]] == [
+            "queued",
+            "queued",
+        ]
+
+        completed = [_wait(client, member["job_id"]) for member in accepted["members"]]
+        assert [member["status"] for member in completed] == ["succeeded", "succeeded"]
+        reports = [
+            client.get(f"/api/backtests/{member['job_id']}/report").json() for member in completed
+        ]
+        assert [report["economics"]["execution"]["fill"]["price"] for report in reports] == [
+            "101.5",
+            "110",
+        ]
+        assert [report["economics"]["net_pnl"]["amount"] for report in reports] == ["17", "0"]
+
+        batch_id = accepted["batch_id"]
+        current = client.get(f"/api/batches/{batch_id}")
+        assert current.status_code == 200
+        assert current.json()["status"] == "complete"
+
+    with TestClient(create_app(settings), base_url=ORIGIN) as restarted:
+        recovered = restarted.get(f"/api/batches/{batch_id}")
+        assert recovered.status_code == 200
+        assert recovered.json() == current.json()
+        assert [
+            member["input_snapshot"]["scenario"]["strategy"]
+            for member in recovered.json()["members"]
+        ] == [
+            {"id": "bounded-long-v1", "target_quantity": "2", "entry_delay_bars": 0},
+            {"id": "bounded-long-v1", "target_quantity": "2", "entry_delay_bars": 2},
+        ]
+
+
+@pytest.mark.parametrize("run_count", [1, 11])
+def test_batch_api_rejects_out_of_bounds_run_counts_without_creating_jobs(
+    tmp_path: Path,
+    run_count: int,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        runs = [
+            {"target_quantity": str(index + 1), "entry_delay_bars": index % 3}
+            for index in range(run_count)
+        ]
+        response = client.post(
+            "/api/batches",
+            json=_batch_request(validated["input_identity"], runs),
+            headers=WRITE_HEADERS,
+        )
+
+        assert response.status_code == 422
+        assert client.get("/api/backtests").json() == {"jobs": []}
+
+
+def test_batch_api_accepts_ten_distinct_parameter_combinations(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        runs = [
+            {"target_quantity": str(quantity), "entry_delay_bars": delay}
+            for quantity in range(1, 5)
+            for delay in range(3)
+        ][:10]
+        response = client.post(
+            "/api/batches",
+            json=_batch_request(validated["input_identity"], runs),
+            headers=WRITE_HEADERS,
+        )
+
+        assert response.status_code == 202, response.text
+        assert response.json()["member_count"] == 10
+        terminal = [_wait(client, member["job_id"]) for member in response.json()["members"]]
+        assert all(member["status"] not in {"accepted", "running"} for member in terminal)
+
+
+def test_batch_api_isolates_success_and_failed_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_delayed_member(
+        scenario: LoadedBacktestScenario,
+        output_root: Path,
+        *,
+        run_id: RunId,
+    ) -> Any:
+        if scenario.entry_delay_bars == 2:
+            raise RuntimeError("injected member failure")
+        return run_product_backtest(scenario, output_root, run_id=run_id)
+
+    monkeypatch.setattr(web_service, "run_backtest_scenario", fail_delayed_member)
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        request = _batch_request(
+            validated["input_identity"],
+            [
+                {"target_quantity": "1", "entry_delay_bars": 0},
+                {"target_quantity": "1", "entry_delay_bars": 2},
+            ],
+        )
+        response = client.post("/api/batches", json=request, headers=WRITE_HEADERS)
+        assert response.status_code == 202, response.text
+        accepted = response.json()
+        for member in accepted["members"]:
+            _wait(client, member["job_id"])
+
+        batch = client.get(f"/api/batches/{accepted['batch_id']}").json()
+        assert batch["status"] == "complete"
+        assert [member["presentation_status"] for member in batch["members"]] == [
+            "succeeded",
+            "failed",
+        ]
+        assert [member["report_ready"] for member in batch["members"]] == [True, False]
+
+
+@pytest.mark.parametrize(
+    "invalid_run",
+    [
+        {"target_quantity": "2", "entry_delay_bars": 3},
+        {"target_quantity": "2", "entry_delay_bars": 0, "unknown": 1},
+    ],
+)
+def test_batch_api_validates_every_member_before_creating_any_job(
+    tmp_path: Path,
+    invalid_run: dict[str, object],
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        response = client.post(
+            "/api/batches",
+            json=_batch_request(
+                validated["input_identity"],
+                [
+                    {"target_quantity": "2", "entry_delay_bars": 0},
+                    invalid_run,
+                ],
+            ),
+            headers=WRITE_HEADERS,
+        )
+
+        assert response.status_code == 422
+        assert client.get("/api/backtests").json() == {"jobs": []}
+
+
+def test_batch_api_rejects_duplicate_normalized_parameter_combinations(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        response = client.post(
+            "/api/batches",
+            json=_batch_request(
+                validated["input_identity"],
+                [
+                    {"target_quantity": "2", "entry_delay_bars": 0},
+                    {"target_quantity": "2", "entry_delay_bars": 0},
+                ],
+            ),
+            headers=WRITE_HEADERS,
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "duplicate_batch_run"
+        assert client.get("/api/backtests").json() == {"jobs": []}
 
 
 def test_history_is_newest_first_by_persisted_creation_time(

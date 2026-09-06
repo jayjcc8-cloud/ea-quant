@@ -58,6 +58,14 @@ class JobNotFoundError(WebBoundaryError):
     """A workspace job does not exist."""
 
 
+class BatchNotFoundError(WebBoundaryError):
+    """A workspace experiment batch does not exist."""
+
+
+class DuplicateBatchRunError(WebBoundaryError):
+    """A batch repeats one normalized strategy parameter combination."""
+
+
 class ReportUnavailableError(WebBoundaryError):
     """A job has no verified immutable report."""
 
@@ -338,6 +346,33 @@ class JobRecord:
         return document
 
 
+@dataclass(frozen=True, slots=True)
+class BatchRecord:
+    batch_id: str
+    created_at: str
+    scenario_id: str
+    input_identity: dict[str, object]
+    member_job_ids: tuple[str, ...]
+    schema: str = "ea.local-web-batch.v1"
+
+    def document(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "batch_id": self.batch_id,
+            "created_at": self.created_at,
+            "scenario_id": self.scenario_id,
+            "input_identity": self.input_identity,
+            "member_job_ids": list(self.member_job_ids),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedJob:
+    scenario: LoadedBacktestScenario
+    input_snapshot_bytes: bytes
+    input_sha256: str
+
+
 def _decode_job(payload: bytes) -> JobRecord:
     try:
         document = json.loads(payload)
@@ -426,6 +461,47 @@ def _decode_job(payload: bytes) -> JobRecord:
         raise WebBoundaryError("workspace job index is invalid") from None
 
 
+def _decode_batch(payload: bytes) -> BatchRecord:
+    try:
+        document = json.loads(payload)
+        if type(document) is not dict or _canonical_json(document) != payload:
+            raise ValueError
+        if set(document) != {
+            "schema",
+            "batch_id",
+            "created_at",
+            "scenario_id",
+            "input_identity",
+            "member_job_ids",
+        }:
+            raise ValueError
+        if document.get("schema") != "ea.local-web-batch.v1":
+            raise ValueError
+        fields = ("batch_id", "created_at", "scenario_id")
+        if any(type(document.get(field)) is not str for field in fields):
+            raise ValueError
+        identity = document.get("input_identity")
+        member_ids = document.get("member_job_ids")
+        if type(identity) is not dict or type(member_ids) is not list:
+            raise ValueError
+        if (
+            not 2 <= len(member_ids) <= 10
+            or len(set(member_ids)) != len(member_ids)
+            or any(type(member_id) is not str for member_id in member_ids)
+        ):
+            raise ValueError
+        datetime.strptime(document["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+        return BatchRecord(
+            batch_id=document["batch_id"],
+            created_at=document["created_at"],
+            scenario_id=document["scenario_id"],
+            input_identity=identity,
+            member_job_ids=tuple(member_ids),
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        raise WebBoundaryError("workspace batch index is invalid") from None
+
+
 class WorkspaceLease:
     """Cross-process exclusive writer lease for one Web workspace."""
 
@@ -473,11 +549,13 @@ class WebService:
         self.registry = ScenarioRegistry(resolved_scenarios)
         self.workspace = _directory(resolved_workspace, label="workspace", create=True)
         self.jobs_dir = _directory(self.workspace / "jobs", label="job index", create=True)
+        self.batches_dir = _directory(self.workspace / "batches", label="batch index", create=True)
         self.inputs_dir = _directory(self.workspace / "inputs", label="input store", create=True)
         self.runs_dir = _directory(self.workspace / "runs", label="attempt root", create=True)
         self.reports_dir = _directory(self.workspace / "reports", label="report root", create=True)
         for directory, label in (
             (self.jobs_dir, "job index"),
+            (self.batches_dir, "batch index"),
             (self.inputs_dir, "input store"),
             (self.runs_dir, "attempt root"),
             (self.reports_dir, "report root"),
@@ -489,12 +567,14 @@ class WebService:
         self._lock = threading.RLock()
         self._jobs: dict[str, JobRecord] = {}
         self._requests: dict[str, str] = {}
+        self._batches: dict[str, BatchRecord] = {}
         self._active: str | None = None
 
     def start(self) -> None:
         self._lease.acquire()
         try:
             self._load_jobs()
+            self._load_batches()
         except Exception:
             self._lease.release()
             raise
@@ -505,6 +585,9 @@ class WebService:
 
     def _job_path(self, job_id: str) -> Path:
         return self.jobs_dir / f"{job_id}.json"
+
+    def _batch_path(self, batch_id: str) -> Path:
+        return self.batches_dir / f"{batch_id}.json"
 
     def _materialize_scenario(
         self,
@@ -570,6 +653,25 @@ class WebService:
         self._jobs[record.job_id] = record
         self._requests[record.request_id] = record.job_id
 
+    def _write_batch(self, record: BatchRecord) -> None:
+        payload = _canonical_json(record.document())
+        descriptor, raw_path = tempfile.mkstemp(prefix=".batch-", dir=self.batches_dir)
+        pending = Path(raw_path)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(pending, self._batch_path(record.batch_id))
+            directory_descriptor = os.open(self.batches_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        finally:
+            pending.unlink(missing_ok=True)
+
     def _load_jobs(self) -> None:
         paths = sorted(self.jobs_dir.glob("*.json"))
         if len(paths) > 1000:
@@ -595,6 +697,31 @@ class WebService:
                 self._write(record)
             self._jobs[record.job_id] = record
             self._requests[record.request_id] = record.job_id
+
+    def _load_batches(self) -> None:
+        paths = sorted(self.batches_dir.glob("*.json"))
+        if len(paths) > 1000:
+            raise WebBoundaryError("workspace exceeds the 1000-batch limit")
+        for path in paths:
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
+                    raise OSError
+                record = _decode_batch(path.read_bytes())
+            except OSError:
+                raise WebBoundaryError("workspace batch index is unavailable") from None
+            if path.name != f"{record.batch_id}.json" or record.batch_id in self._batches:
+                raise WebBoundaryError("workspace batch index conflicts")
+            try:
+                members = [self._jobs[job_id] for job_id in record.member_job_ids]
+            except KeyError:
+                raise WebBoundaryError("workspace batch membership conflicts") from None
+            if any(
+                member.scenario_id != record.scenario_id
+                or member.input_identity != record.input_identity
+                for member in members
+            ):
+                raise WebBoundaryError("workspace batch membership conflicts")
+            self._batches[record.batch_id] = record
 
     def list_jobs(self) -> list[dict[str, object]]:
         with self._lock:
@@ -639,6 +766,58 @@ class WebService:
             except KeyError:
                 raise JobNotFoundError("job was not found in this workspace") from None
 
+    def get_batch(self, batch_id: str) -> dict[str, object]:
+        with self._lock:
+            try:
+                record = self._batches[batch_id]
+            except KeyError:
+                raise BatchNotFoundError("batch was not found in this workspace") from None
+            members: list[dict[str, object]] = []
+            for job_id in record.member_job_ids:
+                member = self._jobs[job_id]
+                presentation_status = member.status
+                if member.status == "accepted":
+                    presentation_status = "queued"
+                elif member.status == "failed" and member.error_code == "risk.rejected":
+                    presentation_status = "risk.rejected"
+                members.append({**member.document(), "presentation_status": presentation_status})
+            running = any(member["status"] in {"accepted", "running"} for member in members)
+            return {
+                **record.document(),
+                "member_count": len(members),
+                "status": "running" if running else "complete",
+                "members": members,
+            }
+
+    def _prepare_job(
+        self,
+        *,
+        scenario_id: str,
+        input_identity: dict[str, object],
+        parameters: dict[str, object] | None,
+    ) -> PreparedJob:
+        scenario = self.registry.load(scenario_id)
+        if _scenario_identity(scenario) != input_identity:
+            raise InputChangedError("scenario input changed; validate it again")
+        if parameters is not None:
+            initial_cash, quantity, entry_delay_bars = _parameter_values(parameters)
+            scenario = parameterize_backtest_scenario(
+                scenario,
+                initial_cash=initial_cash,
+                quantity=quantity,
+                entry_delay_bars=entry_delay_bars,
+            )
+        snapshot_bytes, input_sha256 = _input_snapshot(
+            scenario_id,
+            scenario,
+            input_identity,
+        )
+        return PreparedJob(
+            scenario=scenario,
+            input_snapshot_bytes=snapshot_bytes,
+            input_sha256=input_sha256,
+        )
+
     def create_job(
         self,
         *,
@@ -648,21 +827,10 @@ class WebService:
         request_id: str,
     ) -> tuple[JobRecord, bool]:
         with self._lock:
-            scenario = self.registry.load(scenario_id)
-            if _scenario_identity(scenario) != input_identity:
-                raise InputChangedError("scenario input changed; validate it again")
-            if parameters is not None:
-                initial_cash, quantity, entry_delay_bars = _parameter_values(parameters)
-                scenario = parameterize_backtest_scenario(
-                    scenario,
-                    initial_cash=initial_cash,
-                    quantity=quantity,
-                    entry_delay_bars=entry_delay_bars,
-                )
-            snapshot_bytes, input_sha256 = _input_snapshot(
-                scenario_id,
-                scenario,
-                input_identity,
+            prepared = self._prepare_job(
+                scenario_id=scenario_id,
+                input_identity=input_identity,
+                parameters=parameters,
             )
             existing_id = self._requests.get(request_id)
             if existing_id is not None:
@@ -670,7 +838,7 @@ class WebService:
                 if (
                     existing.scenario_id != scenario_id
                     or existing.input_identity != input_identity
-                    or existing.input_snapshot_bytes != snapshot_bytes
+                    or existing.input_snapshot_bytes != prepared.input_snapshot_bytes
                 ):
                     raise RequestConflictError("request_id is already bound to different input")
                 return existing, False
@@ -678,7 +846,7 @@ class WebService:
                 raise ServiceBusyError("one local backtest is already active")
             job_id = str(uuid4())
             attempt_id = RunId(str(uuid4()))
-            scenario = self._materialize_scenario(job_id, scenario)
+            scenario = self._materialize_scenario(job_id, prepared.scenario)
             record = JobRecord(
                 job_id=job_id,
                 request_id=request_id,
@@ -686,8 +854,8 @@ class WebService:
                 input_identity=input_identity,
                 status="accepted",
                 created_at=_created_at(),
-                input_snapshot_bytes=snapshot_bytes,
-                input_sha256=input_sha256,
+                input_snapshot_bytes=prepared.input_snapshot_bytes,
+                input_sha256=prepared.input_sha256,
                 attempt_id=attempt_id.value,
             )
             self._store(record)
@@ -695,7 +863,103 @@ class WebService:
             self._executor.submit(self._run, record.job_id, scenario)
             return record, True
 
-    def _run(self, job_id: str, scenario: LoadedBacktestScenario) -> None:
+    def create_batch(
+        self,
+        *,
+        scenario_id: str,
+        input_identity: dict[str, object],
+        initial_cash: str,
+        runs: list[dict[str, object]],
+    ) -> dict[str, object]:
+        with self._lock:
+            if not 2 <= len(runs) <= 10:
+                raise BacktestScenarioError("batch run count must be between 2 and 10")
+            if self._active is not None:
+                raise ServiceBusyError("one local backtest or batch is already active")
+            prepared: list[PreparedJob] = []
+            combinations: set[bytes] = set()
+            for strategy_parameters in runs:
+                item = self._prepare_job(
+                    scenario_id=scenario_id,
+                    input_identity=input_identity,
+                    parameters={
+                        "initial_cash": initial_cash,
+                        "strategy_parameters": strategy_parameters,
+                    },
+                )
+                strategy = json.loads(item.scenario.canonical_bytes)["strategy"]
+                combination = _canonical_json(strategy)
+                if combination in combinations:
+                    raise DuplicateBatchRunError(
+                        "batch contains a duplicate normalized parameter combination"
+                    )
+                combinations.add(combination)
+                prepared.append(item)
+
+            batch_id = str(uuid4())
+            records: list[JobRecord] = []
+            executable: list[tuple[str, LoadedBacktestScenario]] = []
+            try:
+                for index, item in enumerate(prepared, start=1):
+                    job_id = str(uuid4())
+                    scenario = self._materialize_scenario(job_id, item.scenario)
+                    record = JobRecord(
+                        job_id=job_id,
+                        request_id=f"batch-{batch_id}-{index}",
+                        scenario_id=scenario_id,
+                        input_identity=input_identity,
+                        status="accepted",
+                        created_at=_created_at(),
+                        input_snapshot_bytes=item.input_snapshot_bytes,
+                        input_sha256=item.input_sha256,
+                        attempt_id=RunId(str(uuid4())).value,
+                    )
+                    self._store(record)
+                    records.append(record)
+                    executable.append((job_id, scenario))
+                batch = BatchRecord(
+                    batch_id=batch_id,
+                    created_at=_created_at(),
+                    scenario_id=scenario_id,
+                    input_identity=input_identity,
+                    member_job_ids=tuple(record.job_id for record in records),
+                )
+                self._write_batch(batch)
+                self._batches[batch.batch_id] = batch
+                self._active = batch.batch_id
+                self._executor.submit(self._run_batch, batch.batch_id, tuple(executable))
+            except Exception:
+                self._active = None
+                self._batches.pop(batch_id, None)
+                self._batch_path(batch_id).unlink(missing_ok=True)
+                for record in records:
+                    self._jobs.pop(record.job_id, None)
+                    self._requests.pop(record.request_id, None)
+                    self._job_path(record.job_id).unlink(missing_ok=True)
+                    (self.inputs_dir / f"{record.job_id}.json").unlink(missing_ok=True)
+                raise
+            return self.get_batch(batch.batch_id)
+
+    def _run_batch(
+        self,
+        batch_id: str,
+        members: tuple[tuple[str, LoadedBacktestScenario], ...],
+    ) -> None:
+        try:
+            for job_id, scenario in members:
+                self._run(job_id, scenario, release_active=False)
+        finally:
+            with self._lock:
+                if self._active == batch_id:
+                    self._active = None
+
+    def _run(
+        self,
+        job_id: str,
+        scenario: LoadedBacktestScenario,
+        *,
+        release_active: bool = True,
+    ) -> None:
         with self._lock:
             record = replace(self._jobs[job_id], status="running")
             self._store(record)
@@ -775,7 +1039,7 @@ class WebService:
             )
         with self._lock:
             self._store(completed)
-            if self._active == job_id:
+            if release_active and self._active == job_id:
                 self._active = None
 
     def report(self, job_id: str) -> bytes:
@@ -824,6 +1088,8 @@ class WebService:
 __all__ = [
     "InputChangedError",
     "JobNotFoundError",
+    "BatchNotFoundError",
+    "DuplicateBatchRunError",
     "ReportUnavailableError",
     "RequestConflictError",
     "ScenarioNotFoundError",

@@ -76,11 +76,24 @@ const rejectedJob: BacktestJob = {
   created_at: '2026-09-05T15:20:00.000000Z', input_snapshot: snapshot('50', '2'), input_sha256: '9'.repeat(64),
 }
 
+const batch = {
+  schema: 'ea.local-web-batch.v1' as const,
+  batch_id: 'batch-1', created_at: '2026-09-06T03:00:00.000000Z',
+  scenario_id: 'bounded-long.yaml', input_identity: identity,
+  member_job_ids: ['job-1', 'job-risk'], member_count: 2, status: 'complete' as const,
+  members: [
+    { ...job, presentation_status: 'succeeded' },
+    { ...rejectedJob, presentation_status: 'risk.rejected' },
+  ],
+}
+
 function adapter(overrides: Partial<ApiAdapter> = {}): ApiAdapter {
   return {
     listScenarios: async () => scenarios,
     validateScenario: async (scenarioId) => scenarios.find((item) => item.scenario_id === scenarioId)!,
     createBacktest: async () => job,
+    createBatch: async () => batch,
+    getBatch: async () => batch,
     listBacktests: async () => [job],
     getBacktest: async () => job,
     getReport: async () => report,
@@ -95,6 +108,67 @@ afterEach(() => {
 })
 
 describe('EA Quant local Web backtests', () => {
+  it('builds and submits a bounded backend-driven batch', async () => {
+    const user = userEvent.setup()
+    const requests: unknown[] = []
+    const batchApi = {
+      ...adapter(),
+      createBatch: async (request: unknown) => { requests.push(request); return batch },
+      getBatch: async () => batch,
+    }
+    window.history.pushState({}, '', '/batches/new')
+    render(<App api={batchApi} />)
+
+    expect(await screen.findByRole('heading', { name: 'New Experiment Batch' })).toBeTruthy()
+    expect(screen.getAllByRole('heading', { name: /Run [12]/ })).toHaveLength(2)
+    expect(screen.getByLabelText('Run 1 entry delay bars').getAttribute('max')).toBe('2')
+    await user.click(screen.getByRole('button', { name: 'Add configuration' }))
+    expect(screen.getByRole('heading', { name: 'Run 3' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: 'Remove Run 3' }))
+    expect(screen.queryByRole('heading', { name: 'Run 3' })).toBeNull()
+
+    await user.clear(screen.getByLabelText('Run 2 quantity'))
+    await user.type(screen.getByLabelText('Run 2 quantity'), '4')
+    await user.clear(screen.getByLabelText('Run 2 entry delay bars'))
+    await user.type(screen.getByLabelText('Run 2 entry delay bars'), '2')
+    await user.click(screen.getByRole('button', { name: 'Run batch' }))
+
+    expect(requests).toEqual([{
+      scenario_id: 'bounded-long.yaml', input_identity: identity, initial_cash: '10000',
+      runs: [
+        { strategy_parameters: { target_quantity: '2', entry_delay_bars: 0 } },
+        { strategy_parameters: { target_quantity: '4', entry_delay_bars: 2 } },
+      ],
+    }])
+    expect(await screen.findByRole('heading', { name: 'Experiment Batch' })).toBeTruthy()
+  })
+
+  it('keeps mixed batch members readable and reuses pair comparison navigation', async () => {
+    const user = userEvent.setup()
+    const batchApi = {
+      ...adapter({
+        getBacktest: async (jobId) => jobId === 'job-1' ? job : rejectedJob,
+        getReport: async () => report,
+      }),
+      createBatch: async () => batch,
+      getBatch: async () => batch,
+    }
+    window.history.pushState({}, '', '/batches/batch-1')
+    render(<App api={batchApi} />)
+
+    expect(await screen.findByRole('heading', { name: 'Experiment Batch' })).toBeTruthy()
+    expect(screen.getByText('risk.rejected')).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 1 2 0 succeeded 17 USD .*0.17% View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 2 2 0 risk.rejected No report View/i })).toBeTruthy()
+    await user.click(screen.getByLabelText('Select job-1 for comparison'))
+    await user.click(screen.getByLabelText('Select job-risk for comparison'))
+    await user.click(screen.getByRole('button', { name: 'Compare selected runs' }))
+
+    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Parameter Delta' })).toBeTruthy()
+    expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
+  })
+
   it('validates selected real input, clears stale validation, and opens the accepted job', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/backtests')

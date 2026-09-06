@@ -104,6 +104,35 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.reload()
   await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
 
+  await page.goto('/batches/new')
+  await expect(page.getByRole('heading', { name: 'New Experiment Batch' })).toBeVisible()
+  await expect(page.getByLabel('Run 1 entry delay bars')).toHaveAttribute('max', '2')
+  await page.getByLabel('Run 2 quantity').fill('4')
+  await page.getByLabel('Run 2 entry delay bars').fill('2')
+  await page.getByRole('button', { name: 'Run batch' }).click()
+  await expect(page).toHaveURL(/\/batches\/[0-9a-f-]+$/)
+  const batchURL = page.url()
+  await expect(page.locator('.page-title .status')).toHaveText('complete', { timeout: 20_000 })
+  await expect(page.getByRole('row', { name: /Run 1 2 0 succeeded 17 USD .*0.17% View/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 0 USD .*0% View/i })).toBeVisible()
+  const batchEvidence = await page.evaluate(async () => {
+    const response = await fetch(new URL(window.location.href).pathname.replace('/batches/', '/api/batches/'))
+    return response.json()
+  })
+  expect(batchEvidence.schema).toBe('ea.local-web-batch.v1')
+  expect(batchEvidence.member_count).toBe(2)
+  expect(batchEvidence.members.map((member: { status: string }) => member.status)).toEqual(['succeeded', 'succeeded'])
+  expect(batchEvidence.members.map((member: { input_snapshot: { scenario: { strategy: unknown } } }) => member.input_snapshot.scenario.strategy)).toEqual([
+    { id: 'bounded-long-v1', target_quantity: '2', entry_delay_bars: 0 },
+    { id: 'bounded-long-v1', target_quantity: '4', entry_delay_bars: 2 },
+  ])
+  await page.getByLabel(`Select ${batchEvidence.member_job_ids[0]} for comparison`).check()
+  await page.getByLabel(`Select ${batchEvidence.member_job_ids[1]} for comparison`).check()
+  await page.getByRole('button', { name: 'Compare selected runs' }).click()
+  await expect(page.getByRole('row', { name: /target_quantity 2 4 Changed/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Net P&L 17 USD 0 USD -17 USD/i })).toBeVisible()
+
   await useParameters(page, baseline.jobId)
   await page.getByLabel('Initial cash').fill('50')
   await page.getByRole('button', { name: 'Validate input' }).click()
@@ -167,9 +196,8 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.getByRole('link', { name: 'Download report.json' }).click()
   expect((await reportDownload).suggestedFilename()).toBe('report.json')
 
-  await page.goto(successComparisonURL)
-  await expect(page.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
+  await page.goto(batchURL)
+  await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 0 USD .*0% View/i })).toBeVisible()
   const serverPid = Number(process.env.EA_WEB_SERVER_PID)
   expect(Number.isSafeInteger(serverPid)).toBe(true)
   process.kill(serverPid, 'SIGTERM')
@@ -183,7 +211,12 @@ test('installed browser completes the bounded local Web research loop', async ({
     restarted = spawn(executable!, args, { stdio: 'ignore' })
     await waitForHealth()
     await page.reload()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Experiment Batch' })).toBeVisible()
+    await expect(page.locator('.page-title .status')).toHaveText('complete')
+    await expect(page.getByRole('row', { name: /Run 1 2 0 succeeded 17 USD .*0.17% View/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /Run 2 4 2 succeeded 0 USD .*0% View/i })).toBeVisible()
+    await page.goto(successComparisonURL)
+    await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
   } finally {
     if (restarted?.pid) process.kill(restarted.pid, 'SIGTERM')
   }

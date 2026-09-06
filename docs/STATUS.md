@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web parameter research.**
+**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web parameter experiments.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -104,14 +104,19 @@ external write, deployment, or live capability is part of this objective.
   normalized integer in canonical scenario identity and the existing input snapshot.
 - History reuse restores both strategy parameters from persisted snapshots. Pairwise comparison
   presents their A-to-B values as Parameter Delta beside formal-report Result Delta without causal
-  interpretation, recommendation, or a new experiment model.
+  interpretation or recommendation.
+- ADR 0032 adds a bounded 2-10 member Web experiment batch for one registered strategy/scenario.
+  The backend validates the full set before creating jobs, rejects normalized duplicates, runs
+  normal jobs serially through the existing engine, and persists only batch-to-job membership.
+- Batch detail derives presentation state from member jobs, keeps mixed failures readable, reuses
+  formal-report summaries and pair comparison, and survives restart without React-state authority.
 
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
-single-run/reporting product, not the broader Phase 2 research, paper, or live roadmap. Arbitrary
-instruction-level or Web recovery, symbol/data editing, uploads, experiment tracking, broader
-performance analytics, stochastic seed hierarchies, strategy plugins, paper/live execution,
+backtest/reporting product, not the broader Phase 2 research, paper, or live roadmap. Arbitrary
+instruction-level or Web recovery, symbol/data editing, uploads, broader experiment tracking,
+automatic optimization, performance analytics, strategy plugins, paper/live execution,
 package-registry publication, and deployment remain unavailable. Phase 1.1/#125 and Phase 2 have
 not been activated.
 
@@ -141,6 +146,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0029 — Governance freeze and bounded product delivery](adr/0029-governance-freeze-and-bounded-delivery.md)
 - [ADR 0030 — Local Web offline backtest integration](adr/0030-local-web-offline-backtest-integration.md)
 - [ADR 0031 — Local Web Research Loop V1](adr/0031-local-web-research-loop-v1.md)
+- [ADR 0032 — Web Bounded Experiment Batch V1](adr/0032-web-bounded-experiment-batch-v1.md)
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
@@ -172,6 +178,9 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [#171 — Web Strategy Parameter Experiment V1](https://github.com/jayjcc8-cloud/ea-quant/issues/171)
   adds one real delayed-entry parameter to the existing bounded-long strategy and carries exactly
   two strategy inputs through backend contract, engine, snapshot, reuse, and comparison.
+- [#174 — Web Bounded Experiment Batch V1](https://github.com/jayjcc8-cloud/ea-quant/issues/174)
+  groups 2-10 explicit parameter combinations into normal persisted Web jobs with whole-batch
+  validation, serial execution, restart recovery, mixed-state detail, and comparison reuse.
 - R9/R10 Issues #149, #150, #152, #153 and PR #151 retain provenance as superseded hardening
   history after the reset governance PR merges; they are not an active delivery chain.
 
@@ -203,6 +212,8 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
   path through validation, a fresh attempt, formal report, refresh, restart, and artifact download.
 - [x] The local Web path replays normalized inputs into fresh attempts, compares two successes and
   a success with risk rejection, persists across restart, and rejects free-text symbol input.
+- [x] The local Web path creates a bounded 2-10 member experiment set, executes normal jobs,
+  persists grouping and member evidence across restart, and pair-compares any two members.
 
 These conditions complete Issues #81, #161, and #83 and the bounded v0.2.0 GitHub prerelease gate
 in #84. They do not activate Phase 1.1/#125, Phase 2, package-registry publication, or deployment.

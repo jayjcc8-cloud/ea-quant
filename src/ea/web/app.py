@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 import ea
 from ea.web.service import (
+    BatchNotFoundError,
+    DuplicateBatchRunError,
     InputChangedError,
     JobNotFoundError,
     ReportUnavailableError,
@@ -54,6 +56,21 @@ class BacktestRequest(BaseModel):
     input_identity: InputIdentity
     parameters: BacktestParameters | None = None
     request_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
+
+
+class BatchRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    strategy_parameters: StrategyParameters
+
+
+class BatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    scenario_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.ya?ml$")
+    input_identity: InputIdentity
+    initial_cash: str = Field(min_length=1, max_length=64)
+    runs: list[BatchRunRequest] = Field(min_length=2, max_length=10)
 
 
 class ScenarioValidationRequest(BaseModel):
@@ -215,6 +232,38 @@ def create_app(settings: WebSettings) -> Any:
     @app.get("/api/backtests")
     def list_backtests() -> dict[str, object]:
         return {"jobs": service.list_jobs()}
+
+    @app.post("/api/batches")
+    def create_batch(request: BatchRequest) -> Response:
+        try:
+            document = service.create_batch(
+                scenario_id=request.scenario_id,
+                input_identity=request.input_identity.model_dump(),
+                initial_cash=request.initial_cash,
+                runs=[item.strategy_parameters.model_dump() for item in request.runs],
+            )
+            return JSONResponse(status_code=202, content=document)
+        except ScenarioNotFoundError as caught:
+            return error(404, "scenario_not_found", str(caught))
+        except InputChangedError as caught:
+            return error(409, "input_conflict", str(caught))
+        except ServiceBusyError as caught:
+            return error(409, "service_busy", str(caught))
+        except DuplicateBatchRunError as caught:
+            return error(422, "duplicate_batch_run", str(caught))
+        except Exception as caught:
+            from ea.product import BacktestScenarioError
+
+            if isinstance(caught, BacktestScenarioError):
+                return error(422, "scenario_invalid", str(caught))
+            return error(500, "batch_acceptance_failed", "batch request could not be accepted")
+
+    @app.get("/api/batches/{batch_id}")
+    def get_batch(batch_id: str) -> object:
+        try:
+            return service.get_batch(batch_id)
+        except BatchNotFoundError as caught:
+            return error(404, "batch_not_found", str(caught))
 
     @app.get("/api/backtests/{job_id}")
     def get_backtest(job_id: str) -> object:
