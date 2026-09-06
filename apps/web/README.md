@@ -6,10 +6,13 @@ served by `ea web serve`; it does not fall back to mock business data when the s
 unavailable. Component tests inject an explicit fake adapter, while the Playwright suite uses an
 installed candidate wheel, actual loopback HTTP, the existing engine, and formal reports.
 
-The V1 research controls are intentionally narrow: `initial_cash` and `quantity` are editable;
-`symbol` is read-only and comes from the selected registered, verified scenario/data combination.
-Saved runs retain their normalized input snapshot. “Use parameters” creates a new validation/run,
-and comparison derives exact deltas from two saved jobs without storing a new comparison artifact.
+The V1 research controls are intentionally narrow: `initial_cash` plus the backend-published
+`bounded-long-v1` parameters `target_quantity` and `entry_delay_bars` are editable; `symbol` is
+read-only and comes from the selected registered, verified scenario/data combination. The backend
+derives the delay maximum from the loaded canonical market-bar sequence and next-bar execution
+semantics. Saved runs retain their normalized input snapshot. “Use parameters” creates a new
+validation/run, and comparison shows parameter changes beside exact report deltas without storing
+a new comparison artifact or making causal claims.
 
 Run the supported frontend checks from this directory:
 

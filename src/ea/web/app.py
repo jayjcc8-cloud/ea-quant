@@ -32,11 +32,19 @@ class InputIdentity(BaseModel):
     record_count: int = Field(ge=1)
 
 
+class StrategyParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    target_quantity: str | None = Field(max_length=64)
+    entry_delay_bars: int
+
+
 class BacktestParameters(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     initial_cash: str = Field(min_length=1, max_length=64)
     quantity: str | None = Field(default=None, max_length=64)
+    strategy_parameters: StrategyParameters | None = None
 
 
 class BacktestRequest(BaseModel):

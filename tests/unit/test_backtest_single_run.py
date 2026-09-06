@@ -142,6 +142,58 @@ def test_affordable_bounded_long_runs_through_fill_and_funded_ledger(tmp_path: P
     assert report["reconciliation"] == {"cash": "match", "position": "match"}
 
 
+def test_entry_delay_uses_later_canonical_market_root_and_execution_bar(
+    tmp_path: Path,
+) -> None:
+    source = _scenario(tmp_path / "source", strategy__entry_delay_bars=0)
+    document = yaml.safe_load(source.read_text(encoding="utf-8"))
+    data_path = source.parent / "prices.csv"
+    data_path.write_text(
+        data_path.read_text(encoding="utf-8")
+        + "1,XNAS,AAPL,2026-01-02T09:32:00.000000Z,2026-01-02T09:33:00.000000Z,"
+        "raw,108.0,111.0,107.0,110.0,9.0,fixture.raw,3,0,"
+        "2026-01-02T09:33:00.000000Z\n",
+        encoding="utf-8",
+    )
+    window = ReplayWindow(
+        datetime(2026, 1, 2, 9, 31, tzinfo=UTC),
+        datetime(2026, 1, 2, 9, 34, tzinfo=UTC),
+    )
+    dataset = decode_phase1_ohlcv_csv(data_path.read_bytes(), replay_window=window)
+    document["data"]["end_utc"] = "2026-01-02T09:34:00.000000Z"
+    document["data"]["fingerprint"] = {
+        "sha256": dataset.selection.fingerprint.sha256.value,
+        "record_count": dataset.selection.fingerprint.record_count,
+    }
+    source.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    delayed_document = dict(document)
+    delayed_document["strategy"] = dict(document["strategy"])
+    delayed_document["strategy"]["entry_delay_bars"] = 2
+    delayed = tmp_path / "source" / "delayed.yaml"
+    delayed.write_text(yaml.safe_dump(delayed_document, sort_keys=False), encoding="utf-8")
+
+    immediate_result = run_backtest_scenario(
+        load_backtest_scenario(source),
+        (tmp_path / "immediate-runs").resolve(),
+    )
+    delayed_result = run_backtest_scenario(
+        load_backtest_scenario(delayed),
+        (tmp_path / "delayed-runs").resolve(),
+    )
+    immediate_report = _report(immediate_result.output_directory)
+    delayed_report = _report(delayed_result.output_directory)
+
+    assert immediate_report["fill"]["price"] == "101.5"  # type: ignore[index]
+    assert delayed_report["fill"]["price"] == "110"  # type: ignore[index]
+    assert immediate_report["fill_evidence"]["occurred_at"] == (  # type: ignore[index]
+        "2026-01-02T09:32:00.000000Z"
+    )
+    assert delayed_report["fill_evidence"]["occurred_at"] == (  # type: ignore[index]
+        "2026-01-02T09:33:00.000000Z"
+    )
+    assert immediate_report["lineage_sha256"] != delayed_report["lineage_sha256"]
+
+
 def test_order_limit_resizes_through_existing_risk_authority(tmp_path: Path) -> None:
     scenario = load_backtest_scenario(
         _scenario(tmp_path / "input", strategy__target_quantity="10", risk__max_order_quantity="2")

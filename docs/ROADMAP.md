@@ -37,9 +37,11 @@ Entry: Phase 0 is released and `main` is healthy.
    prerelease. No package-registry publication or deployment was performed.
 
 Post-release bounded increments retain the Phase 1 product boundary. ADR 0030 adds the local-only
-browser adapter; ADR 0031 adds only input replay, durable normalized history, and pairwise
-comparison for `initial_cash` and `quantity`. Symbol/data configuration, Experiment tracking,
-optimization, and research-grade analytics remain Phase 2 concerns.
+browser adapter; ADR 0031 adds input replay, durable normalized history, and pairwise comparison.
+Issue #171 extends the existing `bounded-long-v1` surface to exactly `target_quantity` and
+`entry_delay_bars`, with backend-derived next-bar bounds and no sweep or optimizer. Symbol/data
+configuration, Experiment tracking, optimization, and research-grade analytics remain Phase 2
+concerns.
 
 This is a product dependency order, not a sequence of governance phases or actor chains.
 

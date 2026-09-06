@@ -99,8 +99,9 @@ The RESET demo is run-only and does not support `resume` or `report`; those comm
 because the demo intentionally does not create a complete strict-attempt evidence set.
 ## Installed Wheel: Local Web Research Loop
 
-The post-v0.2.0 candidate adds a loopback browser path, bounded parameter replay, normalized run
-history, and pairwise comparison. Symbol stays bound to registered verified input; see the [Web README](apps/web/README.md).
+The post-v0.2.0 local Web path supports normalized run history, replay, pairwise comparison, and
+the two backend-defined `bounded-long-v1` parameters `target_quantity` and `entry_delay_bars`.
+Symbol stays bound to registered verified input; see the [Web README](apps/web/README.md).
 ## Contributor Setup
 
 From a source checkout, use the exact `uv` version declared in `pyproject.toml`:

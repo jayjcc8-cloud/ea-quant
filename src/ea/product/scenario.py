@@ -89,6 +89,7 @@ class _InstrumentInput(_StrictModel):
 class _StrategyInput(_StrictModel):
     id: BacktestStrategyId
     target_quantity: StrictStr | None = None
+    entry_delay_bars: StrictInt = 0
 
     @model_validator(mode="after")
     def validate_parameters(self) -> Self:
@@ -96,6 +97,16 @@ class _StrategyInput(_StrictModel):
             raise PydanticCustomError(
                 "incompatible_strategy_parameters",
                 "always-flat-v1 forbids target_quantity",
+            )
+        if self.entry_delay_bars < 0:
+            raise PydanticCustomError(
+                "out_of_range_strategy_parameter",
+                "entry_delay_bars must be at least 0",
+            )
+        if self.id is BacktestStrategyId.ALWAYS_FLAT and self.entry_delay_bars != 0:
+            raise PydanticCustomError(
+                "incompatible_strategy_parameters",
+                "always-flat-v1 forbids entry_delay_bars",
             )
         if self.id is BacktestStrategyId.BOUNDED_LONG and self.target_quantity is None:
             raise PydanticCustomError(
@@ -187,6 +198,8 @@ class LoadedBacktestScenario:
     spec_set: InstrumentExecutionSpecSet
     strategy_id: BacktestStrategyId
     target_quantity: CanonicalDecimal | None
+    entry_delay_bars: int
+    entry_delay_bars_maximum: int | None
     funding_currency: SettlementCurrency
     initial_cash: CanonicalDecimal
     max_order_quantity: CanonicalDecimal
@@ -312,6 +325,20 @@ def _require_market_price_domain(
             raise BacktestScenarioError("market data price domain conflicts with instrument")
         if domain is PriceDomain.NON_NEGATIVE and any(price < 0 for price in prices):
             raise BacktestScenarioError("market data price domain conflicts with instrument")
+
+
+def _next_bar_entry_delay_maximum(dataset: Phase1HistoricalDataset) -> int | None:
+    """Return the latest canonical market-root index with a later executable bar."""
+    events = dataset.selection.events
+    if len(events) < 2:
+        return None
+    latest_future_event_time = events[-1].event_time
+    for index in range(len(events) - 2, -1, -1):
+        event = events[index]
+        if latest_future_event_time > event.available_at:
+            return index
+        latest_future_event_time = max(latest_future_event_time, event.event_time)
+    return None
 
 
 def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
@@ -442,6 +469,17 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
             quantity_quantum,
             field="strategy.target_quantity",
         )
+    entry_delay_maximum: int | None = None
+    if model.strategy.id is BacktestStrategyId.BOUNDED_LONG:
+        entry_delay_maximum = _next_bar_entry_delay_maximum(dataset)
+        if entry_delay_maximum is None:
+            raise BacktestScenarioError(
+                "bounded-long-v1 requires a market bar with an executable next bar"
+            )
+        if model.strategy.entry_delay_bars > entry_delay_maximum:
+            raise BacktestScenarioError(
+                f"strategy.entry_delay_bars must be at most {entry_delay_maximum}"
+            )
     canonical = _canonical_bytes(model, dataset=dataset)
     return LoadedBacktestScenario(
         scenario_path=scenario_path,
@@ -452,6 +490,8 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
         spec_set=spec_set,
         strategy_id=model.strategy.id,
         target_quantity=target,
+        entry_delay_bars=model.strategy.entry_delay_bars,
+        entry_delay_bars_maximum=entry_delay_maximum,
         funding_currency=funding_currency,
         initial_cash=initial_cash,
         max_order_quantity=max_order,
@@ -469,6 +509,7 @@ def parameterize_backtest_scenario(
     *,
     initial_cash: str,
     quantity: str | None,
+    entry_delay_bars: int | None = None,
 ) -> LoadedBacktestScenario:
     """Create one validated immutable run input from a registered scenario."""
     if type(scenario) is not LoadedBacktestScenario:
@@ -483,9 +524,14 @@ def parameterize_backtest_scenario(
         field="initial_cash",
     )
     target: CanonicalDecimal | None = None
+    delay = scenario.entry_delay_bars if entry_delay_bars is None else entry_delay_bars
+    if type(delay) is not int:
+        raise BacktestScenarioError("entry_delay_bars must be an integer")
     if scenario.strategy_id is BacktestStrategyId.ALWAYS_FLAT:
         if quantity is not None:
             raise BacktestScenarioError("always-flat-v1 forbids quantity")
+        if delay != 0:
+            raise BacktestScenarioError("always-flat-v1 forbids entry_delay_bars")
     else:
         if quantity is None:
             raise BacktestScenarioError("bounded-long-v1 requires quantity")
@@ -497,12 +543,18 @@ def parameterize_backtest_scenario(
             specification.quantity_quantum,
             field="quantity",
         )
+        maximum = scenario.entry_delay_bars_maximum
+        if maximum is None:
+            raise BacktestScenarioError("bounded-long-v1 has no executable entry bar")
+        if delay < 0 or delay > maximum:
+            raise BacktestScenarioError(f"entry_delay_bars must be between 0 and {maximum}")
 
     document = cast(dict[str, object], json.loads(scenario.canonical_bytes))
     funding = cast(dict[str, object], document["funding"])
     strategy = cast(dict[str, object], document["strategy"])
     funding["initial_cash"] = cash.text
     strategy["target_quantity"] = None if target is None else target.text
+    strategy["entry_delay_bars"] = delay
     canonical = json.dumps(
         document,
         ensure_ascii=True,
@@ -514,6 +566,7 @@ def parameterize_backtest_scenario(
         scenario,
         initial_cash=cash,
         target_quantity=target,
+        entry_delay_bars=delay,
         canonical_bytes=canonical,
         scenario_sha256=Sha256Digest(sha256(_SCENARIO_DIGEST_DOMAIN + canonical).hexdigest()),
     )

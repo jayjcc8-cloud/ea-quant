@@ -56,6 +56,8 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.getByLabel('Scenario').selectOption('bounded-long.yaml')
   await expect(page.getByLabel('Initial cash')).toHaveValue('10000')
   await expect(page.getByLabel('Quantity')).toHaveValue('2')
+  await expect(page.getByLabel('Entry delay bars')).toHaveValue('0')
+  await expect(page.getByLabel('Entry delay bars')).toHaveAttribute('max', '2')
   const baseline = await validateAndRun(page)
   await expect(page.getByText('9797 USD', { exact: true })).toBeVisible()
   await expect(page.getByText('10017 USD', { exact: true })).toBeVisible()
@@ -68,6 +70,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   expect(baselineEvidence.schema).toBe('ea.local-web-job.v2')
   expect(baselineEvidence.input_snapshot.scenario.funding.initial_cash).toBe('10000')
   expect(baselineEvidence.input_snapshot.scenario.strategy.target_quantity).toBe('2')
+  expect(baselineEvidence.input_snapshot.scenario.strategy.entry_delay_bars).toBe(0)
   expect(baselineEvidence.input_snapshot.scenario.instrument.symbol).toBe('AAPL')
   expect(baselineEvidence.input_snapshot.identity.scenario_sha256).toMatch(/^[0-9a-f]{64}$/)
   expect(baselineEvidence.input_sha256).toMatch(/^[0-9a-f]{64}$/)
@@ -75,14 +78,16 @@ test('installed browser completes the bounded local Web research loop', async ({
   await useParameters(page, baseline.jobId)
   await expect(page.getByLabel('Initial cash')).toHaveValue('10000')
   await expect(page.getByLabel('Quantity')).toHaveValue('2')
+  await expect(page.getByLabel('Entry delay bars')).toHaveValue('0')
   await page.getByLabel('Quantity').fill('4')
+  await page.getByLabel('Entry delay bars').fill('2')
   await expect(page.getByText('Validated input')).toHaveCount(0)
   const changed = await validateAndRun(page)
   expect(changed.runId).not.toBe(baseline.runId)
-  await expect(page.getByText('9594 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('10034 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('34 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('0.0034', { exact: true })).toBeVisible()
+  await expect(page.getByText('9560 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('10000 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('0 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('0', { exact: true })).toBeVisible()
 
   await page.goto('/backtests')
   await expect(page.locator('.job-card').first()).toContainText(changed.runId)
@@ -90,14 +95,14 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.getByLabel(`Select ${changed.jobId} for comparison`).check()
   await page.getByRole('button', { name: 'Compare selected runs' }).click()
   await expect(page).toHaveURL(`/backtests/compare/${baseline.jobId}/${changed.jobId}`)
-  await expect(page.getByRole('row', { name: /Quantity 2 4 Changed/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Net P&L 17 USD 34 USD \+17 USD/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Return 0.17% 0.34% \+0.17 pp/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /target_quantity 2 4 Changed/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Net P&L 17 USD 0 USD -17 USD/i })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('success-success-comparison.png'), fullPage: true })
   const successComparisonURL = page.url()
   await page.reload()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
 
   await useParameters(page, baseline.jobId)
   await page.getByLabel('Initial cash').fill('50')
@@ -119,7 +124,9 @@ test('installed browser completes the bounded local Web research loop', async ({
   const boundary = await page.evaluate(async () => {
     const headers = { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }
     const validation = await fetch('/api/scenarios/bounded-long.yaml/validate', {
-      method: 'POST', headers, body: JSON.stringify({ parameters: { initial_cash: '10000', quantity: '2' } }),
+      method: 'POST', headers, body: JSON.stringify({ parameters: {
+        initial_cash: '10000', strategy_parameters: { target_quantity: '2', entry_delay_bars: 0 },
+      } }),
     }).then((response) => response.json())
     const freeText = await fetch('/api/backtests', {
       method: 'POST', headers,
@@ -129,17 +136,27 @@ test('installed browser completes the bounded local Web research loop', async ({
         request_id: 'playwright-free-text-0001',
       }),
     })
+    const unknownStrategyParameter = await fetch('/api/scenarios/bounded-long.yaml/validate', {
+      method: 'POST', headers, body: JSON.stringify({ parameters: {
+        initial_cash: '10000',
+        strategy_parameters: { target_quantity: '2', entry_delay_bars: 0, unknown: 1 },
+      } }),
+    })
     const request = {
       scenario_id: 'bounded-long.yaml', input_identity: validation.input_identity,
-      parameters: { initial_cash: '10000', quantity: '2' }, request_id: 'playwright-idempotency-0001',
+      parameters: {
+        initial_cash: '10000', strategy_parameters: { target_quantity: '2', entry_delay_bars: 0 },
+      },
+      request_id: 'playwright-idempotency-0001',
     }
     const first = await fetch('/api/backtests', { method: 'POST', headers, body: JSON.stringify(request) })
     const firstBody = await first.json()
     const second = await fetch('/api/backtests', { method: 'POST', headers, body: JSON.stringify(request) })
     const secondBody = await second.json()
-    return { freeTextStatus: freeText.status, firstStatus: first.status, secondStatus: second.status, firstJob: firstBody.job_id, secondJob: secondBody.job_id }
+    return { freeTextStatus: freeText.status, unknownStrategyStatus: unknownStrategyParameter.status, firstStatus: first.status, secondStatus: second.status, firstJob: firstBody.job_id, secondJob: secondBody.job_id }
   })
   expect(boundary.freeTextStatus).toBe(422)
+  expect(boundary.unknownStrategyStatus).toBe(422)
   expect(boundary.firstStatus).toBe(202)
   expect(boundary.secondStatus).toBe(200)
   expect(boundary.secondJob).toBe(boundary.firstJob)
@@ -151,7 +168,8 @@ test('installed browser completes the bounded local Web research loop', async ({
   expect((await reportDownload).suggestedFilename()).toBe('report.json')
 
   await page.goto(successComparisonURL)
-  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
   const serverPid = Number(process.env.EA_WEB_SERVER_PID)
   expect(Number.isSafeInteger(serverPid)).toBe(true)
   process.kill(serverPid, 'SIGTERM')

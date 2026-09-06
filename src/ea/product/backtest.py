@@ -293,9 +293,10 @@ def _lineage(
 ) -> Sha256Digest:
     runtime = _runtime_document()
     strategy_parameters = {
+        "entry_delay_bars": scenario.entry_delay_bars,
         "target_quantity": (
             None if scenario.target_quantity is None else scenario.target_quantity.text
-        )
+        ),
     }
     return build_backtest_lineage(
         BacktestLineageInputs(
@@ -539,11 +540,18 @@ def _execute(
         economic_gate=economic_gate,
     )
 
-    first_window = lifecycle.coordinator.begin_next_dispatch()
+    entry_window = lifecycle.coordinator.begin_next_dispatch()
     signal = None
     order = None
     risk_result = None
     if scenario.strategy_id is BacktestStrategyId.BOUNDED_LONG:
+        for _ in range(scenario.entry_delay_bars):
+            if entry_window.dispatch_kind is not HistoricalDispatchKind.MARKET:
+                raise RuntimeError("bounded-long entry delay reached end of run")
+            lifecycle.coordinator.complete_active_dispatch(entry_window)
+            entry_window = lifecycle.coordinator.begin_next_dispatch()
+        if entry_window.dispatch_kind is not HistoricalDispatchKind.MARKET:
+            raise RuntimeError("bounded-long entry delay selected a non-market root")
         lease = runtime.active_lease
         if lease is None or type(lease.root) is not MarketDataEnvelope:
             raise RuntimeError("backtest runtime did not expose the first market root")
@@ -581,7 +589,7 @@ def _execute(
             raise RuntimeError("bounded-long scenario did not emit an intent")
         risk_result = economic_gate.risk_authority.evaluate(intent, economic_gate.ledger.snapshot)
         if risk_result.decision.kind is RiskDecisionKind.REJECT:
-            lifecycle.coordinator.complete_active_dispatch(first_window)
+            lifecycle.coordinator.complete_active_dispatch(entry_window)
             raise _AttemptFailure(
                 code=OutcomeCode.RISK_REJECTED,
                 message="scenario order was rejected by risk",
@@ -602,13 +610,13 @@ def _execute(
         order = orders.create_order(intent, risk_result)
         instrument_gate.hold_for(order.order_id)
         lifecycle.coordinator.prepare_submission_authorization(
-            first_window,
+            entry_window,
             order,
             causal_market_root=lease.root,
             dispatch_sequence=lease.dispatch_sequence,
         )
-        lifecycle.coordinator.submit_authorized_order(first_window, order)
-    lifecycle.coordinator.complete_active_dispatch(first_window)
+        lifecycle.coordinator.submit_authorized_order(entry_window, order)
+    lifecycle.coordinator.complete_active_dispatch(entry_window)
 
     end_of_run_window = None
     durable_fill_frontier_observed = False
