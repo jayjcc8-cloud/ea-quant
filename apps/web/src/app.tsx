@@ -33,6 +33,16 @@ export type BacktestJob = {
   report_sha256: string | null; summary_sha256: string | null; error_code: string | null; message: string | null; report_ready: boolean
   created_at?: string; input_snapshot?: InputSnapshot; input_sha256?: string; attempt_id?: string | null
 }
+export type BatchMember = BacktestJob & { presentation_status: string }
+export type ExperimentBatch = {
+  schema: 'ea.local-web-batch.v1'; batch_id: string; created_at: string
+  scenario_id: string; input_identity: InputIdentity; member_job_ids: string[]
+  member_count: number; status: 'running' | 'complete'; members: BatchMember[]
+}
+export type BatchRequest = {
+  scenario_id: string; input_identity: InputIdentity; initial_cash: string
+  runs: { strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } }[]
+}
 type Money = { amount: string; currency?: string }
 export type BacktestReport = {
   schema: 'ea.backtest-report.v1'; run_id: string
@@ -50,6 +60,8 @@ export type ApiAdapter = {
   listScenarios(): Promise<ScenarioSummary[]>
   validateScenario(scenarioId: string, parameters: BacktestParameters): Promise<ScenarioSummary>
   createBacktest(request: { scenario_id: string; input_identity: InputIdentity; parameters: BacktestParameters; request_id: string }): Promise<BacktestJob>
+  createBatch(request: BatchRequest): Promise<ExperimentBatch>
+  getBatch(batchId: string): Promise<ExperimentBatch>
   listBacktests(): Promise<BacktestJob[]>
   getBacktest(jobId: string): Promise<BacktestJob>
   getReport(jobId: string): Promise<BacktestReport>
@@ -82,6 +94,12 @@ const browserApi: ApiAdapter = {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request),
     })
   },
+  createBatch(request) {
+    return apiRequest('/api/batches', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request),
+    })
+  },
+  getBatch(batchId) { return apiRequest(`/api/batches/${encodeURIComponent(batchId)}`) },
   async listBacktests() { return (await apiRequest<{ jobs: BacktestJob[] }>('/api/backtests')).jobs },
   getBacktest(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}`) },
   getReport(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/report`) },
@@ -97,7 +115,7 @@ function Shell({ api }: { api: ApiAdapter }) {
     <aside className="sidebar">
       <Link className="brand" to="/backtests"><span>EA</span><strong>QUANT</strong></Link>
       <p className="workspace">LOCAL OFFLINE CONSOLE</p>
-      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink></nav>
+      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/batches/new">Run Batch</NavLink></nav>
       <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
     </aside>
     <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
@@ -105,10 +123,158 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
+        <Route path="/batches/new" element={<BatchCreator api={api} />} />
+        <Route path="/batches/:batchId" element={<BatchDetailRoute api={api} />} />
         <Route path="*" element={<Navigate replace to="/backtests" />} />
       </Routes>
     </div></main>
   </div>
+}
+
+type BatchConfiguration = { target_quantity: string; entry_delay_bars: number }
+
+function BatchCreator({ api }: { api: ApiAdapter }) {
+  const navigate = useNavigate()
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([])
+  const [selected, setSelected] = useState('')
+  const [initialCash, setInitialCash] = useState('')
+  const [runs, setRuns] = useState<BatchConfiguration[]>([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const defaults = (scenario: ScenarioSummary | undefined): BatchConfiguration => ({
+    target_quantity: String(scenario?.summary?.target_quantity ?? ''),
+    entry_delay_bars: scenario?.summary?.entry_delay_bars ?? 0,
+  })
+  const selectScenario = useCallback((scenario: ScenarioSummary | undefined) => {
+    setSelected(scenario?.scenario_id ?? '')
+    setInitialCash(scenario?.summary?.initial_cash ?? '')
+    const initial = defaults(scenario)
+    setRuns([{ ...initial }, { ...initial }])
+    setError(null)
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    api.listScenarios().then((items) => {
+      if (!active) return
+      setScenarios(items)
+      selectScenario(items.find((item) => item.valid && (item.strategy_parameters?.length ?? 0) > 0))
+    }).catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : 'Scenarios unavailable') })
+    return () => { active = false }
+  }, [api, selectScenario])
+
+  const candidate = scenarios.find((item) => item.scenario_id === selected)
+  const targetContract = candidate?.strategy_parameters?.find((item) => item.name === 'target_quantity')
+  const delayContract = candidate?.strategy_parameters?.find((item) => item.name === 'entry_delay_bars')
+  const updateRun = (index: number, update: Partial<BatchConfiguration>) => {
+    setRuns((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...update } : item))
+    setError(null)
+  }
+  const submit = async () => {
+    if (!candidate?.input_identity) return
+    setBusy(true); setError(null)
+    try {
+      const created = await api.createBatch({
+        scenario_id: candidate.scenario_id,
+        input_identity: candidate.input_identity,
+        initial_cash: initialCash,
+        runs: runs.map((item) => ({ strategy_parameters: item })),
+      })
+      navigate(`/batches/${created.batch_id}`)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Batch request failed')
+      setBusy(false)
+    }
+  }
+
+  return <>
+    <PageTitle title="New Experiment Batch" subtitle="Run 2–10 explicit parameter combinations through the installed engine." />
+    {error && <section className="notice error">{error}</section>}
+    <section className="panel batch-control-panel">
+      <header><h2>Batch input</h2><span>One strategy and scenario</span></header>
+      <div className="parameter-grid">
+        <div><label htmlFor="batch-scenario">Scenario</label><select id="batch-scenario" value={selected} onChange={(event) => selectScenario(scenarios.find((item) => item.scenario_id === event.target.value))}>{scenarios.filter((item) => item.valid && (item.strategy_parameters?.length ?? 0) > 0).map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}</option>)}</select></div>
+        <div><label htmlFor="batch-initial-cash">Initial cash</label><input id="batch-initial-cash" value={initialCash} onChange={(event) => setInitialCash(event.target.value)} /></div>
+      </div>
+      {candidate?.summary && <p className="muted">{candidate.summary.strategy_id} · {candidate.summary.venue}:{candidate.summary.symbol} · backend maximum delay {delayContract?.maximum ?? 'n/a'}</p>}
+      <div className="batch-configurations">{runs.map((item, index) => <section className="strategy-parameters batch-configuration" key={index}>
+        <header><h3>Run {index + 1}</h3><button aria-label={`Remove Run ${index + 1}`} disabled={runs.length <= 2} onClick={() => setRuns((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Remove</button></header>
+        <div className="parameter-grid">
+          <div><label htmlFor={`batch-quantity-${index}`}>Run {index + 1} quantity</label><input id={`batch-quantity-${index}`} type="number" min={String(targetContract?.minimum ?? 0)} step={String(targetContract?.minimum ?? 1)} value={item.target_quantity} onChange={(event) => updateRun(index, { target_quantity: event.target.value })} /></div>
+          <div><label htmlFor={`batch-delay-${index}`}>Run {index + 1} entry delay bars</label><input id={`batch-delay-${index}`} type="number" min={String(delayContract?.minimum ?? 0)} max={delayContract?.maximum === null || delayContract?.maximum === undefined ? undefined : String(delayContract.maximum)} step="1" value={Number.isNaN(item.entry_delay_bars) ? '' : item.entry_delay_bars} onChange={(event) => updateRun(index, { entry_delay_bars: event.target.valueAsNumber })} /></div>
+        </div>
+      </section>)}</div>
+      <div className="actions"><button disabled={runs.length >= 10} onClick={() => setRuns((current) => [...current, { ...defaults(candidate) }])}>Add configuration</button><button className="primary" disabled={!candidate?.input_identity || runs.length < 2 || busy} onClick={() => { void submit() }}>Run batch</button></div>
+    </section>
+  </>
+}
+
+function BatchDetailRoute({ api }: { api: ApiAdapter }) {
+  const { batchId = '' } = useParams()
+  return <BatchDetail key={batchId} api={api} batchId={batchId} />
+}
+
+function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
+  const navigate = useNavigate()
+  const [batch, setBatch] = useState<ExperimentBatch | null>(null)
+  const [reports, setReports] = useState<Record<string, BacktestReport | null>>({})
+  const [comparison, setComparison] = useState<string[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const generation = useRef(0)
+
+  const refresh = useCallback(async () => {
+    const currentGeneration = ++generation.current
+    try {
+      const current = await api.getBatch(batchId)
+      if (currentGeneration !== generation.current) return null
+      setBatch(current); setError(null)
+      const available = await Promise.all(current.members.map(async (member) => {
+        if (member.status !== 'succeeded' || !member.report_ready) return [member.job_id, null] as const
+        try {
+          const report = await api.getReport(member.job_id)
+          if (!member.engine_run_id || report.run_id !== member.engine_run_id) throw new ApiFailure('report_identity_conflict', 'Verified report identity does not match this job')
+          return [member.job_id, report] as const
+        } catch (caught) {
+          if (caught instanceof ApiFailure && caught.code !== 'report_unavailable') throw caught
+          return [member.job_id, null] as const
+        }
+      }))
+      if (currentGeneration === generation.current) setReports(Object.fromEntries(available))
+      return current.status
+    } catch (caught) {
+      if (currentGeneration === generation.current) setError(caught instanceof Error ? caught.message : 'Batch unavailable')
+      return null
+    }
+  }, [api, batchId])
+
+  useEffect(() => {
+    let active = true; let timer: number | undefined
+    const poll = async () => {
+      const status = await refresh()
+      if (active && status === 'running') timer = window.setTimeout(poll, 150)
+    }
+    void poll()
+    return () => { active = false; generation.current += 1; if (timer !== undefined) window.clearTimeout(timer) }
+  }, [refresh])
+
+  const toggle = (jobId: string) => setComparison((current) => current.includes(jobId)
+    ? current.filter((value) => value !== jobId)
+    : current.length < 2 ? [...current, jobId] : [current[1], jobId])
+  if (!batch) return <><PageTitle title="Experiment Batch" subtitle="Loading persisted batch members." />{error && <section className="notice error">{error}</section>}</>
+  return <>
+    <PageTitle title="Experiment Batch" subtitle={`${batch.scenario_id} · batch ${batch.batch_id}`} status={batch.status} />
+    {error && <section className="notice error">{error}</section>}
+    <div className="result-toolbar"><Link to="/batches/new">← Run another batch</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
+    <section className="panel identity-panel"><header><h2>Batch identity</h2><span>Persisted grouping only</span></header><dl className="summary-list"><div><dt>Created</dt><dd>{batch.created_at}</dd></div><div><dt>Scenario</dt><dd>{batch.scenario_id}</dd></div><div><dt>Members</dt><dd>{batch.member_count}</dd></div></dl></section>
+    <section className="panel comparison-panel"><header><h2>Member runs</h2><span>Real jobs and formal reports</span></header><table><thead><tr><th>Run</th><th>target_quantity</th><th>entry_delay_bars</th><th>Status</th><th>Key result</th><th>Action</th><th>Compare</th></tr></thead><tbody>{batch.members.map((member, index) => {
+      const strategy = member.input_snapshot?.scenario.strategy
+      const report = reports[member.job_id]
+      const currency = report?.economics.net_pnl.currency ?? report?.economics.currency ?? ''
+      const result = report ? `${report.economics.net_pnl.amount}${currency ? ` ${currency}` : ''} · ${percent(report.economics.total_return.value)}` : 'No report'
+      return <tr key={member.job_id}><th>Run {index + 1}</th><td>{strategy?.target_quantity ?? 'flat'}</td><td>{strategy?.entry_delay_bars ?? 0}</td><td><span className={`status status-${member.presentation_status}`}>{member.presentation_status}</span></td><td>{result}</td><td><Link to={`/backtests/${member.job_id}`}>View</Link></td><td><input type="checkbox" aria-label={`Select ${member.job_id} for comparison`} checked={comparison.includes(member.job_id)} onChange={() => toggle(member.job_id)} /></td></tr>
+    })}</tbody></table><button className="primary compare-button" disabled={comparison.length !== 2} onClick={() => navigate(`/backtests/compare/${comparison[0]}/${comparison[1]}`)}>Compare selected runs</button></section>
+  </>
 }
 
 function Backtests({ api }: { api: ApiAdapter }) {

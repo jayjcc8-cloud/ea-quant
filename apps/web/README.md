@@ -1,7 +1,7 @@
 # EA Quant Web
 
 This is the Dark Professional frontend for the real local offline backtest and bounded research
-loop defined by ADRs 0030 and 0031. The production build talks only to the same-origin `/api`
+loop defined by ADRs 0030-0032. The production build talks only to the same-origin `/api`
 served by `ea web serve`; it does not fall back to mock business data when the service is
 unavailable. Component tests inject an explicit fake adapter, while the Playwright suite uses an
 installed candidate wheel, actual loopback HTTP, the existing engine, and formal reports.
@@ -13,6 +13,11 @@ derives the delay maximum from the loaded canonical market-bar sequence and next
 semantics. Saved runs retain their normalized input snapshot. “Use parameters” creates a new
 validation/run, and comparison shows parameter changes beside exact report deltas without storing
 a new comparison artifact or making causal claims.
+
+`/batches/new` creates one explicit 2-10 member parameter set for a single scenario. The backend
+validates the complete set before creating normal jobs, executes them serially, and persists only
+the batch-to-job relationship. `/batches/{batch_id}` derives member states and stable report
+summaries after refresh or restart, and any two members reuse the existing comparison.
 
 Run the supported frontend checks from this directory:
 
@@ -27,8 +32,8 @@ npm run test:e2e
 
 `npm run test:e2e` builds the wheel and UI, creates a repository-outside Python environment,
 installs the wheel non-editably with its Web extra, and runs Chromium against the installed
-service. The supported product entry is `/backtests`; `/backtests/{job_id}` and
-`/backtests/compare/{left_job_id}/{right_job_id}` are refreshable.
+service. Supported entries are `/backtests` and `/batches/new`; job, batch, and
+`/backtests/compare/{left_job_id}/{right_job_id}` URLs are refreshable.
 
 For direct use, build with `npm run build`, then follow the root README command using separate
 scenario, workspace, and `dist` roots:
