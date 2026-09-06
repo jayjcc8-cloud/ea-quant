@@ -36,6 +36,11 @@ Entry: Phase 0 is released and `main` is healthy.
    exact clean `main` product and published its fixed tag, wheel, and checksum as a GitHub
    prerelease. No package-registry publication or deployment was performed.
 
+Post-release bounded increments retain the Phase 1 product boundary. ADR 0030 adds the local-only
+browser adapter; ADR 0031 adds only input replay, durable normalized history, and pairwise
+comparison for `initial_cash` and `quantity`. Symbol/data configuration, Experiment tracking,
+optimization, and research-grade analytics remain Phase 2 concerns.
+
 This is a product dependency order, not a sequence of governance phases or actor chains.
 
 ## Phase 1 Non-goals
@@ -48,8 +53,8 @@ This is a product dependency order, not a sequence of governance phases or actor
 - Automatic reconciliation correction, balance adjustment, ancestry repair, or exhaustive recovery
   across dormant correction combinations.
 - Initial positions, multiple settlement currencies, network/deployed Web integration, or
-  research-grade performance analytics. ADR 0030 permits only the bounded loopback Web adapter
-  over the existing offline product.
+  research-grade performance analytics. ADRs 0030 and 0031 permit only the bounded loopback Web
+  adapter and its small replay/history/compare loop over the existing offline product.
 
 ## Phase 1 Exit Criteria
 

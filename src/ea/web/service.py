@@ -10,17 +10,20 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ea.core import RunId
 from ea.product import (
     BacktestRunFailure,
     BacktestScenarioError,
     LoadedBacktestScenario,
     generate_backtest_report,
     load_backtest_scenario,
+    parameterize_backtest_scenario,
     run_backtest_scenario,
 )
 
@@ -28,6 +31,7 @@ _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01
 _JOB_STATES = frozenset({"accepted", "running", "succeeded", "failed", "interrupted"})
 _ARTIFACTS = frozenset({"report.json", "summary.txt"})
 _MAX_SCENARIO_BYTES = 64 * 1024
+_INPUT_DIGEST_DOMAIN = b"ea.local-web-input.v1\0"
 
 
 class WebBoundaryError(ValueError):
@@ -127,6 +131,26 @@ def _scenario_summary(scenario_id: str, scenario: LoadedBacktestScenario) -> dic
     }
 
 
+def _input_snapshot(
+    scenario_id: str,
+    scenario: LoadedBacktestScenario,
+    source_identity: dict[str, object],
+) -> tuple[bytes, str]:
+    snapshot = {
+        "schema": "ea.local-web-input.v1",
+        "scenario_id": scenario_id,
+        "source_identity": source_identity,
+        "identity": _scenario_identity(scenario),
+        "scenario": json.loads(scenario.canonical_bytes),
+    }
+    payload = _canonical_json(snapshot)
+    return payload, sha256(_INPUT_DIGEST_DOMAIN + payload).hexdigest()
+
+
+def _created_at() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 class ScenarioRegistry:
     """Resolve only immediate YAML files registered under one authorized root."""
 
@@ -203,6 +227,11 @@ class JobRecord:
     scenario_id: str
     input_identity: dict[str, object]
     status: str
+    schema: str = "ea.local-web-job.v2"
+    created_at: str | None = None
+    input_snapshot_bytes: bytes | None = None
+    input_sha256: str | None = None
+    attempt_id: str | None = None
     engine_run_id: str | None = None
     report_sha256: str | None = None
     summary_sha256: str | None = None
@@ -210,8 +239,8 @@ class JobRecord:
     message: str | None = None
 
     def document(self) -> dict[str, object]:
-        return {
-            "schema": "ea.local-web-job.v1",
+        document: dict[str, object] = {
+            "schema": self.schema,
             "job_id": self.job_id,
             "request_id": self.request_id,
             "scenario_id": self.scenario_id,
@@ -228,6 +257,22 @@ class JobRecord:
                 and self.summary_sha256 is not None
             ),
         }
+        if self.schema == "ea.local-web-job.v2":
+            if (
+                self.created_at is None
+                or self.input_snapshot_bytes is None
+                or self.input_sha256 is None
+            ):
+                raise RuntimeError("v2 Web job is missing immutable input evidence")
+            document.update(
+                {
+                    "created_at": self.created_at,
+                    "input_snapshot": json.loads(self.input_snapshot_bytes),
+                    "input_sha256": self.input_sha256,
+                    "attempt_id": self.attempt_id,
+                }
+            )
+        return document
 
 
 def _decode_job(payload: bytes) -> JobRecord:
@@ -235,7 +280,8 @@ def _decode_job(payload: bytes) -> JobRecord:
         document = json.loads(payload)
         if type(document) is not dict or _canonical_json(document) != payload:
             raise ValueError
-        if document.get("schema") != "ea.local-web-job.v1":
+        schema = document.get("schema")
+        if schema not in {"ea.local-web-job.v1", "ea.local-web-job.v2"}:
             raise ValueError
         status_value = document.get("status")
         identity = document.get("input_identity")
@@ -260,12 +306,53 @@ def _decode_job(payload: bytes) -> JobRecord:
             raise ValueError
         if type(document.get("report_ready")) is not bool:
             raise ValueError
+        created_at: str | None = None
+        input_snapshot_bytes: bytes | None = None
+        input_sha256: str | None = None
+        attempt_id: str | None = None
+        if schema == "ea.local-web-job.v2":
+            created_at_value = document.get("created_at")
+            snapshot = document.get("input_snapshot")
+            input_sha256_value = document.get("input_sha256")
+            attempt_id_value = document.get("attempt_id")
+            if (
+                type(created_at_value) is not str
+                or type(snapshot) is not dict
+                or type(input_sha256_value) is not str
+                or (attempt_id_value is not None and type(attempt_id_value) is not str)
+            ):
+                raise ValueError
+            if (
+                set(snapshot)
+                != {"schema", "scenario_id", "source_identity", "identity", "scenario"}
+                or snapshot.get("schema") != "ea.local-web-input.v1"
+                or snapshot.get("scenario_id") != document["scenario_id"]
+                or snapshot.get("source_identity") != identity
+                or type(snapshot.get("identity")) is not dict
+                or type(snapshot.get("scenario")) is not dict
+            ):
+                raise ValueError
+            datetime.strptime(created_at_value, "%Y-%m-%dT%H:%M:%S.%fZ")
+            input_snapshot_bytes = _canonical_json(snapshot)
+            if (
+                sha256(_INPUT_DIGEST_DOMAIN + input_snapshot_bytes).hexdigest()
+                != input_sha256_value
+            ):
+                raise ValueError
+            created_at = created_at_value
+            input_sha256 = input_sha256_value
+            attempt_id = attempt_id_value
         return JobRecord(
             job_id=document["job_id"],
             request_id=document["request_id"],
             scenario_id=document["scenario_id"],
             input_identity=identity,
             status=status_value,
+            schema=schema,
+            created_at=created_at,
+            input_snapshot_bytes=input_snapshot_bytes,
+            input_sha256=input_sha256,
+            attempt_id=attempt_id,
             engine_run_id=document.get("engine_run_id"),
             report_sha256=document.get("report_sha256"),
             summary_sha256=document.get("summary_sha256"),
@@ -323,10 +410,12 @@ class WebService:
         self.registry = ScenarioRegistry(resolved_scenarios)
         self.workspace = _directory(resolved_workspace, label="workspace", create=True)
         self.jobs_dir = _directory(self.workspace / "jobs", label="job index", create=True)
+        self.inputs_dir = _directory(self.workspace / "inputs", label="input store", create=True)
         self.runs_dir = _directory(self.workspace / "runs", label="attempt root", create=True)
         self.reports_dir = _directory(self.workspace / "reports", label="report root", create=True)
         for directory, label in (
             (self.jobs_dir, "job index"),
+            (self.inputs_dir, "input store"),
             (self.runs_dir, "attempt root"),
             (self.reports_dir, "report root"),
         ):
@@ -353,6 +442,46 @@ class WebService:
 
     def _job_path(self, job_id: str) -> Path:
         return self.jobs_dir / f"{job_id}.json"
+
+    def _materialize_scenario(
+        self,
+        job_id: str,
+        scenario: LoadedBacktestScenario,
+    ) -> LoadedBacktestScenario:
+        document = json.loads(scenario.canonical_bytes)
+        document.pop("canonicalization")
+        document["data"]["path"] = str(scenario.data_path)
+        path = self.inputs_dir / f"{job_id}.json"
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                descriptor = None
+                handle.write(_canonical_json(document))
+                handle.flush()
+                os.fsync(handle.fileno())
+            directory_descriptor = os.open(self.inputs_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+            materialized = load_backtest_scenario(path)
+            if (
+                materialized.canonical_bytes != scenario.canonical_bytes
+                or materialized.scenario_sha256 != scenario.scenario_sha256
+                or materialized.data_path != scenario.data_path
+            ):
+                raise WebBoundaryError("normalized input identity conflicts")
+            return materialized
+        except Exception:
+            if descriptor is not None:
+                os.close(descriptor)
+            path.unlink(missing_ok=True)
+            raise
 
     def _write(self, record: JobRecord) -> None:
         payload = _canonical_json(record.document())
@@ -406,7 +535,39 @@ class WebService:
 
     def list_jobs(self) -> list[dict[str, object]]:
         with self._lock:
-            return [self._jobs[key].document() for key in sorted(self._jobs, reverse=True)]
+            records = sorted(
+                self._jobs.values(),
+                key=lambda record: (
+                    record.created_at is not None,
+                    record.created_at or "",
+                    record.job_id,
+                ),
+                reverse=True,
+            )
+            return [record.document() for record in records]
+
+    def validate_scenario(
+        self,
+        scenario_id: str,
+        *,
+        parameters: dict[str, str | None] | None = None,
+    ) -> dict[str, object]:
+        scenario = self.registry.load(scenario_id)
+        source_summary = _scenario_summary(scenario_id, scenario)
+        if parameters is None:
+            return source_summary
+        initial_cash = parameters.get("initial_cash")
+        if type(initial_cash) is not str:
+            raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
+        normalized = parameterize_backtest_scenario(
+            scenario,
+            initial_cash=initial_cash,
+            quantity=parameters.get("quantity"),
+        )
+        normalized_summary = _scenario_summary(scenario_id, normalized)
+        source_summary["summary"] = normalized_summary["summary"]
+        source_summary["normalized_input_identity"] = normalized_summary["input_identity"]
+        return source_summary
 
     def get_job(self, job_id: str) -> JobRecord:
         with self._lock:
@@ -420,42 +581,73 @@ class WebService:
         *,
         scenario_id: str,
         input_identity: dict[str, object],
+        parameters: dict[str, str | None] | None = None,
         request_id: str,
     ) -> tuple[JobRecord, bool]:
         with self._lock:
+            scenario = self.registry.load(scenario_id)
+            if _scenario_identity(scenario) != input_identity:
+                raise InputChangedError("scenario input changed; validate it again")
+            if parameters is not None:
+                initial_cash = parameters.get("initial_cash")
+                if type(initial_cash) is not str:
+                    raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
+                scenario = parameterize_backtest_scenario(
+                    scenario,
+                    initial_cash=initial_cash,
+                    quantity=parameters.get("quantity"),
+                )
+            snapshot_bytes, input_sha256 = _input_snapshot(
+                scenario_id,
+                scenario,
+                input_identity,
+            )
             existing_id = self._requests.get(request_id)
             if existing_id is not None:
                 existing = self._jobs[existing_id]
-                if existing.scenario_id != scenario_id or existing.input_identity != input_identity:
+                if (
+                    existing.scenario_id != scenario_id
+                    or existing.input_identity != input_identity
+                    or existing.input_snapshot_bytes != snapshot_bytes
+                ):
                     raise RequestConflictError("request_id is already bound to different input")
                 return existing, False
             if self._active is not None:
                 raise ServiceBusyError("one local backtest is already active")
-            scenario = self.registry.load(scenario_id)
-            if _scenario_identity(scenario) != input_identity:
-                raise InputChangedError("scenario input changed; validate it again")
+            job_id = str(uuid4())
+            attempt_id = RunId(str(uuid4()))
+            scenario = self._materialize_scenario(job_id, scenario)
             record = JobRecord(
-                job_id=str(uuid4()),
+                job_id=job_id,
                 request_id=request_id,
                 scenario_id=scenario_id,
                 input_identity=input_identity,
                 status="accepted",
+                created_at=_created_at(),
+                input_snapshot_bytes=snapshot_bytes,
+                input_sha256=input_sha256,
+                attempt_id=attempt_id.value,
             )
             self._store(record)
             self._active = record.job_id
-            self._executor.submit(self._run, record.job_id)
+            self._executor.submit(self._run, record.job_id, scenario)
             return record, True
 
-    def _run(self, job_id: str) -> None:
+    def _run(self, job_id: str, scenario: LoadedBacktestScenario) -> None:
         with self._lock:
             record = replace(self._jobs[job_id], status="running")
             self._store(record)
         try:
-            scenario = self.registry.load(record.scenario_id)
-            if _scenario_identity(scenario) != record.input_identity:
-                raise InputChangedError("scenario input changed; validate it again")
-            result = run_backtest_scenario(scenario, self.runs_dir)
+            if record.attempt_id is None:
+                raise RuntimeError("accepted Web job has no reserved attempt identity")
+            result = run_backtest_scenario(
+                scenario,
+                self.runs_dir,
+                run_id=RunId(record.attempt_id),
+            )
             run_id = result.output_directory.name
+            if run_id != record.attempt_id:
+                raise RuntimeError("engine attempt identity conflicts with accepted Web job")
             record = replace(record, engine_run_id=run_id)
             with self._lock:
                 self._store(record)
@@ -490,13 +682,21 @@ class WebService:
                     message=None,
                 )
         except BacktestRunFailure as error:
-            completed = replace(
-                record,
-                status="failed",
-                engine_run_id=error.output_directory.name,
-                error_code=error.code.value,
-                message=str(error),
-            )
+            if error.output_directory.name != record.attempt_id:
+                completed = replace(
+                    record,
+                    status="failed",
+                    error_code="web.internal_failure",
+                    message="the local backtest failed unexpectedly",
+                )
+            else:
+                completed = replace(
+                    record,
+                    status="failed",
+                    engine_run_id=error.output_directory.name,
+                    error_code=error.code.value,
+                    message=str(error),
+                )
         except (BacktestScenarioError, InputChangedError):
             completed = replace(
                 record,

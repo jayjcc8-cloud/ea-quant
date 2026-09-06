@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 
 import yaml
 from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, ValidationError, model_validator
@@ -464,9 +464,65 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
     )
 
 
+def parameterize_backtest_scenario(
+    scenario: LoadedBacktestScenario,
+    *,
+    initial_cash: str,
+    quantity: str | None,
+) -> LoadedBacktestScenario:
+    """Create one validated immutable run input from a registered scenario."""
+    if type(scenario) is not LoadedBacktestScenario:
+        raise BacktestScenarioError("scenario must be a loaded BacktestScenario")
+    specification = scenario.spec_set.require(scenario.instrument)
+    cash = _quantized(
+        _positive(
+            _decimal(initial_cash, field="initial_cash"),
+            field="initial_cash",
+        ),
+        specification.currency_quantum,
+        field="initial_cash",
+    )
+    target: CanonicalDecimal | None = None
+    if scenario.strategy_id is BacktestStrategyId.ALWAYS_FLAT:
+        if quantity is not None:
+            raise BacktestScenarioError("always-flat-v1 forbids quantity")
+    else:
+        if quantity is None:
+            raise BacktestScenarioError("bounded-long-v1 requires quantity")
+        target = _quantized(
+            _positive(
+                _decimal(quantity, field="quantity"),
+                field="quantity",
+            ),
+            specification.quantity_quantum,
+            field="quantity",
+        )
+
+    document = cast(dict[str, object], json.loads(scenario.canonical_bytes))
+    funding = cast(dict[str, object], document["funding"])
+    strategy = cast(dict[str, object], document["strategy"])
+    funding["initial_cash"] = cash.text
+    strategy["target_quantity"] = None if target is None else target.text
+    canonical = json.dumps(
+        document,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return replace(
+        scenario,
+        initial_cash=cash,
+        target_quantity=target,
+        canonical_bytes=canonical,
+        scenario_sha256=Sha256Digest(sha256(_SCENARIO_DIGEST_DOMAIN + canonical).hexdigest()),
+    )
+
+
 __all__ = [
     "BacktestScenarioError",
     "BacktestStrategyId",
     "LoadedBacktestScenario",
     "load_backtest_scenario",
+    "parameterize_backtest_scenario",
 ]

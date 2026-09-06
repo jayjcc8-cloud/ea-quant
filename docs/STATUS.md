@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web integration.**
+**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web research loop.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -88,14 +88,23 @@ external write, deployment, or live capability is part of this objective.
 - Host/origin/header/content-type, identifier, artifact allowlist, and resolved-root checks fail
   closed at the new HTTP boundary. No CORS relaxation, arbitrary browser path, upload, or CDN is
   part of the product.
+- ADR 0031 adds one bounded local research loop without creating an Experiment or instrument/data
+  configuration system: initial cash and quantity are editable, while symbol remains read-only and
+  bound to a registered, verified scenario/data combination.
+- Each new Web job stores the resolved, validated, normalized scenario snapshot, source and final
+  identities, an input digest, creation time, and attempt identity. History is newest-first and
+  “Use parameters” starts a fresh validation/run rather than mutating or resuming prior evidence.
+- Pairwise comparison reads two persisted snapshots and verified formal reports, computes exact
+  decimal deltas, and leaves failed or unavailable reports without fabricated metrics or deltas.
 
 ## Incomplete
 
-The v0.2.0 prerelease and local Web increment are one deterministic single-run/reporting product,
-not the broader research, paper, or live roadmap. Arbitrary instruction-level or Web recovery,
-uploads/editing, broader performance analytics, stochastic seed hierarchies, strategy plugins,
-paper/live execution, package-registry publication, and deployment remain unavailable. Phase
-1.1/#125 and Phase 2 have not been activated.
+The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
+single-run/reporting product, not the broader Phase 2 research, paper, or live roadmap. Arbitrary
+instruction-level or Web recovery, symbol/data editing, uploads, experiment tracking, broader
+performance analytics, stochastic seed hierarchies, strategy plugins, paper/live execution,
+package-registry publication, and deployment remain unavailable. Phase 1.1/#125 and Phase 2 have
+not been activated.
 
 ## Blockers
 
@@ -122,6 +131,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0027 — Phase 1 offline backtest product boundary](adr/0027-phase1-offline-backtest-product-boundary.md)
 - [ADR 0029 — Governance freeze and bounded product delivery](adr/0029-governance-freeze-and-bounded-delivery.md)
 - [ADR 0030 — Local Web offline backtest integration](adr/0030-local-web-offline-backtest-integration.md)
+- [ADR 0031 — Local Web Research Loop V1](adr/0031-local-web-research-loop-v1.md)
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
@@ -147,6 +157,9 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
   remains parked and does not block the Offline Backtest MVP or v0.2.0 unless explicitly promoted.
 - [#167 — Local real Web backtest loop](https://github.com/jayjcc8-cloud/ea-quant/issues/167)
   adds the bounded browser-to-engine-to-report path without activating Phase 1.1 or Phase 2.
+- [#169 — Local Web Research Loop V1](https://github.com/jayjcc8-cloud/ea-quant/issues/169)
+  adds bounded parameter replay, normalized input history, and pairwise comparison without
+  activating a symbol/data editor, Experiment model, Phase 1.1, or Phase 2.
 - R9/R10 Issues #149, #150, #152, #153 and PR #151 retain provenance as superseded hardening
   history after the reset governance PR merges; they are not an active delivery chain.
 
@@ -176,6 +189,8 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [x] Quick Start identifies the supported boundary and known limitations.
 - [x] An installed candidate wheel and matching Web dist complete the loopback-only real browser
   path through validation, a fresh attempt, formal report, refresh, restart, and artifact download.
+- [x] The local Web path replays normalized inputs into fresh attempts, compares two successes and
+  a success with risk rejection, persists across restart, and rejects free-text symbol input.
 
 These conditions complete Issues #81, #161, and #83 and the bounded v0.2.0 GitHub prerelease gate
 in #84. They do not activate Phase 1.1/#125, Phase 2, package-registry publication, or deployment.

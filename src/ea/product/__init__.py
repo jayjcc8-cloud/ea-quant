@@ -36,6 +36,7 @@ from ea.product.scenario import (
     BacktestStrategyId,
     LoadedBacktestScenario,
     load_backtest_scenario,
+    parameterize_backtest_scenario,
 )
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "canonical_backtest_lineage_bytes",
     "generate_backtest_report",
     "load_backtest_scenario",
+    "parameterize_backtest_scenario",
     "resume_backtest_attempt",
     "run_offline_demo",
     "run_backtest_scenario",

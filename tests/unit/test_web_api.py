@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import time
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+import ea.web.service as web_service
+from ea.product import run_backtest_scenario as run_product_backtest
 from ea.web.app import WebSettings, create_app
 from ea.web.service import WebBoundaryError, WebService
 from unit.test_backtest_report import _priced_scenario
@@ -82,12 +87,320 @@ def _wait(client: TestClient, job_id: str) -> dict[str, Any]:
     raise AssertionError(f"job {job_id} did not finish")
 
 
+def test_history_is_newest_first_by_persisted_creation_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generated_ids = iter(
+        [
+            "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000000",
+            "00000000-0000-4000-8000-000000000002",
+        ]
+    )
+    created_at = iter(["2026-09-05T15:00:00.000000Z", "2026-09-05T15:10:00.000000Z"])
+    monkeypatch.setattr(web_service, "uuid4", lambda: next(generated_ids))
+    monkeypatch.setattr(web_service, "_created_at", lambda: next(created_at))
+    settings = _settings(tmp_path)
+
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        accepted_ids: list[str] = []
+        for request_id in ("request-history-0001", "request-history-0002"):
+            response = client.post(
+                "/api/backtests",
+                json={
+                    "scenario_id": "bounded-long.yaml",
+                    "input_identity": validated["input_identity"],
+                    "request_id": request_id,
+                },
+                headers=WRITE_HEADERS,
+            )
+            assert response.status_code == 202, response.text
+            accepted = response.json()
+            accepted_ids.append(accepted["job_id"])
+            assert _wait(client, accepted["job_id"])["status"] == "succeeded"
+
+        history = client.get("/api/backtests").json()["jobs"]
+        assert [item["job_id"] for item in history] == list(reversed(accepted_ids))
+        assert [item["created_at"] for item in history] == [
+            "2026-09-05T15:10:00.000000Z",
+            "2026-09-05T15:00:00.000000Z",
+        ]
+
+
+def test_validation_normalizes_editable_parameters_without_changing_registered_symbol(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        response = client.post(
+            "/api/scenarios/bounded-long.yaml/validate",
+            json={"parameters": {"initial_cash": "20000", "quantity": "4"}},
+            headers=WRITE_HEADERS,
+        )
+
+    assert response.status_code == 200, response.text
+    validated = response.json()
+    assert validated["summary"]["initial_cash"] == "20000"
+    assert validated["summary"]["target_quantity"] == "4"
+    assert validated["summary"]["symbol"] == "AAPL"
+    assert validated["summary"]["venue"] == "XNAS"
+    assert (
+        validated["normalized_input_identity"]["scenario_sha256"]
+        != validated["input_identity"]["scenario_sha256"]
+    )
+    assert (
+        validated["normalized_input_identity"]["data_sha256"]
+        == validated["input_identity"]["data_sha256"]
+    )
+
+
 def _tree_digest(path: Path) -> dict[str, str]:
     return {
         str(item.relative_to(path)): hashlib.sha256(item.read_bytes()).hexdigest()
         for item in sorted(path.rglob("*"))
         if item.is_file()
     }
+
+
+def _input_sha256(snapshot: dict[str, object]) -> str:
+    payload = (
+        json.dumps(
+            snapshot,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
+    return hashlib.sha256(b"ea.local-web-input.v1\0" + payload).hexdigest()
+
+
+def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        response = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "4"},
+                "request_id": "request-snapshot-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert response.status_code == 202, response.text
+        accepted = response.json()
+
+        snapshot = accepted["input_snapshot"]
+        assert accepted["schema"] == "ea.local-web-job.v2"
+        assert snapshot["schema"] == "ea.local-web-input.v1"
+        assert snapshot["scenario_id"] == "bounded-long.yaml"
+        assert snapshot["source_identity"] == validated["input_identity"]
+        assert snapshot["identity"]["data_sha256"] == validated["input_identity"]["data_sha256"]
+        assert snapshot["identity"]["record_count"] == validated["input_identity"]["record_count"]
+        assert (
+            snapshot["identity"]["scenario_sha256"]
+            != validated["input_identity"]["scenario_sha256"]
+        )
+        assert snapshot["scenario"]["funding"] == {
+            "currency": "USD",
+            "initial_cash": "20000",
+        }
+        assert snapshot["scenario"]["strategy"] == {
+            "id": "bounded-long-v1",
+            "target_quantity": "4",
+        }
+        assert snapshot["scenario"]["instrument"]["symbol"] == "AAPL"
+        assert snapshot["scenario"]["instrument"]["venue"] == "XNAS"
+        assert snapshot["scenario"]["data"]["fingerprint"] == {
+            "record_count": 4,
+            "sha256": validated["input_identity"]["data_sha256"],
+        }
+        assert accepted["input_sha256"] == _input_sha256(snapshot)
+        assert datetime.strptime(accepted["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+
+        persisted = json.loads(
+            (settings.workspace / "jobs" / f"{accepted['job_id']}.json").read_text(encoding="ascii")
+        )
+        assert persisted["input_snapshot"] == snapshot
+        assert persisted["input_sha256"] == accepted["input_sha256"]
+        assert persisted["created_at"] == accepted["created_at"]
+        materialized = settings.workspace / "inputs" / f"{accepted['job_id']}.json"
+        assert materialized.is_file()
+        assert materialized.resolve().is_relative_to((settings.workspace / "inputs").resolve())
+
+        completed = _wait(client, accepted["job_id"])
+        report = client.get(f"/api/backtests/{completed['job_id']}/report").json()
+        assert report["economics"]["initial_funding"] == {
+            "amount": "20000",
+            "currency": "USD",
+        }
+        assert report["economics"]["ending_positions"] == [
+            {"quantity": "4", "symbol": "AAPL", "venue": "XNAS"}
+        ]
+        assert report["economics"]["equity"]["amount"] == "20034"
+        assert report["economics"]["net_pnl"]["amount"] == "34"
+        assert report["economics"]["total_return"]["value"] == "0.0017"
+
+        duplicate = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "4"},
+                "request_id": "request-snapshot-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert duplicate.status_code == 200
+        assert duplicate.json()["job_id"] == accepted["job_id"]
+
+        conflict = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "3"},
+                "request_id": "request-snapshot-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "input_conflict"
+
+
+def test_idempotency_compares_effective_normalized_input_when_parameters_are_omitted(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "bounded-long.yaml")
+        explicit = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "4"},
+                "request_id": "request-explicit-then-omitted-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert explicit.status_code == 202, explicit.text
+        assert _wait(client, explicit.json()["job_id"])["status"] == "succeeded"
+
+        omitted_retry = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-explicit-then-omitted-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert omitted_retry.status_code == 409
+        assert omitted_retry.json()["error"]["code"] == "input_conflict"
+
+        omitted = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-omitted-then-explicit-0002",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert omitted.status_code == 202, omitted.text
+        assert _wait(client, omitted.json()["job_id"])["status"] == "succeeded"
+
+        explicit_retry = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": validated["input_identity"],
+                "parameters": {"initial_cash": "20000", "quantity": "4"},
+                "request_id": "request-omitted-then-explicit-0002",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert explicit_retry.status_code == 409
+        assert explicit_retry.json()["error"]["code"] == "input_conflict"
+
+
+def test_worker_consumes_input_frozen_at_job_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    service = WebService(settings.scenario_root, settings.workspace)
+    service.start()
+    try:
+        validated = service.registry.validate("bounded-long.yaml")
+        original_load = service.registry.load
+        load_count = 0
+
+        def load_only_for_acceptance(scenario_id: str) -> object:
+            nonlocal load_count
+            load_count += 1
+            if load_count > 1:
+                raise AssertionError("worker reloaded mutable registry input")
+            return original_load(scenario_id)
+
+        monkeypatch.setattr(service.registry, "load", load_only_for_acceptance)
+        accepted, created = service.create_job(
+            scenario_id="bounded-long.yaml",
+            input_identity=cast(dict[str, object], validated["input_identity"]),
+            request_id="request-frozen-input-0001",
+        )
+        assert created is True
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            completed = service.get_job(accepted.job_id)
+            if completed.status not in {"accepted", "running"}:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("frozen-input job did not finish")
+
+        assert completed.status == "succeeded"
+        assert completed.engine_run_id
+        assert completed.document()["attempt_id"] == completed.engine_run_id
+        assert load_count == 1
+    finally:
+        service.stop()
+
+
+def test_restart_rejects_v2_job_when_snapshot_conflicts_with_outer_identity(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        validated = _validate(client, "flat.yaml")
+        response = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "flat.yaml",
+                "input_identity": validated["input_identity"],
+                "request_id": "request-snapshot-conflict-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        job = _wait(client, response.json()["job_id"])
+
+    path = settings.workspace / "jobs" / f"{job['job_id']}.json"
+    document = json.loads(path.read_text(encoding="ascii"))
+    document["scenario_id"] = "different.yaml"
+    path.write_text(
+        json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="ascii",
+    )
+
+    with (
+        pytest.raises(WebBoundaryError, match="workspace job index is invalid"),
+        TestClient(create_app(settings), base_url=ORIGIN),
+    ):
+        pass
 
 
 def test_real_api_runs_reports_is_idempotent_and_survives_restart(tmp_path: Path) -> None:
@@ -241,6 +554,37 @@ def test_api_fails_closed_for_input_business_and_browser_boundaries(tmp_path: Pa
             ).status_code
             == 415
         )
+
+        bounded = _validate(client, "bounded-long.yaml")
+        free_text_symbol = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": bounded["input_identity"],
+                "parameters": {
+                    "initial_cash": "10000",
+                    "quantity": "2",
+                    "symbol": "MSFT",
+                },
+                "request_id": "request-symbol-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert free_text_symbol.status_code == 422
+        assert free_text_symbol.json()["error"]["code"] == "invalid_request"
+
+        invalid_quantity = client.post(
+            "/api/backtests",
+            json={
+                "scenario_id": "bounded-long.yaml",
+                "input_identity": bounded["input_identity"],
+                "parameters": {"initial_cash": "10000", "quantity": "1.5"},
+                "request_id": "request-quantity-0001",
+            },
+            headers=WRITE_HEADERS,
+        )
+        assert invalid_quantity.status_code == 422
+        assert invalid_quantity.json()["error"]["code"] == "scenario_invalid"
 
         low = _validate(client, "low-cash.yaml")
         response = client.post(
@@ -478,3 +822,57 @@ def test_restart_marks_inflight_job_interrupted_without_rerun(tmp_path: Path) ->
         }
         assert list((settings.workspace / "runs").iterdir()) == []
         assert list((settings.workspace / "reports").iterdir()) == []
+
+
+def test_restart_retains_reserved_attempt_identity_after_real_engine_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    engine_finished = Event()
+    release_worker = Event()
+
+    def pause_after_engine(*args: object, **kwargs: object) -> object:
+        result = run_product_backtest(*args, **kwargs)  # type: ignore[arg-type]
+        engine_finished.set()
+        assert release_worker.wait(10)
+        return result
+
+    monkeypatch.setattr(web_service, "run_backtest_scenario", pause_after_engine)
+    service = WebService(settings.scenario_root, settings.workspace)
+    service.start()
+    recovered: WebService | None = None
+    try:
+        validated = service.registry.validate("bounded-long.yaml")
+        accepted, created = service.create_job(
+            scenario_id="bounded-long.yaml",
+            input_identity=cast(dict[str, object], validated["input_identity"]),
+            request_id="request-interrupted-attempt-0002",
+        )
+        assert created is True
+        assert engine_finished.wait(10)
+
+        persisted = service.get_job(accepted.job_id)
+        assert persisted.status == "running"
+        assert persisted.attempt_id is not None
+        assert persisted.engine_run_id is None
+        attempt = settings.workspace / "runs" / persisted.attempt_id
+        assert (attempt / "result.json").is_file()
+
+        recovered_workspace = tmp_path / "recovered-workspace"
+        shutil.copytree(settings.workspace, recovered_workspace)
+        recovered = WebService(settings.scenario_root, recovered_workspace)
+        recovered.start()
+
+        interrupted = recovered.get_job(accepted.job_id)
+        assert interrupted.status == "interrupted"
+        assert interrupted.attempt_id == persisted.attempt_id
+        assert interrupted.engine_run_id is None
+        assert interrupted.report_sha256 is None
+        assert interrupted.summary_sha256 is None
+        assert len(list((recovered_workspace / "runs").iterdir())) == 1
+        assert not (recovered_workspace / "reports" / accepted.job_id).exists()
+    finally:
+        if recovered is not None:
+            recovered.stop()
+        release_worker.set()
+        service.stop()

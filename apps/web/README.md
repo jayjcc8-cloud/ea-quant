@@ -1,10 +1,15 @@
 # EA Quant Web
 
-This is the Dark Professional frontend for the real local offline backtest loop defined by ADR
-0030. The production build talks only to the same-origin `/api` served by `ea web serve`; it does
-not fall back to mock business data when the service is unavailable. Component tests inject an
-explicit fake adapter, while the Playwright suite uses an installed candidate wheel, actual
-loopback HTTP, the existing engine, and formal reports.
+This is the Dark Professional frontend for the real local offline backtest and bounded research
+loop defined by ADRs 0030 and 0031. The production build talks only to the same-origin `/api`
+served by `ea web serve`; it does not fall back to mock business data when the service is
+unavailable. Component tests inject an explicit fake adapter, while the Playwright suite uses an
+installed candidate wheel, actual loopback HTTP, the existing engine, and formal reports.
+
+The V1 research controls are intentionally narrow: `initial_cash` and `quantity` are editable;
+`symbol` is read-only and comes from the selected registered, verified scenario/data combination.
+Saved runs retain their normalized input snapshot. “Use parameters” creates a new validation/run,
+and comparison derives exact deltas from two saved jobs without storing a new comparison artifact.
 
 Run the supported frontend checks from this directory:
 
@@ -19,7 +24,8 @@ npm run test:e2e
 
 `npm run test:e2e` builds the wheel and UI, creates a repository-outside Python environment,
 installs the wheel non-editably with its Web extra, and runs Chromium against the installed
-service. The supported product entry is `/backtests`; `/backtests/{job_id}` is refreshable.
+service. The supported product entry is `/backtests`; `/backtests/{job_id}` and
+`/backtests/compare/{left_job_id}/{right_job_id}` are refreshable.
 
 For direct use, build with `npm run build`, then follow the root README command using separate
 scenario, workspace, and `dist` roots:
