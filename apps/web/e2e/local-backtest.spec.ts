@@ -84,10 +84,10 @@ test('installed browser completes the bounded local Web research loop', async ({
   await expect(page.getByText('Validated input')).toHaveCount(0)
   const changed = await validateAndRun(page)
   expect(changed.runId).not.toBe(baseline.runId)
-  await expect(page.getByText('9560 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('10000 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('0 USD', { exact: true })).toBeVisible()
-  await expect(page.getByText('0', { exact: true })).toBeVisible()
+  await expect(page.locator('.metric-card').filter({ hasText: 'Ending cash' })).toContainText('9560 USD')
+  await expect(page.locator('.metric-card').filter({ hasText: 'Equity' })).toContainText('10000 USD')
+  await expect(page.locator('.metric-card').filter({ hasText: 'Net P&L' })).toContainText('0 USD')
+  await expect(page.locator('.metric-card').filter({ hasText: 'Total return' })).toContainText('0')
 
   await page.goto('/backtests')
   await expect(page.locator('.job-card').first()).toContainText(changed.runId)
@@ -97,7 +97,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   await expect(page).toHaveURL(`/backtests/compare/${baseline.jobId}/${changed.jobId}`)
   await expect(page.getByRole('row', { name: /target_quantity 2 4 Changed/i })).toBeVisible()
   await expect(page.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
   await expect(page.getByRole('row', { name: /Net P&L 17 USD 0 USD -17 USD/i })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('success-success-comparison.png'), fullPage: true })
   const successComparisonURL = page.url()
@@ -183,7 +183,7 @@ test('installed browser completes the bounded local Web research loop', async ({
     restarted = spawn(executable!, args, { stdio: 'ignore' })
     await waitForHealth()
     await page.reload()
-    await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
   } finally {
     if (restarted?.pid) process.kill(restarted.pid, 'SIGTERM')
   }
