@@ -351,7 +351,7 @@ def test_validation_normalizes_editable_parameters_without_changing_registered_s
     assert response.status_code == 200, response.text
     validated = response.json()
     assert validated["summary"]["initial_cash"] == "20000"
-    assert validated["summary"]["target_quantity"] == "4"
+    assert validated["summary"]["parameters"]["target_quantity"] == "4"
     assert validated["summary"]["symbol"] == "AAPL"
     assert validated["summary"]["venue"] == "XNAS"
     assert (
@@ -372,6 +372,9 @@ def test_backend_publishes_and_validates_the_two_strategy_parameters(tmp_path: P
         assert set(contracts) == {"target_quantity", "entry_delay_bars"}
         assert contracts["entry_delay_bars"] == {
             "name": "entry_delay_bars",
+            "required": True,
+            "static_minimum": 0,
+            "static_maximum": None,
             "type": "integer",
             "default": 0,
             "current_value": 0,
@@ -395,8 +398,8 @@ def test_backend_publishes_and_validates_the_two_strategy_parameters(tmp_path: P
 
     assert response.status_code == 200, response.text
     validated = response.json()
-    assert validated["summary"]["target_quantity"] == "4"
-    assert validated["summary"]["entry_delay_bars"] == 2
+    assert validated["summary"]["parameters"]["target_quantity"] == "4"
+    assert validated["summary"]["parameters"]["entry_delay_bars"] == 2
     normalized_contracts = {item["name"]: item for item in validated["strategy_parameters"]}
     assert normalized_contracts["entry_delay_bars"]["current_value"] == 2
 

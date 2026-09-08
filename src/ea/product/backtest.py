@@ -92,13 +92,18 @@ from ea.product.offline_demo import (
     _InstrumentGateView,
     _package_code_digest,
 )
-from ea.product.scenario import BacktestStrategyId, LoadedBacktestScenario, load_backtest_scenario
+from ea.product.scenario import (
+    LoadedBacktestScenario,
+    _next_bar_entry_delay_maximum,
+    load_backtest_scenario,
+)
 from ea.reconciliation import create_phase1_reconciliation_authority
 from ea.runtime import (
     create_active_market_dispatch_verifier,
     create_phase1_historical_market_runtime,
 )
 from ea.strategy import create_strategy_signal_authority
+from ea.strategy.registry import BUILTIN_STRATEGIES
 
 _SOURCE_NAMESPACE = SourceNamespace("backtest.scenario.matcher.v1")
 _RECONCILIATION_SOURCE = SourceNamespace("backtest.scenario.reconciliation.v1")
@@ -292,12 +297,12 @@ def _lineage(
     risk_context: dict[str, object],
 ) -> Sha256Digest:
     runtime = _runtime_document()
-    strategy_parameters = {
-        "entry_delay_bars": scenario.entry_delay_bars,
-        "target_quantity": (
-            None if scenario.target_quantity is None else scenario.target_quantity.text
-        ),
-    }
+    strategy_document = json.loads(scenario.canonical_bytes)["strategy"]
+    strategy_parameters = (
+        {key: value for key, value in strategy_document.items() if key != "id"}
+        if scenario.schema_version == 1
+        else strategy_document
+    )
     return build_backtest_lineage(
         BacktestLineageInputs(
             data=scenario.dataset.selection.fingerprint,
@@ -544,34 +549,43 @@ def _execute(
     signal = None
     order = None
     risk_result = None
-    if scenario.strategy_id is BacktestStrategyId.BOUNDED_LONG:
-        for _ in range(scenario.entry_delay_bars):
-            if entry_window.dispatch_kind is not HistoricalDispatchKind.MARKET:
-                raise RuntimeError("bounded-long entry delay reached end of run")
-            lifecycle.coordinator.complete_active_dispatch(entry_window)
-            entry_window = lifecycle.coordinator.begin_next_dispatch()
-        if entry_window.dispatch_kind is not HistoricalDispatchKind.MARKET:
-            raise RuntimeError("bounded-long entry delay selected a non-market root")
+    verifier = create_active_market_dispatch_verifier(runtime)
+    logic = BUILTIN_STRATEGIES.get(scenario.strategy_id.value, scenario.strategy_version).factory(
+        scenario.strategy_parameters
+    )
+    target = None
+    market_index = 0
+    last_entry = _next_bar_entry_delay_maximum(scenario.dataset)
+    while entry_window.dispatch_kind is HistoricalDispatchKind.MARKET:
         lease = runtime.active_lease
         if lease is None or type(lease.root) is not MarketDataEnvelope:
-            raise RuntimeError("backtest runtime did not expose the first market root")
-        signal_authority = create_strategy_signal_authority(
-            run_id=run_id,
-            verifier=create_active_market_dispatch_verifier(runtime),
+            raise RuntimeError("backtest runtime did not expose active market root")
+        verifier.verify_active_market_dispatch(
+            lease.root, dispatch_sequence=lease.dispatch_sequence
         )
+        if last_entry is not None and market_index <= last_entry:
+            target = logic.on_event(lease.root)
+        market_index += 1
+        if target is not None:
+            break
+        lifecycle.coordinator.complete_active_dispatch(entry_window)
+        entry_window = lifecycle.coordinator.begin_next_dispatch()
+    if target is not None:
+        lease = runtime.active_lease
+        if lease is None or type(lease.root) is not MarketDataEnvelope:
+            raise RuntimeError("entry lost its active market root")
+        signal_authority = create_strategy_signal_authority(run_id=run_id, verifier=verifier)
         signal = signal_authority.issue(
             lease.root,
             dispatch_sequence=lease.dispatch_sequence,
             direction=SignalDirection.LONG,
         )
-        if scenario.target_quantity is None:
-            raise RuntimeError("bounded-long scenario lost target quantity")
         portfolio_policy = create_phase1_portfolio_policy(
             policy_id=PortfolioPolicyId("backtest.scenario.v1"),
             entries=(
                 Phase1PortfolioPolicyEntry(
                     instrument=scenario.instrument,
-                    target_quantity=scenario.target_quantity,
+                    target_quantity=target,
                 ),
             ),
             spec_set=scenario.spec_set,
@@ -586,7 +600,7 @@ def _execute(
         planning = planner.plan(signal)
         intent = planning.intent
         if intent is None:
-            raise RuntimeError("bounded-long scenario did not emit an intent")
+            raise RuntimeError("strategy entry did not emit an intent")
         risk_result = economic_gate.risk_authority.evaluate(intent, economic_gate.ledger.snapshot)
         if risk_result.decision.kind is RiskDecisionKind.REJECT:
             lifecycle.coordinator.complete_active_dispatch(entry_window)
@@ -616,11 +630,14 @@ def _execute(
             dispatch_sequence=lease.dispatch_sequence,
         )
         lifecycle.coordinator.submit_authorized_order(entry_window, order)
-    lifecycle.coordinator.complete_active_dispatch(entry_window)
-
     end_of_run_window = None
+    if entry_window.dispatch_kind is HistoricalDispatchKind.END_OF_RUN:
+        end_of_run_window = entry_window
+    else:
+        lifecycle.coordinator.complete_active_dispatch(entry_window)
+
     durable_fill_frontier_observed = False
-    while lifecycle.coordinator.terminal_outcome is None:
+    while end_of_run_window is None and lifecycle.coordinator.terminal_outcome is None:
         active = lifecycle.coordinator.begin_next_dispatch()
         if active.dispatch_kind is HistoricalDispatchKind.END_OF_RUN:
             end_of_run_window = active
@@ -990,8 +1007,8 @@ def _verified_persisted_frontier(
     if durable_economic_dispatches:
         frontier = "dispatch_durable"
 
-    required_reconciliations = 2 if scenario.strategy_id is BacktestStrategyId.BOUNDED_LONG else 1
-    expected_ledger_sequence = 2 if scenario.strategy_id is BacktestStrategyId.BOUNDED_LONG else 1
+    required_reconciliations = 2 if durable_economic_dispatches else 1
+    expected_ledger_sequence = 2 if durable_economic_dispatches else 1
     complete_reconciliation = len(reconciliations) == required_reconciliations and all(
         document.get("run_id") == run_id.value
         and document.get("outcome_code") == OutcomeCode.RECONCILIATION_MATCH.value
@@ -999,9 +1016,7 @@ def _verified_persisted_frontier(
         and document.get("ledger_sequence") == expected_ledger_sequence
         for document in reconciliations
     )
-    if complete_reconciliation and (
-        scenario.strategy_id is BacktestStrategyId.ALWAYS_FLAT or durable_economic_dispatches
-    ):
+    if complete_reconciliation:
         frontier = "reconciliation_durable"
     return frontier
 

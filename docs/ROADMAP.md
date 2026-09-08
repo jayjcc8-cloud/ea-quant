@@ -95,6 +95,18 @@ authorized by the release decision.
 Phase 2 adds serious backtest research capabilities: realistic fees/slippage/latency, out-of-sample
 validation, walk-forward evaluation, experiment tracking, and richer data/version evidence.
 
+## Research Foundation and commercial workflow
+
+EA's product direction is an AI-native quantitative R&D and strategy promotion system, with
+Idea → Evidence-ready Candidate time and cost as its commercial north star. Issue #182 delivers
+SCHEMA_DRIVEN_STRATEGY_V1: a versioned built-in contract, preserved V1 identity, Scenario V2,
+and two real research strategies across the bounded Web/holdout loop. This is the first
+Research Foundation slice, not activation of all Phase 2 capabilities.
+
+Future dependency direction (not delivered or authorized by this slice):
+Research Foundation → Local Strategy Package → Dataset Registry → Candidate → Agent Research Tools.
+AI strategy generation, external plugins/packages, automatic selection and paper/live remain absent.
+
 ## Phase 3 — Paper Trading
 
 Entry: Phase 2 evidence demonstrates credible deterministic research semantics. Purpose: connect

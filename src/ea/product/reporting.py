@@ -57,7 +57,8 @@ from ea.experiments.audit import (
 )
 from ea.product.backtest import BacktestResumeFailure, _load_verified_attempt
 from ea.product.identity import semantic_outcome_sha256
-from ea.product.scenario import BacktestStrategyId, LoadedBacktestScenario
+from ea.product.scenario import LoadedBacktestScenario
+from ea.strategy.registry import BUILTIN_STRATEGIES
 
 _REPORT_SCHEMA = "ea.backtest-report.v1"
 _VALUATION_RULE = "last-admitted-close-v1"
@@ -1022,7 +1023,10 @@ def _validate_result(
         final_snapshot_sha256 = funded_snapshot_sha256
     if terminal_snapshot != final_snapshot_sha256:
         raise ValueError("terminal snapshot conflicts")
-    expected_reconciliations = 2 if scenario.strategy_id is BacktestStrategyId.BOUNDED_LONG else 1
+    BUILTIN_STRATEGIES.get(scenario.strategy_id.value, scenario.strategy_version).validate_outcome(
+        len(order_ids), len(accepted_fills)
+    )
+    expected_reconciliations = 2 if accepted_fills else 1
     if len(reconciliation_payloads) != expected_reconciliations or any(
         item.get("outcome_code") != "reconciliation.match"
         or item.get("requested_action") != "none"
@@ -1080,7 +1084,7 @@ def _validate_result(
     risk = _exact_keys(result["risk"], _RISK_CONTEXT_KEYS | {"decision", "reason"})
     if any(risk.get(key) != value for key, value in risk_context.items()):
         raise ValueError("result risk context conflicts")
-    if scenario.strategy_id is BacktestStrategyId.ALWAYS_FLAT:
+    if result["order"] is None:
         if (
             order_ids
             or accepted_fills
@@ -1096,7 +1100,7 @@ def _validate_result(
         or risk["decision"] not in {"allow", "resize"}
         or type(risk["reason"]) is not str
     ):
-        raise ValueError("bounded-long result economics conflict")
+        raise ValueError("entry result economics conflict")
     fill_semantic: dict[str, object] | None = None
     if result["fill"] is not None:
         fill_result = _exact_keys(result["fill"], {"fill_id", "price", "quantity", "side"})
@@ -1178,7 +1182,7 @@ def _build_report(
     fill = result["fill"]
     order = result["order"]
     execution: dict[str, object]
-    if scenario.strategy_id is BacktestStrategyId.ALWAYS_FLAT:
+    if result["order"] is None:
         if (
             ending_cash != scenario.initial_cash
             or positions
@@ -1198,7 +1202,7 @@ def _build_report(
             or order_document["quantity"] != fill_quantity.text
             or quantity != fill_quantity
         ):
-            raise ValueError("bounded-long execution evidence conflicts")
+            raise ValueError("entry execution evidence conflicts")
         fill_notional = _multiply(fill_price, fill_quantity, specification.contract_multiplier)
         require_quantized(fill_notional, specification.currency_quantum, field_name="fill_notional")
         if ending_cash != _subtract(

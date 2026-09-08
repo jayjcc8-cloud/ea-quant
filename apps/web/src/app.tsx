@@ -2,15 +2,31 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
 
+type ParameterMap = Record<string, string | number>
+type StrategyDescriptor = { strategy_id: string; strategy_version: number; research_visible: boolean; parameters: { name: string; type: 'integer' | 'decimal' }[] }
+const parameterDefaults = (scenario?: ScenarioSummary): ParameterMap => Object.fromEntries((scenario?.strategy_parameters ?? []).map(p => [p.name, p.current_value ?? p.default ?? '']))
+const jobParameters = (job: BacktestJob): ParameterMap => job.parameters ?? job.input_snapshot?.scenario.strategy.parameters ?? {}
+const parameterText = (parameters: ParameterMap) => Object.entries(parameters).map(([name, value]) => `${name}: ${value}`).join(' · ')
+function ParameterControls({ contracts, values, update, prefix = '' }: { contracts: StrategyParameterContract[]; values: ParameterMap; update: (name: string, value: string | number) => void; prefix?: string }) {
+  return <div className="parameter-grid">{contracts.map(p => <div key={p.name}>
+    <label htmlFor={`${prefix}${p.name}`}>{prefix}{p.name}</label>
+    <input id={`${prefix}${p.name}`} type={p.type === 'integer' ? 'number' : 'text'} inputMode={p.type === 'integer' ? 'numeric' : 'decimal'}
+      min={p.minimum === null ? undefined : String(p.minimum)} max={p.maximum === null ? undefined : String(p.maximum)} step={p.type === 'integer' ? '1' : undefined}
+      value={Number.isNaN(values[p.name]) ? '' : values[p.name] ?? ''}
+      onChange={event => update(p.name, p.type === 'integer' ? event.target.valueAsNumber : event.target.value)} />
+    <small>{p.minimum === null ? '' : `Minimum ${p.minimum}`}{p.maximum === null ? '' : ` · Maximum ${p.maximum}`}</small>
+  </div>)}</div>
+}
+
 export type InputIdentity = { scenario_sha256: string; data_sha256: string; record_count: number }
 export type StrategyParameterContract = {
-  name: 'target_quantity' | 'entry_delay_bars'; type: 'decimal' | 'integer'
+  name: string; type: 'decimal' | 'integer'
   default: string | number | null; current_value: string | number | null
   minimum: string | number; maximum: string | number | null
 }
 export type BacktestParameters = {
   initial_cash: string
-  strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } | null
+  strategy_parameters: ParameterMap | null
 }
 type ReplayData = { start_utc: string; end_utc: string; fingerprint: { sha256: string; record_count: number } }
 export type ChronologicalHoldout = { schema: 'ea.chronological-holdout.v1'; validation_id: string; created_at: string; source_job_id: string; holdout_job_id: string }
@@ -23,14 +39,15 @@ export type InputSnapshot = {
     data?: ReplayData
     execution?: { policy: string; commission?: Commission | null }
     funding: { currency: string; initial_cash: string }
-    strategy: { id: string; target_quantity: string | null; entry_delay_bars?: number }
+    strategy: { id: string; version?: number; parameters?: ParameterMap; [key: string]: unknown }
     instrument: { venue: string; symbol: string }
   }
 }
 export type ScenarioSummary = {
   scenario_id: string; name: string; valid: boolean; input_identity?: InputIdentity
-  summary?: { data?: ReplayData; commission?: Commission | null; strategy_id: string; venue: string; symbol: string; initial_cash: string; target_quantity: string | null; entry_delay_bars: number; record_count: number }
+  summary?: { data?: ReplayData; commission?: Commission | null; strategy_id: string; venue: string; symbol: string; initial_cash: string; parameters?: ParameterMap; record_count: number; [key: string]: unknown }
   strategy_parameters?: StrategyParameterContract[]
+  strategy_descriptor?: StrategyDescriptor
   normalized_input_identity?: InputIdentity
   error_code?: string; message?: string
 }
@@ -38,6 +55,7 @@ export type BacktestJob = {
   schema: string; job_id: string; request_id: string; scenario_id: string; input_identity: InputIdentity
   status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'interrupted'; engine_run_id: string | null
   report_sha256: string | null; summary_sha256: string | null; error_code: string | null; message: string | null; report_ready: boolean
+  parameters?: ParameterMap; strategy_descriptor?: StrategyDescriptor
   created_at?: string; input_snapshot?: InputSnapshot; input_sha256?: string; attempt_id?: string | null
 }
 export type BatchMember = BacktestJob & { presentation_status: string }
@@ -48,12 +66,12 @@ export type ExperimentBatch = {
 }
 export type BatchRequest = {
   scenario_id: string; input_identity: InputIdentity; initial_cash: string
-  runs: { strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } }[]
+  runs: { strategy_parameters: ParameterMap }[]
 }
 type Money = { amount: string; currency?: string }
 export type BacktestReport = {
   schema: 'ea.backtest-report.v1'; run_id: string
-  source?: { strategy: { id: string; target_quantity: string | null }; instrument: { venue: string; symbol: string } }
+  source?: { strategy: { id: string }; instrument: { venue: string; symbol: string } }
   scenario?: { strategy_id: string; instrument: { venue: string; symbol: string } }
   economics: {
     currency?: string; initial_funding?: Money; ending_cash: Money[]
@@ -150,9 +168,9 @@ function Shell({ api }: { api: ApiAdapter }) {
   </div>
 }
 
-type BatchConfiguration = { target_quantity: string; entry_delay_bars: number }
+type BatchConfiguration = ParameterMap
 type BatchStatusFilter = 'all' | 'succeeded' | 'risk.rejected' | 'failed' | 'running' | 'queued'
-type BatchSortField = 'member' | 'target_quantity' | 'entry_delay_bars' | 'equity' | 'net_pnl' | 'total_return'
+type BatchSortField = string
 type SortDirection = 'ascending' | 'descending'
 
 function BatchCreator({ api }: { api: ApiAdapter }) {
@@ -164,14 +182,10 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const defaults = (scenario: ScenarioSummary | undefined): BatchConfiguration => ({
-    target_quantity: String(scenario?.summary?.target_quantity ?? ''),
-    entry_delay_bars: scenario?.summary?.entry_delay_bars ?? 0,
-  })
   const selectScenario = useCallback((scenario: ScenarioSummary | undefined) => {
     setSelected(scenario?.scenario_id ?? '')
     setInitialCash(scenario?.summary?.initial_cash ?? '')
-    const initial = defaults(scenario)
+    const initial = parameterDefaults(scenario)
     setRuns([{ ...initial }, { ...initial }])
     setError(null)
   }, [])
@@ -187,9 +201,8 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
   }, [api, selectScenario])
 
   const candidate = scenarios.find((item) => item.scenario_id === selected)
-  const targetContract = candidate?.strategy_parameters?.find((item) => item.name === 'target_quantity')
-  const delayContract = candidate?.strategy_parameters?.find((item) => item.name === 'entry_delay_bars')
-  const updateRun = (index: number, update: Partial<BatchConfiguration>) => {
+
+  const updateRun = (index: number, update: BatchConfiguration) => {
     setRuns((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...update } : item))
     setError(null)
   }
@@ -219,16 +232,13 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
         <div><label htmlFor="batch-scenario">Scenario</label><select id="batch-scenario" value={selected} onChange={(event) => selectScenario(scenarios.find((item) => item.scenario_id === event.target.value))}>{scenarios.filter((item) => item.valid && (item.strategy_parameters?.length ?? 0) > 0).map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}</option>)}</select></div>
         <div><label htmlFor="batch-initial-cash">Initial cash</label><input id="batch-initial-cash" value={initialCash} onChange={(event) => setInitialCash(event.target.value)} /></div>
       </div>
-      {candidate?.summary && <p className="muted">{candidate.summary.strategy_id} · {candidate.summary.venue}:{candidate.summary.symbol} · backend maximum delay {delayContract?.maximum ?? 'n/a'}</p>}
+      {candidate?.summary && <p className="muted">{candidate.summary.strategy_id} · {candidate.summary.venue}:{candidate.summary.symbol}</p>}
       {candidate?.summary && <p>{commissionLabel(candidate.summary.commission)}</p>}
       <div className="batch-configurations">{runs.map((item, index) => <section className="strategy-parameters batch-configuration" key={index}>
         <header><h3>Run {index + 1}</h3><button aria-label={`Remove Run ${index + 1}`} disabled={runs.length <= 2} onClick={() => setRuns((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Remove</button></header>
-        <div className="parameter-grid">
-          <div><label htmlFor={`batch-quantity-${index}`}>Run {index + 1} quantity</label><input id={`batch-quantity-${index}`} type="number" min={String(targetContract?.minimum ?? 0)} step={String(targetContract?.minimum ?? 1)} value={item.target_quantity} onChange={(event) => updateRun(index, { target_quantity: event.target.value })} /></div>
-          <div><label htmlFor={`batch-delay-${index}`}>Run {index + 1} entry delay bars</label><input id={`batch-delay-${index}`} type="number" min={String(delayContract?.minimum ?? 0)} max={delayContract?.maximum === null || delayContract?.maximum === undefined ? undefined : String(delayContract.maximum)} step="1" value={Number.isNaN(item.entry_delay_bars) ? '' : item.entry_delay_bars} onChange={(event) => updateRun(index, { entry_delay_bars: event.target.valueAsNumber })} /></div>
-        </div>
+        <ParameterControls contracts={candidate?.strategy_parameters ?? []} values={item} prefix={`Run ${index + 1} `} update={(name, value) => updateRun(index, { [name]: value })} />
       </section>)}</div>
-      <div className="actions"><button disabled={runs.length >= 10} onClick={() => setRuns((current) => [...current, { ...defaults(candidate) }])}>Add configuration</button><button className="primary" disabled={!candidate?.input_identity || runs.length < 2 || busy} onClick={() => { void submit() }}>Run batch</button></div>
+      <div className="actions"><button disabled={runs.length >= 10} onClick={() => setRuns((current) => [...current, { ...parameterDefaults(candidate) }])}>Add configuration</button><button className="primary" disabled={!candidate?.input_identity || runs.length < 2 || busy} onClick={() => { void submit() }}>Run batch</button></div>
     </section>
   </>
 }
@@ -293,9 +303,10 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
       .map((member, index) => ({ member, ordinal: index + 1, report: reports[member.job_id] }))
       .filter(({ member }) => statusFilter === 'all' || member.presentation_status === statusFilter)
     const value = (row: typeof result[number]): string | undefined => {
-      const strategy = row.member.input_snapshot?.scenario.strategy
-      if (sortField === 'target_quantity') return strategy?.target_quantity ?? undefined
-      if (sortField === 'entry_delay_bars') return String(strategy?.entry_delay_bars ?? 0)
+      if (sortField.startsWith('parameter:')) {
+        const value = jobParameters(row.member)[sortField.slice(10)]
+        return value === undefined ? undefined : String(value)
+      }
       if (sortField === 'equity') return row.report?.economics.equity.amount
       if (sortField === 'net_pnl') return row.report?.economics.net_pnl.amount
       if (sortField === 'total_return') return row.report?.economics.total_return.value
@@ -312,6 +323,7 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
       return compared === 0 ? left.ordinal - right.ordinal : compared * (sortDirection === 'ascending' ? 1 : -1)
     })
   }, [batch, reports, sortDirection, sortField, statusFilter])
+  const parameterNames = batch?.members[0]?.strategy_descriptor?.parameters.map(p => p.name) ?? Object.keys(batch?.members[0] ? jobParameters(batch.members[0]) : {})
   const analysisSummary = useMemo(() => {
     const members = batch?.members ?? []
     const count = (status: string) => members.filter((member) => member.presentation_status === status).length
@@ -332,12 +344,11 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
     <div className="result-toolbar"><Link to="/batches/new">← Run another batch</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
     <section className="panel identity-panel"><header><h2>Batch identity</h2><span>Persisted grouping only</span></header><dl className="summary-list"><div><dt>Created</dt><dd>{batch.created_at}</dd></div><div><dt>Scenario</dt><dd>{batch.scenario_id}</dd></div><div><dt>Members</dt><dd>{batch.member_count}</dd></div></dl></section>
     <section className="panel analysis-summary" aria-label="Analysis summary"><header><h2>Analysis summary</h2><span>Derived from current jobs and verified reports</span></header><dl className="summary-list"><div><dt>Total members</dt><dd data-summary="total">{analysisSummary.total}</dd></div><div><dt>Succeeded</dt><dd data-summary="succeeded">{analysisSummary.succeeded}</dd></div><div><dt>Risk rejected</dt><dd data-summary="risk.rejected">{analysisSummary.riskRejected}</dd></div><div><dt>Failed</dt><dd data-summary="failed">{analysisSummary.failed}</dd></div><div><dt>Running</dt><dd data-summary="running">{analysisSummary.running}</dd></div><div><dt>Queued</dt><dd data-summary="queued">{analysisSummary.queued}</dd></div><div><dt>Reports available</dt><dd data-summary="reports">{analysisSummary.reports}</dd></div></dl></section>
-    <section className="panel comparison-panel"><header><h2>Member runs</h2><span>Real jobs and formal reports</span></header><div className="analysis-controls"><div><label htmlFor="batch-status-filter">Status filter</label><select id="batch-status-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as BatchStatusFilter)}><option value="all">All</option><option value="succeeded">Succeeded</option><option value="risk.rejected">Risk Rejected</option><option value="failed">Failed</option><option value="running">Running</option><option value="queued">Queued</option></select></div><div><label htmlFor="batch-sort">Sort by</label><select id="batch-sort" value={sortField} onChange={(event) => setSortField(event.target.value as BatchSortField)}><option value="member">Member order</option><option value="target_quantity">target_quantity</option><option value="entry_delay_bars">entry_delay_bars</option><option value="equity">Final equity</option><option value="net_pnl">Net P&amp;L</option><option value="total_return">Total return</option></select></div><div><label htmlFor="batch-sort-direction">Direction</label><select id="batch-sort-direction" value={sortDirection} onChange={(event) => setSortDirection(event.target.value as SortDirection)}><option value="ascending">Ascending</option><option value="descending">Descending</option></select></div></div><table><thead><tr><th>Run</th><th>target_quantity</th><th>entry_delay_bars</th><th>Status</th><th>Final equity</th><th>Net P&amp;L</th><th>Total return</th><th>Action</th><th>Compare</th></tr></thead><tbody>{rows.map(({ member, ordinal, report }) => {
-      const strategy = member.input_snapshot?.scenario.strategy
+    <section className="panel comparison-panel"><header><h2>Member runs</h2><span>Real jobs and formal reports</span></header><div className="analysis-controls"><div><label htmlFor="batch-status-filter">Status filter</label><select id="batch-status-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as BatchStatusFilter)}><option value="all">All</option><option value="succeeded">Succeeded</option><option value="risk.rejected">Risk Rejected</option><option value="failed">Failed</option><option value="running">Running</option><option value="queued">Queued</option></select></div><div><label htmlFor="batch-sort">Sort by</label><select id="batch-sort" value={sortField} onChange={(event) => setSortField(event.target.value as BatchSortField)}><option value="member">Member order</option>{parameterNames.map(name => <option key={name} value={`parameter:${name}`}>{name}</option>)}<option value="equity">Final equity</option><option value="net_pnl">Net P&amp;L</option><option value="total_return">Total return</option></select></div><div><label htmlFor="batch-sort-direction">Direction</label><select id="batch-sort-direction" value={sortDirection} onChange={(event) => setSortDirection(event.target.value as SortDirection)}><option value="ascending">Ascending</option><option value="descending">Descending</option></select></div></div><table><thead><tr><th>Run</th>{parameterNames.map(name => <th key={name}>{name}</th>)}<th>Status</th><th>Final equity</th><th>Net P&amp;L</th><th>Total return</th><th>Action</th><th>Compare</th></tr></thead><tbody>{rows.map(({ member, ordinal, report }) => {
       const equityCurrency = report?.economics.equity.currency ?? report?.economics.currency
       const pnlCurrency = report?.economics.net_pnl.currency ?? report?.economics.currency
       const money = (amount: string, currency: string | undefined) => `${amount} ${currency ?? 'Currency unavailable'}`
-      return <tr key={member.job_id}><th>Run {ordinal}</th><td>{strategy?.target_quantity ?? 'flat'}</td><td>{strategy?.entry_delay_bars ?? 0}</td><td><span className={`status status-${member.presentation_status}`}>{member.presentation_status}</span></td>{report ? <><td>{money(report.economics.equity.amount, equityCurrency)}</td><td>{money(report.economics.net_pnl.amount, pnlCurrency)}</td><td>{percent(report.economics.total_return.value)}</td></> : <td colSpan={3}>No report</td>}<td><Link to={`/backtests/${member.job_id}`}>View</Link></td><td><input type="checkbox" aria-label={`Select ${member.job_id} for comparison`} checked={comparison.includes(member.job_id)} onChange={() => toggle(member.job_id)} /></td></tr>
+      return <tr key={member.job_id}><th>Run {ordinal}</th>{parameterNames.map(name => <td key={name}>{jobParameters(member)[name] ?? 'Unavailable'}</td>)}<td><span className={`status status-${member.presentation_status}`}>{member.presentation_status}</span></td>{report ? <><td>{money(report.economics.equity.amount, equityCurrency)}</td><td>{money(report.economics.net_pnl.amount, pnlCurrency)}</td><td>{percent(report.economics.total_return.value)}</td></> : <td colSpan={3}>No report</td>}<td><Link to={`/backtests/${member.job_id}`}>View</Link></td><td><input type="checkbox" aria-label={`Select ${member.job_id} for comparison`} checked={comparison.includes(member.job_id)} onChange={() => toggle(member.job_id)} /></td></tr>
     })}</tbody></table><button className="primary compare-button" disabled={comparison.length !== 2} onClick={() => navigate(`/backtests/compare/${comparison[0]}/${comparison[1]}`)}>Compare selected runs</button></section>
   </>
 }
@@ -348,8 +359,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
   const [jobs, setJobs] = useState<BacktestJob[]>([])
   const [selected, setSelected] = useState('')
   const [initialCash, setInitialCash] = useState('')
-  const [quantity, setQuantity] = useState('')
-  const [entryDelayBars, setEntryDelayBars] = useState(0)
+  const [values, setValues] = useState<ParameterMap>({})
   const [comparison, setComparison] = useState<string[]>([])
   const [validated, setValidated] = useState<ScenarioSummary | null>(null)
   const [busy, setBusy] = useState(false)
@@ -360,28 +370,23 @@ function Backtests({ api }: { api: ApiAdapter }) {
     let current = true
     Promise.all([api.listScenarios(), api.listBacktests()]).then(([nextScenarios, nextJobs]) => {
       if (!current) return
-      const first = nextScenarios.find((item) => item.valid)
+      const first = nextScenarios.find((item) => item.valid && item.strategy_descriptor?.research_visible !== false)
       setScenarios(nextScenarios); setJobs(nextJobs); setSelected(first?.scenario_id ?? '')
-      setInitialCash(first?.summary?.initial_cash ?? ''); setQuantity(first?.summary?.target_quantity ?? '')
-      setEntryDelayBars(first?.summary?.entry_delay_bars ?? 0)
+      setInitialCash(first?.summary?.initial_cash ?? ''); setValues(parameterDefaults(first))
     }).catch(() => { if (current) setDisconnected(true) })
     return () => { current = false }
   }, [api])
 
   const candidate = useMemo(() => scenarios.find((item) => item.scenario_id === selected), [scenarios, selected])
-  const targetContract = candidate?.strategy_parameters?.find((item) => item.name === 'target_quantity')
-  const delayContract = candidate?.strategy_parameters?.find((item) => item.name === 'entry_delay_bars')
+
   const parameters = (): BacktestParameters => ({
     initial_cash: initialCash,
-    strategy_parameters: targetContract && delayContract
-      ? { target_quantity: quantity, entry_delay_bars: entryDelayBars }
-      : null,
+    strategy_parameters: values,
   })
   const changeScenario = (scenarioId: string) => {
     const next = scenarios.find((item) => item.scenario_id === scenarioId)
     setSelected(scenarioId); setInitialCash(next?.summary?.initial_cash ?? '')
-    setQuantity(next?.summary?.target_quantity ?? '')
-    setEntryDelayBars(next?.summary?.entry_delay_bars ?? 0); setValidated(null); setError(null)
+    setValues(parameterDefaults(next)); setValidated(null); setError(null)
   }
   const changeParameter = (setter: (value: string) => void, value: string) => {
     setter(value); setValidated(null); setError(null)
@@ -405,8 +410,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
     const snapshot = item.input_snapshot?.scenario
     if (!snapshot) return
     setSelected(item.scenario_id); setInitialCash(snapshot.funding.initial_cash)
-    setQuantity(snapshot.strategy.target_quantity ?? '')
-    setEntryDelayBars(snapshot.strategy.entry_delay_bars ?? 0); setValidated(null); setError(null)
+    setValues(jobParameters(item)); setValidated(null); setError(null)
   }
   const toggleComparison = (jobId: string) => {
     setComparison((current) => current.includes(jobId)
@@ -424,27 +428,23 @@ function Backtests({ api }: { api: ApiAdapter }) {
         <label htmlFor="scenario">Scenario</label>
         <select id="scenario" value={selected} onChange={(event) => changeScenario(event.target.value)}>
           <option value="">Select prepared scenario</option>
-          {scenarios.map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}{item.valid ? '' : ' · invalid'}</option>)}
+          {scenarios.filter(item => item.strategy_descriptor?.research_visible !== false).map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}{item.valid ? '' : ' · invalid'}</option>)}
         </select>
         {candidate?.summary && <dl className="summary-list">
           <div><dt>Strategy</dt><dd>{candidate.summary.strategy_id}</dd></div><div><dt>Instrument</dt><dd>{candidate.summary.venue}:{candidate.summary.symbol}</dd></div>
           <div><dt>Commission</dt><dd>{commissionLabel(candidate.summary.commission)}</dd></div>
           <div><dt>Initial cash</dt><dd>{candidate.summary.initial_cash}</dd></div><div><dt>Records</dt><dd>{candidate.summary.record_count}</dd></div>
-          <div><dt>Target</dt><dd>{candidate.summary.target_quantity ?? 'flat'}</dd></div>
+
         </dl>}
         <div className="parameter-grid">
           <div><label htmlFor="initial-cash">Initial cash</label><input id="initial-cash" value={initialCash} onChange={(event) => changeParameter(setInitialCash, event.target.value)} /></div>
           <div><label htmlFor="symbol">Symbol</label><input id="symbol" value={candidate?.summary?.symbol ?? ''} readOnly aria-describedby="symbol-source" /><small id="symbol-source">Registered scenario/data only</small></div>
         </div>
-        {targetContract && delayContract && <section className="strategy-parameters">
-          <h3>Strategy Parameters</h3>
-          <div className="parameter-grid">
-            <div><label htmlFor="quantity">Quantity</label><input id="quantity" type="number" min={String(targetContract.minimum)} step={String(targetContract.minimum)} value={quantity} onChange={(event) => changeParameter(setQuantity, event.target.value)} /></div>
-            <div><label htmlFor="entry-delay-bars">Entry delay bars</label><input id="entry-delay-bars" type="number" min={String(delayContract.minimum)} max={delayContract.maximum === null ? undefined : String(delayContract.maximum)} step="1" value={Number.isNaN(entryDelayBars) ? '' : entryDelayBars} onChange={(event) => { setEntryDelayBars(event.target.valueAsNumber); setValidated(null); setError(null) }} /></div>
-          </div>
-        </section>}
+        <section className="strategy-parameters"><h3>Strategy Parameters</h3>
+          <ParameterControls contracts={candidate?.strategy_parameters ?? []} values={values} update={(name, value) => { setValues(current => ({ ...current, [name]: value })); setValidated(null); setError(null) }} />
+        </section>
         <div className="actions"><button disabled={!selected || busy} onClick={validate}>Validate input</button><button className="primary" disabled={!validated || busy} onClick={run}>Run new backtest</button></div>
-        {validated?.summary && <div className="validated"><strong>Validated input</strong><span>Target quantity: {validated.summary.target_quantity ?? 'flat'} · Entry delay bars: {validated.summary.entry_delay_bars}</span><small>{validated.normalized_input_identity?.scenario_sha256.slice(0, 12) ?? validated.input_identity?.scenario_sha256.slice(0, 12)}…</small></div>}
+        {validated?.summary && <div className="validated"><strong>Validated input</strong><span>{parameterText(validated.summary.parameters ?? {})}</span><small>{validated.normalized_input_identity?.scenario_sha256.slice(0, 12) ?? validated.input_identity?.scenario_sha256.slice(0, 12)}…</small></div>}
       </section>
       <section className="panel jobs-panel"><header><h2>Recent Runs</h2><span>Refresh-safe history</span></header>
         {jobs.length === 0 ? <p className="muted">No backtests yet.</p> : <ul className="job-list">{jobs.map((item) => {
@@ -452,7 +452,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
           return <li key={item.job_id} className="job-card">
             <div className="job-card-title"><Link to={`/backtests/${item.job_id}`}><strong>{item.scenario_id}</strong></Link><span className={`status status-${item.status}`}>{item.status}</span></div>
             {item.created_at && <time>{item.created_at}</time>}
-            <small>{input ? `${input.instrument.symbol} · Cash ${input.funding.initial_cash} · Quantity ${input.strategy.target_quantity ?? 'flat'} · Entry delay ${input.strategy.entry_delay_bars ?? 0}` : 'Legacy run · input snapshot unavailable'}</small>
+            <small>{input ? `${input.instrument.symbol} · Cash ${input.funding.initial_cash} · ${parameterText(jobParameters(item))}` : 'Legacy run · input snapshot unavailable'}</small>
             <small>{item.engine_run_id ?? item.job_id}</small>
             <div className="job-actions"><Link to={`/backtests/${item.job_id}`}>View</Link><button disabled={!input} aria-label={`Use parameters for ${item.job_id}`} onClick={() => restoreParameters(item)}>Use parameters</button><label><input type="checkbox" aria-label={`Select ${item.job_id} for comparison`} checked={comparison.includes(item.job_id)} onChange={() => toggleComparison(item.job_id)} /> Compare</label></div>
           </li>
@@ -512,10 +512,8 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
     ['Symbol', leftInput.instrument.symbol, rightInput.instrument.symbol],
     ['Commission', commissionLabel(leftInput.execution?.commission), commissionLabel(rightInput.execution?.commission)],
   ]
-  const parameterRows = [
-    ['target_quantity', leftInput.strategy.target_quantity ?? 'flat', rightInput.strategy.target_quantity ?? 'flat'],
-    ['entry_delay_bars', String(leftInput.strategy.entry_delay_bars ?? 0), String(rightInput.strategy.entry_delay_bars ?? 0)],
-  ]
+  const sameStrategy = leftInput.strategy.id === rightInput.strategy.id && (leftInput.strategy.version ?? 1) === (rightInput.strategy.version ?? 1)
+  const parameterRows = sameStrategy ? (left.job.strategy_descriptor?.parameters.map(p => p.name) ?? Object.keys(jobParameters(left.job))).map(name => [name, String(jobParameters(left.job)[name]), String(jobParameters(right.job)[name])]) : []
   const metricRows = [
     {
       label: 'Final Equity', before: left.report?.economics.equity.amount, after: right.report?.economics.equity.amount, shift: 0, suffix: '',
@@ -541,7 +539,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
       {[left, right].map((run, index) => <article className="panel" key={run.job.job_id}><header><h2>Run {index === 0 ? 'A' : 'B'}</h2><span className={`status status-${run.job.status}`}>{run.job.status}</span></header><dl className="summary-list"><div><dt>Web job</dt><dd>{run.job.job_id}</dd></div><div><dt>Engine run</dt><dd>{run.job.engine_run_id ?? 'not available'}</dd></div><div><dt>Input SHA-256</dt><dd>{run.job.input_sha256 ?? 'not available'}</dd></div><div><dt>Outcome</dt><dd>{run.report ? 'Formal report' : run.job.error_code ?? 'No report'}</dd></div></dl>{!run.report && <p className="no-report">No report</p>}</article>)}
     </section>
     <section className="panel comparison-panel"><header><h2>Input Diff</h2><span>Normalized snapshots</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{inputRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{before === after ? 'Unchanged' : 'Changed'}</td></tr>)}</tbody></table></section>
-    <section className="panel comparison-panel"><header><h2>Parameter Delta</h2><span>Persisted normalized strategy inputs</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{parameterRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{before === after ? 'Unchanged' : 'Changed'}</td></tr>)}</tbody></table></section>
+    <section className="panel comparison-panel">{!sameStrategy && <p>NO_PARAMETER_DELTA · Different strategy ID/version</p>}<header><h2>Parameter Delta</h2><span>Persisted normalized strategy inputs</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{parameterRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{exactDelta(before, after)}</td></tr>)}</tbody></table></section>
     <section className="panel comparison-panel"><header><h2>Result Diff</h2><span>Formal reports only</span></header><table><thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Δ</th></tr></thead><tbody>{metricRows.map(({ label, before, after, shift, suffix, monetary, leftCurrency, rightCurrency }) => {
       const leftValue = before === undefined ? 'No report' : label === 'Return' ? percent(before) : `${before}${leftCurrency ? ` ${leftCurrency}` : ''}`
       const rightValue = after === undefined ? 'No report' : label === 'Return' ? percent(after) : `${after}${rightCurrency ? ` ${rightCurrency}` : ''}`
@@ -613,7 +611,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
       <div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
     </dl></section>
-    {report && job.input_snapshot?.scenario.strategy.id === 'bounded-long-v1' && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
+    {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
     {job.input_snapshot && <p>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</p>}
     {economics ? <>
       <section className="metrics">
@@ -654,10 +652,8 @@ function HoldoutHistory({ api }: { api: ApiAdapter }) {
 }
 
 function FrozenParameters({ job }: { job: BacktestJob }) {
-  const strategy = job.input_snapshot?.scenario.strategy
   return <section className="panel"><header><h2>Frozen Parameters</h2><span>Frozen from source</span></header><dl className="summary-list">
-    <div><dt>target_quantity</dt><dd>{strategy?.target_quantity ?? 'Unavailable'}</dd></div>
-    <div><dt>entry_delay_bars</dt><dd>{strategy?.entry_delay_bars ?? 'Unavailable'}</dd></div>
+    {Object.entries(jobParameters(job)).map(([name, value]) => <div key={name}><dt>{name}</dt><dd>{value}</dd></div>)}
   </dl></section>
 }
 

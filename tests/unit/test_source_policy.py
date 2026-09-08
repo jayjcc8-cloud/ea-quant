@@ -264,6 +264,7 @@ def test_inner_runtime_package_depends_only_on_core_and_itself() -> None:
 def test_inner_strategy_package_depends_only_on_core_and_itself() -> None:
     allowed = frozenset(
         {
+            "ea.core.economics",
             "ea.core.execution_identity",
             "ea.core.market_data",
             "ea.core.market_data_codec",
