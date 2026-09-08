@@ -10,8 +10,8 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Any, Literal
 
-from ea.core import Adjustment, CanonicalDecimal, require_positive, require_quantized
-from ea.core.market_data import MarketDataEnvelope
+from ea.core.economics import CanonicalDecimal, require_positive, require_quantized
+from ea.core.market_data import Adjustment, MarketDataEnvelope
 
 ParameterValue = int | str
 
