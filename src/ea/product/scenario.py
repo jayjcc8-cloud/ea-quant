@@ -201,9 +201,15 @@ class _StrategyInputV3(_StrategyInputV2):
     source: _StrategySourceV3
 
 
-class BacktestScenarioV3(BacktestScenarioV2):
-    schema_version: Literal[3]  # type: ignore[assignment]
+class BacktestScenarioV3(_StrictModel):
+    schema_version: Literal[3]
+    data: _DataInput
+    instrument: _InstrumentInput
     strategy: _StrategyInputV3
+    funding: _FundingInput
+    risk: _RiskInput
+    execution: _ExecutionInput
+    randomness_profile: Literal["none"]
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -366,7 +372,7 @@ def _quantized(
 
 
 def _canonical_bytes(
-    model: _ScenarioInput | BacktestScenarioV2,
+    model: _ScenarioInput | BacktestScenarioV2 | BacktestScenarioV3,
     *,
     dataset: Phase1HistoricalDataset,
 ) -> bytes:
@@ -453,7 +459,7 @@ def load_backtest_scenario(
     scenario_path = _resolve_file(path, label="scenario path")
     document = _load_document(scenario_path)
     try:
-        model: _ScenarioInput | BacktestScenarioV2 = (
+        model: _ScenarioInput | BacktestScenarioV2 | BacktestScenarioV3 = (
             BacktestScenarioV3.model_validate(document)
             if type(document.get("schema_version")) is int and document["schema_version"] == 3
             else BacktestScenarioV2.model_validate(document)

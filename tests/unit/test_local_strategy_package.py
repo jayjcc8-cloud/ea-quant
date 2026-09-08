@@ -503,3 +503,102 @@ def test_hook_failures_are_classified(tmp_path: Path, hook: str) -> None:
     with pytest.raises(ValueError if hook == "validation" else BacktestRunFailure) as caught:
         run_backtest_scenario(load_backtest_scenario(path, strategy_root=root), tmp_path / "runs")
     assert "private error" not in str(caught.value)
+
+
+@pytest.mark.parametrize("frontier", ["root", "ancestor", "member"])
+def test_root_replacement_cannot_redirect_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frontier: str
+) -> None:
+    import os
+
+    from ea.strategy.package import StrategyPackageError, read_regular
+
+    parent = tmp_path / "parent"
+    root = parent / "authorized"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "x.eastrategy").write_bytes(b"authorized")
+    (outside / "x.eastrategy").write_bytes(b"OUTSIDE")
+    real_open = os.open
+    swapped = False
+
+    def swap(file: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal swapped
+        chosen = root if frontier == "root" else parent
+        if not swapped and (frontier != "member" or str(file).endswith("x.eastrategy")):
+            swapped = True
+            if frontier == "member":
+                (root / "x.eastrategy").unlink()
+                (root / "x.eastrategy").symlink_to(outside / "x.eastrategy")
+            else:
+                chosen.rename(tmp_path / "original")
+                chosen.symlink_to(outside, target_is_directory=True)
+        return real_open(file, flags, *args, **kwargs)
+
+    monkeypatch.setattr("ea.strategy.package.os.open", swap)
+    try:
+        result = read_regular(root / "x.eastrategy", root)
+    except StrategyPackageError:
+        return
+    assert result == b"authorized"
+
+
+def test_catalog_root_race_never_executes_outside_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+    import os
+    import zipfile
+
+    from ea.strategy.catalog import ResearchStrategyCatalogV1
+    from ea.strategy.package import _container
+
+    _, root, package = local_scenario(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = tmp_path / "outside-executed"
+    with zipfile.ZipFile(io.BytesIO(package.artifact_bytes)) as archive:
+        manifest = archive.read("manifest.json")
+    code = (
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n".encode() + package.source_bytes
+    )
+    (outside / "threshold.eastrategy").write_bytes(_container(manifest, code))
+    real_open = os.open
+    swapped = False
+
+    def swap(file: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            root.rename(tmp_path / "original")
+            root.symlink_to(outside, target_is_directory=True)
+        return real_open(file, flags, *args, **kwargs)
+
+    monkeypatch.setattr("ea.strategy.package.os.open", swap)
+    with pytest.raises(ValueError):
+        ResearchStrategyCatalogV1.from_root(root)
+    assert not marker.exists()
+
+
+def test_required_entry_without_signal_fails_run(tmp_path: Path) -> None:
+    import yaml
+
+    from ea.product import BacktestRunFailure, load_backtest_scenario, run_backtest_scenario
+    from ea.strategy.package import pack_strategy
+
+    path, root, _ = local_scenario(tmp_path)
+    source = tmp_path / "source"
+    manifest = json.loads((source / "manifest.json").read_bytes())
+    manifest["strategy"]["outcome_mode"] = "required_single_long_entry"
+    (source / "manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    )
+    (root / "threshold.eastrategy").unlink()
+    package = pack_strategy(source, root / "threshold.eastrategy")
+    doc = yaml.safe_load(path.read_text())
+    doc["strategy"]["source"]["artifact_sha256"] = package.identity.artifact_sha256
+    doc["strategy"]["parameters"]["threshold_price"] = "100000"
+    path.write_text(yaml.safe_dump(doc))
+    with pytest.raises(BacktestRunFailure):
+        run_backtest_scenario(load_backtest_scenario(path, strategy_root=root), tmp_path / "runs")

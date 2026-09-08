@@ -4,7 +4,7 @@ Date: 2026-09-08
 
 ## Status
 
-Proposed — Issue #185
+Accepted — Issue #185
 
 ## Decision
 
@@ -13,7 +13,7 @@ Research Foundation accepts one explicitly trusted local Python implementation p
 `strategy.py`, in that order, with fixed 1980 timestamp, Unix regular-file mode 0444, stored
 compression and empty metadata. Each member is limited to 1 MiB, artifacts to 2 MiB + 4096 bytes,
 and explicitly configured absolute roots to 100 immediate artifacts. No recursive discovery,
-symlinks, extra members, remote URLs, upload, dependencies or installation is supported.
+symlinks (including race-safe descriptor traversal), extra members, remote URLs, upload, dependencies or installation is supported.
 
 `ea.strategy.sdk_v1` exposes immutable admitted-bar projections with exact Decimal prices/volume,
 read-only validation facts, canonical parameter values, and a single target-quantity decision.

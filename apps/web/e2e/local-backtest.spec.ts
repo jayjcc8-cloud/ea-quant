@@ -354,7 +354,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   const localBatchId = new URL(page.url()).pathname.split('/').at(-1)!
   const localBatch = await page.request.get(`/api/batches/${localBatchId}`).then(r => r.json())
   await page.goto(`/backtests/compare/${localBatch.member_job_ids[0]}/${localBatch.member_job_ids[1]}`)
-  await expect(page.getByRole('row', { name: /target_quantity 2 3 1/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /target_quantity 2 3 \+1/ })).toBeVisible()
   await page.goto(`/backtests/${localBatch.member_job_ids[0]}`)
   await page.getByRole('link', { name: 'Evaluate chronological holdout' }).click()
   await page.getByLabel('Holdout scenario').selectOption('local-holdout.yaml')

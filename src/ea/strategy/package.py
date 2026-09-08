@@ -149,14 +149,27 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
 
 
 def read_regular(path: Path, root: Path, *, limit: int = MAX_ARTIFACT_BYTES) -> bytes:
+    directory: int | None = None
     try:
-        if (
-            not root.is_absolute()
-            or path.is_symlink()
-            or not path.resolve(strict=True).is_relative_to(root.resolve(strict=True))
-        ):
+        resolved_root = root.resolve(strict=True)
+        resolved_path = path.resolve(strict=True)
+        if not root.is_absolute() or path.is_symlink() or resolved_path.parent != resolved_root:
             raise ValueError
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        expected_root = resolved_root.stat()
+        # Traverse from an anchored descriptor. O_NOFOLLOW on a full pathname protects
+        # only the final component and cannot prevent ancestor/root replacement.
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory = os.open(resolved_root.anchor, flags)
+        for component in resolved_root.parts[1:]:
+            child = os.open(component, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        actual_root = os.fstat(directory)
+        if (actual_root.st_dev, actual_root.st_ino) != (expected_root.st_dev, expected_root.st_ino):
+            raise ValueError
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+        )
         with os.fdopen(descriptor, "rb") as handle:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
@@ -169,6 +182,9 @@ def read_regular(path: Path, root: Path, *, limit: int = MAX_ARTIFACT_BYTES) -> 
         raise StrategyPackageError(
             "strategy file must be a bounded regular file inside its root"
         ) from None
+    finally:
+        if directory is not None:
+            os.close(directory)
 
 
 def pack_strategy(source: Path, output: Path) -> StrategyPackageV1:

@@ -656,6 +656,7 @@ def _execute(
             _interrupt("dispatch_durable")
 
     fills = lifecycle.fact_authority.fills
+    scenario.strategy_entry.validate_outcome(0 if order is None else 1, len(fills))
     snapshot = economic_gate.ledger.snapshot
     replay_ledger = create_portfolio_ledger(run_id, scenario.spec_set)
     replay_funding = replay_ledger.apply_initial_funding(funding)
