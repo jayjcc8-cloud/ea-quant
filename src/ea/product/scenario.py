@@ -272,6 +272,7 @@ class LoadedBacktestScenario:
     scenario_sha256: Sha256Digest
 
     strategy_package: StrategyPackageV1 | None = None
+    research_input_bytes: bytes | None = None
 
     @property
     def strategy_entry(self) -> StrategyEntryV1:
@@ -458,6 +459,19 @@ def load_backtest_scenario(
         raise BacktestScenarioError("scenario path must be a pathlib.Path")
     scenario_path = _resolve_file(path, label="scenario path")
     document = _load_document(scenario_path)
+    return _load_scenario_document(
+        scenario_path, document, strategy_root=strategy_root, catalog=catalog
+    )
+
+
+def _load_scenario_document(
+    scenario_path: Path,
+    document: dict[str, Any],
+    *,
+    strategy_root: Path | None = None,
+    catalog: ResearchStrategyCatalogV1 | None = None,
+    captured_dataset: Phase1HistoricalDataset | None = None,
+) -> LoadedBacktestScenario:
     try:
         model: _ScenarioInput | BacktestScenarioV2 | BacktestScenarioV3 = (
             BacktestScenarioV3.model_validate(document)
@@ -478,7 +492,13 @@ def load_backtest_scenario(
         raise BacktestScenarioError(str(error)) from None
     data_path = _resolve_file(scenario_path.parent / model.data.path, label="data.path")
     try:
-        dataset = read_phase1_ohlcv_csv(data_path, replay_window=replay_window)
+        dataset = (
+            read_phase1_ohlcv_csv(data_path, replay_window=replay_window)
+            if captured_dataset is None
+            else captured_dataset
+        )
+        if dataset.replay_window != replay_window:
+            raise BacktestScenarioError("captured replay window conflicts")
     except HistoricalMarketDataError as error:
         raise BacktestScenarioError(f"data.path failed validation ({error.code.value})") from None
     try:
@@ -838,4 +858,53 @@ def resolved_scenario_parameters(
     return tuple(
         ResolvedStrategyParameterV1(p, p.static_minimum, p.static_maximum)
         for p in scenario.strategy_entry.descriptor.parameters
+    )
+
+
+def rebind_research_dataset(
+    scenario: LoadedBacktestScenario,
+    *,
+    data_path: Path,
+    dataset: Phase1HistoricalDataset,
+    dataset_id: str,
+    frozen_document: dict[str, Any] | None = None,
+) -> LoadedBacktestScenario:
+    """Replace only data and run the existing complete scenario validation."""
+    document = (
+        json.loads(scenario.canonical_bytes)
+        if frozen_document is None
+        else json.loads(json.dumps(frozen_document))
+    )
+    document.pop("canonicalization")
+    window = dataset.replay_window
+    document["data"] = {
+        "path": str(data_path),
+        "start_utc": window.start_inclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "end_utc": window.end_exclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "fingerprint": {
+            "sha256": dataset.selection.fingerprint.sha256.value,
+            "record_count": dataset.selection.fingerprint.record_count,
+        },
+    }
+    result = _load_scenario_document(
+        scenario.scenario_path,
+        document,
+        captured_dataset=dataset,
+        catalog=ResearchStrategyCatalogV1(
+            () if scenario.strategy_package is None else (scenario.strategy_package,)
+        ),
+    )
+    evidence = {
+        "dataset_id": dataset_id,
+        "source_sha256": dataset.source_bytes_sha256.value,
+        "data_sha256": dataset.selection.fingerprint.sha256.value,
+        "record_count": dataset.selection.fingerprint.record_count,
+        "replay_start_utc": document["data"]["start_utc"],
+        "replay_end_utc": document["data"]["end_utc"],
+    }
+    return replace(
+        result,
+        research_input_bytes=json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode(
+            "ascii"
+        ),
     )

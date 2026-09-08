@@ -80,3 +80,24 @@ examples with separate six-bar chronological windows. MA enters once when fast S
 SMA using admitted raw revision-0 closes; revisions do not count as additional history. The whole
 map is frozen for holdout and validated against target data, without clamping or target defaults.
 No AI generation, external plugin loading, data editor, optimizer or live capability is included.
+
+
+## Registered local research data
+
+Start the installed server with optional `--data-root /absolute/research-data` alongside the
+existing scenario, strategy, workspace and UI roots. Keep these directories separate. Place
+strict Phase-1 OHLCV CSV files directly in that directory; choose **Research dataset** before
+validation or batch creation. `ea data inspect /absolute/research-data/research.csv` prints raw
+provenance, canonical fingerprint, instrument, record count and the derived full-capture window.
+No source changes or manual fingerprint calculation are needed for another compatible dataset.
+
+The registered scenario still authorizes the exact instrument and economic configuration.
+Invalid or incompatible CSVs reject; there is no upload, path field, cleaning, date-range editor
+or automatic splitting. For chronological Holdout, provide a separate strictly later compatible
+CSV and explicitly select it from the Holdout choices. Source strategy bytes and parameters stay
+frozen. Dataset filenames identify catalog entries, not economic semantics.
+
+History reuse retains the selected dataset and expected raw SHA. If its contents changed,
+validation reports a conflict; explicitly selecting current input starts a new validation.
+Completed Web reports, comparisons and Holdout remain readable after external CSV deletion or
+replacement. New runs and CLI report regeneration/resume may require the original source file.

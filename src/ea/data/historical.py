@@ -9,7 +9,7 @@ import re
 import stat
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
@@ -375,6 +375,12 @@ def decode_phase1_ohlcv_csv(
     """Decode one strict bounded CSV capture into canonical semantic evidence."""
     if type(content) is not bytes or type(replay_window) is not ReplayWindow:
         _raise(HistoricalMarketDataFailureCode.INVALID_TYPE)
+    return _decode_phase1_capture(content, replay_window=replay_window)
+
+
+def _decode_phase1_capture(
+    content: bytes, *, replay_window: ReplayWindow | None
+) -> Phase1HistoricalDataset:
     if not content:
         _raise(HistoricalMarketDataFailureCode.EMPTY_SOURCE)
     if len(content) > PHASE1_OHLCV_MAX_BYTES:
@@ -423,6 +429,14 @@ def decode_phase1_ohlcv_csv(
         record_numbers.append(record_number)
     materialized = tuple(events)
     _validate_complete_history(materialized, tuple(record_numbers))
+    if replay_window is None:
+        try:
+            replay_window = ReplayWindow(
+                min(event.available_at for event in materialized),
+                max(event.available_at for event in materialized) + timedelta(microseconds=1),
+            )
+        except (OverflowError, RunContractError):
+            _raise(HistoricalMarketDataFailureCode.INVALID_TIMESTAMP)
     selected = tuple(
         event
         for event in materialized
@@ -455,12 +469,31 @@ def read_phase1_ohlcv_csv(
     """Capture one stable local regular file and invoke the strict decoder."""
     if type(path) is not type(Path()) or type(replay_window) is not ReplayWindow:
         _raise(HistoricalMarketDataFailureCode.INVALID_TYPE)
+    return decode_phase1_ohlcv_csv(_read_phase1_capture(path), replay_window=replay_window)
+
+
+def read_full_capture_phase1_ohlcv_csv(
+    path: Path, *, directory_descriptor: int | None = None
+) -> Phase1HistoricalDataset:
+    """Validate the complete capture and derive its smallest admission window."""
+    if type(path) is not type(Path()):
+        _raise(HistoricalMarketDataFailureCode.INVALID_TYPE)
+    return _decode_phase1_capture(
+        _read_phase1_capture(path, directory_descriptor=directory_descriptor), replay_window=None
+    )
+
+
+def _read_phase1_capture(path: Path, *, directory_descriptor: int | None = None) -> bytes:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     nonblock = getattr(os, "O_NONBLOCK", None)
     if type(nofollow) is not int or type(nonblock) is not int:
         _raise(HistoricalMarketDataFailureCode.SOURCE_UNREADABLE)
     try:
-        before = path.lstat()
+        before = (
+            path.lstat()
+            if directory_descriptor is None
+            else os.stat(path.name, dir_fd=directory_descriptor, follow_symlinks=False)
+        )
     except OSError:
         _raise(HistoricalMarketDataFailureCode.SOURCE_UNREADABLE)
     if not stat.S_ISREG(before.st_mode):
@@ -468,9 +501,10 @@ def read_phase1_ohlcv_csv(
     if before.st_size > PHASE1_OHLCV_MAX_BYTES:
         _raise(HistoricalMarketDataFailureCode.SOURCE_TOO_LARGE)
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | nofollow | nonblock,
+        descriptor = (
+            os.open(path, os.O_RDONLY | nofollow | nonblock)
+            if directory_descriptor is None
+            else os.open(path.name, os.O_RDONLY | nofollow | nonblock, dir_fd=directory_descriptor)
         )
     except OSError:
         _raise(_classify_open_failure(path, before))
@@ -481,7 +515,7 @@ def read_phase1_ohlcv_csv(
             os.close(descriptor)
         raise
     os.close(descriptor)
-    return decode_phase1_ohlcv_csv(content, replay_window=replay_window)
+    return content
 
 
 def create_phase1_historical_market_data_source(
