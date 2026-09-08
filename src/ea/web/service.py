@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import stat
 import tempfile
 import threading
@@ -26,6 +27,8 @@ from ea.product import (
     parameterize_backtest_scenario,
     run_backtest_scenario,
 )
+from ea.product.scenario import _SCENARIO_DIGEST_DOMAIN
+from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
 
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 _JOB_STATES = frozenset({"accepted", "running", "succeeded", "failed", "interrupted"})
@@ -173,6 +176,7 @@ def _scenario_summary(
             "entry_delay_bars": scenario.entry_delay_bars,
             "record_count": scenario.dataset.selection.fingerprint.record_count,
             "commission": json.loads(scenario.canonical_bytes)["execution"].get("commission"),
+            "data": json.loads(scenario.canonical_bytes)["data"],
         },
         "strategy_parameters": _strategy_parameter_contracts(scenario, defaults=defaults),
     }
@@ -569,6 +573,7 @@ class WebService:
         self._jobs: dict[str, JobRecord] = {}
         self._requests: dict[str, str] = {}
         self._batches: dict[str, BatchRecord] = {}
+        self._holdouts: dict[str, HoldoutRecord] = {}
         self._active: str | None = None
 
     def start(self) -> None:
@@ -576,6 +581,7 @@ class WebService:
         try:
             self._load_jobs()
             self._load_batches()
+            self._load_holdouts()
         except Exception:
             self._lease.release()
             raise
@@ -585,7 +591,8 @@ class WebService:
         self._lease.release()
 
     def _job_path(self, job_id: str) -> Path:
-        return self.jobs_dir / f"{job_id}.json"
+        bundle = self.jobs_dir / job_id
+        return bundle / "job.json" if bundle.is_dir() else self.jobs_dir / f"{job_id}.json"
 
     def _batch_path(self, batch_id: str) -> Path:
         return self.batches_dir / f"{batch_id}.json"
@@ -641,7 +648,9 @@ class WebService:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(pending, self._job_path(record.job_id))
-            directory_descriptor = os.open(self.jobs_dir, os.O_RDONLY | os.O_DIRECTORY)
+            directory_descriptor = os.open(
+                self._job_path(record.job_id).parent, os.O_RDONLY | os.O_DIRECTORY
+            )
             try:
                 os.fsync(directory_descriptor)
             finally:
@@ -674,7 +683,11 @@ class WebService:
             pending.unlink(missing_ok=True)
 
     def _load_jobs(self) -> None:
-        paths = sorted(self.jobs_dir.glob("*.json"))
+        paths = sorted(self.jobs_dir.glob("*.json")) + sorted(
+            path
+            for path in self.jobs_dir.glob("*/job.json")
+            if not path.parent.name.startswith(".")
+        )
         if len(paths) > 1000:
             raise WebBoundaryError("workspace exceeds the 1000-job limit")
         for path in paths:
@@ -684,7 +697,7 @@ class WebService:
                 record = _decode_job(path.read_bytes())
             except OSError:
                 raise WebBoundaryError("workspace job index is unavailable") from None
-            if path.name != f"{record.job_id}.json" or record.job_id in self._jobs:
+            if path != self._job_path(record.job_id) or record.job_id in self._jobs:
                 raise WebBoundaryError("workspace job index conflicts")
             if record.request_id in self._requests:
                 raise WebBoundaryError("workspace request index conflicts")
@@ -940,6 +953,164 @@ class WebService:
                     (self.inputs_dir / f"{record.job_id}.json").unlink(missing_ok=True)
                 raise
             return self.get_batch(batch.batch_id)
+
+    def _load_holdouts(self) -> None:
+        for path in sorted(self.jobs_dir.glob("*/holdout.json")):
+            if path.parent.name.startswith("."):
+                continue
+            if path.is_symlink() or path.parent.is_symlink() or path.stat().st_size > 65536:
+                raise WebBoundaryError("holdout index is invalid")
+            relation = decode_holdout(path.read_bytes())
+            if (
+                relation.holdout_job_id != path.parent.name
+                or relation.validation_id in self._holdouts
+                or relation.source_job_id not in self._jobs
+                or relation.holdout_job_id not in self._jobs
+            ):
+                raise WebBoundaryError("holdout membership conflicts")
+            self._holdouts[relation.validation_id] = relation
+        for job in self._jobs.values():
+            if self._job_path(job.job_id).name == "job.json" and not any(
+                item.holdout_job_id == job.job_id for item in self._holdouts.values()
+            ):
+                raise WebBoundaryError("holdout job has no relationship")
+
+    def list_holdouts(self) -> list[dict[str, str]]:
+        with self._lock:
+            return [
+                item.document()
+                for item in sorted(
+                    self._holdouts.values(),
+                    key=lambda item: (item.created_at, item.validation_id),
+                    reverse=True,
+                )
+            ]
+
+    def get_holdout(self, validation_id: str) -> dict[str, str]:
+        with self._lock:
+            try:
+                return self._holdouts[validation_id].document()
+            except KeyError:
+                raise JobNotFoundError("holdout was not found in this workspace") from None
+
+    def _holdout_source(self, source_job_id: str) -> dict[str, Any]:
+        source = self.get_job(source_job_id)
+        report = json.loads(self.report(source_job_id))
+        # Reuse canonical snapshot digest validation, including legacy exclusion.
+        checked = _decode_job(_canonical_json(source.document()))
+        if checked.input_snapshot_bytes is None:
+            raise WebBoundaryError("source has no immutable input snapshot")
+        snapshot = json.loads(checked.input_snapshot_bytes)
+        document: dict[str, Any] = snapshot["scenario"]
+        if document.get("strategy", {}).get("id") != "bounded-long-v1":
+            raise WebBoundaryError("source must use bounded-long-v1")
+        scenario_digest = sha256(
+            _SCENARIO_DIGEST_DOMAIN + _canonical_json(document).rstrip(b"\n")
+        ).hexdigest()
+        if scenario_digest != snapshot["identity"]["scenario_sha256"]:
+            raise WebBoundaryError("source scenario identity conflicts with snapshot")
+        strategy = document["strategy"]
+        if (
+            type(strategy.get("target_quantity")) is not str
+            or type(strategy.get("entry_delay_bars")) is not int
+        ):
+            raise WebBoundaryError("source parameters are unavailable")
+        if (
+            report.get("source", {}).get("scenario_sha256")
+            != snapshot["identity"]["scenario_sha256"]
+        ):
+            raise WebBoundaryError("source report and snapshot identity conflict")
+        return document
+
+    def _prepare_holdout(self, source_job_id: str, scenario_id: str) -> PreparedJob:
+        source = self._holdout_source(source_job_id)
+        target = self.registry.load(scenario_id)
+        document = json.loads(target.canonical_bytes)
+        if not compatible(source, document):
+            raise WebBoundaryError("holdout configuration is incompatible with source")
+        require_chronology(source, document)
+        normalized = parameterize_backtest_scenario(
+            target,
+            initial_cash=source["funding"]["initial_cash"],
+            quantity=source["strategy"]["target_quantity"],
+            entry_delay_bars=source["strategy"]["entry_delay_bars"],
+        )
+        payload, digest = _input_snapshot(scenario_id, normalized, _scenario_identity(target))
+        return PreparedJob(normalized, payload, digest)
+
+    def holdout_candidates(self, source_job_id: str) -> list[dict[str, object]]:
+        with self._lock:
+            self._holdout_source(source_job_id)
+            candidates = []
+            for item in self.registry.list():
+                if not item["valid"]:
+                    continue
+                scenario_id = str(item["scenario_id"])
+                try:
+                    self._prepare_holdout(source_job_id, scenario_id)
+                except (WebBoundaryError, BacktestScenarioError, ValueError):
+                    continue
+                candidates.append(item)
+            return candidates
+
+    def create_holdout(self, *, source_job_id: str, scenario_id: str) -> dict[str, str]:
+        with self._lock:
+            prepared = self._prepare_holdout(source_job_id, scenario_id)
+            if self._active is not None:
+                raise ServiceBusyError("one local backtest or batch is already active")
+            job_id = str(uuid4())
+            relation = HoldoutRecord(str(uuid4()), _created_at(), source_job_id, job_id)
+            record = JobRecord(
+                job_id=job_id,
+                request_id=f"holdout-{relation.validation_id}",
+                scenario_id=scenario_id,
+                input_identity=json.loads(prepared.input_snapshot_bytes)["source_identity"],
+                status="accepted",
+                created_at=relation.created_at,
+                input_snapshot_bytes=prepared.input_snapshot_bytes,
+                input_sha256=prepared.input_sha256,
+                attempt_id=RunId(str(uuid4())).value,
+            )
+            pending = Path(tempfile.mkdtemp(prefix=".holdout-", dir=self.jobs_dir))
+            published = self.jobs_dir / job_id
+            try:
+                scenario = self._materialize_scenario(job_id, prepared.scenario)
+                for name, document in (
+                    ("job.json", record.document()),
+                    ("holdout.json", relation.document()),
+                ):
+                    with (pending / name).open("xb") as handle:
+                        os.fchmod(handle.fileno(), 0o600)
+                        handle.write(_canonical_json(document))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                descriptor = os.open(pending, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.replace(pending, published)
+                descriptor = os.open(self.jobs_dir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                self._jobs[job_id] = record
+                self._requests[record.request_id] = job_id
+                self._holdouts[relation.validation_id] = relation
+                self._active = job_id
+                self._executor.submit(self._run, job_id, scenario)
+            except Exception:
+                self._active = None
+                self._jobs.pop(job_id, None)
+                self._requests.pop(record.request_id, None)
+                self._holdouts.pop(relation.validation_id, None)
+                shutil.rmtree(published, ignore_errors=True)
+                (self.inputs_dir / f"{job_id}.json").unlink(missing_ok=True)
+                raise
+            finally:
+                shutil.rmtree(pending, ignore_errors=True)
+            return relation.document()
 
     def _run_batch(
         self,
