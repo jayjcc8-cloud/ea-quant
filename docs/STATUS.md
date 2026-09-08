@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 2 — deterministic commission on the bounded offline research loop.**
+**Phase 2 — deterministic commission and Chronological Holdout on the bounded offline research loop.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -124,13 +124,19 @@ external write, deployment, or live capability is part of this objective.
   Legacy zero-fee scenario identities remain unchanged, and all three supported resume frontiers
   remain available without new recovery states or historical migration.
 
+- Issue #180 / ADR 0034 adds Chronological Holdout V1: explicit successful source selection,
+  backend-frozen canonical strategy parameters, strictly later compatible registered scenario,
+  atomic job/relationship publication, and independent after-fee formal reports. The minimal
+  relationship and both runs reopen after restart; original batch membership stays unchanged.
+  The claim is chronological holdout evaluation; no statistical conclusion or automatic selection.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
 backtest/reporting product, not the broader validation, optimization, paper, or live roadmap. Arbitrary
 instruction-level or Web recovery, symbol/data editing, uploads, broader experiment tracking,
 automatic optimization, broader performance analytics, strategy plugins, paper/live execution,
-package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Phase 2 activation is limited to deterministic commission.
+package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Phase 2 activation includes deterministic commission and Chronological Holdout V1 only.
 
 ## Blockers
 
@@ -160,6 +166,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0031 — Local Web Research Loop V1](adr/0031-local-web-research-loop-v1.md)
 - [ADR 0032 — Web Bounded Experiment Batch V1](adr/0032-web-bounded-experiment-batch-v1.md)
 - [ADR 0033 — Web Experiment Analysis V1](adr/0033-web-experiment-analysis-v1.md)
+- [ADR 0034 — Chronological Holdout V1](adr/0034-chronological-holdout-v1.md)
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
@@ -202,7 +209,7 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 
 ## Last Confirmed
 
-- Date: **2026-09-06** (Asia/Shanghai).
+- Date: **2026-09-08** (Asia/Shanghai).
 - The containing merged `main` commit and its CI are the authoritative durable-state checkpoint;
   the released product identity remains the exact commit and wheel recorded above.
 - Live capability: unavailable and prohibited.

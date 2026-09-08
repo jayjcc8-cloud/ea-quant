@@ -75,6 +75,7 @@ try {
   execFileSync(python, ['-I', '-c', "import ea, pathlib; print(pathlib.Path(ea.__file__).resolve()); assert 'site-packages' in str(pathlib.Path(ea.__file__).resolve())"], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
 
   cpSync(join(repository, 'examples', 'web-scenarios', 'prices.csv'), join(scenarioRoot, 'prices.csv'))
+  for (const file of ['holdout-prices.csv', 'chronological-holdout.yaml']) cpSync(join(repository, 'examples', 'web-scenarios', file), join(scenarioRoot, file))
   const bounded = readFileSync(join(repository, 'examples', 'web-scenarios', 'bounded-long.yaml'), 'utf8')
   const flat = readFileSync(join(repository, 'examples', 'web-scenarios', 'flat.yaml'), 'utf8')
   writeFileSync(join(scenarioRoot, 'bounded-long.yaml'), bounded)

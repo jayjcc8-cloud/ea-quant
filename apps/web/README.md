@@ -61,3 +61,16 @@ Vite development mode is not the delivery entrypoint.
 execution policy charges 100 bps per actual Fill, half-even rounded to the settlement currency
 quantum. The UI displays the fixed assumption and verified report fees; equity, P&L and return
 include ledger-applied commission. There is no cost editor or second fee calculator in Web.
+
+## Chronological Holdout
+
+Open a successful bounded-long-v1 run (including an explicitly selected batch member), choose
+**Evaluate chronological holdout**, and select a compatible later registered scenario. Parameters
+are frozen from the source snapshot. The backend rejects equal/overlapping windows, configuration
+mismatches, invalid target dynamic bounds, and unavailable source reports before creating a job.
+
+The bundled `bounded-long-commission.yaml` and `chronological-holdout.yaml` provide an earlier/later
+positive-commission example with different target defaults to demonstrate source parameter authority.
+The new run uses the normal single execution slot and formal reporter. The Chronological Holdout
+sidebar reopens saved relationships and both independent reports after restart. Unfinished jobs
+remain interrupted under the existing restart behavior. This evaluation makes no statistical claim.

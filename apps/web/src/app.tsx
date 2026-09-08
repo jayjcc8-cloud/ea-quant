@@ -12,12 +12,15 @@ export type BacktestParameters = {
   initial_cash: string
   strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } | null
 }
+type ReplayData = { start_utc: string; end_utc: string; fingerprint: { sha256: string; record_count: number } }
+export type ChronologicalHoldout = { schema: 'ea.chronological-holdout.v1'; validation_id: string; created_at: string; source_job_id: string; holdout_job_id: string }
 type Commission = { policy: string; commission_bps: string }
 const commissionLabel = (commission?: Commission | null) => commission ? `${commission.policy} · ${commission.commission_bps} bps` : 'Legacy zero commission · 0 bps'
 
 export type InputSnapshot = {
   schema: 'ea.local-web-input.v1'; scenario_id: string; source_identity: InputIdentity; identity: InputIdentity
   scenario: {
+    data?: ReplayData
     execution?: { policy: string; commission?: Commission | null }
     funding: { currency: string; initial_cash: string }
     strategy: { id: string; target_quantity: string | null; entry_delay_bars?: number }
@@ -26,7 +29,7 @@ export type InputSnapshot = {
 }
 export type ScenarioSummary = {
   scenario_id: string; name: string; valid: boolean; input_identity?: InputIdentity
-  summary?: { commission?: Commission | null; strategy_id: string; venue: string; symbol: string; initial_cash: string; target_quantity: string | null; entry_delay_bars: number; record_count: number }
+  summary?: { data?: ReplayData; commission?: Commission | null; strategy_id: string; venue: string; symbol: string; initial_cash: string; target_quantity: string | null; entry_delay_bars: number; record_count: number }
   strategy_parameters?: StrategyParameterContract[]
   normalized_input_identity?: InputIdentity
   error_code?: string; message?: string
@@ -62,6 +65,10 @@ export type BacktestReport = {
   }
 }
 export type ApiAdapter = {
+  holdoutScenarios(sourceJobId: string): Promise<ScenarioSummary[]>
+  createHoldout(request: { source_job_id: string; scenario_id: string }): Promise<ChronologicalHoldout>
+  getHoldout(validationId: string): Promise<ChronologicalHoldout>
+  listHoldouts(): Promise<ChronologicalHoldout[]>
   listScenarios(): Promise<ScenarioSummary[]>
   validateScenario(scenarioId: string, parameters: BacktestParameters): Promise<ScenarioSummary>
   createBacktest(request: { scenario_id: string; input_identity: InputIdentity; parameters: BacktestParameters; request_id: string }): Promise<BacktestJob>
@@ -88,6 +95,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const browserApi: ApiAdapter = {
+  async holdoutScenarios(jobId) { return (await apiRequest<{ scenarios: ScenarioSummary[] }>(`/api/backtests/${encodeURIComponent(jobId)}/holdout-scenarios`)).scenarios },
+  createHoldout(request) { return apiRequest('/api/holdouts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request) }) },
+  getHoldout(id) { return apiRequest(`/api/holdouts/${encodeURIComponent(id)}`) },
+  async listHoldouts() { return (await apiRequest<{ holdouts: ChronologicalHoldout[] }>('/api/holdouts')).holdouts },
   async listScenarios() { return (await apiRequest<{ scenarios: ScenarioSummary[] }>('/api/scenarios')).scenarios },
   validateScenario(scenarioId, parameters) {
     return apiRequest(`/api/scenarios/${encodeURIComponent(scenarioId)}/validate`, {
@@ -120,7 +131,7 @@ function Shell({ api }: { api: ApiAdapter }) {
     <aside className="sidebar">
       <Link className="brand" to="/backtests"><span>EA</span><strong>QUANT</strong></Link>
       <p className="workspace">LOCAL OFFLINE CONSOLE</p>
-      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/batches/new">Run Batch</NavLink></nav>
+      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/batches/new">Run Batch</NavLink><NavLink to="/holdouts">Chronological Holdout</NavLink></nav>
       <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
     </aside>
     <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
@@ -128,6 +139,9 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
+        <Route path="/holdouts" element={<HoldoutHistory api={api} />} />
+        <Route path="/holdouts/new/:jobId" element={<HoldoutCreatorRoute api={api} />} />
+        <Route path="/holdouts/:validationId" element={<HoldoutDetailRoute api={api} />} />
         <Route path="/batches/new" element={<BatchCreator api={api} />} />
         <Route path="/batches/:batchId" element={<BatchDetailRoute api={api} />} />
         <Route path="*" element={<Navigate replace to="/backtests" />} />
@@ -599,6 +613,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
       <div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
     </dl></section>
+    {report && job.input_snapshot?.scenario.strategy.id === 'bounded-long-v1' && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
     {job.input_snapshot && <p>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</p>}
     {economics ? <>
       <section className="metrics">
@@ -626,6 +641,114 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
           ? error ? 'No current verified report is available.' : 'Loading the formal report.'
           : 'The installed engine is running. This page will refresh automatically.'
     }</p></section>}
+  </>
+}
+
+function HoldoutHistory({ api }: { api: ApiAdapter }) {
+  const [items, setItems] = useState<ChronologicalHoldout[]>([])
+  const [error, setError] = useState('')
+  useEffect(() => { let active = true; api.listHoldouts().then(value => { if (active) setItems(value) }).catch(caught => { if (active) setError(String(caught)) }); return () => { active = false } }, [api])
+  return <><PageTitle title="Chronological Holdout" subtitle="Saved chronological holdout evaluations. Select a completed run to create one." />
+    {error && <p className="notice error">{error}</p>}
+    <section className="panel"><Link to="/backtests">Choose a source run</Link><ul>{items.map(item => <li key={item.validation_id}><Link to={`/holdouts/${item.validation_id}`}>{item.validation_id}</Link> · {item.created_at}</li>)}</ul></section></>
+}
+
+function FrozenParameters({ job }: { job: BacktestJob }) {
+  const strategy = job.input_snapshot?.scenario.strategy
+  return <section className="panel"><header><h2>Frozen Parameters</h2><span>Frozen from source</span></header><dl className="summary-list">
+    <div><dt>target_quantity</dt><dd>{strategy?.target_quantity ?? 'Unavailable'}</dd></div>
+    <div><dt>entry_delay_bars</dt><dd>{strategy?.entry_delay_bars ?? 'Unavailable'}</dd></div>
+  </dl></section>
+}
+
+function HoldoutEvidence({ role, job, report }: { role: string; job: BacktestJob; report: BacktestReport | null }) {
+  const data = job.input_snapshot?.scenario.data
+  const economics = report?.economics
+  const currency = economics?.currency ?? job.input_snapshot?.scenario.funding.currency
+  return <section className="panel"><header><h2>{role}</h2><span>{job.status}</span></header><dl className="summary-list">
+    <div><dt>Scenario</dt><dd>{job.scenario_id}</dd></div>
+    <div><dt>Window (UTC)</dt><dd>{data ? `${data.start_utc} → ${data.end_utc}` : 'Unavailable'}</dd></div>
+    <div><dt>Data fingerprint</dt><dd>{data?.fingerprint.sha256 ?? 'Unavailable'}</dd></div>
+    <div><dt>Record count</dt><dd>{data?.fingerprint.record_count ?? 'Unavailable'}</dd></div>
+    <div><dt>Commission assumption</dt><dd>{commissionLabel(job.input_snapshot?.scenario.execution?.commission)}</dd></div>
+    <div><dt>Fees</dt><dd>{economics?.fees ? `${economics.fees.amount} ${economics.fees.currency}` : 'No report'}</dd></div>
+    <div><dt>Final equity</dt><dd>{economics ? `${economics.equity.amount} ${currency}` : 'No report'}</dd></div>
+    <div><dt>Net P&amp;L</dt><dd>{economics ? `${economics.net_pnl.amount} ${currency}` : 'No report'}</dd></div>
+    <div><dt>Total return</dt><dd>{economics ? percent(economics.total_return.value) : 'No report'}</dd></div>
+  </dl><Link to={`/backtests/${job.job_id}`}>Open {role} formal run</Link></section>
+}
+
+async function holdoutRun(api: ApiAdapter, id: string) {
+  const job = await api.getBacktest(id)
+  let report: BacktestReport | null = null
+  if (job.status === 'succeeded') {
+    try { const value = await api.getReport(id); if (value.run_id === job.engine_run_id) report = value } catch { /* Unavailable evidence stays unavailable. */ }
+  }
+  return { job, report }
+}
+
+function HoldoutCreatorRoute({ api }: { api: ApiAdapter }) {
+  const { jobId = '' } = useParams()
+  return <HoldoutCreator key={jobId} api={api} jobId={jobId} />
+}
+
+function HoldoutCreator({ api, jobId }: { api: ApiAdapter; jobId: string }) {
+  const navigate = useNavigate()
+  const [source, setSource] = useState<Awaited<ReturnType<typeof holdoutRun>> | null>(null)
+  const [candidates, setCandidates] = useState<ScenarioSummary[]>([])
+  const [selected, setSelected] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    let active = true
+    Promise.all([holdoutRun(api, jobId), api.holdoutScenarios(jobId)]).then(([run, items]) => {
+      if (active) { setSource(run); setCandidates(items) }
+    }).catch(caught => { if (active) setError(String(caught)) })
+    return () => { active = false }
+  }, [api, jobId])
+  const candidate = candidates.find(item => item.scenario_id === selected)
+  const submit = async () => {
+    setBusy(true); setError('')
+    try { const relation = await api.createHoldout({ source_job_id: jobId, scenario_id: selected }); navigate(`/holdouts/${relation.validation_id}`) }
+    catch (caught) { setError(String(caught)); setBusy(false) }
+  }
+  return <><PageTitle title="New Chronological Holdout" subtitle="Chronological holdout evaluation using parameters frozen from your selected source." />
+    {error && <p className="notice error">{error}</p>}
+    {source && <><FrozenParameters job={source.job} /><HoldoutEvidence role="IS" {...source} /></>}
+    <section className="panel"><label htmlFor="holdout-scenario">Holdout scenario</label>
+      <select id="holdout-scenario" value={selected} onChange={event => setSelected(event.target.value)}><option value="">Select a compatible later registered scenario</option>{candidates.map(item => <option key={item.scenario_id} value={item.scenario_id}>{item.name}</option>)}</select>
+      {source && candidates.length === 0 && <p>No compatible later registered scenario with valid frozen parameters is available.</p>}
+      {candidate?.summary?.data && <dl className="summary-list"><div><dt>Window (UTC)</dt><dd>{candidate.summary.data.start_utc} → {candidate.summary.data.end_utc}</dd></div><div><dt>Data fingerprint</dt><dd>{candidate.summary.data.fingerprint.sha256}</dd></div><div><dt>Record count</dt><dd>{candidate.summary.data.fingerprint.record_count}</dd></div></dl>}
+      <button className="primary" disabled={!selected || !source?.report || busy} onClick={() => { void submit() }}>Run chronological holdout</button>
+    </section></>
+}
+
+function HoldoutDetailRoute({ api }: { api: ApiAdapter }) {
+  const { validationId = '' } = useParams()
+  return <HoldoutDetail key={validationId} api={api} validationId={validationId} />
+}
+
+function HoldoutDetail({ api, validationId }: { api: ApiAdapter; validationId: string }) {
+  const [runs, setRuns] = useState<Awaited<ReturnType<typeof holdoutRun>>[]>([])
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true; let timer: number | undefined
+    const refresh = async () => {
+      try {
+        const relation = await api.getHoldout(validationId)
+        const next = await Promise.all([holdoutRun(api, relation.source_job_id), holdoutRun(api, relation.holdout_job_id)])
+        if (!active) return
+        setRuns(next); setError('')
+        if (next.some(run => ['accepted', 'running'].includes(run.job.status))) timer = window.setTimeout(() => { void refresh() }, 500)
+      } catch (caught) { if (active) { setRuns([]); setError(String(caught)) } }
+    }
+    void refresh()
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [api, validationId])
+  return <><PageTitle title="Chronological Holdout" subtitle={`Chronological holdout evaluation · ${validationId}`} />
+    <p><Link to="/holdouts">Saved evaluations</Link></p>{error && <p className="notice error">{error}</p>}
+    {runs[0] && <FrozenParameters job={runs[0].job} />}
+    <div className="backtest-grid">{runs.map((run, index) => <HoldoutEvidence key={run.job.job_id} role={index === 0 ? 'IS' : 'OOS'} {...run} />)}</div>
   </>
 }
 

@@ -73,6 +73,13 @@ class BatchRequest(BaseModel):
     runs: list[BatchRunRequest] = Field(min_length=2, max_length=10)
 
 
+class HoldoutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source_job_id: str = Field(min_length=1, max_length=128)
+    scenario_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.ya?ml$")
+
+
 class ScenarioValidationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -264,6 +271,47 @@ def create_app(settings: WebSettings) -> Any:
             return service.get_batch(batch_id)
         except BatchNotFoundError as caught:
             return error(404, "batch_not_found", str(caught))
+
+    @app.post("/api/holdouts")
+    def create_holdout(request: HoldoutRequest) -> Response:
+        from ea.product import BacktestScenarioError
+
+        try:
+            return JSONResponse(
+                status_code=202,
+                content=service.create_holdout(
+                    source_job_id=request.source_job_id,
+                    scenario_id=request.scenario_id,
+                ),
+            )
+        except (JobNotFoundError, ScenarioNotFoundError) as caught:
+            return error(404, "not_found", str(caught))
+        except ServiceBusyError as caught:
+            return error(409, "service_busy", str(caught))
+        except (WebBoundaryError, BacktestScenarioError, ValueError) as caught:
+            return error(422, "holdout_invalid", str(caught))
+        except Exception:
+            return error(500, "holdout_acceptance_failed", "holdout request could not be accepted")
+
+    @app.get("/api/holdouts")
+    def list_holdouts() -> object:
+        return {"holdouts": service.list_holdouts()}
+
+    @app.get("/api/holdouts/{validation_id}")
+    def get_holdout(validation_id: str) -> object:
+        try:
+            return service.get_holdout(validation_id)
+        except JobNotFoundError as caught:
+            return error(404, "holdout_not_found", str(caught))
+
+    @app.get("/api/backtests/{job_id}/holdout-scenarios")
+    def holdout_scenarios(job_id: str) -> object:
+        try:
+            return {"scenarios": service.holdout_candidates(job_id)}
+        except JobNotFoundError as caught:
+            return error(404, "job_not_found", str(caught))
+        except (WebBoundaryError, ValueError) as caught:
+            return error(422, "holdout_invalid", str(caught))
 
     @app.get("/api/backtests/{job_id}")
     def get_backtest(job_id: str) -> object:

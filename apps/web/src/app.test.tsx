@@ -94,6 +94,10 @@ const batch = {
 
 function adapter(overrides: Partial<ApiAdapter> = {}): ApiAdapter {
   return {
+    holdoutScenarios: async () => [],
+    createHoldout: async () => { throw new Error('unused') },
+    getHoldout: async () => { throw new Error('unused') },
+    listHoldouts: async () => [],
     listScenarios: async () => scenarios,
     validateScenario: async (scenarioId) => scenarios.find((item) => item.scenario_id === scenarioId)!,
     createBacktest: async () => job,
@@ -619,4 +623,29 @@ it('shows persisted commission assumptions and formal report fees', async () => 
   expect(await screen.findByText('deterministic-commission-v1 · 100 bps')).toBeTruthy()
   expect(await screen.findByText('2.03 USD')).toBeTruthy()
   expect(screen.queryByLabelText('Commission bps')).toBeNull()
+})
+
+describe('Chronological Holdout', () => {
+  it('submits only explicitly selected source and target, with frozen values', async () => {
+    const user = userEvent.setup()
+    let submitted: unknown
+    window.history.pushState({}, '', '/holdouts/new/job-1')
+    const relation = { schema: 'ea.chronological-holdout.v1' as const, validation_id: 'validation-1', created_at: job.created_at!, source_job_id: 'job-1', holdout_job_id: 'job-2' }
+    render(<App api={adapter({
+      holdoutScenarios: async () => [scenarios[0]],
+      createHoldout: async (request) => { submitted = request; return relation },
+      getHoldout: async () => relation,
+      getBacktest: async id => id === job.job_id ? job : secondJob,
+      getReport: async id => id === job.job_id ? report : secondReport,
+    })} />)
+    await screen.findByText('Frozen from source')
+    expect(screen.queryByRole('spinbutton')).toBeNull()
+    await user.selectOptions(screen.getByLabelText('Holdout scenario'), 'bounded-long.yaml')
+    await user.click(screen.getByRole('button', { name: 'Run chronological holdout' }))
+    await waitFor(() => expect(submitted).toEqual({ source_job_id: 'job-1', scenario_id: 'bounded-long.yaml' }))
+    await screen.findByRole('link', { name: 'Open IS formal run' })
+    await screen.findByRole('link', { name: 'Open OOS formal run' })
+    expect(screen.queryByText('Parameter Delta')).toBeNull()
+    expect(screen.queryByText('Result Diff')).toBeNull()
+  })
 })
