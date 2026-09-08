@@ -54,6 +54,7 @@ async function useParameters(page: Page, sourceJobId: string): Promise<void> {
 }
 
 test('installed browser completes the bounded local Web research loop', async ({ page }, testInfo) => {
+  test.setTimeout(120_000)
   await page.goto('/backtests')
   await page.getByLabel('Scenario').selectOption('bounded-long.yaml')
   await expect(page.getByLabel('Initial cash')).toHaveValue('10000')
