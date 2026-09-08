@@ -223,7 +223,7 @@ def test_commission_resume_equivalence(
     from unit.test_backtest_resume import _AbruptInterruption, _interrupt_at
 
     ledgers: dict[str, PortfolioLedger] = {}
-    create_ledger = backtest.create_portfolio_ledger
+    from ea.portfolio import create_portfolio_ledger as create_ledger
 
     def capture(run_id: RunId, spec_set: InstrumentExecutionSpecSet) -> PortfolioLedger:
         ledger = create_ledger(run_id, spec_set)
