@@ -1,0 +1,38 @@
+schema_version: 2
+data:
+  path: moving-average-entry.csv
+  start_utc: '2026-01-02T09:31:00.000000Z'
+  end_utc: '2026-01-02T09:37:00.000000Z'
+  fingerprint:
+    sha256: a47d11de9d846409ba177ea06bc341de9f692237a9a3032bd7264c4d9b4e5290
+    record_count: 6
+instrument:
+  venue: XNAS
+  symbol: AAPL
+  specification_id: xnas.aapl.v1
+  specification_set_id: scenario.xnas.aapl.v1
+  settlement_currency: USD
+  price_quantum: '0.01'
+  quantity_quantum: '1'
+  currency_quantum: '0.01'
+  contract_multiplier: '1'
+strategy:
+  id: moving-average-entry-v1
+  version: 1
+  parameters:
+    fast_window: 1
+    slow_window: 2
+    target_quantity: '2'
+funding:
+  currency: USD
+  initial_cash: '10000'
+risk:
+  max_order_quantity: '5'
+  max_position_quantity: '5'
+  max_notional: '1000'
+execution:
+  policy: phase1.next-bar-close.v1
+  commission:
+    policy: deterministic-commission-v1
+    commission_bps: '100'
+randomness_profile: none

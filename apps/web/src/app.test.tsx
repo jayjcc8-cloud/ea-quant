@@ -7,7 +7,7 @@ const identity = { scenario_sha256: 'a'.repeat(64), data_sha256: 'b'.repeat(64),
 const scenarios = [
   {
     scenario_id: 'bounded-long.yaml', name: 'bounded-long', valid: true as const, input_identity: identity,
-    summary: { strategy_id: 'bounded-long-v1', venue: 'XNAS', symbol: 'AAPL', initial_cash: '10000', target_quantity: '2', entry_delay_bars: 0, record_count: 4 },
+    summary: { strategy_id: 'bounded-long-v1', venue: 'XNAS', symbol: 'AAPL', initial_cash: '10000', parameters: { target_quantity: '2', entry_delay_bars: 0 }, record_count: 4 },
     strategy_parameters: [
       { name: 'target_quantity' as const, type: 'decimal' as const, default: '2', current_value: '2', minimum: '1', maximum: null },
       { name: 'entry_delay_bars' as const, type: 'integer' as const, default: 0, current_value: 0, minimum: 0, maximum: 2 },
@@ -26,7 +26,7 @@ function snapshot(initialCash: string, quantity: string, entryDelayBars = 0): In
     identity: { ...identity, scenario_sha256: `${quantity.at(0) ?? 'f'}`.repeat(64) },
     scenario: {
       funding: { currency: 'USD', initial_cash: initialCash },
-      strategy: { id: 'bounded-long-v1', target_quantity: quantity, entry_delay_bars: entryDelayBars },
+      strategy: { id: 'bounded-long-v1', version: 1, parameters: { target_quantity: quantity, entry_delay_bars: entryDelayBars } },
       instrument: { venue: 'XNAS', symbol: 'AAPL' },
     },
   }
@@ -38,6 +38,7 @@ const job: BacktestJob = {
   summary_sha256: 'd'.repeat(64), error_code: null, message: null, report_ready: true,
   created_at: '2026-09-05T15:00:00.000000Z', input_snapshot: snapshot('10000', '2'),
   input_sha256: 'e'.repeat(64), attempt_id: 'run-1',
+  strategy_descriptor: { strategy_id: 'bounded-long-v1', strategy_version: 1, research_visible: true, parameters: [{ name: 'target_quantity', type: 'decimal' }, { name: 'entry_delay_bars', type: 'integer' }] },
 }
 const report: BacktestReport = {
   schema: 'ea.backtest-report.v1', run_id: 'run-1',
@@ -130,16 +131,16 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByRole('heading', { name: 'New Experiment Batch' })).toBeTruthy()
     expect(screen.getAllByRole('heading', { name: /Run [12]/ })).toHaveLength(2)
-    expect(screen.getByLabelText('Run 1 entry delay bars').getAttribute('max')).toBe('2')
+    expect(screen.getByLabelText('Run 1 entry_delay_bars').getAttribute('max')).toBe('2')
     await user.click(screen.getByRole('button', { name: 'Add configuration' }))
     expect(screen.getByRole('heading', { name: 'Run 3' })).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Remove Run 3' }))
     expect(screen.queryByRole('heading', { name: 'Run 3' })).toBeNull()
 
-    await user.clear(screen.getByLabelText('Run 2 quantity'))
-    await user.type(screen.getByLabelText('Run 2 quantity'), '4')
-    await user.clear(screen.getByLabelText('Run 2 entry delay bars'))
-    await user.type(screen.getByLabelText('Run 2 entry delay bars'), '2')
+    await user.clear(screen.getByLabelText('Run 2 target_quantity'))
+    await user.type(screen.getByLabelText('Run 2 target_quantity'), '4')
+    await user.clear(screen.getByLabelText('Run 2 entry_delay_bars'))
+    await user.type(screen.getByLabelText('Run 2 entry_delay_bars'), '2')
     await user.click(screen.getByRole('button', { name: 'Run batch' }))
 
     expect(requests).toEqual([{
@@ -235,7 +236,7 @@ describe('EA Quant local Web backtests', () => {
     })} />)
 
     await screen.findByRole('row', { name: /Run 3 3 1 succeeded/i })
-    await user.selectOptions(screen.getByLabelText('Sort by'), 'target_quantity')
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'parameter:target_quantity')
     await waitFor(() => expect(screen.getAllByRole('row').slice(1).map((row) => row.textContent)).toEqual([
       expect.stringContaining('Run 2'),
       expect.stringContaining('Run 3'),
@@ -363,7 +364,7 @@ describe('EA Quant local Web backtests', () => {
     await user.selectOptions(screen.getByLabelText('Scenario'), 'bounded-long.yaml')
     await user.click(screen.getByRole('button', { name: 'Validate input' }))
     expect(await screen.findByText('Validated input')).toBeTruthy()
-    expect(screen.getByText(/Target quantity: 2 · Entry delay bars: 0/)).toBeTruthy()
+    expect(screen.getAllByText(/target_quantity: 2 · entry_delay_bars: 0/).length).toBeGreaterThan(0)
 
     await user.selectOptions(screen.getByLabelText('Scenario'), 'flat.yaml')
     expect(screen.queryByText('Validated input')).toBeNull()
@@ -376,8 +377,8 @@ describe('EA Quant local Web backtests', () => {
 
   it('restores immutable parameters, revalidates edits, and submits a new run', async () => {
     const user = userEvent.setup()
-    const validations: { scenarioId: string; initial_cash: string; strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } | null }[] = []
-    const creations: { parameters: { initial_cash: string; strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } | null } }[] = []
+    const validations: { scenarioId: string; initial_cash: string; strategy_parameters: Record<string, string | number> | null }[] = []
+    const creations: { parameters: { initial_cash: string; strategy_parameters: Record<string, string | number> | null } }[] = []
     window.history.pushState({}, '', '/backtests')
     render(<App api={adapter({
       listBacktests: async () => [job],
@@ -395,18 +396,18 @@ describe('EA Quant local Web backtests', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Use parameters for job-1' }))
     expect((screen.getByLabelText('Initial cash') as HTMLInputElement).value).toBe('10000')
-    expect((screen.getByLabelText('Quantity') as HTMLInputElement).value).toBe('2')
-    expect((screen.getByLabelText('Entry delay bars') as HTMLInputElement).value).toBe('0')
-    expect(screen.getByLabelText('Entry delay bars').getAttribute('max')).toBe('2')
+    expect((screen.getByLabelText('target_quantity') as HTMLInputElement).value).toBe('2')
+    expect((screen.getByLabelText('entry_delay_bars') as HTMLInputElement).value).toBe('0')
+    expect(screen.getByLabelText('entry_delay_bars').getAttribute('max')).toBe('2')
     expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('AAPL')
     expect((screen.getByLabelText('Symbol') as HTMLInputElement).readOnly).toBe(true)
 
     await user.click(screen.getByRole('button', { name: 'Validate input' }))
     expect(await screen.findByText('Validated input')).toBeTruthy()
-    await user.clear(screen.getByLabelText('Quantity'))
-    await user.type(screen.getByLabelText('Quantity'), '4')
-    await user.clear(screen.getByLabelText('Entry delay bars'))
-    await user.type(screen.getByLabelText('Entry delay bars'), '2')
+    await user.clear(screen.getByLabelText('target_quantity'))
+    await user.type(screen.getByLabelText('target_quantity'), '4')
+    await user.clear(screen.getByLabelText('entry_delay_bars'))
+    await user.type(screen.getByLabelText('entry_delay_bars'), '2')
     expect(screen.queryByText('Validated input')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Validate input' }))
     await user.click(await screen.findByRole('button', { name: 'Run new backtest' }))
@@ -430,8 +431,8 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Parameter Delta' })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /target_quantity 2 4 Changed/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /target_quantity 2 4 \+2/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /entry_delay_bars 0 2 \+2/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Net P&L 17 USD 34 USD \+17 USD/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /Return 0.17% 0.34% \+0.17 pp/i })).toBeTruthy()
@@ -517,8 +518,8 @@ describe('EA Quant local Web backtests', () => {
     })} />)
 
     expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /target_quantity 2 4 Changed/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /entry_delay_bars 0 2 Changed/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /target_quantity 2 4 \+2/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /entry_delay_bars 0 2 \+2/i })).toBeTruthy()
     expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
     expect(screen.getByRole('row', { name: /Final Equity No report 10034 USD —/i })).toBeTruthy()
     expect(screen.queryByText('verified report is unavailable')).toBeNull()
@@ -648,4 +649,14 @@ describe('Chronological Holdout', () => {
     expect(screen.queryByText('Parameter Delta')).toBeNull()
     expect(screen.queryByText('Result Diff')).toBeNull()
   })
+})
+
+it('renders an unfamiliar built-in parameter schema without strategy-specific controls', async () => {
+  window.history.replaceState({}, '', '/backtests')
+  render(<App api={adapter({ listScenarios: async () => [{
+    scenario_id: 'third.yaml', name: 'third', valid: true, input_identity: identity,
+    summary: { strategy_id: 'third-built-in', venue: 'XNAS', symbol: 'AAPL', initial_cash: '10000', target_quantity: null, entry_delay_bars: 0, record_count: 4 },
+    strategy_parameters: [{ name: 'unfamiliar_window', type: 'integer', default: 2, current_value: 2, minimum: 1, maximum: 3 }],
+  }] })} />)
+  expect(await screen.findByLabelText('unfamiliar_window')).toHaveProperty('value', '2')
 })

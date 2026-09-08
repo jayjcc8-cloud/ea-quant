@@ -42,6 +42,7 @@ from ea.core.economics import EconomicValidationError
 from ea.core.run import RunContractError
 from ea.data import HistoricalMarketDataError, Phase1HistoricalDataset, read_phase1_ohlcv_csv
 from ea.product.identity import BacktestRandomness
+from ea.strategy.registry import BUILTIN_STRATEGIES, project_parameters, resolve_parameters
 
 _SCENARIO_DIGEST_DOMAIN = b"ea.backtest-scenario.v1\0"
 _CANONICALIZATION = "ea-backtest-scenario-v1"
@@ -58,6 +59,11 @@ class BacktestScenarioError(ValueError):
 class BacktestStrategyId(StrEnum):
     ALWAYS_FLAT = "always-flat-v1"
     BOUNDED_LONG = "bounded-long-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredStrategyId:
+    value: str
 
 
 class _StrictModel(BaseModel):
@@ -159,6 +165,23 @@ class _ScenarioInput(_StrictModel):
         return self
 
 
+class _StrategyInputV2(_StrictModel):
+    id: StrictStr
+    version: StrictInt
+    parameters: dict[StrictStr, Any]
+
+
+class BacktestScenarioV2(_StrictModel):
+    schema_version: Literal[2]
+    data: _DataInput
+    instrument: _InstrumentInput
+    strategy: _StrategyInputV2
+    funding: _FundingInput
+    risk: _RiskInput
+    execution: _ExecutionInput
+    randomness_profile: Literal["none"]
+
+
 class _UniqueKeySafeLoader(yaml.SafeLoader):
     pass
 
@@ -204,7 +227,7 @@ class LoadedBacktestScenario:
     replay_window: ReplayWindow
     instrument: Instrument
     spec_set: InstrumentExecutionSpecSet
-    strategy_id: BacktestStrategyId
+    strategy_id: BacktestStrategyId | RegisteredStrategyId
     target_quantity: CanonicalDecimal | None
     entry_delay_bars: int
     entry_delay_bars_maximum: int | None
@@ -217,6 +240,18 @@ class LoadedBacktestScenario:
     randomness: BacktestRandomness
     canonical_bytes: bytes
     scenario_sha256: Sha256Digest
+
+    @property
+    def strategy_version(self) -> int:
+        return int(json.loads(self.canonical_bytes)["strategy"].get("version", 1))
+
+    @property
+    def strategy_parameters(self) -> dict[str, int | str]:
+        return project_parameters(json.loads(self.canonical_bytes)["strategy"])
+
+    @property
+    def schema_version(self) -> int:
+        return int(json.loads(self.canonical_bytes)["schema_version"])
 
 
 def _safe_validation_message(error: ValidationError) -> str:
@@ -296,7 +331,7 @@ def _quantized(
 
 
 def _canonical_bytes(
-    model: _ScenarioInput,
+    model: _ScenarioInput | BacktestScenarioV2,
     *,
     dataset: Phase1HistoricalDataset,
 ) -> bytes:
@@ -306,7 +341,9 @@ def _canonical_bytes(
     data = dict(document["data"])
     data.pop("path")
     document["data"] = data
-    document["canonicalization"] = _CANONICALIZATION
+    document["canonicalization"] = (
+        _CANONICALIZATION if model.schema_version == 1 else "ea-backtest-scenario-v2"
+    )
     document["data"]["fingerprint"] = {
         "record_count": dataset.selection.fingerprint.record_count,
         "sha256": dataset.selection.fingerprint.sha256.value,
@@ -357,6 +394,16 @@ def _next_bar_entry_delay_maximum(dataset: Phase1HistoricalDataset) -> int | Non
     return None
 
 
+def _entry_history_bars(dataset: Phase1HistoricalDataset) -> int:
+    maximum = _next_bar_entry_delay_maximum(dataset)
+    if maximum is None:
+        return 0
+    return sum(
+        event.revision == 0 and event.payload.adjustment is Adjustment.RAW
+        for event in dataset.selection.events[: maximum + 1]
+    )
+
+
 def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
     """Load, capture, and cross-validate one strict BacktestScenario v1."""
     if not isinstance(path, Path):
@@ -364,7 +411,11 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
     scenario_path = _resolve_file(path, label="scenario path")
     document = _load_document(scenario_path)
     try:
-        model = _ScenarioInput.model_validate(document)
+        model: _ScenarioInput | BacktestScenarioV2 = (
+            BacktestScenarioV2.model_validate(document)
+            if type(document.get("schema_version")) is int and document["schema_version"] == 2
+            else _ScenarioInput.model_validate(document)
+        )
     except ValidationError as error:
         raise BacktestScenarioError(_safe_validation_message(error)) from None
 
@@ -476,7 +527,7 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
         field="risk.max_notional",
     )
     target = None
-    if model.strategy.target_quantity is not None:
+    if isinstance(model, _ScenarioInput) and model.strategy.target_quantity is not None:
         target = _quantized(
             _positive(
                 _decimal(model.strategy.target_quantity, field="strategy.target_quantity"),
@@ -486,7 +537,7 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
             field="strategy.target_quantity",
         )
     entry_delay_maximum: int | None = None
-    if model.strategy.id is BacktestStrategyId.BOUNDED_LONG:
+    if isinstance(model, _ScenarioInput) and model.strategy.id is BacktestStrategyId.BOUNDED_LONG:
         entry_delay_maximum = _next_bar_entry_delay_maximum(dataset)
         if entry_delay_maximum is None:
             raise BacktestScenarioError(
@@ -496,6 +547,24 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
             raise BacktestScenarioError(
                 f"strategy.entry_delay_bars must be at most {entry_delay_maximum}"
             )
+    if isinstance(model, BacktestScenarioV2):
+        try:
+            normalized = BUILTIN_STRATEGIES.get(
+                model.strategy.id, model.strategy.version
+            ).normalize(model.strategy.parameters)
+            resolve_parameters(
+                model.strategy.id,
+                model.strategy.version,
+                normalized,
+                quantity_quantum=quantity_quantum,
+                last_entry_index=_next_bar_entry_delay_maximum(dataset),
+                history_bars=_entry_history_bars(dataset),
+            )
+            model = model.model_copy(
+                update={"strategy": model.strategy.model_copy(update={"parameters": normalized})}
+            )
+        except ValueError as error:
+            raise BacktestScenarioError(str(error)) from None
     execution_policy = _ACCEPTED_EXECUTION_POLICY
     if model.execution.commission is not None:
         try:
@@ -516,9 +585,15 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
         replay_window=replay_window,
         instrument=instrument,
         spec_set=spec_set,
-        strategy_id=model.strategy.id,
+        strategy_id=(
+            BacktestStrategyId(model.strategy.id)
+            if isinstance(model, _ScenarioInput)
+            else RegisteredStrategyId(model.strategy.id)
+        ),
         target_quantity=target,
-        entry_delay_bars=model.strategy.entry_delay_bars,
+        entry_delay_bars=model.strategy.entry_delay_bars
+        if isinstance(model, _ScenarioInput)
+        else 0,
         entry_delay_bars_maximum=entry_delay_maximum,
         funding_currency=funding_currency,
         initial_cash=initial_cash,
@@ -528,7 +603,9 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
         execution_policy=execution_policy,
         randomness=BacktestRandomness(),
         canonical_bytes=canonical,
-        scenario_sha256=Sha256Digest(sha256(_SCENARIO_DIGEST_DOMAIN + canonical).hexdigest()),
+        scenario_sha256=Sha256Digest(
+            sha256(scenario_digest_domain(model.schema_version) + canonical).hexdigest()
+        ),
     )
 
 
@@ -542,6 +619,8 @@ def parameterize_backtest_scenario(
     """Create one validated immutable run input from a registered scenario."""
     if type(scenario) is not LoadedBacktestScenario:
         raise BacktestScenarioError("scenario must be a loaded BacktestScenario")
+    if scenario.schema_version != 1:
+        raise BacktestScenarioError("Scenario V2 requires the generic parameter map")
     specification = scenario.spec_set.require(scenario.instrument)
     cash = _quantized(
         _positive(
@@ -601,9 +680,65 @@ def parameterize_backtest_scenario(
 
 
 __all__ = [
+    "BacktestScenarioV2",
+    "parameterize_strategy_scenario",
     "BacktestScenarioError",
     "BacktestStrategyId",
     "LoadedBacktestScenario",
     "load_backtest_scenario",
     "parameterize_backtest_scenario",
 ]
+
+
+def scenario_digest_domain(version: int) -> bytes:
+    if version not in (1, 2):
+        raise BacktestScenarioError("unsupported scenario digest version")
+    return f"ea.backtest-scenario.v{version}\0".encode("ascii")
+
+
+def parameterize_strategy_scenario(
+    scenario: LoadedBacktestScenario,
+    *,
+    initial_cash: str,
+    parameters: dict[str, object],
+) -> LoadedBacktestScenario:
+    """Normalize an entire closed map using the registered strategy contract."""
+    specification = scenario.spec_set.require(scenario.instrument)
+    try:
+        normalized = BUILTIN_STRATEGIES.get(
+            scenario.strategy_id.value, scenario.strategy_version
+        ).normalize(parameters)
+        resolve_parameters(
+            scenario.strategy_id.value,
+            scenario.strategy_version,
+            normalized,
+            quantity_quantum=specification.quantity_quantum,
+            last_entry_index=_next_bar_entry_delay_maximum(scenario.dataset),
+            history_bars=_entry_history_bars(scenario.dataset),
+        )
+    except ValueError as error:
+        raise BacktestScenarioError(str(error)) from None
+    if scenario.schema_version == 1:
+        return parameterize_backtest_scenario(
+            scenario,
+            initial_cash=initial_cash,
+            quantity=cast(str | None, normalized.get("target_quantity")),
+            entry_delay_bars=cast(int, normalized.get("entry_delay_bars", 0)),
+        )
+    cash = _quantized(
+        _positive(_decimal(initial_cash, field="initial_cash"), field="initial_cash"),
+        specification.currency_quantum,
+        field="initial_cash",
+    )
+    document = json.loads(scenario.canonical_bytes)
+    document["funding"]["initial_cash"] = cash.text
+    document["strategy"]["parameters"] = normalized
+    canonical = json.dumps(
+        document, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode("ascii")
+    return replace(
+        scenario,
+        initial_cash=cash,
+        canonical_bytes=canonical,
+        scenario_sha256=Sha256Digest(sha256(scenario_digest_domain(2) + canonical).hexdigest()),
+    )

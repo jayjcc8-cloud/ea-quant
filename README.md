@@ -1,10 +1,10 @@
 # EA Quant Trading System
 
-EA is deterministic, auditable quantitative-trading infrastructure. Live trading remains disabled.
+EA is an AI-native quantitative R&D and strategy promotion system in development.
+Its delivered offline Research Foundation reduces Idea → Evidence-ready Candidate work; live is unavailable.
 
 ## Current Phase and Health
-
-- Phase: **Phase 1 bounded offline Backtest MVP**
+- Phase: **Research Foundation — schema-driven bounded research**
 - GitHub prerelease: **v0.2.0 published**
 - Merged baseline: **main healthy**
 - Live trading: **unavailable**
@@ -99,9 +99,9 @@ The RESET demo is run-only and does not support `resume` or `report`; those comm
 because the demo intentionally does not create a complete strict-attempt evidence set.
 ## Installed Wheel: Local Web Research Loop
 
-The post-v0.2.0 local Web path supports normalized history, replay, pairwise comparison, and
-bounded 2-10 member experiment batches over the backend-defined `bounded-long-v1` parameters
-`target_quantity` and `entry_delay_bars`. Symbol stays registered; see the [Web README](apps/web/README.md).
+The bounded research loop uses a versioned schema-driven Strategy Contract, verified with
+`bounded-long-v1` and `moving-average-entry-v1`. Generic parameters flow through history/reuse,
+2-10 member batches, comparison and Chronological Holdout; see the [Web README](apps/web/README.md).
 ## Contributor Setup
 
 From a source checkout, use the exact `uv` version declared in `pyproject.toml`:
@@ -115,6 +115,6 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
 
 ## Product Boundary
 
-This offline, single-instrument, single-currency product has two strategies, three CLI resume
-frontiers, and one bounded Web research loop. Symbol/data editing, automatic optimization, broader
-analytics, paper/live, brokers, deployment, publication, and arbitrary Web recovery are unavailable.
+Two research strategies and CLI-compatible always-flat run offline on registered data. AI strategy
+generation, external plugins, dataset editing, optimization, paper/live and deployment are unavailable.
+Future: Research Foundation → Local Strategy Package → Dataset Registry → Candidate → Agent Research Tools.

@@ -41,7 +41,10 @@ def compatible(source: dict[str, Any], target: dict[str, Any]) -> bool:
     def projection(document: dict[str, Any]) -> dict[str, Any]:
         return {
             **{key: value for key, value in document.items() if key not in {"data", "strategy"}},
-            "strategy": {"id": document["strategy"]["id"]},
+            "strategy": {
+                "id": document["strategy"]["id"],
+                "version": document["strategy"].get("version", 1),
+            },
         }
 
     return projection(source) == projection(target)

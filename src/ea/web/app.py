@@ -34,19 +34,12 @@ class InputIdentity(BaseModel):
     record_count: int = Field(ge=1)
 
 
-class StrategyParameters(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    target_quantity: str | None = Field(max_length=64)
-    entry_delay_bars: int
-
-
 class BacktestParameters(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     initial_cash: str = Field(min_length=1, max_length=64)
     quantity: str | None = Field(default=None, max_length=64)
-    strategy_parameters: StrategyParameters | None = None
+    strategy_parameters: dict[str, Any] | None = None
 
 
 class BacktestRequest(BaseModel):
@@ -61,7 +54,7 @@ class BacktestRequest(BaseModel):
 class BatchRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    strategy_parameters: StrategyParameters
+    strategy_parameters: dict[str, Any]
 
 
 class BatchRequest(BaseModel):
@@ -222,7 +215,9 @@ def create_app(settings: WebSettings) -> Any:
                 parameters=None if request.parameters is None else request.parameters.model_dump(),
                 request_id=request.request_id,
             )
-            return JSONResponse(status_code=202 if created else 200, content=record.document())
+            return JSONResponse(
+                status_code=202 if created else 200, content=record.document(presentation=True)
+            )
         except ScenarioNotFoundError as caught:
             return error(404, "scenario_not_found", str(caught))
         except (InputChangedError, RequestConflictError) as caught:
@@ -247,7 +242,7 @@ def create_app(settings: WebSettings) -> Any:
                 scenario_id=request.scenario_id,
                 input_identity=request.input_identity.model_dump(),
                 initial_cash=request.initial_cash,
-                runs=[item.strategy_parameters.model_dump() for item in request.runs],
+                runs=[item.strategy_parameters for item in request.runs],
             )
             return JSONResponse(status_code=202, content=document)
         except ScenarioNotFoundError as caught:
@@ -316,7 +311,7 @@ def create_app(settings: WebSettings) -> Any:
     @app.get("/api/backtests/{job_id}")
     def get_backtest(job_id: str) -> object:
         try:
-            return service.get_job(job_id).document()
+            return service.get_job(job_id).document(presentation=True)
         except JobNotFoundError as caught:
             return error(404, "job_not_found", str(caught))
 

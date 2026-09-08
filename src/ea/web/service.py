@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from ea.core import RunId
@@ -27,7 +27,13 @@ from ea.product import (
     parameterize_backtest_scenario,
     run_backtest_scenario,
 )
-from ea.product.scenario import _SCENARIO_DIGEST_DOMAIN
+from ea.product.scenario import (
+    _entry_history_bars,
+    _next_bar_entry_delay_maximum,
+    parameterize_strategy_scenario,
+    scenario_digest_domain,
+)
+from ea.strategy.registry import BUILTIN_STRATEGIES, project_parameters, resolve_parameters
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
 
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -129,29 +135,19 @@ def _strategy_parameter_contracts(
     *,
     defaults: LoadedBacktestScenario | None = None,
 ) -> list[dict[str, object]]:
-    if scenario.strategy_id.value != "bounded-long-v1":
-        return []
     source = scenario if defaults is None else defaults
-    specification = scenario.spec_set.require(scenario.instrument)
-    target = scenario.target_quantity
-    default_target = source.target_quantity
+    parameters = scenario.strategy_parameters
+    resolved = resolve_parameters(
+        scenario.strategy_id.value,
+        scenario.strategy_version,
+        parameters,
+        quantity_quantum=scenario.spec_set.require(scenario.instrument).quantity_quantum,
+        last_entry_index=_next_bar_entry_delay_maximum(scenario.dataset),
+        history_bars=_entry_history_bars(scenario.dataset),
+    )
     return [
-        {
-            "name": "target_quantity",
-            "type": "decimal",
-            "default": None if default_target is None else default_target.text,
-            "current_value": None if target is None else target.text,
-            "minimum": specification.quantity_quantum.text,
-            "maximum": None,
-        },
-        {
-            "name": "entry_delay_bars",
-            "type": "integer",
-            "default": 0,
-            "current_value": scenario.entry_delay_bars,
-            "minimum": 0,
-            "maximum": scenario.entry_delay_bars_maximum,
-        },
+        p.document(parameters[p.parameter.name], source.strategy_parameters[p.parameter.name])
+        for p in resolved
     ]
 
 
@@ -161,7 +157,6 @@ def _scenario_summary(
     *,
     defaults: LoadedBacktestScenario | None = None,
 ) -> dict[str, object]:
-    target = scenario.target_quantity
     return {
         "scenario_id": scenario_id,
         "name": Path(scenario_id).stem,
@@ -172,39 +167,40 @@ def _scenario_summary(
             "venue": scenario.instrument.venue.code,
             "symbol": scenario.instrument.symbol,
             "initial_cash": scenario.initial_cash.text,
-            "target_quantity": None if target is None else target.text,
-            "entry_delay_bars": scenario.entry_delay_bars,
+            "parameters": scenario.strategy_parameters,
+            "strategy_version": scenario.strategy_version,
             "record_count": scenario.dataset.selection.fingerprint.record_count,
             "commission": json.loads(scenario.canonical_bytes)["execution"].get("commission"),
             "data": json.loads(scenario.canonical_bytes)["data"],
         },
         "strategy_parameters": _strategy_parameter_contracts(scenario, defaults=defaults),
+        "strategy_descriptor": BUILTIN_STRATEGIES.get(
+            scenario.strategy_id.value, scenario.strategy_version
+        ).descriptor.document(),
     }
 
 
-def _parameter_values(
-    parameters: dict[str, object],
-) -> tuple[str, str | None, int | None]:
+def _parameterized(
+    scenario: LoadedBacktestScenario, parameters: dict[str, object]
+) -> LoadedBacktestScenario:
     initial_cash = parameters.get("initial_cash")
     if type(initial_cash) is not str:
         raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
     strategy_parameters = parameters.get("strategy_parameters")
-    legacy_quantity = parameters.get("quantity")
     if strategy_parameters is None:
-        if legacy_quantity is not None and type(legacy_quantity) is not str:
-            raise BacktestScenarioError("quantity must be an ea-decimal-v1 string")
-        return initial_cash, legacy_quantity, None
+        # Compatibility for the original public quantity-only request, isolated in V1 adapter.
+        return parameterize_backtest_scenario(
+            scenario,
+            initial_cash=initial_cash,
+            quantity=cast(str | None, parameters.get("quantity")),
+        )
     if type(strategy_parameters) is not dict:
         raise BacktestScenarioError("strategy_parameters must be a mapping")
-    if legacy_quantity is not None:
+    if parameters.get("quantity") is not None:
         raise BacktestScenarioError("quantity conflicts with strategy_parameters")
-    target_quantity = strategy_parameters.get("target_quantity")
-    entry_delay_bars = strategy_parameters.get("entry_delay_bars")
-    if target_quantity is not None and type(target_quantity) is not str:
-        raise BacktestScenarioError("target_quantity must be an ea-decimal-v1 string")
-    if type(entry_delay_bars) is not int:
-        raise BacktestScenarioError("entry_delay_bars must be an integer")
-    return initial_cash, target_quantity, entry_delay_bars
+    return parameterize_strategy_scenario(
+        scenario, initial_cash=initial_cash, parameters=strategy_parameters
+    )
 
 
 def _input_snapshot(
@@ -314,7 +310,7 @@ class JobRecord:
     error_code: str | None = None
     message: str | None = None
 
-    def document(self) -> dict[str, object]:
+    def document(self, *, presentation: bool = False) -> dict[str, object]:
         document: dict[str, object] = {
             "schema": self.schema,
             "job_id": self.job_id,
@@ -348,6 +344,11 @@ class JobRecord:
                     "attempt_id": self.attempt_id,
                 }
             )
+        if presentation and self.input_snapshot_bytes is not None:
+            strategy = json.loads(self.input_snapshot_bytes)["scenario"]["strategy"]
+            entry = BUILTIN_STRATEGIES.get(strategy["id"], strategy.get("version", 1))
+            document["parameters"] = project_parameters(strategy)
+            document["strategy_descriptor"] = entry.descriptor.document()
         return document
 
 
@@ -748,7 +749,7 @@ class WebService:
                 ),
                 reverse=True,
             )
-            return [record.document() for record in records]
+            return [record.document(presentation=True) for record in records]
 
     def validate_scenario(
         self,
@@ -760,13 +761,7 @@ class WebService:
         source_summary = _scenario_summary(scenario_id, scenario)
         if parameters is None:
             return source_summary
-        initial_cash, quantity, entry_delay_bars = _parameter_values(parameters)
-        normalized = parameterize_backtest_scenario(
-            scenario,
-            initial_cash=initial_cash,
-            quantity=quantity,
-            entry_delay_bars=entry_delay_bars,
-        )
+        normalized = _parameterized(scenario, parameters)
         normalized_summary = _scenario_summary(scenario_id, normalized, defaults=scenario)
         source_summary["summary"] = normalized_summary["summary"]
         source_summary["strategy_parameters"] = normalized_summary["strategy_parameters"]
@@ -794,7 +789,12 @@ class WebService:
                     presentation_status = "queued"
                 elif member.status == "failed" and member.error_code == "risk.rejected":
                     presentation_status = "risk.rejected"
-                members.append({**member.document(), "presentation_status": presentation_status})
+                members.append(
+                    {
+                        **member.document(presentation=True),
+                        "presentation_status": presentation_status,
+                    }
+                )
             running = any(member["status"] in {"accepted", "running"} for member in members)
             return {
                 **record.document(),
@@ -814,13 +814,7 @@ class WebService:
         if _scenario_identity(scenario) != input_identity:
             raise InputChangedError("scenario input changed; validate it again")
         if parameters is not None:
-            initial_cash, quantity, entry_delay_bars = _parameter_values(parameters)
-            scenario = parameterize_backtest_scenario(
-                scenario,
-                initial_cash=initial_cash,
-                quantity=quantity,
-                entry_delay_bars=entry_delay_bars,
-            )
+            scenario = _parameterized(scenario, parameters)
         snapshot_bytes, input_sha256 = _input_snapshot(
             scenario_id,
             scenario,
@@ -1002,19 +996,18 @@ class WebService:
             raise WebBoundaryError("source has no immutable input snapshot")
         snapshot = json.loads(checked.input_snapshot_bytes)
         document: dict[str, Any] = snapshot["scenario"]
-        if document.get("strategy", {}).get("id") != "bounded-long-v1":
-            raise WebBoundaryError("source must use bounded-long-v1")
+        entry = BUILTIN_STRATEGIES.get(
+            document["strategy"]["id"], document["strategy"].get("version", 1)
+        )
+        if not entry.descriptor.research_visible:
+            raise WebBoundaryError("source strategy is not research-visible")
         scenario_digest = sha256(
-            _SCENARIO_DIGEST_DOMAIN + _canonical_json(document).rstrip(b"\n")
+            scenario_digest_domain(document["schema_version"])
+            + _canonical_json(document).rstrip(b"\n")
         ).hexdigest()
         if scenario_digest != snapshot["identity"]["scenario_sha256"]:
             raise WebBoundaryError("source scenario identity conflicts with snapshot")
-        strategy = document["strategy"]
-        if (
-            type(strategy.get("target_quantity")) is not str
-            or type(strategy.get("entry_delay_bars")) is not int
-        ):
-            raise WebBoundaryError("source parameters are unavailable")
+        project_parameters(document["strategy"])
         if (
             report.get("source", {}).get("scenario_sha256")
             != snapshot["identity"]["scenario_sha256"]
@@ -1029,11 +1022,10 @@ class WebService:
         if not compatible(source, document):
             raise WebBoundaryError("holdout configuration is incompatible with source")
         require_chronology(source, document)
-        normalized = parameterize_backtest_scenario(
+        normalized = parameterize_strategy_scenario(
             target,
             initial_cash=source["funding"]["initial_cash"],
-            quantity=source["strategy"]["target_quantity"],
-            entry_delay_bars=source["strategy"]["entry_delay_bars"],
+            parameters=dict(project_parameters(source["strategy"])),
         )
         payload, digest = _input_snapshot(scenario_id, normalized, _scenario_identity(target))
         return PreparedJob(normalized, payload, digest)

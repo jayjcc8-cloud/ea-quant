@@ -1,18 +1,18 @@
 # EA Quant Web
 
 This is the Dark Professional frontend for the real local offline backtest and bounded research
-loop defined by ADRs 0030-0033. The production build talks only to the same-origin `/api`
+loop defined by ADRs 0030-0035. The production build talks only to the same-origin `/api`
 served by `ea web serve`; it does not fall back to mock business data when the service is
 unavailable. Component tests inject an explicit fake adapter, while the Playwright suite uses an
 installed candidate wheel, actual loopback HTTP, the existing engine, and formal reports.
 
-The V1 research controls are intentionally narrow: `initial_cash` plus the backend-published
-`bounded-long-v1` parameters `target_quantity` and `entry_delay_bars` are editable; `symbol` is
-read-only and comes from the selected registered, verified scenario/data combination. The backend
-derives the delay maximum from the loaded canonical market-bar sequence and next-bar execution
-semantics. Saved runs retain their normalized input snapshot. “Use parameters” creates a new
-validation/run, and comparison shows parameter changes beside exact report deltas without storing
-a new comparison artifact or making causal claims.
+StrategyDescriptorV1 drives generic integer/decimal controls for both built-in research strategies:
+`bounded-long-v1` and `moving-average-entry-v1`. Initial cash is editable; symbol remains bound to
+registered data. The backend resolves every dynamic bound, including MA history and next-bar
+eligibility. The entire normalized parameter map passes through immutable history/reuse, explicit
+batches, and same-strategy/version parameter deltas. Different strategies have no parameter delta.
+V1 scenarios and historical relationships remain readable without migration; Scenario V2 uses an
+independent identity domain. Always-flat remains available to CLI but hidden from research selection.
 
 `/batches/new` creates one explicit 2-10 member parameter set for a single scenario. The backend
 validates the complete set before creating normal jobs, executes them serially, and persists only
@@ -64,7 +64,7 @@ include ledger-applied commission. There is no cost editor or second fee calcula
 
 ## Chronological Holdout
 
-Open a successful bounded-long-v1 run (including an explicitly selected batch member), choose
+Open a successful research-strategy run (including an explicitly selected batch member), choose
 **Evaluate chronological holdout**, and select a compatible later registered scenario. Parameters
 are frozen from the source snapshot. The backend rejects equal/overlapping windows, configuration
 mismatches, invalid target dynamic bounds, and unavailable source reports before creating a job.
@@ -74,3 +74,9 @@ positive-commission example with different target defaults to demonstrate source
 The new run uses the normal single execution slot and formal reporter. The Chronological Holdout
 sidebar reopens saved relationships and both independent reports after restart. Unfinished jobs
 remain interrupted under the existing restart behavior. This evaluation makes no statistical claim.
+
+The bundled `moving-average-entry.yaml` and `moving-average-holdout.yaml` are Scenario V2
+examples with separate six-bar chronological windows. MA enters once when fast SMA exceeds slow
+SMA using admitted raw revision-0 closes; revisions do not count as additional history. The whole
+map is frozen for holdout and validated against target data, without clamping or target defaults.
+No AI generation, external plugin loading, data editor, optimizer or live capability is included.

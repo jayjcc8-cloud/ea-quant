@@ -75,7 +75,7 @@ try {
   execFileSync(python, ['-I', '-c', "import ea, pathlib; print(pathlib.Path(ea.__file__).resolve()); assert 'site-packages' in str(pathlib.Path(ea.__file__).resolve())"], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
 
   cpSync(join(repository, 'examples', 'web-scenarios', 'prices.csv'), join(scenarioRoot, 'prices.csv'))
-  for (const file of ['holdout-prices.csv', 'chronological-holdout.yaml']) cpSync(join(repository, 'examples', 'web-scenarios', file), join(scenarioRoot, file))
+  for (const file of ['holdout-prices.csv', 'chronological-holdout.yaml', 'moving-average-entry.csv', 'moving-average-entry.yaml', 'moving-average-holdout.csv', 'moving-average-holdout.yaml']) cpSync(join(repository, 'examples', 'web-scenarios', file), join(scenarioRoot, file))
   const bounded = readFileSync(join(repository, 'examples', 'web-scenarios', 'bounded-long.yaml'), 'utf8')
   const flat = readFileSync(join(repository, 'examples', 'web-scenarios', 'flat.yaml'), 'utf8')
   writeFileSync(join(scenarioRoot, 'bounded-long.yaml'), bounded)
@@ -84,6 +84,11 @@ try {
   writeFileSync(join(scenarioRoot, 'one.yaml'), bounded.replace("target_quantity: '2'", "target_quantity: '1'"))
   writeFileSync(join(scenarioRoot, 'low-cash.yaml'), bounded.replace("initial_cash: '10000'", "initial_cash: '50'"))
   writeFileSync(join(scenarioRoot, 'invalid.yaml'), bounded.replace(/sha256: [0-9a-f]{64}/, `sha256: ${'0'.repeat(64)}`))
+
+  for (const name of ['bounded-long.yaml', 'moving-average-entry.yaml']) {
+    execFileSync(ea, ['backtest', 'validate', '--scenario', join(scenarioRoot, name)], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+    execFileSync(ea, ['backtest', 'run', '--scenario', join(scenarioRoot, name), '--output-root', join(temporary, 'cli-runs')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  }
 
   const args = ['web', 'serve', '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
   server = spawn(ea, args, { cwd: outside, env: cleanEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] })

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 2 — deterministic commission and Chronological Holdout on the bounded offline research loop.**
+**Research Foundation — schema-driven Strategy Contract on the bounded offline research loop.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -10,6 +10,9 @@ authoritative checkpoint. GitHub Issues and pull requests carry mutable coordina
 file records only durable product state and the next bounded outcome.
 
 ## Phase Objective
+
+Product positioning: AI-native quantitative R&D and strategy promotion system. Commercial north
+star: reduce Idea → Evidence-ready Candidate time and cost. AI integration is not delivered.
 
 From an installed wheel and outside a Git checkout, validate and run one user-supplied strict
 scenario with local OHLCV, deterministic initial funding, bounded risk, simulated execution,
@@ -98,15 +101,16 @@ external write, deployment, or live capability is part of this objective.
   “Use parameters” starts a fresh validation/run rather than mutating or resuming prior evidence.
 - Pairwise comparison reads two persisted snapshots and verified formal reports, computes exact
   decimal deltas, and leaves failed or unavailable reports without fabricated metrics or deltas.
-- The existing `bounded-long-v1` Web surface exposes exactly two backend-defined strategy
-  parameters: `target_quantity` and integer `entry_delay_bars`. Delay zero preserves the original
-  entry behavior; a positive delay skips canonical market roots actually delivered to the strategy.
-- The backend derives the delay maximum from the loaded scenario and next-bar execution
-  eligibility, rejects invalid or unknown strategy parameters with HTTP 422, and persists the
-  normalized integer in canonical scenario identity and the existing input snapshot.
-- History reuse restores both strategy parameters from persisted snapshots. Pairwise comparison
-  presents their A-to-B values as Parameter Delta beside formal-report Result Delta without causal
-  interpretation or recommendation.
+- Issue #182 / ADR 0035 replaces the strategy-specific Web surface with StrategyDescriptorV1,
+  resolved backend constraints and a closed built-in StrategyRegistryV1. Bounded-long and moving
+  average entry use generic integer/decimal parameters through single-run, history reuse, batch,
+  comparison and Chronological Holdout. Always-flat remains CLI-compatible and not research-visible.
+- BacktestScenarioV2 binds strategy ID/version and the complete canonical parameter map in a
+  separate digest domain; V1 identities and historical snapshots/relations remain unchanged.
+- Moving average entry uses deterministic rolling state from admitted raw revision-0 bars and the
+  existing active market, signal, risk, Order/Fill, matcher, ledger, audit and report authorities.
+  Dynamic history/next-bar constraints remain backend-owned; target holdout defaults never replace
+  frozen source parameters. No external strategy loading or AI model integration is delivered.
 - ADR 0032 adds a bounded 2-10 member Web experiment batch for one registered strategy/scenario.
   The backend validates the full set before creating jobs, rejects normalized duplicates, runs
   normal jobs serially through the existing engine, and persists only batch-to-job membership.
@@ -136,7 +140,8 @@ The v0.2.0 prerelease and bounded local Web research loop remain one determinist
 backtest/reporting product, not the broader validation, optimization, paper, or live roadmap. Arbitrary
 instruction-level or Web recovery, symbol/data editing, uploads, broader experiment tracking,
 automatic optimization, broader performance analytics, strategy plugins, paper/live execution,
-package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Phase 2 activation includes deterministic commission and Chronological Holdout V1 only.
+package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Research Foundation adds only the schema-driven strategy slice to commission and Chronological Holdout.
+Future direction: Local Strategy Package → Dataset Registry → Candidate → Agent Research Tools; none is delivered.
 
 ## Blockers
 
@@ -167,6 +172,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0032 — Web Bounded Experiment Batch V1](adr/0032-web-bounded-experiment-batch-v1.md)
 - [ADR 0033 — Web Experiment Analysis V1](adr/0033-web-experiment-analysis-v1.md)
 - [ADR 0034 — Chronological Holdout V1](adr/0034-chronological-holdout-v1.md)
+- [ADR 0035 — Schema-driven Strategy Contract V1](adr/0035-schema-driven-strategy-contract-v1.md)
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
