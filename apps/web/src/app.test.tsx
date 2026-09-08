@@ -660,3 +660,19 @@ it('renders an unfamiliar built-in parameter schema without strategy-specific co
   }] })} />)
   expect(await screen.findByLabelText('unfamiliar_window')).toHaveProperty('value', '2')
 })
+
+it('distinguishes local implementation changes from parameter deltas', async () => {
+  const localJob = (original: BacktestJob, digest: string): BacktestJob => ({ ...original,
+    input_snapshot: { ...original.input_snapshot!, scenario: { ...original.input_snapshot!.scenario,
+      strategy: { ...original.input_snapshot!.scenario.strategy,
+        source: { kind: 'local-package', package_id: 'example.threshold', artifact_sha256: digest } },
+    } },
+  })
+  window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+  render(<App api={adapter({
+    getBacktest: async id => localJob(id === 'job-1' ? job : secondJob, id === 'job-1' ? 'a'.repeat(64) : 'b'.repeat(64)),
+    getReport: async id => id === 'job-1' ? report : secondReport,
+  })} />)
+  expect(await screen.findByText('Strategy implementation changed')).toBeTruthy()
+  expect(screen.queryByRole('row', { name: /target_quantity/ })).toBeNull()
+})

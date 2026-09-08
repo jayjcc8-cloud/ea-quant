@@ -28,12 +28,13 @@ from ea.product import (
     run_backtest_scenario,
 )
 from ea.product.scenario import (
-    _entry_history_bars,
-    _next_bar_entry_delay_maximum,
     parameterize_strategy_scenario,
+    resolved_scenario_parameters,
     scenario_digest_domain,
 )
-from ea.strategy.registry import BUILTIN_STRATEGIES, project_parameters, resolve_parameters
+from ea.strategy.catalog import ResearchStrategyCatalogV1
+from ea.strategy.package import StrategyPackageV1, read_regular, validate_package
+from ea.strategy.registry import project_parameters
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
 
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -137,14 +138,7 @@ def _strategy_parameter_contracts(
 ) -> list[dict[str, object]]:
     source = scenario if defaults is None else defaults
     parameters = scenario.strategy_parameters
-    resolved = resolve_parameters(
-        scenario.strategy_id.value,
-        scenario.strategy_version,
-        parameters,
-        quantity_quantum=scenario.spec_set.require(scenario.instrument).quantity_quantum,
-        last_entry_index=_next_bar_entry_delay_maximum(scenario.dataset),
-        history_bars=_entry_history_bars(scenario.dataset),
-    )
+    resolved = resolved_scenario_parameters(scenario)
     return [
         p.document(parameters[p.parameter.name], source.strategy_parameters[p.parameter.name])
         for p in resolved
@@ -174,15 +168,18 @@ def _scenario_summary(
             "data": json.loads(scenario.canonical_bytes)["data"],
         },
         "strategy_parameters": _strategy_parameter_contracts(scenario, defaults=defaults),
-        "strategy_descriptor": BUILTIN_STRATEGIES.get(
-            scenario.strategy_id.value, scenario.strategy_version
-        ).descriptor.document(),
+        "strategy_descriptor": scenario.strategy_entry.descriptor.document(),
     }
 
 
 def _parameterized(
     scenario: LoadedBacktestScenario, parameters: dict[str, object]
 ) -> LoadedBacktestScenario:
+    expected_source = parameters.get("strategy_source")
+    if expected_source is not None and expected_source != json.loads(scenario.canonical_bytes)[
+        "strategy"
+    ].get("source"):
+        raise BacktestScenarioError("strategy implementation changed; frozen artifact is required")
     initial_cash = parameters.get("initial_cash")
     if type(initial_cash) is not str:
         raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
@@ -226,7 +223,8 @@ def _created_at() -> str:
 class ScenarioRegistry:
     """Resolve only immediate YAML files registered under one authorized root."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, strategy_root: Path | None = None) -> None:
+        self.strategy_root = strategy_root
         self.root = _directory(root, label="scenario root", create=False)
 
     def _path(self, scenario_id: str) -> Path:
@@ -250,8 +248,12 @@ class ScenarioRegistry:
             raise ScenarioNotFoundError("scenario is not registered")
         return resolved
 
-    def load(self, scenario_id: str) -> LoadedBacktestScenario:
-        scenario = load_backtest_scenario(self._path(scenario_id))
+    def load(
+        self, scenario_id: str, *, catalog: ResearchStrategyCatalogV1 | None = None
+    ) -> LoadedBacktestScenario:
+        scenario = load_backtest_scenario(
+            self._path(scenario_id), strategy_root=self.strategy_root, catalog=catalog
+        )
         if not _contained(scenario.scenario_path, self.root) or not _contained(
             scenario.data_path, self.root
         ):
@@ -309,6 +311,7 @@ class JobRecord:
     summary_sha256: str | None = None
     error_code: str | None = None
     message: str | None = None
+    strategy_package: StrategyPackageV1 | None = None
 
     def document(self, *, presentation: bool = False) -> dict[str, object]:
         document: dict[str, object] = {
@@ -346,8 +349,14 @@ class JobRecord:
             )
         if presentation and self.input_snapshot_bytes is not None:
             strategy = json.loads(self.input_snapshot_bytes)["scenario"]["strategy"]
-            entry = BUILTIN_STRATEGIES.get(strategy["id"], strategy.get("version", 1))
-            document["parameters"] = project_parameters(strategy)
+            entry = ResearchStrategyCatalogV1(
+                () if self.strategy_package is None else (self.strategy_package,)
+            ).resolve(strategy)
+            document["parameters"] = (
+                entry.normalize(strategy["parameters"])
+                if "source" in strategy
+                else project_parameters(strategy)
+            )
             document["strategy_descriptor"] = entry.descriptor.document()
         return document
 
@@ -544,7 +553,9 @@ class WorkspaceLease:
 class WebService:
     """Persistent, single-active-job adapter over the existing product functions."""
 
-    def __init__(self, scenario_root: Path, workspace: Path) -> None:
+    def __init__(
+        self, scenario_root: Path, workspace: Path, *, strategy_root: Path | None = None
+    ) -> None:
         resolved_scenarios = _directory(scenario_root, label="scenario root", create=False)
         try:
             resolved_workspace = workspace.resolve(strict=False)
@@ -552,7 +563,12 @@ class WebService:
             raise WebBoundaryError("workspace is unavailable") from None
         if roots_overlap(resolved_scenarios, resolved_workspace):
             raise WebBoundaryError("scenario and workspace roots must not overlap")
-        self.registry = ScenarioRegistry(resolved_scenarios)
+        if strategy_root is not None and (
+            not strategy_root.is_absolute()
+            or roots_overlap(strategy_root.resolve(), resolved_scenarios, resolved_workspace)
+        ):
+            raise WebBoundaryError("strategy root must be absolute and separate")
+        self.registry = ScenarioRegistry(resolved_scenarios, strategy_root)
         self.workspace = _directory(resolved_workspace, label="workspace", create=True)
         self.jobs_dir = _directory(self.workspace / "jobs", label="job index", create=True)
         self.batches_dir = _directory(self.workspace / "batches", label="batch index", create=True)
@@ -603,6 +619,13 @@ class WebService:
         job_id: str,
         scenario: LoadedBacktestScenario,
     ) -> LoadedBacktestScenario:
+        if scenario.strategy_package is not None:
+            package_path = self.inputs_dir / f"{job_id}.eastrategy"
+            with package_path.open("xb") as handle:
+                handle.write(scenario.strategy_package.artifact_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            package_path.chmod(0o444)
         document = json.loads(scenario.canonical_bytes)
         document.pop("canonicalization")
         document["data"]["path"] = str(scenario.data_path)
@@ -624,7 +647,12 @@ class WebService:
                 os.fsync(directory_descriptor)
             finally:
                 os.close(directory_descriptor)
-            materialized = load_backtest_scenario(path)
+            materialized = load_backtest_scenario(
+                path,
+                catalog=ResearchStrategyCatalogV1(
+                    () if scenario.strategy_package is None else (scenario.strategy_package,)
+                ),
+            )
             if (
                 materialized.canonical_bytes != scenario.canonical_bytes
                 or materialized.scenario_sha256 != scenario.scenario_sha256
@@ -710,6 +738,17 @@ class WebService:
                     message="local service stopped before completion; the job was not rerun",
                 )
                 self._write(record)
+            if record.input_snapshot_bytes is not None:
+                strategy = json.loads(record.input_snapshot_bytes)["scenario"]["strategy"]
+                if "source" in strategy:
+                    package = validate_package(
+                        read_regular(
+                            self.inputs_dir / f"{record.job_id}.eastrategy", self.inputs_dir
+                        ),
+                        expected_sha256=strategy["source"]["artifact_sha256"],
+                    )
+                    ResearchStrategyCatalogV1((package,)).resolve(strategy)
+                    record = replace(record, strategy_package=package)
             self._jobs[record.job_id] = record
             self._requests[record.request_id] = record.job_id
 
@@ -856,6 +895,7 @@ class WebService:
             attempt_id = RunId(str(uuid4()))
             scenario = self._materialize_scenario(job_id, prepared.scenario)
             record = JobRecord(
+                strategy_package=prepared.scenario.strategy_package,
                 job_id=job_id,
                 request_id=request_id,
                 scenario_id=scenario_id,
@@ -912,6 +952,7 @@ class WebService:
                     job_id = str(uuid4())
                     scenario = self._materialize_scenario(job_id, item.scenario)
                     record = JobRecord(
+                        strategy_package=item.scenario.strategy_package,
                         job_id=job_id,
                         request_id=f"batch-{batch_id}-{index}",
                         scenario_id=scenario_id,
@@ -996,9 +1037,9 @@ class WebService:
             raise WebBoundaryError("source has no immutable input snapshot")
         snapshot = json.loads(checked.input_snapshot_bytes)
         document: dict[str, Any] = snapshot["scenario"]
-        entry = BUILTIN_STRATEGIES.get(
-            document["strategy"]["id"], document["strategy"].get("version", 1)
-        )
+        entry = ResearchStrategyCatalogV1(
+            () if source.strategy_package is None else (source.strategy_package,)
+        ).resolve(document["strategy"])
         if not entry.descriptor.research_visible:
             raise WebBoundaryError("source strategy is not research-visible")
         scenario_digest = sha256(
@@ -1007,7 +1048,9 @@ class WebService:
         ).hexdigest()
         if scenario_digest != snapshot["identity"]["scenario_sha256"]:
             raise WebBoundaryError("source scenario identity conflicts with snapshot")
-        project_parameters(document["strategy"])
+        entry.normalize(document["strategy"]["parameters"]) if "source" in document[
+            "strategy"
+        ] else project_parameters(document["strategy"])
         if (
             report.get("source", {}).get("scenario_sha256")
             != snapshot["identity"]["scenario_sha256"]
@@ -1017,7 +1060,11 @@ class WebService:
 
     def _prepare_holdout(self, source_job_id: str, scenario_id: str) -> PreparedJob:
         source = self._holdout_source(source_job_id)
-        target = self.registry.load(scenario_id)
+        source_package = self.get_job(source_job_id).strategy_package
+        frozen_catalog = (
+            None if source_package is None else ResearchStrategyCatalogV1((source_package,))
+        )
+        target = self.registry.load(scenario_id, catalog=frozen_catalog)
         document = json.loads(target.canonical_bytes)
         if not compatible(source, document):
             raise WebBoundaryError("holdout configuration is incompatible with source")
@@ -1025,7 +1072,11 @@ class WebService:
         normalized = parameterize_strategy_scenario(
             target,
             initial_cash=source["funding"]["initial_cash"],
-            parameters=dict(project_parameters(source["strategy"])),
+            parameters=dict(
+                source["strategy"]["parameters"]
+                if source_package is not None
+                else project_parameters(source["strategy"])
+            ),
         )
         payload, digest = _input_snapshot(scenario_id, normalized, _scenario_identity(target))
         return PreparedJob(normalized, payload, digest)
@@ -1034,15 +1085,13 @@ class WebService:
         with self._lock:
             self._holdout_source(source_job_id)
             candidates = []
-            for item in self.registry.list():
-                if not item["valid"]:
-                    continue
-                scenario_id = str(item["scenario_id"])
+            for path in sorted(self.registry.root.glob("*.y*ml")):
+                scenario_id = path.name
                 try:
-                    self._prepare_holdout(source_job_id, scenario_id)
+                    prepared = self._prepare_holdout(source_job_id, scenario_id)
                 except (WebBoundaryError, BacktestScenarioError, ValueError):
                     continue
-                candidates.append(item)
+                candidates.append(_scenario_summary(scenario_id, prepared.scenario))
             return candidates
 
     def create_holdout(self, *, source_job_id: str, scenario_id: str) -> dict[str, str]:
@@ -1053,6 +1102,7 @@ class WebService:
             job_id = str(uuid4())
             relation = HoldoutRecord(str(uuid4()), _created_at(), source_job_id, job_id)
             record = JobRecord(
+                strategy_package=prepared.scenario.strategy_package,
                 job_id=job_id,
                 request_id=f"holdout-{relation.validation_id}",
                 scenario_id=scenario_id,

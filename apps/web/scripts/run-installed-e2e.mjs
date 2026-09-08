@@ -90,7 +90,54 @@ try {
     execFileSync(ea, ['backtest', 'run', '--scenario', join(scenarioRoot, name), '--output-root', join(temporary, 'cli-runs')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
   }
 
-  const args = ['web', 'serve', '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
+  const strategyRoot = join(temporary, 'strategies')
+  const strategySource = join(outside, 'my-strategy')
+  mkdirSync(strategyRoot)
+  mkdirSync(strategySource)
+  // The reference implementation is created only in the external acceptance workspace.
+  execFileSync(python, ['-I', '-c', `
+import json, pathlib, sys, yaml
+source, scenarios = map(pathlib.Path, sys.argv[1:])
+manifest = {"schema_version": 1, "package_id": "example.threshold", "strategy": {
+ "id": "local-close-threshold-entry-v1", "version": 1, "display_name": "Local threshold",
+ "outcome_mode": "optional_single_long_entry", "parameters": [
+ {"name": name, "type": "decimal", "required": True, "default": value,
+  "static_minimum": "0", "static_maximum": None}
+ for name, value in [("threshold_price", "100"), ("target_quantity", "2")]]}}
+(source / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+(source / "strategy.py").write_text("""from decimal import Decimal
+from ea.strategy.sdk_v1 import StrategyDecisionV1
+def validate_parameters(parameters, context):
+    if Decimal(parameters['target_quantity']) <= 0: raise ValueError('quantity')
+class Logic:
+    def __init__(self, p): self.p = p
+    def on_bar(self, bar):
+        if bar.close > Decimal(self.p['threshold_price']):
+            return StrategyDecisionV1(self.p['target_quantity'])
+def create_logic(parameters): return Logic(parameters)
+""")
+`, strategySource, scenarioRoot], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  const artifact = join(strategyRoot, 'threshold.eastrategy')
+  execFileSync(ea, ['strategy', 'pack', '--source', strategySource, '--output', artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  execFileSync(ea, ['strategy', 'validate', '--artifact', artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  execFileSync(ea, ['strategy', 'inspect', '--artifact', artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  execFileSync(python, ['-I', '-c', `
+import hashlib, pathlib, sys, yaml
+root, artifact = map(pathlib.Path, sys.argv[1:])
+for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronological-holdout.yaml', 'local-holdout.yaml')]:
+    doc = yaml.safe_load((root / original).read_text())
+    doc['schema_version'] = 3
+    doc['execution'].pop('commission', None)
+    doc['strategy'] = {'id': 'local-close-threshold-entry-v1', 'version': 1,
+       'source': {'kind': 'local-package', 'package_id': 'example.threshold',
+                  'artifact_sha256': hashlib.sha256(artifact.read_bytes()).hexdigest()},
+       'parameters': {'threshold_price': '100', 'target_quantity': '2'}}
+    (root / name).write_text(yaml.safe_dump(doc))
+`, scenarioRoot, artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  execFileSync(ea, ['backtest', 'validate', '--scenario', join(scenarioRoot, 'local-threshold.yaml'), '--strategy-root', strategyRoot], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  execFileSync(ea, ['backtest', 'run', '--scenario', join(scenarioRoot, 'local-threshold.yaml'), '--strategy-root', strategyRoot, '--output-root', join(temporary, 'cli-runs')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+
+  const args = ['web', 'serve', '--strategy-root', strategyRoot, '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
   server = spawn(ea, args, { cwd: outside, env: cleanEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] })
   await waitForHealth()
   console.log(`candidate-wheel-sha256=${sha256(wheel)} file=${basename(wheel)}`)
@@ -101,7 +148,7 @@ try {
   const playwright = join(webRoot, 'node_modules', '.bin', 'playwright')
   const completed = spawn(playwright, ['test', '--config', 'playwright.config.ts'], {
     cwd: webRoot,
-    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace },
+    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact },
     stdio: 'inherit',
   })
   const code = await new Promise((resolveExit) => completed.on('exit', resolveExit))

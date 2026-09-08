@@ -3,7 +3,8 @@ import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, use
 import { compareCanonicalDecimal, exactDelta } from './decimal'
 
 type ParameterMap = Record<string, string | number>
-type StrategyDescriptor = { strategy_id: string; strategy_version: number; research_visible: boolean; parameters: { name: string; type: 'integer' | 'decimal' }[] }
+type StrategySource = { kind: string; package_id: string; artifact_sha256: string }
+type StrategyDescriptor = { display_name?: string; strategy_id: string; strategy_version: number; research_visible: boolean; parameters: { name: string; type: 'integer' | 'decimal' }[] }
 const parameterDefaults = (scenario?: ScenarioSummary): ParameterMap => Object.fromEntries((scenario?.strategy_parameters ?? []).map(p => [p.name, p.current_value ?? p.default ?? '']))
 const jobParameters = (job: BacktestJob): ParameterMap => job.parameters ?? job.input_snapshot?.scenario.strategy.parameters ?? {}
 const parameterText = (parameters: ParameterMap) => Object.entries(parameters).map(([name, value]) => `${name}: ${value}`).join(' · ')
@@ -26,6 +27,7 @@ export type StrategyParameterContract = {
 }
 export type BacktestParameters = {
   initial_cash: string
+  strategy_source?: StrategySource
   strategy_parameters: ParameterMap | null
 }
 type ReplayData = { start_utc: string; end_utc: string; fingerprint: { sha256: string; record_count: number } }
@@ -39,7 +41,7 @@ export type InputSnapshot = {
     data?: ReplayData
     execution?: { policy: string; commission?: Commission | null }
     funding: { currency: string; initial_cash: string }
-    strategy: { id: string; version?: number; parameters?: ParameterMap; [key: string]: unknown }
+    strategy: { source?: StrategySource; id: string; version?: number; parameters?: ParameterMap; [key: string]: unknown }
     instrument: { venue: string; symbol: string }
   }
 }
@@ -360,6 +362,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
   const [selected, setSelected] = useState('')
   const [initialCash, setInitialCash] = useState('')
   const [values, setValues] = useState<ParameterMap>({})
+  const [frozenSource, setFrozenSource] = useState<StrategySource | undefined>()
   const [comparison, setComparison] = useState<string[]>([])
   const [validated, setValidated] = useState<ScenarioSummary | null>(null)
   const [busy, setBusy] = useState(false)
@@ -382,9 +385,11 @@ function Backtests({ api }: { api: ApiAdapter }) {
   const parameters = (): BacktestParameters => ({
     initial_cash: initialCash,
     strategy_parameters: values,
+    ...(frozenSource ? { strategy_source: frozenSource } : {}),
   })
   const changeScenario = (scenarioId: string) => {
     const next = scenarios.find((item) => item.scenario_id === scenarioId)
+    setFrozenSource(undefined)
     setSelected(scenarioId); setInitialCash(next?.summary?.initial_cash ?? '')
     setValues(parameterDefaults(next)); setValidated(null); setError(null)
   }
@@ -409,6 +414,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
   const restoreParameters = (item: BacktestJob) => {
     const snapshot = item.input_snapshot?.scenario
     if (!snapshot) return
+    setFrozenSource(snapshot.strategy.source)
     setSelected(item.scenario_id); setInitialCash(snapshot.funding.initial_cash)
     setValues(jobParameters(item)); setValidated(null); setError(null)
   }
@@ -453,6 +459,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
             <div className="job-card-title"><Link to={`/backtests/${item.job_id}`}><strong>{item.scenario_id}</strong></Link><span className={`status status-${item.status}`}>{item.status}</span></div>
             {item.created_at && <time>{item.created_at}</time>}
             <small>{input ? `${input.instrument.symbol} · Cash ${input.funding.initial_cash} · ${parameterText(jobParameters(item))}` : 'Legacy run · input snapshot unavailable'}</small>
+            {input && <small>{item.strategy_descriptor?.display_name ?? input.strategy.id} · {input.strategy.id} v{input.strategy.version ?? 1}{input.strategy.source && ` · Local package · ${input.strategy.source.package_id} · ${input.strategy.source.artifact_sha256.slice(0, 12)}`}</small>}
             <small>{item.engine_run_id ?? item.job_id}</small>
             <div className="job-actions"><Link to={`/backtests/${item.job_id}`}>View</Link><button disabled={!input} aria-label={`Use parameters for ${item.job_id}`} onClick={() => restoreParameters(item)}>Use parameters</button><label><input type="checkbox" aria-label={`Select ${item.job_id} for comparison`} checked={comparison.includes(item.job_id)} onChange={() => toggleComparison(item.job_id)} /> Compare</label></div>
           </li>
@@ -512,7 +519,8 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
     ['Symbol', leftInput.instrument.symbol, rightInput.instrument.symbol],
     ['Commission', commissionLabel(leftInput.execution?.commission), commissionLabel(rightInput.execution?.commission)],
   ]
-  const sameStrategy = leftInput.strategy.id === rightInput.strategy.id && (leftInput.strategy.version ?? 1) === (rightInput.strategy.version ?? 1)
+  const sameImplementation = (leftInput.strategy.source?.kind ?? 'builtin') === (rightInput.strategy.source?.kind ?? 'builtin') && leftInput.strategy.source?.artifact_sha256 === rightInput.strategy.source?.artifact_sha256
+  const sameStrategy = sameImplementation && leftInput.strategy.id === rightInput.strategy.id && (leftInput.strategy.version ?? 1) === (rightInput.strategy.version ?? 1)
   const parameterRows = sameStrategy ? (left.job.strategy_descriptor?.parameters.map(p => p.name) ?? Object.keys(jobParameters(left.job))).map(name => [name, String(jobParameters(left.job)[name]), String(jobParameters(right.job)[name])]) : []
   const metricRows = [
     {
@@ -539,7 +547,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
       {[left, right].map((run, index) => <article className="panel" key={run.job.job_id}><header><h2>Run {index === 0 ? 'A' : 'B'}</h2><span className={`status status-${run.job.status}`}>{run.job.status}</span></header><dl className="summary-list"><div><dt>Web job</dt><dd>{run.job.job_id}</dd></div><div><dt>Engine run</dt><dd>{run.job.engine_run_id ?? 'not available'}</dd></div><div><dt>Input SHA-256</dt><dd>{run.job.input_sha256 ?? 'not available'}</dd></div><div><dt>Outcome</dt><dd>{run.report ? 'Formal report' : run.job.error_code ?? 'No report'}</dd></div></dl>{!run.report && <p className="no-report">No report</p>}</article>)}
     </section>
     <section className="panel comparison-panel"><header><h2>Input Diff</h2><span>Normalized snapshots</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{inputRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{before === after ? 'Unchanged' : 'Changed'}</td></tr>)}</tbody></table></section>
-    <section className="panel comparison-panel">{!sameStrategy && <p>NO_PARAMETER_DELTA · Different strategy ID/version</p>}<header><h2>Parameter Delta</h2><span>Persisted normalized strategy inputs</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{parameterRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{exactDelta(before, after)}</td></tr>)}</tbody></table></section>
+    <section className="panel comparison-panel">{!sameImplementation ? <p>Strategy implementation changed</p> : !sameStrategy && <p>NO_PARAMETER_DELTA · Different strategy ID/version</p>}<header><h2>Parameter Delta</h2><span>Persisted normalized strategy inputs</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{parameterRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{exactDelta(before, after)}</td></tr>)}</tbody></table></section>
     <section className="panel comparison-panel"><header><h2>Result Diff</h2><span>Formal reports only</span></header><table><thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Δ</th></tr></thead><tbody>{metricRows.map(({ label, before, after, shift, suffix, monetary, leftCurrency, rightCurrency }) => {
       const leftValue = before === undefined ? 'No report' : label === 'Return' ? percent(before) : `${before}${leftCurrency ? ` ${leftCurrency}` : ''}`
       const rightValue = after === undefined ? 'No report' : label === 'Return' ? percent(after) : `${after}${rightCurrency ? ` ${rightCurrency}` : ''}`

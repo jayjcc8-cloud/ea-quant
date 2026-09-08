@@ -103,7 +103,8 @@ from ea.runtime import (
     create_phase1_historical_market_runtime,
 )
 from ea.strategy import create_strategy_signal_authority
-from ea.strategy.registry import BUILTIN_STRATEGIES
+from ea.strategy.catalog import ResearchStrategyCatalogV1
+from ea.strategy.package import read_regular, validate_package
 
 _SOURCE_NAMESPACE = SourceNamespace("backtest.scenario.matcher.v1")
 _RECONCILIATION_SOURCE = SourceNamespace("backtest.scenario.reconciliation.v1")
@@ -550,9 +551,7 @@ def _execute(
     order = None
     risk_result = None
     verifier = create_active_market_dispatch_verifier(runtime)
-    logic = BUILTIN_STRATEGIES.get(scenario.strategy_id.value, scenario.strategy_version).factory(
-        scenario.strategy_parameters
-    )
+    logic = scenario.strategy_entry.factory(scenario.strategy_parameters)
     target = None
     market_index = 0
     last_entry = _next_bar_entry_delay_maximum(scenario.dataset)
@@ -571,6 +570,13 @@ def _execute(
         lifecycle.coordinator.complete_active_dispatch(entry_window)
         entry_window = lifecycle.coordinator.begin_next_dispatch()
     if target is not None:
+        from ea.core.economics import require_quantized
+
+        require_quantized(
+            target,
+            scenario.spec_set.require(scenario.instrument).quantity_quantum,
+            field_name="target_quantity",
+        )
         lease = runtime.active_lease
         if lease is None or type(lease.root) is not MarketDataEnvelope:
             raise RuntimeError("entry lost its active market root")
@@ -1090,7 +1096,13 @@ def _load_verified_attempt(
     if document["schema"] != _ATTEMPT_SCHEMA or document["run_id"] != run_id.value:
         raise BacktestResumeFailure("resume identity evidence conflicts", attempt)
     try:
-        scenario = load_backtest_scenario(scenario_path)
+        package_path = attempt / "strategy.eastrategy"
+        catalog = None
+        if package_path.exists():
+            catalog = ResearchStrategyCatalogV1(
+                (validate_package(read_regular(package_path, attempt)),)
+            )
+        scenario = load_backtest_scenario(scenario_path, catalog=catalog)
         risk_policy, risk_context = _risk_context(scenario)
         recomputed_lineage = _lineage(
             scenario,
@@ -1154,6 +1166,10 @@ def run_backtest_scenario(
             prepared = store.prepare_canonical_attempt(manifest)
         except StoreCollisionError:
             raise BacktestRunError("fresh attempt directory could not be created") from None
+        if scenario.strategy_package is not None:
+            package_path = attempt / "strategy.eastrategy"
+            _write_or_verify(package_path, scenario.strategy_package.artifact_bytes)
+            package_path.chmod(0o444)
         journal = create_posix_audit_journal(prepared.audit)
 
         def retain_funding(document: dict[str, object]) -> None:

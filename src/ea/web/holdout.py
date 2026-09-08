@@ -44,6 +44,11 @@ def compatible(source: dict[str, Any], target: dict[str, Any]) -> bool:
             "strategy": {
                 "id": document["strategy"]["id"],
                 "version": document["strategy"].get("version", 1),
+                **(
+                    {"source": document["strategy"]["source"]}
+                    if "source" in document["strategy"]
+                    else {}
+                ),
             },
         }
 

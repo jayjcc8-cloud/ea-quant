@@ -42,7 +42,16 @@ from ea.core.economics import EconomicValidationError
 from ea.core.run import RunContractError
 from ea.data import HistoricalMarketDataError, Phase1HistoricalDataset, read_phase1_ohlcv_csv
 from ea.product.identity import BacktestRandomness
-from ea.strategy.registry import BUILTIN_STRATEGIES, project_parameters, resolve_parameters
+from ea.strategy.catalog import ResearchStrategyCatalogV1, package_entry, validate_context
+from ea.strategy.package import StrategyPackageV1
+from ea.strategy.registry import (
+    BUILTIN_STRATEGIES,
+    ResolvedStrategyParameterV1,
+    StrategyEntryV1,
+    project_parameters,
+    resolve_parameters,
+)
+from ea.strategy.sdk_v1 import StrategyValidationContextV1
 
 _SCENARIO_DIGEST_DOMAIN = b"ea.backtest-scenario.v1\0"
 _CANONICALIZATION = "ea-backtest-scenario-v1"
@@ -182,6 +191,21 @@ class BacktestScenarioV2(_StrictModel):
     randomness_profile: Literal["none"]
 
 
+class _StrategySourceV3(_StrictModel):
+    kind: Literal["local-package"]
+    package_id: StrictStr
+    artifact_sha256: StrictStr
+
+
+class _StrategyInputV3(_StrategyInputV2):
+    source: _StrategySourceV3
+
+
+class BacktestScenarioV3(BacktestScenarioV2):
+    schema_version: Literal[3]  # type: ignore[assignment]
+    strategy: _StrategyInputV3
+
+
 class _UniqueKeySafeLoader(yaml.SafeLoader):
     pass
 
@@ -241,13 +265,24 @@ class LoadedBacktestScenario:
     canonical_bytes: bytes
     scenario_sha256: Sha256Digest
 
+    strategy_package: StrategyPackageV1 | None = None
+
+    @property
+    def strategy_entry(self) -> StrategyEntryV1:
+        if self.strategy_package is not None:
+            return package_entry(self.strategy_package)
+        return BUILTIN_STRATEGIES.get(self.strategy_id.value, self.strategy_version)
+
     @property
     def strategy_version(self) -> int:
         return int(json.loads(self.canonical_bytes)["strategy"].get("version", 1))
 
     @property
     def strategy_parameters(self) -> dict[str, int | str]:
-        return project_parameters(json.loads(self.canonical_bytes)["strategy"])
+        document = json.loads(self.canonical_bytes)["strategy"]
+        if self.strategy_package is not None:
+            return self.strategy_entry.normalize(document["parameters"])
+        return project_parameters(document)
 
     @property
     def schema_version(self) -> int:
@@ -342,7 +377,9 @@ def _canonical_bytes(
     data.pop("path")
     document["data"] = data
     document["canonicalization"] = (
-        _CANONICALIZATION if model.schema_version == 1 else "ea-backtest-scenario-v2"
+        _CANONICALIZATION
+        if model.schema_version == 1
+        else f"ea-backtest-scenario-v{model.schema_version}"
     )
     document["data"]["fingerprint"] = {
         "record_count": dataset.selection.fingerprint.record_count,
@@ -404,7 +441,12 @@ def _entry_history_bars(dataset: Phase1HistoricalDataset) -> int:
     )
 
 
-def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
+def load_backtest_scenario(
+    path: Path,
+    *,
+    strategy_root: Path | None = None,
+    catalog: ResearchStrategyCatalogV1 | None = None,
+) -> LoadedBacktestScenario:
     """Load, capture, and cross-validate one strict BacktestScenario v1."""
     if not isinstance(path, Path):
         raise BacktestScenarioError("scenario path must be a pathlib.Path")
@@ -412,7 +454,9 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
     document = _load_document(scenario_path)
     try:
         model: _ScenarioInput | BacktestScenarioV2 = (
-            BacktestScenarioV2.model_validate(document)
+            BacktestScenarioV3.model_validate(document)
+            if type(document.get("schema_version")) is int and document["schema_version"] == 3
+            else BacktestScenarioV2.model_validate(document)
             if type(document.get("schema_version")) is int and document["schema_version"] == 2
             else _ScenarioInput.model_validate(document)
         )
@@ -547,7 +591,31 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
             raise BacktestScenarioError(
                 f"strategy.entry_delay_bars must be at most {entry_delay_maximum}"
             )
-    if isinstance(model, BacktestScenarioV2):
+    package = None
+    if isinstance(model, BacktestScenarioV3):
+        try:
+            selected = (
+                catalog
+                if catalog is not None
+                else ResearchStrategyCatalogV1.from_root(strategy_root)
+            )
+            package = selected.package(model.strategy.model_dump())
+            normalized = package_entry(package).normalize(model.strategy.parameters)
+            validate_context(
+                package,
+                normalized,
+                StrategyValidationContextV1(
+                    _entry_history_bars(dataset),
+                    _next_bar_entry_delay_maximum(dataset),
+                    quantity_quantum.text,
+                ),
+            )
+            model = model.model_copy(
+                update={"strategy": model.strategy.model_copy(update={"parameters": normalized})}
+            )
+        except ValueError as error:
+            raise BacktestScenarioError(str(error)) from None
+    elif isinstance(model, BacktestScenarioV2):
         try:
             normalized = BUILTIN_STRATEGIES.get(
                 model.strategy.id, model.strategy.version
@@ -579,6 +647,7 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
             raise BacktestScenarioError(str(error)) from None
     canonical = _canonical_bytes(model, dataset=dataset)
     return LoadedBacktestScenario(
+        strategy_package=package,
         scenario_path=scenario_path,
         data_path=data_path,
         dataset=dataset,
@@ -691,7 +760,7 @@ __all__ = [
 
 
 def scenario_digest_domain(version: int) -> bytes:
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         raise BacktestScenarioError("unsupported scenario digest version")
     return f"ea.backtest-scenario.v{version}\0".encode("ascii")
 
@@ -705,17 +774,8 @@ def parameterize_strategy_scenario(
     """Normalize an entire closed map using the registered strategy contract."""
     specification = scenario.spec_set.require(scenario.instrument)
     try:
-        normalized = BUILTIN_STRATEGIES.get(
-            scenario.strategy_id.value, scenario.strategy_version
-        ).normalize(parameters)
-        resolve_parameters(
-            scenario.strategy_id.value,
-            scenario.strategy_version,
-            normalized,
-            quantity_quantum=specification.quantity_quantum,
-            last_entry_index=_next_bar_entry_delay_maximum(scenario.dataset),
-            history_bars=_entry_history_bars(scenario.dataset),
-        )
+        normalized = scenario.strategy_entry.normalize(parameters)
+        resolved_scenario_parameters(scenario, normalized)
     except ValueError as error:
         raise BacktestScenarioError(str(error)) from None
     if scenario.schema_version == 1:
@@ -740,5 +800,36 @@ def parameterize_strategy_scenario(
         scenario,
         initial_cash=cash,
         canonical_bytes=canonical,
-        scenario_sha256=Sha256Digest(sha256(scenario_digest_domain(2) + canonical).hexdigest()),
+        scenario_sha256=Sha256Digest(
+            sha256(scenario_digest_domain(scenario.schema_version) + canonical).hexdigest()
+        ),
+    )
+
+
+def resolved_scenario_parameters(
+    scenario: LoadedBacktestScenario, parameters: dict[str, int | str] | None = None
+) -> tuple[ResolvedStrategyParameterV1, ...]:
+    values = scenario.strategy_parameters if parameters is None else parameters
+    spec = scenario.spec_set.require(scenario.instrument)
+    if scenario.strategy_package is None:
+        return resolve_parameters(
+            scenario.strategy_id.value,
+            scenario.strategy_version,
+            values,
+            quantity_quantum=spec.quantity_quantum,
+            last_entry_index=_next_bar_entry_delay_maximum(scenario.dataset),
+            history_bars=_entry_history_bars(scenario.dataset),
+        )
+    validate_context(
+        scenario.strategy_package,
+        values,
+        StrategyValidationContextV1(
+            _entry_history_bars(scenario.dataset),
+            _next_bar_entry_delay_maximum(scenario.dataset),
+            spec.quantity_quantum.text,
+        ),
+    )
+    return tuple(
+        ResolvedStrategyParameterV1(p, p.static_minimum, p.static_maximum)
+        for p in scenario.strategy_entry.descriptor.parameters
     )

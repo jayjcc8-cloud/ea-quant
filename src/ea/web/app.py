@@ -40,6 +40,7 @@ class BacktestParameters(BaseModel):
     initial_cash: str = Field(min_length=1, max_length=64)
     quantity: str | None = Field(default=None, max_length=64)
     strategy_parameters: dict[str, Any] | None = None
+    strategy_source: dict[str, str] | None = None
 
 
 class BacktestRequest(BaseModel):
@@ -87,6 +88,7 @@ class WebSettings:
     workspace: Path
     ui_dir: Path
     port: int
+    strategy_root: Path | None = None
 
     @property
     def trusted_origin(self) -> str:
@@ -119,7 +121,11 @@ def create_app(settings: WebSettings) -> Any:
         or not index_path.is_file()
     ):
         raise WebBoundaryError("ui directory must contain index.html")
-    service = WebService(scenario_root, workspace_root)
+    if settings.strategy_root is not None and roots_overlap(
+        settings.strategy_root.resolve(), ui_root
+    ):
+        raise WebBoundaryError("strategy and UI roots must not overlap")
+    service = WebService(scenario_root, workspace_root, strategy_root=settings.strategy_root)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
