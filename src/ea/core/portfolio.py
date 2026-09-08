@@ -107,6 +107,7 @@ class LedgerAccountKind(StrEnum):
     PORTFOLIO_CASH = "portfolio.cash"
     EXTERNAL_SETTLEMENT = "external.settlement"
     PORTFOLIO_ROUNDING = "portfolio.rounding"
+    COMMISSION_EXPENSE = "portfolio.commission"
 
 
 class LedgerConflictKind(StrEnum):
@@ -338,6 +339,7 @@ _POSTING_ORDER = {
     LedgerAccountKind.PORTFOLIO_CASH: 2,
     LedgerAccountKind.EXTERNAL_SETTLEMENT: 3,
     LedgerAccountKind.PORTFOLIO_ROUNDING: 4,
+    LedgerAccountKind.COMMISSION_EXPENSE: 5,
 }
 
 

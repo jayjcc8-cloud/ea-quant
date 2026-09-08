@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import final
 
+from ea.core.commission import commission_amount
 from ea.core.economics import (
     CanonicalDecimal,
     EconomicValidationError,
@@ -895,7 +896,17 @@ class PortfolioLedger:
 
         side_sign = 1 if fill.side.value == "buy" else -1
         position_delta = _signed(fill.quantity, side_sign)
-        cash_delta = _signed(settlement.amount, -side_sign)
+        try:
+            cash_delta = _add_decimal(
+                _signed(settlement.amount, -side_sign), _signed(fill.fees[0].amount, -1)
+            )
+        except EconomicValidationError:
+            return self._failure(
+                fill=fill,
+                fill_sha256=submitted_digest,
+                code=OutcomeCode.ARITHMETIC_OVERFLOW,
+                stage=LedgerFailureStage.CASH_BALANCE_OVERFLOW,
+            )
         rounding_delta = _signed(settlement.rounding_residual, -side_sign)
         postings = _postings(
             instrument=fill.instrument,
@@ -904,6 +915,7 @@ class PortfolioLedger:
             cash_delta=cash_delta,
             external_notional=_signed(exact_notional, side_sign),
             rounding_delta=rounding_delta,
+            commission=fill.fees[0].amount,
         )
 
         try:
@@ -1141,7 +1153,18 @@ class PortfolioLedger:
         if (
             fee.fee_code is not FeeCode.COMMISSION
             or fee.currency != specification.settlement_currency
-            or fee.amount.text != "0"
+            or fee.amount
+            != (
+                CanonicalDecimal("0")
+                if fee.commission_bps is None
+                else commission_amount(
+                    fill.price,
+                    fill.quantity,
+                    specification.contract_multiplier,
+                    fee.commission_bps,
+                    specification.currency_quantum,
+                )
+            )
         ):
             raise PortfolioLedgerError(
                 OutcomeCode.CONFLICTING_ID,
@@ -1518,6 +1541,7 @@ def _postings(
     cash_delta: CanonicalDecimal,
     external_notional: CanonicalDecimal,
     rounding_delta: CanonicalDecimal,
+    commission: CanonicalDecimal,
 ) -> tuple[LedgerPosting, ...]:
     instrument_commodity = InstrumentCommodity(instrument)
     currency_commodity = CurrencyCommodity(currency)
@@ -1556,6 +1580,10 @@ def _postings(
                 currency_commodity,
                 rounding_delta,
             )
+        )
+    if commission.coefficient != 0:
+        values.append(
+            LedgerPosting(LedgerAccountKind.COMMISSION_EXPENSE, currency_commodity, commission)
         )
     return tuple(values)
 

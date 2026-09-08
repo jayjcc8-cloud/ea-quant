@@ -50,6 +50,7 @@ from ea.core.audit import (
     MAX_AUDIT_RECORDS,
     MAX_LARGE_AUDIT_PAYLOAD_BYTES,
 )
+from ea.core.commission import COMMISSION_POLICY, commission_amount, commission_bps_from_identity
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
     MAX_AUDIT_JOURNAL_BYTES,
@@ -773,9 +774,27 @@ def _validate_fill_evidence(
     fees = document["fees"]
     if type(fees) is not list or len(fees) != 1:
         raise ValueError("fill fee evidence is incomplete")
-    fee = _exact_keys(fees[0], {"amount", "currency", "fee_code"})
+    bps = commission_bps_from_identity(
+        scenario.execution_policy.identifier.value, scenario.execution_policy.sha256.value
+    )
+    keys = {"amount", "currency", "fee_code"}
+    if bps is not None:
+        keys.add("commission")
+    fee = _exact_keys(fees[0], keys)
+    expected = CanonicalDecimal("0")
+    if bps is not None:
+        if fee["commission"] != {"policy": COMMISSION_POLICY, "commission_bps": bps.text}:
+            raise ValueError("fill commission policy conflicts")
+        spec = scenario.spec_set.require(scenario.instrument)
+        expected = commission_amount(
+            CanonicalDecimal(_text(document["price"])),
+            CanonicalDecimal(_text(document["quantity"])),
+            spec.contract_multiplier,
+            bps,
+            spec.currency_quantum,
+        )
     if (
-        fee["amount"] != "0"
+        fee["amount"] != expected.text
         or fee["currency"] != scenario.funding_currency.code
         or fee["fee_code"] != "commission"
     ):
@@ -1099,9 +1118,29 @@ def _validate_result(
         "strategy": strategy,
         "terminal_state": "completed",
     }
+    if "commission" in json.loads(scenario.canonical_bytes)["execution"]:
+        semantic["schema"] = "ea.backtest-semantic-outcome.v2"
+        semantic["fees"] = _result_fees(result)
     if result["semantic_outcome_sha256"] != semantic_outcome_sha256(semantic).value:
         raise ValueError("semantic outcome digest conflicts")
     return len(order_ids), len(accepted_fills), terminal_snapshot
+
+
+def _result_fees(result: dict[str, object]) -> list[object]:
+    evidence = result["fill_evidence"]
+    if evidence is None:
+        return []
+    fees = _object(evidence)["fees"]
+    if type(fees) is not list:
+        raise ValueError("invalid fee evidence")
+    return fees
+
+
+def _total_fees(result: dict[str, object]) -> CanonicalDecimal:
+    amount = CanonicalDecimal("0")
+    for fee in _result_fees(result):
+        amount = _add(amount, CanonicalDecimal(_text(_object(fee)["amount"])))
+    return amount
 
 
 def manifest_digest(manifest: Mapping[str, object]) -> str:
@@ -1162,8 +1201,10 @@ def _build_report(
             raise ValueError("bounded-long execution evidence conflicts")
         fill_notional = _multiply(fill_price, fill_quantity, specification.contract_multiplier)
         require_quantized(fill_notional, specification.currency_quantum, field_name="fill_notional")
-        if ending_cash != _subtract(scenario.initial_cash, fill_notional):
-            raise ValueError("ending cash conflicts with fill and zero-fee policy")
+        if ending_cash != _subtract(
+            _subtract(scenario.initial_cash, fill_notional), _total_fees(result)
+        ):
+            raise ValueError("ending cash conflicts with fill and fee policy")
         execution = {
             "fill": {
                 "price": fill_price.text,
@@ -1211,10 +1252,14 @@ def _build_report(
             "equity": {"amount": equity.text, "rule": _EQUITY_RULE},
             "execution": execution,
             "fees": {
-                "amount": "0",
-                "count": fill_count,
+                "amount": _total_fees(result).text,
+                "count": len(_result_fees(result)),
                 "currency": scenario.funding_currency.code,
-                "rule": _FEE_RULE,
+                "rule": (
+                    COMMISSION_POLICY
+                    if "commission" in _object(canonical_scenario["execution"])
+                    else _FEE_RULE
+                ),
             },
             "initial_funding": {
                 "amount": scenario.initial_cash.text,
@@ -1427,8 +1472,8 @@ def generate_backtest_report(run_dir: Path, output_dir: Path) -> BacktestReportR
             )
             execution = _exact_keys(manifest["execution"], {"policy_id", "policy_sha256"})
             if execution != {
-                "policy_id": _SUPPORTED_EXECUTION_POLICY,
-                "policy_sha256": _SUPPORTED_EXECUTION_POLICY_SHA256,
+                "policy_id": scenario.execution_policy.identifier.value,
+                "policy_sha256": scenario.execution_policy.sha256.value,
             }:
                 raise ValueError("execution fee policy is unsupported")
             report = _build_report(
@@ -1439,6 +1484,15 @@ def generate_backtest_report(run_dir: Path, output_dir: Path) -> BacktestReportR
                 order_count=order_count,
                 fill_count=fill_count,
             )
+            if "commission" in json.loads(scenario.canonical_bytes)["execution"]:
+                sources = report["field_sources"]
+                if type(sources) is not list:
+                    raise ValueError("invalid field sources")
+                for source in sources:
+                    if source["field"] == "economics.fees":
+                        source.update(rule=COMMISSION_POLICY, source_version=COMMISSION_POLICY)
+                    elif source["field"] == "semantic_outcome_sha256":
+                        source["source_version"] = "ea.backtest-semantic-outcome.v2"
             report_model = BacktestReportV1(
                 canonical_bytes=_canonical_json(report) + b"\n",
                 summary_bytes=_summary(report),

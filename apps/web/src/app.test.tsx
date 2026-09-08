@@ -605,3 +605,18 @@ describe('EA Quant local Web backtests', () => {
     expect(screen.getByText('20008 USD')).toBeTruthy()
   })
 })
+
+it('shows persisted commission assumptions and formal report fees', async () => {
+  const feeJob = { ...job, input_snapshot: { ...job.input_snapshot!, scenario: {
+    ...job.input_snapshot!.scenario,
+    execution: { policy: 'phase1.next-bar-close.v1', commission: { policy: 'deterministic-commission-v1', commission_bps: '100' } },
+  } } }
+  const feeReport = { ...report, economics: { ...report.economics,
+    fees: { amount: '2.03', count: 1, currency: 'USD', rule: 'deterministic-commission-v1' },
+  } }
+  window.history.pushState({}, '', `/backtests/${job.job_id}`)
+  render(<App api={adapter({ getBacktest: async () => feeJob, getReport: async () => feeReport })} />)
+  expect(await screen.findByText('deterministic-commission-v1 · 100 bps')).toBeTruthy()
+  expect(await screen.findByText('2.03 USD')).toBeTruthy()
+  expect(screen.queryByLabelText('Commission bps')).toBeNull()
+})

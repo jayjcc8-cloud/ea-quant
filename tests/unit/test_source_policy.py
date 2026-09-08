@@ -123,6 +123,7 @@ def test_execution_value_modules_keep_the_frozen_import_boundary() -> None:
             }
         ),
         "economics.py": frozenset({"ea.core.outcomes"}),
+        "commission.py": frozenset({"ea.core.economics", "ea.core.outcomes"}),
         "execution.py": frozenset(
             {
                 "ea.core.economics",
@@ -132,6 +133,7 @@ def test_execution_value_modules_keep_the_frozen_import_boundary() -> None:
         ),
         "execution_messages.py": frozenset(
             {
+                "ea.core.commission",
                 "ea.core.economics",
                 "ea.core.execution",
                 "ea.core.execution_identity",
@@ -319,6 +321,7 @@ def test_inner_risk_package_depends_only_on_core_and_itself() -> None:
 def test_inner_execution_package_depends_only_on_core_and_itself() -> None:
     allowed = frozenset(
         {
+            "ea.core.commission",
             "ea.core.economics",
             "ea.core.execution",
             "ea.core.execution_identity",

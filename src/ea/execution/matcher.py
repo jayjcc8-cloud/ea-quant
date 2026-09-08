@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import NamedTuple, Protocol, final
 from weakref import WeakKeyDictionary
 
+from ea.core.commission import commission_bps_from_identity
 from ea.core.economics import CanonicalDecimal, EconomicValidationError, require_positive
 from ea.core.execution import (
     InstrumentExecutionSpec,
@@ -2431,6 +2432,10 @@ class Phase1HistoricalMatcher:
                     side=record.order.side,
                     quantity=CanonicalDecimal(record.order.quantity.text),
                     price=CanonicalDecimal(price.text),
+                    commission_bps=commission_bps_from_identity(
+                        self._execution_policy.identifier.value,
+                        self._execution_policy.sha256.value,
+                    ),
                     source_namespace=SourceNamespace(self._source_namespace.value),
                     dedup_identity=SourceNativeSequence(fact_sequence),
                     occurred_at=occurred_at,

@@ -12,9 +12,13 @@ export type BacktestParameters = {
   initial_cash: string
   strategy_parameters: { target_quantity: string | null; entry_delay_bars: number } | null
 }
+type Commission = { policy: string; commission_bps: string }
+const commissionLabel = (commission?: Commission | null) => commission ? `${commission.policy} · ${commission.commission_bps} bps` : 'Legacy zero commission · 0 bps'
+
 export type InputSnapshot = {
   schema: 'ea.local-web-input.v1'; scenario_id: string; source_identity: InputIdentity; identity: InputIdentity
   scenario: {
+    execution?: { policy: string; commission?: Commission | null }
     funding: { currency: string; initial_cash: string }
     strategy: { id: string; target_quantity: string | null; entry_delay_bars?: number }
     instrument: { venue: string; symbol: string }
@@ -22,7 +26,7 @@ export type InputSnapshot = {
 }
 export type ScenarioSummary = {
   scenario_id: string; name: string; valid: boolean; input_identity?: InputIdentity
-  summary?: { strategy_id: string; venue: string; symbol: string; initial_cash: string; target_quantity: string | null; entry_delay_bars: number; record_count: number }
+  summary?: { commission?: Commission | null; strategy_id: string; venue: string; symbol: string; initial_cash: string; target_quantity: string | null; entry_delay_bars: number; record_count: number }
   strategy_parameters?: StrategyParameterContract[]
   normalized_input_identity?: InputIdentity
   error_code?: string; message?: string
@@ -52,6 +56,7 @@ export type BacktestReport = {
     currency?: string; initial_funding?: Money; ending_cash: Money[]
     ending_positions: { quantity: string; venue: string; symbol: string }[]
     valuation: { price: string; position_value: string }; equity: Money; net_pnl: Money
+    fees?: { amount: string; currency: string; count: number; rule: string }
     total_return: { value: string }; counts: { orders: number; fills: number }
     execution: { order: { quantity: string; side: string } | null; fill: { quantity: string; price: string; side: string } | null }
   }
@@ -201,6 +206,7 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
         <div><label htmlFor="batch-initial-cash">Initial cash</label><input id="batch-initial-cash" value={initialCash} onChange={(event) => setInitialCash(event.target.value)} /></div>
       </div>
       {candidate?.summary && <p className="muted">{candidate.summary.strategy_id} · {candidate.summary.venue}:{candidate.summary.symbol} · backend maximum delay {delayContract?.maximum ?? 'n/a'}</p>}
+      {candidate?.summary && <p>{commissionLabel(candidate.summary.commission)}</p>}
       <div className="batch-configurations">{runs.map((item, index) => <section className="strategy-parameters batch-configuration" key={index}>
         <header><h3>Run {index + 1}</h3><button aria-label={`Remove Run ${index + 1}`} disabled={runs.length <= 2} onClick={() => setRuns((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Remove</button></header>
         <div className="parameter-grid">
@@ -408,6 +414,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
         </select>
         {candidate?.summary && <dl className="summary-list">
           <div><dt>Strategy</dt><dd>{candidate.summary.strategy_id}</dd></div><div><dt>Instrument</dt><dd>{candidate.summary.venue}:{candidate.summary.symbol}</dd></div>
+          <div><dt>Commission</dt><dd>{commissionLabel(candidate.summary.commission)}</dd></div>
           <div><dt>Initial cash</dt><dd>{candidate.summary.initial_cash}</dd></div><div><dt>Records</dt><dd>{candidate.summary.record_count}</dd></div>
           <div><dt>Target</dt><dd>{candidate.summary.target_quantity ?? 'flat'}</dd></div>
         </dl>}
@@ -489,6 +496,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
   const inputRows = [
     ['Initial Cash', leftInput.funding.initial_cash, rightInput.funding.initial_cash],
     ['Symbol', leftInput.instrument.symbol, rightInput.instrument.symbol],
+    ['Commission', commissionLabel(leftInput.execution?.commission), commissionLabel(rightInput.execution?.commission)],
   ]
   const parameterRows = [
     ['target_quantity', leftInput.strategy.target_quantity ?? 'flat', rightInput.strategy.target_quantity ?? 'flat'],
@@ -507,6 +515,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
       leftCurrency: left.report?.economics.net_pnl.currency ?? left.report?.economics.currency,
       rightCurrency: right.report?.economics.net_pnl.currency ?? right.report?.economics.currency,
     },
+    { label: 'Fees', before: left.report?.economics.fees?.amount, after: right.report?.economics.fees?.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.report?.economics.fees?.currency, rightCurrency: right.report?.economics.fees?.currency },
     { label: 'Return', before: left.report?.economics.total_return.value, after: right.report?.economics.total_return.value, shift: 2, suffix: ' pp', monetary: false },
     { label: 'Orders', before: left.report ? String(left.report.economics.counts.orders) : undefined, after: right.report ? String(right.report.economics.counts.orders) : undefined, shift: 0, suffix: '', monetary: false },
     { label: 'Fills', before: left.report ? String(left.report.economics.counts.fills) : undefined, after: right.report ? String(right.report.economics.counts.fills) : undefined, shift: 0, suffix: '', monetary: false },
@@ -590,6 +599,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
       <div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
     </dl></section>
+    {job.input_snapshot && <p>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</p>}
     {economics ? <>
       <section className="metrics">
         <Metric label="Initial cash" value={economics.initial_funding ? `${economics.initial_funding.amount} ${currency}` : 'not available'} />
@@ -597,6 +607,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
         <Metric label="Equity" value={`${economics.equity.amount} ${currency}`} />
         <Metric label="Net P&L" value={`${economics.net_pnl.amount} ${currency}`} />
         <Metric label="Total return" value={economics.total_return.value} />
+        <Metric label="Fees" value={economics.fees ? `${economics.fees.amount} ${economics.fees.currency}` : 'not available'} />
         <Metric label="Position quantity" value={economics.ending_positions[0]?.quantity ?? '0'} />
       </section>
       <div className="backtest-grid">

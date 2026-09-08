@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 1 delivery reset — v0.2.0 bounded offline prerelease plus local Web experiment analysis.**
+**Phase 2 — deterministic commission on the bounded offline research loop.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -18,6 +18,8 @@ available through a single-user Web UI served on loopback only. No broker, remot
 external write, deployment, or live capability is part of this objective.
 
 ## Completed
+
+- Phase 1 delivery reset is complete; its offline and governance-freeze boundaries remain in force.
 
 - Phase 0 engineering foundation is released as `v0.1.0`.
 - `main@969f5f086acd9c28f80e3960a56b83981b1d0e5d` is the verified pre-reset baseline.
@@ -115,14 +117,20 @@ external write, deployment, or live capability is part of this objective.
   currency. Explicit exact-decimal sorting, status filtering, stable missing-last behavior, and
   the existing pair comparison support human judgment without ranking or recommendation.
 
+- Issue #178 adds explicit `deterministic-commission-v1` at registered scenario execution policy.
+  Canonical Decimal bps in [0,10000] produce one half-even currency-quantized commission per Fill,
+  balanced ledger cash effects, versioned semantic evidence, and verified BacktestReportV1 fees.
+  The existing Web history, comparison and batch analysis consume the after-fee formal results.
+  Legacy zero-fee scenario identities remain unchanged, and all three supported resume frontiers
+  remain available without new recovery states or historical migration.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
-backtest/reporting product, not the broader Phase 2 research, paper, or live roadmap. Arbitrary
+backtest/reporting product, not the broader validation, optimization, paper, or live roadmap. Arbitrary
 instruction-level or Web recovery, symbol/data editing, uploads, broader experiment tracking,
 automatic optimization, broader performance analytics, strategy plugins, paper/live execution,
-package-registry publication, and deployment remain unavailable. Phase 1.1/#125 and Phase 2 have
-not been activated.
+package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Phase 2 activation is limited to deterministic commission.
 
 ## Blockers
 
@@ -226,7 +234,7 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
   the derived read model, preserves missing values and currencies, and rebuilds after restart.
 
 These conditions complete Issues #81, #161, and #83 and the bounded v0.2.0 GitHub prerelease gate
-in #84. They do not activate Phase 1.1/#125, Phase 2, package-registry publication, or deployment.
+in #84. They do not activate Phase 1.1/#125, further Phase 2 capabilities, publication, or deployment.
 
 ## Delivery Metrics
 

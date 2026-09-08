@@ -10,6 +10,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import NoReturn, cast, final
 
+from ea.core.commission import COMMISSION_POLICY, commission_amount, require_commission_bps
 from ea.core.economics import (
     CanonicalDecimal,
     EconomicValidationError,
@@ -267,6 +268,7 @@ class FeeEntry:
     fee_code: FeeCode
     currency: SettlementCurrency
     amount: CanonicalDecimal
+    commission_bps: CanonicalDecimal | None = None
 
     def __post_init__(self) -> None:
         if type(self.fee_code) is not FeeCode:
@@ -281,7 +283,9 @@ class FeeEntry:
                 OutcomeCode.INVALID_TYPE,
                 "fee amount must be an exact CanonicalDecimal",
             )
-        if self.amount.text != "0":
+        if self.commission_bps is not None:
+            require_commission_bps(self.commission_bps)
+        if self.amount.coefficient < 0 or (self.commission_bps is None and self.amount.text != "0"):
             raise _fail(
                 OutcomeCode.OUT_OF_RANGE,
                 "Phase 1 commission amount must be exactly zero",
@@ -1604,6 +1608,7 @@ def _phase1_trade_payload(
     side: OrderSide,
     quantity: CanonicalDecimal,
     price: CanonicalDecimal,
+    commission_bps: CanonicalDecimal | None = None,
 ) -> TradeFactPayload:
     if type(side) is not OrderSide:
         raise _fail(OutcomeCode.INVALID_TYPE, "side must be an exact OrderSide")
@@ -1612,7 +1617,18 @@ def _phase1_trade_payload(
     _require_price(price, specification)
     zero = CanonicalDecimal("0")
     require_quantized(zero, specification.currency_quantum, field_name="fee")
-    fee = FeeEntry(FeeCode.COMMISSION, specification.settlement_currency, zero)
+    amount = (
+        zero
+        if commission_bps is None
+        else commission_amount(
+            price,
+            quantity,
+            specification.contract_multiplier,
+            commission_bps,
+            specification.currency_quantum,
+        )
+    )
+    fee = FeeEntry(FeeCode.COMMISSION, specification.settlement_currency, amount, commission_bps)
     payload = object.__new__(TradeFactPayload)
     object.__setattr__(payload, "side", side)
     object.__setattr__(payload, "quantity", quantity)
@@ -1639,6 +1655,7 @@ def create_trade_execution_fact(
     side: OrderSide,
     quantity: CanonicalDecimal,
     price: CanonicalDecimal,
+    commission_bps: CanonicalDecimal | None = None,
     client_submission_key: Sha256Digest | None = None,
     venue_order_id: VenueOrderId | None = None,
     order_id: EconomicId | None = None,
@@ -1677,6 +1694,7 @@ def create_trade_execution_fact(
         side=side,
         quantity=quantity,
         price=price,
+        commission_bps=commission_bps,
     )
     return _new_fact(
         source_namespace=source,
@@ -1748,11 +1766,17 @@ def create_submission_query_execution_fact(
 
 
 def _fee_document(fee: FeeEntry) -> dict[str, object]:
-    return {
+    document: dict[str, object] = {
         "amount": fee.amount.text,
         "currency": fee.currency.code,
         "fee_code": fee.fee_code.value,
     }
+    if fee.commission_bps is not None:
+        document["commission"] = {
+            "policy": COMMISSION_POLICY,
+            "commission_bps": fee.commission_bps.text,
+        }
+    return document
 
 
 def _fact_payload_document(payload: ExecutionFactPayload) -> dict[str, object]:
@@ -1963,7 +1987,7 @@ def create_fill(
     )
     _require_quantity(payload.quantity, specification)
     _require_price(payload.price, specification)
-    _require_phase1_fees(payload.fees, specification)
+    _require_phase1_fees(payload.fees, specification, payload.price, payload.quantity)
     _require_same_run(
         fill_id.run_id,
         fact.order_id,
@@ -2005,6 +2029,8 @@ def create_fill(
 def _require_phase1_fees(
     fees: object,
     specification: InstrumentExecutionSpec,
+    price: CanonicalDecimal,
+    quantity: CanonicalDecimal,
 ) -> tuple[FeeEntry, ...]:
     if type(fees) is not tuple or len(fees) != 1 or type(fees[0]) is not FeeEntry:
         raise _fail(
@@ -2015,7 +2041,18 @@ def _require_phase1_fees(
     if (
         fee.fee_code is not FeeCode.COMMISSION
         or fee.currency != specification.settlement_currency
-        or fee.amount.text != "0"
+        or fee.amount
+        != (
+            CanonicalDecimal("0")
+            if fee.commission_bps is None
+            else commission_amount(
+                price,
+                quantity,
+                specification.contract_multiplier,
+                fee.commission_bps,
+                specification.currency_quantum,
+            )
+        )
     ):
         raise _fail(
             OutcomeCode.CONFLICTING_ID,
@@ -2710,9 +2747,13 @@ def _preflight_dedup_types(value: object) -> None:
 def _preflight_fee_types(value: object, *, index: int) -> None:
     document = _require_wire_object(
         value,
-        _FEE_WIRE_KEYS,
+        (_FEE_WIRE_KEYS | {"commission"})
+        if type(value) is dict and "commission" in value
+        else _FEE_WIRE_KEYS,
         field_name=f"fees[{index}]",
     )
+    if "commission" in document:
+        _parse_commission(document["commission"])
     for field in ("amount", "currency", "fee_code"):
         _require_wire_type(
             document[field],
@@ -3466,8 +3507,20 @@ def _parse_trade_payload(
         set_sha256=set_digest,
     )
     fees = _parse_fees(value["fees"])
-    _require_phase1_fees(fees, specification)
+    _require_phase1_fees(fees, specification, price, quantity)
     return side, quantity, price
+
+
+def _parse_commission(value: object) -> CanonicalDecimal | None:
+    if value is None:
+        return None
+    if type(value) is not dict or set(value) != {"policy", "commission_bps"}:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "commission has invalid keys")
+    if value["policy"] != COMMISSION_POLICY:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "unsupported commission policy")
+    return require_commission_bps(
+        _parse_decimal(value["commission_bps"], field_name="commission_bps")
+    )
 
 
 def _parse_fees(value: object) -> tuple[FeeEntry, ...]:
@@ -3477,7 +3530,10 @@ def _parse_fees(value: object) -> tuple[FeeEntry, ...]:
             "Phase 1 fees must be a one-element JSON array",
         )
     fee_document = value[0]
-    if set(fee_document) != {"amount", "currency", "fee_code"}:
+    if set(fee_document) not in (
+        {"amount", "currency", "fee_code"},
+        {"amount", "currency", "fee_code", "commission"},
+    ):
         raise _fail(OutcomeCode.OUT_OF_RANGE, "fee document has invalid keys")
     if fee_document["fee_code"] != FeeCode.COMMISSION.value:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "fee code is not Phase 1 commission")
@@ -3489,6 +3545,7 @@ def _parse_fees(value: object) -> tuple[FeeEntry, ...]:
             FeeCode.COMMISSION,
             SettlementCurrency(currency),
             _parse_decimal(fee_document["amount"], field_name="fee amount"),
+            _parse_commission(fee_document.get("commission")),
         ),
     )
 
@@ -3587,6 +3644,9 @@ def decode_execution_fact(
             side=side,
             quantity=quantity,
             price=price,
+            commission_bps=_parse_fees(cast(dict[str, object], document["payload"])["fees"])[
+                0
+            ].commission_bps,
             client_submission_key=client_key,
             venue_order_id=venue_order_id,
             order_id=order_id,

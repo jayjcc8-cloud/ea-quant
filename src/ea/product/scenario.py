@@ -37,6 +37,7 @@ from ea.core import (
     require_positive,
     require_quantized,
 )
+from ea.core.commission import commission_policy_identity, require_commission_bps
 from ea.core.economics import EconomicValidationError
 from ea.core.run import RunContractError
 from ea.data import HistoricalMarketDataError, Phase1HistoricalDataset, read_phase1_ohlcv_csv
@@ -128,8 +129,14 @@ class _RiskInput(_StrictModel):
     max_notional: StrictStr
 
 
+class _CommissionInput(_StrictModel):
+    policy: Literal["deterministic-commission-v1"]
+    commission_bps: StrictStr
+
+
 class _ExecutionInput(_StrictModel):
     policy: Literal["phase1.next-bar-close.v1"]
+    commission: _CommissionInput | None = None
 
 
 class _ScenarioInput(_StrictModel):
@@ -294,6 +301,8 @@ def _canonical_bytes(
     dataset: Phase1HistoricalDataset,
 ) -> bytes:
     document = model.model_dump(mode="json")
+    if model.execution.commission is None:
+        document["execution"].pop("commission")
     data = dict(document["data"])
     data.pop("path")
     document["data"] = data
@@ -487,6 +496,18 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
             raise BacktestScenarioError(
                 f"strategy.entry_delay_bars must be at most {entry_delay_maximum}"
             )
+    execution_policy = _ACCEPTED_EXECUTION_POLICY
+    if model.execution.commission is not None:
+        try:
+            bps = require_commission_bps(
+                CanonicalDecimal(model.execution.commission.commission_bps)
+            )
+            identifier, digest = commission_policy_identity(bps)
+            execution_policy = ExecutionPolicyRef(
+                ExecutionPolicyId(identifier), Sha256Digest(digest)
+            )
+        except EconomicValidationError as error:
+            raise BacktestScenarioError(str(error)) from None
     canonical = _canonical_bytes(model, dataset=dataset)
     return LoadedBacktestScenario(
         scenario_path=scenario_path,
@@ -504,7 +525,7 @@ def load_backtest_scenario(path: Path) -> LoadedBacktestScenario:
         max_order_quantity=max_order,
         max_position_quantity=max_position,
         max_notional=max_notional,
-        execution_policy=_ACCEPTED_EXECUTION_POLICY,
+        execution_policy=execution_policy,
         randomness=BacktestRandomness(),
         canonical_bytes=canonical,
         scenario_sha256=Sha256Digest(sha256(_SCENARIO_DIGEST_DOMAIN + canonical).hexdigest()),

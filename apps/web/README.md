@@ -56,3 +56,8 @@ web-env/bin/ea web serve \
 
 Open `http://127.0.0.1:8765/backtests`; stop the service with `Ctrl-C`. There is no host option and
 Vite development mode is not the delivery entrypoint.
+
+`bounded-long-commission.yaml` is a positive-fee sibling of the legacy scenario. Its registered
+execution policy charges 100 bps per actual Fill, half-even rounded to the settlement currency
+quantum. The UI displays the fixed assumption and verified report fees; equity, P&L and return
+include ledger-applied commission. There is no cost editor or second fee calculator in Web.
