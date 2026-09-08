@@ -235,7 +235,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   const commissionComparison = `/backtests/compare/${baseline.jobId}/${commissioned.jobId}`
   await page.goto(commissionComparison)
   await expect(page.getByRole('row', { name: /Net P&L 17 USD 14.97 USD -2.03 USD/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Fees 0 USD 2.03 USD 2.03 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Fees 0 USD 2.03 USD \+2.03 USD/i })).toBeVisible()
   await page.goto('/batches/new')
   await page.getByLabel('Scenario').selectOption('bounded-long-commission.yaml')
   await page.getByLabel('Run 2 entry delay bars').fill('2')
