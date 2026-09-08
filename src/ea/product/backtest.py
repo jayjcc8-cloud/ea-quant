@@ -761,6 +761,9 @@ def _execute(
         "strategy": strategy_document,
         "terminal_state": "completed",
     }
+    if "commission" in json.loads(scenario.canonical_bytes)["execution"]:
+        semantic["schema"] = "ea.backtest-semantic-outcome.v2"
+        semantic["fees"] = [] if fill_evidence is None else fill_evidence["fees"]
     report: dict[str, object] = {
         "audit_chain_head_sha256": audit_chain_head(audit.records[-1]).value,
         "ending_cash": ending_cash,

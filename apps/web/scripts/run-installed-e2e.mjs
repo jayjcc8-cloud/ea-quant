@@ -79,6 +79,7 @@ try {
   const flat = readFileSync(join(repository, 'examples', 'web-scenarios', 'flat.yaml'), 'utf8')
   writeFileSync(join(scenarioRoot, 'bounded-long.yaml'), bounded)
   writeFileSync(join(scenarioRoot, 'flat.yaml'), flat)
+  cpSync(join(repository, 'examples', 'web-scenarios', 'bounded-long-commission.yaml'), join(scenarioRoot, 'bounded-long-commission.yaml'))
   writeFileSync(join(scenarioRoot, 'one.yaml'), bounded.replace("target_quantity: '2'", "target_quantity: '1'"))
   writeFileSync(join(scenarioRoot, 'low-cash.yaml'), bounded.replace("initial_cash: '10000'", "initial_cash: '50'"))
   writeFileSync(join(scenarioRoot, 'invalid.yaml'), bounded.replace(/sha256: [0-9a-f]{64}/, `sha256: ${'0'.repeat(64)}`))

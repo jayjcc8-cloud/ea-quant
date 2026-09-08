@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, NoReturn, Protocol, cast, final
 
+from ea.core.commission import commission_bps_from_identity
 from ea.core.economics import CanonicalDecimal, EconomicValidationError
 from ea.core.execution import InstrumentExecutionSpecSet, instrument_spec_set_digest
 from ea.core.execution_identity import (
@@ -1163,7 +1164,16 @@ def _fact_contradicts_order(fact: ExecutionFact, order: Order) -> bool:
             and fact.client_submission_key != order.client_submission_key
         )
         or (fact.instrument is not None and fact.instrument != order.instrument)
-        or (type(payload) is TradeFactPayload and payload.side is not order.side)
+        or (
+            type(payload) is TradeFactPayload
+            and (
+                payload.side is not order.side
+                or payload.fees[0].commission_bps
+                != commission_bps_from_identity(
+                    order.execution_policy.identifier.value, order.execution_policy.sha256.value
+                )
+            )
+        )
         or (fact.correlation_id is not None and fact.correlation_id != order.correlation_id)
         or (fact.causation_id is not None and fact.causation_id != order.order_id)
     )

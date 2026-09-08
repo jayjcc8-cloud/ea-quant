@@ -172,6 +172,7 @@ def _scenario_summary(
             "target_quantity": None if target is None else target.text,
             "entry_delay_bars": scenario.entry_delay_bars,
             "record_count": scenario.dataset.selection.fingerprint.record_count,
+            "commission": json.loads(scenario.canonical_bytes)["execution"].get("commission"),
         },
         "strategy_parameters": _strategy_parameter_contracts(scenario, defaults=defaults),
     }

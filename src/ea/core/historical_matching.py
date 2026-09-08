@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, NamedTuple, cast, final
 from weakref import WeakKeyDictionary
 
+from ea.core.commission import commission_bps_from_identity
 from ea.core.economics import (
     CanonicalDecimal,
     EconomicValidationError,
@@ -3615,6 +3616,9 @@ def _expected_decoded_batch_ingress(
             side=order.side,
             quantity=CanonicalDecimal(order.quantity.text),
             price=price,
+            commission_bps=commission_bps_from_identity(
+                context.execution_policy.identifier.value, context.execution_policy.sha256.value
+            ),
             source_namespace=context.source_namespace,
             dedup_identity=SourceNativeSequence(fact_sequence),
             occurred_at=occurred_at,
