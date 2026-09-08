@@ -32,6 +32,8 @@ class InputIdentity(BaseModel):
     scenario_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     data_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     record_count: int = Field(ge=1)
+    dataset_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.csv$")
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class BacktestParameters(BaseModel):
@@ -68,6 +70,8 @@ class BatchRequest(BaseModel):
 
 
 class HoldoutRequest(BaseModel):
+    dataset_id: str | None = None
+    source_sha256: str | None = None
     model_config = ConfigDict(extra="forbid", strict=True)
 
     source_job_id: str = Field(min_length=1, max_length=128)
@@ -75,6 +79,8 @@ class HoldoutRequest(BaseModel):
 
 
 class ScenarioValidationRequest(BaseModel):
+    dataset_id: str | None = None
+    source_sha256: str | None = None
     model_config = ConfigDict(extra="forbid", strict=True)
 
     parameters: BacktestParameters | None = None
@@ -89,6 +95,7 @@ class WebSettings:
     ui_dir: Path
     port: int
     strategy_root: Path | None = None
+    data_root: Path | None = None
 
     @property
     def trusted_origin(self) -> str:
@@ -125,7 +132,14 @@ def create_app(settings: WebSettings) -> Any:
         settings.strategy_root.resolve(), ui_root
     ):
         raise WebBoundaryError("strategy and UI roots must not overlap")
-    service = WebService(scenario_root, workspace_root, strategy_root=settings.strategy_root)
+    if settings.data_root is not None and roots_overlap(settings.data_root.resolve(), ui_root):
+        raise WebBoundaryError("data and UI roots must not overlap")
+    service = WebService(
+        scenario_root,
+        workspace_root,
+        strategy_root=settings.strategy_root,
+        data_root=settings.data_root,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -178,6 +192,19 @@ def create_app(settings: WebSettings) -> Any:
             "single_active_job": True,
         }
 
+    @app.get("/api/datasets")
+    def list_datasets() -> object:
+        return {"datasets": [] if service.datasets is None else service.datasets.list()}
+
+    @app.get("/api/datasets/{dataset_id}")
+    def inspect_dataset(dataset_id: str) -> object:
+        try:
+            if service.datasets is None:
+                raise ValueError("no data root is configured")
+            return service.datasets.inspect(dataset_id)
+        except (OSError, ValueError):
+            return error(422, "dataset_invalid", "dataset is invalid or unavailable")
+
     @app.get("/api/scenarios")
     def list_scenarios() -> object:
         try:
@@ -193,12 +220,16 @@ def create_app(settings: WebSettings) -> Any:
         try:
             return service.validate_scenario(
                 scenario_id,
+                dataset_id=None if request is None else request.dataset_id,
+                source_sha256=None if request is None else request.source_sha256,
                 parameters=(
                     None
                     if request is None or request.parameters is None
                     else request.parameters.model_dump()
                 ),
             )
+        except InputChangedError as caught:
+            return error(409, "input_conflict", str(caught))
         except ScenarioNotFoundError as caught:
             return error(404, "scenario_not_found", str(caught))
         except WebBoundaryError as caught:
@@ -206,7 +237,7 @@ def create_app(settings: WebSettings) -> Any:
         except Exception as caught:
             from ea.product import BacktestScenarioError
 
-            if isinstance(caught, BacktestScenarioError):
+            if isinstance(caught, (BacktestScenarioError, WebBoundaryError)):
                 return error(422, "scenario_invalid", str(caught))
             return error(
                 500, "scenario_validation_failed", "scenario validation failed unexpectedly"
@@ -217,7 +248,7 @@ def create_app(settings: WebSettings) -> Any:
         try:
             record, created = service.create_job(
                 scenario_id=request.scenario_id,
-                input_identity=request.input_identity.model_dump(),
+                input_identity=request.input_identity.model_dump(exclude_none=True),
                 parameters=None if request.parameters is None else request.parameters.model_dump(),
                 request_id=request.request_id,
             )
@@ -233,7 +264,7 @@ def create_app(settings: WebSettings) -> Any:
         except Exception as caught:
             from ea.product import BacktestScenarioError
 
-            if isinstance(caught, BacktestScenarioError):
+            if isinstance(caught, (BacktestScenarioError, WebBoundaryError)):
                 return error(422, "scenario_invalid", str(caught))
             return error(500, "job_acceptance_failed", "backtest request could not be accepted")
 
@@ -246,7 +277,7 @@ def create_app(settings: WebSettings) -> Any:
         try:
             document = service.create_batch(
                 scenario_id=request.scenario_id,
-                input_identity=request.input_identity.model_dump(),
+                input_identity=request.input_identity.model_dump(exclude_none=True),
                 initial_cash=request.initial_cash,
                 runs=[item.strategy_parameters for item in request.runs],
             )
@@ -262,7 +293,7 @@ def create_app(settings: WebSettings) -> Any:
         except Exception as caught:
             from ea.product import BacktestScenarioError
 
-            if isinstance(caught, BacktestScenarioError):
+            if isinstance(caught, (BacktestScenarioError, WebBoundaryError)):
                 return error(422, "scenario_invalid", str(caught))
             return error(500, "batch_acceptance_failed", "batch request could not be accepted")
 
@@ -283,6 +314,8 @@ def create_app(settings: WebSettings) -> Any:
                 content=service.create_holdout(
                     source_job_id=request.source_job_id,
                     scenario_id=request.scenario_id,
+                    dataset_id=request.dataset_id,
+                    source_sha256=request.source_sha256,
                 ),
             )
         except (JobNotFoundError, ScenarioNotFoundError) as caught:

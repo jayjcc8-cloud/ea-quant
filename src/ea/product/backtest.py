@@ -93,6 +93,7 @@ from ea.product.offline_demo import (
     _package_code_digest,
 )
 from ea.product.scenario import (
+    BacktestScenarioError,
     LoadedBacktestScenario,
     _next_bar_entry_delay_maximum,
     load_backtest_scenario,
@@ -346,6 +347,12 @@ def _attempt_manifest_bytes(
     risk_context: dict[str, object],
 ) -> bytes:
     funding = InitialFunding(run_id, scenario.funding_currency, scenario.initial_cash)
+    source_file_sha256 = sha256(scenario.data_path.read_bytes()).hexdigest()
+    if (
+        scenario.research_input_bytes is not None
+        and source_file_sha256 != scenario.dataset.source_bytes_sha256.value
+    ):
+        raise BacktestScenarioError("registered dataset changed before engine acceptance")
     document = {
         "canonicalization": _ATTEMPT_CANONICALIZATION,
         "code_sha256": _package_code_digest().value,
@@ -355,7 +362,7 @@ def _attempt_manifest_bytes(
                 "sha256": scenario.dataset.selection.fingerprint.sha256.value,
             },
             "path": str(scenario.data_path),
-            "source_file_sha256": sha256(scenario.data_path.read_bytes()).hexdigest(),
+            "source_file_sha256": source_file_sha256,
         },
         "distribution": {"name": "ea-quant", "version": ea.__version__},
         "execution": {

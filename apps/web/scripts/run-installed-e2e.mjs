@@ -137,7 +137,13 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   execFileSync(ea, ['backtest', 'validate', '--scenario', join(scenarioRoot, 'local-threshold.yaml'), '--strategy-root', strategyRoot], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
   execFileSync(ea, ['backtest', 'run', '--scenario', join(scenarioRoot, 'local-threshold.yaml'), '--strategy-root', strategyRoot, '--output-root', join(temporary, 'cli-runs')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
 
-  const args = ['web', 'serve', '--strategy-root', strategyRoot, '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
+  const dataRoot = join(temporary, 'research-data')
+  mkdirSync(dataRoot)
+  cpSync(join(scenarioRoot, 'prices.csv'), join(dataRoot, 'research.csv'))
+  cpSync(join(scenarioRoot, 'holdout-prices.csv'), join(dataRoot, 'later.csv'))
+  execFileSync(ea, ['data', 'inspect', join(dataRoot, 'research.csv')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+
+  const args = ['web', 'serve', '--data-root', dataRoot, '--strategy-root', strategyRoot, '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
   server = spawn(ea, args, { cwd: outside, env: cleanEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] })
   await waitForHealth()
   console.log(`candidate-wheel-sha256=${sha256(wheel)} file=${basename(wheel)}`)
@@ -148,7 +154,7 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   const playwright = join(webRoot, 'node_modules', '.bin', 'playwright')
   const completed = spawn(playwright, ['test', '--config', 'playwright.config.ts'], {
     cwd: webRoot,
-    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact },
+    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact, EA_DATA_ROOT: dataRoot },
     stdio: 'inherit',
   })
   const code = await new Promise((resolveExit) => completed.on('exit', resolveExit))

@@ -29,12 +29,14 @@ from ea.product import (
 )
 from ea.product.scenario import (
     parameterize_strategy_scenario,
+    rebind_research_dataset,
     resolved_scenario_parameters,
     scenario_digest_domain,
 )
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import StrategyPackageV1, read_regular, validate_package
 from ea.strategy.registry import project_parameters
+from ea.web.datasets import LocalResearchDatasetRegistryV1
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
 
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -124,7 +126,15 @@ def roots_overlap(*roots: Path) -> bool:
 
 def _scenario_identity(scenario: LoadedBacktestScenario) -> dict[str, object]:
     fingerprint = scenario.dataset.selection.fingerprint
+    research = (
+        {} if scenario.research_input_bytes is None else json.loads(scenario.research_input_bytes)
+    )
     return {
+        **(
+            {"dataset_id": research["dataset_id"], "source_sha256": research["source_sha256"]}
+            if research
+            else {}
+        ),
         "scenario_sha256": scenario.scenario_sha256.value,
         "data_sha256": fingerprint.sha256.value,
         "record_count": fingerprint.record_count,
@@ -212,6 +222,9 @@ def _input_snapshot(
         "identity": _scenario_identity(scenario),
         "scenario": json.loads(scenario.canonical_bytes),
     }
+    if scenario.research_input_bytes is not None:
+        snapshot["schema"] = "ea.local-web-input.v2"
+        snapshot["research_input"] = json.loads(scenario.research_input_bytes)
     payload = _canonical_json(snapshot)
     return payload, sha256(_INPUT_DIGEST_DOMAIN + payload).hexdigest()
 
@@ -437,8 +450,15 @@ def _decode_job(payload: bytes) -> JobRecord:
                 raise ValueError
             if (
                 set(snapshot)
-                != {"schema", "scenario_id", "source_identity", "identity", "scenario"}
-                or snapshot.get("schema") != "ea.local-web-input.v1"
+                != (
+                    {"schema", "scenario_id", "source_identity", "identity", "scenario"}
+                    | (
+                        {"research_input"}
+                        if snapshot.get("schema") == "ea.local-web-input.v2"
+                        else set()
+                    )
+                )
+                or snapshot.get("schema") not in {"ea.local-web-input.v1", "ea.local-web-input.v2"}
                 or snapshot.get("scenario_id") != document["scenario_id"]
                 or snapshot.get("source_identity") != identity
                 or type(snapshot.get("identity")) is not dict
@@ -554,7 +574,12 @@ class WebService:
     """Persistent, single-active-job adapter over the existing product functions."""
 
     def __init__(
-        self, scenario_root: Path, workspace: Path, *, strategy_root: Path | None = None
+        self,
+        scenario_root: Path,
+        workspace: Path,
+        *,
+        strategy_root: Path | None = None,
+        data_root: Path | None = None,
     ) -> None:
         resolved_scenarios = _directory(scenario_root, label="scenario root", create=False)
         try:
@@ -568,6 +593,17 @@ class WebService:
             or roots_overlap(strategy_root.resolve(), resolved_scenarios, resolved_workspace)
         ):
             raise WebBoundaryError("strategy root must be absolute and separate")
+        self.datasets = None
+        if data_root is not None:
+            other_roots = [resolved_scenarios, resolved_workspace]
+            if strategy_root is not None:
+                other_roots.append(strategy_root.resolve())
+            if not data_root.is_absolute() or roots_overlap(data_root.resolve(), *other_roots):
+                raise WebBoundaryError("data root must be absolute and separate")
+            try:
+                self.datasets = LocalResearchDatasetRegistryV1(data_root)
+            except (OSError, ValueError):
+                raise WebBoundaryError("data root is unavailable") from None
         self.registry = ScenarioRegistry(resolved_scenarios, strategy_root)
         self.workspace = _directory(resolved_workspace, label="workspace", create=True)
         self.jobs_dir = _directory(self.workspace / "jobs", label="job index", create=True)
@@ -647,6 +683,9 @@ class WebService:
                 os.fsync(directory_descriptor)
             finally:
                 os.close(directory_descriptor)
+            if scenario.research_input_bytes is not None:
+                self._check_dataset(scenario)
+                return replace(scenario, scenario_path=path)
             materialized = load_backtest_scenario(
                 path,
                 catalog=ResearchStrategyCatalogV1(
@@ -790,13 +829,48 @@ class WebService:
             )
             return [record.document(presentation=True) for record in records]
 
+    def _bind_dataset(
+        self, scenario: LoadedBacktestScenario, dataset_id: str | None
+    ) -> LoadedBacktestScenario:
+        if dataset_id is None:
+            return scenario
+        if self.datasets is None:
+            raise WebBoundaryError("no data root is configured")
+        try:
+            path, dataset = self.datasets.load(dataset_id)
+            return rebind_research_dataset(
+                scenario, data_path=path, dataset=dataset, dataset_id=dataset_id
+            )
+        except (OSError, ValueError):
+            raise WebBoundaryError("dataset is invalid, incompatible, or unavailable") from None
+
+    def _check_dataset(self, scenario: LoadedBacktestScenario) -> None:
+        if scenario.research_input_bytes is None:
+            return
+        evidence = json.loads(scenario.research_input_bytes)
+        if self.datasets is None:
+            raise InputChangedError("dataset is unavailable")
+        try:
+            _, current = self.datasets.load(evidence["dataset_id"])
+            if current.source_bytes_sha256 != scenario.dataset.source_bytes_sha256:
+                raise ValueError
+        except (OSError, ValueError):
+            raise InputChangedError("dataset changed; validate it again") from None
+
     def validate_scenario(
         self,
         scenario_id: str,
         *,
         parameters: dict[str, object] | None = None,
+        dataset_id: str | None = None,
+        source_sha256: str | None = None,
     ) -> dict[str, object]:
-        scenario = self.registry.load(scenario_id)
+        scenario = self._bind_dataset(self.registry.load(scenario_id), dataset_id)
+        if (
+            source_sha256 is not None
+            and scenario.dataset.source_bytes_sha256.value != source_sha256
+        ):
+            raise InputChangedError("dataset changed; explicitly select and validate it again")
         source_summary = _scenario_summary(scenario_id, scenario)
         if parameters is None:
             return source_summary
@@ -848,8 +922,15 @@ class WebService:
         scenario_id: str,
         input_identity: dict[str, object],
         parameters: dict[str, object] | None,
+        captured: LoadedBacktestScenario | None = None,
     ) -> PreparedJob:
-        scenario = self.registry.load(scenario_id)
+        scenario = (
+            captured
+            if captured is not None
+            else self._bind_dataset(
+                self.registry.load(scenario_id), cast(str | None, input_identity.get("dataset_id"))
+            )
+        )
         if _scenario_identity(scenario) != input_identity:
             raise InputChangedError("scenario input changed; validate it again")
         if parameters is not None:
@@ -926,8 +1007,12 @@ class WebService:
                 raise ServiceBusyError("one local backtest or batch is already active")
             prepared: list[PreparedJob] = []
             combinations: set[bytes] = set()
+            captured = self._bind_dataset(
+                self.registry.load(scenario_id), cast(str | None, input_identity.get("dataset_id"))
+            )
             for strategy_parameters in runs:
                 item = self._prepare_job(
+                    captured=captured,
                     scenario_id=scenario_id,
                     input_identity=input_identity,
                     parameters={
@@ -1058,13 +1143,32 @@ class WebService:
             raise WebBoundaryError("source report and snapshot identity conflict")
         return document
 
-    def _prepare_holdout(self, source_job_id: str, scenario_id: str) -> PreparedJob:
+    def _prepare_holdout(
+        self,
+        source_job_id: str,
+        scenario_id: str,
+        dataset_id: str | None = None,
+        source_sha256: str | None = None,
+    ) -> PreparedJob:
         source = self._holdout_source(source_job_id)
         source_package = self.get_job(source_job_id).strategy_package
         frozen_catalog = (
             None if source_package is None else ResearchStrategyCatalogV1((source_package,))
         )
         target = self.registry.load(scenario_id, catalog=frozen_catalog)
+        if dataset_id is not None:
+            if self.datasets is None:
+                raise WebBoundaryError("no data root is configured")
+            path, dataset = self.datasets.load(dataset_id)
+            if source_sha256 is not None and dataset.source_bytes_sha256.value != source_sha256:
+                raise InputChangedError("holdout dataset changed; reselect it")
+            target = rebind_research_dataset(
+                target,
+                data_path=path,
+                dataset=dataset,
+                dataset_id=dataset_id,
+                frozen_document=source,
+            )
         document = json.loads(target.canonical_bytes)
         if not compatible(source, document):
             raise WebBoundaryError("holdout configuration is incompatible with source")
@@ -1092,11 +1196,32 @@ class WebService:
                 except (WebBoundaryError, BacktestScenarioError, ValueError):
                     continue
                 candidates.append(_scenario_summary(scenario_id, prepared.scenario))
+            if self.datasets is not None:
+                scenario_id = self.get_job(source_job_id).scenario_id
+                for entry in self.datasets.list():
+                    if not entry["valid"]:
+                        continue
+                    try:
+                        prepared = self._prepare_holdout(
+                            source_job_id, scenario_id, cast(str, entry["dataset_id"])
+                        )
+                    except (OSError, ValueError):
+                        continue
+                    summary = _scenario_summary(scenario_id, prepared.scenario)
+                    summary["name"] = entry["dataset_id"]
+                    candidates.append(summary)
             return candidates
 
-    def create_holdout(self, *, source_job_id: str, scenario_id: str) -> dict[str, str]:
+    def create_holdout(
+        self,
+        *,
+        source_job_id: str,
+        scenario_id: str,
+        dataset_id: str | None = None,
+        source_sha256: str | None = None,
+    ) -> dict[str, str]:
         with self._lock:
-            prepared = self._prepare_holdout(source_job_id, scenario_id)
+            prepared = self._prepare_holdout(source_job_id, scenario_id, dataset_id, source_sha256)
             if self._active is not None:
                 raise ServiceBusyError("one local backtest or batch is already active")
             job_id = str(uuid4())
@@ -1180,6 +1305,7 @@ class WebService:
         try:
             if record.attempt_id is None:
                 raise RuntimeError("accepted Web job has no reserved attempt identity")
+            self._check_dataset(scenario)
             result = run_backtest_scenario(
                 scenario,
                 self.runs_dir,

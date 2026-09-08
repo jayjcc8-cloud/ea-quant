@@ -19,7 +19,9 @@ function ParameterControls({ contracts, values, update, prefix = '' }: { contrac
   </div>)}</div>
 }
 
-export type InputIdentity = { scenario_sha256: string; data_sha256: string; record_count: number }
+type Dataset = { dataset_id: string; valid: boolean; source_sha256?: string; record_count?: number; replay_start_utc?: string; replay_end_utc?: string }
+type DatasetReference = { dataset_id?: string; source_sha256?: string }
+export type InputIdentity = DatasetReference & { scenario_sha256: string; data_sha256: string; record_count: number }
 export type StrategyParameterContract = {
   name: string; type: 'decimal' | 'integer'
   default: string | number | null; current_value: string | number | null
@@ -36,7 +38,7 @@ type Commission = { policy: string; commission_bps: string }
 const commissionLabel = (commission?: Commission | null) => commission ? `${commission.policy} · ${commission.commission_bps} bps` : 'Legacy zero commission · 0 bps'
 
 export type InputSnapshot = {
-  schema: 'ea.local-web-input.v1'; scenario_id: string; source_identity: InputIdentity; identity: InputIdentity
+  schema: 'ea.local-web-input.v1' | 'ea.local-web-input.v2'; research_input?: Dataset; scenario_id: string; source_identity: InputIdentity; identity: InputIdentity
   scenario: {
     data?: ReplayData
     execution?: { policy: string; commission?: Commission | null }
@@ -86,11 +88,12 @@ export type BacktestReport = {
 }
 export type ApiAdapter = {
   holdoutScenarios(sourceJobId: string): Promise<ScenarioSummary[]>
-  createHoldout(request: { source_job_id: string; scenario_id: string }): Promise<ChronologicalHoldout>
+  listDatasets?(): Promise<Dataset[]>
+  createHoldout(request: { source_job_id: string; scenario_id: string; dataset_id?: string; source_sha256?: string }): Promise<ChronologicalHoldout>
   getHoldout(validationId: string): Promise<ChronologicalHoldout>
   listHoldouts(): Promise<ChronologicalHoldout[]>
   listScenarios(): Promise<ScenarioSummary[]>
-  validateScenario(scenarioId: string, parameters: BacktestParameters): Promise<ScenarioSummary>
+  validateScenario(scenarioId: string, parameters: BacktestParameters, dataset?: DatasetReference): Promise<ScenarioSummary>
   createBacktest(request: { scenario_id: string; input_identity: InputIdentity; parameters: BacktestParameters; request_id: string }): Promise<BacktestJob>
   createBatch(request: BatchRequest): Promise<ExperimentBatch>
   getBatch(batchId: string): Promise<ExperimentBatch>
@@ -115,14 +118,15 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const browserApi: ApiAdapter = {
+  async listDatasets() { return (await apiRequest<{ datasets: Dataset[] }>('/api/datasets')).datasets },
   async holdoutScenarios(jobId) { return (await apiRequest<{ scenarios: ScenarioSummary[] }>(`/api/backtests/${encodeURIComponent(jobId)}/holdout-scenarios`)).scenarios },
   createHoldout(request) { return apiRequest('/api/holdouts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request) }) },
   getHoldout(id) { return apiRequest(`/api/holdouts/${encodeURIComponent(id)}`) },
   async listHoldouts() { return (await apiRequest<{ holdouts: ChronologicalHoldout[] }>('/api/holdouts')).holdouts },
   async listScenarios() { return (await apiRequest<{ scenarios: ScenarioSummary[] }>('/api/scenarios')).scenarios },
-  validateScenario(scenarioId, parameters) {
+  validateScenario(scenarioId, parameters, dataset) {
     return apiRequest(`/api/scenarios/${encodeURIComponent(scenarioId)}/validate`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ parameters }),
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ parameters, ...dataset }),
     })
   },
   createBacktest(request) {
@@ -140,6 +144,25 @@ const browserApi: ApiAdapter = {
   getBacktest(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}`) },
   getReport(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/report`) },
   artifactUrl(jobId, name) { return `/api/backtests/${encodeURIComponent(jobId)}/artifacts/${name}` },
+}
+
+function DatasetSelector({ api, value, change }: { api: ApiAdapter; value: DatasetReference; change: (value: DatasetReference) => void }) {
+  const [items, setItems] = useState<Dataset[]>([])
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true
+    api.listDatasets?.().then(items => { if (active) setItems(items) }).catch(() => { if (active) setError('Dataset catalog unavailable') })
+    return () => { active = false }
+  }, [api])
+  if (!items.length && !value.dataset_id && !error) return null
+  return <div><label htmlFor="research-dataset">Research dataset</label>
+    <select id="research-dataset" value={value.dataset_id ?? ''} onChange={event => {
+      const item = items.find(item => item.dataset_id === event.target.value)
+      change(item ? { dataset_id: item.dataset_id, source_sha256: item.source_sha256 } : {})
+    }}><option value="">Registered scenario data</option>
+      {value.dataset_id && !items.some(item => item.dataset_id === value.dataset_id) && <option value={value.dataset_id}>{value.dataset_id} · unavailable</option>}
+      {items.map(item => <option key={item.dataset_id} value={item.dataset_id} disabled={!item.valid}>{item.dataset_id}{item.valid ? '' : ' · invalid'}</option>)}
+    </select>{error && <p className="notice error">{error}</p>}</div>
 }
 
 function PageTitle({ title, subtitle, status }: { title: string; subtitle: string; status?: string }) {
@@ -179,6 +202,7 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
   const navigate = useNavigate()
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([])
   const [selected, setSelected] = useState('')
+  const [dataset, setDataset] = useState<DatasetReference>({})
   const [initialCash, setInitialCash] = useState('')
   const [runs, setRuns] = useState<BatchConfiguration[]>([])
   const [busy, setBusy] = useState(false)
@@ -212,9 +236,10 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
     if (!candidate?.input_identity) return
     setBusy(true); setError(null)
     try {
+      const checked = dataset.dataset_id ? await api.validateScenario(selected, { initial_cash: initialCash, strategy_parameters: runs[0] }, dataset) : candidate
       const created = await api.createBatch({
         scenario_id: candidate.scenario_id,
-        input_identity: candidate.input_identity,
+        input_identity: checked.input_identity!,
         initial_cash: initialCash,
         runs: runs.map((item) => ({ strategy_parameters: item })),
       })
@@ -230,6 +255,7 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
     {error && <section className="notice error">{error}</section>}
     <section className="panel batch-control-panel">
       <header><h2>Batch input</h2><span>One strategy and scenario</span></header>
+      <DatasetSelector api={api} value={dataset} change={setDataset} />
       <div className="parameter-grid">
         <div><label htmlFor="batch-scenario">Scenario</label><select id="batch-scenario" value={selected} onChange={(event) => selectScenario(scenarios.find((item) => item.scenario_id === event.target.value))}>{scenarios.filter((item) => item.valid && (item.strategy_parameters?.length ?? 0) > 0).map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}</option>)}</select></div>
         <div><label htmlFor="batch-initial-cash">Initial cash</label><input id="batch-initial-cash" value={initialCash} onChange={(event) => setInitialCash(event.target.value)} /></div>
@@ -362,6 +388,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
   const [selected, setSelected] = useState('')
   const [initialCash, setInitialCash] = useState('')
   const [values, setValues] = useState<ParameterMap>({})
+  const [dataset, setDataset] = useState<DatasetReference>({})
   const [frozenSource, setFrozenSource] = useState<StrategySource | undefined>()
   const [comparison, setComparison] = useState<string[]>([])
   const [validated, setValidated] = useState<ScenarioSummary | null>(null)
@@ -398,7 +425,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
   }
   const validate = async () => {
     setBusy(true); setError(null)
-    try { setValidated(await api.validateScenario(selected, parameters())) }
+    try { setValidated(await api.validateScenario(selected, parameters(), dataset)) }
     catch (caught) { setValidated(null); setError(caught instanceof Error ? caught.message : 'Validation failed') }
     finally { setBusy(false) }
   }
@@ -414,6 +441,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
   const restoreParameters = (item: BacktestJob) => {
     const snapshot = item.input_snapshot?.scenario
     if (!snapshot) return
+    setDataset(item.input_snapshot?.research_input ? { dataset_id: item.input_snapshot.research_input.dataset_id, source_sha256: item.input_snapshot.research_input.source_sha256 } : {})
     setFrozenSource(snapshot.strategy.source)
     setSelected(item.scenario_id); setInitialCash(snapshot.funding.initial_cash)
     setValues(jobParameters(item)); setValidated(null); setError(null)
@@ -436,6 +464,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
           <option value="">Select prepared scenario</option>
           {scenarios.filter(item => item.strategy_descriptor?.research_visible !== false).map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}{item.valid ? '' : ' · invalid'}</option>)}
         </select>
+        <DatasetSelector api={api} value={dataset} change={value => { setDataset(value); setValidated(null) }} />
         {candidate?.summary && <dl className="summary-list">
           <div><dt>Strategy</dt><dd>{candidate.summary.strategy_id}</dd></div><div><dt>Instrument</dt><dd>{candidate.summary.venue}:{candidate.summary.symbol}</dd></div>
           <div><dt>Commission</dt><dd>{commissionLabel(candidate.summary.commission)}</dd></div>
@@ -447,7 +476,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
           <div><label htmlFor="symbol">Symbol</label><input id="symbol" value={candidate?.summary?.symbol ?? ''} readOnly aria-describedby="symbol-source" /><small id="symbol-source">Registered scenario/data only</small></div>
         </div>
         <section className="strategy-parameters"><h3>Strategy Parameters</h3>
-          <ParameterControls contracts={candidate?.strategy_parameters ?? []} values={values} update={(name, value) => { setValues(current => ({ ...current, [name]: value })); setValidated(null); setError(null) }} />
+          <ParameterControls contracts={validated?.strategy_parameters ?? candidate?.strategy_parameters ?? []} values={values} update={(name, value) => { setValues(current => ({ ...current, [name]: value })); setValidated(null); setError(null) }} />
         </section>
         <div className="actions"><button disabled={!selected || busy} onClick={validate}>Validate input</button><button className="primary" disabled={!validated || busy} onClick={run}>Run new backtest</button></div>
         {validated?.summary && <div className="validated"><strong>Validated input</strong><span>{parameterText(validated.summary.parameters ?? {})}</span><small>{validated.normalized_input_identity?.scenario_sha256.slice(0, 12) ?? validated.input_identity?.scenario_sha256.slice(0, 12)}…</small></div>}
@@ -457,6 +486,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
           const input = item.input_snapshot?.scenario
           return <li key={item.job_id} className="job-card">
             <div className="job-card-title"><Link to={`/backtests/${item.job_id}`}><strong>{item.scenario_id}</strong></Link><span className={`status status-${item.status}`}>{item.status}</span></div>
+            {item.input_snapshot?.research_input && <small>Dataset: {item.input_snapshot.research_input.dataset_id}</small>}
             {item.created_at && <time>{item.created_at}</time>}
             <small>{input ? `${input.instrument.symbol} · Cash ${input.funding.initial_cash} · ${parameterText(jobParameters(item))}` : 'Legacy run · input snapshot unavailable'}</small>
             {input && <small>{item.strategy_descriptor?.display_name ?? input.strategy.id} · {input.strategy.id} v{input.strategy.version ?? 1}{input.strategy.source && ` · Local package · ${input.strategy.source.package_id} · ${input.strategy.source.artifact_sha256.slice(0, 12)}`}</small>}
@@ -618,6 +648,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     <div className="result-toolbar"><Link to="/backtests">← New or saved backtest</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
     <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
       <div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
+      {job.input_snapshot?.research_input && <><div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div><div><dt>Source SHA-256</dt><dd>{job.input_snapshot.research_input.source_sha256}</dd></div></>}
     </dl></section>
     {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
     {job.input_snapshot && <p>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</p>}
@@ -671,6 +702,7 @@ function HoldoutEvidence({ role, job, report }: { role: string; job: BacktestJob
   const currency = economics?.currency ?? job.input_snapshot?.scenario.funding.currency
   return <section className="panel"><header><h2>{role}</h2><span>{job.status}</span></header><dl className="summary-list">
     <div><dt>Scenario</dt><dd>{job.scenario_id}</dd></div>
+    {job.input_snapshot?.research_input && <div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div>}
     <div><dt>Window (UTC)</dt><dd>{data ? `${data.start_utc} → ${data.end_utc}` : 'Unavailable'}</dd></div>
     <div><dt>Data fingerprint</dt><dd>{data?.fingerprint.sha256 ?? 'Unavailable'}</dd></div>
     <div><dt>Record count</dt><dd>{data?.fingerprint.record_count ?? 'Unavailable'}</dd></div>
@@ -710,17 +742,17 @@ function HoldoutCreator({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     }).catch(caught => { if (active) setError(String(caught)) })
     return () => { active = false }
   }, [api, jobId])
-  const candidate = candidates.find(item => item.scenario_id === selected)
+  const candidate = candidates.find(item => (item.input_identity?.dataset_id ? `${item.scenario_id}|${item.input_identity.dataset_id}` : item.scenario_id) === selected)
   const submit = async () => {
     setBusy(true); setError('')
-    try { const relation = await api.createHoldout({ source_job_id: jobId, scenario_id: selected }); navigate(`/holdouts/${relation.validation_id}`) }
+    try { const relation = await api.createHoldout({ source_job_id: jobId, scenario_id: candidate!.scenario_id, ...(candidate?.input_identity?.dataset_id ? { dataset_id: candidate.input_identity.dataset_id, source_sha256: candidate.input_identity.source_sha256 } : {}) }); navigate(`/holdouts/${relation.validation_id}`) }
     catch (caught) { setError(String(caught)); setBusy(false) }
   }
   return <><PageTitle title="New Chronological Holdout" subtitle="Chronological holdout evaluation using parameters frozen from your selected source." />
     {error && <p className="notice error">{error}</p>}
     {source && <><FrozenParameters job={source.job} /><HoldoutEvidence role="IS" {...source} /></>}
     <section className="panel"><label htmlFor="holdout-scenario">Holdout scenario</label>
-      <select id="holdout-scenario" value={selected} onChange={event => setSelected(event.target.value)}><option value="">Select a compatible later registered scenario</option>{candidates.map(item => <option key={item.scenario_id} value={item.scenario_id}>{item.name}</option>)}</select>
+      <select id="holdout-scenario" value={selected} onChange={event => setSelected(event.target.value)}><option value="">Select a compatible later registered scenario</option>{candidates.map(item => <option key={(item.input_identity?.dataset_id ? `${item.scenario_id}|${item.input_identity.dataset_id}` : item.scenario_id)} value={(item.input_identity?.dataset_id ? `${item.scenario_id}|${item.input_identity.dataset_id}` : item.scenario_id)}>{item.name}</option>)}</select>
       {source && candidates.length === 0 && <p>No compatible later registered scenario with valid frozen parameters is available.</p>}
       {candidate?.summary?.data && <dl className="summary-list"><div><dt>Window (UTC)</dt><dd>{candidate.summary.data.start_utc} → {candidate.summary.data.end_utc}</dd></div><div><dt>Data fingerprint</dt><dd>{candidate.summary.data.fingerprint.sha256}</dd></div><div><dt>Record count</dt><dd>{candidate.summary.data.fingerprint.record_count}</dd></div></dl>}
       <button className="primary" disabled={!selected || !source?.report || busy} onClick={() => { void submit() }}>Run chronological holdout</button>

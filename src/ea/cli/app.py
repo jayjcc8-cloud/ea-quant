@@ -46,6 +46,26 @@ strategy_app = typer.Typer(help="Pack, validate and inspect trusted local strate
 app.add_typer(strategy_app, name="strategy")
 
 
+data_app = typer.Typer(help="Inspect strict full-capture local OHLCV input.")
+app.add_typer(data_app, name="data")
+
+
+@data_app.command("inspect")
+def data_inspect(path: Path) -> None:
+    """Print validated full-capture provenance and canonical data identity."""
+    from ea.web.datasets import LocalResearchDatasetRegistryV1
+
+    try:
+        absolute = path.absolute()
+        result = LocalResearchDatasetRegistryV1(absolute.parent).inspect(absolute.name)
+        result.pop("dataset_id")
+        result.pop("valid")
+        typer.echo(canonical_json(result).decode("ascii"))
+    except (OSError, ValueError):
+        typer.echo("data input error: invalid or unavailable strict OHLCV capture", err=True)
+        raise typer.Exit(code=2) from None
+
+
 @dataclass(frozen=True, slots=True)
 class CliConfiguration:
     config_path: str | None
@@ -268,6 +288,7 @@ def web_serve(
         ),
     ] = 8765,
     strategy_root: Annotated[Path | None, typer.Option("--strategy-root")] = None,
+    data_root: Annotated[Path | None, typer.Option("--data-root")] = None,
 ) -> None:
     """Serve the real offline Web backtest loop from explicit local roots."""
     try:
@@ -296,6 +317,7 @@ def web_serve(
                 ui_dir=resolved_ui,
                 port=port,
                 strategy_root=strategy_root,
+                data_root=data_root,
             )
         )
     except WebDependencyError as error:

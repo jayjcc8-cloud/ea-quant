@@ -143,6 +143,12 @@ external write, deployment, or live capability is part of this objective.
   comparison retain source identity. Executable Python is trusted local code, not sandboxed;
   upload, URLs, package installation, dependency bundles and implicit scanning are unsupported.
 
+- Issue #187 / ADR 0037 adds optional explicit `--data-root` and strict local OHLCV discovery.
+  Full-capture data-only derivation reuses the historical decoder and preserves V1/V2/V3 identity
+  domains. Raw SHA is provenance; dataset filenames are non-semantic. Generic Web run/reuse,
+  batch, comparison and frozen chronological Holdout retain immutable dataset evidence and old
+  reports remain readable after external data removal. `ea data inspect` emits canonical JSON.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
@@ -150,7 +156,7 @@ backtest/reporting product, not the broader validation, optimization, paper, or 
 instruction-level or Web recovery, symbol/data editing, uploads, broader experiment tracking,
 automatic optimization, broader performance analytics, remote strategy plugins, paper/live execution,
 package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Research Foundation adds schema-driven strategies and immutable local artifacts to commission and Chronological Holdout.
-Next bounded design: Research Input Workflow V1. Dataset Registry, Candidate and Agent Research Tools remain future work.
+Research Input Workflow V1 is delivered; further capability selection returns to architecture review after real input-flow usage. Candidate and Agent Research Tools remain future work.
 
 ## Blockers
 
@@ -183,6 +189,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0034 — Chronological Holdout V1](adr/0034-chronological-holdout-v1.md)
 - [ADR 0035 — Schema-driven Strategy Contract V1](adr/0035-schema-driven-strategy-contract-v1.md)
 - [ADR 0036 — Immutable Local Strategy Package V1](adr/0036-immutable-local-strategy-package-v1.md)
+- [ADR 0037 — Registered Local OHLCV Research Input V1](adr/0037-registered-local-ohlcv-research-input-v1.md)
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
