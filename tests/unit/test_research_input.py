@@ -1,6 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -360,5 +360,49 @@ def test_batch_members_execute_one_captured_dataset(
         )
         executable = calls[0][2]
         assert executable[0][1].dataset is executable[1][1].dataset
+    finally:
+        service.stop()
+
+
+def test_engine_entry_rejects_representation_change_after_web_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    import ea.web.service as service_module
+    from ea.web.service import WebService
+
+    root = _scenario_root(tmp_path)
+    base = load_backtest_scenario(root / "bounded-long.yaml")
+    data = tmp_path / "data"
+    data.mkdir()
+    path = data / "research.csv"
+    path.write_bytes(base.data_path.read_bytes())
+    from ea.product import run_backtest_scenario as original
+
+    def change_then_run(scenario: Any, *args: Any, **kwargs: Any) -> Any:
+        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        return original(scenario, *args, **kwargs)
+
+    monkeypatch.setattr(service_module, "run_backtest_scenario", change_then_run)
+    service = WebService(root, tmp_path / "workspace", data_root=data)
+    service.start()
+    try:
+        identity = service.validate_scenario("bounded-long.yaml", dataset_id=path.name)[
+            "input_identity"
+        ]
+        accepted, _ = service.create_job(
+            scenario_id="bounded-long.yaml",
+            input_identity=cast(dict[str, object], identity),
+            request_id="engine-entry-race",
+        )
+        for _ in range(200):
+            job = service.get_job(accepted.job_id)
+            if job.status not in {"accepted", "running"}:
+                break
+            time.sleep(0.02)
+        assert job.status == "failed", "changed raw provenance must never become a successful job"
+        assert job.error_code == "input_changed"
+        assert not list(service.reports_dir.iterdir())
     finally:
         service.stop()
