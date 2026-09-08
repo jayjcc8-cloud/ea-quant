@@ -58,7 +58,6 @@ from ea.experiments.audit import (
 from ea.product.backtest import BacktestResumeFailure, _load_verified_attempt
 from ea.product.identity import semantic_outcome_sha256
 from ea.product.scenario import LoadedBacktestScenario
-from ea.strategy.registry import BUILTIN_STRATEGIES
 
 _REPORT_SCHEMA = "ea.backtest-report.v1"
 _VALUATION_RULE = "last-admitted-close-v1"
@@ -1023,9 +1022,7 @@ def _validate_result(
         final_snapshot_sha256 = funded_snapshot_sha256
     if terminal_snapshot != final_snapshot_sha256:
         raise ValueError("terminal snapshot conflicts")
-    BUILTIN_STRATEGIES.get(scenario.strategy_id.value, scenario.strategy_version).validate_outcome(
-        len(order_ids), len(accepted_fills)
-    )
+    scenario.strategy_entry.validate_outcome(len(order_ids), len(accepted_fills))
     expected_reconciliations = 2 if accepted_fills else 1
     if len(reconciliation_payloads) != expected_reconciliations or any(
         item.get("outcome_code") != "reconciliation.match"

@@ -114,7 +114,6 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
 ## Product Boundary
-
-Two research strategies and CLI-compatible always-flat run offline on registered data. AI strategy
-generation, external plugins, dataset editing, optimization, paper/live and deployment are unavailable.
-Future: Research Foundation → Local Strategy Package → Dataset Registry → Candidate → Agent Research Tools.
+Built-ins and trusted local strategies run offline. See [local strategy tools and SDK](docs/local-strategy-package-v1.md).
+`.eastrategy` contains executable Python and should only be loaded from sources the user trusts.
+This is not a Python sandbox. AI, datasets, optimization, paper/live and deployment remain unavailable.

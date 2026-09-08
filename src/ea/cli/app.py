@@ -24,6 +24,13 @@ from ea.product import (
     run_backtest_scenario,
     run_offline_demo,
 )
+from ea.strategy.package import (
+    StrategyPackageError,
+    canonical_json,
+    pack_strategy,
+    read_regular,
+    validate_package,
+)
 
 app = typer.Typer(
     help="EA quantitative trading system CLI.",
@@ -35,6 +42,8 @@ backtest_app = typer.Typer(
 web_app = typer.Typer(help="Serve the installed offline backtest UI on 127.0.0.1 only.")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(web_app, name="web")
+strategy_app = typer.Typer(help="Pack, validate and inspect trusted local strategy artifacts.")
+app.add_typer(strategy_app, name="strategy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +162,7 @@ def run(
             metavar="FILE",
         ),
     ] = None,
+    strategy_root: Annotated[Path | None, typer.Option("--strategy-root")] = None,
 ) -> None:
     """Run one strict scenario, or the run-only RESET demo when --scenario is omitted."""
     try:
@@ -177,7 +187,7 @@ def run(
         result_path = demo_completed.output_directory / "result.json"
     else:
         try:
-            loaded = load_backtest_scenario(scenario)
+            loaded = load_backtest_scenario(scenario, strategy_root=strategy_root)
             backtest_completed = run_backtest_scenario(loaded, resolved_output)
         except BacktestScenarioError as error:
             typer.echo(f"scenario validation error: {error}", err=True)
@@ -208,17 +218,18 @@ def validate(
             metavar="FILE",
         ),
     ],
+    strategy_root: Annotated[Path | None, typer.Option("--strategy-root")] = None,
 ) -> None:
     """Validate one scenario and its selected local OHLCV without executing it."""
     try:
-        load_backtest_scenario(scenario)
+        loaded = load_backtest_scenario(scenario, strategy_root=strategy_root)
     except BacktestScenarioError as error:
         typer.echo(f"scenario validation error: {error}", err=True)
         raise typer.Exit(code=2) from None
     except Exception:
         typer.echo("scenario validation internal error", err=True)
         raise typer.Exit(code=1) from None
-    typer.echo("scenario valid: BacktestScenario v1")
+    typer.echo(f"scenario valid: BacktestScenario v{loaded.schema_version}")
 
 
 @web_app.command("serve")
@@ -256,6 +267,7 @@ def web_serve(
             help="Loopback HTTP port on fixed host 127.0.0.1.",
         ),
     ] = 8765,
+    strategy_root: Annotated[Path | None, typer.Option("--strategy-root")] = None,
 ) -> None:
     """Serve the real offline Web backtest loop from explicit local roots."""
     try:
@@ -283,6 +295,7 @@ def web_serve(
                 workspace=resolved_workspace,
                 ui_dir=resolved_ui,
                 port=port,
+                strategy_root=strategy_root,
             )
         )
     except WebDependencyError as error:
@@ -366,3 +379,31 @@ def report(
 
 if __name__ == "__main__":
     app()
+
+
+@strategy_app.command("pack")
+def strategy_pack(
+    source: Annotated[Path, typer.Option("--source")],
+    output: Annotated[Path, typer.Option("--output")],
+) -> None:
+    """Pack exactly manifest.json and strategy.py into a deterministic artifact."""
+    try:
+        package = pack_strategy(source, output)
+    except StrategyPackageError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(2) from None
+    typer.echo(canonical_json(package.document()).decode("ascii"))
+
+
+@strategy_app.command("validate")
+@strategy_app.command("inspect")
+def strategy_inspect(artifact: Annotated[Path, typer.Option("--artifact")]) -> None:
+    """Validate executable trusted local code and print canonical JSON identity."""
+    try:
+        if not artifact.is_absolute() or artifact.suffix != ".eastrategy":
+            raise StrategyPackageError("artifact must be an absolute .eastrategy path")
+        package = validate_package(read_regular(artifact, artifact.parent))
+    except StrategyPackageError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(2) from None
+    typer.echo(canonical_json(package.document()).decode("ascii"))
