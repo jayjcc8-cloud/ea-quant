@@ -19,6 +19,8 @@ external write, deployment, or live capability is part of this objective.
 
 ## Completed
 
+- Phase 1 delivery reset is complete; its offline and governance-freeze boundaries remain in force.
+
 - Phase 0 engineering foundation is released as `v0.1.0`.
 - `main@969f5f086acd9c28f80e3960a56b83981b1d0e5d` is the verified pre-reset baseline.
 - Merged code already provides deterministic time/data handling, strategy interfaces, portfolio
