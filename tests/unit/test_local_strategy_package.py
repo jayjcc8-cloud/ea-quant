@@ -119,6 +119,7 @@ def local_scenario(tmp_path: Path) -> tuple[Path, Path, StrategyPackageV1]:
     root = tmp_path / "packages"
     root.mkdir()
     package = pack_strategy(source, root / "threshold.eastrategy")
+    assert isinstance(package, StrategyPackageV1)
     document = yaml.safe_load(path.read_text())
     document["schema_version"] = 3
     document["strategy"] = {

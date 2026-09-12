@@ -145,6 +145,13 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   cpSync(join(repository, 'examples', 'web-scenarios', 'single-long-round-trip.yaml'), join(scenarioRoot, 'roundtrip.yaml'))
   execFileSync(ea, ['data', 'inspect', join(dataRoot, 'research.csv')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
 
+  const v2Source = join(outside, 'ma-crossover-v2')
+  cpSync(join(repository, 'examples/local-strategies/moving-average-crossover-v2'), v2Source, { recursive: true })
+  const v2Artifact = join(strategyRoot, 'ma-v2.eastrategy')
+  execFileSync(ea, ['strategy', 'pack', '--source', v2Source, '--output', v2Artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  for (const command of ['validate', 'inspect']) execFileSync(ea, ['strategy', command, '--artifact', v2Artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  execFileSync(python, ['-I', join(webRoot, 'scripts/setup-local-v2.py'), scenarioRoot, dataRoot, v2Artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+
   const args = ['web', 'serve', '--data-root', dataRoot, '--strategy-root', strategyRoot, '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
   server = spawn(ea, args, { cwd: outside, env: cleanEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] })
   await waitForHealth()
@@ -156,7 +163,7 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   const playwright = join(webRoot, 'node_modules', '.bin', 'playwright')
   const completed = spawn(playwright, ['test', '--config', 'playwright.config.ts', ...(process.env.EA_WEB_E2E_GREP ? ['--grep', process.env.EA_WEB_E2E_GREP] : [])], {
     cwd: webRoot,
-    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact, EA_DATA_ROOT: dataRoot },
+    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact, EA_DATA_ROOT: dataRoot, EA_V2_ARTIFACT: v2Artifact, EA_V2_SOURCE: v2Source, EA_SCENARIO_ROOT: scenarioRoot },
     stdio: 'inherit',
   })
   const code = await new Promise((resolveExit) => completed.on('exit', resolveExit))

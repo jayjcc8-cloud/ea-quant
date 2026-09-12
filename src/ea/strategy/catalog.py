@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from ea.core.economics import CanonicalDecimal, require_positive
 from ea.core.market_data import Adjustment, MarketDataEnvelope
 from ea.strategy.package import (
+    StrategyPackage,
     StrategyPackageError,
     StrategyPackageV1,
+    StrategyPackageV2,
     read_regular,
     validate_package,
 )
 from ea.strategy.registry import BUILTIN_STRATEGIES, EntryLogic, ParameterValue, StrategyEntryV1
 from ea.strategy.sdk_v1 import StrategyBarV1, StrategyDecisionV1, StrategyValidationContextV1
+from ea.strategy.sdk_v2 import ROUND_TRIP_STRATEGY, PositionViewV2, StrategyDescriptorV2
 
 
 class LocalEntryLogic(EntryLogic):
@@ -78,8 +82,49 @@ def package_entry(package: StrategyPackageV1) -> StrategyEntryV1:
     return StrategyEntryV1(package.descriptor, validate, factory, outcome)
 
 
+class LocalActionLogic:
+    def __init__(
+        self, package: StrategyPackageV2, parameters: Mapping[str, ParameterValue]
+    ) -> None:
+        try:
+            self.logic = package.module()["create_logic"](MappingProxyType(dict(parameters)))
+            if not callable(getattr(self.logic, "on_bar", None)):
+                raise ValueError
+        except BaseException:
+            raise StrategyPackageError("strategy factory failed") from None
+
+    def on_bar(self, bar: StrategyBarV1, position: PositionViewV2) -> dict[str, str]:
+        try:
+            from ea.strategy.sdk_v2 import decode_action
+
+            decision = self.logic.on_bar(bar, position)
+            decode_action(decision)
+            return cast(dict[str, str], decision)
+        except BaseException:
+            raise StrategyPackageError("strategy decision failed") from None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalActionEntry:
+    package: StrategyPackageV2
+
+    @property
+    def descriptor(self) -> StrategyDescriptorV2:
+        return self.package.descriptor
+
+    def normalize(self, parameters: Mapping[str, object]) -> dict[str, ParameterValue]:
+        if not isinstance(parameters, Mapping) or set(parameters) != {
+            p.name for p in self.descriptor.parameters
+        }:
+            raise ValueError("complete closed V2 parameters required")
+        return {p.name: p.normalize(parameters[p.name]) for p in self.descriptor.parameters}
+
+    def factory(self, parameters: Mapping[str, ParameterValue]) -> LocalActionLogic:
+        return LocalActionLogic(self.package, self.normalize(parameters))
+
+
 def validate_context(
-    package: StrategyPackageV1,
+    package: StrategyPackage,
     parameters: Mapping[str, ParameterValue],
     context: StrategyValidationContextV1,
 ) -> None:
@@ -90,8 +135,10 @@ def validate_context(
 
 
 class ResearchStrategyCatalogV1:
-    def __init__(self, packages: tuple[StrategyPackageV1, ...] = ()) -> None:
-        builtin_ids = {d.strategy_id for d in BUILTIN_STRATEGIES.descriptors()}
+    def __init__(self, packages: tuple[StrategyPackage, ...] = ()) -> None:
+        builtin_ids = {d.strategy_id for d in BUILTIN_STRATEGIES.descriptors()} | {
+            ROUND_TRIP_STRATEGY.descriptor.strategy_id
+        }
         ids = [p.descriptor.strategy_id for p in packages]
         package_ids = [p.identity.package_id for p in packages]
         if (
@@ -120,7 +167,7 @@ class ResearchStrategyCatalogV1:
         # ID alone can only select a distribution-owned implementation.
         return BUILTIN_STRATEGIES.get(strategy_id, version)
 
-    def package(self, strategy: Mapping[str, Any]) -> StrategyPackageV1:
+    def package(self, strategy: Mapping[str, Any]) -> StrategyPackage:
         source = strategy.get("source", {})
         for package in self.packages:
             if (
@@ -137,7 +184,12 @@ class ResearchStrategyCatalogV1:
                 return package
         raise StrategyPackageError("exact strategy package identity is unavailable")
 
-    def resolve(self, strategy: Mapping[str, Any]) -> StrategyEntryV1:
+    def resolve(self, strategy: Mapping[str, Any]) -> StrategyEntryV1 | LocalActionEntry:
         if "source" in strategy:
-            return package_entry(self.package(strategy))
+            package = self.package(strategy)
+            return (
+                LocalActionEntry(package)
+                if isinstance(package, StrategyPackageV2)
+                else package_entry(package)
+            )
         return self.get(strategy["id"], strategy.get("version", 1))

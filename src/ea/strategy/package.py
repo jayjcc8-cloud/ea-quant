@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ea.strategy.registry import ParameterV1, StrategyDescriptorV1
+from ea.strategy.sdk_v2 import StrategyDescriptorV2
 
 MAX_MEMBER_BYTES = 1024 * 1024
 MAX_ARTIFACT_BYTES = 2 * MAX_MEMBER_BYTES + 4096
@@ -53,16 +54,41 @@ class StrategyPackageV1:
         }
 
     def module(self) -> dict[str, Any]:
-        namespace: dict[str, Any] = {"__name__": "ea_local_" + self.identity.artifact_sha256}
-        try:
-            exec(compile(self.source_bytes, "<trusted-local-strategy>", "exec"), namespace)
-            if not all(
-                callable(namespace.get(name)) for name in ("validate_parameters", "create_logic")
-            ):
-                raise ValueError
-        except BaseException:
-            raise StrategyPackageError("strategy code contract failed") from None
-        return namespace
+        return _module(self.source_bytes, self.identity.artifact_sha256)
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyPackageV2:
+    identity: StrategyPackageIdentityV1
+    artifact_bytes: bytes
+    source_bytes: bytes
+    descriptor: StrategyDescriptorV2
+
+    def document(self) -> dict[str, Any]:
+        return {
+            **asdict(self.identity),
+            **self.descriptor.document(),
+            "schema": "ea-strategy-package-v2",
+        }
+
+    def module(self) -> dict[str, Any]:
+        return _module(self.source_bytes, self.identity.artifact_sha256)
+
+
+StrategyPackage = StrategyPackageV1 | StrategyPackageV2
+
+
+def _module(source_bytes: bytes, digest: str) -> dict[str, Any]:
+    namespace: dict[str, Any] = {"__name__": "ea_local_" + digest}
+    try:
+        exec(compile(source_bytes, "<trusted-local-strategy>", "exec"), namespace)
+        if not all(
+            callable(namespace.get(name)) for name in ("validate_parameters", "create_logic")
+        ):
+            raise ValueError
+    except BaseException:
+        raise StrategyPackageError("strategy code contract failed") from None
+    return namespace
 
 
 def _container(manifest: bytes, source: bytes) -> bytes:
@@ -77,7 +103,7 @@ def _container(manifest: bytes, source: bytes) -> bytes:
     return result.getvalue()
 
 
-def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> StrategyPackageV1:
+def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> StrategyPackage:
     try:
         if type(payload) is not bytes or len(payload) > MAX_ARTIFACT_BYTES:
             raise ValueError
@@ -99,7 +125,7 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
             "strategy",
         }:
             raise ValueError
-        if type(document["schema_version"]) is not int or document["schema_version"] != 1:
+        if type(document["schema_version"]) is not int or document["schema_version"] not in (1, 2):
             raise ValueError
         package_id = document["package_id"]
         if type(package_id) is not str or not re.fullmatch(
@@ -107,7 +133,9 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
         ):
             raise ValueError
         strategy = document["strategy"]
-        if set(strategy) != {"id", "version", "display_name", "parameters", "outcome_mode"}:
+        version = document["schema_version"]
+        fields = {"outcome_mode"} if version == 1 else {"action_contract", "position_lifecycle"}
+        if set(strategy) != {"id", "version", "display_name", "parameters"} | fields:
             raise ValueError
         if type(strategy["id"]) is not str or not re.fullmatch(
             r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", strategy["id"]
@@ -128,19 +156,38 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
             True,
             tuple(ParameterV1(**p) for p in strategy["parameters"]),
         )
-        if strategy["outcome_mode"] not in {
+        if version == 1 and strategy["outcome_mode"] not in {
             "optional_single_long_entry",
             "required_single_long_entry",
             "no_entry",
         }:
             raise ValueError
         source.decode("utf-8")
-        package = StrategyPackageV1(
-            StrategyPackageIdentityV1(package_id, digest),
-            payload,
-            source,
-            descriptor,
-            strategy["outcome_mode"],
+        if version == 2 and (
+            strategy["action_contract"] != "V2"
+            or strategy["position_lifecycle"] != "single-long-round-trip-v1"
+        ):
+            raise ValueError
+        package: StrategyPackage = (
+            StrategyPackageV1(
+                StrategyPackageIdentityV1(package_id, digest),
+                payload,
+                source,
+                descriptor,
+                strategy["outcome_mode"],
+            )
+            if version == 1
+            else StrategyPackageV2(
+                StrategyPackageIdentityV1(package_id, digest),
+                payload,
+                source,
+                StrategyDescriptorV2(
+                    strategy_id=descriptor.strategy_id,
+                    strategy_version=descriptor.strategy_version,
+                    display_name=descriptor.display_name,
+                    parameters=descriptor.parameters,
+                ),
+            )
         )
     except Exception:
         raise StrategyPackageError("strategy package validation failed") from None
@@ -187,7 +234,7 @@ def read_regular(path: Path, root: Path, *, limit: int = MAX_ARTIFACT_BYTES) -> 
             os.close(directory)
 
 
-def pack_strategy(source: Path, output: Path) -> StrategyPackageV1:
+def pack_strategy(source: Path, output: Path) -> StrategyPackage:
     try:
         if (
             not source.is_absolute()

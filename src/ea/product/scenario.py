@@ -42,8 +42,13 @@ from ea.core.economics import EconomicValidationError
 from ea.core.run import RunContractError
 from ea.data import HistoricalMarketDataError, Phase1HistoricalDataset, read_phase1_ohlcv_csv
 from ea.product.identity import BacktestRandomness
-from ea.strategy.catalog import ResearchStrategyCatalogV1, package_entry, validate_context
-from ea.strategy.package import StrategyPackageV1
+from ea.strategy.catalog import (
+    LocalActionEntry,
+    ResearchStrategyCatalogV1,
+    package_entry,
+    validate_context,
+)
+from ea.strategy.package import StrategyPackage, StrategyPackageV2
 from ea.strategy.registry import (
     BUILTIN_STRATEGIES,
     ResolvedStrategyParameterV1,
@@ -214,6 +219,7 @@ class BacktestScenarioV3(_StrictModel):
 
 
 class _StrategyInputV4(_StrategyInputV2):
+    source: _StrategySourceV3 | None = None
     action_contract: Literal["V2"]
     position_lifecycle: Literal["single-long-round-trip-v1"]
 
@@ -288,11 +294,13 @@ class LoadedBacktestScenario:
     canonical_bytes: bytes
     scenario_sha256: Sha256Digest
 
-    strategy_package: StrategyPackageV1 | None = None
+    strategy_package: StrategyPackage | None = None
     research_input_bytes: bytes | None = None
 
     @property
-    def strategy_entry(self) -> StrategyEntryV1 | StrategyEntryV2:
+    def strategy_entry(self) -> StrategyEntryV1 | StrategyEntryV2 | LocalActionEntry:
+        if isinstance(self.strategy_package, StrategyPackageV2):
+            return LocalActionEntry(self.strategy_package)
         if self.schema_version == 4:
             return ROUND_TRIP_STRATEGY
         if self.strategy_package is not None:
@@ -397,6 +405,8 @@ def _canonical_bytes(
     dataset: Phase1HistoricalDataset,
 ) -> bytes:
     document = model.model_dump(mode="json")
+    if isinstance(model, BacktestScenarioV4) and model.strategy.source is None:
+        document["strategy"].pop("source")
     if model.execution.commission is None:
         document["execution"].pop("commission")
     data = dict(document["data"])
@@ -639,7 +649,7 @@ def _load_scenario_document(
                 f"strategy.entry_delay_bars must be at most {entry_delay_maximum}"
             )
     package = None
-    if isinstance(model, BacktestScenarioV4):
+    if isinstance(model, BacktestScenarioV4) and model.strategy.source is None:
         try:
             if (model.strategy.id, model.strategy.version) != ("single-long-hold-roots-v1", 1):
                 raise ValueError("unsupported V2 strategy")
@@ -654,7 +664,7 @@ def _load_scenario_document(
             )
         except ValueError as error:
             raise BacktestScenarioError(str(error)) from None
-    elif isinstance(model, BacktestScenarioV3):
+    elif isinstance(model, (BacktestScenarioV3, BacktestScenarioV4)):
         try:
             selected = (
                 catalog
@@ -662,7 +672,14 @@ def _load_scenario_document(
                 else ResearchStrategyCatalogV1.from_root(strategy_root)
             )
             package = selected.package(model.strategy.model_dump())
-            normalized = package_entry(package).normalize(model.strategy.parameters)
+            if isinstance(model, BacktestScenarioV4) != isinstance(package, StrategyPackageV2):
+                raise ValueError("package version conflicts with scenario route")
+            entry = (
+                LocalActionEntry(package)
+                if isinstance(package, StrategyPackageV2)
+                else package_entry(package)
+            )
+            normalized = entry.normalize(model.strategy.parameters)
             validate_context(
                 package,
                 normalized,
@@ -873,7 +890,7 @@ def resolved_scenario_parameters(
 ) -> tuple[ResolvedStrategyParameterV1, ...]:
     values = scenario.strategy_parameters if parameters is None else parameters
     spec = scenario.spec_set.require(scenario.instrument)
-    if scenario.schema_version == 4:
+    if scenario.schema_version == 4 and scenario.strategy_package is None:
         ROUND_TRIP_STRATEGY.normalize(values)
         require_quantized(
             CanonicalDecimal(str(values["target_quantity"])),
