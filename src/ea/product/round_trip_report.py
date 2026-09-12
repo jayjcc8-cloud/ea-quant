@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Any
+from typing import Any, ClassVar
 
 import ea
 from ea.core import (
@@ -46,9 +46,9 @@ def economics(result: dict[str, Any], scenario: Any, price: CanonicalDecimal) ->
     for index, notional in enumerate(notionals):
         require_quantized(notional, spec.currency_quantum, field_name="settled notional")
         cash = r._subtract(
-            r._subtract(cash, notional) if index == 0 else r._add(cash, notional), fees[index]
+            r._subtract(cash, notional) if index % 2 == 0 else r._add(cash, notional), fees[index]
         )
-    quantity = CanonicalDecimal(fills[0]["quantity"]) if len(fills) == 1 else zero
+    quantity = CanonicalDecimal(fills[-1]["quantity"]) if len(fills) % 2 else zero
     if (
         result["ending_cash"] != [{"amount": cash.text, "currency": scenario.funding_currency.code}]
         or result["final_quantity"] != quantity.text
@@ -64,10 +64,31 @@ def economics(result: dict[str, Any], scenario: Any, price: CanonicalDecimal) ->
     total_fees = zero
     for fee in fees:
         total_fees = r._add(total_fees, fee)
-    realized = r._subtract(cash, scenario.initial_cash) if len(fills) == 2 else zero
-    unrealized = r._subtract(value, notionals[0]) if len(fills) == 1 else zero
+    realized = zero
+    trades = []
+    for index in range(0, len(fills) - 1, 2):
+        pnl = r._subtract(
+            r._subtract(r._subtract(notionals[index + 1], notionals[index]), fees[index]),
+            fees[index + 1],
+        )
+        realized = r._add(realized, pnl)
+        trades.append(
+            {
+                "entry_order_id": fills[index]["order_id"],
+                "entry_fill_id": fills[index]["fill_id"],
+                "exit_order_id": fills[index + 1]["order_id"],
+                "exit_fill_id": fills[index + 1]["fill_id"],
+                "quantity": fills[index]["quantity"],
+                "entry_settled_notional": notionals[index].text,
+                "exit_settled_notional": notionals[index + 1].text,
+                "entry_fee": fees[index].text,
+                "exit_fee": fees[index + 1].text,
+                "realized_pnl": pnl.text,
+            }
+        )
+    unrealized = r._subtract(value, notionals[-1]) if len(fills) % 2 else zero
     net = r._subtract(equity, scenario.initial_cash)
-    return {
+    summary = {
         "currency": scenario.funding_currency.code,
         "counts": {"orders": len(result["execution_legs"]), "fills": len(fills)},
         "initial_funding": {
@@ -107,10 +128,47 @@ def economics(result: dict[str, Any], scenario: Any, price: CanonicalDecimal) ->
         },
     }
 
+    if scenario.schema_version == 5:
+        summary.pop("entry_fee")
+        summary.pop("exit_fee")
+        summary["trades"] = trades
+        summary["open_position"] = (
+            {
+                "entry_order_id": fills[-1]["order_id"],
+                "entry_fill_id": fills[-1]["fill_id"],
+                "quantity": quantity.text,
+                "entry_settled_notional": notionals[-1].text,
+                "entry_fee": fees[-1].text,
+                "last_valuation": value.text,
+                "gross_unrealized_pnl": unrealized.text,
+            }
+            if len(fills) % 2
+            else None
+        )
+    return summary
+
+
+def _position(count: int, bounded: bool) -> tuple[str, str]:
+    if bounded:
+        return (
+            ("LONG", "OPEN_AT_END")
+            if count % 2
+            else ("FLAT", "FLAT_AFTER_TRADES" if count else "FLAT_NO_TRADE")
+        )
+    return (
+        ("FLAT_INITIAL", "FLAT_INITIAL"),
+        ("LONG_OPEN", "OPEN_AT_END"),
+        ("FLAT_CLOSED", "CLOSED"),
+    )[count]
+
 
 def semantic_projection(result: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "ea.backtest-semantic-outcome.v3",
+        "schema": (
+            "ea.backtest-semantic-outcome.v4"
+            if result["schema"] == "ea.backtest-single-run-result.v4"
+            else "ea.backtest-semantic-outcome.v3"
+        ),
         "lineage_sha256": result["lineage_sha256"],
         "position_state": result["position_state"],
         "position_outcome": result["position_outcome"],
@@ -197,6 +255,8 @@ def validate_result(
     run_id: str,
     lineage: str,
 ) -> None:
+    bounded = scenario.schema_version == 5
+    limit = json.loads(scenario.canonical_bytes)["strategy"]["max_round_trips"] if bounded else 1
     r._exact_keys(
         result,
         {
@@ -224,7 +284,8 @@ def validate_result(
         },
     )
     if (
-        result["schema"] != "ea.backtest-single-run-result.v3"
+        result["schema"]
+        != ("ea.backtest-single-run-result.v4" if bounded else "ea.backtest-single-run-result.v3")
         or result["status"] != "success"
         or result["terminal_state"] != "completed"
         or result["run_id"] != run_id
@@ -289,7 +350,7 @@ def validate_result(
         elif kind is AuditRecordKind.RUN_TERMINAL:
             terminal = payload
     legs = result["execution_legs"]
-    if type(legs) is not list or len(legs) > 2 or len(authorized) != len(legs):
+    if type(legs) is not list or len(legs) > 2 * limit or len(authorized) != len(legs):
         raise ValueError("bounded order count conflicts")
     filled: list[Any] = []
     for index, leg in enumerate(legs):
@@ -311,17 +372,19 @@ def validate_result(
         if (
             identity not in authorized
             or identity[1] != index + 1
-            or order["side"] != ("buy" if index == 0 else "sell")
-            or leg["role"] != ("entry" if index == 0 else "exit")
-            or (index == 1 and (not filled or order["quantity"] != filled[0]["quantity"]))
+            or order["side"] != ("buy" if index % 2 == 0 else "sell")
+            or leg["role"] != ("entry" if index % 2 == 0 else "exit")
+            or (index % 2 == 1 and (not filled or order["quantity"] != filled[-1]["quantity"]))
         ):
             raise ValueError("bounded leg order conflicts")
+        if len(filled) != index:
+            raise ValueError("leg follows an unfilled order")
         if scenario.strategy_package is not None:
-            _verify_local_risk(leg["order_evidence"], leg["risk"], exit_leg=index == 1)
+            _verify_local_risk(leg["order_evidence"], leg["risk"], exit_leg=index % 2 == 1)
         else:
             expected_risk = (
                 "allow"
-                if index == 1
+                if index % 2 == 1
                 or order["quantity"] == str(scenario.strategy_parameters["target_quantity"])
                 else "resize"
             )
@@ -388,9 +451,9 @@ def validate_result(
         or terminal.get("terminal_kind") != "success"
         or terminal.get("final_published_snapshot_sha256") != previous
         or result["ledger_sequence"] != count + 1
-        or result["position_state"] != ("FLAT_INITIAL", "LONG_OPEN", "FLAT_CLOSED")[count]
-        or result["position_outcome"] != ("FLAT_INITIAL", "OPEN_AT_END", "CLOSED")[count]
-        or result["completed_round_trips"] != int(count == 2)
+        or result["position_state"] != _position(count, bounded)[0]
+        or result["position_outcome"] != _position(count, bounded)[1]
+        or result["completed_round_trips"] != count // 2
     ):
         raise ValueError("terminal position conflicts")
     if len(reconciliations) != (2 if count else 1) or any(
@@ -419,6 +482,7 @@ def validate_result(
 class BacktestReportV2:
     canonical_bytes: bytes
     summary_bytes: bytes
+    VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         try:
@@ -438,9 +502,9 @@ class BacktestReportV2:
                 },
             )
             if (
-                doc["schema"] != "ea.backtest-report.v2"
+                doc["schema"] != f"ea.backtest-report.v{self.VERSION}"
                 or type(doc["schema_version"]) is not int
-                or doc["schema_version"] != 2
+                or doc["schema_version"] != self.VERSION
             ):
                 raise ValueError("V2 report schema conflicts")
             economic = r._exact_keys(
@@ -457,8 +521,6 @@ class BacktestReportV2:
                     "position_outcome",
                     "completed_round_trips",
                     "execution_legs",
-                    "entry_fee",
-                    "exit_fee",
                     "fees",
                     "realized_pnl",
                     "gross_unrealized_pnl",
@@ -466,9 +528,14 @@ class BacktestReportV2:
                     "equity",
                     "total_return",
                     "valuation",
-                },
+                }
+                | ({"entry_fee", "exit_fee"} if self.VERSION == 2 else {"trades", "open_position"}),
             )
-            for name in ("final_quantity", "final_position_value", "entry_fee", "exit_fee"):
+            for name in (
+                ("final_quantity", "final_position_value", "entry_fee", "exit_fee")
+                if self.VERSION == 2
+                else ("final_quantity", "final_position_value")
+            ):
                 CanonicalDecimal(r._text(economic[name]))
             for name in ("realized_pnl", "gross_unrealized_pnl", "net_pnl", "equity"):
                 item = r._exact_keys(economic[name], {"amount", "rule"})
@@ -477,13 +544,13 @@ class BacktestReportV2:
             counts = r._exact_keys(economic["counts"], {"orders", "fills"})
             fills = r._integer(counts["fills"])
             orders = r._integer(counts["orders"])
-            if not 0 <= fills <= orders <= 2:
+            if not 0 <= fills <= orders <= (2 if self.VERSION == 2 else 512):
                 raise ValueError("V2 counts conflict")
             if (
-                economic["position_state"] != ("FLAT_INITIAL", "LONG_OPEN", "FLAT_CLOSED")[fills]
-                or economic["position_outcome"] != ("FLAT_INITIAL", "OPEN_AT_END", "CLOSED")[fills]
+                economic["position_state"] != _position(fills, self.VERSION == 3)[0]
+                or economic["position_outcome"] != _position(fills, self.VERSION == 3)[1]
                 or type(economic["completed_round_trips"]) is not int
-                or economic["completed_round_trips"] != int(fills == 2)
+                or economic["completed_round_trips"] != fills // 2
             ):
                 raise ValueError("V2 position conflicts")
             legs = economic["execution_legs"]
@@ -503,6 +570,8 @@ class BacktestReportV2:
                         "fill_sha256",
                     },
                 )
+            if self.VERSION == 3:
+                _validate_multi_trade_summary(doc)
             if type(self.summary_bytes) is not bytes or not self.summary_bytes.endswith(b"\n"):
                 raise ValueError("V2 summary conflicts")
         except (KeyError, TypeError, ValueError):
@@ -513,6 +582,145 @@ class BacktestReportV2:
         return r._decode_canonical(self.canonical_bytes, newline=True)
 
 
+def _validate_multi_trade_summary(doc: dict[str, Any]) -> None:
+    economic = doc["economics"]
+    strategy = doc["source"]["strategy"]
+    limit = r._integer(strategy["max_round_trips"])
+    if (
+        not 1 <= limit <= 256
+        or strategy["action_contract"] != "V2"
+        or strategy["position_lifecycle"] != "bounded-long-round-trips-v1"
+    ):
+        raise ValueError("bounded strategy identity conflicts")
+    legs = economic["execution_legs"]
+    if len(legs) > 2 * limit:
+        raise ValueError("bounded leg count conflicts")
+    fills: list[Any] = []
+    for index, leg in enumerate(legs):
+        entry = index % 2 == 0
+        if leg["role"] != ("entry" if entry else "exit"):
+            raise ValueError("bounded leg role conflicts")
+        fill = leg["fill"]
+        if fill is None:
+            if index != len(legs) - 1 or leg["outcome"] != "expired":
+                raise ValueError("unfilled leg ordering conflicts")
+            continue
+        if (
+            leg["outcome"] != "filled"
+            or fill["side"] != ("buy" if entry else "sell")
+            or fill["quantity"] != leg["order"]["quantity"]
+            or fill["order_id"] != leg["order"]["order_id"]
+            or (not entry and fill["quantity"] != fills[-1]["quantity"])
+        ):
+            raise ValueError("full leg evidence conflicts")
+        fills.append(fill)
+    if len(fills) != economic["counts"]["fills"]:
+        raise ValueError("Fill count conflicts")
+    instrument = doc["source"]["instrument"]
+    multiplier = CanonicalDecimal(instrument["contract_multiplier"])
+    quantum = CanonicalDecimal(instrument["currency_quantum"])
+    notionals = [
+        settle_product(
+            CanonicalDecimal(f["price"]), CanonicalDecimal(f["quantity"]), multiplier, quantum
+        ).amount
+        for f in fills
+    ]
+    fees = [CanonicalDecimal(f["fees"][0]["amount"]) for f in fills]
+    cash = CanonicalDecimal(economic["initial_funding"]["amount"])
+    initial = cash
+    total_fees = CanonicalDecimal("0")
+    for index, (notional, fee) in enumerate(zip(notionals, fees, strict=True)):
+        cash = r._subtract(
+            r._subtract(cash, notional) if index % 2 == 0 else r._add(cash, notional), fee
+        )
+        total_fees = r._add(total_fees, fee)
+        if cash.coefficient < 0 or fee.coefficient < 0:
+            raise ValueError("negative cash or fee")
+    quantity = CanonicalDecimal(fills[-1]["quantity"] if len(fills) % 2 else "0")
+    value = (
+        settle_product(
+            CanonicalDecimal(economic["valuation"]["price"]), quantity, multiplier, quantum
+        ).amount
+        if quantity.coefficient
+        else CanonicalDecimal("0")
+    )
+    equity = r._add(cash, value)
+    net = r._subtract(equity, initial)
+    unrealized = r._subtract(value, notionals[-1]) if len(fills) % 2 else CanonicalDecimal("0")
+    currency = instrument["settlement_currency"]
+    positions = (
+        [{"quantity": quantity.text, "symbol": instrument["symbol"], "venue": instrument["venue"]}]
+        if quantity.coefficient
+        else []
+    )
+    if (
+        economic["currency"] != currency
+        or economic["initial_funding"]["currency"] != currency
+        or economic["ending_cash"] != [{"amount": cash.text, "currency": currency}]
+        or economic["ending_positions"] != positions
+        or economic["final_quantity"] != quantity.text
+        or economic["final_position_value"] != value.text
+        or economic["valuation"]["position_value"] != value.text
+        or economic["fees"]
+        != {
+            "amount": total_fees.text,
+            "count": len(fees),
+            "currency": currency,
+            "rule": "per-fill-commission",
+        }
+        or economic["equity"]["amount"] != equity.text
+        or economic["net_pnl"]["amount"] != net.text
+        or economic["gross_unrealized_pnl"]["amount"] != unrealized.text
+        or economic["total_return"]["value"] != r._ratio(net, initial).text
+    ):
+        raise ValueError("aggregate accounting conflicts with funding, Fill or valuation evidence")
+    expected_trades = []
+    realized = CanonicalDecimal("0")
+    for index in range(0, len(fills) - 1, 2):
+        pnl = r._subtract(
+            r._subtract(r._subtract(notionals[index + 1], notionals[index]), fees[index]),
+            fees[index + 1],
+        )
+        realized = r._add(realized, pnl)
+        expected_trades.append(
+            {
+                "entry_order_id": fills[index]["order_id"],
+                "entry_fill_id": fills[index]["fill_id"],
+                "exit_order_id": fills[index + 1]["order_id"],
+                "exit_fill_id": fills[index + 1]["fill_id"],
+                "quantity": fills[index]["quantity"],
+                "entry_settled_notional": notionals[index].text,
+                "exit_settled_notional": notionals[index + 1].text,
+                "entry_fee": fees[index].text,
+                "exit_fee": fees[index + 1].text,
+                "realized_pnl": pnl.text,
+            }
+        )
+    expected_open = None
+    if len(fills) % 2:
+        value = CanonicalDecimal(economic["final_position_value"])
+        expected_open = {
+            "entry_order_id": fills[-1]["order_id"],
+            "entry_fill_id": fills[-1]["fill_id"],
+            "quantity": fills[-1]["quantity"],
+            "entry_settled_notional": notionals[-1].text,
+            "entry_fee": fees[-1].text,
+            "last_valuation": value.text,
+            "gross_unrealized_pnl": r._subtract(value, notionals[-1]).text,
+        }
+    if (
+        economic["trades"] != expected_trades
+        or economic["open_position"] != expected_open
+        or economic["realized_pnl"]["amount"] != realized.text
+    ):
+        raise ValueError("trade accounting conflicts with Fill evidence")
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestReportV3(BacktestReportV2):
+    VERSION: ClassVar[int] = 3
+
+
 def build_report(*, result: Any, scenario: Any, manifest: Any, records: Any) -> BacktestReportV2:
     price, valuation = r._last_admitted_price(
         scenario, records, expected_source_file_sha256=manifest["data"]["source_file_sha256"]
@@ -521,9 +729,10 @@ def build_report(*, result: Any, scenario: Any, manifest: Any, records: Any) -> 
     if summary["equity"]["amount"] != result["final_equity"]:
         raise ValueError("final equity conflicts")
     summary["valuation"] = {**valuation, "position_value": summary["final_position_value"]}
+    version = 3 if scenario.schema_version == 5 else 2
     document = {
-        "schema": "ea.backtest-report.v2",
-        "schema_version": 2,
+        "schema": f"ea.backtest-report.v{version}",
+        "schema_version": version,
         "run_id": result["run_id"],
         "lineage_sha256": result["lineage_sha256"],
         "report_generator": {"distribution": "ea-quant", "version": ea.__version__},
@@ -556,14 +765,14 @@ def build_report(*, result: Any, scenario: Any, manifest: Any, records: Any) -> 
             {
                 "field": "economics",
                 "source": "committed ordered Fill and ledger handoffs",
-                "source_version": "ea.backtest-single-run-result.v3",
-                "rule": "ADR0040-accounting",
+                "source_version": result["schema"],
+                "rule": "ADR0042-accounting" if version == 3 else "ADR0040-accounting",
             },
         ],
     }
     text = "\n".join(
         [
-            "Single Long Round Trip V1",
+            "Bounded Long Round Trips V1" if version == 3 else "Single Long Round Trip V1",
             f"Position: {result['position_outcome']}",
             f"Realized P&L: {summary['realized_pnl']['amount']}",
             f"Gross unrealized P&L: {summary['gross_unrealized_pnl']['amount']}",
@@ -573,4 +782,6 @@ def build_report(*, result: Any, scenario: Any, manifest: Any, records: Any) -> 
             "",
         ]
     ).encode()
-    return BacktestReportV2(r._canonical_json(document) + b"\n", text)
+    return (BacktestReportV3 if version == 3 else BacktestReportV2)(
+        r._canonical_json(document) + b"\n", text
+    )

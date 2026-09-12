@@ -162,6 +162,12 @@ external write, deployment, or live capability is part of this objective.
   Package/SDK V1 and built-in V1/V2 remain compatible. A stateful MA crossover example illustrates
   the single-entry/full-exit contract. #125 is closed not-planned as historical provenance.
 
+- Issue #200 / ADR 0042 adds the bounded-long-round-trips-v1 core route: explicit Scenario V5
+  binds max_round_trips (1..256), reuses Action V2 and existing economic owners, and publishes
+  Result/Semantic V4 and Report V3 for ordered complete trades and optional open positions.
+  Multi-dispatch resume preserves deterministic identities and the funding-plus-fill ledger
+  sequence. Package V3, Path V3 and Web research integration remain the second implementation PR.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
@@ -178,8 +184,8 @@ uses each acknowledged cash/position balance and the unchanged full-path drawdow
 Web Job V4 persists the new report/path versions; Run Detail, Batch, Comparison and Holdout use
 those verified artifacts, including restart/reopen without external CSV. Existing V1 routes
 remain unchanged. New metrics, optimizer, arbitrary multi-trade and Agent Research Tools remain
-future work. The next decision follows actual strategy/data research; Candidate or multi-round-trip
-work is not authorized by this delivery.
+future work. The next decision follows actual strategy/data research; Candidate remains deferred. Issue #200 separately authorizes bounded repeated long round trips;
+its research integration and installed capability acceptance remain pending.
 
 ## Blockers
 

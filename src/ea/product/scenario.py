@@ -57,7 +57,7 @@ from ea.strategy.registry import (
     resolve_parameters,
 )
 from ea.strategy.sdk_v1 import StrategyValidationContextV1
-from ea.strategy.sdk_v2 import ROUND_TRIP_STRATEGY, StrategyEntryV2
+from ea.strategy.sdk_v2 import BOUNDED_ROUND_TRIP_STRATEGY, ROUND_TRIP_STRATEGY, StrategyEntryV2
 
 _SCENARIO_DIGEST_DOMAIN = b"ea.backtest-scenario.v1\0"
 _CANONICALIZATION = "ea-backtest-scenario-v1"
@@ -235,6 +235,29 @@ class BacktestScenarioV4(_StrictModel):
     randomness_profile: Literal["none"]
 
 
+class _StrategyInputV5(_StrategyInputV2):
+    action_contract: Literal["V2"]
+    position_lifecycle: Literal["bounded-long-round-trips-v1"]
+    max_round_trips: StrictInt
+
+    @model_validator(mode="after")
+    def bounded_limit(self) -> Self:
+        if not 1 <= self.max_round_trips <= 256:
+            raise ValueError("max_round_trips must be in 1..256")
+        return self
+
+
+class BacktestScenarioV5(_StrictModel):
+    schema_version: Literal[5]
+    data: _DataInput
+    instrument: _InstrumentInput
+    strategy: _StrategyInputV5
+    funding: _FundingInput
+    risk: _RiskInput
+    execution: _ExecutionInput
+    randomness_profile: Literal["none"]
+
+
 class _UniqueKeySafeLoader(yaml.SafeLoader):
     pass
 
@@ -301,6 +324,8 @@ class LoadedBacktestScenario:
     def strategy_entry(self) -> StrategyEntryV1 | StrategyEntryV2 | LocalActionEntry:
         if isinstance(self.strategy_package, StrategyPackageV2):
             return LocalActionEntry(self.strategy_package)
+        if self.schema_version == 5:
+            return BOUNDED_ROUND_TRIP_STRATEGY
         if self.schema_version == 4:
             return ROUND_TRIP_STRATEGY
         if self.strategy_package is not None:
@@ -314,7 +339,7 @@ class LoadedBacktestScenario:
     @property
     def strategy_parameters(self) -> dict[str, int | str]:
         document = json.loads(self.canonical_bytes)["strategy"]
-        if self.strategy_package is not None or self.schema_version == 4:
+        if self.strategy_package is not None or self.schema_version in (4, 5):
             return self.strategy_entry.normalize(document["parameters"])
         return project_parameters(document)
 
@@ -400,7 +425,11 @@ def _quantized(
 
 
 def _canonical_bytes(
-    model: _ScenarioInput | BacktestScenarioV2 | BacktestScenarioV3 | BacktestScenarioV4,
+    model: _ScenarioInput
+    | BacktestScenarioV2
+    | BacktestScenarioV3
+    | BacktestScenarioV4
+    | BacktestScenarioV5,
     *,
     dataset: Phase1HistoricalDataset,
 ) -> bytes:
@@ -502,8 +531,16 @@ def _load_scenario_document(
     captured_dataset: Phase1HistoricalDataset | None = None,
 ) -> LoadedBacktestScenario:
     try:
-        model: _ScenarioInput | BacktestScenarioV2 | BacktestScenarioV3 | BacktestScenarioV4 = (
-            BacktestScenarioV4.model_validate(document)
+        model: (
+            _ScenarioInput
+            | BacktestScenarioV2
+            | BacktestScenarioV3
+            | BacktestScenarioV4
+            | BacktestScenarioV5
+        ) = (
+            BacktestScenarioV5.model_validate(document)
+            if type(document.get("schema_version")) is int and document["schema_version"] == 5
+            else BacktestScenarioV4.model_validate(document)
             if type(document.get("schema_version")) is int and document["schema_version"] == 4
             else BacktestScenarioV3.model_validate(document)
             if type(document.get("schema_version")) is int and document["schema_version"] == 3
@@ -649,6 +686,21 @@ def _load_scenario_document(
                 f"strategy.entry_delay_bars must be at most {entry_delay_maximum}"
             )
     package = None
+    if isinstance(model, BacktestScenarioV5):
+        try:
+            if (model.strategy.id, model.strategy.version) != ("bounded-long-hold-roots-v1", 1):
+                raise ValueError("unsupported bounded V2 strategy")
+            normalized = BOUNDED_ROUND_TRIP_STRATEGY.normalize(model.strategy.parameters)
+            _quantized(
+                CanonicalDecimal(str(normalized["target_quantity"])),
+                quantity_quantum,
+                field="target_quantity",
+            )
+            model = model.model_copy(
+                update={"strategy": model.strategy.model_copy(update={"parameters": normalized})}
+            )
+        except ValueError as error:
+            raise BacktestScenarioError(str(error)) from None
     if isinstance(model, BacktestScenarioV4) and model.strategy.source is None:
         try:
             if (model.strategy.id, model.strategy.version) != ("single-long-hold-roots-v1", 1):
@@ -839,7 +891,7 @@ __all__ = [
 
 
 def scenario_digest_domain(version: int) -> bytes:
-    if version not in (1, 2, 3, 4):
+    if version not in (1, 2, 3, 4, 5):
         raise BacktestScenarioError("unsupported scenario digest version")
     return f"ea.backtest-scenario.v{version}\0".encode("ascii")
 
@@ -890,7 +942,7 @@ def resolved_scenario_parameters(
 ) -> tuple[ResolvedStrategyParameterV1, ...]:
     values = scenario.strategy_parameters if parameters is None else parameters
     spec = scenario.spec_set.require(scenario.instrument)
-    if scenario.schema_version == 4 and scenario.strategy_package is None:
+    if scenario.schema_version in (4, 5) and scenario.strategy_package is None:
         ROUND_TRIP_STRATEGY.normalize(values)
         require_quantized(
             CanonicalDecimal(str(values["target_quantity"])),

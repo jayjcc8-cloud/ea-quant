@@ -432,7 +432,7 @@ def _observation(
             PositionReconciliationBalance(balance.instrument, balance.quantity)
             for balance in snapshot.position_balances
         )
-        if scenario.schema_version == 4 and not balances:
+        if scenario.schema_version in (4, 5) and not balances:
             balances = (PositionReconciliationBalance(scenario.instrument, CanonicalDecimal("0")),)
         kind = ReconciliationObservationKind.POSITION_SNAPSHOT
         scope = ReconciliationScopeKind.POSITION
@@ -502,7 +502,7 @@ def _execute(
     on_funding: Callable[[dict[str, object]], None] | None = None,
     on_frontier: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, object], bytes, dict[str, object]]:
-    if scenario.schema_version == 4:
+    if scenario.schema_version in (4, 5):
         from ea.product.round_trip import execute_round_trip
 
         return execute_round_trip(
@@ -1046,12 +1046,17 @@ def _verified_persisted_frontier(
 
     required_reconciliations = 2 if durable_economic_dispatches else 1
     expected_ledger_sequence = 2 if durable_economic_dispatches else 1
-    if scenario.schema_version == 4:
+    if scenario.schema_version in (4, 5):
         if (
             accepted_fact_dispatches != durable_economic_dispatches
             or applied_handoff_dispatches != durable_economic_dispatches
             or completed_economic_dispatches != durable_economic_dispatches
-            or len(durable_economic_dispatches) > 2
+            or len(durable_economic_dispatches)
+            > (
+                2 * json.loads(scenario.canonical_bytes)["strategy"]["max_round_trips"]
+                if scenario.schema_version == 5
+                else 2
+            )
         ):
             raise BacktestResumeFailure("partial or excess round-trip dispatch evidence", attempt)
         expected_ledger_sequence = 1 + len(durable_economic_dispatches)

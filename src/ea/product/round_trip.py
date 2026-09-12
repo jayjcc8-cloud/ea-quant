@@ -145,6 +145,10 @@ def execute_round_trip(
         execution_policy=scenario.execution_policy,
     )
     logic = scenario.strategy_entry.factory(scenario.strategy_parameters)
+    bounded = scenario.schema_version == 5
+    max_round_trips = (
+        json.loads(scenario.canonical_bytes)["strategy"]["max_round_trips"] if bounded else 1
+    )
     issued: list[Any] = []
     risk_results: list[Any] = []
     committed: list[Any] = []
@@ -189,9 +193,16 @@ def execute_round_trip(
                 if action.action != "HOLD":
                     entering = action.action == "ENTER_LONG"
                     if (
-                        (entering and (state is not PositionState.FLAT_INITIAL or issued))
+                        (
+                            entering
+                            and (
+                                state is not PositionState.FLAT_INITIAL
+                                or (issued and not bounded)
+                                or len(committed) // 2 >= max_round_trips
+                            )
+                        )
                         or (not entering and state is not PositionState.LONG_OPEN)
-                        or len(issued) >= 2
+                        or len(issued) >= 2 * max_round_trips
                     ):
                         raise ValueError("illegal bounded position transition")
                     if (
@@ -263,7 +274,7 @@ def execute_round_trip(
         lifecycle.coordinator.complete_active_dispatch(active)
         fills = lifecycle.fact_authority.fills
         if len(fills) != len(committed):
-            if len(fills) != len(committed) + 1 or len(fills) > 2:
+            if len(fills) != len(committed) + 1 or len(fills) > 2 * max_round_trips:
                 raise ValueError("invalid bounded Fill count")
             fill = fills[-1]
             order = issued[len(committed)]
@@ -274,8 +285,14 @@ def execute_round_trip(
             ):
                 raise ValueError("Fill conflicts with issued full order")
             committed.append(fill)
-            state = PositionState.LONG_OPEN if len(committed) == 1 else PositionState.FLAT_CLOSED
-            quantity = fill.quantity if len(committed) == 1 else CanonicalDecimal("0")
+            state = (
+                PositionState.LONG_OPEN
+                if len(committed) % 2
+                else PositionState.FLAT_INITIAL
+                if bounded
+                else PositionState.FLAT_CLOSED
+            )
+            quantity = fill.quantity if len(committed) % 2 else CanonicalDecimal("0")
             pending = False
             if on_frontier is not None:
                 on_frontier("dispatch_durable")
@@ -316,7 +333,7 @@ def execute_round_trip(
         leg_fill = committed[index] if index < len(committed) else None
         legs.append(
             {
-                "role": "entry" if index == 0 else "exit",
+                "role": "entry" if index % 2 == 0 else "exit",
                 "order_evidence": json.loads(canonical_order_bytes(order)),
                 "order_sha256": order_digest(order).value,
                 "fill_sha256": None if leg_fill is None else fill_digest(leg_fill).value,
@@ -333,7 +350,9 @@ def execute_round_trip(
             }
         )
     document: dict[str, Any] = {
-        "schema": "ea.backtest-single-run-result.v3",
+        "schema": "ea.backtest-single-run-result.v4"
+        if bounded
+        else "ea.backtest-single-run-result.v3",
         "status": "success",
         "terminal_state": "completed",
         "run_id": run_id.value,
@@ -341,14 +360,16 @@ def execute_round_trip(
         "scenario_sha256": scenario.scenario_sha256.value,
         "audit_chain_head_sha256": audit_chain_head(audit.records[-1]).value,
         "execution_legs": legs,
-        "position_state": state.value,
+        "position_state": ("LONG" if quantity.coefficient else "FLAT") if bounded else state.value,
         "position_outcome": "OPEN_AT_END"
         if state is PositionState.LONG_OPEN
+        else ("FLAT_AFTER_TRADES" if committed else "FLAT_NO_TRADE")
+        if bounded
         else "CLOSED"
         if state is PositionState.FLAT_CLOSED
         else "FLAT_INITIAL",
         "final_quantity": quantity.text,
-        "completed_round_trips": int(len(committed) == 2),
+        "completed_round_trips": len(committed) // 2,
         "ledger_sequence": snapshot.ledger_sequence,
         "portfolio_snapshot_evidence": json.loads(canonical_portfolio_snapshot_bytes(snapshot)),
         "ending_cash": [
