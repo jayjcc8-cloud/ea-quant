@@ -251,7 +251,8 @@ def _change(path: Path, dotted: str, value: object) -> Path:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("schema_version", 5, "unsupported_schema_version"),
+        ("schema_version", 6, "unsupported_schema_version"),
+        ("schema_version", 5, "invalid field 'strategy.version'"),
         ("funding.initial_cash", 10000, "string_type"),
         ("funding.initial_cash", "0", "strictly positive"),
         ("strategy.target_quantity", "1.5", "not quantized"),
