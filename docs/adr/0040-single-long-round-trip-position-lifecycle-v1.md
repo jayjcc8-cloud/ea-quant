@@ -135,9 +135,8 @@ contract. Verify the consecutive snapshot/transaction digest chain and replay le
 
 Require cash, quantity and final-equity reconciliation. For FLAT_CLOSED explicitly verify the
 expected instrument quantity is zero against the final snapshot and deterministic replay; an
-absent zero balance must not be mistaken for 'position never checked'. Use existing observation
-semantics where a zero instrument observation is supported; do not add adjustment/correction
-commands. Final closed equity equals cash. A mismatch preserves failure evidence, never success.
+absent zero balance must not be mistaken for 'position never checked'. Use an explicit zero `PositionReconciliationBalance` for the instrument: the existing
+comparison treats an absent local balance as zero. Do not add adjustment/correction commands. Final closed equity equals cash. A mismatch preserves failure evidence, never success.
 
 ## REPORT_VERSIONING (Q7)
 

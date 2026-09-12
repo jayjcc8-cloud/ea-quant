@@ -26,7 +26,7 @@ The following are current code findings, not assumptions from the roadmap:
 | Resume | `product/backtest.py::resume_backtest_attempt`, `_verified_persisted_frontier` | Reconstructs same execution with journal retry, but 'any fill' fixes sequence 2/reconciliation count |
 | Journal/store | `experiments/audit.py::PosixAuditJournal.append`; `experiments/store.py::recover_incomplete_attempt` | Exact logical payload retry and verified record prefix; no intrinsic one-Fill counter here |
 | Reconciliation | `reconciliation/authority.py::_compare_position_balances`; `product/backtest.py::_observation` | Missing local balance compares as zero; product currently skips position observation when empty |
-| Web | `web/service.py::_decode_job`, `report`, `artifact`, `_execute`; `apps/web/src/equity-path.tsx` | Readers bind specific report/path schemas; adapters must version explicitly |
+| Web | `web/service.py::_decode_job`, `report`, `artifact`, `_run`; `apps/web/src/equity-path.tsx` | Readers bind specific report/path schemas; adapters must version explicitly |
 
 Paths in the table are relative to `src/ea/` except the explicitly named Web app path. Old
 product assumptions are more extensive than changing a MAX_FILL_COUNT constant. The lower
