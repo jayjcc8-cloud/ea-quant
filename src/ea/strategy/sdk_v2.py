@@ -97,7 +97,29 @@ class StrategyEntryV2:
         return result
 
     def factory(self, parameters: Mapping[str, int | str]) -> HoldRootsLogic:
-        return HoldRootsLogic(self.normalize(parameters))
+        logic_type = (
+            RepeatedHoldRootsLogic
+            if self.descriptor.position_lifecycle == "bounded-long-round-trips-v1"
+            else HoldRootsLogic
+        )
+        return logic_type(self.normalize(parameters))
 
 
 ROUND_TRIP_STRATEGY = StrategyEntryV2()
+
+
+BOUNDED_ROUND_TRIP_STRATEGY = StrategyEntryV2(
+    StrategyDescriptorV2(
+        strategy_id="bounded-long-hold-roots-v1",
+        display_name="Bounded long hold roots",
+        position_lifecycle="bounded-long-round-trips-v1",
+    )
+)
+
+
+class RepeatedHoldRootsLogic(HoldRootsLogic):
+    def on_bar(self, bar: StrategyBarV1, position: PositionViewV2) -> dict[str, str]:
+        action = super().on_bar(bar, position)
+        if action["action"] == "EXIT_LONG":
+            self.entry_roots = self.hold_roots = 0
+        return action

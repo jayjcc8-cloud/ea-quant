@@ -72,3 +72,4 @@ __all__ = [
 ]
 
 from ea.product.round_trip_report import BacktestReportV2 as BacktestReportV2
+from ea.product.round_trip_report import BacktestReportV3 as BacktestReportV3

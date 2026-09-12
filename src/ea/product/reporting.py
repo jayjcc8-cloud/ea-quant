@@ -1470,7 +1470,7 @@ def generate_backtest_report(run_dir: Path, output_dir: Path) -> BacktestReportR
                 run_id=run_id.value,
             )
             result = _decode_canonical(_read_regular(attempt / "result.json"), newline=True)
-            if scenario.schema_version == 4:
+            if scenario.schema_version in (4, 5):
                 from ea.product.round_trip_report import build_report, validate_result
 
                 validate_result(
