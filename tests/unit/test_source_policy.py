@@ -276,6 +276,7 @@ def test_inner_strategy_package_depends_only_on_core_and_itself() -> None:
             "ea.strategy.registry",
             "ea.strategy.package",
             "ea.strategy.sdk_v1",
+            "ea.strategy.sdk_v2",
         }
     )
     imported_ea_modules: set[str] = set()
