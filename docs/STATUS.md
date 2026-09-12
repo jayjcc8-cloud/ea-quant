@@ -163,9 +163,10 @@ instruction-level or Web recovery, symbol/data editing, uploads, broader experim
 automatic optimization, broader performance analytics, remote strategy plugins, paper/live execution,
 package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Research Foundation adds schema-driven strategies and immutable local artifacts to commission and Chronological Holdout.
 Path-aware Research Analysis V1 is delivered. PR #191 records the Strategy Lifecycle architecture
-review and Proposed ADR 0039; Candidate runtime remains deferred. Issue #192 / Proposed ADR 0040
-reviews Single Long Round Trip Position Lifecycle V1 as the next capability: one entry, one exit,
-at most two Fills. This is architecture only; no exit runtime is delivered. New metrics, optimizer,
+review and Proposed ADR 0039; Candidate runtime remains deferred. Issue #192 / Accepted ADR 0040
+authorizes SINGLE_LONG_ROUND_TRIP_V1 implementation as the next bounded offline capability:
+one entry, one exit, at most two Fills. Economic semantics are accepted; no exit runtime is yet
+delivered. Implementation proceeds through core execution followed by research integration. New metrics, optimizer,
 arbitrary multi-trade and Agent Research Tools remain future work.
 
 ## Blockers
@@ -202,10 +203,11 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0037 — Registered Local OHLCV Research Input V1](adr/0037-registered-local-ohlcv-research-input-v1.md)
 - [ADR 0038 — Equity Path and Maximum Drawdown V1](adr/0038-equity-path-and-maximum-drawdown-v1.md)
 
+- [ADR 0040 — Single Long Round Trip Position Lifecycle](adr/0040-single-long-round-trip-position-lifecycle-v1.md) — Accepted; bounded offline implementation authorized, runtime pending.
+
 Proposed architecture (not implemented capabilities):
 
 - [ADR 0039 — Research Candidate Identity](adr/0039-strategy-lifecycle-and-research-candidate-identity-v1.md) — runtime deferred.
-- [ADR 0040 — Single Long Round Trip Position Lifecycle](adr/0040-single-long-round-trip-position-lifecycle-v1.md) — Issue #192 architecture proposal.
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
