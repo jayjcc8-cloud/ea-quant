@@ -144,18 +144,33 @@ def _scenario_identity(scenario: LoadedBacktestScenario) -> dict[str, object]:
     }
 
 
+def _validate_web_integer_parameters(scenario: LoadedBacktestScenario) -> None:
+    if scenario.schema_version == 4 and any(
+        type(value) is int and abs(value) > 9007199254740991
+        for value in scenario.strategy_parameters.values()
+    ):
+        raise BacktestScenarioError("Web integer parameters must be within the exact safe range")
+
+
 def _strategy_parameter_contracts(
     scenario: LoadedBacktestScenario,
     *,
     defaults: LoadedBacktestScenario | None = None,
 ) -> list[dict[str, object]]:
     source = scenario if defaults is None else defaults
+    _validate_web_integer_parameters(scenario)
+    _validate_web_integer_parameters(source)
     parameters = scenario.strategy_parameters
     resolved = resolved_scenario_parameters(scenario)
-    return [
+    contracts = [
         p.document(parameters[p.parameter.name], source.strategy_parameters[p.parameter.name])
         for p in resolved
     ]
+    if scenario.schema_version == 4:
+        for contract in contracts:
+            if contract["type"] == "integer":
+                contract["maximum"] = 9007199254740991
+    return contracts
 
 
 def _scenario_summary(
@@ -218,6 +233,7 @@ def _input_snapshot(
     scenario: LoadedBacktestScenario,
     source_identity: dict[str, object],
 ) -> tuple[bytes, str]:
+    _validate_web_integer_parameters(scenario)
     snapshot = {
         "schema": "ea.local-web-input.v1",
         "scenario_id": scenario_id,

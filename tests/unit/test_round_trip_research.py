@@ -100,3 +100,42 @@ def test_v4_job_cannot_be_relabelled_as_legacy(tmp_path: Path) -> None:
     document["schema"] = "ea.local-web-job.v3"
     with pytest.raises(WebBoundaryError):
         _decode_job(_canonical_json(document))
+
+
+def test_web_v4_rejects_unsafe_integer_without_changing_cli_contract(tmp_path: Path) -> None:
+    import pytest
+    import yaml
+
+    from ea.product import BacktestScenarioError
+
+    path = closed_scenario(tmp_path / "scenarios")
+    service = WebService(path.parent, tmp_path / "workspace")
+    try:
+        summary: Any = service.validate_scenario(path.name)
+        limits = {p["name"]: p["maximum"] for p in summary["strategy_parameters"]}
+        assert limits["entry_delay"] == limits["hold_root_count"] == 9007199254740991
+        for value in (9007199254740992, "9007199254740993", "1.0000000000000001"):
+            with pytest.raises(BacktestScenarioError):
+                service.validate_scenario(
+                    path.name,
+                    parameters={
+                        "initial_cash": "10000",
+                        "strategy_parameters": {
+                            "entry_delay": value,
+                            "hold_root_count": 1,
+                            "target_quantity": "2",
+                        },
+                    },
+                )
+        document = yaml.safe_load(path.read_text())
+        document["strategy"]["parameters"]["entry_delay"] = 9007199254740993
+        path.write_text(yaml.safe_dump(document))
+        assert load_backtest_scenario(path).strategy_parameters["entry_delay"] == 9007199254740993
+        with pytest.raises(BacktestScenarioError, match="Web integer"):
+            service.validate_scenario(path.name)
+        with pytest.raises(BacktestScenarioError, match="Web integer"):
+            from ea.web.service import _input_snapshot
+
+            _input_snapshot(path.name, load_backtest_scenario(path), {})
+    finally:
+        service.stop()

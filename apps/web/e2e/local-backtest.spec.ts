@@ -530,7 +530,7 @@ test('installed browser completes the bounded local Web research loop', async ({
     await testInfo.attach('ma-research-evidence', { body: JSON.stringify({ ma, maReplay, maBatch, maRelation, maOos, maReport }, null, 2), contentType: 'application/json' })
     await page.screenshot({ path: testInfo.outputPath('holdout-restarted.png'), fullPage: true })
   } finally {
-    if (restarted?.pid) process.kill(restarted.pid, 'SIGTERM')
+    if (restarted?.pid) { process.kill(restarted.pid, 'SIGTERM'); await waitForProcessExit(restarted.pid) }
   }
 })
 
@@ -545,6 +545,15 @@ test('installed round trip research completes and reopens immutable evidence', a
   await page.goto('/backtests')
   await page.getByLabel('Scenario', { exact: true }).selectOption('roundtrip.yaml')
   await page.getByLabel('Research dataset').selectOption('roundtrip.csv')
+  await expect(page.getByLabel('entry_delay')).toHaveAttribute('max', '9007199254740991')
+  await page.getByLabel('entry_delay').fill('9007199254740993')
+  const unsafeRequest = page.waitForRequest(request => request.url().endsWith('/roundtrip.yaml/validate') && request.method() === 'POST')
+  const unsafeResponse = page.waitForResponse(response => response.url().endsWith('/roundtrip.yaml/validate') && response.request().method() === 'POST')
+  await page.getByRole('button', { name: 'Validate input' }).click()
+  expect((await unsafeRequest).postDataJSON().parameters.strategy_parameters.entry_delay).toBe('9007199254740993')
+  expect((await unsafeResponse).status()).toBe(422)
+  await expect(page.getByRole('button', { name: 'Run new backtest' })).toBeDisabled()
+  await page.getByLabel('entry_delay').fill('0')
   const closed = await validateAndRun(page)
   await expect(page.locator('dt', { hasText: /^Position outcome$/ }).locator('..')).toContainText('CLOSED')
   await expect(page.locator('dt', { hasText: /^Exit$/ }).locator('..')).not.toContainText('—')

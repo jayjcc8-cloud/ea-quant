@@ -115,3 +115,6 @@ Report V2 and Path V2 are persisted under Web Job V4. The curve updates cash and
 acknowledged fill and retains every root for drawdown. Batch, comparison and chronological
 holdout reuse these verified artifacts; holdout freezes the strategy parameters and lifecycle.
 Old scenarios, reports and jobs retain their original formats and behavior.
+
+Web V4 integer controls reject values outside ±9007199254740991 to preserve exact JSON/browser
+input identity. The CLI retains its original integer contract; no value is silently clamped.

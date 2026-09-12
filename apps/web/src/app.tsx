@@ -15,7 +15,7 @@ function ParameterControls({ contracts, values, update, prefix = '' }: { contrac
     <input id={`${prefix}${p.name}`} type={p.type === 'integer' ? 'number' : 'text'} inputMode={p.type === 'integer' ? 'numeric' : 'decimal'}
       min={p.minimum === null ? undefined : String(p.minimum)} max={p.maximum === null ? undefined : String(p.maximum)} step={p.type === 'integer' ? '1' : undefined}
       value={Number.isNaN(values[p.name]) ? '' : values[p.name] ?? ''}
-      onChange={event => update(p.name, p.type === 'integer' ? event.target.valueAsNumber : event.target.value)} />
+      onChange={event => update(p.name, p.type === 'integer' && /^-?\d+$/.test(event.target.value) && Number.isSafeInteger(event.target.valueAsNumber) ? event.target.valueAsNumber : event.target.value)} />
     <small>{p.minimum === null ? '' : `Minimum ${p.minimum}`}{p.maximum === null ? '' : ` · Maximum ${p.maximum}`}</small>
   </div>)}</div>
 }
