@@ -75,7 +75,17 @@ class StrategyPackageV2:
         return _module(self.source_bytes, self.identity.artifact_sha256)
 
 
-StrategyPackage = StrategyPackageV1 | StrategyPackageV2
+@dataclass(frozen=True, slots=True)
+class StrategyPackageV3(StrategyPackageV2):
+    def document(self) -> dict[str, Any]:
+        return {
+            **super(StrategyPackageV3, self).document(),
+            "schema": "ea-strategy-package-v3",
+            "schema_version": 3,
+        }
+
+
+StrategyPackage = StrategyPackageV1 | StrategyPackageV2 | StrategyPackageV3
 
 
 def _module(source_bytes: bytes, digest: str) -> dict[str, Any]:
@@ -125,7 +135,11 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
             "strategy",
         }:
             raise ValueError
-        if type(document["schema_version"]) is not int or document["schema_version"] not in (1, 2):
+        if type(document["schema_version"]) is not int or document["schema_version"] not in (
+            1,
+            2,
+            3,
+        ):
             raise ValueError
         package_id = document["package_id"]
         if type(package_id) is not str or not re.fullmatch(
@@ -163,9 +177,10 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
         }:
             raise ValueError
         source.decode("utf-8")
-        if version == 2 and (
+        if version in (2, 3) and (
             strategy["action_contract"] != "V2"
-            or strategy["position_lifecycle"] != "single-long-round-trip-v1"
+            or strategy["position_lifecycle"]
+            != ("single-long-round-trip-v1" if version == 2 else "bounded-long-round-trips-v1")
         ):
             raise ValueError
         package: StrategyPackage = (
@@ -177,7 +192,7 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
                 strategy["outcome_mode"],
             )
             if version == 1
-            else StrategyPackageV2(
+            else (StrategyPackageV2 if version == 2 else StrategyPackageV3)(
                 StrategyPackageIdentityV1(package_id, digest),
                 payload,
                 source,
@@ -186,6 +201,7 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
                     strategy_version=descriptor.strategy_version,
                     display_name=descriptor.display_name,
                     parameters=descriptor.parameters,
+                    position_lifecycle=strategy["position_lifecycle"],
                 ),
             )
         )

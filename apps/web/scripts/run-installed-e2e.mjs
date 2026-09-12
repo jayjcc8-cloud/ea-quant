@@ -152,6 +152,14 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   for (const command of ['validate', 'inspect']) execFileSync(ea, ['strategy', command, '--artifact', v2Artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
   execFileSync(python, ['-I', join(webRoot, 'scripts/setup-local-v2.py'), scenarioRoot, dataRoot, v2Artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
 
+  const v3Source = join(outside, 'ma-crossover-v3')
+  cpSync(join(repository, 'examples/local-strategies/moving-average-crossover-v3'), v3Source, { recursive: true })
+  const v3Artifact = join(strategyRoot, 'ma-v3.eastrategy')
+  execFileSync(ea, ['strategy', 'pack', '--source', v3Source, '--output', v3Artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  for (const command of ['validate', 'inspect']) execFileSync(ea, ['strategy', command, '--artifact', v3Artifact], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  execFileSync(python, ['-I', join(webRoot, 'scripts/setup-local-v3.py'), scenarioRoot, dataRoot, v3Artifact, join(repository, 'examples/research-data/coinbase-btc-usd-2024.json')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+  execFileSync(ea, ['data', 'inspect', join(dataRoot, 'local-v3.csv')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
+
   const args = ['web', 'serve', '--data-root', dataRoot, '--strategy-root', strategyRoot, '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
   server = spawn(ea, args, { cwd: outside, env: cleanEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] })
   await waitForHealth()
@@ -163,7 +171,7 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   const playwright = join(webRoot, 'node_modules', '.bin', 'playwright')
   const completed = spawn(playwright, ['test', '--config', 'playwright.config.ts', ...(process.env.EA_WEB_E2E_GREP ? ['--grep', process.env.EA_WEB_E2E_GREP] : [])], {
     cwd: webRoot,
-    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact, EA_DATA_ROOT: dataRoot, EA_V2_ARTIFACT: v2Artifact, EA_V2_SOURCE: v2Source, EA_SCENARIO_ROOT: scenarioRoot },
+    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact, EA_DATA_ROOT: dataRoot, EA_V2_ARTIFACT: v2Artifact, EA_V2_SOURCE: v2Source, EA_V3_ARTIFACT: v3Artifact, EA_V3_SOURCE: v3Source, EA_SCENARIO_ROOT: scenarioRoot },
     stdio: 'inherit',
   })
   const code = await new Promise((resolveExit) => completed.on('exit', resolveExit))

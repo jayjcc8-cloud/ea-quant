@@ -46,7 +46,7 @@ def compatible(source: dict[str, Any], target: dict[str, Any]) -> bool:
                 "version": document["strategy"].get("version", 1),
                 **{
                     key: document["strategy"][key]
-                    for key in ("action_contract", "position_lifecycle")
+                    for key in ("action_contract", "position_lifecycle", "max_round_trips")
                     if key in document["strategy"]
                 },
                 **(

@@ -48,7 +48,12 @@ from ea.strategy.catalog import (
     package_entry,
     validate_context,
 )
-from ea.strategy.package import StrategyPackage, StrategyPackageV2
+from ea.strategy.package import (
+    StrategyPackage,
+    StrategyPackageV1,
+    StrategyPackageV2,
+    StrategyPackageV3,
+)
 from ea.strategy.registry import (
     BUILTIN_STRATEGIES,
     ResolvedStrategyParameterV1,
@@ -236,6 +241,7 @@ class BacktestScenarioV4(_StrictModel):
 
 
 class _StrategyInputV5(_StrategyInputV2):
+    source: _StrategySourceV3 | None = None
     action_contract: Literal["V2"]
     position_lifecycle: Literal["bounded-long-round-trips-v1"]
     max_round_trips: StrictInt
@@ -434,7 +440,10 @@ def _canonical_bytes(
     dataset: Phase1HistoricalDataset,
 ) -> bytes:
     document = model.model_dump(mode="json")
-    if isinstance(model, BacktestScenarioV4) and model.strategy.source is None:
+    if (
+        isinstance(model, (BacktestScenarioV4, BacktestScenarioV5))
+        and model.strategy.source is None
+    ):
         document["strategy"].pop("source")
     if model.execution.commission is None:
         document["execution"].pop("commission")
@@ -686,7 +695,7 @@ def _load_scenario_document(
                 f"strategy.entry_delay_bars must be at most {entry_delay_maximum}"
             )
     package = None
-    if isinstance(model, BacktestScenarioV5):
+    if isinstance(model, BacktestScenarioV5) and model.strategy.source is None:
         try:
             if (model.strategy.id, model.strategy.version) != ("bounded-long-hold-roots-v1", 1):
                 raise ValueError("unsupported bounded V2 strategy")
@@ -701,7 +710,7 @@ def _load_scenario_document(
             )
         except ValueError as error:
             raise BacktestScenarioError(str(error)) from None
-    if isinstance(model, BacktestScenarioV4) and model.strategy.source is None:
+    elif isinstance(model, BacktestScenarioV4) and model.strategy.source is None:
         try:
             if (model.strategy.id, model.strategy.version) != ("single-long-hold-roots-v1", 1):
                 raise ValueError("unsupported V2 strategy")
@@ -716,7 +725,7 @@ def _load_scenario_document(
             )
         except ValueError as error:
             raise BacktestScenarioError(str(error)) from None
-    elif isinstance(model, (BacktestScenarioV3, BacktestScenarioV4)):
+    elif isinstance(model, (BacktestScenarioV3, BacktestScenarioV4, BacktestScenarioV5)):
         try:
             selected = (
                 catalog
@@ -724,7 +733,12 @@ def _load_scenario_document(
                 else ResearchStrategyCatalogV1.from_root(strategy_root)
             )
             package = selected.package(model.strategy.model_dump())
-            if isinstance(model, BacktestScenarioV4) != isinstance(package, StrategyPackageV2):
+            if (
+                type(package)
+                is not {3: StrategyPackageV1, 4: StrategyPackageV2, 5: StrategyPackageV3}[
+                    model.schema_version
+                ]
+            ):
                 raise ValueError("package version conflicts with scenario route")
             entry = (
                 LocalActionEntry(package)

@@ -232,13 +232,16 @@ def execute_round_trip(
                             ),
                             spec_set=scenario.spec_set,
                         )
-                        planner = create_portfolio_planning_authority(
-                            run_id=run_id,
-                            ledger=economic_gate.ledger,
-                            spec_set=scenario.spec_set,
-                            policy=policy,
-                            execution_policy=scenario.execution_policy,
-                        )
+                        if bounded:
+                            planner.rebind_flat_policy(policy)
+                        else:
+                            planner = create_portfolio_planning_authority(
+                                run_id=run_id,
+                                ledger=economic_gate.ledger,
+                                spec_set=scenario.spec_set,
+                                policy=policy,
+                                execution_policy=scenario.execution_policy,
+                            )
                     signal = signals.issue(
                         root,
                         dispatch_sequence=lease.dispatch_sequence,

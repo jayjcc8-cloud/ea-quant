@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Research Foundation — immutable local strategy artifacts on the bounded offline research loop.**
+**Research Validation — bounded repeated long-only offline research.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -166,7 +166,10 @@ external write, deployment, or live capability is part of this objective.
   binds max_round_trips (1..256), reuses Action V2 and existing economic owners, and publishes
   Result/Semantic V4 and Report V3 for ordered complete trades and optional open positions.
   Multi-dispatch resume preserves deterministic identities and the funding-plus-fill ledger
-  sequence. Package V3, Path V3 and Web research integration remain the second implementation PR.
+  sequence. Package V3 retains Action/SDK V2 while preserving planning identities across local
+  action quantities. Path V3 and Web Job V5 expose ordered trades, acknowledged-balance paths,
+  Batch, comparison and frozen chronological Holdout. The installed reference MA crossover uses
+  captured real OHLCV and retains readable source/holdout evidence after source/CSV deletion.
 
 ## Incomplete
 
@@ -185,7 +188,8 @@ Web Job V4 persists the new report/path versions; Run Detail, Batch, Comparison 
 those verified artifacts, including restart/reopen without external CSV. Existing V1 routes
 remain unchanged. New metrics, optimizer, arbitrary multi-trade and Agent Research Tools remain
 future work. The next decision follows actual strategy/data research; Candidate remains deferred. Issue #200 separately authorizes bounded repeated long round trips;
-its research integration and installed capability acceptance remain pending.
+its research integration is delivered. Trade Analytics V1 is the recommended next capability,
+not activated by this delivery.
 
 ## Blockers
 
@@ -223,6 +227,8 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 
 - [ADR 0041 — Immutable Local Strategy Action V2 Package V1](adr/0041-immutable-local-strategy-action-v2-package-v1.md) — Accepted; local V2 authoring on existing offline research routes.
 - [ADR 0040 — Single Long Round Trip Position Lifecycle](adr/0040-single-long-round-trip-position-lifecycle-v1.md) — Accepted; bounded offline single-round-trip runtime and research integration delivered.
+
+- [ADR 0042 — Bounded Long Round Trips V1](adr/0042-bounded-long-round-trips-v1.md) — Accepted; repeated offline research and versioned evidence.
 
 Proposed architecture (not implemented capabilities):
 

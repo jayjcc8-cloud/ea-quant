@@ -21,7 +21,13 @@ from ea.strategy.package import (
 )
 from ea.strategy.registry import BUILTIN_STRATEGIES, EntryLogic, ParameterValue, StrategyEntryV1
 from ea.strategy.sdk_v1 import StrategyBarV1, StrategyDecisionV1, StrategyValidationContextV1
-from ea.strategy.sdk_v2 import ROUND_TRIP_STRATEGY, PositionViewV2, StrategyDescriptorV2
+from ea.strategy.sdk_v2 import (
+    BOUNDED_ROUND_TRIP_STRATEGY,
+    ROUND_TRIP_STRATEGY,
+    PositionViewV2,
+    StrategyDescriptorV2,
+    StrategyEntryV2,
+)
 
 
 class LocalEntryLogic(EntryLogic):
@@ -137,7 +143,8 @@ def validate_context(
 class ResearchStrategyCatalogV1:
     def __init__(self, packages: tuple[StrategyPackage, ...] = ()) -> None:
         builtin_ids = {d.strategy_id for d in BUILTIN_STRATEGIES.descriptors()} | {
-            ROUND_TRIP_STRATEGY.descriptor.strategy_id
+            ROUND_TRIP_STRATEGY.descriptor.strategy_id,
+            BOUNDED_ROUND_TRIP_STRATEGY.descriptor.strategy_id,
         }
         ids = [p.descriptor.strategy_id for p in packages]
         package_ids = [p.identity.package_id for p in packages]
@@ -184,7 +191,9 @@ class ResearchStrategyCatalogV1:
                 return package
         raise StrategyPackageError("exact strategy package identity is unavailable")
 
-    def resolve(self, strategy: Mapping[str, Any]) -> StrategyEntryV1 | LocalActionEntry:
+    def resolve(
+        self, strategy: Mapping[str, Any]
+    ) -> StrategyEntryV1 | StrategyEntryV2 | LocalActionEntry:
         if "source" in strategy:
             package = self.package(strategy)
             return (
@@ -192,4 +201,13 @@ class ResearchStrategyCatalogV1:
                 if isinstance(package, StrategyPackageV2)
                 else package_entry(package)
             )
+        for entry in (ROUND_TRIP_STRATEGY, BOUNDED_ROUND_TRIP_STRATEGY):
+            if strategy["id"] == entry.descriptor.strategy_id:
+                if (
+                    strategy.get("version") != entry.descriptor.strategy_version
+                    or strategy.get("action_contract") != "V2"
+                    or strategy.get("position_lifecycle") != entry.descriptor.position_lifecycle
+                ):
+                    raise StrategyPackageError("built-in lifecycle identity conflicts")
+                return entry
         return self.get(strategy["id"], strategy.get("version", 1))
