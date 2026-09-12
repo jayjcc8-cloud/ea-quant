@@ -46,7 +46,7 @@ for Candidate creation. Never substitute the currently installed version or curr
 
 Canonicalize with the existing Web JSON convention: sorted keys, ASCII escaping, compact
 separators, no NaN/Infinity, and exactly one final LF. Hash
-`b"ea.research-candidate.fingerprint.v1\\0"` interpreted as the domain text followed by one
+`b"ea.research-candidate.fingerprint.v1\x00"` interpreted as the domain text followed by one
 NUL byte, concatenated with these canonical projection bytes. Use lowercase 64-digit hex.
 Integers remain integers, decimal parameters use their existing canonical decimal strings.
 Do not hash UUID of the Candidate record, status, reason, timestamps or display labels.
