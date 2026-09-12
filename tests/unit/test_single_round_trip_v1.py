@@ -444,3 +444,38 @@ def test_v2_reader_rejects_unknown_economic_field(tmp_path: Path) -> None:
             json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n",
             report.summary_bytes,
         )
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_fractional_fill_uses_settled_notional(tmp_path: Path, closed: bool) -> None:
+    from ea.product import generate_backtest_report
+
+    path = (closed_scenario if closed else round_trip_scenario)(tmp_path / "input")
+    doc = yaml.safe_load(path.read_text())
+    doc["instrument"]["quantity_quantum"] = "0.01"
+    doc["strategy"]["parameters"]["target_quantity"] = "0.01"
+    path.write_text(yaml.safe_dump(doc))
+    result = run_backtest_scenario(load_backtest_scenario(path), tmp_path / "runs")
+    report: Any = generate_backtest_report(
+        result.output_directory, tmp_path / "report"
+    ).report.document
+    assert report["economics"]["net_pnl"]["amount"] == ("0.18" if closed else "0")
+    assert report["economics"]["ending_cash"][0]["amount"] == ("10000.18" if closed else "9998.98")
+
+
+@pytest.mark.parametrize("field", ["reconciliation", "risk"])
+def test_report_rejects_unverified_completion_claim(tmp_path: Path, field: str) -> None:
+    from ea.product import BacktestReportError, generate_backtest_report
+
+    result = run_backtest_scenario(
+        load_backtest_scenario(closed_scenario(tmp_path / "input")), tmp_path / "runs"
+    )
+    path = result.output_directory / "result.json"
+    doc = json.loads(path.read_bytes())
+    if field == "reconciliation":
+        doc[field] = {"cash": "mismatch", "position": "mismatch"}
+    else:
+        doc["execution_legs"][1]["risk"] = {"decision": "resize", "reason": "fabricated"}
+    path.write_text(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(BacktestReportError):
+        generate_backtest_report(result.output_directory, tmp_path / "report")

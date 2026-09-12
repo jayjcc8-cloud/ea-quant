@@ -301,7 +301,6 @@ def execute_round_trip(
                 "fill": None if leg_fill is None else json.loads(canonical_fill_bytes(leg_fill)),
                 "risk": {
                     "decision": risk_results[index].decision.kind.value,
-                    "reason": risk_results[index].evidence.reason_code.value,
                 },
                 "outcome": "expired" if leg_fill is None else "filled",
             }

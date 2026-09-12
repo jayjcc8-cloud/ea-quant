@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from ea.product import (
+    BacktestReportV1,
     equity_path,
     generate_backtest_report,
     load_backtest_scenario,
@@ -57,6 +58,7 @@ def test_real_attempt_path_is_deterministic_and_matches_report(tmp_path: Path, f
     scenario = load_backtest_scenario(_priced_scenario(tmp_path / "input", flat=flat))
     attempt = run_backtest_scenario(scenario, tmp_path / "runs").output_directory
     report = generate_backtest_report(attempt, tmp_path / "report").report
+    assert isinstance(report, BacktestReportV1)
     first = equity_path.generate_equity_path_analysis(attempt, report)
     second = equity_path.generate_equity_path_analysis(attempt, report)
     assert first.canonical_bytes == second.canonical_bytes
@@ -83,6 +85,7 @@ def test_commission_commits_at_fill_root(tmp_path: Path) -> None:
     )
     attempt = run_backtest_scenario(scenario, tmp_path / "runs").output_directory
     report = generate_backtest_report(attempt, tmp_path / "report").report
+    assert isinstance(report, BacktestReportV1)
     d = json.loads(equity_path.generate_equity_path_analysis(attempt, report).canonical_bytes)
     assert [p["equity"] for p in d["display_points"]] == ["10000", "10000", "10000", "9997.97"]
     assert d["max_drawdown"]["amount"] == "2.03"
@@ -220,6 +223,7 @@ def test_known_ohlcv_path(
         load_backtest_scenario(source), tmp_path / "runs"
     ).output_directory
     report = generate_backtest_report(attempt, tmp_path / "report").report
+    assert isinstance(report, BacktestReportV1)
     d = json.loads(equity_path.generate_equity_path_analysis(attempt, report).canonical_bytes)
     assert [p["equity"] for p in d["display_points"]] == expected
     dd = d["max_drawdown"]
@@ -275,6 +279,7 @@ def test_mismatched_report_and_changed_source_fail_closed(tmp_path: Path) -> Non
     scenario = load_backtest_scenario(_priced_scenario(tmp_path / "input"))
     attempt = run_backtest_scenario(scenario, tmp_path / "runs").output_directory
     report = generate_backtest_report(attempt, tmp_path / "report").report
+    assert isinstance(report, BacktestReportV1)
     document: Any = report.document
     document["economics"]["equity"]["amount"] = "1"
     changed = BacktestReportV1(_canonical_json(document) + b"\n", report.summary_bytes)

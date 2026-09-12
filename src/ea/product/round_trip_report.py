@@ -15,7 +15,9 @@ from ea.core import (
     CanonicalDecimal,
     audit_chain_head,
     require_quantized,
+    settle_execution,
 )
+from ea.core.economics import settle_product
 from ea.product import reporting as r
 from ea.product.identity import semantic_outcome_sha256
 
@@ -26,11 +28,12 @@ def economics(result: dict[str, Any], scenario: Any, price: CanonicalDecimal) ->
     fills = [leg["fill"] for leg in result["execution_legs"] if leg["fill"] is not None]
     fees = [CanonicalDecimal(fill["fees"][0]["amount"]) for fill in fills]
     notionals = [
-        r._multiply(
+        settle_execution(
+            scenario.spec_set,
+            scenario.instrument,
             CanonicalDecimal(fill["price"]),
             CanonicalDecimal(fill["quantity"]),
-            spec.contract_multiplier,
-        )
+        ).amount
         for fill in fills
     ]
     cash = scenario.initial_cash
@@ -45,7 +48,11 @@ def economics(result: dict[str, Any], scenario: Any, price: CanonicalDecimal) ->
         or result["final_quantity"] != quantity.text
     ):
         raise ValueError("settlement balances conflict")
-    value = r._multiply(price, quantity, spec.contract_multiplier)
+    value = (
+        settle_product(price, quantity, spec.contract_multiplier, spec.currency_quantum).amount
+        if quantity.coefficient
+        else zero
+    )
     require_quantized(value, spec.currency_quantum, field_name="position value")
     equity = r._add(cash, value)
     total_fees = zero
@@ -248,6 +255,14 @@ def validate_result(
             or (index == 1 and (not filled or order["quantity"] != filled[0]["quantity"]))
         ):
             raise ValueError("bounded leg order conflicts")
+        expected_risk = (
+            "allow"
+            if index == 1
+            or order["quantity"] == str(scenario.strategy_parameters["target_quantity"])
+            else "resize"
+        )
+        if leg["risk"] != {"decision": expected_risk}:
+            raise ValueError("risk projection conflicts with authorized quantity")
         order_evidence = leg["order_evidence"]
         if (
             sha256(ORDER_DIGEST_DOMAIN + r._canonical_json(order_evidence)).hexdigest()
@@ -299,6 +314,11 @@ def validate_result(
             raise ValueError("ordered ledger handoff conflicts")
         previous = handoff["after_snapshot_sha256"]
     count = len(filled)
+    if result["reconciliation"] != {
+        "cash": "match",
+        "position": "match" if count else "not_required_empty",
+    }:
+        raise ValueError("result reconciliation conflicts with acknowledged observations")
     if (
         terminal is None
         or terminal.get("terminal_kind") != "success"
