@@ -61,9 +61,13 @@ new lifecycle/action semantics in a separate digest domain. Existing V1/V2/V3 ar
 
 At most two issued Orders, one pending at a time, and two unique full Fills: BUY then equal-q SELL.
 Entry risk RESIZE can create a smaller full order; exit RESIZE cannot create a partial close.
-Keep the same ID authorities throughout both legs. Use existing order/fact identity validation;
-prove illegal third Fill rejection before ledger effects rather than checking only final counts.
-Exact duplicate replay is not a new Fill. Expiry is not a Fill and does not change position.
+Keep the same ID authorities throughout both legs. Protection comes from bounded issuance and
+exact active matcher-issued ingress verification: this closed source emits the full issued Order
+quantity only. Test third issuance and non-issued/tampered third, partial or unknown-order ingress
+before ledger effects; final counts alone are insufficient. Core fact handling itself supports
+partials and UNRESOLVED Fills which the ledger may apply before halt, so it is not that guard.
+Do not expand V4 to anomalous authentic sources. Exact duplicate replay is not a new Fill. Expiry
+is not a Fill and does not change position.
 
 ## Q5 — COMMISSION_MODEL
 

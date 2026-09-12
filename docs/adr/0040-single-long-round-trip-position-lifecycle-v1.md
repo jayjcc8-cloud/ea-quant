@@ -101,11 +101,18 @@ or create a special risk-free SELL path. No shared Ledger/Matcher relaxation is 
 Matcher continues using its exact next-eligible-bar rule, side-dependent price quantization and
 full-order trade facts. SELL does not fill at strategy signal price or on the causal bar. Fact
 admission must bind each leg's Order ID, causal/submission evidence, side, quantity and unique
-Fill ID. Bounded issuance plus existing order/fact full-fill checks prevent a third economic Fill;
-explicitly test third/unknown-order Fill rejection before ledger effects, repeated same-ID replay
-as a no-op, and conflicting identities as failures. A post-hoc report count check alone is not
-sufficient protection. If current fact admission cannot enforce this, stop implementation rather
-than bypass it or activate the generic ancestry work in #125.
+Fill ID. The closed historical matcher creates only issued-order facts at the entire Order
+quantity; fact admission verifies the exact active source-issued ingress. Together with bounded
+issuance this route cannot produce a third, partial or unknown-order trade. Test illegal third
+issuance and non-issued/tampered third, partial or unknown-order ingress rejection before ledger
+effects, exact same-ID replay as a no-op, and conflicting identities as failures.
+
+Do not attribute this protection to generic fact anomaly handling: core fact projection supports
+partial fills and preserves some anomalous trades as UNRESOLVED Fills; the ledger can apply those
+before a halt. V4 must stay on the closed matcher route. Admitting authentic anomalous source
+facts would require an explicit bounded guard before ledger application, not a report-only count
+check or suppression of existing core facts. Such ingress expansion is outside this slice: stop
+and reassess rather than bypass checks or activate the generic ancestry work in #125.
 
 ## ACCOUNTING_MODEL / COMMISSION_MODEL (Q5, Q6)
 
