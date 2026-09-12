@@ -36,7 +36,7 @@ from ea.product.scenario import (
     scenario_digest_domain,
 )
 from ea.strategy.catalog import ResearchStrategyCatalogV1
-from ea.strategy.package import StrategyPackageV1, read_regular, validate_package
+from ea.strategy.package import StrategyPackage, read_regular, validate_package
 from ea.strategy.registry import project_parameters
 from ea.strategy.sdk_v2 import ROUND_TRIP_STRATEGY
 from ea.web.datasets import LocalResearchDatasetRegistryV1
@@ -169,7 +169,11 @@ def _strategy_parameter_contracts(
     if scenario.schema_version == 4:
         for contract in contracts:
             if contract["type"] == "integer":
-                contract["maximum"] = 9007199254740991
+                contract["maximum"] = (
+                    min(9007199254740991, contract["maximum"])
+                    if contract["maximum"] is not None
+                    else 9007199254740991
+                )
     return contracts
 
 
@@ -344,7 +348,7 @@ class JobRecord:
     equity_path_sha256: str | None = None
     error_code: str | None = None
     message: str | None = None
-    strategy_package: StrategyPackageV1 | None = None
+    strategy_package: StrategyPackage | None = None
 
     def document(self, *, presentation: bool = False) -> dict[str, object]:
         document: dict[str, object] = {
@@ -390,7 +394,7 @@ class JobRecord:
             strategy = json.loads(self.input_snapshot_bytes)["scenario"]["strategy"]
             entry = (
                 ROUND_TRIP_STRATEGY
-                if self.schema == "ea.local-web-job.v4"
+                if self.schema == "ea.local-web-job.v4" and self.strategy_package is None
                 else ResearchStrategyCatalogV1(
                     () if self.strategy_package is None else (self.strategy_package,)
                 ).resolve(strategy)
@@ -1182,7 +1186,7 @@ class WebService:
         document: dict[str, Any] = snapshot["scenario"]
         entry = (
             ROUND_TRIP_STRATEGY
-            if document["schema_version"] == 4
+            if document["schema_version"] == 4 and source.strategy_package is None
             else ResearchStrategyCatalogV1(
                 () if source.strategy_package is None else (source.strategy_package,)
             ).resolve(document["strategy"])

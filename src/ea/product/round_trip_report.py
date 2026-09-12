@@ -13,11 +13,17 @@ from ea.core import (
     ORDER_DIGEST_DOMAIN,
     AuditRecordKind,
     CanonicalDecimal,
+    OutcomeCode,
     audit_chain_head,
     require_quantized,
     settle_execution,
 )
 from ea.core.economics import settle_product
+from ea.core.execution_messages import (
+    EXECUTION_APPROVAL_CANONICALIZATION,
+    RISK_DECISION_CANONICALIZATION,
+    RISK_DECISION_DIGEST_DOMAIN,
+)
 from ea.product import reporting as r
 from ea.product.identity import semantic_outcome_sha256
 
@@ -124,6 +130,61 @@ def semantic_projection(result: dict[str, Any]) -> dict[str, Any]:
             for leg in result["execution_legs"]
         ],
     }
+
+
+def _verify_local_risk(order: dict[str, Any], risk: dict[str, Any], *, exit_leg: bool) -> None:
+    """Reconstruct the closed decision and verify its hash in the authorized Order.
+
+    Local quantity is action-defined, so a parameter name cannot prove allow/resize.
+    The existing Order pins every decision/approval field needed for this read-only check.
+    """
+    r._exact_keys(risk, {"decision"})
+    kind = risk["decision"]
+    if kind not in {"allow", "resize"} or (exit_leg and kind != "allow"):
+        raise ValueError("unsupported local risk decision")
+    common = {
+        key: order[key]
+        for key in (
+            "correlation_id",
+            "decision_id",
+            "dispatch_sequence",
+            "effective_intent_sha256",
+            "intent_id",
+            "portfolio_snapshot_version",
+            "risk_state_version",
+            "run_id",
+            "schema_version",
+        )
+    }
+    common.update(
+        approved_quantity=order["quantity"],
+        causal_root_available_at=order["eligible_after_available_at"],
+    )
+    approval = {
+        **common,
+        "approval_id": order["approval_id"],
+        "canonicalization": EXECUTION_APPROVAL_CANONICALIZATION,
+        "causation_id": order["decision_id"],
+        "message_type": "execution_approval",
+        "original_intent_sha256": order["original_intent_sha256"],
+    }
+    decision = {
+        **common,
+        "approval": approval,
+        "canonicalization": RISK_DECISION_CANONICALIZATION,
+        "causation_id": order["intent_id"],
+        "intent_sha256": order["original_intent_sha256"],
+        "kind": kind,
+        "message_type": "risk_decision",
+        "outcome_code": (
+            OutcomeCode.RISK_ALLOWED if kind == "allow" else OutcomeCode.RISK_RESIZED
+        ).value,
+    }
+    if (
+        sha256(RISK_DECISION_DIGEST_DOMAIN + r._canonical_json(decision)).hexdigest()
+        != order["risk_decision_sha256"]
+    ):
+        raise ValueError("local risk decision conflicts with authorized Order")
 
 
 def validate_result(
@@ -255,14 +316,17 @@ def validate_result(
             or (index == 1 and (not filled or order["quantity"] != filled[0]["quantity"]))
         ):
             raise ValueError("bounded leg order conflicts")
-        expected_risk = (
-            "allow"
-            if index == 1
-            or order["quantity"] == str(scenario.strategy_parameters["target_quantity"])
-            else "resize"
-        )
-        if leg["risk"] != {"decision": expected_risk}:
-            raise ValueError("risk projection conflicts with authorized quantity")
+        if scenario.strategy_package is not None:
+            _verify_local_risk(leg["order_evidence"], leg["risk"], exit_leg=index == 1)
+        else:
+            expected_risk = (
+                "allow"
+                if index == 1
+                or order["quantity"] == str(scenario.strategy_parameters["target_quantity"])
+                else "resize"
+            )
+            if leg["risk"] != {"decision": expected_risk}:
+                raise ValueError("risk projection conflicts with authorized quantity")
         order_evidence = leg["order_evidence"]
         if (
             sha256(ORDER_DIGEST_DOMAIN + r._canonical_json(order_evidence)).hexdigest()

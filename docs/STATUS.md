@@ -155,13 +155,20 @@ external write, deployment, or live capability is part of this objective.
   BacktestReportV1. Run detail, Batch sorting, Comparison and Holdout read persisted path evidence;
   v1/v2 jobs remain readable without migration. No strategy or economic authority expands.
 
+- Issue #198 / ADR 0041 adds independent Local StrategyPackageV2 through the existing CLI
+  pack/validate/inspect commands. Trusted local Action V2 code enters Scenario V4 without source
+  edits to EA, with generic Web controls, Report V2/Path V2, Batch, comparison and frozen Holdout.
+  Exact artifact bytes and normalized parameters persist through source deletion and restart.
+  Package/SDK V1 and built-in V1/V2 remain compatible. A stateful MA crossover example illustrates
+  the single-entry/full-exit contract. #125 is closed not-planned as historical provenance.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
 backtest/reporting product, not the broader validation, optimization, paper, or live roadmap. Arbitrary
 instruction-level or Web recovery, symbol/data editing, uploads, broader experiment tracking,
 automatic optimization, broader performance analytics, remote strategy plugins, paper/live execution,
-package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Research Foundation adds schema-driven strategies and immutable local artifacts to commission and Chronological Holdout.
+package-registry publication, and deployment remain unavailable. Phase 1.1/#125 is closed not-planned (historical provenance). Research Foundation adds schema-driven strategies and immutable local artifacts to commission and Chronological Holdout.
 Path-aware Research Analysis V1 is delivered. PR #191 records the Strategy Lifecycle architecture
 review and Proposed ADR 0039; Candidate runtime remains deferred. Issue #192 / Accepted ADR 0040
 delivers SINGLE_LONG_ROUND_TRIP_V1 under Issue #195: one entry, one full exit and at most two
@@ -208,6 +215,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0037 — Registered Local OHLCV Research Input V1](adr/0037-registered-local-ohlcv-research-input-v1.md)
 - [ADR 0038 — Equity Path and Maximum Drawdown V1](adr/0038-equity-path-and-maximum-drawdown-v1.md)
 
+- [ADR 0041 — Immutable Local Strategy Action V2 Package V1](adr/0041-immutable-local-strategy-action-v2-package-v1.md) — Accepted; local V2 authoring on existing offline research routes.
 - [ADR 0040 — Single Long Round Trip Position Lifecycle](adr/0040-single-long-round-trip-position-lifecycle-v1.md) — Accepted; bounded offline single-round-trip runtime and research integration delivered.
 
 Proposed architecture (not implemented capabilities):
@@ -235,7 +243,7 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 - [#84 — v0.2.0 product acceptance and release gate](https://github.com/jayjcc8-cloud/ea-quant/issues/84)
   records the accepted clean-main product and the completed limited GitHub prerelease path.
 - [#125 — Phase 1.1 reconciliation/recovery expansion](https://github.com/jayjcc8-cloud/ea-quant/issues/125)
-  remains parked and does not block the Offline Backtest MVP or v0.2.0 unless explicitly promoted.
+  is closed not-planned; future concrete needs require a new bounded Issue.
 - [#167 — Local real Web backtest loop](https://github.com/jayjcc8-cloud/ea-quant/issues/167)
   adds the bounded browser-to-engine-to-report path without activating Phase 1.1 or Phase 2.
 - [#169 — Local Web Research Loop V1](https://github.com/jayjcc8-cloud/ea-quant/issues/169)

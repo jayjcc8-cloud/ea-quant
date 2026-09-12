@@ -130,6 +130,8 @@ def execute_round_trip(
                 instrument=scenario.instrument,
                 target_quantity=CanonicalDecimal(
                     str(scenario.strategy_parameters["target_quantity"])
+                    if scenario.strategy_package is None
+                    else scenario.max_order_quantity.text
                 ),
             ),
         ),
@@ -192,7 +194,11 @@ def execute_round_trip(
                         or len(issued) >= 2
                     ):
                         raise ValueError("illegal bounded position transition")
-                    if entering and action.quantity != policy.entries[0].target_quantity:
+                    if (
+                        entering
+                        and scenario.strategy_package is None
+                        and action.quantity != policy.entries[0].target_quantity
+                    ):
                         raise ValueError("entry quantity conflicts with declared target")
                     if entering and action.quantity is None:
                         raise ValueError("missing entry quantity")
@@ -201,6 +207,27 @@ def execute_round_trip(
                         scenario.spec_set.require(scenario.instrument).quantity_quantum,
                         field_name="order quantity",
                     )
+                    if (
+                        entering
+                        and action.quantity is not None
+                        and scenario.strategy_package is not None
+                    ):
+                        policy = create_phase1_portfolio_policy(
+                            policy_id=PortfolioPolicyId("backtest.single-long-round-trip.v1"),
+                            entries=(
+                                Phase1PortfolioPolicyEntry(
+                                    instrument=scenario.instrument, target_quantity=action.quantity
+                                ),
+                            ),
+                            spec_set=scenario.spec_set,
+                        )
+                        planner = create_portfolio_planning_authority(
+                            run_id=run_id,
+                            ledger=economic_gate.ledger,
+                            spec_set=scenario.spec_set,
+                            policy=policy,
+                            execution_policy=scenario.execution_policy,
+                        )
                     signal = signals.issue(
                         root,
                         dispatch_sequence=lease.dispatch_sequence,
