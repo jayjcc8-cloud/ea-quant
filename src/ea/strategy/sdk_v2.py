@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
-from ea.core import CanonicalDecimal, require_positive
+from ea.core.economics import CanonicalDecimal, require_positive
 from ea.strategy.registry import ParameterV1
 from ea.strategy.sdk_v1 import StrategyBarV1
 
