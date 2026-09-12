@@ -5,7 +5,7 @@ import { EquityCurve, pathPercent, type EquityPath } from './equity-path'
 
 type ParameterMap = Record<string, string | number>
 type StrategySource = { kind: string; package_id: string; artifact_sha256: string }
-type StrategyDescriptor = { display_name?: string; strategy_id: string; strategy_version: number; research_visible: boolean; parameters: { name: string; type: 'integer' | 'decimal' }[] }
+type StrategyDescriptor = { display_name?: string; action_contract?: string; position_lifecycle?: string; strategy_id: string; strategy_version: number; research_visible: boolean; parameters: { name: string; type: 'integer' | 'decimal' }[] }
 const parameterDefaults = (scenario?: ScenarioSummary): ParameterMap => Object.fromEntries((scenario?.strategy_parameters ?? []).map(p => [p.name, p.current_value ?? p.default ?? '']))
 const jobParameters = (job: BacktestJob): ParameterMap => job.parameters ?? job.input_snapshot?.scenario.strategy.parameters ?? {}
 const parameterText = (parameters: ParameterMap) => Object.entries(parameters).map(([name, value]) => `${name}: ${value}`).join(' · ')
@@ -15,7 +15,7 @@ function ParameterControls({ contracts, values, update, prefix = '' }: { contrac
     <input id={`${prefix}${p.name}`} type={p.type === 'integer' ? 'number' : 'text'} inputMode={p.type === 'integer' ? 'numeric' : 'decimal'}
       min={p.minimum === null ? undefined : String(p.minimum)} max={p.maximum === null ? undefined : String(p.maximum)} step={p.type === 'integer' ? '1' : undefined}
       value={Number.isNaN(values[p.name]) ? '' : values[p.name] ?? ''}
-      onChange={event => update(p.name, p.type === 'integer' ? event.target.valueAsNumber : event.target.value)} />
+      onChange={event => update(p.name, p.type === 'integer' && /^-?\d+$/.test(event.target.value) && Number.isSafeInteger(event.target.valueAsNumber) ? event.target.valueAsNumber : event.target.value)} />
     <small>{p.minimum === null ? '' : `Minimum ${p.minimum}`}{p.maximum === null ? '' : ` · Maximum ${p.maximum}`}</small>
   </div>)}</div>
 }
@@ -75,8 +75,8 @@ export type BatchRequest = {
   runs: { strategy_parameters: ParameterMap }[]
 }
 type Money = { amount: string; currency?: string }
-export type BacktestReport = {
-  schema: 'ea.backtest-report.v1'; run_id: string
+type ReportBase = {
+  run_id: string
   source?: { strategy: { id: string }; instrument: { venue: string; symbol: string } }
   scenario?: { strategy_id: string; instrument: { venue: string; symbol: string } }
   economics: {
@@ -85,8 +85,28 @@ export type BacktestReport = {
     valuation: { price: string; position_value: string }; equity: Money; net_pnl: Money
     fees?: { amount: string; currency: string; count: number; rule: string }
     total_return: { value: string }; counts: { orders: number; fills: number }
-    execution: { order: { quantity: string; side: string } | null; fill: { quantity: string; price: string; side: string } | null }
   }
+}
+type RoundTripEconomics = ReportBase['economics'] & {
+  position_state: string; position_outcome: 'FLAT_INITIAL' | 'OPEN_AT_END' | 'CLOSED'
+  realized_pnl: Money; gross_unrealized_pnl: Money; entry_fee: string; exit_fee: string
+  execution_legs: { role: 'entry' | 'exit'; outcome: string; fill: { quantity: string; price: string; occurred_at: string; fees: Money[] } | null }[]
+}
+export type BacktestReport = (ReportBase & { schema: 'ea.backtest-report.v1'; economics: ReportBase['economics'] & {
+  execution: { order: { quantity: string; side: string } | null; fill: { quantity: string; price: string; side: string } | null }
+}}) | (ReportBase & { schema: 'ea.backtest-report.v2'; economics: RoundTripEconomics })
+
+function RoundTripExecution({ economics }: { economics: RoundTripEconomics }) {
+  return <>
+    <div><dt>Position outcome</dt><dd>{economics.position_outcome}</dd></div>
+    <div><dt>Position state</dt><dd>{economics.position_state}</dd></div>
+    {(['entry', 'exit'] as const).map(role => {
+      const leg = economics.execution_legs.find(item => item.role === role)
+      return <div key={role}><dt>{role === 'entry' ? 'Entry' : 'Exit'}</dt><dd>{leg?.fill ? `${leg.fill.quantity} @ ${leg.fill.price} · ${leg.fill.occurred_at} · fee ${leg.fill.fees[0]?.amount ?? '0'}` : '—'}</dd></div>
+    })}
+    <div><dt>Realized P&amp;L</dt><dd>{economics.realized_pnl.amount}</dd></div>
+    <div><dt>Gross unrealized P&amp;L</dt><dd>{economics.gross_unrealized_pnl.amount}</dd></div>
+  </>
 }
 export type ApiAdapter = {
   holdoutScenarios(sourceJobId: string): Promise<ScenarioSummary[]>
@@ -154,12 +174,12 @@ async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath |
   if (job.status !== 'succeeded' || !job.equity_path_sha256) return null
   try {
     const path = await api.getEquityPath(job.job_id)
-    if (path.schema !== 'ea.backtest-equity-path.v1' || path.run_id !== job.engine_run_id || path.report_sha256 !== job.report_sha256) return null
+    if (path.schema !== (job.schema === 'ea.local-web-job.v4' ? 'ea.backtest-equity-path.v2' : 'ea.backtest-equity-path.v1') || path.run_id !== job.engine_run_id || path.report_sha256 !== job.report_sha256) return null
     return path
   } catch { return null }
 }
 function pathUnavailable(job: BacktestJob) {
-  return job.schema === 'ea.local-web-job.v3' ? 'Path analysis unavailable.' : 'Path analysis unavailable for this legacy run.'
+  return ['ea.local-web-job.v3', 'ea.local-web-job.v4'].includes(job.schema ?? '') ? 'Path analysis unavailable.' : 'Path analysis unavailable for this legacy run.'
 }
 
 function DatasetSelector({ api, value, change }: { api: ApiAdapter; value: DatasetReference; change: (value: DatasetReference) => void }) {
@@ -566,6 +586,8 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
   if (!leftInput || !rightInput) return <><PageTitle title="Compare Backtests" subtitle="Pairwise comparison requires v2 input snapshots." /><section className="notice error">Input snapshot unavailable</section></>
   const inputRows = [
     ['Initial Cash', leftInput.funding.initial_cash, rightInput.funding.initial_cash],
+    ['Action contract', String(leftInput.strategy.action_contract ?? 'V1'), String(rightInput.strategy.action_contract ?? 'V1')],
+    ['Position lifecycle', String(leftInput.strategy.position_lifecycle ?? 'single-entry'), String(rightInput.strategy.position_lifecycle ?? 'single-entry')],
     ['Symbol', leftInput.instrument.symbol, rightInput.instrument.symbol],
     ['Commission', commissionLabel(leftInput.execution?.commission), commissionLabel(rightInput.execution?.commission)],
   ]
@@ -691,8 +713,10 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
       </section>
       <div className="backtest-grid">
         <section className="panel"><header><h2>Execution</h2><span>Canonical strings</span></header><dl className="summary-list">
-          <div><dt>Order</dt><dd>{economics.execution.order ? `${economics.execution.order.side} ${economics.execution.order.quantity}` : 'none'}</dd></div>
-          <div><dt>Fill quantity</dt><dd>{economics.execution.fill?.quantity ?? 'none'}</dd></div><div><dt>Fill price</dt><dd>{economics.execution.fill?.price ?? 'none'}</dd></div>
+          {report?.schema === 'ea.backtest-report.v2' ? <RoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v1' ? <>
+          <div><dt>Order</dt><dd>{report.economics.execution.order ? `${report.economics.execution.order.side} ${report.economics.execution.order.quantity}` : 'none'}</dd></div>
+          <div><dt>Fill quantity</dt><dd>{report.economics.execution.fill?.quantity ?? 'none'}</dd></div><div><dt>Fill price</dt><dd>{report.economics.execution.fill?.price ?? 'none'}</dd></div>
+          </> : null}
           <div><dt>Valuation price</dt><dd>{economics.valuation.price}</dd></div><div><dt>Position value</dt><dd>{economics.valuation.position_value}</dd></div>
           <div><dt>Counts</dt><dd><span>Orders {economics.counts.orders}</span> · <span>Fills {economics.counts.fills}</span></dd></div>
         </dl></section>

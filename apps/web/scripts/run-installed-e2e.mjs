@@ -141,6 +141,8 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   mkdirSync(dataRoot)
   cpSync(join(scenarioRoot, 'prices.csv'), join(dataRoot, 'research.csv'))
   cpSync(join(scenarioRoot, 'holdout-prices.csv'), join(dataRoot, 'later.csv'))
+  for (const [source, target] of [['moving-average-entry.csv', 'roundtrip.csv'], ['moving-average-holdout.csv', 'roundtrip-later.csv']]) cpSync(join(scenarioRoot, source), join(dataRoot, target))
+  cpSync(join(repository, 'examples', 'web-scenarios', 'single-long-round-trip.yaml'), join(scenarioRoot, 'roundtrip.yaml'))
   execFileSync(ea, ['data', 'inspect', join(dataRoot, 'research.csv')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
 
   const args = ['web', 'serve', '--data-root', dataRoot, '--strategy-root', strategyRoot, '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
@@ -152,7 +154,7 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   console.log(`web-dist-manifest-sha256=${distIdentity.digest('hex')}`)
 
   const playwright = join(webRoot, 'node_modules', '.bin', 'playwright')
-  const completed = spawn(playwright, ['test', '--config', 'playwright.config.ts'], {
+  const completed = spawn(playwright, ['test', '--config', 'playwright.config.ts', ...(process.env.EA_WEB_E2E_GREP ? ['--grep', process.env.EA_WEB_E2E_GREP] : [])], {
     cwd: webRoot,
     env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact, EA_DATA_ROOT: dataRoot },
     stdio: 'inherit',

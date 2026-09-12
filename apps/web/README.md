@@ -101,3 +101,20 @@ History reuse retains the selected dataset and expected raw SHA. If its contents
 validation reports a conflict; explicitly selecting current input starts a new validation.
 Completed Web reports, comparisons and Holdout remain readable after external CSV deletion or
 replacement. New runs and CLI report regeneration/resume may require the original source file.
+
+### Single long round trip
+
+Select `single-long-round-trip.yaml` for Scenario V4 / Action V2. `entry_delay` counts eligible
+pre-entry roots; `hold_root_count` counts eligible roots after entry; `target_quantity` is the
+requested entry quantity. Each run permits one entry and one full exit, with independent fees.
+Run Detail shows entry/exit facts and `FLAT_INITIAL`, `OPEN_AT_END`, or `CLOSED`. An absent exit
+is shown as `—`; an open position has zero realized P&L and gross unrealized P&L before its entry
+fee. Net P&L includes fees. No forced closing occurs at the end of a window.
+
+Report V2 and Path V2 are persisted under Web Job V4. The curve updates cash and position at each
+acknowledged fill and retains every root for drawdown. Batch, comparison and chronological
+holdout reuse these verified artifacts; holdout freezes the strategy parameters and lifecycle.
+Old scenarios, reports and jobs retain their original formats and behavior.
+
+Web V4 integer controls reject values outside ±9007199254740991 to preserve exact JSON/browser
+input identity. The CLI retains its original integer contract; no value is silently clamped.

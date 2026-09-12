@@ -171,6 +171,15 @@ def test_two_leg_resume_is_byte_identical(
             baseline / filename
         ).read_bytes()
     assert b.resume_backtest_attempt(attempt) == resumed
+    from ea.product import generate_backtest_report
+    from ea.product.equity_path import generate_equity_path_analysis
+
+    baseline_report = generate_backtest_report(baseline, tmp_path / "baseline-report").report
+    resumed_report = generate_backtest_report(attempt, tmp_path / "resumed-report").report
+    assert resumed_report.canonical_bytes == baseline_report.canonical_bytes
+    assert generate_equity_path_analysis(attempt, resumed_report).canonical_bytes == (
+        generate_equity_path_analysis(baseline, baseline_report).canonical_bytes
+    )
 
 
 @pytest.mark.parametrize("closed", [False, True])
