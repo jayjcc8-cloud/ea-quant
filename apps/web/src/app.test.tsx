@@ -107,6 +107,7 @@ function adapter(overrides: Partial<ApiAdapter> = {}): ApiAdapter {
     listBacktests: async () => [job],
     getBacktest: async () => job,
     getReport: async () => report,
+    getEquityPath: async () => { throw new Error('legacy') },
     artifactUrl: (jobId, name) => `/api/backtests/${jobId}/artifacts/${name}`,
     ...overrides,
   }
@@ -168,8 +169,8 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByRole('heading', { name: 'Experiment Batch' })).toBeTruthy()
     expect(screen.getByText('risk.rejected')).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% View/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 2 2 0 risk.rejected No report View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% Unavailable View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 2 2 0 risk.rejected No report Unavailable View/i })).toBeTruthy()
     await user.click(screen.getByLabelText('Select job-1 for comparison'))
     await user.click(screen.getByLabelText('Select job-risk for comparison'))
     await user.click(screen.getByRole('button', { name: 'Compare selected runs' }))
@@ -328,9 +329,9 @@ describe('EA Quant local Web backtests', () => {
     expect(await screen.findByRole('columnheader', { name: 'Final equity' })).toBeTruthy()
     expect(screen.getByRole('columnheader', { name: 'Net P&L' })).toBeTruthy()
     expect(screen.getByRole('columnheader', { name: 'Total return' })).toBeTruthy()
-    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% View/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 2 4 2 succeeded 10034 EUR 34 EUR 0.34% View/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 3 2 0 risk.rejected No report View/i })).toBeTruthy()
+    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% Unavailable View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 2 4 2 succeeded 10034 EUR 34 EUR 0.34% Unavailable View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 3 2 0 risk.rejected No report Unavailable View/i })).toBeTruthy()
     const summary = within(screen.getByRole('region', { name: 'Analysis summary' }))
     expect(summary.getByText('3', { selector: 'dd[data-summary="total"]' })).toBeTruthy()
     expect(summary.getByText('2', { selector: 'dd[data-summary="succeeded"]' })).toBeTruthy()
@@ -350,7 +351,7 @@ describe('EA Quant local Web backtests', () => {
       getReport: async () => { throw Object.assign(new Error('verified report is unavailable'), { code: 'report_unavailable' }) },
     })} />)
 
-    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded No report View/i })).toBeTruthy()
+    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded No report Unavailable View/i })).toBeTruthy()
     expect(screen.queryByText('verified report is unavailable')).toBeNull()
     expect(screen.getByText('0', { selector: 'dd[data-summary="reports"]' })).toBeTruthy()
   })
@@ -675,4 +676,45 @@ it('distinguishes local implementation changes from parameter deltas', async () 
   })} />)
   expect(await screen.findByText('Strategy implementation changed')).toBeTruthy()
   expect(screen.queryByRole('row', { name: /target_quantity/ })).toBeNull()
+})
+
+it('shows backend path evidence and sampled equity curve without replacing terminal metrics', async () => {
+  window.history.pushState({}, '', '/backtests/job-1')
+  render(<App api={adapter({
+    getBacktest: async () => ({ ...job, schema: 'ea.local-web-job.v3', equity_path_sha256: '7'.repeat(64) }),
+    getEquityPath: async () => ({
+      schema: 'ea.backtest-equity-path.v1', run_id: 'run-1', report_sha256: job.report_sha256!, currency: 'USD',
+      point_count: 3000, display_sampling: 'uniform-index-extrema-v1',
+      display_points: [{ index: 0, time: '2026-01-01', equity: '10000' }, { index: 2999, time: '2026-01-02', equity: '10017' }],
+      max_drawdown: { amount: '30', ratio: '0.003', peak_index: 0, peak_time: '2026-01-01', peak_equity: '10000', trough_index: 1, trough_time: '2026-01-02', trough_equity: '9970' },
+    }),
+  })} />)
+  await screen.findByRole('heading', { name: 'Equity Curve' })
+  expect(screen.getByRole('img', { name: 'Equity curve' })).toBeTruthy()
+  expect(screen.getByText('30 USD')).toBeTruthy()
+  expect(screen.getByText(/0.3%/)).toBeTruthy()
+  expect(screen.getByText(/sampled display/)).toBeTruthy()
+  expect(screen.getByText('10017 USD')).toBeTruthy()
+})
+
+it('sorts drawdown ratios exactly with stable missing-last legacy rows in both directions', async () => {
+  const user = userEvent.setup()
+  const members = [job, secondJob, thirdJob, { ...job, job_id: 'legacy' }].map((item, index) => ({
+    ...item, presentation_status: 'succeeded', ...(index < 3 ? { schema: 'ea.local-web-job.v3', equity_path_sha256: '7'.repeat(64) } : {}),
+  }))
+  window.history.pushState({}, '', '/batches/path-batch')
+  render(<App api={adapter({
+    getBatch: async () => ({ ...batch, members, member_job_ids: members.map(m => m.job_id), member_count: 4 }),
+    getReport: async id => ({ ...report, run_id: members.find(m => m.job_id === id)!.engine_run_id! }),
+    getEquityPath: async id => ({ schema: 'ea.backtest-equity-path.v1', run_id: members.find(m => m.job_id === id)!.engine_run_id!, report_sha256: job.report_sha256!, currency: 'USD',
+      point_count: 1, display_sampling: 'uniform-index-extrema-v1', display_points: [{ index: 0, time: 't', equity: '10000' }],
+      max_drawdown: { amount: '1', ratio: id === 'job-1' ? '0.123456789012345679' : '0.123456789012345678', peak_index: 0, peak_time: 't', peak_equity: '10000', trough_index: 0, trough_time: 't', trough_equity: '10000' },
+    }),
+  })} />)
+  await screen.findByText('12.3456789012345679%')
+  await user.selectOptions(screen.getByLabelText('Sort by'), 'max_drawdown_ratio')
+  const order = () => screen.getAllByRole('row').slice(1).map(row => row.querySelector('th')!.textContent)
+  expect(order()).toEqual(['Run 2', 'Run 3', 'Run 1', 'Run 4'])
+  await user.selectOptions(screen.getByLabelText('Direction'), 'descending')
+  expect(order()).toEqual(['Run 1', 'Run 2', 'Run 3', 'Run 4'])
 })

@@ -366,7 +366,9 @@ def create_app(settings: WebSettings) -> Any:
     @app.get("/api/backtests/{job_id}/artifacts/{name}")
     def get_artifact(job_id: str, name: str) -> Response:
         try:
-            media_type = "application/json" if name == "report.json" else "text/plain"
+            media_type = (
+                "application/json" if name in {"report.json", "equity-path.json"} else "text/plain"
+            )
             return Response(
                 content=service.artifact(job_id, name),
                 media_type=media_type,
