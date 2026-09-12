@@ -48,6 +48,7 @@ __all__ = [
     "BacktestReportError",
     "BacktestReportResult",
     "BacktestReportV1",
+    "BacktestReportV2",
     "BacktestRunError",
     "BacktestRunFailure",
     "BacktestRunResult",
@@ -69,3 +70,5 @@ __all__ = [
     "run_backtest_scenario",
     "semantic_outcome_sha256",
 ]
+
+from ea.product.round_trip_report import BacktestReportV2 as BacktestReportV2

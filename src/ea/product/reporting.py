@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from io import StringIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import ea
 from ea.core import (
@@ -58,6 +59,10 @@ from ea.experiments.audit import (
 from ea.product.backtest import BacktestResumeFailure, _load_verified_attempt
 from ea.product.identity import semantic_outcome_sha256
 from ea.product.scenario import LoadedBacktestScenario
+from ea.strategy.registry import StrategyEntryV1
+
+if TYPE_CHECKING:
+    from ea.product.round_trip_report import BacktestReportV2
 
 _REPORT_SCHEMA = "ea.backtest-report.v1"
 _VALUATION_RULE = "last-admitted-close-v1"
@@ -195,7 +200,7 @@ class BacktestReportV1:
 class BacktestReportResult:
     status: str
     output_directory: Path
-    report: BacktestReportV1
+    report: BacktestReportV1 | BacktestReportV2
 
 
 def _canonical_json(document: object) -> bytes:
@@ -1022,7 +1027,10 @@ def _validate_result(
         final_snapshot_sha256 = funded_snapshot_sha256
     if terminal_snapshot != final_snapshot_sha256:
         raise ValueError("terminal snapshot conflicts")
-    scenario.strategy_entry.validate_outcome(len(order_ids), len(accepted_fills))
+    legacy_entry = scenario.strategy_entry
+    if not isinstance(legacy_entry, StrategyEntryV1):
+        raise ValueError("V1 route requires V1 strategy")
+    legacy_entry.validate_outcome(len(order_ids), len(accepted_fills))
     expected_reconciliations = 2 if accepted_fills else 1
     if len(reconciliation_payloads) != expected_reconciliations or any(
         item.get("outcome_code") != "reconciliation.match"
@@ -1462,6 +1470,23 @@ def generate_backtest_report(run_dir: Path, output_dir: Path) -> BacktestReportR
                 run_id=run_id.value,
             )
             result = _decode_canonical(_read_regular(attempt / "result.json"), newline=True)
+            if scenario.schema_version == 4:
+                from ea.product.round_trip_report import build_report, validate_result
+
+                validate_result(
+                    result,
+                    scenario=scenario,
+                    manifest=manifest,
+                    records=records,
+                    funded_snapshot=funded_snapshot,
+                    run_id=run_id.value,
+                    lineage=lineage.value,
+                )
+                v2_report = build_report(
+                    result=result, scenario=scenario, manifest=manifest, records=records
+                )
+                _publish(output, v2_report.canonical_bytes, v2_report.summary_bytes)
+                return BacktestReportResult("success", output, v2_report)
             order_count, fill_count, _terminal_snapshot = _validate_result(
                 result,
                 manifest=manifest,

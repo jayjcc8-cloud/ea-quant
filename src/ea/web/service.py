@@ -1343,6 +1343,10 @@ class WebService:
                 ) as temporary:
                     staged = Path(temporary) / "artifacts"
                     generated = generate_backtest_report(result.output_directory, staged)
+                    from ea.product.reporting import BacktestReportV1
+
+                    if not isinstance(generated.report, BacktestReportV1):
+                        raise ValueError("this Web route requires Report V1")
                     analysis = generate_equity_path_analysis(
                         result.output_directory, generated.report
                     )

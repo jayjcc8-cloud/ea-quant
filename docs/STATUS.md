@@ -165,8 +165,9 @@ package-registry publication, and deployment remain unavailable. Phase 1.1/#125 
 Path-aware Research Analysis V1 is delivered. PR #191 records the Strategy Lifecycle architecture
 review and Proposed ADR 0039; Candidate runtime remains deferred. Issue #192 / Accepted ADR 0040
 authorizes SINGLE_LONG_ROUND_TRIP_V1 implementation as the next bounded offline capability:
-one entry, one exit, at most two Fills. Economic semantics are accepted; no exit runtime is yet
-delivered. Implementation proceeds through core execution followed by research integration. New metrics, optimizer,
+one entry, one exit, at most two Fills. Core execution delivers Action V2, Scenario V4, Result/Semantic V3 and Report V2, including
+full-quantity exit, per-leg fees and deterministic two-leg resume. Research integration
+(Path V2, Web Job V4 and browser acceptance) remains pending under Issue #195. New metrics, optimizer,
 arbitrary multi-trade and Agent Research Tools remain future work.
 
 ## Blockers
