@@ -164,11 +164,15 @@ automatic optimization, broader performance analytics, remote strategy plugins, 
 package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Research Foundation adds schema-driven strategies and immutable local artifacts to commission and Chronological Holdout.
 Path-aware Research Analysis V1 is delivered. PR #191 records the Strategy Lifecycle architecture
 review and Proposed ADR 0039; Candidate runtime remains deferred. Issue #192 / Accepted ADR 0040
-authorizes SINGLE_LONG_ROUND_TRIP_V1 implementation as the next bounded offline capability:
-one entry, one exit, at most two Fills. Core execution delivers Action V2, Scenario V4, Result/Semantic V3 and Report V2, including
-full-quantity exit, per-leg fees and deterministic two-leg resume. Research integration
-(Path V2, Web Job V4 and browser acceptance) remains pending under Issue #195. New metrics, optimizer,
-arbitrary multi-trade and Agent Research Tools remain future work.
+delivers SINGLE_LONG_ROUND_TRIP_V1 under Issue #195: one entry, one full exit and at most two
+Orders/Fills through existing offline owners. Action V2, Scenario V4, Result/Semantic V3 and
+Report V2 bind per-leg fees, open/closed economics and deterministic two-leg resume. Path V2
+uses each acknowledged cash/position balance and the unchanged full-path drawdown algorithm.
+Web Job V4 persists the new report/path versions; Run Detail, Batch, Comparison and Holdout use
+those verified artifacts, including restart/reopen without external CSV. Existing V1 routes
+remain unchanged. New metrics, optimizer, arbitrary multi-trade and Agent Research Tools remain
+future work. The next decision follows actual strategy/data research; Candidate or multi-round-trip
+work is not authorized by this delivery.
 
 ## Blockers
 
@@ -204,7 +208,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0037 — Registered Local OHLCV Research Input V1](adr/0037-registered-local-ohlcv-research-input-v1.md)
 - [ADR 0038 — Equity Path and Maximum Drawdown V1](adr/0038-equity-path-and-maximum-drawdown-v1.md)
 
-- [ADR 0040 — Single Long Round Trip Position Lifecycle](adr/0040-single-long-round-trip-position-lifecycle-v1.md) — Accepted; bounded offline implementation authorized, runtime pending.
+- [ADR 0040 — Single Long Round Trip Position Lifecycle](adr/0040-single-long-round-trip-position-lifecycle-v1.md) — Accepted; bounded offline single-round-trip runtime and research integration delivered.
 
 Proposed architecture (not implemented capabilities):
 

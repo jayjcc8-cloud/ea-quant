@@ -44,6 +44,11 @@ def compatible(source: dict[str, Any], target: dict[str, Any]) -> bool:
             "strategy": {
                 "id": document["strategy"]["id"],
                 "version": document["strategy"].get("version", 1),
+                **{
+                    key: document["strategy"][key]
+                    for key in ("action_contract", "position_lifecycle")
+                    if key in document["strategy"]
+                },
                 **(
                     {"source": document["strategy"]["source"]}
                     if "source" in document["strategy"]

@@ -11,9 +11,11 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from ea.core import AuditRecordKind, CanonicalDecimal, require_quantized
+from ea.core import AuditRecordKind, CanonicalDecimal, require_quantized, settle_execution
+from ea.core.economics import settle_product
 from ea.product import reporting as r
 from ea.product.backtest import _load_verified_attempt
+from ea.product.round_trip_report import BacktestReportV2
 
 MAX_DISPLAY_POINTS = 2048
 DISPLAY_SAMPLING = "uniform-index-extrema-v1"
@@ -31,6 +33,11 @@ class EquityPoint:
 
 @dataclass(frozen=True, slots=True)
 class BacktestEquityPathAnalysisV1:
+    canonical_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestEquityPathAnalysisV2:
     canonical_bytes: bytes
 
 
@@ -112,8 +119,8 @@ def _market_key(row: dict[str, Any]) -> tuple[str, ...]:
 
 def generate_equity_path_analysis(
     run_dir: Path,
-    report: r.BacktestReportV1,
-) -> BacktestEquityPathAnalysisV1:
+    report: r.BacktestReportV1 | BacktestReportV2,
+) -> BacktestEquityPathAnalysisV1 | BacktestEquityPathAnalysisV2:
     """Verify exact completed evidence and derive points without rerunning execution."""
     attempt = r._safe_attempt(run_dir)
     try:
@@ -139,6 +146,8 @@ def generate_equity_path_analysis(
             roots: list[dict[str, Any]] = []
             admitted: dict[int, dict[str, Any]] = {}
             committed_at: int | None = None
+            commits: list[int] = []
+            v2 = isinstance(report, BacktestReportV2)
             for record in records:
                 payload: Any = r._payload(record)
                 if (
@@ -150,8 +159,9 @@ def generate_equity_path_analysis(
                     record.record_kind is AuditRecordKind.PORTFOLIO_LEDGER_HANDOFF_OUTCOME
                     and payload.get("action") == "effect_committed"
                 ):
-                    if committed_at is not None:
+                    if committed_at is not None and not v2:
                         raise ValueError("multiple fill commits unsupported")
+                    commits.append(payload["dispatch_sequence"])
                     committed_at = payload["dispatch_sequence"]
                 elif (
                     record.record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED
@@ -165,6 +175,8 @@ def generate_equity_path_analysis(
                 raise ValueError("incomplete market path")
             economics = document["economics"]
             filled = economics["counts"]["fills"] == 1
+            if v2:
+                return _round_trip_path(report, scenario, economics, roots, commits, prices)
             if filled != (committed_at is not None) or (
                 filled and committed_at not in {root["dispatch_sequence"] for root in roots}
             ):
@@ -214,3 +226,81 @@ def generate_equity_path_analysis(
             return BacktestEquityPathAnalysisV1(r._canonical_json(analysis) + b"\n")
     except (KeyError, TypeError, ValueError, OSError) as error:
         raise r.BacktestReportError("completed path evidence is invalid") from error
+
+
+def _round_trip_path(
+    report: BacktestReportV2 | r.BacktestReportV1,
+    scenario: Any,
+    economics: dict[str, Any],
+    roots: list[dict[str, Any]],
+    commits: list[int],
+    prices: dict[tuple[str, ...], CanonicalDecimal],
+) -> BacktestEquityPathAnalysisV2:
+    legs = [leg for leg in economics["execution_legs"] if leg["fill"] is not None]
+    sequences = {root["dispatch_sequence"] for root in roots}
+    if (
+        len(commits) != len(legs)
+        or len(set(commits)) != len(commits)
+        or not set(commits) <= sequences
+    ):
+        raise ValueError("fills are not bound to completed roots")
+    acknowledged = dict(zip(commits, legs, strict=True))
+    spec = scenario.spec_set.require(scenario.instrument)
+
+    def points() -> Iterator[EquityPoint]:
+        cash, quantity = scenario.initial_cash, CanonicalDecimal("0")
+        yield EquityPoint(
+            0,
+            scenario.dataset.replay_window.start_inclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            cash.text,
+        )
+        last = cash
+        for index, root in enumerate(roots, 1):
+            leg = acknowledged.get(root["dispatch_sequence"])
+            if leg is not None:
+                fill = leg["fill"]
+                amount = settle_execution(
+                    scenario.spec_set,
+                    scenario.instrument,
+                    CanonicalDecimal(fill["price"]),
+                    CanonicalDecimal(fill["quantity"]),
+                ).amount
+                cash = r._subtract(
+                    r._subtract(cash, amount) if leg["role"] == "entry" else r._add(cash, amount),
+                    CanonicalDecimal(fill["fees"][0]["amount"]),
+                )
+                quantity = CanonicalDecimal(fill["quantity"] if leg["role"] == "entry" else "0")
+            key = root["trigger_root_key"]
+            price = prices[_market_key(key)]
+            require_quantized(price, spec.price_quantum, field_name="path_price")
+            value = (
+                settle_product(
+                    price, quantity, spec.contract_multiplier, spec.currency_quantum
+                ).amount
+                if quantity.coefficient
+                else CanonicalDecimal("0")
+            )
+            last = r._add(cash, value)
+            yield EquityPoint(index, key["available_at"], last.text)
+        if last.text != economics["equity"]["amount"]:
+            raise ValueError("final path equity conflicts with formal report")
+
+    document: Any = report.document
+    source = document["source"]
+    analysis = analyze_points(points)
+    analysis.update(
+        {
+            "schema": "ea.backtest-equity-path.v2",
+            "schema_version": 2,
+            "evidence_role": "DERIVED_PATH_EVIDENCE",
+            "run_id": document["run_id"],
+            "scenario_sha256": source["scenario_sha256"],
+            "data_sha256": source["data"]["fingerprint"]["sha256"],
+            "record_count": source["data"]["fingerprint"]["record_count"],
+            "report_sha256": sha256(report.canonical_bytes).hexdigest(),
+            "semantic_outcome_sha256": document["completion"]["semantic_outcome_sha256"],
+            "currency": economics["currency"],
+            "valuation_rule": r._VALUATION_RULE,
+        }
+    )
+    return BacktestEquityPathAnalysisV2(r._canonical_json(analysis) + b"\n")

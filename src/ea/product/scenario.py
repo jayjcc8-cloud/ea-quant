@@ -873,6 +873,17 @@ def resolved_scenario_parameters(
 ) -> tuple[ResolvedStrategyParameterV1, ...]:
     values = scenario.strategy_parameters if parameters is None else parameters
     spec = scenario.spec_set.require(scenario.instrument)
+    if scenario.schema_version == 4:
+        ROUND_TRIP_STRATEGY.normalize(values)
+        require_quantized(
+            CanonicalDecimal(str(values["target_quantity"])),
+            spec.quantity_quantum,
+            field_name="target_quantity",
+        )
+        return tuple(
+            ResolvedStrategyParameterV1(p, p.static_minimum, p.static_maximum)
+            for p in ROUND_TRIP_STRATEGY.descriptor.parameters
+        )
     if scenario.strategy_package is None:
         return resolve_parameters(
             scenario.strategy_id.value,

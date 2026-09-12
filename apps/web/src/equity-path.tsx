@@ -1,7 +1,7 @@
 import { compareCanonicalDecimal, exactDelta } from './decimal'
 
 export type EquityPath = {
-  schema: 'ea.backtest-equity-path.v1'; run_id: string; report_sha256: string; currency: string
+  schema: 'ea.backtest-equity-path.v1' | 'ea.backtest-equity-path.v2'; run_id: string; report_sha256: string; currency: string
   point_count: number; display_sampling: string
   display_points: { index: number; time: string; equity: string }[]
   max_drawdown: { amount: string; ratio: string; peak_index: number; peak_time: string; peak_equity: string; trough_index: number; trough_time: string; trough_equity: string }
