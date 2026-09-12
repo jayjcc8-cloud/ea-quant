@@ -106,6 +106,7 @@ from ea.runtime import (
 from ea.strategy import create_strategy_signal_authority
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import read_regular, validate_package
+from ea.strategy.registry import StrategyEntryV1
 
 _SOURCE_NAMESPACE = SourceNamespace("backtest.scenario.matcher.v1")
 _RECONCILIATION_SOURCE = SourceNamespace("backtest.scenario.reconciliation.v1")
@@ -431,6 +432,8 @@ def _observation(
             PositionReconciliationBalance(balance.instrument, balance.quantity)
             for balance in snapshot.position_balances
         )
+        if scenario.schema_version == 4 and not balances:
+            balances = (PositionReconciliationBalance(scenario.instrument, CanonicalDecimal("0")),)
         kind = ReconciliationObservationKind.POSITION_SNAPSHOT
         scope = ReconciliationScopeKind.POSITION
         sequence = 1
@@ -499,6 +502,20 @@ def _execute(
     on_funding: Callable[[dict[str, object]], None] | None = None,
     on_frontier: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, object], bytes, dict[str, object]]:
+    if scenario.schema_version == 4:
+        from ea.product.round_trip import execute_round_trip
+
+        return execute_round_trip(
+            scenario,
+            run_id=run_id,
+            binding=binding,
+            lineage=lineage,
+            risk_policy=risk_policy,
+            risk_context=risk_context,
+            audit=audit,
+            on_funding=on_funding,
+            on_frontier=on_frontier,
+        )
     audit = _DemoAudit(binding, scenario.spec_set) if audit is None else audit
     prepared = audit.append(
         record_kind=AuditRecordKind.RUN_PREPARED,
@@ -558,7 +575,10 @@ def _execute(
     order = None
     risk_result = None
     verifier = create_active_market_dispatch_verifier(runtime)
-    logic = scenario.strategy_entry.factory(scenario.strategy_parameters)
+    legacy_entry = scenario.strategy_entry
+    if not isinstance(legacy_entry, StrategyEntryV1):
+        raise ValueError("V1 route requires V1 strategy")
+    logic = legacy_entry.factory(scenario.strategy_parameters)
     target = None
     market_index = 0
     last_entry = _next_bar_entry_delay_maximum(scenario.dataset)
@@ -663,7 +683,10 @@ def _execute(
             _interrupt("dispatch_durable")
 
     fills = lifecycle.fact_authority.fills
-    scenario.strategy_entry.validate_outcome(0 if order is None else 1, len(fills))
+    legacy_entry = scenario.strategy_entry
+    if not isinstance(legacy_entry, StrategyEntryV1):
+        raise ValueError("V1 route requires V1 strategy")
+    legacy_entry.validate_outcome(0 if order is None else 1, len(fills))
     snapshot = economic_gate.ledger.snapshot
     replay_ledger = create_portfolio_ledger(run_id, scenario.spec_set)
     replay_funding = replay_ledger.apply_initial_funding(funding)
@@ -1023,6 +1046,15 @@ def _verified_persisted_frontier(
 
     required_reconciliations = 2 if durable_economic_dispatches else 1
     expected_ledger_sequence = 2 if durable_economic_dispatches else 1
+    if scenario.schema_version == 4:
+        if (
+            accepted_fact_dispatches != durable_economic_dispatches
+            or applied_handoff_dispatches != durable_economic_dispatches
+            or completed_economic_dispatches != durable_economic_dispatches
+            or len(durable_economic_dispatches) > 2
+        ):
+            raise BacktestResumeFailure("partial or excess round-trip dispatch evidence", attempt)
+        expected_ledger_sequence = 1 + len(durable_economic_dispatches)
     complete_reconciliation = len(reconciliations) == required_reconciliations and all(
         document.get("run_id") == run_id.value
         and document.get("outcome_code") == OutcomeCode.RECONCILIATION_MATCH.value
