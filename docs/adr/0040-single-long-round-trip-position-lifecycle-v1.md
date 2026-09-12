@@ -4,7 +4,12 @@ Date: 2026-09-12
 
 ## Status
 
-Proposed — Issue #192. This is the Phase A architectural proposal, not runtime support.
+Accepted — 2026-09-12.
+
+Product Owner accepted the bounded offline Single Long Round Trip V1 economic semantics
+reviewed in Issue #192. Acceptance authorizes implementation of the versioned offline research
+route defined here. It does not authorize Paper, Live, arbitrary multi-trade, #125, Candidate,
+or broader economic authority. Runtime support is not delivered by this acceptance.
 Candidate implementation (ADR 0039) remains deferred. Existing Accepted ADRs are unchanged.
 
 ## Context and alternatives
@@ -253,7 +258,7 @@ no need for #125 or a new recovery subsystem was found. The architecture constra
 position, at most two full Fills, no short/reentry/partial/pyramiding, version-preserved legacy,
 deterministic replay, and unchanged Paper/Live.
 
-`IMPLEMENT_NOW=NO` for this Phase A delivery: ADR 0040 remains Proposed and the first change to
+`IMPLEMENT_NOW=NO` was the Phase A architecture-delivery decision: ADR 0040 was Proposed and the first change to
 economic semantics is presented as a separate architecture decision before the implementation
 Issue/PR, as requested. This is an explicit phase boundary, not a claim that a technical blocker
 exists. `ARCHITECTURE_BLOCKED=NO`. Accepting the proposed contract can enable the separately
