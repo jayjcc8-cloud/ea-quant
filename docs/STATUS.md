@@ -149,6 +149,12 @@ external write, deployment, or live capability is part of this objective.
   batch, comparison and frozen chronological Holdout retain immutable dataset evidence and old
   reports remain readable after external data removal. `ea data inspect` emits canonical JSON.
 
+- Issue #189 / ADR 0038 adds separate deterministic equity-path evidence and exact maximum
+  drawdown, with an initial funding anchor, post-market-root valuation and commission at Fill
+  commitment. New Web v3 jobs atomically publish a bounded 2048-point curve beside unchanged
+  BacktestReportV1. Run detail, Batch sorting, Comparison and Holdout read persisted path evidence;
+  v1/v2 jobs remain readable without migration. No strategy or economic authority expands.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
@@ -156,7 +162,7 @@ backtest/reporting product, not the broader validation, optimization, paper, or 
 instruction-level or Web recovery, symbol/data editing, uploads, broader experiment tracking,
 automatic optimization, broader performance analytics, remote strategy plugins, paper/live execution,
 package-registry publication, and deployment remain unavailable. Phase 1.1/#125 remains inactive. Research Foundation adds schema-driven strategies and immutable local artifacts to commission and Chronological Holdout.
-Research Input Workflow V1 is delivered; further capability selection returns to architecture review after real input-flow usage. Candidate and Agent Research Tools remain future work.
+Path-aware Research Analysis V1 is delivered; the next capability decision returns to architecture review for strategy lifecycle. Candidate and Agent Research Tools remain future work.
 
 ## Blockers
 
@@ -190,6 +196,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0035 — Schema-driven Strategy Contract V1](adr/0035-schema-driven-strategy-contract-v1.md)
 - [ADR 0036 — Immutable Local Strategy Package V1](adr/0036-immutable-local-strategy-package-v1.md)
 - [ADR 0037 — Registered Local OHLCV Research Input V1](adr/0037-registered-local-ohlcv-research-input-v1.md)
+- [ADR 0038 — Equity Path and Maximum Drawdown V1](adr/0038-equity-path-and-maximum-drawdown-v1.md)
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
@@ -232,7 +239,7 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 
 ## Last Confirmed
 
-- Date: **2026-09-08** (Asia/Shanghai).
+- Date: **2026-09-12** (Asia/Shanghai).
 - The containing merged `main` commit and its CI are the authoritative durable-state checkpoint;
   the released product identity remains the exact commit and wheel recorded above.
 - Live capability: unavailable and prohibited.

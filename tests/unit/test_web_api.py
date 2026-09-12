@@ -472,7 +472,7 @@ def test_new_job_persists_normalized_input_snapshot_and_digest(tmp_path: Path) -
         accepted = response.json()
 
         snapshot = accepted["input_snapshot"]
-        assert accepted["schema"] == "ea.local-web-job.v2"
+        assert accepted["schema"] == "ea.local-web-job.v3"
         assert snapshot["schema"] == "ea.local-web-input.v1"
         assert snapshot["scenario_id"] == "bounded-long.yaml"
         assert snapshot["source_identity"] == validated["input_identity"]

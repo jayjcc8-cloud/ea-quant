@@ -27,6 +27,8 @@ from ea.product import (
     parameterize_backtest_scenario,
     run_backtest_scenario,
 )
+from ea.product.equity_path import generate_equity_path_analysis
+from ea.product.reporting import _fsync_directory, _write_report_file
 from ea.product.scenario import (
     parameterize_strategy_scenario,
     rebind_research_dataset,
@@ -41,7 +43,7 @@ from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_ch
 
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 _JOB_STATES = frozenset({"accepted", "running", "succeeded", "failed", "interrupted"})
-_ARTIFACTS = frozenset({"report.json", "summary.txt"})
+_ARTIFACTS = frozenset({"report.json", "summary.txt", "equity-path.json"})
 _MAX_SCENARIO_BYTES = 64 * 1024
 _INPUT_DIGEST_DOMAIN = b"ea.local-web-input.v1\0"
 
@@ -314,7 +316,7 @@ class JobRecord:
     scenario_id: str
     input_identity: dict[str, object]
     status: str
-    schema: str = "ea.local-web-job.v2"
+    schema: str = "ea.local-web-job.v3"
     created_at: str | None = None
     input_snapshot_bytes: bytes | None = None
     input_sha256: str | None = None
@@ -322,6 +324,7 @@ class JobRecord:
     engine_run_id: str | None = None
     report_sha256: str | None = None
     summary_sha256: str | None = None
+    equity_path_sha256: str | None = None
     error_code: str | None = None
     message: str | None = None
     strategy_package: StrategyPackageV1 | None = None
@@ -343,9 +346,12 @@ class JobRecord:
                 self.status == "succeeded"
                 and self.report_sha256 is not None
                 and self.summary_sha256 is not None
+                and (self.schema != "ea.local-web-job.v3" or self.equity_path_sha256 is not None)
             ),
         }
-        if self.schema == "ea.local-web-job.v2":
+        if self.schema == "ea.local-web-job.v3":
+            document["equity_path_sha256"] = self.equity_path_sha256
+        if self.schema in {"ea.local-web-job.v2", "ea.local-web-job.v3"}:
             if (
                 self.created_at is None
                 or self.input_snapshot_bytes is None
@@ -407,7 +413,7 @@ def _decode_job(payload: bytes) -> JobRecord:
         if type(document) is not dict or _canonical_json(document) != payload:
             raise ValueError
         schema = document.get("schema")
-        if schema not in {"ea.local-web-job.v1", "ea.local-web-job.v2"}:
+        if schema not in {"ea.local-web-job.v1", "ea.local-web-job.v2", "ea.local-web-job.v3"}:
             raise ValueError
         status_value = document.get("status")
         identity = document.get("input_identity")
@@ -436,7 +442,7 @@ def _decode_job(payload: bytes) -> JobRecord:
         input_snapshot_bytes: bytes | None = None
         input_sha256: str | None = None
         attempt_id: str | None = None
-        if schema == "ea.local-web-job.v2":
+        if schema in {"ea.local-web-job.v2", "ea.local-web-job.v3"}:
             created_at_value = document.get("created_at")
             snapshot = document.get("input_snapshot")
             input_sha256_value = document.get("input_sha256")
@@ -475,6 +481,16 @@ def _decode_job(payload: bytes) -> JobRecord:
             created_at = created_at_value
             input_sha256 = input_sha256_value
             attempt_id = attempt_id_value
+        if schema == "ea.local-web-job.v3":
+            digest = document.get("equity_path_sha256")
+            if digest is not None and (
+                type(digest) is not str
+                or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)
+            ):
+                raise ValueError
+            if status_value == "succeeded" and digest is None:
+                raise ValueError
         return JobRecord(
             job_id=document["job_id"],
             request_id=document["request_id"],
@@ -489,6 +505,9 @@ def _decode_job(payload: bytes) -> JobRecord:
             engine_run_id=document.get("engine_run_id"),
             report_sha256=document.get("report_sha256"),
             summary_sha256=document.get("summary_sha256"),
+            equity_path_sha256=document.get("equity_path_sha256")
+            if schema == "ea.local-web-job.v3"
+            else None,
             error_code=document.get("error_code"),
             message=document.get("message"),
         )
@@ -1319,7 +1338,19 @@ class WebService:
                 self._store(record)
             try:
                 report_dir = self.reports_dir / job_id
-                generated = generate_backtest_report(result.output_directory, report_dir)
+                with tempfile.TemporaryDirectory(
+                    prefix=".path-pending-", dir=self.reports_dir
+                ) as temporary:
+                    staged = Path(temporary) / "artifacts"
+                    generated = generate_backtest_report(result.output_directory, staged)
+                    analysis = generate_equity_path_analysis(
+                        result.output_directory, generated.report
+                    )
+                    path_payload = analysis.canonical_bytes
+                    _write_report_file(staged / "equity-path.json", path_payload)
+                    _fsync_directory(staged)
+                    os.rename(staged, report_dir)
+                    _fsync_directory(self.reports_dir)
                 payload = generated.report.canonical_bytes
                 summary_payload = generated.report.summary_bytes
                 document = json.loads(payload)
@@ -1344,6 +1375,7 @@ class WebService:
                     status="succeeded",
                     report_sha256=sha256(payload).hexdigest(),
                     summary_sha256=sha256(summary_payload).hexdigest(),
+                    equity_path_sha256=sha256(path_payload).hexdigest(),
                     error_code=None,
                     message=None,
                 )
@@ -1411,6 +1443,25 @@ class WebService:
         if name == "report.json":
             return report_payload
         record = self.get_job(job_id)
+        if name == "equity-path.json":
+            if record.schema != "ea.local-web-job.v3" or record.equity_path_sha256 is None:
+                raise ReportUnavailableError("Path analysis unavailable for this legacy run.")
+            try:
+                payload = read_regular(self.reports_dir / job_id / name, self.reports_dir / job_id)
+                document = json.loads(payload)
+                report = json.loads(report_payload)
+                if (
+                    sha256(payload).hexdigest() != record.equity_path_sha256
+                    or document["schema"] != "ea.backtest-equity-path.v1"
+                    or document["run_id"] != record.engine_run_id
+                    or document["report_sha256"] != record.report_sha256
+                    or document["semantic_outcome_sha256"]
+                    != report["completion"]["semantic_outcome_sha256"]
+                ):
+                    raise ValueError
+                return payload
+            except (OSError, ValueError, KeyError, TypeError):
+                raise ReportUnavailableError("verified path analysis is unavailable") from None
         if record.summary_sha256 is None:
             raise ReportUnavailableError("verified summary is not available for this job")
         path = self.reports_dir / job_id / name

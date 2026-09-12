@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
+import { EquityCurve, pathPercent, type EquityPath } from './equity-path'
 
 type ParameterMap = Record<string, string | number>
 type StrategySource = { kind: string; package_id: string; artifact_sha256: string }
@@ -59,6 +60,7 @@ export type BacktestJob = {
   schema: string; job_id: string; request_id: string; scenario_id: string; input_identity: InputIdentity
   status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'interrupted'; engine_run_id: string | null
   report_sha256: string | null; summary_sha256: string | null; error_code: string | null; message: string | null; report_ready: boolean
+  equity_path_sha256?: string | null
   parameters?: ParameterMap; strategy_descriptor?: StrategyDescriptor
   created_at?: string; input_snapshot?: InputSnapshot; input_sha256?: string; attempt_id?: string | null
 }
@@ -100,7 +102,8 @@ export type ApiAdapter = {
   listBacktests(): Promise<BacktestJob[]>
   getBacktest(jobId: string): Promise<BacktestJob>
   getReport(jobId: string): Promise<BacktestReport>
-  artifactUrl(jobId: string, name: 'report.json' | 'summary.txt'): string
+  getEquityPath(jobId: string): Promise<EquityPath>
+  artifactUrl(jobId: string, name: 'report.json' | 'summary.txt' | 'equity-path.json'): string
 }
 
 class ApiFailure extends Error {
@@ -143,7 +146,20 @@ const browserApi: ApiAdapter = {
   async listBacktests() { return (await apiRequest<{ jobs: BacktestJob[] }>('/api/backtests')).jobs },
   getBacktest(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}`) },
   getReport(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/report`) },
+  getEquityPath(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/artifacts/equity-path.json`) },
   artifactUrl(jobId, name) { return `/api/backtests/${encodeURIComponent(jobId)}/artifacts/${name}` },
+}
+
+async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath | null> {
+  if (job.status !== 'succeeded' || !job.equity_path_sha256) return null
+  try {
+    const path = await api.getEquityPath(job.job_id)
+    if (path.schema !== 'ea.backtest-equity-path.v1' || path.run_id !== job.engine_run_id || path.report_sha256 !== job.report_sha256) return null
+    return path
+  } catch { return null }
+}
+function pathUnavailable(job: BacktestJob) {
+  return job.schema === 'ea.local-web-job.v3' ? 'Path analysis unavailable.' : 'Path analysis unavailable for this legacy run.'
 }
 
 function DatasetSelector({ api, value, change }: { api: ApiAdapter; value: DatasetReference; change: (value: DatasetReference) => void }) {
@@ -280,6 +296,7 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
   const navigate = useNavigate()
   const [batch, setBatch] = useState<ExperimentBatch | null>(null)
   const [reports, setReports] = useState<Record<string, BacktestReport | null>>({})
+  const [paths, setPaths] = useState<Record<string, EquityPath | null>>({})
   const [comparison, setComparison] = useState<string[]>([])
   const [statusFilter, setStatusFilter] = useState<BatchStatusFilter>('all')
   const [sortField, setSortField] = useState<BatchSortField>('member')
@@ -305,6 +322,8 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
         }
       }))
       if (currentGeneration === generation.current) setReports(Object.fromEntries(available))
+      const availablePaths = await Promise.all(current.members.map(async member => [member.job_id, await loadPath(api, member)] as const))
+      if (currentGeneration === generation.current) setPaths(Object.fromEntries(availablePaths))
       return current.status
     } catch (caught) {
       if (currentGeneration === generation.current) setError(caught instanceof Error ? caught.message : 'Batch unavailable')
@@ -335,6 +354,7 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
         const value = jobParameters(row.member)[sortField.slice(10)]
         return value === undefined ? undefined : String(value)
       }
+      if (sortField === 'max_drawdown_ratio') return paths[row.member.job_id]?.max_drawdown.ratio
       if (sortField === 'equity') return row.report?.economics.equity.amount
       if (sortField === 'net_pnl') return row.report?.economics.net_pnl.amount
       if (sortField === 'total_return') return row.report?.economics.total_return.value
@@ -350,7 +370,7 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
       const compared = compareCanonicalDecimal(leftValue, rightValue)
       return compared === 0 ? left.ordinal - right.ordinal : compared * (sortDirection === 'ascending' ? 1 : -1)
     })
-  }, [batch, reports, sortDirection, sortField, statusFilter])
+  }, [batch, reports, paths, sortDirection, sortField, statusFilter])
   const parameterNames = batch?.members[0]?.strategy_descriptor?.parameters.map(p => p.name) ?? Object.keys(batch?.members[0] ? jobParameters(batch.members[0]) : {})
   const analysisSummary = useMemo(() => {
     const members = batch?.members ?? []
@@ -372,11 +392,11 @@ function BatchDetail({ api, batchId }: { api: ApiAdapter; batchId: string }) {
     <div className="result-toolbar"><Link to="/batches/new">← Run another batch</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
     <section className="panel identity-panel"><header><h2>Batch identity</h2><span>Persisted grouping only</span></header><dl className="summary-list"><div><dt>Created</dt><dd>{batch.created_at}</dd></div><div><dt>Scenario</dt><dd>{batch.scenario_id}</dd></div><div><dt>Members</dt><dd>{batch.member_count}</dd></div></dl></section>
     <section className="panel analysis-summary" aria-label="Analysis summary"><header><h2>Analysis summary</h2><span>Derived from current jobs and verified reports</span></header><dl className="summary-list"><div><dt>Total members</dt><dd data-summary="total">{analysisSummary.total}</dd></div><div><dt>Succeeded</dt><dd data-summary="succeeded">{analysisSummary.succeeded}</dd></div><div><dt>Risk rejected</dt><dd data-summary="risk.rejected">{analysisSummary.riskRejected}</dd></div><div><dt>Failed</dt><dd data-summary="failed">{analysisSummary.failed}</dd></div><div><dt>Running</dt><dd data-summary="running">{analysisSummary.running}</dd></div><div><dt>Queued</dt><dd data-summary="queued">{analysisSummary.queued}</dd></div><div><dt>Reports available</dt><dd data-summary="reports">{analysisSummary.reports}</dd></div></dl></section>
-    <section className="panel comparison-panel"><header><h2>Member runs</h2><span>Real jobs and formal reports</span></header><div className="analysis-controls"><div><label htmlFor="batch-status-filter">Status filter</label><select id="batch-status-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as BatchStatusFilter)}><option value="all">All</option><option value="succeeded">Succeeded</option><option value="risk.rejected">Risk Rejected</option><option value="failed">Failed</option><option value="running">Running</option><option value="queued">Queued</option></select></div><div><label htmlFor="batch-sort">Sort by</label><select id="batch-sort" value={sortField} onChange={(event) => setSortField(event.target.value as BatchSortField)}><option value="member">Member order</option>{parameterNames.map(name => <option key={name} value={`parameter:${name}`}>{name}</option>)}<option value="equity">Final equity</option><option value="net_pnl">Net P&amp;L</option><option value="total_return">Total return</option></select></div><div><label htmlFor="batch-sort-direction">Direction</label><select id="batch-sort-direction" value={sortDirection} onChange={(event) => setSortDirection(event.target.value as SortDirection)}><option value="ascending">Ascending</option><option value="descending">Descending</option></select></div></div><table><thead><tr><th>Run</th>{parameterNames.map(name => <th key={name}>{name}</th>)}<th>Status</th><th>Final equity</th><th>Net P&amp;L</th><th>Total return</th><th>Action</th><th>Compare</th></tr></thead><tbody>{rows.map(({ member, ordinal, report }) => {
+    <section className="panel comparison-panel"><header><h2>Member runs</h2><span>Real jobs and formal reports</span></header><div className="analysis-controls"><div><label htmlFor="batch-status-filter">Status filter</label><select id="batch-status-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as BatchStatusFilter)}><option value="all">All</option><option value="succeeded">Succeeded</option><option value="risk.rejected">Risk Rejected</option><option value="failed">Failed</option><option value="running">Running</option><option value="queued">Queued</option></select></div><div><label htmlFor="batch-sort">Sort by</label><select id="batch-sort" value={sortField} onChange={(event) => setSortField(event.target.value as BatchSortField)}><option value="member">Member order</option>{parameterNames.map(name => <option key={name} value={`parameter:${name}`}>{name}</option>)}<option value="equity">Final equity</option><option value="net_pnl">Net P&amp;L</option><option value="total_return">Total return</option><option value="max_drawdown_ratio">Max Drawdown</option></select></div><div><label htmlFor="batch-sort-direction">Direction</label><select id="batch-sort-direction" value={sortDirection} onChange={(event) => setSortDirection(event.target.value as SortDirection)}><option value="ascending">Ascending</option><option value="descending">Descending</option></select></div></div><table><thead><tr><th>Run</th>{parameterNames.map(name => <th key={name}>{name}</th>)}<th>Status</th><th>Final equity</th><th>Net P&amp;L</th><th>Total return</th><th>Max Drawdown</th><th>Action</th><th>Compare</th></tr></thead><tbody>{rows.map(({ member, ordinal, report }) => {
       const equityCurrency = report?.economics.equity.currency ?? report?.economics.currency
       const pnlCurrency = report?.economics.net_pnl.currency ?? report?.economics.currency
       const money = (amount: string, currency: string | undefined) => `${amount} ${currency ?? 'Currency unavailable'}`
-      return <tr key={member.job_id}><th>Run {ordinal}</th>{parameterNames.map(name => <td key={name}>{jobParameters(member)[name] ?? 'Unavailable'}</td>)}<td><span className={`status status-${member.presentation_status}`}>{member.presentation_status}</span></td>{report ? <><td>{money(report.economics.equity.amount, equityCurrency)}</td><td>{money(report.economics.net_pnl.amount, pnlCurrency)}</td><td>{percent(report.economics.total_return.value)}</td></> : <td colSpan={3}>No report</td>}<td><Link to={`/backtests/${member.job_id}`}>View</Link></td><td><input type="checkbox" aria-label={`Select ${member.job_id} for comparison`} checked={comparison.includes(member.job_id)} onChange={() => toggle(member.job_id)} /></td></tr>
+      return <tr key={member.job_id}><th>Run {ordinal}</th>{parameterNames.map(name => <td key={name}>{jobParameters(member)[name] ?? 'Unavailable'}</td>)}<td><span className={`status status-${member.presentation_status}`}>{member.presentation_status}</span></td>{report ? <><td>{money(report.economics.equity.amount, equityCurrency)}</td><td>{money(report.economics.net_pnl.amount, pnlCurrency)}</td><td>{percent(report.economics.total_return.value)}</td></> : <td colSpan={3}>No report</td>}<td>{paths[member.job_id] ? pathPercent(paths[member.job_id]!.max_drawdown.ratio) : 'Unavailable'}</td><td><Link to={`/backtests/${member.job_id}`}>View</Link></td><td><input type="checkbox" aria-label={`Select ${member.job_id} for comparison`} checked={comparison.includes(member.job_id)} onChange={() => toggle(member.job_id)} /></td></tr>
     })}</tbody></table><button className="primary compare-button" disabled={comparison.length !== 2} onClick={() => navigate(`/backtests/compare/${comparison[0]}/${comparison[1]}`)}>Compare selected runs</button></section>
   </>
 }
@@ -505,7 +525,7 @@ function BacktestDetailRoute({ api }: { api: ApiAdapter }) {
   return <BacktestDetail key={jobId} api={api} jobId={jobId} />
 }
 
-type ComparedRun = { job: BacktestJob; report: BacktestReport | null }
+type ComparedRun = { job: BacktestJob; report: BacktestReport | null; path?: EquityPath | null }
 
 function percent(value: string): string {
   return `${exactDelta('0', value, 2).replace(/^\+/, '')}%`
@@ -531,7 +551,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
       if (!job.engine_run_id || report.run_id !== job.engine_run_id) {
         throw new ApiFailure('report_identity_conflict', 'Verified report identity does not match this job')
       }
-      return { job, report }
+      return { job, report, path: await loadPath(api, job) }
     }
     Promise.all([load(leftId), load(rightId)])
       .then(([left, right]) => { if (active) setRuns([left, right]) })
@@ -566,6 +586,8 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
       rightCurrency: right.report?.economics.net_pnl.currency ?? right.report?.economics.currency,
     },
     { label: 'Fees', before: left.report?.economics.fees?.amount, after: right.report?.economics.fees?.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.report?.economics.fees?.currency, rightCurrency: right.report?.economics.fees?.currency },
+    { label: 'Maximum Drawdown Amount', before: left.path?.max_drawdown.amount, after: right.path?.max_drawdown.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.path?.currency, rightCurrency: right.path?.currency },
+    { label: 'Maximum Drawdown Ratio', before: left.path?.max_drawdown.ratio, after: right.path?.max_drawdown.ratio, shift: 0, suffix: '', monetary: false },
     { label: 'Return', before: left.report?.economics.total_return.value, after: right.report?.economics.total_return.value, shift: 2, suffix: ' pp', monetary: false },
     { label: 'Orders', before: left.report ? String(left.report.economics.counts.orders) : undefined, after: right.report ? String(right.report.economics.counts.orders) : undefined, shift: 0, suffix: '', monetary: false },
     { label: 'Fills', before: left.report ? String(left.report.economics.counts.fills) : undefined, after: right.report ? String(right.report.economics.counts.fills) : undefined, shift: 0, suffix: '', monetary: false },
@@ -578,9 +600,9 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
     </section>
     <section className="panel comparison-panel"><header><h2>Input Diff</h2><span>Normalized snapshots</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{inputRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{before === after ? 'Unchanged' : 'Changed'}</td></tr>)}</tbody></table></section>
     <section className="panel comparison-panel">{!sameImplementation ? <p>Strategy implementation changed</p> : !sameStrategy && <p>NO_PARAMETER_DELTA · Different strategy ID/version</p>}<header><h2>Parameter Delta</h2><span>Persisted normalized strategy inputs</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{parameterRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{exactDelta(before, after)}</td></tr>)}</tbody></table></section>
-    <section className="panel comparison-panel"><header><h2>Result Diff</h2><span>Formal reports only</span></header><table><thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Δ</th></tr></thead><tbody>{metricRows.map(({ label, before, after, shift, suffix, monetary, leftCurrency, rightCurrency }) => {
-      const leftValue = before === undefined ? 'No report' : label === 'Return' ? percent(before) : `${before}${leftCurrency ? ` ${leftCurrency}` : ''}`
-      const rightValue = after === undefined ? 'No report' : label === 'Return' ? percent(after) : `${after}${rightCurrency ? ` ${rightCurrency}` : ''}`
+    <section className="panel comparison-panel"><header><h2>Result Diff</h2><span>Verified reports and path evidence</span></header><table><thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Δ</th></tr></thead><tbody>{metricRows.map(({ label, before, after, shift, suffix, monetary, leftCurrency, rightCurrency }) => {
+      const leftValue = before === undefined ? (label.startsWith('Maximum Drawdown') ? 'Unavailable' : 'No report') : label === 'Return' ? percent(before) : `${before}${leftCurrency ? ` ${leftCurrency}` : ''}`
+      const rightValue = after === undefined ? (label.startsWith('Maximum Drawdown') ? 'Unavailable' : 'No report') : label === 'Return' ? percent(after) : `${after}${rightCurrency ? ` ${rightCurrency}` : ''}`
       let delta = '—'
       if (before !== undefined && after !== undefined) {
         if (monetary && (!leftCurrency || !rightCurrency)) delta = 'Currency unavailable'
@@ -595,6 +617,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
 function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   const [job, setJob] = useState<BacktestJob | null>(null)
   const [report, setReport] = useState<BacktestReport | null>(null)
+  const [path, setPath] = useState<EquityPath | null>(null)
   const [disconnected, setDisconnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const refreshGeneration = useRef(0)
@@ -602,6 +625,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current
     setReport(null)
+    setPath(null)
     setError(null)
     try {
       const current = await api.getBacktest(jobId)
@@ -614,6 +638,8 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
           throw new ApiFailure('report_identity_conflict', 'Verified report identity does not match this job')
         }
         setReport(currentReport)
+        const currentPath = await loadPath(api, current)
+        if (generation === refreshGeneration.current) setPath(currentPath)
       }
       return current.status
     } catch (caught) {
@@ -653,6 +679,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
     {job.input_snapshot && <p>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</p>}
     {economics ? <>
+      {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
       <section className="metrics">
         <Metric label="Initial cash" value={economics.initial_funding ? `${economics.initial_funding.amount} ${currency}` : 'not available'} />
         <Metric label="Ending cash" value={`${economics.ending_cash[0]?.amount ?? '0'} ${currency}`} />
@@ -669,7 +696,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
           <div><dt>Valuation price</dt><dd>{economics.valuation.price}</dd></div><div><dt>Position value</dt><dd>{economics.valuation.position_value}</dd></div>
           <div><dt>Counts</dt><dd><span>Orders {economics.counts.orders}</span> · <span>Fills {economics.counts.fills}</span></dd></div>
         </dl></section>
-        <section className="panel"><header><h2>Artifacts</h2><span>Read-only downloads</span></header><div className="downloads"><a href={api.artifactUrl(jobId, 'report.json')}>Download report.json</a><a href={api.artifactUrl(jobId, 'summary.txt')}>Download summary.txt</a></div><p className="muted">Net P&amp;L may include open-position valuation; it is not presented as realized profit.</p></section>
+        <section className="panel"><header><h2>Artifacts</h2><span>Read-only downloads</span></header><div className="downloads"><a href={api.artifactUrl(jobId, 'report.json')}>Download report.json</a><a href={api.artifactUrl(jobId, 'summary.txt')}>Download summary.txt</a>{path && <a href={api.artifactUrl(jobId, 'equity-path.json')}>Download equity-path.json</a>}</div><p className="muted">Net P&amp;L may include open-position valuation; it is not presented as realized profit.</p></section>
       </div>
     </> : <section className="panel"><p className="muted">{
       job.status === 'failed' || job.status === 'interrupted'
@@ -696,7 +723,7 @@ function FrozenParameters({ job }: { job: BacktestJob }) {
   </dl></section>
 }
 
-function HoldoutEvidence({ role, job, report }: { role: string; job: BacktestJob; report: BacktestReport | null }) {
+function HoldoutEvidence({ role, job, report, path }: { role: string } & ComparedRun) {
   const data = job.input_snapshot?.scenario.data
   const economics = report?.economics
   const currency = economics?.currency ?? job.input_snapshot?.scenario.funding.currency
@@ -711,6 +738,7 @@ function HoldoutEvidence({ role, job, report }: { role: string; job: BacktestJob
     <div><dt>Final equity</dt><dd>{economics ? `${economics.equity.amount} ${currency}` : 'No report'}</dd></div>
     <div><dt>Net P&amp;L</dt><dd>{economics ? `${economics.net_pnl.amount} ${currency}` : 'No report'}</dd></div>
     <div><dt>Total return</dt><dd>{economics ? percent(economics.total_return.value) : 'No report'}</dd></div>
+    <div><dt>Maximum Drawdown</dt><dd>{path ? `${path.max_drawdown.amount} ${path.currency} / ${pathPercent(path.max_drawdown.ratio)}` : pathUnavailable(job)}</dd></div>
   </dl><Link to={`/backtests/${job.job_id}`}>Open {role} formal run</Link></section>
 }
 
@@ -720,7 +748,7 @@ async function holdoutRun(api: ApiAdapter, id: string) {
   if (job.status === 'succeeded') {
     try { const value = await api.getReport(id); if (value.run_id === job.engine_run_id) report = value } catch { /* Unavailable evidence stays unavailable. */ }
   }
-  return { job, report }
+  return { job, report, path: report ? await loadPath(api, job) : null }
 }
 
 function HoldoutCreatorRoute({ api }: { api: ApiAdapter }) {
