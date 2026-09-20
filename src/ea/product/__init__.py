@@ -49,6 +49,7 @@ __all__ = [
     "BacktestReportResult",
     "BacktestReportV1",
     "BacktestReportV2",
+    "BacktestReportV3",
     "BacktestRunError",
     "BacktestRunFailure",
     "BacktestRunResult",

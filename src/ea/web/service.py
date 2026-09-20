@@ -38,7 +38,6 @@ from ea.product.scenario import (
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import StrategyPackage, read_regular, validate_package
 from ea.strategy.registry import project_parameters
-from ea.strategy.sdk_v2 import ROUND_TRIP_STRATEGY
 from ea.web.datasets import LocalResearchDatasetRegistryV1
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
 
@@ -47,6 +46,22 @@ _JOB_STATES = frozenset({"accepted", "running", "succeeded", "failed", "interrup
 _ARTIFACTS = frozenset({"report.json", "summary.txt", "equity-path.json"})
 _MAX_SCENARIO_BYTES = 64 * 1024
 _INPUT_DIGEST_DOMAIN = b"ea.local-web-input.v1\0"
+
+
+_REPORT_SCHEMAS = {
+    "ea.local-web-job.v4": "ea.backtest-report.v2",
+    "ea.local-web-job.v5": "ea.backtest-report.v3",
+}
+_PATH_SCHEMAS = {
+    "ea.local-web-job.v4": "ea.backtest-equity-path.v2",
+    "ea.local-web-job.v5": "ea.backtest-equity-path.v3",
+}
+
+
+def _job_schema(scenario: LoadedBacktestScenario) -> str:
+    return {4: "ea.local-web-job.v4", 5: "ea.local-web-job.v5"}.get(
+        scenario.schema_version, "ea.local-web-job.v3"
+    )
 
 
 class WebBoundaryError(ValueError):
@@ -145,7 +160,7 @@ def _scenario_identity(scenario: LoadedBacktestScenario) -> dict[str, object]:
 
 
 def _validate_web_integer_parameters(scenario: LoadedBacktestScenario) -> None:
-    if scenario.schema_version == 4 and any(
+    if scenario.schema_version in (4, 5) and any(
         type(value) is int and abs(value) > 9007199254740991
         for value in scenario.strategy_parameters.values()
     ):
@@ -166,7 +181,7 @@ def _strategy_parameter_contracts(
         p.document(parameters[p.parameter.name], source.strategy_parameters[p.parameter.name])
         for p in resolved
     ]
-    if scenario.schema_version == 4:
+    if scenario.schema_version in (4, 5):
         for contract in contracts:
             if contract["type"] == "integer":
                 contract["maximum"] = (
@@ -368,14 +383,20 @@ class JobRecord:
                 and self.report_sha256 is not None
                 and self.summary_sha256 is not None
                 and (
-                    self.schema not in {"ea.local-web-job.v3", "ea.local-web-job.v4"}
+                    self.schema
+                    not in {"ea.local-web-job.v3", "ea.local-web-job.v4", "ea.local-web-job.v5"}
                     or self.equity_path_sha256 is not None
                 )
             ),
         }
-        if self.schema in {"ea.local-web-job.v3", "ea.local-web-job.v4"}:
+        if self.schema in {"ea.local-web-job.v3", "ea.local-web-job.v4", "ea.local-web-job.v5"}:
             document["equity_path_sha256"] = self.equity_path_sha256
-        if self.schema in {"ea.local-web-job.v2", "ea.local-web-job.v3", "ea.local-web-job.v4"}:
+        if self.schema in {
+            "ea.local-web-job.v2",
+            "ea.local-web-job.v3",
+            "ea.local-web-job.v4",
+            "ea.local-web-job.v5",
+        }:
             if (
                 self.created_at is None
                 or self.input_snapshot_bytes is None
@@ -392,16 +413,13 @@ class JobRecord:
             )
         if presentation and self.input_snapshot_bytes is not None:
             strategy = json.loads(self.input_snapshot_bytes)["scenario"]["strategy"]
-            entry = (
-                ROUND_TRIP_STRATEGY
-                if self.schema == "ea.local-web-job.v4" and self.strategy_package is None
-                else ResearchStrategyCatalogV1(
-                    () if self.strategy_package is None else (self.strategy_package,)
-                ).resolve(strategy)
-            )
+            entry = ResearchStrategyCatalogV1(
+                () if self.strategy_package is None else (self.strategy_package,)
+            ).resolve(strategy)
             document["parameters"] = (
                 entry.normalize(strategy["parameters"])
-                if "source" in strategy or self.schema == "ea.local-web-job.v4"
+                if "source" in strategy
+                or self.schema in {"ea.local-web-job.v4", "ea.local-web-job.v5"}
                 else project_parameters(strategy)
             )
             document["strategy_descriptor"] = entry.descriptor.document()
@@ -446,6 +464,7 @@ def _decode_job(payload: bytes) -> JobRecord:
             "ea.local-web-job.v2",
             "ea.local-web-job.v3",
             "ea.local-web-job.v4",
+            "ea.local-web-job.v5",
         }:
             raise ValueError
         status_value = document.get("status")
@@ -475,7 +494,12 @@ def _decode_job(payload: bytes) -> JobRecord:
         input_snapshot_bytes: bytes | None = None
         input_sha256: str | None = None
         attempt_id: str | None = None
-        if schema in {"ea.local-web-job.v2", "ea.local-web-job.v3", "ea.local-web-job.v4"}:
+        if schema in {
+            "ea.local-web-job.v2",
+            "ea.local-web-job.v3",
+            "ea.local-web-job.v4",
+            "ea.local-web-job.v5",
+        }:
             created_at_value = document.get("created_at")
             snapshot = document.get("input_snapshot")
             input_sha256_value = document.get("input_sha256")
@@ -504,8 +528,9 @@ def _decode_job(payload: bytes) -> JobRecord:
                 or type(snapshot.get("scenario")) is not dict
             ):
                 raise ValueError
-            if (schema == "ea.local-web-job.v4") != (
-                snapshot["scenario"].get("schema_version") == 4
+            if any(
+                (schema == job_schema) != (snapshot["scenario"].get("schema_version") == version)
+                for job_schema, version in (("ea.local-web-job.v4", 4), ("ea.local-web-job.v5", 5))
             ):
                 raise ValueError
             datetime.strptime(created_at_value, "%Y-%m-%dT%H:%M:%S.%fZ")
@@ -518,7 +543,7 @@ def _decode_job(payload: bytes) -> JobRecord:
             created_at = created_at_value
             input_sha256 = input_sha256_value
             attempt_id = attempt_id_value
-        if schema in {"ea.local-web-job.v3", "ea.local-web-job.v4"}:
+        if schema in {"ea.local-web-job.v3", "ea.local-web-job.v4", "ea.local-web-job.v5"}:
             digest = document.get("equity_path_sha256")
             if digest is not None and (
                 type(digest) is not str
@@ -543,7 +568,7 @@ def _decode_job(payload: bytes) -> JobRecord:
             report_sha256=document.get("report_sha256"),
             summary_sha256=document.get("summary_sha256"),
             equity_path_sha256=document.get("equity_path_sha256")
-            if schema in {"ea.local-web-job.v3", "ea.local-web-job.v4"}
+            if schema in {"ea.local-web-job.v3", "ea.local-web-job.v4", "ea.local-web-job.v5"}
             else None,
             error_code=document.get("error_code"),
             message=document.get("message"),
@@ -1032,9 +1057,7 @@ class WebService:
             attempt_id = RunId(str(uuid4()))
             scenario = self._materialize_scenario(job_id, prepared.scenario)
             record = JobRecord(
-                schema="ea.local-web-job.v4"
-                if prepared.scenario.schema_version == 4
-                else "ea.local-web-job.v3",
+                schema=_job_schema(prepared.scenario),
                 strategy_package=prepared.scenario.strategy_package,
                 job_id=job_id,
                 request_id=request_id,
@@ -1096,9 +1119,7 @@ class WebService:
                     job_id = str(uuid4())
                     scenario = self._materialize_scenario(job_id, item.scenario)
                     record = JobRecord(
-                        schema="ea.local-web-job.v4"
-                        if item.scenario.schema_version == 4
-                        else "ea.local-web-job.v3",
+                        schema=_job_schema(item.scenario),
                         strategy_package=item.scenario.strategy_package,
                         job_id=job_id,
                         request_id=f"batch-{batch_id}-{index}",
@@ -1184,13 +1205,9 @@ class WebService:
             raise WebBoundaryError("source has no immutable input snapshot")
         snapshot = json.loads(checked.input_snapshot_bytes)
         document: dict[str, Any] = snapshot["scenario"]
-        entry = (
-            ROUND_TRIP_STRATEGY
-            if document["schema_version"] == 4 and source.strategy_package is None
-            else ResearchStrategyCatalogV1(
-                () if source.strategy_package is None else (source.strategy_package,)
-            ).resolve(document["strategy"])
-        )
+        entry = ResearchStrategyCatalogV1(
+            () if source.strategy_package is None else (source.strategy_package,)
+        ).resolve(document["strategy"])
         if not entry.descriptor.research_visible:
             raise WebBoundaryError("source strategy is not research-visible")
         scenario_digest = sha256(
@@ -1199,9 +1216,10 @@ class WebService:
         ).hexdigest()
         if scenario_digest != snapshot["identity"]["scenario_sha256"]:
             raise WebBoundaryError("source scenario identity conflicts with snapshot")
-        entry.normalize(document["strategy"]["parameters"]) if document[
-            "schema_version"
-        ] == 4 or "source" in document["strategy"] else project_parameters(document["strategy"])
+        entry.normalize(document["strategy"]["parameters"]) if document["schema_version"] in (
+            4,
+            5,
+        ) or "source" in document["strategy"] else project_parameters(document["strategy"])
         if (
             report.get("source", {}).get("scenario_sha256")
             != snapshot["identity"]["scenario_sha256"]
@@ -1244,7 +1262,7 @@ class WebService:
             initial_cash=source["funding"]["initial_cash"],
             parameters=dict(
                 source["strategy"]["parameters"]
-                if source_package is not None or source["schema_version"] == 4
+                if source_package is not None or source["schema_version"] in (4, 5)
                 else project_parameters(source["strategy"])
             ),
         )
@@ -1293,9 +1311,7 @@ class WebService:
             job_id = str(uuid4())
             relation = HoldoutRecord(str(uuid4()), _created_at(), source_job_id, job_id)
             record = JobRecord(
-                schema="ea.local-web-job.v4"
-                if prepared.scenario.schema_version == 4
-                else "ea.local-web-job.v3",
+                schema=_job_schema(prepared.scenario),
                 strategy_package=prepared.scenario.strategy_package,
                 job_id=job_id,
                 request_id=f"holdout-{relation.validation_id}",
@@ -1407,11 +1423,7 @@ class WebService:
                 if (
                     type(document) is not dict
                     or document.get("schema")
-                    != (
-                        "ea.backtest-report.v2"
-                        if record.schema == "ea.local-web-job.v4"
-                        else "ea.backtest-report.v1"
-                    )
+                    != (_REPORT_SCHEMAS.get(record.schema, "ea.backtest-report.v1"))
                     or document.get("run_id") != run_id
                 ):
                     raise ReportUnavailableError("generated report identity conflicts")
@@ -1486,11 +1498,7 @@ class WebService:
             sha256(payload).hexdigest() != record.report_sha256
             or type(document) is not dict
             or document.get("schema")
-            != (
-                "ea.backtest-report.v2"
-                if record.schema == "ea.local-web-job.v4"
-                else "ea.backtest-report.v1"
-            )
+            != (_REPORT_SCHEMAS.get(record.schema, "ea.backtest-report.v1"))
             or document.get("run_id") != record.engine_run_id
         ):
             raise ReportUnavailableError("verified report identity conflicts")
@@ -1505,7 +1513,8 @@ class WebService:
         record = self.get_job(job_id)
         if name == "equity-path.json":
             if (
-                record.schema not in {"ea.local-web-job.v3", "ea.local-web-job.v4"}
+                record.schema
+                not in {"ea.local-web-job.v3", "ea.local-web-job.v4", "ea.local-web-job.v5"}
                 or record.equity_path_sha256 is None
             ):
                 raise ReportUnavailableError("Path analysis unavailable for this legacy run.")
@@ -1516,11 +1525,7 @@ class WebService:
                 if (
                     sha256(payload).hexdigest() != record.equity_path_sha256
                     or document["schema"]
-                    != (
-                        "ea.backtest-equity-path.v2"
-                        if record.schema == "ea.local-web-job.v4"
-                        else "ea.backtest-equity-path.v1"
-                    )
+                    != (_PATH_SCHEMAS.get(record.schema, "ea.backtest-equity-path.v1"))
                     or document["run_id"] != record.engine_run_id
                     or document["report_sha256"] != record.report_sha256
                     or document["semantic_outcome_sha256"]

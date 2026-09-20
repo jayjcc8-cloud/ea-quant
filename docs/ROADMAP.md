@@ -107,6 +107,14 @@ Future dependency direction (not delivered or authorized by this slice):
 Research Foundation → Local Strategy Package → Dataset Registry → Candidate → Agent Research Tools.
 AI strategy generation, external plugins/packages, automatic selection and paper/live remain absent.
 
+## Research Validation
+
+Issue #200 enters the bounded Research Validation phase with repeated full long-only round trips,
+identity-bound limits, Local Package V3 and formal Report/Path V3 evidence through the existing
+Web/Batch/Comparison/Holdout loop. Captured real OHLCV and a stateful MA crossover are the reference
+acceptance path. Candidate, optimizer, general multi-position trading and Paper/Live stay deferred.
+Trade Analytics V1 is the next recommended decision, not an authorization to start it.
+
 ## Phase 3 — Paper Trading
 
 Entry: Phase 2 evidence demonstrates credible deterministic research semantics. Purpose: connect

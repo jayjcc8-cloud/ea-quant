@@ -1,10 +1,10 @@
 # EA Quant Trading System
 
 EA is an AI-native quantitative R&D and strategy promotion system in development.
-Its delivered offline Research Foundation reduces Idea → Evidence-ready Candidate work; live is unavailable.
+Its delivered offline Research Validation reduces Idea → Evidence-ready Candidate work; live is unavailable.
 
 ## Current Phase and Health
-- Phase: **Research Foundation — schema-driven bounded research**
+- Phase: **Research Validation — bounded repeated long round trips**
 - GitHub prerelease: **v0.2.0 published**
 - Merged baseline: **main healthy**
 - Live trading: **unavailable**
@@ -117,3 +117,4 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
 Built-ins and trusted local strategies run offline. See [local strategy tools and SDK](docs/local-strategy-package-v1.md).
 `.eastrategy` contains executable Python and should only be loaded from sources the user trusts.
 This is not a Python sandbox. AI, datasets, optimization, paper/live and deployment remain unavailable.
+Bounded repeated trades: [Package V3 and lifecycle](docs/local-strategy-package-v1.md#bounded-repeated-long-round-trips).

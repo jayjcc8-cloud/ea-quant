@@ -84,3 +84,29 @@ different digests as “Strategy implementation changed”. Jobs and attempts re
 package bytes. Completed reports and history survive external package deletion. Chronological
 Holdout reuses source frozen bytes and parameters with a compatible later Scenario V3 pointing to
 that same digest. It never substitutes the currently configured package or target defaults.
+
+## Bounded repeated long round trips
+
+Scenario V5 adds the explicit `bounded-long-round-trips-v1` lifecycle and identity-bound
+`strategy.max_round_trips` in `1..256`. Local strategies use Package V3 while keeping the existing
+Action V2 `HOLD`, `ENTER_LONG(quantity)` and `EXIT_LONG` contract. The reference source is
+[`moving-average-crossover-v3`](../examples/local-strategies/moving-average-crossover-v3); pack,
+validate and inspect it with the existing `ea strategy` commands. Preserve the manifest's exact
+canonical bytes. The prior V2 example and all legacy scenarios remain supported.
+
+Each acknowledged full exit permits another entry until the bound. Entry while long, exit while
+flat, a new action during pending execution, partial/resized exits and entry beyond the bound
+fail closed. Replay end never forces an exit. Report V3 lists ordered complete trades and an
+optional open position with per-Fill fees; Path V3 uses the actual acknowledged balances at each
+market root. Web Job V5 displays these formal values and reuses ordinary Batch, comparison and
+chronological Holdout. The bound is frozen with source parameters and package bytes for Holdout.
+Persisted evidence remains readable after restart and removal of original source/CSV files.
+
+The installed browser acceptance uses [captured real daily OHLCV](../examples/research-data/README.md)
+with the existing MA crossover, including at least three completed round trips. This capability
+is offline research only; it does not enable Candidate, optimization, Paper, Live or broker access.
+
+Known inherited settlement limit: fractional quantities that produce both a settled-notional
+rounding residual and nonzero commission can fail closed in the existing Ledger. This limitation
+also affects legacy V4; no successful report is emitted. The reference acceptance uses whole-unit
+quantities and explicit funding/risk bounds, while retaining per-Fill commission.

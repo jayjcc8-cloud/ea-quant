@@ -15,7 +15,7 @@ from ea.core import AuditRecordKind, CanonicalDecimal, require_quantized, settle
 from ea.core.economics import settle_product
 from ea.product import reporting as r
 from ea.product.backtest import _load_verified_attempt
-from ea.product.round_trip_report import BacktestReportV2
+from ea.product.round_trip_report import BacktestReportV2, BacktestReportV3
 
 MAX_DISPLAY_POINTS = 2048
 DISPLAY_SAMPLING = "uniform-index-extrema-v1"
@@ -39,6 +39,11 @@ class BacktestEquityPathAnalysisV1:
 @dataclass(frozen=True, slots=True)
 class BacktestEquityPathAnalysisV2:
     canonical_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestEquityPathAnalysisV3(BacktestEquityPathAnalysisV2):
+    pass
 
 
 def analyze_points(points: Callable[[], Iterator[EquityPoint]]) -> dict[str, Any]:
@@ -290,8 +295,10 @@ def _round_trip_path(
     analysis = analyze_points(points)
     analysis.update(
         {
-            "schema": "ea.backtest-equity-path.v2",
-            "schema_version": 2,
+            "schema": "ea.backtest-equity-path.v3"
+            if isinstance(report, BacktestReportV3)
+            else "ea.backtest-equity-path.v2",
+            "schema_version": 3 if isinstance(report, BacktestReportV3) else 2,
             "evidence_role": "DERIVED_PATH_EVIDENCE",
             "run_id": document["run_id"],
             "scenario_sha256": source["scenario_sha256"],
@@ -303,4 +310,8 @@ def _round_trip_path(
             "valuation_rule": r._VALUATION_RULE,
         }
     )
-    return BacktestEquityPathAnalysisV2(r._canonical_json(analysis) + b"\n")
+    return (
+        BacktestEquityPathAnalysisV3
+        if isinstance(report, BacktestReportV3)
+        else BacktestEquityPathAnalysisV2
+    )(r._canonical_json(analysis) + b"\n")

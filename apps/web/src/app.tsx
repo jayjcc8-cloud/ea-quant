@@ -95,6 +95,32 @@ type RoundTripEconomics = ReportBase['economics'] & {
 export type BacktestReport = (ReportBase & { schema: 'ea.backtest-report.v1'; economics: ReportBase['economics'] & {
   execution: { order: { quantity: string; side: string } | null; fill: { quantity: string; price: string; side: string } | null }
 }}) | (ReportBase & { schema: 'ea.backtest-report.v2'; economics: RoundTripEconomics })
+ | (ReportBase & { schema: 'ea.backtest-report.v3'; economics: MultiRoundTripEconomics })
+
+type MultiRoundTripEconomics = Omit<RoundTripEconomics, 'position_outcome' | 'entry_fee' | 'exit_fee'> & {
+  position_outcome: 'FLAT_NO_TRADE' | 'FLAT_AFTER_TRADES' | 'OPEN_AT_END'
+  completed_round_trips: number
+  trades: { quantity: string; entry_settled_notional: string; exit_settled_notional: string;
+    entry_fee: string; exit_fee: string; realized_pnl: string;
+    entry_order_id: { owner_sequence: number }; exit_order_id: { owner_sequence: number };
+    entry_fill_id: { owner_sequence: number }; exit_fill_id: { owner_sequence: number } }[]
+  open_position: { quantity: string; entry_fee: string; last_valuation: string; gross_unrealized_pnl: string } | null
+}
+function MultiRoundTripExecution({ economics }: { economics: MultiRoundTripEconomics }) {
+  return <>
+    <div><dt>Position outcome</dt><dd>{economics.position_outcome}</dd></div>
+    <div><dt>Completed round trips</dt><dd>{economics.completed_round_trips}</dd></div>
+    <div className="trade-history"><dt>Complete trades</dt><dd><table><thead><tr><th>Trade</th><th>Entry order / fill</th><th>Exit order / fill</th><th>Quantity</th><th>Entry notional</th><th>Exit notional</th><th>Entry fee</th><th>Exit fee</th><th>Realized P&amp;L</th></tr></thead><tbody>
+      {economics.trades.map((trade, i) => <tr key={trade.entry_order_id.owner_sequence}>
+        <td>{i + 1}</td><td>{trade.entry_order_id.owner_sequence} / {trade.entry_fill_id.owner_sequence}</td><td>{trade.exit_order_id.owner_sequence} / {trade.exit_fill_id.owner_sequence}</td>
+        <td>{trade.quantity}</td><td>{trade.entry_settled_notional}</td><td>{trade.exit_settled_notional}</td><td>{trade.entry_fee}</td><td>{trade.exit_fee}</td><td>{trade.realized_pnl}</td>
+      </tr>)}
+    </tbody></table></dd></div>
+    <div><dt>Open position</dt><dd>{economics.open_position ? `${economics.open_position.quantity} · entry fee ${economics.open_position.entry_fee} · valuation ${economics.open_position.last_valuation}` : '—'}</dd></div>
+    <div><dt>Realized P&amp;L</dt><dd>{economics.realized_pnl.amount}</dd></div>
+    <div><dt>Gross unrealized P&amp;L</dt><dd>{economics.gross_unrealized_pnl.amount}</dd></div>
+  </>
+}
 
 function RoundTripExecution({ economics }: { economics: RoundTripEconomics }) {
   return <>
@@ -174,12 +200,12 @@ async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath |
   if (job.status !== 'succeeded' || !job.equity_path_sha256) return null
   try {
     const path = await api.getEquityPath(job.job_id)
-    if (path.schema !== (job.schema === 'ea.local-web-job.v4' ? 'ea.backtest-equity-path.v2' : 'ea.backtest-equity-path.v1') || path.run_id !== job.engine_run_id || path.report_sha256 !== job.report_sha256) return null
+    if (path.schema !== (job.schema === 'ea.local-web-job.v5' ? 'ea.backtest-equity-path.v3' : job.schema === 'ea.local-web-job.v4' ? 'ea.backtest-equity-path.v2' : 'ea.backtest-equity-path.v1') || path.run_id !== job.engine_run_id || path.report_sha256 !== job.report_sha256) return null
     return path
   } catch { return null }
 }
 function pathUnavailable(job: BacktestJob) {
-  return ['ea.local-web-job.v3', 'ea.local-web-job.v4'].includes(job.schema ?? '') ? 'Path analysis unavailable.' : 'Path analysis unavailable for this legacy run.'
+  return ['ea.local-web-job.v3', 'ea.local-web-job.v4', 'ea.local-web-job.v5'].includes(job.schema ?? '') ? 'Path analysis unavailable.' : 'Path analysis unavailable for this legacy run.'
 }
 
 function DatasetSelector({ api, value, change }: { api: ApiAdapter; value: DatasetReference; change: (value: DatasetReference) => void }) {
@@ -588,6 +614,8 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
     ['Initial Cash', leftInput.funding.initial_cash, rightInput.funding.initial_cash],
     ['Action contract', String(leftInput.strategy.action_contract ?? 'V1'), String(rightInput.strategy.action_contract ?? 'V1')],
     ['Position lifecycle', String(leftInput.strategy.position_lifecycle ?? 'single-entry'), String(rightInput.strategy.position_lifecycle ?? 'single-entry')],
+    ['Max round trips', String(leftInput.strategy.max_round_trips ?? '—'), String(rightInput.strategy.max_round_trips ?? '—')],
+    ['Report version', left.report?.schema ?? '—', right.report?.schema ?? '—'],
     ['Symbol', leftInput.instrument.symbol, rightInput.instrument.symbol],
     ['Commission', commissionLabel(leftInput.execution?.commission), commissionLabel(rightInput.execution?.commission)],
   ]
@@ -700,6 +728,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     </dl></section>
     {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
     {job.input_snapshot && <p>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</p>}
+    {job.schema === 'ea.local-web-job.v5' && <p>Round trip limit: {String(job.input_snapshot?.scenario.strategy.max_round_trips)}</p>}
     {economics ? <>
       {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
       <section className="metrics">
@@ -713,7 +742,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
       </section>
       <div className="backtest-grid">
         <section className="panel"><header><h2>Execution</h2><span>Canonical strings</span></header><dl className="summary-list">
-          {report?.schema === 'ea.backtest-report.v2' ? <RoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v1' ? <>
+          {report?.schema === 'ea.backtest-report.v3' ? <MultiRoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v2' ? <RoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v1' ? <>
           <div><dt>Order</dt><dd>{report.economics.execution.order ? `${report.economics.execution.order.side} ${report.economics.execution.order.quantity}` : 'none'}</dd></div>
           <div><dt>Fill quantity</dt><dd>{report.economics.execution.fill?.quantity ?? 'none'}</dd></div><div><dt>Fill price</dt><dd>{report.economics.execution.fill?.price ?? 'none'}</dd></div>
           </> : null}

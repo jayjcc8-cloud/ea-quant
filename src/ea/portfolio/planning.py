@@ -212,6 +212,41 @@ class PortfolioPlanningAuthority:
             "create_portfolio_planning_authority"
         )
 
+    def _rebind_flat_policy(self, policy: Phase1PortfolioPolicy) -> None:
+        """Bind the next flat-position policy while retaining target/intent identity owners.
+
+        The offline Action V2 caller invokes this only before an entry with no pending order.
+        Existing replay results and monotonically increasing allocators remain untouched.
+        """
+        if self._state.public.halted or any(
+            balance.quantity.coefficient for balance in self._ledger.snapshot.position_balances
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "policy rebind requires unhalted flat position")
+        if type(policy) is not Phase1PortfolioPolicy:
+            raise _fail(OutcomeCode.INVALID_TYPE, "policy must be exact")
+        if (
+            policy.policy_id != self._policy.policy_id
+            or policy.instrument_spec_set_id != self._spec_set.identifier
+            or policy.instrument_spec_set_sha256 != self._spec_set_sha256
+            or {e.instrument for e in policy.entries} != set(self._entry_by_instrument)
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "policy rebind identity conflicts")
+        retained = create_phase1_portfolio_policy(
+            policy_id=policy.policy_id,
+            entries=tuple(
+                Phase1PortfolioPolicyEntry(
+                    instrument=self._spec_set.require(e.instrument).instrument,
+                    target_quantity=CanonicalDecimal(e.target_quantity.text),
+                )
+                for e in policy.entries
+            ),
+            spec_set=self._spec_set,
+        )
+        payload = canonical_phase1_portfolio_policy_bytes(retained)
+        digest = phase1_portfolio_policy_digest(retained)
+        self._policy, self._policy_bytes, self._policy_sha256 = retained, payload, digest
+        self._entry_by_instrument = MappingProxyType({e.instrument: e for e in retained.entries})
+
     @property
     def state(self) -> PortfolioPlanningAuthorityState:
         return self._state.public
