@@ -171,6 +171,10 @@ external write, deployment, or live capability is part of this objective.
   Batch, comparison and frozen chronological Holdout. The installed reference MA crossover uses
   captured real OHLCV and retains readable source/holdout evidence after source/CSV deletion.
 
+- Issue #203 admits the existing six-account Fill structure when fractional settlement needs
+  both commission and a rounding residual. Legacy V1 reports and equity paths use the existing
+  currency settlement arithmetic; zero-position reports and supported resume remain compatible.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline

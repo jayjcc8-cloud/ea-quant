@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -211,9 +212,10 @@ def test_ledger_fee_balanced_atomic_replay() -> None:
     assert _state_bytes(poor) == before
 
 
+@pytest.mark.parametrize("quantity", ["2", "0.33"])
 @pytest.mark.parametrize("stage", ["funding_durable", "dispatch_durable", "reconciliation_durable"])
 def test_commission_resume_equivalence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, quantity: str
 ) -> None:
     import ea.product.backtest as backtest
     from ea.core import InstrumentExecutionSpecSet, LedgerTransaction, RunId
@@ -231,7 +233,13 @@ def test_commission_resume_equivalence(
         return ledger
 
     monkeypatch.setattr(backtest, "create_portfolio_ledger", capture)
-    scenario = load_backtest_scenario(commission_scenario(tmp_path / "input"))
+    scenario_path = commission_scenario(tmp_path / "input")
+    document = yaml.safe_load(scenario_path.read_text())
+    if quantity == "0.33":
+        document["instrument"]["quantity_quantum"] = "0.01"
+    document["strategy"]["target_quantity"] = quantity
+    scenario_path.write_text(yaml.safe_dump(document))
+    scenario = load_backtest_scenario(scenario_path)
     baseline = run_backtest_scenario(scenario, tmp_path / "baseline").output_directory
     _interrupt_at(monkeypatch, stage)
     with pytest.raises(_AbruptInterruption):
@@ -242,6 +250,11 @@ def test_commission_resume_equivalence(
     first = _report(baseline, tmp_path / "report1")
     second = _report(attempt, tmp_path / "report2")
     assert _economic_projection(first) == _economic_projection(second)
+    if quantity == "0.33":
+        economics: Any = first["economics"]
+        assert economics["ending_cash"][0]["amount"] == "9966.17"
+        assert economics["fees"]["amount"] == "0.33"
+        assert economics["net_pnl"]["amount"] == "2.47"
     result1 = json.loads((baseline / "result.json").read_bytes())
     result2 = json.loads((attempt / "result.json").read_bytes())
     assert result1["fill_evidence"]["fees"] == result2["fill_evidence"]["fees"]
@@ -456,3 +469,117 @@ def test_combined_cash_delta_overflow_is_atomic() -> None:
     before = _state_bytes(ledger)
     assert ledger.apply_fill(fill).code is OutcomeCode.ARITHMETIC_OVERFLOW
     assert _state_bytes(ledger) == before
+
+
+@pytest.mark.parametrize("sell_price, expected_cash", [("102.35", "99.44"), ("100.15", "98.72")])
+def test_fractional_round_trip_with_fee_and_rounding(sell_price: str, expected_cash: str) -> None:
+    from ea.core import (
+        EconomicOwnerKind,
+        ExternalFactId,
+        InitialFunding,
+        OrderSide,
+        OutcomeCode,
+        create_fill,
+        create_trade_execution_fact,
+    )
+    from ea.portfolio import create_portfolio_ledger
+    from unit.test_portfolio_ledger import (
+        INSTRUMENT,
+        PROVENANCE,
+        RUN_ID,
+        SOURCE,
+        TIME,
+        USD,
+        _id,
+        _spec,
+        _spec_set,
+        _state_bytes,
+    )
+
+    specifications = _spec_set(_spec(quantity_quantum="0.01"))
+    ledger = create_portfolio_ledger(RUN_ID, specifications)
+    ledger.apply_initial_funding(InitialFunding(RUN_ID, USD, CanonicalDecimal("100")))
+    for sequence, side, price in [(1, OrderSide.BUY, "101.99"), (2, OrderSide.SELL, sell_price)]:
+        fact = create_trade_execution_fact(
+            source_namespace=SOURCE,
+            dedup_identity=ExternalFactId(str(sequence)),
+            occurred_at=TIME,
+            provenance=PROVENANCE,
+            spec_set=specifications,
+            instrument=INSTRUMENT,
+            side=side,
+            quantity=CanonicalDecimal("0.33"),
+            price=CanonicalDecimal(price),
+            commission_bps=CanonicalDecimal("100"),
+        )
+        fill = create_fill(
+            fill_id=_id(EconomicOwnerKind.EXECUTION_FILL, sequence),
+            fact=fact,
+            spec_set=specifications,
+        )
+        outcome = ledger.apply_fill(fill)
+        assert outcome.code is OutcomeCode.LEDGER_APPLIED
+        assert outcome.transaction is not None
+        assert len(outcome.transaction.postings) == 6
+        from dataclasses import replace
+
+        from ea.core import PortfolioLedgerError
+
+        postings = outcome.transaction.postings
+        with pytest.raises(PortfolioLedgerError):
+            replace(outcome.transaction, postings=postings + (postings[-1],))
+        with pytest.raises(PortfolioLedgerError):
+            replace(outcome.transaction, postings=postings[:-1] + (postings[-2],))
+        with pytest.raises(PortfolioLedgerError):
+            replace(
+                outcome.transaction,
+                postings=postings[:-1] + (replace(postings[-1], amount=CanonicalDecimal("1")),),
+            )
+        before = _state_bytes(ledger)
+        assert ledger.apply_fill(fill).code is OutcomeCode.LEDGER_DUPLICATE
+        assert _state_bytes(ledger) == before
+    assert ledger.snapshot.cash_balances[0].amount.text == expected_cash
+
+
+def test_fractional_repeated_round_trips_formal_report(tmp_path: Path) -> None:
+    from unit.test_bounded_round_trips_v1 import bounded_scenario
+
+    path = bounded_scenario(tmp_path / "input")
+    document = yaml.safe_load(path.read_text())
+    document["instrument"]["quantity_quantum"] = "0.001"
+    document["strategy"]["parameters"]["target_quantity"] = "0.333"
+    path.write_text(yaml.safe_dump(document))
+    attempt = run_backtest_scenario(
+        load_backtest_scenario(path), tmp_path / "runs"
+    ).output_directory
+    report = generate_backtest_report(attempt, tmp_path / "report").report.document
+    economics: Any = report["economics"]
+    assert len(economics["trades"]) == 3
+    assert economics["fees"]["amount"] == "0.21"
+    assert economics["realized_pnl"]["amount"] == "1.79"
+    assert economics["equity"]["amount"] == "10001.79"
+    assert economics["open_position"] is None
+
+
+def test_fractional_legacy_report_and_path(tmp_path: Path) -> None:
+    from ea.product import BacktestReportV1, equity_path
+
+    path = commission_scenario(tmp_path / "input")
+    document = yaml.safe_load(path.read_text())
+    document["instrument"]["quantity_quantum"] = "0.01"
+    document["strategy"]["target_quantity"] = "0.33"
+    path.write_text(yaml.safe_dump(document))
+    attempt = run_backtest_scenario(
+        load_backtest_scenario(path), tmp_path / "runs"
+    ).output_directory
+    report = generate_backtest_report(attempt, tmp_path / "report").report
+    assert isinstance(report, BacktestReportV1)
+    analysis = equity_path.generate_equity_path_analysis(attempt, report)
+    points = json.loads(analysis.canonical_bytes)["display_points"]
+    assert [point["equity"] for point in points] == [
+        "10000",
+        "10000",
+        "10000",
+        "9999.67",
+        "10002.47",
+    ]
