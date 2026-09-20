@@ -199,3 +199,83 @@ def decide_record(record: dict[str, Any], outcome: str, reason: str, now: str) -
     checked["status"] = outcome
     checked["decision"] = {"outcome": outcome, "reason": reason, "decided_at": now}
     return decode_record(canonical(checked))
+
+
+def validate_path(path: dict[str, Any], report: dict[str, Any], version: int) -> None:
+    """Check the closed persisted path shape and its report-bound valuation facts."""
+    from ea.core import CanonicalDecimal
+    from ea.product.reporting import _ratio, _subtract
+
+    _fields(
+        path,
+        "schema schema_version evidence_role run_id scenario_sha256 data_sha256 "
+        "record_count report_sha256 semantic_outcome_sha256 currency valuation_rule "
+        "point_count display_sampling display_points max_drawdown",
+    )
+    economics = report["economics"]
+    if (
+        path["schema"] != f"ea.backtest-equity-path.v{version}"
+        or type(path["schema_version"]) is not int
+        or path["schema_version"] != version
+        or path["evidence_role"] != "DERIVED_PATH_EVIDENCE"
+        or path["valuation_rule"] != "last-admitted-close-v1"
+        or path["display_sampling"] != "uniform-index-extrema-v1"
+        or path["currency"] != economics["currency"]
+        or path["currency"] != report["source"]["instrument"]["settlement_currency"]
+    ):
+        raise ValueError("candidate path valuation identity conflicts")
+    count = path["point_count"]
+    points = path["display_points"]
+    if (
+        type(count) is not int
+        or count < 1
+        or type(points) is not list
+        or len(points) != min(count, 2048)
+    ):
+        raise ValueError("candidate path observations are invalid")
+    by_index = {}
+    previous_time = None
+    last_index = -1
+    for point in points:
+        _fields(point, "index time equity")
+        index = point["index"]
+        if type(index) is not int or not last_index < index < count:
+            raise ValueError("candidate path indices are invalid")
+        stamp = _time(point["time"])
+        if previous_time is not None and stamp < previous_time:
+            raise ValueError("candidate path times regress")
+        CanonicalDecimal(point["equity"])
+        by_index[index] = point
+        previous_time, last_index = stamp, index
+    if (
+        0 not in by_index
+        or count - 1 not in by_index
+        or by_index[0]["equity"] != economics["initial_funding"]["amount"]
+        or by_index[count - 1]["equity"] != economics["equity"]["amount"]
+    ):
+        raise ValueError("candidate path endpoints conflict with report")
+    drawdown = path["max_drawdown"]
+    _fields(
+        drawdown,
+        "amount ratio peak_index peak_time peak_equity trough_index trough_time trough_equity",
+    )
+    for role in ("peak", "trough"):
+        index = drawdown[f"{role}_index"]
+        if type(index) is not int or index not in by_index:
+            raise ValueError("candidate path extremum is absent")
+        if (
+            by_index[index]["time"] != drawdown[f"{role}_time"]
+            or by_index[index]["equity"] != drawdown[f"{role}_equity"]
+        ):
+            raise ValueError("candidate path extremum conflicts")
+    peak = CanonicalDecimal(drawdown["peak_equity"])
+    trough = CanonicalDecimal(drawdown["trough_equity"])
+    amount = _subtract(peak, trough)
+    if (
+        peak.coefficient <= 0
+        or amount.coefficient < 0
+        or drawdown["peak_index"] > drawdown["trough_index"]
+        or amount.text != drawdown["amount"]
+        or _ratio(amount, peak).text != drawdown["ratio"]
+    ):
+        raise ValueError("candidate path drawdown facts conflict")

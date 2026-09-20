@@ -1,4 +1,5 @@
 from copy import deepcopy
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -6,8 +7,8 @@ import pytest
 from ea.web.candidates import canonical, create_record, decide_record, decode_record
 
 
-def projection() -> dict:
-    def evidence() -> dict:
+def projection() -> dict[str, Any]:
+    def evidence() -> dict[str, Any]:
         return {
             "job_id": str(uuid4()),
             "run_id": str(uuid4()),

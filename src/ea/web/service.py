@@ -1530,6 +1530,7 @@ class WebService:
         report = json.loads(report_bytes)
         path_bytes = self._candidate_read(self.reports_dir / job_id / "equity-path.json")
         path = json.loads(path_bytes)
+        candidates.validate_path(path, report, version)
         source = report["source"]
         fingerprint = scenario["data"]["fingerprint"]
         if (

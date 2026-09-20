@@ -195,8 +195,8 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 const browserApi: ApiAdapter = {
   async listCandidates() { return (await apiRequest<{ candidates: Candidate[] }>('/api/candidates')).candidates },
   getCandidate: id => apiRequest(`/api/candidates/${id}`),
-  createCandidate: validationId => apiRequest('/api/candidates', { method: 'POST', body: JSON.stringify({ validation_id: validationId }) }),
-  decideCandidate: (id, outcome, reason) => apiRequest(`/api/candidates/${id}/decision`, { method: 'POST', body: JSON.stringify({ outcome, reason }) }),
+  createCandidate: validationId => apiRequest('/api/candidates', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ validation_id: validationId }) }),
+  decideCandidate: (id, outcome, reason) => apiRequest(`/api/candidates/${id}/decision`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ outcome, reason }) }),
   async listDatasets() { return (await apiRequest<{ datasets: Dataset[] }>('/api/datasets')).datasets },
   async holdoutScenarios(jobId) { return (await apiRequest<{ scenarios: ScenarioSummary[] }>(`/api/backtests/${encodeURIComponent(jobId)}/holdout-scenarios`)).scenarios },
   createHoldout(request) { return apiRequest('/api/holdouts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request) }) },

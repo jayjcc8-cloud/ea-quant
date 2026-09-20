@@ -96,7 +96,15 @@ def test_candidate_api_requires_explicit_decision_and_reports_unavailable(tmp_pa
 
 @pytest.mark.parametrize(
     "field",
-    ["scenario_sha256", "data_sha256", "report_sha256", "run_id", "semantic_outcome_sha256"],
+    [
+        "scenario_sha256",
+        "data_sha256",
+        "report_sha256",
+        "run_id",
+        "semantic_outcome_sha256",
+        "currency",
+        "incomplete",
+    ],
 )
 def test_candidate_rejects_cross_evidence_conflict_even_with_updated_file_hash(
     tmp_path: Path, field: str
@@ -115,7 +123,10 @@ def test_candidate_rejects_cross_evidence_conflict_even_with_updated_file_hash(
         _wait(client, relation["holdout_job_id"])
     path = settings.workspace / "reports" / source["job_id"] / "equity-path.json"
     document = json.loads(path.read_bytes())
-    document[field] = "0" * 64
+    if field == "incomplete":
+        document.pop("display_points")
+    else:
+        document[field] = "EUR" if field == "currency" else "0" * 64
     path.write_bytes(canonical(document))
     job_path = settings.workspace / "jobs" / (source["job_id"] + ".json")
     job = json.loads(job_path.read_bytes())
@@ -134,6 +145,8 @@ def test_candidate_rejects_cross_evidence_conflict_even_with_updated_file_hash(
 def test_failed_candidate_decision_publish_preserves_evaluated_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import os
+
     import ea.web.service as module
 
     settings = _settings(tmp_path)
@@ -146,14 +159,14 @@ def test_failed_candidate_decision_publish_preserves_evaluated_record(
     service.start()
     try:
         record = service.create_candidate(relation["validation_id"])
-        original_replace = module.os.replace
+        original_replace = os.replace
 
-        def fail_candidate(source: object, destination: object) -> None:
+        def fail_candidate(source: Path, destination: Path) -> None:
             if "/candidates/" in str(destination):
                 raise OSError("injected publication failure")
             original_replace(source, destination)
 
-        monkeypatch.setattr(module.os, "replace", fail_candidate)
+        monkeypatch.setattr(os, "replace", fail_candidate)
         with pytest.raises(OSError):
             service.decide_candidate(record["candidate_id"], "ACCEPTED", "Retain")
         assert service.get_candidate(record["candidate_id"]) == record
