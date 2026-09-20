@@ -759,3 +759,22 @@ it('sorts trade analytics with missing values last in both directions', async ()
   await user.selectOptions(screen.getByLabelText('Direction'), 'descending')
   expect(order()).toEqual(['Run 2', 'Run 1', 'Run 3'])
 })
+
+it.each(['/backtests', '/batches/new'])('explains dataset quality and incompatible instruments on %s', async path => {
+  const user = userEvent.setup()
+  window.history.pushState({}, '', path)
+  render(<App api={adapter({ listDatasets: async () => [
+    { dataset_id: 'valid.csv', valid: true, venue: 'XNAS', symbol: 'AAPL', source_sha256: 'a'.repeat(64), record_count: 3, bar_count: 2, revision_count: 1, bar_durations_seconds: ['60', '120'], observed_gap_count: 1, largest_gap_seconds: '120' },
+    { dataset_id: 'other.csv', valid: true, venue: 'XNAS', symbol: 'MSFT' },
+    { dataset_id: 'bad.csv', valid: false, error_code: 'invalid_float', record_number: 2, field_name: 'high' },
+  ] })} />)
+  await screen.findByRole('option', { name: 'valid.csv' })
+  expect((screen.getByRole('option', { name: 'other.csv · incompatible instrument' }) as HTMLOptionElement).disabled).toBe(true)
+  await user.selectOptions(screen.getByLabelText('Research dataset'), 'valid.csv')
+  const panel = screen.getByRole('region', { name: 'Dataset quality' })
+  expect(within(panel).getByText('3 / 2 / 1')).toBeTruthy()
+  expect(within(panel).getByText('60s, 120s')).toBeTruthy()
+  expect(within(panel).getByText('1 · largest 120s')).toBeTruthy()
+  await user.click(screen.getByText('Invalid datasets'))
+  expect(screen.getByText(/invalid_float · CSV record 2 · field high/)).toBeTruthy()
+})

@@ -180,6 +180,11 @@ external write, deployment, or live capability is part of this objective.
   Run Detail, Batch and Comparison. Missing denominators remain unavailable and open positions
   are excluded. See [Trade Analytics V1](trade-analytics-v1.md).
 
+- Issue #207 extends the existing dataset catalog with source-scoped bar/revision counts,
+  observed durations and uncovered interval diagnostics. Single-run and batch selectors expose
+  safe decoder locations and instrument incompatibility before submission; strict validation,
+  input identities and historical evidence remain authoritative.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
