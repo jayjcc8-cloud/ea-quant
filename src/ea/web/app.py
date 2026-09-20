@@ -363,6 +363,15 @@ def create_app(settings: WebSettings) -> Any:
         except ReportUnavailableError as caught:
             return error(409, "report_unavailable", str(caught))
 
+    @app.get("/api/backtests/{job_id}/trade-analytics")
+    def get_trade_analytics(job_id: str) -> object:
+        try:
+            return service.trade_analytics(job_id)
+        except JobNotFoundError as caught:
+            return error(404, "job_not_found", str(caught))
+        except ReportUnavailableError as caught:
+            return error(409, "report_unavailable", str(caught))
+
     @app.get("/api/backtests/{job_id}/artifacts/{name}")
     def get_artifact(job_id: str, name: str) -> Response:
         try:

@@ -175,6 +175,11 @@ external write, deployment, or live capability is part of this objective.
   both commission and a rounding residual. Legacy V1 reports and equity paths use the existing
   currency settlement arithmetic; zero-position reports and supported resume remain compatible.
 
+- Issue #205 adds read-only Trade Analytics V1 over verified Report V2/V3: closed-trade counts,
+  after-fee win/loss/breakeven statistics, payoff ratio and Fill-based holding durations across
+  Run Detail, Batch and Comparison. Missing denominators remain unavailable and open positions
+  are excluded. See [Trade Analytics V1](trade-analytics-v1.md).
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
@@ -192,8 +197,7 @@ Web Job V4 persists the new report/path versions; Run Detail, Batch, Comparison 
 those verified artifacts, including restart/reopen without external CSV. Existing V1 routes
 remain unchanged. New metrics, optimizer, arbitrary multi-trade and Agent Research Tools remain
 future work. The next decision follows actual strategy/data research; Candidate remains deferred. Issue #200 separately authorizes bounded repeated long round trips;
-its research integration is delivered. Trade Analytics V1 is the recommended next capability,
-not activated by this delivery.
+its research integration is delivered. Trade Analytics V1 is delivered under Issue #205; broader research validation remains bounded.
 
 ## Blockers
 

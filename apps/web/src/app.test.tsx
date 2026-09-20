@@ -169,8 +169,8 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByRole('heading', { name: 'Experiment Batch' })).toBeTruthy()
     expect(screen.getByText('risk.rejected')).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% Unavailable View/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 2 2 0 risk.rejected No report Unavailable View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% (Unavailable ){6}View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 2 2 0 risk.rejected No report (Unavailable ){6}View/i })).toBeTruthy()
     await user.click(screen.getByLabelText('Select job-1 for comparison'))
     await user.click(screen.getByLabelText('Select job-risk for comparison'))
     await user.click(screen.getByRole('button', { name: 'Compare selected runs' }))
@@ -329,9 +329,9 @@ describe('EA Quant local Web backtests', () => {
     expect(await screen.findByRole('columnheader', { name: 'Final equity' })).toBeTruthy()
     expect(screen.getByRole('columnheader', { name: 'Net P&L' })).toBeTruthy()
     expect(screen.getByRole('columnheader', { name: 'Total return' })).toBeTruthy()
-    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% Unavailable View/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 2 4 2 succeeded 10034 EUR 34 EUR 0.34% Unavailable View/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Run 3 2 0 risk.rejected No report Unavailable View/i })).toBeTruthy()
+    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded 10017 USD 17 USD 0.17% (Unavailable ){6}View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 2 4 2 succeeded 10034 EUR 34 EUR 0.34% (Unavailable ){6}View/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /Run 3 2 0 risk.rejected No report (Unavailable ){6}View/i })).toBeTruthy()
     const summary = within(screen.getByRole('region', { name: 'Analysis summary' }))
     expect(summary.getByText('3', { selector: 'dd[data-summary="total"]' })).toBeTruthy()
     expect(summary.getByText('2', { selector: 'dd[data-summary="succeeded"]' })).toBeTruthy()
@@ -351,7 +351,7 @@ describe('EA Quant local Web backtests', () => {
       getReport: async () => { throw Object.assign(new Error('verified report is unavailable'), { code: 'report_unavailable' }) },
     })} />)
 
-    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded No report Unavailable View/i })).toBeTruthy()
+    expect(await screen.findByRole('row', { name: /Run 1 2 0 succeeded No report (Unavailable ){6}View/i })).toBeTruthy()
     expect(screen.queryByText('verified report is unavailable')).toBeNull()
     expect(screen.getByText('0', { selector: 'dd[data-summary="reports"]' })).toBeTruthy()
   })
@@ -717,4 +717,45 @@ it('sorts drawdown ratios exactly with stable missing-last legacy rows in both d
   expect(order()).toEqual(['Run 2', 'Run 3', 'Run 1', 'Run 4'])
   await user.selectOptions(screen.getByLabelText('Direction'), 'descending')
   expect(order()).toEqual(['Run 1', 'Run 2', 'Run 3', 'Run 4'])
+})
+
+it('shows evidence-bound trade statistics and unavailable denominators', async () => {
+  window.history.pushState({}, '', '/backtests/job-1')
+  render(<App api={adapter({ getTradeAnalytics: async () => ({
+    schema: 'ea.trade-analytics.v1', run_id: 'run-1', report_sha256: job.report_sha256!, currency: 'USD',
+    closed_trades: 1, wins: 1, losses: 0, breakeven: 0, win_rate: '1', average_win: '10',
+    average_loss: null, payoff_ratio: null, average_holding_seconds: '120', has_open_position: true,
+    trades: [{ realized_pnl: '10', holding_seconds: '120' }],
+  }) })} />)
+  const panel = await screen.findByRole('region', { name: 'Trade analytics' })
+  await waitFor(() => expect(within(panel).getByText('100%')).toBeTruthy())
+  expect(within(panel).getByText('120 seconds')).toBeTruthy()
+  expect(within(panel).getByText('Present · excluded from statistics')).toBeTruthy()
+  expect(within(panel).getAllByText('Unavailable')).toHaveLength(2)
+})
+
+it('sorts trade analytics with missing values last in both directions', async () => {
+  const user = userEvent.setup()
+  window.history.pushState({}, '', '/batches/batch-1')
+  render(<App api={adapter({
+    getBatch: async () => ({ ...batch, members: [
+      { ...job, presentation_status: 'succeeded' },
+      { ...secondJob, presentation_status: 'succeeded' },
+      { ...rejectedJob, presentation_status: 'failed' },
+    ] }),
+    getReport: async id => id === job.job_id ? report : secondReport,
+    getTradeAnalytics: async id => ({
+      schema: 'ea.trade-analytics.v1', run_id: id === job.job_id ? job.engine_run_id! : secondJob.engine_run_id!,
+      report_sha256: job.report_sha256!, currency: 'USD', closed_trades: 4, wins: id === job.job_id ? 2 : 3,
+      losses: 1, breakeven: id === job.job_id ? 1 : 0, win_rate: id === job.job_id ? '0.5' : '0.75',
+      average_win: '10', average_loss: '-5', payoff_ratio: '2', average_holding_seconds: '120',
+      has_open_position: false, trades: [],
+    }),
+  })} />)
+  await screen.findByText('75%')
+  await user.selectOptions(screen.getByLabelText('Sort by'), 'trade:win_rate')
+  const order = () => screen.getAllByRole('row').slice(1).map(row => within(row).getByRole('rowheader').textContent)
+  expect(order()).toEqual(['Run 1', 'Run 2', 'Run 3'])
+  await user.selectOptions(screen.getByLabelText('Direction'), 'descending')
+  expect(order()).toEqual(['Run 2', 'Run 1', 'Run 3'])
 })

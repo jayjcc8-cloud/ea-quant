@@ -35,6 +35,7 @@ from ea.product.scenario import (
     resolved_scenario_parameters,
     scenario_digest_domain,
 )
+from ea.product.trade_analytics import trade_analytics
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import StrategyPackage, read_regular, validate_package
 from ea.strategy.registry import project_parameters
@@ -1503,6 +1504,15 @@ class WebService:
         ):
             raise ReportUnavailableError("verified report identity conflicts")
         return payload
+
+    def trade_analytics(self, job_id: str) -> dict[str, Any]:
+        payload = self.report(job_id)
+        try:
+            return trade_analytics(payload)
+        except (ValueError, KeyError, TypeError):
+            raise ReportUnavailableError(
+                "Verified complete-trade analytics are unavailable"
+            ) from None
 
     def artifact(self, job_id: str, name: str) -> bytes:
         if name not in _ARTIFACTS:
