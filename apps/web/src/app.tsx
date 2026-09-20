@@ -21,7 +21,13 @@ function ParameterControls({ contracts, values, update, prefix = '' }: { contrac
   </div>)}</div>
 }
 
-type Dataset = { dataset_id: string; valid: boolean; source_sha256?: string; record_count?: number; replay_start_utc?: string; replay_end_utc?: string }
+type Dataset = {
+  dataset_id: string; valid: boolean; source_sha256?: string; record_count?: number
+  venue?: string; symbol?: string; replay_start_utc?: string; replay_end_utc?: string
+  bar_count?: number; revision_count?: number; bar_durations_seconds?: string[]
+  observed_gap_count?: number; largest_gap_seconds?: string | null; bar_start_utc?: string; bar_end_utc?: string
+  error_code?: string; record_number?: number | null; field_name?: string | null; message?: string
+}
 type DatasetReference = { dataset_id?: string; source_sha256?: string }
 export type InputIdentity = DatasetReference & { scenario_sha256: string; data_sha256: string; record_count: number }
 export type StrategyParameterContract = {
@@ -220,7 +226,7 @@ function pathUnavailable(job: BacktestJob) {
   return ['ea.local-web-job.v3', 'ea.local-web-job.v4', 'ea.local-web-job.v5'].includes(job.schema ?? '') ? 'Path analysis unavailable.' : 'Path analysis unavailable for this legacy run.'
 }
 
-function DatasetSelector({ api, value, change }: { api: ApiAdapter; value: DatasetReference; change: (value: DatasetReference) => void }) {
+function DatasetSelector({ api, value, change, instrument }: { api: ApiAdapter; value: DatasetReference; change: (value: DatasetReference) => void; instrument?: { venue: string; symbol: string } }) {
   const [items, setItems] = useState<Dataset[]>([])
   const [error, setError] = useState('')
   useEffect(() => {
@@ -228,6 +234,9 @@ function DatasetSelector({ api, value, change }: { api: ApiAdapter; value: Datas
     api.listDatasets?.().then(items => { if (active) setItems(items) }).catch(() => { if (active) setError('Dataset catalog unavailable') })
     return () => { active = false }
   }, [api])
+  const selected = items.find(item => item.dataset_id === value.dataset_id)
+  const incompatible = (item: Dataset) => Boolean(instrument && item.venue && item.symbol && (item.venue !== instrument.venue || item.symbol !== instrument.symbol))
+  const diagnostic = (item: Dataset) => `${item.error_code ?? item.message ?? 'Unavailable'}${item.record_number ? ` · CSV record ${item.record_number}` : ''}${item.field_name ? ` · field ${item.field_name}` : ''}`
   if (!items.length && !value.dataset_id && !error) return null
   return <div><label htmlFor="research-dataset">Research dataset</label>
     <select id="research-dataset" value={value.dataset_id ?? ''} onChange={event => {
@@ -235,8 +244,24 @@ function DatasetSelector({ api, value, change }: { api: ApiAdapter; value: Datas
       change(item ? { dataset_id: item.dataset_id, source_sha256: item.source_sha256 } : {})
     }}><option value="">Registered scenario data</option>
       {value.dataset_id && !items.some(item => item.dataset_id === value.dataset_id) && <option value={value.dataset_id}>{value.dataset_id} · unavailable</option>}
-      {items.map(item => <option key={item.dataset_id} value={item.dataset_id} disabled={!item.valid}>{item.dataset_id}{item.valid ? '' : ' · invalid'}</option>)}
-    </select>{error && <p className="notice error">{error}</p>}</div>
+      {items.map(item => <option key={item.dataset_id} value={item.dataset_id} disabled={!item.valid || incompatible(item)}>{item.dataset_id}{item.valid ? (incompatible(item) ? ' · incompatible instrument' : '') : ' · invalid'}</option>)}
+    </select>
+    {selected?.valid && <section aria-label="Dataset quality" className="dataset-quality">
+      <p><strong>{selected.venue}:{selected.symbol}</strong> · Strict format validated</p>
+      <dl className="summary-list">
+        <div><dt>Records / bars / revisions</dt><dd>{selected.record_count ?? 'Unavailable'} / {selected.bar_count ?? 'Unavailable'} / {selected.revision_count ?? 'Unavailable'}</dd></div>
+        <div><dt>Observed bar durations</dt><dd>{selected.bar_durations_seconds?.map(value => `${value}s`).join(', ') ?? 'Unavailable'}</dd></div>
+        <div><dt>Bar coverage (UTC)</dt><dd>{selected.bar_start_utc ?? 'Unavailable'} — {selected.bar_end_utc ?? 'Unavailable'}</dd></div>
+        <div><dt>Replay availability (UTC)</dt><dd>{selected.replay_start_utc} — {selected.replay_end_utc}</dd></div>
+        <div><dt>Observed gaps</dt><dd>{selected.observed_gap_count ?? 'Unavailable'}{selected.largest_gap_seconds ? ` · largest ${selected.largest_gap_seconds}s` : ''}</dd></div>
+      </dl>
+      <p className="muted">Gaps describe uncovered time between captured bars, not missing exchange sessions. Bars are source-scoped; revisions count records with revision greater than zero.</p>
+      {incompatible(selected) && <p role="alert" className="notice error">Dataset instrument {selected.venue}:{selected.symbol} is incompatible with scenario {instrument?.venue}:{instrument?.symbol}. Select compatible data.</p>}
+      {value.source_sha256 && value.source_sha256 !== selected.source_sha256 && <p role="alert" className="notice error">Dataset content changed since selection. Explicitly select and validate it again.</p>}
+    </section>}
+    {value.dataset_id && !selected && <p className="notice error">Selected dataset is unavailable. Historical reports remain readable.</p>}
+    {items.some(item => !item.valid) && <details><summary>Invalid datasets</summary><ul>{items.filter(item => !item.valid).map(item => <li key={item.dataset_id}><strong>{item.dataset_id}</strong>: {diagnostic(item)}</li>)}</ul></details>}
+    {error && <p className="notice error">{error}</p>}</div>
 }
 
 function PageTitle({ title, subtitle, status }: { title: string; subtitle: string; status?: string }) {
@@ -329,7 +354,7 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
     {error && <section className="notice error">{error}</section>}
     <section className="panel batch-control-panel">
       <header><h2>Batch input</h2><span>One strategy and scenario</span></header>
-      <DatasetSelector api={api} value={dataset} change={setDataset} />
+      <DatasetSelector api={api} value={dataset} change={setDataset} instrument={candidate?.summary} />
       <div className="parameter-grid">
         <div><label htmlFor="batch-scenario">Scenario</label><select id="batch-scenario" value={selected} onChange={(event) => selectScenario(scenarios.find((item) => item.scenario_id === event.target.value))}>{scenarios.filter((item) => item.valid && (item.strategy_parameters?.length ?? 0) > 0).map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}</option>)}</select></div>
         <div><label htmlFor="batch-initial-cash">Initial cash</label><input id="batch-initial-cash" value={initialCash} onChange={(event) => setInitialCash(event.target.value)} /></div>
@@ -552,7 +577,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
           <option value="">Select prepared scenario</option>
           {scenarios.filter(item => item.strategy_descriptor?.research_visible !== false).map((item) => <option key={item.scenario_id} value={item.scenario_id}>{item.name}{item.valid ? '' : ' · invalid'}</option>)}
         </select>
-        <DatasetSelector api={api} value={dataset} change={value => { setDataset(value); setValidated(null) }} />
+        <DatasetSelector api={api} value={dataset} change={value => { setDataset(value); setValidated(null) }} instrument={candidate?.summary} />
         {candidate?.summary && <dl className="summary-list">
           <div><dt>Strategy</dt><dd>{candidate.summary.strategy_id}</dd></div><div><dt>Instrument</dt><dd>{candidate.summary.venue}:{candidate.summary.symbol}</dd></div>
           <div><dt>Commission</dt><dd>{commissionLabel(candidate.summary.commission)}</dd></div>
