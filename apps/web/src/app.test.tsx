@@ -780,3 +780,19 @@ it.each(['/backtests', '/batches/new'])('explains dataset quality and incompatib
   await user.click(screen.getByText('Invalid datasets'))
   expect(screen.getByText(/invalid_float · CSV record 2 · field high/)).toBeTruthy()
 })
+
+it('requires a reason for terminal candidate decisions and displays saved evidence', async () => {
+  const user = userEvent.setup()
+  window.history.pushState({}, '', '/candidates/candidate-1')
+  const evidence = { job_id: 'job-1', run_id: 'run-1', input_sha256: 'a', scenario_sha256: 'b', data_sha256: 'c', record_count: 4, report_sha256: 'd', equity_path_sha256: 'e' }
+  const candidate = { candidate_id: 'candidate-1', status: 'EVALUATED' as const, fingerprint: 'f'.repeat(64), projection: { strategy: { id: 'bounded-long-v1', version: 1, parameters: { target_quantity: '2' } }, source: evidence, holdout: { ...evidence, job_id: 'job-2' }, relationship: { validation_id: 'validation-1', sha256: 'a' } }, decision: null }
+  render(<App api={adapter({ getCandidate: async () => candidate, decideCandidate: async (id, outcome, reason) => ({ ...candidate, candidate_id: id, status: outcome as 'ACCEPTED', decision: { outcome, reason, decided_at: '2026-09-20T08:00:00.000000Z' } }) })} />)
+  const accept = await screen.findByRole('button', { name: 'Accept candidate' })
+  expect((accept as HTMLButtonElement).disabled).toBe(true)
+  await user.type(screen.getByLabelText('Decision reason'), 'Retain for another evaluation')
+  await user.click(accept)
+  await screen.findByText('ACCEPTED')
+  expect(screen.getByText('Retain for another evaluation')).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Accept candidate' })).toBeNull()
+  expect(screen.getByRole('link', { name: 'Chronological Holdout evaluation' }).getAttribute('href')).toBe('/holdouts/validation-1')
+})
