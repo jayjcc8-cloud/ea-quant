@@ -44,6 +44,8 @@ type ReplayData = { start_utc: string; end_utc: string; fingerprint: { sha256: s
 export type ChronologicalHoldout = { schema: 'ea.chronological-holdout.v1'; validation_id: string; created_at: string; source_job_id: string; holdout_job_id: string }
 type Commission = { policy: string; commission_bps: string }
 type Slippage = { policy: string; slippage_bps: string }
+type Latency = { policy: string; latency_ms: number }
+const latencyLabel = (latency?: Latency | null) => `${latency?.latency_ms ?? 0} ms execution latency`
 const slippageLabel = (slippage?: Slippage | null) => slippage ? `${slippage.slippage_bps} bps adverse slippage` : '0 bps slippage'
 const commissionLabel = (commission?: Commission | null) => commission ? `${commission.policy} · ${commission.commission_bps} bps` : 'Legacy zero commission · 0 bps'
 
@@ -51,7 +53,7 @@ export type InputSnapshot = {
   schema: 'ea.local-web-input.v1' | 'ea.local-web-input.v2'; research_input?: Dataset; scenario_id: string; source_identity: InputIdentity; identity: InputIdentity
   scenario: {
     data?: ReplayData
-    execution?: { policy: string; commission?: Commission | null; slippage?: Slippage | null }
+    execution?: { policy: string; commission?: Commission | null; slippage?: Slippage | null; latency?: Latency | null }
     funding: { currency: string; initial_cash: string }
     strategy: { source?: StrategySource; id: string; version?: number; parameters?: ParameterMap; [key: string]: unknown }
     instrument: { venue: string; symbol: string }
@@ -59,7 +61,7 @@ export type InputSnapshot = {
 }
 export type ScenarioSummary = {
   scenario_id: string; name: string; valid: boolean; input_identity?: InputIdentity
-  summary?: { data?: ReplayData; commission?: Commission | null; slippage?: Slippage | null; strategy_id: string; venue: string; symbol: string; initial_cash: string; parameters?: ParameterMap; record_count: number; [key: string]: unknown }
+  summary?: { data?: ReplayData; commission?: Commission | null; slippage?: Slippage | null; latency?: Latency | null; strategy_id: string; venue: string; symbol: string; initial_cash: string; parameters?: ParameterMap; record_count: number; [key: string]: unknown }
   strategy_parameters?: StrategyParameterContract[]
   strategy_descriptor?: StrategyDescriptor
   normalized_input_identity?: InputIdentity
@@ -362,7 +364,7 @@ function BatchCreator({ api }: { api: ApiAdapter }) {
         <div><label htmlFor="batch-initial-cash">Initial cash</label><input id="batch-initial-cash" value={initialCash} onChange={(event) => setInitialCash(event.target.value)} /></div>
       </div>
       {candidate?.summary && <p className="muted">{candidate.summary.strategy_id} · {candidate.summary.venue}:{candidate.summary.symbol}</p>}
-      {candidate?.summary && <p><span>{commissionLabel(candidate.summary.commission)}</span> · <span>{slippageLabel(candidate.summary.slippage)}</span></p>}
+      {candidate?.summary && <p><span>{commissionLabel(candidate.summary.commission)}</span> · <span>{slippageLabel(candidate.summary.slippage)}</span> · <span>{latencyLabel(candidate.summary.latency)}</span></p>}
       <div className="batch-configurations">{runs.map((item, index) => <section className="strategy-parameters batch-configuration" key={index}>
         <header><h3>Run {index + 1}</h3><button aria-label={`Remove Run ${index + 1}`} disabled={runs.length <= 2} onClick={() => setRuns((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Remove</button></header>
         <ParameterControls contracts={candidate?.strategy_parameters ?? []} values={item} prefix={`Run ${index + 1} `} update={(name, value) => updateRun(index, { [name]: value })} />
@@ -584,6 +586,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
           <div><dt>Strategy</dt><dd>{candidate.summary.strategy_id}</dd></div><div><dt>Instrument</dt><dd>{candidate.summary.venue}:{candidate.summary.symbol}</dd></div>
           <div><dt>Commission</dt><dd>{commissionLabel(candidate.summary.commission)}</dd></div>
           <div><dt>Slippage</dt><dd>{slippageLabel(candidate.summary.slippage)}</dd></div>
+          <div><dt>Execution latency</dt><dd>{latencyLabel(candidate.summary.latency)}</dd></div>
           <div><dt>Initial cash</dt><dd>{candidate.summary.initial_cash}</dd></div><div><dt>Records</dt><dd>{candidate.summary.record_count}</dd></div>
 
         </dl>}
@@ -669,6 +672,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
     ['Symbol', leftInput.instrument.symbol, rightInput.instrument.symbol],
     ['Commission', commissionLabel(leftInput.execution?.commission), commissionLabel(rightInput.execution?.commission)],
     ['Slippage', slippageLabel(leftInput.execution?.slippage), slippageLabel(rightInput.execution?.slippage)],
+    ['Execution latency', latencyLabel(leftInput.execution?.latency), latencyLabel(rightInput.execution?.latency)],
   ]
   const sameImplementation = (leftInput.strategy.source?.kind ?? 'builtin') === (rightInput.strategy.source?.kind ?? 'builtin') && leftInput.strategy.source?.artifact_sha256 === rightInput.strategy.source?.artifact_sha256
   const sameStrategy = sameImplementation && leftInput.strategy.id === rightInput.strategy.id && (leftInput.strategy.version ?? 1) === (rightInput.strategy.version ?? 1)
@@ -790,7 +794,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
       {job.input_snapshot?.research_input && <><div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div><div><dt>Source SHA-256</dt><dd>{job.input_snapshot.research_input.source_sha256}</dd></div></>}
     </dl></section>
     {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
-    {job.input_snapshot && <p><span>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</span> · <span>{slippageLabel(job.input_snapshot.scenario.execution?.slippage)}</span></p>}
+    {job.input_snapshot && <p><span>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</span> · <span>{slippageLabel(job.input_snapshot.scenario.execution?.slippage)}</span> · <span>{latencyLabel(job.input_snapshot.scenario.execution?.latency)}</span></p>}
     {job.schema === 'ea.local-web-job.v5' && <p>Round trip limit: {String(job.input_snapshot?.scenario.strategy.max_round_trips)}</p>}
     {economics ? <>
       {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
@@ -852,6 +856,7 @@ function HoldoutEvidence({ role, job, report, path }: { role: string } & Compare
     <div><dt>Record count</dt><dd>{data?.fingerprint.record_count ?? 'Unavailable'}</dd></div>
     <div><dt>Commission assumption</dt><dd>{commissionLabel(job.input_snapshot?.scenario.execution?.commission)}</dd></div>
     <div><dt>Slippage assumption</dt><dd>{slippageLabel(job.input_snapshot?.scenario.execution?.slippage)}</dd></div>
+    <div><dt>Execution latency</dt><dd>{latencyLabel(job.input_snapshot?.scenario.execution?.latency)}</dd></div>
     <div><dt>Fees</dt><dd>{economics?.fees ? `${economics.fees.amount} ${economics.fees.currency}` : 'No report'}</dd></div>
     <div><dt>Final equity</dt><dd>{economics ? `${economics.equity.amount} ${currency}` : 'No report'}</dd></div>
     <div><dt>Net P&amp;L</dt><dd>{economics ? `${economics.net_pnl.amount} ${currency}` : 'No report'}</dd></div>

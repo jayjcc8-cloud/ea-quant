@@ -40,6 +40,7 @@ from ea.core import (
 from ea.core.commission import (
     commission_policy_identity,
     execution_cost_policy_identity,
+    execution_latency_policy_identity,
     require_commission_bps,
     require_slippage_bps,
 )
@@ -170,10 +171,16 @@ class _SlippageInput(_StrictModel):
     slippage_bps: StrictStr
 
 
+class _LatencyInput(_StrictModel):
+    policy: Literal["deterministic-latency-v1"]
+    latency_ms: StrictInt
+
+
 class _ExecutionInput(_StrictModel):
     policy: Literal["phase1.next-bar-close.v1"]
     commission: _CommissionInput | None = None
     slippage: _SlippageInput | None = None
+    latency: _LatencyInput | None = None
 
 
 class _ScenarioInput(_StrictModel):
@@ -460,6 +467,8 @@ def _canonical_bytes(
         document["execution"].pop("commission")
     if model.execution.slippage is None:
         document["execution"].pop("slippage")
+    if model.execution.latency is None:
+        document["execution"].pop("latency")
     data = dict(document["data"])
     data.pop("path")
     document["data"] = data
@@ -792,7 +801,11 @@ def _load_scenario_document(
         except ValueError as error:
             raise BacktestScenarioError(str(error)) from None
     execution_policy = _ACCEPTED_EXECUTION_POLICY
-    if model.execution.commission is not None or model.execution.slippage is not None:
+    if (
+        model.execution.commission is not None
+        or model.execution.slippage is not None
+        or model.execution.latency is not None
+    ):
         try:
             bps = (
                 None
@@ -801,8 +814,16 @@ def _load_scenario_document(
                     CanonicalDecimal(model.execution.commission.commission_bps)
                 )
             )
-            if model.execution.slippage is not None:
-                slip = require_slippage_bps(CanonicalDecimal(model.execution.slippage.slippage_bps))
+            slip = (
+                None
+                if model.execution.slippage is None
+                else require_slippage_bps(CanonicalDecimal(model.execution.slippage.slippage_bps))
+            )
+            if model.execution.latency is not None:
+                identifier, digest = execution_latency_policy_identity(
+                    model.execution.latency.latency_ms, slip, bps
+                )
+            elif slip is not None:
                 identifier, digest = execution_cost_policy_identity(slip, bps)
             else:
                 assert bps is not None

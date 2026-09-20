@@ -1,0 +1,25 @@
+schema_version: 1
+data:
+  path: prices.csv
+  start_utc: '2026-01-02T09:31:00.000000Z'
+  end_utc: '2026-01-02T09:34:00.000000Z'
+  fingerprint: {sha256: c95c6182ba68d8c03726336172b5ce089c464fdd87ba28cb4444460fcdbae2fb, record_count: 4}
+instrument:
+  venue: XNAS
+  symbol: AAPL
+  specification_id: xnas.aapl.v1
+  specification_set_id: scenario.xnas.aapl.v1
+  settlement_currency: USD
+  price_quantum: '0.01'
+  quantity_quantum: '1'
+  currency_quantum: '0.01'
+  contract_multiplier: '1'
+strategy: {id: bounded-long-v1, target_quantity: '2', entry_delay_bars: 0}
+funding: {currency: USD, initial_cash: '10000'}
+risk: {max_order_quantity: '5', max_position_quantity: '5', max_notional: '1000'}
+execution:
+  policy: phase1.next-bar-close.v1
+  commission: {policy: deterministic-commission-v1, commission_bps: '100'}
+  slippage: {policy: deterministic-slippage-v1, slippage_bps: '100'}
+  latency: {policy: deterministic-latency-v1, latency_ms: 60000}
+randomness_profile: none

@@ -53,6 +53,29 @@ async function useParameters(page: Page, sourceJobId: string): Promise<void> {
   await expect(page.getByLabel('Symbol')).toHaveAttribute('readonly', '')
 }
 
+test('installed latency changes actual fill timing and downloaded economics', async ({ page }, testInfo) => {
+  await page.goto('/backtests')
+  await page.getByLabel('Scenario').selectOption('bounded-long-latency.yaml')
+  const completed = await validateAndRun(page)
+  await expect(page.getByText('60000 ms execution latency', { exact: true })).toBeVisible()
+  await expect(page.getByText('111.1', { exact: true })).toBeVisible()
+  await expect(page.getByText('-4.42 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('2.22 USD', { exact: true })).toBeVisible()
+  const downloading = page.waitForEvent('download')
+  await page.getByRole('link', { name: 'Download report.json' }).click()
+  const download = await downloading
+  const artifact = testInfo.outputPath('latency-report.json')
+  await download.saveAs(artifact)
+  const report = JSON.parse(readFileSync(artifact, 'utf8'))
+  expect(report.run_id).toBe(completed.runId)
+  expect(report.economics.net_pnl.amount).toBe('-4.42')
+  expect(report.economics.fees.amount).toBe('2.22')
+  await page.reload()
+  await expect(page.getByText('60000 ms execution latency', { exact: true })).toBeVisible()
+  await expect(page.getByText('-4.42 USD', { exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('latency.png'), fullPage: true })
+})
+
 test('installed slippage affects real fills, fees and downloaded report', async ({ page }, testInfo) => {
   await page.goto('/backtests')
   await page.getByLabel('Scenario').selectOption('bounded-long-slippage.yaml')

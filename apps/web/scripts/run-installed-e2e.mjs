@@ -82,11 +82,12 @@ try {
   writeFileSync(join(scenarioRoot, 'flat.yaml'), flat)
   cpSync(join(repository, 'examples', 'web-scenarios', 'bounded-long-commission.yaml'), join(scenarioRoot, 'bounded-long-commission.yaml'))
   cpSync(join(repository, 'examples', 'web-scenarios', 'bounded-long-slippage.yaml'), join(scenarioRoot, 'bounded-long-slippage.yaml'))
+  cpSync(join(repository, 'examples', 'web-scenarios', 'bounded-long-latency.yaml'), join(scenarioRoot, 'bounded-long-latency.yaml'))
   writeFileSync(join(scenarioRoot, 'one.yaml'), bounded.replace("target_quantity: '2'", "target_quantity: '1'"))
   writeFileSync(join(scenarioRoot, 'low-cash.yaml'), bounded.replace("initial_cash: '10000'", "initial_cash: '50'"))
   writeFileSync(join(scenarioRoot, 'invalid.yaml'), bounded.replace(/sha256: [0-9a-f]{64}/, `sha256: ${'0'.repeat(64)}`))
 
-  for (const name of ['bounded-long.yaml', 'moving-average-entry.yaml', 'bounded-long-slippage.yaml']) {
+  for (const name of ['bounded-long.yaml', 'moving-average-entry.yaml', 'bounded-long-slippage.yaml', 'bounded-long-latency.yaml']) {
     execFileSync(ea, ['backtest', 'validate', '--scenario', join(scenarioRoot, name)], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
     execFileSync(ea, ['backtest', 'run', '--scenario', join(scenarioRoot, name), '--output-root', join(temporary, 'cli-runs')], { cwd: outside, stdio: 'inherit', env: cleanEnvironment() })
   }

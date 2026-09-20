@@ -10,7 +10,11 @@ from types import MappingProxyType
 from typing import NamedTuple, Protocol, final
 from weakref import WeakKeyDictionary
 
-from ea.core.commission import commission_bps_from_identity, slippage_bps_from_identity
+from ea.core.commission import (
+    commission_bps_from_identity,
+    execution_latency_allows,
+    slippage_bps_from_identity,
+)
 from ea.core.economics import CanonicalDecimal, EconomicValidationError, require_positive
 from ea.core.execution import (
     InstrumentExecutionSpec,
@@ -2207,7 +2211,12 @@ class Phase1HistoricalMatcher:
                         and owned_market_root.payload.adjustment is Adjustment.RAW
                         and owned_market_root.revision == 0
                         and root_key > record.causal_root_key
-                        and owned_market_root.event_time > record.order.eligible_after_available_at
+                        and execution_latency_allows(
+                            owned_market_root.event_time,
+                            record.order.eligible_after_available_at,
+                            self._execution_policy.identifier.value,
+                            self._execution_policy.sha256.value,
+                        )
                     )
                 ),
                 key=lambda record: record.receipt.submission_sequence,
