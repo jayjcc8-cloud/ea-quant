@@ -233,7 +233,7 @@ def execute_round_trip(
                             spec_set=scenario.spec_set,
                         )
                         if bounded:
-                            planner.rebind_flat_policy(policy)
+                            planner._rebind_flat_policy(policy)
                         else:
                             planner = create_portfolio_planning_authority(
                                 run_id=run_id,

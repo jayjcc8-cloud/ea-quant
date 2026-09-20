@@ -212,7 +212,7 @@ class PortfolioPlanningAuthority:
             "create_portfolio_planning_authority"
         )
 
-    def rebind_flat_policy(self, policy: Phase1PortfolioPolicy) -> None:
+    def _rebind_flat_policy(self, policy: Phase1PortfolioPolicy) -> None:
         """Bind the next flat-position policy while retaining target/intent identity owners.
 
         The offline Action V2 caller invokes this only before an entry with no pending order.

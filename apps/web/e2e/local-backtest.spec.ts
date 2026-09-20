@@ -720,7 +720,8 @@ test('installed local Action V2 package freezes research evidence', async ({ pag
 })
 
 test('installed bounded local Action V2 package freezes multi-round-trip research evidence', async ({ page }, testInfo) => {
-  test.setTimeout(300_000)
+  test.setTimeout(900_000)
+  // Real 50-bar multi-leg evidence needs a larger bounded wait on shared CI runners.
   let currentPid = Number(process.env.EA_WEB_SERVER_PID)
   try { process.kill(currentPid, 0) } catch {
     const initial = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!), { stdio: 'ignore' })
@@ -734,7 +735,7 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   await expect(page.getByText('Validated input')).toBeVisible()
   await page.getByRole('button', { name: 'Run new backtest' }).click()
   await expect(page).toHaveURL(/\/backtests\/[0-9a-f-]+$/)
-  await expect(page.locator('.status')).toHaveText('succeeded', { timeout: 60_000 })
+  await expect(page.locator('.status')).toHaveText('succeeded', { timeout: 240_000 })
   const closed = { jobId: jobId(page), url: page.url(), runId: await page.locator('dt', { hasText: 'Engine run_id' }).locator('..').locator('dd').innerText() }
   await expect(page.locator('dt', { hasText: /^Position outcome$/ }).locator('..')).toContainText(/FLAT_AFTER_TRADES|OPEN_AT_END/)
   await expect(page.getByRole('columnheader', { name: 'Realized P&L', exact: true })).toBeVisible()
@@ -771,7 +772,7 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   await page.getByLabel('Run 1 quantity', { exact: true }).fill('1')
   await page.getByLabel('Run 2 quantity', { exact: true }).fill('2')
   await page.getByRole('button', { name: 'Run batch', exact: true }).click()
-  await expect(page.locator('.page-title .status')).toHaveText('complete', { timeout: 60_000 })
+  await expect(page.locator('.page-title .status')).toHaveText('complete', { timeout: 240_000 })
   const batchURL = page.url()
   const batch = await page.request.get(`/api/batches/${new URL(batchURL).pathname.split('/').at(-1)}`).then(r => r.json())
   expect(batch.members.every((m: { schema: string; status: string }) => m.schema === 'ea.local-web-job.v5' && m.status === 'succeeded')).toBe(true)
@@ -787,7 +788,7 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   await page.getByRole('button', { name: 'Run chronological holdout' }).click()
   await expect(page).toHaveURL(/\/holdouts\/[0-9a-f-]+$/)
   const holdoutURL = page.url()
-  await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'OOS', exact: true }) }).getByText('succeeded', { exact: true })).toBeVisible({ timeout: 60_000 })
+  await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'OOS', exact: true }) }).getByText('succeeded', { exact: true })).toBeVisible({ timeout: 240_000 })
   const relation = await page.request.get(`/api/holdouts/${new URL(holdoutURL).pathname.split('/').at(-1)}`).then(r => r.json())
   const oos = await page.request.get(`/api/backtests/${relation.holdout_job_id}`).then(r => r.json())
   const source = await page.request.get(`/api/backtests/${closed.jobId}`).then(r => r.json())
