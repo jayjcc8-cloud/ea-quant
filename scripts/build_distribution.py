@@ -59,13 +59,13 @@ def build(output: Path) -> Path:
                 str(source / "build-constraints.txt"),
                 "--require-hashes",
                 "--out-dir",
-                str(stage),
+                str(stage / "wheel"),
             ],
             cwd=source,
             env=env,
             check=True,
         )
-        wheels = list(stage.glob("*.whl"))
+        wheels = list((stage / "wheel").glob("*.whl"))
         if len(wheels) != 1:
             raise ValueError("expected exactly one wheel")
         wheel = wheels[0]
