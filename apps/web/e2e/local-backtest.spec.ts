@@ -53,6 +53,29 @@ async function useParameters(page: Page, sourceJobId: string): Promise<void> {
   await expect(page.getByLabel('Symbol')).toHaveAttribute('readonly', '')
 }
 
+test('installed slippage affects real fills, fees and downloaded report', async ({ page }, testInfo) => {
+  await page.goto('/backtests')
+  await page.getByLabel('Scenario').selectOption('bounded-long-slippage.yaml')
+  const completed = await validateAndRun(page)
+  await expect(page.getByText('100 bps adverse slippage', { exact: true })).toBeVisible()
+  await expect(page.getByText('9792.91 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('12.91 USD', { exact: true })).toBeVisible()
+  await expect(page.getByText('2.05 USD', { exact: true })).toBeVisible()
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('link', { name: 'Download report.json' }).click()
+  const download = await downloadPromise
+  const artifact = testInfo.outputPath('slippage-report.json')
+  await download.saveAs(artifact)
+  const report = JSON.parse(readFileSync(artifact, 'utf8'))
+  expect(report.run_id).toBe(completed.runId)
+  expect(report.economics.net_pnl.amount).toBe('12.91')
+  expect(report.economics.fees.amount).toBe('2.05')
+  await page.reload()
+  await expect(page.getByText('100 bps adverse slippage', { exact: true })).toBeVisible()
+  await expect(page.getByText('12.91 USD', { exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('slippage.png'), fullPage: true })
+})
+
 test('installed browser completes the bounded local Web research loop', async ({ page }, testInfo) => {
   test.setTimeout(120_000)
   await page.goto('/backtests')

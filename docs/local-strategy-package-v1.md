@@ -106,7 +106,9 @@ The installed browser acceptance uses [captured real daily OHLCV](../examples/re
 with the existing MA crossover, including at least three completed round trips. This capability
 is offline research only; it does not enable Candidate, optimization, Paper, Live or broker access.
 
-Known inherited settlement limit: fractional quantities that produce both a settled-notional
-rounding residual and nonzero commission can fail closed in the existing Ledger. This limitation
-also affects legacy V4; no successful report is emitted. The reference acceptance uses whole-unit
-quantities and explicit funding/risk bounds, while retaining per-Fill commission.
+Fractional settlement with both a rounding residual and commission is supported by Issue #203.
+Explicit funding/risk bounds still apply. Optional scenario `execution.slippage` also applies to
+local packages through the existing matcher; see [ADR 0044](adr/0044-deterministic-adverse-slippage-v1.md).
+The [slippage example](../examples/web-scenarios/bounded-long-slippage.yaml) specifies 100 bps of
+adverse price movement and 100 bps commission. Both assumptions persist with the run. They are
+deterministic research assumptions, not a measured liquidity or venue-execution model.

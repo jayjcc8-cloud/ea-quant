@@ -185,6 +185,11 @@ external write, deployment, or live capability is part of this objective.
   safe decoder locations and instrument incompatibility before submission; strict validation,
   input identities and historical evidence remain authoritative.
 
+- Issue #212 / ADR 0044 adds explicit deterministic adverse slippage in basis points to the
+  existing next-bar-close policy. Actual Fill prices drive commission, settlement and formal
+  reports; persisted Web assumptions, compatible Holdout and supported resume retain the policy.
+  Omitted slippage preserves historical identities. Timing and liquidity models remain future work.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
@@ -242,6 +247,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 - [ADR 0040 — Single Long Round Trip Position Lifecycle](adr/0040-single-long-round-trip-position-lifecycle-v1.md) — Accepted; bounded offline single-round-trip runtime and research integration delivered.
 
 - [ADR 0042 — Bounded Long Round Trips V1](adr/0042-bounded-long-round-trips-v1.md) — Accepted; repeated offline research and versioned evidence.
+- [ADR 0044 — Deterministic Adverse Slippage V1](adr/0044-deterministic-adverse-slippage-v1.md) — explicit offline execution cost assumption.
 
 Proposed architecture (not implemented capabilities):
 

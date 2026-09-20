@@ -14,7 +14,11 @@ from types import MappingProxyType
 from typing import Any, NamedTuple, cast, final
 from weakref import WeakKeyDictionary
 
-from ea.core.commission import commission_bps_from_identity
+from ea.core.commission import (
+    commission_bps_from_identity,
+    require_slippage_bps,
+    slippage_bps_from_identity,
+)
 from ea.core.economics import (
     CanonicalDecimal,
     EconomicValidationError,
@@ -1160,6 +1164,7 @@ def _quantized_historical_close(
     *,
     side: OrderSide,
     specification: InstrumentExecutionSpec,
+    slippage_bps: CanonicalDecimal | None = None,
 ) -> CanonicalDecimal:
     if type(close) is not float:
         raise _fail(OutcomeCode.INVALID_TYPE, "Bar close must be exact float")
@@ -1170,6 +1175,12 @@ def _quantized_historical_close(
     if c <= 0:
         raise _fail(OutcomeCode.CONFLICTING_ID, "price quantum is invalid")
     p, q = close.as_integer_ratio()
+    if slippage_bps is not None:
+        require_slippage_bps(slippage_bps)
+        scale = 10000 * 10**slippage_bps.scale
+        adverse = abs(p) * slippage_bps.coefficient
+        p = p * scale + (adverse if side is OrderSide.BUY else -adverse)
+        q *= scale
     numerator = p * (10**s)
     denominator = q * c
     ticks, remainder = divmod(numerator, denominator)
@@ -2945,6 +2956,9 @@ def canonical_historical_matcher_observation_bytes(
                 trigger_root.payload.close,
                 side=side,
                 specification=specification,
+                slippage_bps=slippage_bps_from_identity(
+                    execution_policy.identifier.value, execution_policy.sha256.value
+                ),
             )
         )
         if (
@@ -3563,6 +3577,9 @@ def _expected_decoded_batch_ingress(
             trigger_root.payload.close,
             side=order.side,
             specification=context.spec_set.require(order.instrument),
+            slippage_bps=slippage_bps_from_identity(
+                context.execution_policy.identifier.value, context.execution_policy.sha256.value
+            ),
         )
         expiry_code = None
         occurred_at = trigger_root.event_time
