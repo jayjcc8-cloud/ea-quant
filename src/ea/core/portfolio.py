@@ -895,8 +895,9 @@ def _require_version(value: object, *, field_name: str) -> int:
 def _require_postings(postings: object) -> tuple[LedgerPosting, ...]:
     if type(postings) is not tuple or any(type(item) is not LedgerPosting for item in postings):
         raise _fail(OutcomeCode.INVALID_TYPE, "postings must be an exact LedgerPosting tuple")
-    if len(postings) < 2 or len(postings) > 5:
-        raise _fail(OutcomeCode.OUT_OF_RANGE, "ledger transaction requires 2..5 postings")
+    # A Fill can use both rounding and commission alongside the four base accounts.
+    if len(postings) < 2 or len(postings) > 6:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "ledger transaction requires 2..6 postings")
     order = tuple(_POSTING_ORDER[posting.account] for posting in postings)
     if order != tuple(sorted(order)) or len(order) != len(set(order)):
         raise _fail(OutcomeCode.CONFLICTING_ID, "posting order or account uniqueness conflicts")

@@ -201,7 +201,9 @@ def generate_equity_path_analysis(
                     price = prices[_market_key(key)]
                     require_quantized(price, spec.price_quantum, field_name="path_price")
                     if committed_at is not None and root["dispatch_sequence"] >= committed_at:
-                        position = r._multiply(price, quantity, spec.contract_multiplier)
+                        position = settle_product(
+                            price, quantity, spec.contract_multiplier, spec.currency_quantum
+                        ).amount
                         require_quantized(
                             position, spec.currency_quantum, field_name="path_position"
                         )

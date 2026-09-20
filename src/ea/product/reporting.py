@@ -52,6 +52,7 @@ from ea.core.audit import (
     MAX_LARGE_AUDIT_PAYLOAD_BYTES,
 )
 from ea.core.commission import COMMISSION_POLICY, commission_amount, commission_bps_from_identity
+from ea.core.economics import settle_product
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
     MAX_AUDIT_JOURNAL_BYTES,
@@ -1208,7 +1209,12 @@ def _build_report(
             or quantity != fill_quantity
         ):
             raise ValueError("entry execution evidence conflicts")
-        fill_notional = _multiply(fill_price, fill_quantity, specification.contract_multiplier)
+        fill_notional = settle_product(
+            fill_price,
+            fill_quantity,
+            specification.contract_multiplier,
+            specification.currency_quantum,
+        ).amount
         require_quantized(fill_notional, specification.currency_quantum, field_name="fill_notional")
         if ending_cash != _subtract(
             _subtract(scenario.initial_cash, fill_notional), _total_fees(result)
@@ -1222,7 +1228,13 @@ def _build_report(
             },
             "order": {"quantity": fill_quantity.text, "side": "buy"},
         }
-    position_value = _multiply(price, quantity, specification.contract_multiplier)
+    position_value = (
+        settle_product(
+            price, quantity, specification.contract_multiplier, specification.currency_quantum
+        ).amount
+        if quantity.coefficient
+        else CanonicalDecimal("0")
+    )
     require_quantized(position_value, specification.currency_quantum, field_name="position_value")
     equity = _add(ending_cash, position_value)
     net_pnl = _subtract(equity, scenario.initial_cash)
