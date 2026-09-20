@@ -8,7 +8,8 @@ uv run --no-project --python 3.12 python scripts/build_distribution.py --output-
 uv run --no-project --python 3.12 python scripts/build_distribution.py --output-dir /absolute/output-b
 ```
 
-The output directories must be outside the checkout. Existing bundles are never overwritten.
+Builds run in a fresh export of the exact tracked commit, excluding ignored build caches and
+untracked artifacts. The output directories must be outside the checkout. Existing bundles are never overwritten.
 Compare the two printed SHA-256 values; identical commits and build tools should yield identical
 ZIP bytes. The archive contains one noneditable wheel, matching Web assets, hash-locked runtime
 requirements, example scenarios, INSTALL.md, a source commit manifest and SHA256SUMS.

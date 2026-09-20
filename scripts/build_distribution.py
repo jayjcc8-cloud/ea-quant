@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 import zipfile
@@ -34,10 +36,19 @@ def build(output: Path) -> Path:
     if destination.exists():
         raise ValueError("output bundle already exists")
     env = {**os.environ, "SOURCE_DATE_EPOCH": str(epoch)}
-    subprocess.run(["npm", "ci", "--prefix", "apps/web"], cwd=ROOT, env=env, check=True)
-    subprocess.run(["npm", "run", "build", "--prefix", "apps/web"], cwd=ROOT, env=env, check=True)
     with tempfile.TemporaryDirectory(prefix="ea-distribution-") as temporary:
         stage = Path(temporary)
+        source = stage / "source"
+        source.mkdir()
+        archive_bytes = subprocess.check_output(
+            ["git", "archive", "--format=tar", commit], cwd=ROOT
+        )
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
+            archive.extractall(source, filter="data")
+        subprocess.run(["npm", "ci", "--prefix", "apps/web"], cwd=source, env=env, check=True)
+        subprocess.run(
+            ["npm", "run", "build", "--prefix", "apps/web"], cwd=source, env=env, check=True
+        )
         subprocess.run(
             [
                 "uv",
@@ -45,12 +56,12 @@ def build(output: Path) -> Path:
                 "--wheel",
                 "--clear",
                 "--build-constraints",
-                str(ROOT / "build-constraints.txt"),
+                str(source / "build-constraints.txt"),
                 "--require-hashes",
                 "--out-dir",
                 str(stage),
             ],
-            cwd=ROOT,
+            cwd=source,
             env=env,
             check=True,
         )
@@ -70,21 +81,21 @@ def build(output: Path) -> Path:
                 "--no-header",
                 "--no-annotate",
             ],
-            cwd=ROOT,
+            cwd=source,
             env=env,
         )
         members = {wheel.name: wheel.read_bytes(), "requirements.txt": requirements}
-        for path in sorted((ROOT / "apps/web/dist").rglob("*")):
+        for path in sorted((source / "apps/web/dist").rglob("*")):
             if path.is_symlink():
                 raise ValueError("Web assets must not be symlinks")
             if path.is_file():
-                members["ui/" + path.relative_to(ROOT / "apps/web/dist").as_posix()] = (
+                members["ui/" + path.relative_to(source / "apps/web/dist").as_posix()] = (
                     path.read_bytes()
                 )
         if "ui/index.html" not in members:
             raise ValueError("production Web index is missing")
         for name in capture("git", "ls-files", "examples/web-scenarios").splitlines():
-            path = ROOT / name
+            path = source / name
             if path.is_symlink():
                 raise ValueError("example inputs must not be symlinks")
             members["scenarios/" + path.name] = path.read_bytes()
