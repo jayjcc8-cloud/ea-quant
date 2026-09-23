@@ -39,6 +39,7 @@ from ea.product.trade_analytics import trade_analytics
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import StrategyPackage, read_regular, validate_package
 from ea.strategy.registry import project_parameters
+from ea.web import candidates
 from ea.web.datasets import LocalResearchDatasetRegistryV1
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
 
@@ -691,6 +692,9 @@ class WebService:
         self.registry = ScenarioRegistry(resolved_scenarios, strategy_root)
         self.workspace = _directory(resolved_workspace, label="workspace", create=True)
         self.jobs_dir = _directory(self.workspace / "jobs", label="job index", create=True)
+        self.candidates_dir = _directory(
+            self.workspace / "candidates", label="candidates", create=True
+        )
         self.batches_dir = _directory(self.workspace / "batches", label="batch index", create=True)
         self.inputs_dir = _directory(self.workspace / "inputs", label="input store", create=True)
         self.runs_dir = _directory(self.workspace / "runs", label="attempt root", create=True)
@@ -1483,6 +1487,68 @@ class WebService:
             self._store(completed)
             if release_active and self._active == job_id:
                 self._active = None
+
+    def _candidate_projection(self, validation_id: str) -> dict[str, Any]:
+        from ea.web.candidate_evidence import CandidateEvidenceReader
+
+        relation = self.get_holdout(validation_id)
+        return CandidateEvidenceReader(self.workspace).projection(
+            validation_id, relation["holdout_job_id"]
+        )
+
+    def _write_candidate(self, record: dict[str, Any]) -> None:
+        payload = candidates.canonical(record)
+        candidates.decode_record(payload)
+        if self.candidates_dir.is_symlink() or self.candidates_dir.resolve() != self.candidates_dir:
+            raise ValueError("candidate directory is invalid")
+        descriptor, name = tempfile.mkstemp(prefix=".candidate-", dir=self.candidates_dir)
+        pending = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(pending, self.candidates_dir / f"{record['candidate_id']}.json")
+            _fsync_directory(self.candidates_dir)
+        finally:
+            pending.unlink(missing_ok=True)
+
+    def create_candidate(self, validation_id: str) -> dict[str, Any]:
+        with self._lock:
+            record = candidates.create_record(
+                self._candidate_projection(validation_id),
+                datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            )
+            self._write_candidate(record)
+            return record
+
+    def get_candidate(self, candidate_id: str) -> dict[str, Any]:
+        from ea.web.candidate_evidence import CandidateEvidenceReader
+
+        with self._lock:
+            return CandidateEvidenceReader(self.workspace).record(candidate_id)
+
+    def decide_candidate(self, candidate_id: str, outcome: str, reason: str) -> dict[str, Any]:
+        with self._lock:
+            before = self.get_candidate(candidate_id)
+            after = candidates.decide_record(
+                before, outcome, reason, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            )
+            if after != before:
+                self._write_candidate(after)
+            return after
+
+    def list_candidates(self) -> list[dict[str, Any]]:
+        with self._lock:
+            records = []
+            for path in sorted(self.candidates_dir.glob("*.json")):
+                if path.name.startswith("."):
+                    continue
+                try:
+                    records.append(self.get_candidate(path.stem))
+                except (OSError, ValueError, KeyError, TypeError):
+                    records.append({"candidate_id": path.stem, "status": "UNAVAILABLE"})
+            return records
 
     def report(self, job_id: str) -> bytes:
         record = self.get_job(job_id)

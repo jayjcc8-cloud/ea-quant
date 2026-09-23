@@ -19,13 +19,17 @@ def product_logger(
     operation: str,
     enabled: bool = True,
     sink: Callable[[str], None] | None = None,
+    candidate_id: str | None = None,
 ) -> OperationalLogger | None:
     """Construct observational context without changing attempt admission or economics."""
     if not enabled:
         return None
     try:
         context = OperationalContext(
-            run_id=run_id.value, strategy_id=scenario.strategy_id.value, operation=operation
+            run_id=run_id.value,
+            strategy_id=scenario.strategy_id.value,
+            candidate_id=candidate_id,
+            operation=operation,
         )
         selected_sink = JsonlFileSink(attempt / "operational.jsonl") if sink is None else sink
         return OperationalLogger(context, selected_sink)

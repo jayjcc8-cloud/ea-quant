@@ -78,6 +78,17 @@ class HoldoutRequest(BaseModel):
     scenario_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.ya?ml$")
 
 
+class CandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    validation_id: str = Field(min_length=36, max_length=36)
+
+
+class CandidateDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    outcome: str = Field(pattern=r"^(ACCEPTED|REJECTED)$")
+    reason: str = Field(min_length=1, max_length=4096)
+
+
 class ScenarioValidationRequest(BaseModel):
     dataset_id: str | None = None
     source_sha256: str | None = None
@@ -191,6 +202,44 @@ def create_app(settings: WebSettings) -> Any:
             "offline_only": True,
             "single_active_job": True,
         }
+
+    @app.get("/api/candidates")
+    def list_candidates() -> object:
+        try:
+            return {"candidates": service.list_candidates()}
+        except (OSError, ValueError, KeyError, TypeError):
+            return error(409, "candidate_unavailable", "Candidate evidence is unavailable")
+
+    @app.post("/api/candidates", status_code=201)
+    def create_candidate(request: CandidateRequest) -> object:
+        try:
+            return service.create_candidate(request.validation_id)
+        except (OSError, ValueError, KeyError, TypeError):
+            return error(
+                409,
+                "candidate_unavailable",
+                "Candidate creation was not confirmed. Check saved candidates before retrying; "
+                "verified source and Holdout evidence are required.",
+            )
+
+    @app.get("/api/candidates/{candidate_id}")
+    def get_candidate(candidate_id: str) -> object:
+        try:
+            return service.get_candidate(candidate_id)
+        except (OSError, ValueError, KeyError, TypeError):
+            return error(409, "candidate_unavailable", "Candidate evidence is unavailable")
+
+    @app.post("/api/candidates/{candidate_id}/decision")
+    def decide_candidate(candidate_id: str, request: CandidateDecisionRequest) -> object:
+        try:
+            return service.decide_candidate(candidate_id, request.outcome, request.reason)
+        except (OSError, ValueError, KeyError, TypeError):
+            return error(
+                409,
+                "candidate_decision_rejected",
+                "Decision was not confirmed. Reload the candidate to check its state; "
+                "verified evidence, a reason and a legal transition are required.",
+            )
 
     @app.get("/api/datasets")
     def list_datasets() -> object:

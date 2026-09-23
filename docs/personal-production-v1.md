@@ -35,8 +35,23 @@ Logs have no economic authority and sink failures cannot change economic behavio
 [the event and identity contract](operational-logging.md); audit/ledger formats remain unchanged.
 
 Acceptance uses focused logging contract/runtime tests and existing economic/resume regressions.
-This is PPV-04 repository delivery, not the continuous Paper product gate. The next work unit is
-PPV-07 Candidate Lifecycle V1.
+This is PPV-04 repository delivery, not the continuous Paper product gate.
+
+## PPV-07 Candidate Lifecycle V1
+
+When read from merged main with required validation/CI passing, Issue #208 delivers explicit
+EVALUATED → ACCEPTED/REJECTED research decisions over exactly one successful source and its
+selected chronological Holdout. Each immutable Candidate identity binds verified report/path,
+normalized configuration, parameters, artifact and captured data. Terminal decisions require a
+reason; exact retries preserve the original decision. Missing or changed evidence rejects loading.
+
+The real `ea candidate inspect` and `ea candidate run` entries recheck accepted identity and
+persisted evidence without starting the Web service. The run guard compares configuration before
+executing any frozen strategy code, then uses the existing offline engine. Operational logs and a
+`candidate-binding.json` sidecar retain the accepted identity. Acceptance alone does not authorize
+Paper/Live execution. See [the Candidate usage contract](candidate-lifecycle.md) and
+[ADR 0047](adr/0047-accepted-candidate-loading-v1.md). The next work unit is PPV-08; continuous
+Paper composition and installed product acceptance remain PPV-11.
 
 ## PPV-01 execution-cost contract
 
@@ -67,7 +82,7 @@ Acceptance evidence: `tests/unit/test_commission.py`, `test_slippage.py` and
 results, invalid inputs, identity binding, fractional settlement, deterministic recovery and
 frozen research inputs. Installed browser flows in `apps/web/e2e/local-backtest.spec.ts` exercise
 formal results, refresh and download. Required CI and delivery evidence belong to the PR.
-Candidate, Paper/Live, broker and advanced execution realism remain deferred. PPV-02 below adds only the runtime profile.
+Paper/Live, broker and advanced execution realism remain deferred at the PPV-01 boundary. PPV-02 below adds only the runtime profile.
 
 ## PPV-02 production runtime contract
 
@@ -269,7 +284,7 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | PPV-04 Structured Logging | SATISFIED | #220; logging contract above | Continuous-runtime composition remains PPV-11; infrastructure deferred | Existing audit and economic IDs | JSON events with causal IDs; economic behavior unchanged |
 | PPV-05 Backup & Restore | MISSING | E5/E13 | Consistent snapshot, retention, isolated restore and integrity checks | 02; final runtime persistence 12 | Quiesced or proven consistent backup, restore drill; no state repair |
 | PPV-06 Monitoring & Alerts | MISSING | E6/E13 | Signals, thresholds, delivery and alert test | 03/04/05; 13/14/15 operational states | One operator/channel; actionable liveness, reconciliation, disk and backup alerts |
-| PPV-07 Candidate V1 | PARTIAL | E2/E3/E14; #208 | Immutable evidence-bound candidate and human terminal decision | 01 for final strategy validation; existing source/Holdout | Continue #208 under its existing repair decision; no new candidate engine or auto-promotion |
+| PPV-07 Candidate V1 | SATISFIED | #208; Candidate contract above | Continuous Paper composition remains PPV-11 | Existing source/Holdout and frozen artifacts | Explicit decision, immutable identity, fresh evidence and pre-execution loading guard |
 | PPV-08 Order Lifecycle V1 | PARTIAL | E8 | Operational cancel/timeout/ambiguity and partial-fill integration | Existing order/fact authorities | Extend existing semantics; preserve late facts and dedup; no new OMS |
 | PPV-09 Broker Contract V1 | PARTIAL | E8 | Bounded submit/cancel/query, client mapping and normalized failures | 08 | Narrow contract for one intended broker and paper adapter; no generic framework |
 | PPV-10 Market Event Loop | PARTIAL | E7 | Real-time feed, heartbeat, freshness, reconnect | 02/04; shared historical event contracts | One feed/instrument; preserve admission/time visibility and ordering |

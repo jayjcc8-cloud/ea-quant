@@ -1,3 +1,4 @@
+import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
@@ -146,6 +147,10 @@ function RoundTripExecution({ economics }: { economics: RoundTripEconomics }) {
   </>
 }
 export type ApiAdapter = {
+  listCandidates?(): Promise<Candidate[]>
+  getCandidate?(id: string): Promise<Candidate>
+  createCandidate?(validationId: string): Promise<Candidate>
+  decideCandidate?(id: string, outcome: string, reason: string): Promise<Candidate>
   holdoutScenarios(sourceJobId: string): Promise<ScenarioSummary[]>
   listDatasets?(): Promise<Dataset[]>
   createHoldout(request: { source_job_id: string; scenario_id: string; dataset_id?: string; source_sha256?: string }): Promise<ChronologicalHoldout>
@@ -188,6 +193,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const browserApi: ApiAdapter = {
+  async listCandidates() { return (await apiRequest<{ candidates: Candidate[] }>('/api/candidates')).candidates },
+  getCandidate: id => apiRequest(`/api/candidates/${id}`),
+  createCandidate: validationId => apiRequest('/api/candidates', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ validation_id: validationId }) }),
+  decideCandidate: (id, outcome, reason) => apiRequest(`/api/candidates/${id}/decision`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ outcome, reason }) }),
   async listDatasets() { return (await apiRequest<{ datasets: Dataset[] }>('/api/datasets')).datasets },
   async holdoutScenarios(jobId) { return (await apiRequest<{ scenarios: ScenarioSummary[] }>(`/api/backtests/${encodeURIComponent(jobId)}/holdout-scenarios`)).scenarios },
   createHoldout(request) { return apiRequest('/api/holdouts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request) }) },
@@ -277,7 +286,7 @@ function Shell({ api }: { api: ApiAdapter }) {
     <aside className="sidebar">
       <Link className="brand" to="/backtests"><span>EA</span><strong>QUANT</strong></Link>
       <p className="workspace">LOCAL OFFLINE CONSOLE</p>
-      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/batches/new">Run Batch</NavLink><NavLink to="/holdouts">Chronological Holdout</NavLink></nav>
+      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/batches/new">Run Batch</NavLink><NavLink to="/holdouts">Chronological Holdout</NavLink><NavLink to="/candidates">Candidates</NavLink></nav>
       <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
     </aside>
     <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
@@ -285,6 +294,8 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
+        <Route path="/candidates" element={<CandidateHistory api={api} />} />
+        <Route path="/candidates/:candidateId" element={<CandidateDetail api={api} />} />
         <Route path="/holdouts" element={<HoldoutHistory api={api} />} />
         <Route path="/holdouts/new/:jobId" element={<HoldoutCreatorRoute api={api} />} />
         <Route path="/holdouts/:validationId" element={<HoldoutDetailRoute api={api} />} />
@@ -826,6 +837,7 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
           : 'The installed engine is running. This page will refresh automatically.'
     }</p></section>}
     {report && <TradeAnalyticsPanel analytics={analytics} />}
+    {report && api.createCandidate && <CandidateCreate api={api} jobId={jobId} />}
   </>
 }
 

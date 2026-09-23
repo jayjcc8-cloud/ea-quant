@@ -44,6 +44,10 @@ app.add_typer(backtest_app, name="backtest")
 app.add_typer(web_app, name="web")
 strategy_app = typer.Typer(help="Pack, validate and inspect trusted local strategy artifacts.")
 app.add_typer(strategy_app, name="strategy")
+candidate_app = typer.Typer(
+    help="Inspect accepted candidates and run their fixed offline configuration."
+)
+app.add_typer(candidate_app, name="candidate")
 
 
 data_app = typer.Typer(help="Inspect strict full-capture local OHLCV input.")
@@ -397,6 +401,53 @@ def report(
     typer.echo(f"report: {completed.output_directory / 'report.json'}")
     typer.echo(f"summary: {completed.output_directory / 'summary.txt'}")
     typer.echo("source attempt: read-only")
+
+
+@candidate_app.command("inspect")
+def candidate_inspect(
+    workspace: Annotated[Path, typer.Option("--workspace")],
+    candidate_id: Annotated[str, typer.Option("--candidate-id")],
+) -> None:
+    """Read accepted identity and fresh evidence without executing strategy code."""
+    from ea.product.candidate import inspect_candidate_binding
+
+    try:
+        binding = inspect_candidate_binding(workspace.expanduser().absolute(), candidate_id)
+    except (OSError, ValueError, KeyError, TypeError):
+        typer.echo("candidate rejected: accepted identity and intact evidence required", err=True)
+        raise typer.Exit(code=3) from None
+    typer.echo(canonical_json(binding.document()).decode("ascii"))
+
+
+@candidate_app.command("run")
+def candidate_run(
+    workspace: Annotated[Path, typer.Option("--workspace")],
+    candidate_id: Annotated[str, typer.Option("--candidate-id")],
+    scenario: Annotated[Path, typer.Option("--scenario")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+) -> None:
+    """Guard the accepted artifact/configuration before loading an offline strategy."""
+    from ea.product.candidate import inspect_candidate_binding, run_accepted_candidate
+
+    try:
+        binding = inspect_candidate_binding(workspace.expanduser().absolute(), candidate_id)
+        completed = run_accepted_candidate(
+            binding,
+            scenario.expanduser().absolute(),
+            output_root.expanduser().absolute(),
+        )
+    except BacktestRunFailure as error:
+        typer.echo(f"candidate backtest failed closed: {error.code.value}", err=True)
+        typer.echo(f"evidence: {error.output_directory}", err=True)
+        raise typer.Exit(code=3) from None
+    except (OSError, ValueError, KeyError, TypeError, BacktestScenarioError, BacktestRunError):
+        typer.echo(
+            "candidate rejected: accepted identity and matching configuration required", err=True
+        )
+        raise typer.Exit(code=3) from None
+    typer.echo(f"candidate backtest: {completed.status}")
+    typer.echo(f"result: {completed.output_directory / 'result.json'}")
+    typer.echo("live capability: unavailable")
 
 
 if __name__ == "__main__":
