@@ -2,6 +2,7 @@ import { cleanup, render, screen, waitFor, within } from '@testing-library/react
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type InputSnapshot } from './app'
+import type { Candidate } from './candidates'
 
 const identity = { scenario_sha256: 'a'.repeat(64), data_sha256: 'b'.repeat(64), record_count: 4 }
 const scenarios = [
@@ -795,4 +796,56 @@ it('requires a reason for terminal candidate decisions and displays saved eviden
   expect(screen.getByText('Retain for another evaluation')).toBeTruthy()
   expect(screen.queryByRole('button', { name: 'Accept candidate' })).toBeNull()
   expect(screen.getByRole('link', { name: 'Chronological Holdout evaluation' }).getAttribute('href')).toBe('/holdouts/validation-1')
+})
+
+function evaluatedCandidate(): Candidate {
+  const evidence = { job_id: 'job-1', run_id: 'run-1', input_sha256: 'a', scenario_sha256: 'b', data_sha256: 'c', record_count: 4, report_sha256: 'd', equity_path_sha256: 'e' }
+  return { candidate_id: 'candidate-1', status: 'EVALUATED', fingerprint: 'f'.repeat(64), projection: { strategy: { id: 'bounded-long-v1', version: 1, parameters: { target_quantity: '2' } }, source: evidence, holdout: { ...evidence, job_id: 'job-2' }, relationship: { validation_id: 'validation-1', sha256: 'a' } }, decision: null }
+}
+
+it('requires explicit source-matched Holdout selection before creating a candidate', async () => {
+  const user = userEvent.setup()
+  const selected: string[] = []
+  window.history.pushState({}, '', '/backtests/job-1')
+  render(<App api={adapter({
+    listHoldouts: async () => [
+      { schema: 'ea.chronological-holdout.v1', validation_id: 'validation-1', source_job_id: 'job-1', holdout_job_id: 'job-2', created_at: '2026-09-20T08:00:00.000000Z' },
+      { schema: 'ea.chronological-holdout.v1', validation_id: 'validation-other', source_job_id: 'job-other', holdout_job_id: 'job-3', created_at: '2026-09-20T08:00:00.000000Z' },
+    ],
+    createCandidate: async id => { selected.push(id); return evaluatedCandidate() },
+    getCandidate: async () => evaluatedCandidate(),
+  })} />)
+  const create = await screen.findByRole('button', { name: 'Create evaluated candidate' })
+  expect((create as HTMLButtonElement).disabled).toBe(true)
+  expect(selected).toEqual([])
+  await screen.findByRole('option', { name: /validation-1/ })
+  expect(screen.queryByRole('option', { name: /validation-other/ })).toBeNull()
+  await user.selectOptions(screen.getByLabelText('Candidate Holdout'), 'validation-1')
+  await user.click(create)
+  await screen.findByText('EVALUATED')
+  expect(selected).toEqual(['validation-1'])
+  expect(window.location.pathname).toBe('/candidates/candidate-1')
+})
+
+it('disables candidate decisions when persisted evidence cannot be verified', async () => {
+  window.history.pushState({}, '', '/candidates/candidate-1')
+  render(<App api={adapter({ getCandidate: async () => { throw new Error('evidence mismatch') } })} />)
+  expect((await screen.findByRole('alert')).textContent).toContain('Candidate evidence unavailable')
+  expect(screen.queryByRole('button', { name: 'Accept candidate' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Reject candidate' })).toBeNull()
+})
+
+it('removes candidate decision controls when fresh evidence rejects a decision', async () => {
+  const user = userEvent.setup()
+  window.history.pushState({}, '', '/candidates/candidate-1')
+  render(<App api={adapter({
+    getCandidate: async () => evaluatedCandidate(),
+    decideCandidate: async () => { throw new Error('Candidate pinned evidence is unavailable') },
+  })} />)
+  await screen.findByRole('button', { name: 'Accept candidate' })
+  await user.type(screen.getByLabelText('Decision reason'), 'Retain the selected research evidence')
+  await user.click(screen.getByRole('button', { name: 'Accept candidate' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('Candidate pinned evidence is unavailable')
+  expect(screen.queryByRole('button', { name: 'Accept candidate' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Reject candidate' })).toBeNull()
 })

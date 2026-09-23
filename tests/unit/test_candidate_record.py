@@ -76,3 +76,37 @@ def test_candidate_rejects_incomplete_or_ambiguous_records() -> None:
     record["projection"]["source"]["report_sha256"] = "3" * 64
     with pytest.raises(ValueError):
         decode_record(canonical(record))
+
+
+@pytest.mark.parametrize("outcome", ["ACCEPTED", "REJECTED"])
+def test_candidate_terminal_decision_cannot_be_revised(outcome: str) -> None:
+    record = create_record(projection(), "2026-09-20T08:00:00.000000Z")
+    decided = decide_record(record, outcome, "Explicit human judgment", record["created_at"])
+    assert (
+        decide_record(decided, outcome, "Explicit human judgment", "2026-09-22T08:00:00.000000Z")
+        == decided
+    )
+    for target, reason in [(outcome, "New reason"), ("EVALUATED", "Undo"), ("DRAFT", "Reset")]:
+        with pytest.raises(ValueError):
+            decide_record(decided, target, reason, "2026-09-22T08:00:00.000000Z")
+    assert record["status"] == "EVALUATED"
+    assert record["decision"] is None
+
+
+def test_candidate_fingerprint_binds_strategy_configuration_and_runtime_identity() -> None:
+    original = projection()
+    baseline = create_record(original, "2026-09-20T08:00:00.000000Z")
+    changed = deepcopy(original)
+    changed["strategy"]["parameters"]["target_quantity"] = "3"
+    assert create_record(changed, baseline["created_at"])["fingerprint"] != baseline["fingerprint"]
+    changed = deepcopy(original)
+    changed["source"]["run_id"] = str(uuid4())
+    assert create_record(changed, baseline["created_at"])["fingerprint"] != baseline["fingerprint"]
+
+
+@pytest.mark.parametrize("identity", ["unknown", "00000000-0000-1000-8000-000000000000"])
+def test_candidate_record_requires_canonical_uuid4(identity: str) -> None:
+    record = create_record(projection(), "2026-09-20T08:00:00.000000Z")
+    record["candidate_id"] = identity
+    with pytest.raises(ValueError):
+        decode_record(canonical(record))

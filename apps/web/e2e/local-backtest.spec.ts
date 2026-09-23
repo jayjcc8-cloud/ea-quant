@@ -867,12 +867,26 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   await expect(page).toHaveURL(/\/candidates\/[0-9a-f-]+$/)
   const candidateURL = page.url()
   const candidateId = new URL(candidateURL).pathname.split('/').at(-1)!
+  await expect(page.getByText('EVALUATED', { exact: true })).toBeVisible()
+  const evaluated = await page.request.get(`/api/candidates/${candidateId}`).then(r => r.json())
+  expect(evaluated.status).toBe('EVALUATED')
+  expect(evaluated.decision).toBeNull()
+  expect(evaluated.projection.source.run_id).toBe(closed.runId)
+  expect(evaluated.projection.holdout.run_id).toBe(oos.engine_run_id)
+  expect(evaluated.projection.source.report_sha256).toBe(source.report_sha256)
+  expect(evaluated.projection.source.equity_path_sha256).toBe(source.equity_path_sha256)
+  expect(evaluated.projection.strategy.implementation.artifact_sha256).toBe(source.input_snapshot.scenario.strategy.source.artifact_sha256)
   await expect(page.getByRole('button', { name: 'Accept candidate' })).toBeDisabled()
-  await page.getByLabel('Decision reason').fill('Retain this exact source and holdout evidence for further research')
+  const decisionReason = 'Retain this exact source and holdout evidence for further research'
+  await page.getByLabel('Decision reason').fill(decisionReason)
   await page.getByRole('button', { name: 'Accept candidate' }).click()
   await expect(page.getByText('ACCEPTED', { exact: true })).toBeVisible()
   const candidateBytes = await page.request.get(`/api/candidates/${candidateId}`).then(r => r.text())
   const candidate = JSON.parse(candidateBytes)
+  expect(candidate.fingerprint).toBe(evaluated.fingerprint)
+  expect(candidate.projection).toEqual(evaluated.projection)
+  expect(candidate.created_at).toBe(evaluated.created_at)
+  expect(candidate.decision.reason).toBe(decisionReason)
   expect(candidate.projection.source.job_id).toBe(closed.jobId)
   expect(candidate.projection.holdout.job_id).toBe(relation.holdout_job_id)
   await page.screenshot({ path: testInfo.outputPath('accepted-candidate.png'), fullPage: true })
@@ -893,6 +907,8 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
     expect(await page.request.get(`/api/candidates/${candidateId}`).then(r => r.text())).toBe(candidateBytes)
     await page.goto(candidateURL)
     await expect(page.getByText('ACCEPTED', { exact: true })).toBeVisible()
+    await expect(page.getByText(decisionReason, { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Accept candidate' })).toHaveCount(0)
     await page.goto(closed.url)
     await expect(page.getByRole('region', { name: 'Trade analytics' })).toContainText('Closed trades')
     expect(await page.request.get(`/api/backtests/${closed.jobId}/artifacts/equity-path.json`).then(r => r.text())).toBe(pathBytes)
@@ -904,6 +920,26 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   await expect(page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'Closed trades', exact: true }) }).locator('td').nth(1)).toHaveText(String(batchStats[1].closed_trades))
     await page.goto(holdoutURL)
     await expect(page.getByText('Frozen from source')).toBeVisible()
+    // A changed pinned path invalidates the Candidate independently of readable legacy reports.
+    const pinnedPath = join(process.env.EA_WEB_WORKSPACE!, 'reports', closed.jobId, 'equity-path.json')
+    const pinnedBytes = readFileSync(pinnedPath)
+    try {
+      writeFileSync(pinnedPath, Buffer.concat([pinnedBytes, Buffer.from(' ')]))
+      expect((await page.request.get(`/api/candidates/${candidateId}`)).status()).toBe(409)
+      expect((await page.request.post(`/api/candidates/${candidateId}/decision`, {
+        headers: { Origin: baseURL, 'X-EA-Web-Request': '1' },
+        data: { outcome: 'ACCEPTED', reason: decisionReason },
+      })).status()).toBe(409)
+      await page.goto(candidateURL)
+      await expect(page.getByRole('alert')).toContainText('Candidate evidence unavailable')
+      await expect(page.getByRole('button', { name: 'Accept candidate' })).toHaveCount(0)
+      await page.goto('/candidates')
+      await expect(page.locator('.job-card').filter({ hasText: candidateId })).toContainText('UNAVAILABLE')
+      expect(await page.request.get(`/api/backtests/${closed.jobId}/report`).then(r => r.text())).toBe(reportBytes)
+    } finally {
+      writeFileSync(pinnedPath, pinnedBytes)
+    }
+    await testInfo.attach('candidate-lifecycle-evidence', { body: JSON.stringify({ evaluated, candidate }), contentType: 'application/json' })
   } finally {
     if (restarted.pid) { process.kill(restarted.pid, 'SIGTERM'); await waitForProcessExit(restarted.pid) }
   }

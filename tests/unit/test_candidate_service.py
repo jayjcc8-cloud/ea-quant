@@ -173,3 +173,109 @@ def test_failed_candidate_decision_publish_preserves_evaluated_record(
         assert len(list(service.candidates_dir.iterdir())) == 1
     finally:
         service.stop()
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_round_trip_candidate_binds_nominal_report_and_path_versions(
+    tmp_path: Path, version: int
+) -> None:
+    import json
+    from datetime import datetime
+    from hashlib import sha256
+
+    import yaml
+
+    from ea.core import ReplayWindow
+    from ea.data import decode_phase1_ohlcv_csv
+    from ea.web.candidates import canonical
+    from ea.web.service import WebService
+    from unit.test_bounded_round_trips_v1 import bounded_scenario
+    from unit.test_single_round_trip_v1 import closed_scenario
+
+    source_path = (
+        closed_scenario(tmp_path / "scenarios")
+        if version == 2
+        else bounded_scenario(tmp_path / "scenarios")
+    )
+    root = source_path.parent
+    source_document = yaml.safe_load(source_path.read_text())
+    target_document = json.loads(json.dumps(source_document).replace("2026-01-02", "2026-01-03"))
+    payload = (root / "prices.csv").read_bytes().replace(b"2026-01-02", b"2026-01-03")
+    (root / "later.csv").write_bytes(payload)
+    target_document["data"]["path"] = "later.csv"
+    dataset = decode_phase1_ohlcv_csv(
+        payload,
+        replay_window=ReplayWindow(
+            datetime.fromisoformat(target_document["data"]["start_utc"]),
+            datetime.fromisoformat(target_document["data"]["end_utc"]),
+        ),
+    )
+    target_document["data"]["fingerprint"] = {
+        "sha256": dataset.selection.fingerprint.sha256.value,
+        "record_count": dataset.selection.fingerprint.record_count,
+    }
+    (root / "later.yaml").write_text(yaml.safe_dump(target_document))
+    service = WebService(root, tmp_path / "workspace")
+    service.start()
+    try:
+        summary = service.validate_scenario(source_path.name)
+        identity = summary["input_identity"]
+        assert isinstance(identity, dict)
+        source, _ = service.create_job(
+            scenario_id=source_path.name,
+            input_identity=identity,
+            request_id="candidate-version-source",
+        )
+    finally:
+        service.stop()
+    assert service.get_job(source.job_id).status == "succeeded"
+    service = WebService(root, tmp_path / "workspace")
+    service.start()
+    try:
+        relation = service.create_holdout(source_job_id=source.job_id, scenario_id="later.yaml")
+    finally:
+        service.stop()
+    assert service.get_job(relation["holdout_job_id"]).status == "succeeded"
+    service = WebService(root, tmp_path / "workspace")
+    service.start()
+    try:
+        record = service.create_candidate(relation["validation_id"])
+        duplicate = service.create_candidate(relation["validation_id"])
+        assert record["status"] == "EVALUATED"
+        assert record["candidate_id"] != duplicate["candidate_id"]
+        assert record["fingerprint"] == duplicate["fingerprint"]
+        for role in ("source", "holdout"):
+            evidence = record["projection"][role]
+            job = service.get_job(evidence["job_id"])
+            assert job.schema == f"ea.local-web-job.v{version + 2}"
+            report = json.loads(service.report(job.job_id))
+            path = json.loads(service.artifact(job.job_id, "equity-path.json"))
+            assert report["schema"] == f"ea.backtest-report.v{version}"
+            assert path["schema"] == f"ea.backtest-equity-path.v{version}"
+            assert report["run_id"] == path["run_id"] == evidence["run_id"]
+    finally:
+        service.stop()
+    for csv in root.glob("*.csv"):
+        csv.unlink()
+    service = WebService(root, tmp_path / "workspace")
+    service.start()
+    try:
+        assert service.get_candidate(record["candidate_id"]) == record
+        path_file = service.reports_dir / source.job_id / "equity-path.json"
+        wrong_path = json.loads(path_file.read_bytes())
+        wrong_version = 2 if version == 3 else 3
+        wrong_path["schema"] = f"ea.backtest-equity-path.v{wrong_version}"
+        wrong_path["schema_version"] = wrong_version
+        path_file.write_bytes(canonical(wrong_path))
+        job_file = service.jobs_dir / f"{source.job_id}.json"
+        wrong_job = json.loads(job_file.read_bytes())
+        wrong_job["equity_path_sha256"] = sha256(path_file.read_bytes()).hexdigest()
+        job_file.write_bytes(canonical(wrong_job))
+        with pytest.raises(ValueError):
+            service.create_candidate(relation["validation_id"])
+        with pytest.raises(ValueError):
+            service.decide_candidate(record["candidate_id"], "ACCEPTED", "Retain")
+        assert all(item["status"] == "UNAVAILABLE" for item in service.list_candidates())
+        assert service.report(source.job_id)
+    finally:
+        service.stop()
