@@ -21,7 +21,9 @@ then execs the existing Web command as one process. Keep replaceable release art
 from durable inputs/workspace; configuration and the stable launcher are operator owned.
 
 Systemd supplies boot enablement, on-failure restart with a finite rate limit, clean stop and process
-status. Configuration failures do not restart. No job is automatically retried or resumed.
+status. Launcher validation refusals exit 78 and do not restart. Failures detected later by the
+existing Web CLI or systemd, including inaccessible/occupied workspace, use the same finite
+start limit. No job is automatically retried or resumed.
 Activation happens with the writer stopped. Application rollback requires established persistent
 reader/writer compatibility; unknown compatibility leaves the service stopped without state edits.
 

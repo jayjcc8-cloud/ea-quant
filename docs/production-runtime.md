@@ -103,7 +103,10 @@ sudo systemctl stop ea.service
 `multi-user.target` enablement makes the service eligible for boot startup; only an actual reboot
 on the deployment host proves that host's boot behavior. `Restart=on-failure`, a 5-second delay,
 and at most 3 starts in a 60-second window bound a rapid failure loop. Exit 78 is not restarted.
-An operator stop does not restart. After correcting a start-limit failure, explicitly run
+This exclusion covers launcher validation refusals; errors detected later by systemd or the
+existing Web CLI (for example filesystem permissions or an occupied workspace) can exit with
+other statuses and consume the same finite start limit. An operator stop does not restart.
+After correcting a start-limit failure, explicitly run
 `systemctl reset-failed ea.service` and start again. A clean application exit is not auto-restarted.
 SIGTERM gets 60 seconds before systemd kills the service control group. Existing interrupted-job
 semantics apply after interruption: no automatic job retry, economic resume or state repair.
