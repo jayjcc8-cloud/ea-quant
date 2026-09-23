@@ -42,6 +42,8 @@ Do not put input directories or workspace under `current` or a release. Do not c
 on upgrade. Keep input roots distinct; their contents remain subject to existing validation and
 frozen-input semantics. Symlink-resolved roots cannot overlap. Existing workspaces can be used by
 setting their absolute location and adjusting the unit's `ReadWritePaths` to that same location.
+The existing audit journal requires at least 13 GiB free on the workspace filesystem at admission;
+provision additional room for durable results. This profile does not lower that requirement.
 There is one service instance and one writer; do not run another CLI/Web writer on this workspace.
 
 Copy `runtime.toml.example` and replace all identity placeholders. The configuration requires

@@ -221,7 +221,14 @@ def accept(old_bundle: Path, new_bundle: Path, root: Path, systemd: bool) -> Non
                 },
             )
         )["job_id"]
-        wait_for(lambda: json.loads(request(f"/api/backtests/{job}"))["status"] == "succeeded")
+
+        def completed() -> bool:
+            document = json.loads(request(f"/api/backtests/{job}"))
+            (root / "last-job.json").write_text(json.dumps(document, indent=2) + "\n")
+            assert document["status"] not in {"failed", "interrupted"}, document
+            return bool(document["status"] == "succeeded")
+
+        wait_for(completed)
         report = request(f"/api/backtests/{job}/report")
         report_equal(job, report)
         stop()
@@ -296,10 +303,10 @@ def accept(old_bundle: Path, new_bundle: Path, root: Path, systemd: bool) -> Non
                 journal = run("sudo", "-n", "journalctl", "-u", unit, "--no-pager")
                 (root / "journal.txt").write_text(journal)
                 ctl("disable")
+                ctl("reset-failed")
                 unit_path_command = str(unit_path)
                 run("sudo", "-n", "rm", "--", unit_path_command)
                 run("sudo", "-n", "systemctl", "daemon-reload")
-                subprocess.run(["sudo", "-n", "systemctl", "reset-failed", unit], check=False)
             log.close()
 
 

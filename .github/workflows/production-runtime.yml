@@ -41,6 +41,20 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
+      - name: Prepare existing audit filesystem requirement
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          df -B1 /var/lib
+          sudo rm -rf -- /usr/local/lib/android/sdk /usr/share/dotnet /usr/local/.ghcup
+          python3 - <<'PYTHON'
+          import os
+          filesystem = os.statvfs('/var/lib')
+          available = filesystem.f_bavail * filesystem.f_frsize
+          print(f'Acceptance workspace available bytes: {available}')
+          assert available >= 15 * 1024**3, 'existing audit needs 13 GiB plus test headroom'
+          PYTHON
       - name: Build old and new real pinned bundles
         run: |
           set -euo pipefail
@@ -65,3 +79,4 @@ jobs:
             /var/lib/ea-ppv02-acceptance/runtime/acceptance.json
             /var/lib/ea-ppv02-acceptance/runtime/journal.txt
             /var/lib/ea-ppv02-acceptance/runtime/service.log
+            /var/lib/ea-ppv02-acceptance/runtime/last-job.json
