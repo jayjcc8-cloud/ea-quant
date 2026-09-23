@@ -132,3 +132,9 @@ operational runbooks.
 Entry: small live operation has durable recovery and operational evidence. Purpose: multi-strategy
 and multi-environment operation, monitoring/alerts, periodic reports, backup, and deployment
 discipline without weakening safety contracts.
+
+## EA Personal Production V1 — bounded planning
+
+[PPV-00 baseline and scope lock](personal-production-v1.md) records the inspected main
+capabilities, remaining work and dependency order for one strategy/server/account. It is
+planning only; it does not activate Paper, Live, deployment or the broader Phase 5 scope.
