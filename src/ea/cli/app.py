@@ -413,7 +413,7 @@ def candidate_inspect(
 
     try:
         binding = inspect_candidate_binding(workspace.expanduser().absolute(), candidate_id)
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError, TypeError):
         typer.echo("candidate rejected: accepted identity and intact evidence required", err=True)
         raise typer.Exit(code=3) from None
     typer.echo(canonical_json(binding.document()).decode("ascii"))
@@ -440,7 +440,7 @@ def candidate_run(
         typer.echo(f"candidate backtest failed closed: {error.code.value}", err=True)
         typer.echo(f"evidence: {error.output_directory}", err=True)
         raise typer.Exit(code=3) from None
-    except (OSError, ValueError, BacktestScenarioError, BacktestRunError):
+    except (OSError, ValueError, KeyError, TypeError, BacktestScenarioError, BacktestRunError):
         typer.echo(
             "candidate rejected: accepted identity and matching configuration required", err=True
         )
