@@ -22,6 +22,11 @@ external write, deployment, or live capability is part of this objective.
 
 ## Completed
 
+- Issue #220 adds PPV-04 Structured Operational Logging V1 to the existing scenario runtime.
+  Machine-readable operational events reuse run, strategy, signal, order, client submission and
+  Fill identities through simulation, ledger updates and reconciliation. Logs remain observational;
+  audit and ledger retain authority. See [logging contract](operational-logging.md).
+
 - Issue #218 / ADR 0046 adds Production Runtime Profile V1: the existing commit-bound bundle,
   strict pinned installed launcher, external persistent workspace/inputs and one loopback-only
   systemd service. Explicit activation and compatible application rollback preserve state;
