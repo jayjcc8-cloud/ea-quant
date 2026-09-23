@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
-import { spawn, type ChildProcess } from 'node:child_process'
-import { readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { readFileSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 const baseURL = process.env.EA_WEB_BASE_URL ?? 'http://127.0.0.1:8765'
@@ -876,6 +876,9 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   expect(evaluated.projection.source.report_sha256).toBe(source.report_sha256)
   expect(evaluated.projection.source.equity_path_sha256).toBe(source.equity_path_sha256)
   expect(evaluated.projection.strategy.implementation.artifact_sha256).toBe(source.input_snapshot.scenario.strategy.source.artifact_sha256)
+  const candidateArgs = ['--workspace', process.env.EA_WEB_WORKSPACE!, '--candidate-id', candidateId]
+  const rejectedLoad = spawnSync(process.env.EA_WEB_BIN!, ['candidate', 'inspect', ...candidateArgs], { encoding: 'utf8' })
+  expect(rejectedLoad.status).toBe(3)
   await expect(page.getByRole('button', { name: 'Accept candidate' })).toBeDisabled()
   const decisionReason = 'Retain this exact source and holdout evidence for further research'
   await page.getByLabel('Decision reason').fill(decisionReason)
@@ -889,6 +892,20 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   expect(candidate.decision.reason).toBe(decisionReason)
   expect(candidate.projection.source.job_id).toBe(closed.jobId)
   expect(candidate.projection.holdout.job_id).toBe(relation.holdout_job_id)
+  const binding = JSON.parse(execFileSync(process.env.EA_WEB_BIN!, ['candidate', 'inspect', ...candidateArgs], { encoding: 'utf8' }))
+  expect(binding.candidate_id).toBe(candidateId)
+  expect(binding.artifact_sha256).toBe(evaluated.projection.strategy.implementation.artifact_sha256)
+  const candidateRuns = join(process.env.EA_WEB_WORKSPACE!, 'accepted-offline-runs')
+  execFileSync(process.env.EA_WEB_BIN!, ['candidate', 'run', ...candidateArgs,
+    '--scenario', join(process.env.EA_SCENARIO_ROOT!, 'local-v3.yaml'), '--output-root', candidateRuns], { stdio: 'pipe', timeout: 240_000 })
+  const candidateAttempt = join(candidateRuns, readdirSync(candidateRuns)[0])
+  const runBinding = JSON.parse(readFileSync(join(candidateAttempt, 'candidate-binding.json'), 'utf8'))
+  expect(runBinding.candidate_id).toBe(candidateId)
+  expect(runBinding.configuration_sha256).toBe(binding.configuration_sha256)
+  const logEvents = readFileSync(join(candidateAttempt, 'operational.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  expect(logEvents.length).toBeGreaterThan(0)
+  expect(logEvents.every(event => event.candidate_id === candidateId)).toBe(true)
+  await testInfo.attach('candidate-runtime-binding', { body: JSON.stringify({ binding, runBinding, logEvents }), contentType: 'application/json' })
   await page.screenshot({ path: testInfo.outputPath('accepted-candidate.png'), fullPage: true })
   // Restart this isolated installed server; persisted artifacts must survive absent source data.
   const pid = currentPid
