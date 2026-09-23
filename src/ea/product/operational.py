@@ -27,7 +27,8 @@ def product_logger(
         context = OperationalContext(
             run_id=run_id.value, strategy_id=scenario.strategy_id.value, operation=operation
         )
-        return OperationalLogger(context, sink or JsonlFileSink(attempt / "operational.jsonl"))
+        selected_sink = JsonlFileSink(attempt / "operational.jsonl") if sink is None else sink
+        return OperationalLogger(context, selected_sink)
     except Exception:
         return None
 

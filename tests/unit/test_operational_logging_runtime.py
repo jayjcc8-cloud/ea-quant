@@ -132,8 +132,14 @@ def test_completed_verification_does_not_modify_operational_evidence(tmp_path: P
     assert {
         p.relative_to(attempt): p.read_bytes() for p in attempt.rglob("*") if p.is_file()
     } == before
-    verification: list[str] = []
-    resume_backtest_attempt(attempt, operational_sink=verification.append)
+
+    class Capture(list[str]):
+        def __call__(self, line: str) -> None:
+            self.append(line)
+
+    verification = Capture()
+    assert not verification
+    resume_backtest_attempt(attempt, operational_sink=verification)
     assert verification
     assert {json.loads(line)["operation"] for line in verification} == {"verify"}
     assert {
