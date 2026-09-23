@@ -22,6 +22,13 @@ external write, deployment, or live capability is part of this objective.
 
 ## Completed
 
+- Issue #218 / ADR 0046 adds Production Runtime Profile V1: the existing commit-bound bundle,
+  strict pinned installed launcher, external persistent workspace/inputs and one loopback-only
+  systemd service. Explicit activation and compatible application rollback preserve state;
+  unknown downgrade compatibility fails closed. Linux CI exercises the installed supervisor path.
+  Actual VPS deployment and reboot acceptance remain NOT_YET_HOST_VERIFIED. See
+  [runtime operations and limitations](production-runtime.md). Paper/Live remains unavailable.
+
 - Phase 1 delivery reset is complete; its offline and governance-freeze boundaries remain in force.
 
 - Phase 0 engineering foundation is released as `v0.1.0`.

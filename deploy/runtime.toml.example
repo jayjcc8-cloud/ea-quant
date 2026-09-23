@@ -1,0 +1,11 @@
+schema = "ea.production-runtime.v1"
+# Full commit directory and manifest hash from the independently verified bundle.
+bundle_root = "/srv/ea/releases/REPLACE_WITH_FULL_COMMIT"
+commit = "REPLACE_WITH_FULL_COMMIT"
+manifest_sha256 = "REPLACE_WITH_MANIFEST_SHA256"
+scenario_root = "/srv/ea/inputs/scenarios"
+workspace = "/srv/ea/workspace"
+port = 8765
+# Optional explicit persistent input roots, never nested in another configured root:
+# data_root = "/srv/ea/inputs/data"
+# strategy_root = "/srv/ea/inputs/strategies"

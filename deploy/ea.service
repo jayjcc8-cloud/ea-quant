@@ -1,0 +1,27 @@
+[Unit]
+Description=EA pinned offline research service
+After=local-fs.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ea
+Group=ea
+WorkingDirectory=/srv/ea
+ExecStart=/srv/ea/current/.venv/bin/python -I /srv/ea/runtime.py serve --config /srv/ea/runtime.toml
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=78
+TimeoutStopSec=60
+KillMode=control-group
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/ea/workspace
+
+[Install]
+WantedBy=multi-user.target

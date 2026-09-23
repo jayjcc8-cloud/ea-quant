@@ -85,6 +85,13 @@ def build(output: Path) -> Path:
             env=env,
         )
         members = {wheel.name: wheel.read_bytes(), "requirements.txt": requirements}
+        for name, relative in {
+            "runtime.py": "scripts/production_runtime.py",
+            "ea.service": "deploy/ea.service",
+            "runtime.toml.example": "deploy/runtime.toml.example",
+            "RUNTIME.md": "docs/production-runtime.md",
+        }.items():
+            members[name] = (source / relative).read_bytes()
         for path in sorted((source / "apps/web/dist").rglob("*")):
             if path.is_symlink():
                 raise ValueError("Web assets must not be symlinks")

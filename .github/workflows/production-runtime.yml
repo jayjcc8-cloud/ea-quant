@@ -1,0 +1,82 @@
+name: Production runtime acceptance
+on:
+  pull_request:
+    paths:
+      - 'scripts/production_runtime.py'
+      - 'scripts/accept_production_runtime.py'
+      - 'scripts/build_distribution.py'
+      - 'deploy/**'
+      - '.github/workflows/production-runtime.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/production_runtime.py'
+      - 'scripts/accept_production_runtime.py'
+      - 'scripts/build_distribution.py'
+      - 'deploy/**'
+      - '.github/workflows/production-runtime.yml'
+permissions:
+  contents: read
+jobs:
+  installed-systemd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Accessible to the system service with ProtectHome and PrivateTmp enabled.
+      UV_PYTHON_INSTALL_DIR: /opt/hostedtoolcache/ea-ppv02-python
+      OLD_SHA: 4d20e8a37f683d954408e4fede10eba3ee2853b4
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact event checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        with:
+          version-file: pyproject.toml
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Prepare existing audit filesystem requirement
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          df -B1 /var/lib
+          sudo rm -rf -- /usr/local/lib/android/sdk /usr/share/dotnet /usr/local/.ghcup
+          python3 - <<'PYTHON'
+          import os
+          filesystem = os.statvfs('/var/lib')
+          available = filesystem.f_bavail * filesystem.f_frsize
+          print(f'Acceptance workspace available bytes: {available}')
+          assert available >= 15 * 1024**3, 'existing audit needs 13 GiB plus test headroom'
+          PYTHON
+      - name: Build old and new real pinned bundles
+        run: |
+          set -euo pipefail
+          uv python install 3.12
+          git worktree add --detach "$RUNNER_TEMP/ea-ppv01-source" "$OLD_SHA"
+          uv run --no-project --python 3.12 python "$RUNNER_TEMP/ea-ppv01-source/scripts/build_distribution.py" --output-dir "$RUNNER_TEMP/ea-old-bundle"
+          uv run --no-project --python 3.12 python scripts/build_distribution.py --output-dir "$RUNNER_TEMP/ea-new-bundle"
+      - name: Real systemd lifecycle and installed application rollback
+        run: |
+          set -euo pipefail
+          sudo install -d -o "$USER" -g "$(id -gn)" /var/lib/ea-ppv02-acceptance
+          uv run --no-project --python 3.12 python scripts/accept_production_runtime.py \
+            --old-bundle "$RUNNER_TEMP"/ea-old-bundle/*.zip \
+            --new-bundle "$RUNNER_TEMP"/ea-new-bundle/*.zip \
+            --root /var/lib/ea-ppv02-acceptance/runtime --systemd
+      - name: Retain actual supervisor evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ppv02-installed-systemd
+          path: |
+            /var/lib/ea-ppv02-acceptance/runtime/acceptance.json
+            /var/lib/ea-ppv02-acceptance/runtime/journal.txt
+            /var/lib/ea-ppv02-acceptance/runtime/service.log
+            /var/lib/ea-ppv02-acceptance/runtime/last-job.json
