@@ -145,7 +145,7 @@ jobs:
       github.event_name == 'pull_request' &&
       (needs.classify.outputs.python == 'true' || needs.classify.outputs.ci == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       UV_PROJECT_ENVIRONMENT: venv
     steps:
