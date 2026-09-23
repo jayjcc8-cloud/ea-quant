@@ -16,6 +16,8 @@ Share one read-only evidence reader between Web decisions and runtime loading. R
 canonical record, source/Holdout relationship, captured snapshots, report/path identities and
 frozen package bytes. Do not start a Web service or execute package code to inspect this binding.
 Expose immutable candidate, artifact, parameter and configuration identities to the caller.
+Executable loading additionally requires the recorded EA code/distribution identity; inspection
+remains available for intact historical evidence after an upgrade.
 
 Before the accepted offline run executes package validation or strategy code, compare the strict
 scenario's normalized non-data configuration against the accepted configuration. Configuration

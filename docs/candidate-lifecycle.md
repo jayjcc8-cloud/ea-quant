@@ -25,7 +25,8 @@ ea candidate run --workspace /absolute/workspace --candidate-id UUID \
 
 The scenario must retain the accepted strategy, normalized parameters, lifecycle, instrument,
 funding, risk and execution assumptions. Its data is validated independently. Configuration and
-artifact checks precede executable package loading. Frozen accepted bytes provide the local
+artifact checks precede executable package loading. Execution also requires the EA code and
+distribution recorded by the research evidence; an upgrade requires new research evidence. Frozen accepted bytes provide the local
 strategy; an arbitrary Python filename is never an accepted-candidate selector.
 
 Each new attempt retains `candidate-binding.json`, normal economic evidence and correlated
