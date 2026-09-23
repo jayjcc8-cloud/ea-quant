@@ -79,6 +79,7 @@ from ea.experiments.store import (
     VerifiedIncompleteRecoveryBinding,
     VerifiedTerminalRecoveryBinding,
 )
+from ea.observability import OperationalLogger
 from ea.portfolio import create_portfolio_ledger, create_portfolio_planning_authority
 from ea.product.identity import (
     BacktestLineageInputs,
@@ -92,6 +93,7 @@ from ea.product.offline_demo import (
     _InstrumentGateView,
     _package_code_digest,
 )
+from ea.product.operational import ProductObservation, product_logger
 from ea.product.scenario import (
     BacktestScenarioError,
     LoadedBacktestScenario,
@@ -501,6 +503,7 @@ def _execute(
     audit: Any | None = None,
     on_funding: Callable[[dict[str, object]], None] | None = None,
     on_frontier: Callable[[str], None] | None = None,
+    operational_logger: OperationalLogger | None = None,
 ) -> tuple[dict[str, object], bytes, dict[str, object]]:
     if scenario.schema_version in (4, 5):
         from ea.product.round_trip import execute_round_trip
@@ -515,7 +518,9 @@ def _execute(
             audit=audit,
             on_funding=on_funding,
             on_frontier=on_frontier,
+            operational_logger=operational_logger,
         )
+    operations = ProductObservation(operational_logger)
     audit = _DemoAudit(binding, scenario.spec_set) if audit is None else audit
     prepared = audit.append(
         record_kind=AuditRecordKind.RUN_PREPARED,
@@ -543,6 +548,12 @@ def _execute(
     funding_document = _funding_document(funding, funding_outcome)
     if on_funding is not None:
         on_funding(funding_document)
+    operations.emit(
+        "portfolio.funded",
+        amount=scenario.initial_cash.text,
+        currency=scenario.funding_currency.code,
+        ledger_sequence=1,
+    )
     if on_frontier is not None:
         on_frontier("funding_durable")
     _interrupt("funding_durable")
@@ -571,6 +582,7 @@ def _execute(
     )
 
     entry_window = lifecycle.coordinator.begin_next_dispatch()
+    operations.window(runtime, lifecycle, economic_gate)
     signal = None
     order = None
     risk_result = None
@@ -591,11 +603,14 @@ def _execute(
         )
         if last_entry is not None and market_index <= last_entry:
             target = logic.on_event(lease.root)
+            if target is None:
+                operations.hold(lease.root, lease.dispatch_sequence)
         market_index += 1
         if target is not None:
             break
         lifecycle.coordinator.complete_active_dispatch(entry_window)
         entry_window = lifecycle.coordinator.begin_next_dispatch()
+        operations.window(runtime, lifecycle, economic_gate)
     if target is not None:
         from ea.core.economics import require_quantized
 
@@ -613,6 +628,7 @@ def _execute(
             dispatch_sequence=lease.dispatch_sequence,
             direction=SignalDirection.LONG,
         )
+        operations.strategy(signal)
         portfolio_policy = create_phase1_portfolio_policy(
             policy_id=PortfolioPolicyId("backtest.scenario.v1"),
             entries=(
@@ -635,6 +651,7 @@ def _execute(
         if intent is None:
             raise RuntimeError("strategy entry did not emit an intent")
         risk_result = economic_gate.risk_authority.evaluate(intent, economic_gate.ledger.snapshot)
+        operations.risk(signal, risk_result)
         if risk_result.decision.kind is RiskDecisionKind.REJECT:
             lifecycle.coordinator.complete_active_dispatch(entry_window)
             raise _AttemptFailure(
@@ -655,6 +672,7 @@ def _execute(
         if risk_result.decision.kind not in {RiskDecisionKind.ALLOW, RiskDecisionKind.RESIZE}:
             raise RuntimeError("scenario risk evaluation failed")
         order = orders.create_order(intent, risk_result)
+        operations.order(order, signal)
         instrument_gate.hold_for(order.order_id)
         lifecycle.coordinator.prepare_submission_authorization(
             entry_window,
@@ -662,7 +680,8 @@ def _execute(
             causal_market_root=lease.root,
             dispatch_sequence=lease.dispatch_sequence,
         )
-        lifecycle.coordinator.submit_authorized_order(entry_window, order)
+        receipt = lifecycle.coordinator.submit_authorized_order(entry_window, order)
+        operations.submitted(order, receipt)
     end_of_run_window = None
     if entry_window.dispatch_kind is HistoricalDispatchKind.END_OF_RUN:
         end_of_run_window = entry_window
@@ -672,6 +691,7 @@ def _execute(
     durable_fill_frontier_observed = False
     while end_of_run_window is None and lifecycle.coordinator.terminal_outcome is None:
         active = lifecycle.coordinator.begin_next_dispatch()
+        operations.window(runtime, lifecycle, economic_gate)
         if active.dispatch_kind is HistoricalDispatchKind.END_OF_RUN:
             end_of_run_window = active
             break
@@ -733,6 +753,7 @@ def _execute(
             dispatch_sequence=dispatch_sequence,
         )
         _append_reconciliation(audit, position_outcome)
+        operations.reconciliation(position_outcome, position=True)
         if position_outcome.outcome_code is not OutcomeCode.RECONCILIATION_MATCH:
             raise _AttemptFailure(
                 OutcomeCode.RECONCILIATION_MISMATCH,
@@ -749,6 +770,7 @@ def _execute(
         dispatch_sequence=dispatch_sequence,
     )
     _append_reconciliation(audit, cash_outcome)
+    operations.reconciliation(cash_outcome, position=False)
     if cash_outcome.outcome_code is not OutcomeCode.RECONCILIATION_MATCH:
         raise _AttemptFailure(
             OutcomeCode.RECONCILIATION_MISMATCH,
@@ -1202,6 +1224,8 @@ def run_backtest_scenario(
     output_root: Path,
     *,
     run_id: RunId | None = None,
+    operational_logging: bool = True,
+    operational_sink: Callable[[str], None] | None = None,
 ) -> BacktestRunResult:
     """Run one validated scenario through the existing offline authorities."""
     if type(scenario) is not LoadedBacktestScenario:
@@ -1226,11 +1250,22 @@ def run_backtest_scenario(
     journal: Any | None = None
     attempt = output_root / run_id.value
     last_frontier = "attempt_prepared"
+    operations = ProductObservation(None)
     try:
         try:
             prepared = store.prepare_canonical_attempt(manifest)
         except StoreCollisionError:
             raise BacktestRunError("fresh attempt directory could not be created") from None
+        operational_logger = product_logger(
+            attempt,
+            scenario,
+            run_id,
+            operation="run",
+            enabled=operational_logging,
+            sink=operational_sink,
+        )
+        operations = ProductObservation(operational_logger)
+        operations.emit("run.started")
         if scenario.strategy_package is not None:
             package_path = attempt / "strategy.eastrategy"
             _write_or_verify(package_path, scenario.strategy_package.artifact_bytes)
@@ -1254,8 +1289,10 @@ def run_backtest_scenario(
             audit=journal,
             on_funding=retain_funding,
             on_frontier=retain_frontier,
+            operational_logger=operational_logger,
         )
     except _AttemptFailure as failure:
+        operations.emit("run.failed", outcome=failure.code.value, frontier=last_frontier)
         if journal is not None:
             _write_or_verify(attempt / "audit.jsonl", _audit_bytes(list(journal.records)))
             _write_or_verify(
@@ -1278,6 +1315,7 @@ def run_backtest_scenario(
     except BacktestRunFailure:
         raise
     except Exception:
+        operations.emit("run.failed", outcome="backtest.internal_failure", frontier=last_frontier)
         if journal is not None:
             _write_or_verify(
                 attempt / "failure.json",
@@ -1304,10 +1342,16 @@ def run_backtest_scenario(
     _write_or_verify(attempt / "audit.jsonl", audit)
     _write_or_verify(attempt / "funding.json", _canonical_json(funding) + b"\n")
     _publish_success(attempt, _canonical_json(report) + b"\n")
+    operations.emit("run.completed", outcome="success")
     return BacktestRunResult("success", attempt)
 
 
-def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
+def resume_backtest_attempt(
+    run_dir: Path,
+    *,
+    operational_logging: bool = True,
+    operational_sink: Callable[[str], None] | None = None,
+) -> BacktestRunResult:
     """Verify and continue one supported durable frontier of the same attempt."""
     scenario, run_id, lineage, risk_policy, risk_context, manifest = _load_verified_attempt(run_dir)
     attempt = run_dir
@@ -1316,6 +1360,7 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
     terminal_recovery: Any | None = None
     last_frontier = "attempt_prepared"
     replay_record_count: int | None = None
+    operations = ProductObservation(None)
     try:
         try:
             verified = store.verify_recovery_attempt(manifest)
@@ -1362,6 +1407,14 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 or result.get("lineage_sha256") != lineage.value
             ):
                 raise BacktestResumeFailure("resume success identity conflicts", attempt)
+            verification_logger = product_logger(
+                attempt,
+                scenario,
+                run_id,
+                operation="verify",
+                enabled=operational_logging and operational_sink is not None,
+                sink=operational_sink,
+            )
             reconstructed_report, reconstructed_audit, reconstructed_funding = _execute(
                 scenario,
                 run_id=run_id,
@@ -1369,6 +1422,7 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 lineage=lineage,
                 risk_policy=risk_policy,
                 risk_context=risk_context,
+                operational_logger=verification_logger,
             )
             reconstructed_terminal = json.loads(reconstructed_audit.splitlines()[-1])
             if (
@@ -1405,6 +1459,16 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
 
         if type(verified) is VerifiedTerminalRecoveryBinding:
             terminal_recovery = store.recover_terminal_attempt(verified)
+            operational_logger = product_logger(
+                attempt,
+                scenario,
+                run_id,
+                operation="resume",
+                enabled=operational_logging,
+                sink=operational_sink,
+            )
+            operations = ProductObservation(operational_logger)
+            operations.emit("run.started")
             report, audit, funding = _execute(
                 scenario,
                 run_id=run_id,
@@ -1414,6 +1478,7 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 risk_context=risk_context,
                 on_funding=retain_funding,
                 on_frontier=retain_frontier,
+                operational_logger=operational_logger,
             )
             reconstructed = json.loads(audit.splitlines()[-1])
             if (
@@ -1435,6 +1500,16 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 records=persisted_records,
             )
             replay_record_count = len(persisted_records)
+            operational_logger = product_logger(
+                attempt,
+                scenario,
+                run_id,
+                operation="resume",
+                enabled=operational_logging,
+                sink=operational_sink,
+            )
+            operations = ProductObservation(operational_logger)
+            operations.emit("run.started")
             report, audit, funding = _execute(
                 scenario,
                 run_id=run_id,
@@ -1445,18 +1520,22 @@ def resume_backtest_attempt(run_dir: Path) -> BacktestRunResult:
                 audit=journal,
                 on_funding=retain_funding,
                 on_frontier=retain_frontier,
+                operational_logger=operational_logger,
             )
         else:
             raise BacktestResumeFailure("resume frontier classification is unsupported", attempt)
         _write_or_verify(attempt / "audit.jsonl", audit)
         _write_or_verify(attempt / "funding.json", _canonical_json(funding) + b"\n")
         _publish_success(attempt, _canonical_json(report) + b"\n")
+        operations.emit("run.completed", outcome="success")
         return BacktestRunResult("success", attempt)
     except BacktestResumeFailure:
+        operations.emit("run.failed", outcome="backtest.resume_rejected", frontier=last_frontier)
         raise
     except BacktestRunFailure as error:
         raise BacktestResumeFailure(str(error), attempt) from None
     except Exception:
+        operations.emit("run.failed", outcome="backtest.internal_failure", frontier=last_frontier)
         if journal is not None:
             _write_or_verify(
                 attempt / "failure.json",
