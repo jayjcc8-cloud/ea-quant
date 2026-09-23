@@ -19,7 +19,9 @@ def test_strict_cli_emits_run_logs_and_readers_leave_attempt_unchanged(tmp_path:
     )
     assert executed.exit_code == 0, executed.output
     attempt = next(path for path in runs.iterdir() if path.is_dir())
-    events = [json.loads(line) for line in (attempt / "operational.jsonl").read_bytes().splitlines()]
+    events = [
+        json.loads(line) for line in (attempt / "operational.jsonl").read_bytes().splitlines()
+    ]
     assert events
     assert {event["run_id"] for event in events} == {attempt.name}
     assert {event["strategy_id"] for event in events} == {"bounded-long-v1"}
