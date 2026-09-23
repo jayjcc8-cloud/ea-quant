@@ -209,7 +209,11 @@ external write, deployment, or live capability is part of this objective.
 
 - Issue #208 / ADR 0043 adds explicit research Candidates over verified source and chronological
   Holdout evidence. Immutable exact-evidence fingerprints and human ACCEPTED/REJECTED reasons
-  persist under the existing workspace lock; decisions grant no execution permission.
+  persist under the existing workspace lock; decisions grant no execution permission. PPV-07 /
+  ADR 0047 adds read-only accepted identity inspection and guarded offline execution through
+  `ea candidate inspect/run`. Fresh artifact, parameter and configuration identity is checked
+  before executable package loading; logs and `candidate-binding.json` retain the identity.
+  See [Candidate usage](candidate-lifecycle.md). Continuous Paper composition remains PPV-11.
 
 ## Incomplete
 
@@ -280,6 +284,7 @@ machinery and the delivery-process requirements of ADRs 0026 and 0028. Historica
 immutable. Merged code, tests, and CI remain the authority for actual behavior.
 
 - [ADR 0043 — Research Candidate Runtime V1](adr/0043-research-candidate-runtime-v1.md) — implements the proposed Candidate identity and decision contract.
+- [ADR 0047 — Accepted Candidate Loading V1](adr/0047-accepted-candidate-loading-v1.md) — guards frozen artifact/configuration loading and propagates accepted identity.
 
 ## Primary Issues
 
