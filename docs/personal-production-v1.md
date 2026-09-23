@@ -5,8 +5,38 @@
 Run one validated strategy on one real server and eventually one personal real account,
 with observable, recoverable, auditable and stoppable operation. PPV-00 is inspection and
 planning only. This document is the canonical bounded PPV plan, linked from ROADMAP;
-STATUS remains the current product-state authority. Nothing here activates Paper, Live,
-deployment, credentials, publication or external orders. Later units require explicit authorization.
+STATUS remains the current product-state authority. Delivery and local acceptance do not imply
+host validation or Live authorization. Deployment, credentials, publication and external orders
+remain outside the authorization below.
+
+## Personal Production V2 Phase A
+
+The Product Owner authorizes sequential PPV-04 → PPV-07 → PPV-08 → PPV-09 → PPV-10 → PPV-11
+delivery, with each work unit merged before the next starts. The target is a real Mac-local
+continuous Paper runtime using simulated feed and Paper broker, an explicitly accepted candidate,
+existing strategy/risk/portfolio/ledger authorities and correlated operational logs. Accepted
+candidate status alone grants no execution permission. A real installed product-entry acceptance
+at PPV-11 must prove orders, fills, cash/equity, positions, duplicate protection, a failure path and
+controlled shutdown.
+
+REPO_DELIVERY, LOCAL_ACCEPTANCE, HOST_VALIDATION and LIVE_AUTHORIZATION are distinct claims.
+VPS_DEPLOYMENT=DENIED; LIVE_ORDER_AUTHORIZATION=DENIED. PPV-02 target-host validation remains
+NOT_YET_HOST_VERIFIED. PPV-03 readiness finalization, 05/06 infrastructure, 12/13 durable recovery
+and reconciliation finalization, 14/15 operational guards, 16 soak and 17–19 real broker/Live are
+deferred. No new governance system or execution engine is part of Phase A.
+
+## PPV-04 structured operational logging contract
+
+When read from merged main with required validation/CI passing, Issue #220 delivers correlated
+JSON operational logging over the existing deterministic scenario/simulator path. Reused economic
+IDs connect market, strategy, risk, submission, execution fact, Fill, acknowledged portfolio and
+reconciliation observations. Candidate/account context is nullable where no such identity exists.
+Logs have no economic authority and sink failures cannot change economic behavior. See
+[the event and identity contract](operational-logging.md); audit/ledger formats remain unchanged.
+
+Acceptance uses focused logging contract/runtime tests and existing economic/resume regressions.
+This is PPV-04 repository delivery, not the continuous Paper product gate. The next work unit is
+PPV-07 Candidate Lifecycle V1.
 
 ## PPV-01 execution-cost contract
 
@@ -236,7 +266,7 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | PPV-01 Execution Cost Closeout | SATISFIED | #213; #214; ADRs 0044/0045; execution-cost contract above | Liquidity explicitly DEFERRED | Existing research | Deterministic commission, slippage and latency; stop research realism expansion |
 | PPV-02 Production Runtime Profile | SATISFIED | #218; ADR 0046; runtime contract above | Target VPS deployment/boot acceptance NOT_YET_HOST_VERIFIED | Existing bundle and offline Web | One supervised loopback service, persistent workspace, explicit compatible activation/rollback |
 | PPV-03 Health & Readiness | PARTIAL | E6 | Dynamic fail-closed readiness | 02; final feed/recovery/broker signals from 10/12/13 | Distinguish alive from permitted to trade |
-| PPV-04 Structured Logging | PARTIAL | E12 | Operational event schema/correlation/rotation | 02, existing audit IDs | Reuse RunId/order/fact IDs; preserve audit authority and redact secrets |
+| PPV-04 Structured Logging | SATISFIED | #220; logging contract above | Continuous-runtime composition remains PPV-11; infrastructure deferred | Existing audit and economic IDs | JSON events with causal IDs; economic behavior unchanged |
 | PPV-05 Backup & Restore | MISSING | E5/E13 | Consistent snapshot, retention, isolated restore and integrity checks | 02; final runtime persistence 12 | Quiesced or proven consistent backup, restore drill; no state repair |
 | PPV-06 Monitoring & Alerts | MISSING | E6/E13 | Signals, thresholds, delivery and alert test | 03/04/05; 13/14/15 operational states | One operator/channel; actionable liveness, reconciliation, disk and backup alerts |
 | PPV-07 Candidate V1 | PARTIAL | E2/E3/E14; #208 | Immutable evidence-bound candidate and human terminal decision | 01 for final strategy validation; existing source/Holdout | Continue #208 under its existing repair decision; no new candidate engine or auto-promotion |

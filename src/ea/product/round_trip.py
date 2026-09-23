@@ -44,6 +44,7 @@ from ea.portfolio import create_portfolio_ledger, create_portfolio_planning_auth
 from ea.product import backtest as b
 from ea.product.identity import semantic_outcome_sha256
 from ea.product.offline_demo import _audit_bytes, _DemoAudit, _GlobalHaltView, _InstrumentGateView
+from ea.product.operational import ProductObservation
 from ea.product.scenario import _next_bar_entry_delay_maximum
 from ea.reconciliation import create_phase1_reconciliation_authority
 from ea.runtime import (
@@ -66,7 +67,9 @@ def execute_round_trip(
     audit: Any = None,
     on_funding: Any = None,
     on_frontier: Any = None,
+    operational_logger: Any = None,
 ) -> tuple[dict[str, object], bytes, dict[str, object]]:
+    operations = ProductObservation(operational_logger)
     audit = _DemoAudit(binding, scenario.spec_set) if audit is None else audit
     prepared = audit.append(
         record_kind=AuditRecordKind.RUN_PREPARED,
@@ -94,6 +97,12 @@ def execute_round_trip(
     funding_document = b._funding_document(funding, funding_outcome)
     if on_funding is not None:
         on_funding(funding_document)
+    operations.emit(
+        "portfolio.funded",
+        amount=scenario.initial_cash.text,
+        currency=scenario.funding_currency.code,
+        ledger_sequence=1,
+    )
     if on_frontier is not None:
         on_frontier("funding_durable")
     b._interrupt("funding_durable")
@@ -159,6 +168,7 @@ def execute_round_trip(
     market_index = 0
     while True:
         active = lifecycle.coordinator.begin_next_dispatch()
+        operations.window(runtime, lifecycle, economic_gate)
         if active.dispatch_kind is HistoricalDispatchKind.END_OF_RUN:
             end_window = active
             break
@@ -190,6 +200,8 @@ def execute_round_trip(
                         PositionViewV2(state, quantity),
                     )
                 )
+                if action.action == "HOLD":
+                    operations.hold(root, lease.dispatch_sequence)
                 if action.action != "HOLD":
                     entering = action.action == "ENTER_LONG"
                     if (
@@ -247,17 +259,20 @@ def execute_round_trip(
                         dispatch_sequence=lease.dispatch_sequence,
                         direction=SignalDirection.LONG if entering else SignalDirection.FLAT,
                     )
+                    operations.strategy(signal)
                     intent = planner.plan(signal).intent
                     if intent is None:
                         raise ValueError("action did not produce an intent")
                     risk = economic_gate.risk_authority.evaluate(
                         intent, economic_gate.ledger.snapshot
                     )
+                    operations.risk(signal, risk)
                     if risk.decision.kind is RiskDecisionKind.REJECT or (
                         not entering and risk.decision.kind is not RiskDecisionKind.ALLOW
                     ):
                         raise ValueError("round trip risk rejected or resized exit")
                     order = orders.create_order(intent, risk)
+                    operations.order(order, signal)
                     if (order.quantity != quantity and not entering) or order.side.value != (
                         "buy" if entering else "sell"
                     ):
@@ -271,7 +286,8 @@ def execute_round_trip(
                         causal_market_root=root,
                         dispatch_sequence=lease.dispatch_sequence,
                     )
-                    lifecycle.coordinator.submit_authorized_order(active, order)
+                    receipt = lifecycle.coordinator.submit_authorized_order(active, order)
+                    operations.submitted(order, receipt)
                     pending = True
             market_index += 1
         lifecycle.coordinator.complete_active_dispatch(active)
@@ -323,6 +339,7 @@ def execute_round_trip(
         )
         outcome = reconciliation.admit_observation(observation, dispatch_sequence=sequence)
         b._append_reconciliation(audit, outcome)
+        operations.reconciliation(outcome, position=position)
         if outcome.outcome_code is not OutcomeCode.RECONCILIATION_MATCH:
             raise ValueError("round trip reconciliation failed")
     if on_frontier is not None:
