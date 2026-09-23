@@ -11,17 +11,24 @@ source. Existing `audit.jsonl`, manifest, funding, result and formal reports kee
   never be inferred from a job ID, strategy name or ledger posting category.
 - `correlation_id` is the originating strategy signal's existing EconomicId, carried through
   intent, risk, order, fact, Fill and ledger. `market_event_id` links that decision to admitted data.
-- `order_id` and `fill_id` encode existing run-scoped EconomicIds. `client_order_id` exposes
+- `order_id` and `fill_id` use the canonical digests of existing run-scoped EconomicIds.
+  `client_order_id` exposes
   the existing stable client submission key, not a newly allocated order identity.
 - `operation` distinguishes a fresh execution from observational replay during supported resume.
 
-Each line is one JSON object with a versioned schema, event name, timestamp and sequence, with
+Each line is one JSON object with schema `ea.operational-log.v1`, event name, timestamp and sequence, with
 applicable identity and outcome fields. Decimal economic values stay decimal strings. Context
 is explicitly passed per run so concurrent Web workers cannot inherit another run's identity.
 Only selected scalars are logged; strategy source, full configuration, arbitrary exception text
 and credentials are not log payloads.
 
 ## Reconstruction and failure
+
+The event names are `run.started`, `portfolio.funded`, `market.event`, `strategy.decision`,
+`risk.decision`, `order.created`, `broker.submitted`, `execution.fact`, `execution.fill`,
+`portfolio.updated`, `reconciliation.result`, and `run.completed`/`run.failed`. Broker events in
+this work unit describe the existing local historical simulator. The legacy run-only RESET demo
+is unchanged; logging is provided by the strict scenario path used by both CLI and Web jobs.
 
 Filter by `run_id`, then follow the market event and signal correlation to the risk decision and
 order/client key. Match the simulator submission result, execution facts and Fill to those IDs;
