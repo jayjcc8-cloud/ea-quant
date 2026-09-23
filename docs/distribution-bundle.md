@@ -20,3 +20,7 @@ already cached. Running the local product requires neither Node.js nor the sourc
 
 This command only builds an unpublished artifact. A release requires its own verified version,
 exact commit, artifact hashes and explicit Product Owner authorization before tagging or publishing.
+
+The bundle also includes `runtime.py`, `ea.service`, `runtime.toml.example` and `RUNTIME.md`
+for the [Production Runtime Profile](production-runtime.md). These are inert until explicitly
+configured and activated; building or extracting a bundle never starts or installs a service.

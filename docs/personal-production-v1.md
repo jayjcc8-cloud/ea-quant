@@ -37,7 +37,29 @@ Acceptance evidence: `tests/unit/test_commission.py`, `test_slippage.py` and
 results, invalid inputs, identity binding, fractional settlement, deterministic recovery and
 frozen research inputs. Installed browser flows in `apps/web/e2e/local-backtest.spec.ts` exercise
 formal results, refresh and download. Required CI and delivery evidence belong to the PR.
-Candidate, Paper/Live, broker, production runtime and advanced execution realism remain deferred.
+Candidate, Paper/Live, broker and advanced execution realism remain deferred. PPV-02 below adds only the runtime profile.
+
+## PPV-02 production runtime contract
+
+When read from merged main with required validation/CI passing, PPV-02 is SATISFIED at the
+repository-delivery boundary. The [Production Runtime Profile](production-runtime.md) provides
+one pinned existing bundle, strict explicit configuration, persistent external inputs/workspace,
+and one systemd-supervised loopback offline research service. The launcher verifies commit,
+manifest/payload hashes and the noneditable installed EA bytes, then execs the existing Web CLI.
+Systemd enables boot eligibility and bounded failure restart; operator stop stays stopped.
+
+Activation stops the single writer, explicitly changes the pinned release/configuration, and
+retains workspace. Rollback requires established state-format compatibility; unknown compatibility
+leaves the service stopped. PPV-01/02 installed acceptance asserts identical EA package bytes and
+reopens the same completed formal report after restart, activation and rollback without state
+rewrite. No generalized migration or recovery mechanism is added.
+
+Evidence: `tests/unit/test_production_runtime.py`, `scripts/accept_production_runtime.py`, and
+`Production runtime acceptance / installed-systemd` CI on the delivery PR. The Linux CI test
+exercises the actual service manager, failure restart limit and enablement. A target VPS has not
+been provisioned or reboot-tested: HOST_VALIDATION=NOT_YET_HOST_VERIFIED. No actual deployment,
+public exposure, Paper/Live, broker, monitoring, backup or later PPV unit is authorized by delivery.
+See [ADR 0046](adr/0046-production-runtime-profile-v1.md).
 
 ## CURRENT_BASELINE
 
@@ -212,7 +234,7 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | Work unit | STATUS | CURRENT_EVIDENCE | REMAINING_GAP | DEPENDENCIES | RECOMMENDED_SCOPE |
 |---|---|---|---|---|---|
 | PPV-01 Execution Cost Closeout | SATISFIED | #213; #214; ADRs 0044/0045; execution-cost contract above | Liquidity explicitly DEFERRED | Existing research | Deterministic commission, slippage and latency; stop research realism expansion |
-| PPV-02 Production Runtime Profile | PARTIAL | E4/E5/E11 | One server profile, persistent paths, startup/restart, pinned activation/rollback | Existing bundle; runtime hooks completed with 11/12 | One service process and workspace; preserve loopback access; deployment separately authorized |
+| PPV-02 Production Runtime Profile | SATISFIED | #218; ADR 0046; runtime contract above | Target VPS deployment/boot acceptance NOT_YET_HOST_VERIFIED | Existing bundle and offline Web | One supervised loopback service, persistent workspace, explicit compatible activation/rollback |
 | PPV-03 Health & Readiness | PARTIAL | E6 | Dynamic fail-closed readiness | 02; final feed/recovery/broker signals from 10/12/13 | Distinguish alive from permitted to trade |
 | PPV-04 Structured Logging | PARTIAL | E12 | Operational event schema/correlation/rotation | 02, existing audit IDs | Reuse RunId/order/fact IDs; preserve audit authority and redact secrets |
 | PPV-05 Backup & Restore | MISSING | E5/E13 | Consistent snapshot, retention, isolated restore and integrity checks | 02; final runtime persistence 12 | Quiesced or proven consistent backup, restore drill; no state repair |
