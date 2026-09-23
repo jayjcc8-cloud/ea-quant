@@ -37,7 +37,12 @@ from ea.core import (
     require_positive,
     require_quantized,
 )
-from ea.core.commission import commission_policy_identity, require_commission_bps
+from ea.core.commission import (
+    commission_policy_identity,
+    execution_cost_policy_identity,
+    require_commission_bps,
+    require_slippage_bps,
+)
 from ea.core.economics import EconomicValidationError
 from ea.core.run import RunContractError
 from ea.data import HistoricalMarketDataError, Phase1HistoricalDataset, read_phase1_ohlcv_csv
@@ -160,9 +165,15 @@ class _CommissionInput(_StrictModel):
     commission_bps: StrictStr
 
 
+class _SlippageInput(_StrictModel):
+    policy: Literal["deterministic-slippage-v1"]
+    slippage_bps: StrictStr
+
+
 class _ExecutionInput(_StrictModel):
     policy: Literal["phase1.next-bar-close.v1"]
     commission: _CommissionInput | None = None
+    slippage: _SlippageInput | None = None
 
 
 class _ScenarioInput(_StrictModel):
@@ -447,6 +458,8 @@ def _canonical_bytes(
         document["strategy"].pop("source")
     if model.execution.commission is None:
         document["execution"].pop("commission")
+    if model.execution.slippage is None:
+        document["execution"].pop("slippage")
     data = dict(document["data"])
     data.pop("path")
     document["data"] = data
@@ -779,12 +792,21 @@ def _load_scenario_document(
         except ValueError as error:
             raise BacktestScenarioError(str(error)) from None
     execution_policy = _ACCEPTED_EXECUTION_POLICY
-    if model.execution.commission is not None:
+    if model.execution.commission is not None or model.execution.slippage is not None:
         try:
-            bps = require_commission_bps(
-                CanonicalDecimal(model.execution.commission.commission_bps)
+            bps = (
+                None
+                if model.execution.commission is None
+                else require_commission_bps(
+                    CanonicalDecimal(model.execution.commission.commission_bps)
+                )
             )
-            identifier, digest = commission_policy_identity(bps)
+            if model.execution.slippage is not None:
+                slip = require_slippage_bps(CanonicalDecimal(model.execution.slippage.slippage_bps))
+                identifier, digest = execution_cost_policy_identity(slip, bps)
+            else:
+                assert bps is not None
+                identifier, digest = commission_policy_identity(bps)
             execution_policy = ExecutionPolicyRef(
                 ExecutionPolicyId(identifier), Sha256Digest(digest)
             )

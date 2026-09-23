@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import NamedTuple, Protocol, final
 from weakref import WeakKeyDictionary
 
-from ea.core.commission import commission_bps_from_identity
+from ea.core.commission import commission_bps_from_identity, slippage_bps_from_identity
 from ea.core.economics import CanonicalDecimal, EconomicValidationError, require_positive
 from ea.core.execution import (
     InstrumentExecutionSpec,
@@ -532,8 +532,11 @@ def _quantized_close(
     *,
     side: OrderSide,
     specification: InstrumentExecutionSpec,
+    slippage_bps: CanonicalDecimal | None = None,
 ) -> CanonicalDecimal:
-    return _quantized_historical_close(close, side=side, specification=specification)
+    return _quantized_historical_close(
+        close, side=side, specification=specification, slippage_bps=slippage_bps
+    )
 
 
 def _canonical_runtime_key_bytes(value: RuntimeRootOrderKey) -> bytes:
@@ -2381,6 +2384,10 @@ class Phase1HistoricalMatcher:
                     close,
                     side=record.order.side,
                     specification=self._spec_set.require(record.order.instrument),
+                    slippage_bps=slippage_bps_from_identity(
+                        self._execution_policy.identifier.value,
+                        self._execution_policy.sha256.value,
+                    ),
                 )
             observation_sha256 = historical_matcher_observation_digest(
                 fact_sequence=fact_sequence,
