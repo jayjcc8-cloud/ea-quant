@@ -188,7 +188,12 @@ external write, deployment, or live capability is part of this objective.
 - Issue #212 / ADR 0044 adds explicit deterministic adverse slippage in basis points to the
   existing next-bar-close policy. Actual Fill prices drive commission, settlement and formal
   reports; persisted Web assumptions, compatible Holdout and supported resume retain the policy.
-  Omitted slippage preserves historical identities. Timing and liquidity models remain future work.
+  Omitted slippage preserves historical identities. Liquidity models remain future work.
+
+- Issue #214 / ADR 0045 adds explicit execution latency in milliseconds, independently of strategy
+  entry delay. Matching and fact/history verification use the first eligible bar strictly after
+  the original submission-time bound. Combined costs, frozen Web assumptions and supported resume
+  retain this policy; source exhaustion preserves expiry without fabricated fills. Liquidity remains future work.
 
 ## Incomplete
 
@@ -248,6 +253,7 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 
 - [ADR 0042 — Bounded Long Round Trips V1](adr/0042-bounded-long-round-trips-v1.md) — Accepted; repeated offline research and versioned evidence.
 - [ADR 0044 — Deterministic Adverse Slippage V1](adr/0044-deterministic-adverse-slippage-v1.md) — explicit offline execution cost assumption.
+- [ADR 0045 — Deterministic Execution Latency V1](adr/0045-deterministic-execution-latency-v1.md) — explicit minimum post-submission delay.
 
 Proposed architecture (not implemented capabilities):
 

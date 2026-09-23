@@ -686,6 +686,26 @@ def _execute(
     legacy_entry = scenario.strategy_entry
     if not isinstance(legacy_entry, StrategyEntryV1):
         raise ValueError("V1 route requires V1 strategy")
+    if (
+        order is not None
+        and not fills
+        and end_of_run_window is not None
+        and "latency" in json.loads(scenario.canonical_bytes)["execution"]
+    ):
+        raise _AttemptFailure(
+            OutcomeCode.ORDER_EXPIRED_NO_ELIGIBLE_MARKET_DATA,
+            "order expired before a market event satisfied execution latency",
+            _audit_bytes(audit.records),
+            funding_document,
+            {
+                "fill": None,
+                "order": {
+                    "order_id": _id_document(order.order_id),
+                    "quantity": order.quantity.text,
+                    "side": order.side.value,
+                },
+            },
+        )
     legacy_entry.validate_outcome(0 if order is None else 1, len(fills))
     snapshot = economic_gate.ledger.snapshot
     replay_ledger = create_portfolio_ledger(run_id, scenario.spec_set)

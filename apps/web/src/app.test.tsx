@@ -615,7 +615,7 @@ describe('EA Quant local Web backtests', () => {
 it('shows persisted commission assumptions and formal report fees', async () => {
   const feeJob = { ...job, input_snapshot: { ...job.input_snapshot!, scenario: {
     ...job.input_snapshot!.scenario,
-    execution: { policy: 'phase1.next-bar-close.v1', commission: { policy: 'deterministic-commission-v1', commission_bps: '100' }, slippage: { policy: 'deterministic-slippage-v1', slippage_bps: '25' } },
+    execution: { policy: 'phase1.next-bar-close.v1', commission: { policy: 'deterministic-commission-v1', commission_bps: '100' }, slippage: { policy: 'deterministic-slippage-v1', slippage_bps: '25' }, latency: { policy: 'deterministic-latency-v1', latency_ms: 60000 } },
   } } }
   const feeReport = { ...report, economics: { ...report.economics,
     fees: { amount: '2.03', count: 1, currency: 'USD', rule: 'deterministic-commission-v1' },
@@ -625,6 +625,7 @@ it('shows persisted commission assumptions and formal report fees', async () => 
   expect(await screen.findByText('deterministic-commission-v1 · 100 bps')).toBeTruthy()
   expect(await screen.findByText('2.03 USD')).toBeTruthy()
   expect(await screen.findByText('25 bps adverse slippage')).toBeTruthy()
+  expect(await screen.findByText('60000 ms execution latency')).toBeTruthy()
   expect(screen.queryByLabelText('Commission bps')).toBeNull()
 })
 

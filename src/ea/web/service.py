@@ -214,6 +214,7 @@ def _scenario_summary(
             "record_count": scenario.dataset.selection.fingerprint.record_count,
             "commission": json.loads(scenario.canonical_bytes)["execution"].get("commission"),
             "slippage": json.loads(scenario.canonical_bytes)["execution"].get("slippage"),
+            "latency": json.loads(scenario.canonical_bytes)["execution"].get("latency"),
             "data": json.loads(scenario.canonical_bytes)["data"],
         },
         "strategy_parameters": _strategy_parameter_contracts(scenario, defaults=defaults),

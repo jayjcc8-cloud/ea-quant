@@ -16,6 +16,7 @@ from weakref import WeakKeyDictionary
 
 from ea.core.commission import (
     commission_bps_from_identity,
+    execution_latency_allows,
     require_slippage_bps,
     slippage_bps_from_identity,
 )
@@ -2974,8 +2975,12 @@ def canonical_historical_matcher_observation_bytes(
             or suffix.adjustment != Adjustment.RAW.value
             or suffix.revision != 0
             or trigger_root_key <= submission_receipt.causal_root_key
-            or cast(MarketDataEnvelope, trigger_root).event_time
-            <= order.eligible_after_available_at
+            or not execution_latency_allows(
+                cast(MarketDataEnvelope, trigger_root).event_time,
+                order.eligible_after_available_at,
+                execution_policy.identifier.value,
+                execution_policy.sha256.value,
+            )
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "trade observation fields conflict")
     elif fact_kind == "expiry":
@@ -3569,7 +3574,12 @@ def _expected_decoded_batch_ingress(
             or trigger_root.payload.adjustment is not Adjustment.RAW
             or trigger_root.revision != 0
             or root_key <= runtime_root_order_key(causal_root)
-            or trigger_root.event_time <= order.eligible_after_available_at
+            or not execution_latency_allows(
+                trigger_root.event_time,
+                order.eligible_after_available_at,
+                context.execution_policy.identifier.value,
+                context.execution_policy.sha256.value,
+            )
         ):
             raise _fail(OutcomeCode.CONFLICTING_ID, "batch market eligibility conflicts")
         fact_kind = "trade"
@@ -4161,7 +4171,12 @@ def decode_historical_matcher_state(
                     and trigger_root.payload.adjustment is Adjustment.RAW
                     and trigger_root.revision == 0
                     and batch.trigger_root_key > receipt.causal_root_key
-                    and trigger_root.event_time > order.eligible_after_available_at
+                    and execution_latency_allows(
+                        trigger_root.event_time,
+                        order.eligible_after_available_at,
+                        context.execution_policy.identifier.value,
+                        context.execution_policy.sha256.value,
+                    )
                 )
             )
         else:

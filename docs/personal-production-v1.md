@@ -8,6 +8,37 @@ planning only. This document is the canonical bounded PPV plan, linked from ROAD
 STATUS remains the current product-state authority. Nothing here activates Paper, Live,
 deployment, credentials, publication or external orders. Later units require explicit authorization.
 
+## PPV-01 execution-cost contract
+
+PPV-01 closes deterministic research execution costs. When read from merged main with
+passing required CI, the delivered state is COMMISSION=SATISFIED, SLIPPAGE=SATISFIED,
+LATENCY=SATISFIED, LIQUIDITY=DEFERRED. A branch copy is a candidate, not delivery evidence.
+
+- Commission: explicit deterministic bps, calculated once per Fill from its actual execution
+  price and currency-quantized half-even; existing ledger and formal reports retain after-fee economics.
+- Slippage: optional fixed adverse bps in [0,10000); buy adds and sell subtracts the absolute
+  close-based adjustment, then nearest-tick rounding with adverse ties. Small adjustments can
+  round to the same price. See [ADR 0044](adr/0044-deterministic-adverse-slippage-v1.md).
+- Latency: optional strict integer `latency_ms` in [0,86400000]. The first otherwise eligible
+  initial raw bar must have event time strictly after original submission availability plus
+  latency; equality is skipped. The delayed close supplies the slipped Fill price and commission
+  base. Latency is not a fee or strategy entry delay. See [ADR 0045](adr/0045-deterministic-execution-latency-v1.md).
+- Omitted options preserve historical identities. Explicit zero preserves economics but records
+  a distinct assumption. Canonical scenario/policy identities, frozen Web inputs, audit, report
+  verification and supported resume retain the cost contract; invalid configuration is rejected.
+- Liquidity is explicitly DEFERRED: historical matching fills the entire order at the eligible
+  bar-based price without volume participation, partial fills, market impact or venue simulation.
+  This does not establish Paper or Live execution realism. If no bar qualifies, existing expiry
+  semantics apply: entry-required V1 fails without a success report; bounded V4/V5 retains actual
+  no-trade/open-position economics without a forced fill or exit.
+
+Acceptance evidence: `tests/unit/test_commission.py`, `test_slippage.py` and
+`test_execution_latency.py` cover exact costs, zero/nonzero/boundary timing, combined after-fee
+results, invalid inputs, identity binding, fractional settlement, deterministic recovery and
+frozen research inputs. Installed browser flows in `apps/web/e2e/local-backtest.spec.ts` exercise
+formal results, refresh and download. Required CI and delivery evidence belong to the PR.
+Candidate, Paper/Live, broker, production runtime and advanced execution realism remain deferred.
+
 ## CURRENT_BASELINE
 
 Inspected 2026-09-23 (Asia/Shanghai).
@@ -173,13 +204,14 @@ would mark a capability irrelevant to this mission; none of the requested capabi
 
 ## PPV-01 ... PPV-19 STATUS
 
-No entire production work unit is SATISFIED at this baseline. Reuse the satisfied research
+The PPV-00 inspection below is historical; PPV-01 is satisfied by its merged execution-cost
+contract and passing delivery evidence above. Reuse the satisfied research
 capabilities above; do not rebuild commission, holdout, comparison, identity or local persistence.
 Dependencies below are closure prerequisites; bounded design may begin before all are delivered.
 
 | Work unit | STATUS | CURRENT_EVIDENCE | REMAINING_GAP | DEPENDENCIES | RECOMMENDED_SCOPE |
 |---|---|---|---|---|---|
-| PPV-01 Execution Cost Closeout | PARTIAL | E1; #212/#213/#214 | Merge/verify slippage, latency; explicit bounded liquidity assumption | Existing research | Finish existing work, then minimal liquidity constraints/limitations; no complex simulator |
+| PPV-01 Execution Cost Closeout | SATISFIED | #213; #214; ADRs 0044/0045; execution-cost contract above | Liquidity explicitly DEFERRED | Existing research | Deterministic commission, slippage and latency; stop research realism expansion |
 | PPV-02 Production Runtime Profile | PARTIAL | E4/E5/E11 | One server profile, persistent paths, startup/restart, pinned activation/rollback | Existing bundle; runtime hooks completed with 11/12 | One service process and workspace; preserve loopback access; deployment separately authorized |
 | PPV-03 Health & Readiness | PARTIAL | E6 | Dynamic fail-closed readiness | 02; final feed/recovery/broker signals from 10/12/13 | Distinguish alive from permitted to trade |
 | PPV-04 Structured Logging | PARTIAL | E12 | Operational event schema/correlation/rotation | 02, existing audit IDs | Reuse RunId/order/fact IDs; preserve audit authority and redact secrets |
