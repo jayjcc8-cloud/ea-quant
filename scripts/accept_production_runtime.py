@@ -258,24 +258,32 @@ def accept(old_bundle: Path, new_bundle: Path, root: Path, systemd: bool) -> Non
             wait_for(lambda: pid() not in (0, before) and available())
             assert int(ctl("show", "--property=NRestarts", "--value")) >= 1
             report_equal(job, report)
-            # Repeated real process failures exhaust the canonical 3 starts / 60 seconds.
+
+            # systemd versions may retain Result=signal when the next start is rate-limited.
+            # Require the actual terminal state and exhausted restart count, not that label.
+            def exhausted() -> bool:
+                return (
+                    ctl("show", "--property=ActiveState", "--value") == "failed"
+                    and pid() == 0
+                    and int(ctl("show", "--property=NRestarts", "--value")) == 3
+                )
+
             for _ in range(2):
                 previous = pid()
                 ctl("kill", "--kill-whom=main", "--signal=SIGKILL")
                 wait_for(
                     lambda previous=previous: (
-                        ctl("show", "--property=Result", "--value") == "start-limit-hit"
-                        or (pid() not in (0, previous) and available())
+                        exhausted() or (pid() not in (0, previous) and available())
                     )
                 )
-                if ctl("show", "--property=Result", "--value") == "start-limit-hit":
+                if exhausted():
                     break
-            wait_for(
-                lambda previous=previous: (
-                    ctl("show", "--property=Result", "--value") == "start-limit-hit"
-                )
-            )
+            wait_for(exhausted)
+            time.sleep(6)
+            assert exhausted() and not available()
             evidence["bounded_failure_restart"] = "VERIFIED"
+            evidence["limit_result"] = ctl("show", "--property=Result", "--value")
+            evidence["limit_restart_count"] = 3
             ctl("reset-failed")
             start()
             stop()
