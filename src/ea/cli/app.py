@@ -412,7 +412,9 @@ def candidate_inspect(
     from ea.product.candidate import inspect_candidate_binding
 
     try:
-        binding = inspect_candidate_binding(workspace.expanduser().absolute(), candidate_id)
+        binding = inspect_candidate_binding(
+            workspace.expanduser().resolve(strict=True), candidate_id
+        )
     except (OSError, ValueError, KeyError, TypeError):
         typer.echo("candidate rejected: accepted identity and intact evidence required", err=True)
         raise typer.Exit(code=3) from None
@@ -430,7 +432,9 @@ def candidate_run(
     from ea.product.candidate import inspect_candidate_binding, run_accepted_candidate
 
     try:
-        binding = inspect_candidate_binding(workspace.expanduser().absolute(), candidate_id)
+        binding = inspect_candidate_binding(
+            workspace.expanduser().resolve(strict=True), candidate_id
+        )
         completed = run_accepted_candidate(
             binding,
             scenario.expanduser().absolute(),

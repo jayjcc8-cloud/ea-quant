@@ -27,7 +27,9 @@ def test_candidate_cli_requires_acceptance_and_binds_real_offline_run(tmp_path: 
         assert response.status_code == 201
         candidate_id = response.json()["candidate_id"]
         runner = CliRunner()
-        selection = ["--workspace", str(settings.workspace), "--candidate-id", candidate_id]
+        workspace_alias = tmp_path / "workspace-alias"
+        workspace_alias.symlink_to(settings.workspace, target_is_directory=True)
+        selection = ["--workspace", str(workspace_alias), "--candidate-id", candidate_id]
         rejected = runner.invoke(app, ["candidate", "inspect", *selection])
         assert rejected.exit_code == 3
         accepted = client.post(
