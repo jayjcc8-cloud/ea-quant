@@ -22,6 +22,13 @@ external write, deployment, or live capability is part of this objective.
 
 ## Completed
 
+- Issue #224 adds PPV-08 local Paper order command tracking over issued Orders. Submission
+  uncertainty blocks blind resend; cancel requests remain separate from fact confirmation.
+  Existing execution facts retain partial/full and late Fills, terminal anomalies and dedup,
+  with direct cash/position/ledger tests. The tracker grants no execution permission and provides
+  no crash recovery. Broker transport and continuous Paper remain PPV-09/11. See the
+  [order lifecycle contract](personal-production-v1.md#ppv-08-local-paper-order-command-lifecycle).
+
 - Issue #220 adds PPV-04 Structured Operational Logging V1 to the existing scenario runtime.
   Machine-readable operational events reuse run, strategy, signal, order, client submission and
   Fill identities through simulation, ledger updates and reconciliation. Logs remain observational;
