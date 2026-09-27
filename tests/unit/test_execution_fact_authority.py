@@ -65,6 +65,7 @@ from ea.core import (
     prepare_bounded_runtime_roots,
 )
 from ea.core.execution import InstrumentExecutionSpecSet
+from ea.core.portfolio import InitialFunding
 from ea.execution import (
     ExecutionFactAuthorityError,
     Phase1ExecutionFactAuthority,
@@ -73,6 +74,13 @@ from ea.execution import (
     create_phase1_order_authority,
 )
 from ea.execution import fact_authority as fact_authority_module
+from ea.execution.order_lifecycle import (
+    CancellationAttemptState,
+    OrderCommandError,
+    OrderCommandTracker,
+    SubmissionAttemptState,
+)
+from ea.portfolio import create_portfolio_ledger
 from ea.risk import create_phase1_risk_authority
 from ea.runtime import (
     DeterministicRootQueue,
@@ -2425,3 +2433,170 @@ def test_fact_and_queue_authorities_are_factory_only() -> None:
         DeterministicRootQueue()
     with pytest.raises(TypeError):
         RuntimeDispatchLease()
+
+
+def test_order_command_normal_fill_has_one_economic_effect() -> None:
+    spec_set, orders_authority, orders = _orders(quantity="2")
+    order = orders[0]
+    tracker = OrderCommandTracker(orders_authority)
+    command = tracker.begin_submit(order)
+    assert command is not None
+    assert command.client_submission_key == order.client_submission_key
+    assert tracker.begin_submit(order) is None
+    submit_result = tracker.record_submit_result(command, SubmissionAttemptState.SUBMITTED)
+    assert submit_result is SubmissionAttemptState.SUBMITTED
+    with pytest.raises(OrderCommandError):
+        tracker.record_submit_result(command, SubmissionAttemptState.UNCERTAIN)
+    with pytest.raises(OrderCommandError):
+        tracker.begin_submit(_clone_slots(order, quantity=CanonicalDecimal("3")))
+
+    acknowledgement = _ingress(_lifecycle(order), sequence=1)
+    trade = _ingress(
+        _trade(
+            spec_set,
+            order,
+            external_id="full",
+            quantity="2",
+            occurred_at=TIME + timedelta(seconds=1),
+        ),
+        sequence=2,
+    )
+    _source, queue, facts = _runtime(spec_set, orders_authority, (acknowledgement, trade))
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+    ledger.apply_initial_funding(
+        InitialFunding(RUN_ID, SettlementCurrency("USD"), CanonicalDecimal("1000"))
+    )
+    ack_lease, ack = _process_next(queue, facts)
+    assert ack.fill_id is None
+    queue.acknowledge(ack_lease)
+    fill_lease, outcome = _process_next(queue, facts)
+    assert outcome.fill_id is not None
+    assert ledger.apply_fill(facts.fills[-1]).code is OutcomeCode.LEDGER_APPLIED
+    view = tracker.snapshot(order, facts)
+    assert view.projection is not None
+    assert view.projection.projection_state is OrderProjectionState.FILLED
+    assert view.projection.projected_executed_quantity == CanonicalDecimal("2")
+    assert ledger.snapshot.cash_balances[0].amount == CanonicalDecimal("800")
+    assert ledger.snapshot.position_balances[0].quantity == CanonicalDecimal("2")
+    assert ledger.snapshot.ledger_sequence == 2
+    assert len(orders_authority.orders) == 1
+    with pytest.raises(OrderCommandError):
+        tracker.begin_cancel(order, facts)
+    queue.acknowledge(fill_lease)
+
+
+def test_cancel_request_waits_for_fact_and_late_fill_still_posts_once() -> None:
+    spec_set, orders_authority, orders = _orders(quantity="2")
+    order = orders[0]
+    tracker = OrderCommandTracker(orders_authority)
+    submit = tracker.begin_submit(order)
+    assert submit is not None
+    tracker.record_submit_result(submit, SubmissionAttemptState.SUBMITTED)
+    first = _ingress(_trade(spec_set, order, external_id="partial", quantity="1"), sequence=1)
+    cancelled = _ingress(
+        _lifecycle(
+            order,
+            kind=ExecutionFactKind.CANCELLATION,
+            external_id="cancelled",
+            occurred_at=TIME + timedelta(seconds=1),
+        ),
+        sequence=2,
+    )
+    late_fact = _trade(
+        spec_set,
+        order,
+        external_id="late",
+        quantity="1",
+        occurred_at=TIME + timedelta(seconds=2),
+    )
+    late = _ingress(late_fact, sequence=3)
+    duplicate = _ingress(late_fact, sequence=4)
+    _source, queue, facts = _runtime(
+        spec_set, orders_authority, (first, cancelled, late, duplicate)
+    )
+    ledger = create_portfolio_ledger(RUN_ID, spec_set)
+    ledger.apply_initial_funding(
+        InitialFunding(RUN_ID, SettlementCurrency("USD"), CanonicalDecimal("1000"))
+    )
+
+    first_lease, first_outcome = _process_next(queue, facts)
+    assert first_outcome.fill_id is not None
+    assert ledger.apply_fill(facts.fills[-1]).code is OutcomeCode.LEDGER_APPLIED
+    queue.acknowledge(first_lease)
+    cancel = tracker.begin_cancel(order, facts)
+    assert cancel is not None
+    assert tracker.begin_cancel(order, facts) is None
+    cancel_result = tracker.record_cancel_result(cancel, CancellationAttemptState.ACCEPTED)
+    assert cancel_result is CancellationAttemptState.ACCEPTED
+    partial_view = tracker.snapshot(order, facts)
+    assert partial_view.projection is not None
+    assert partial_view.projection.projection_state is OrderProjectionState.PARTIALLY_FILLED
+    assert ledger.snapshot.cash_balances[0].amount == CanonicalDecimal("900")
+    assert ledger.snapshot.position_balances[0].quantity == CanonicalDecimal("1")
+
+    cancel_lease, cancel_outcome = _process_next(queue, facts)
+    assert cancel_outcome.fill_id is None
+    cancelled_view = tracker.snapshot(order, facts)
+    assert cancelled_view.projection is not None
+    assert cancelled_view.projection.projection_state is OrderProjectionState.CANCELLED
+    queue.acknowledge(cancel_lease)
+    late_lease, late_outcome = _process_next(queue, facts)
+    assert late_outcome.anomalies == (ExecutionFactAnomaly.LATE_AFTER_TERMINAL,)
+    assert late_outcome.requires_reconciliation
+    assert late_outcome.halt_requested
+    assert late_outcome.fill_id is not None
+    assert ledger.apply_fill(facts.fills[-1]).code is OutcomeCode.LEDGER_APPLIED
+    late_view = tracker.snapshot(order, facts)
+    assert late_view.projection is not None
+    assert late_view.projection.projection_state is OrderProjectionState.CANCELLED
+    queue.acknowledge(late_lease)
+    duplicate_lease, duplicate_outcome = _process_next(queue, facts)
+    assert duplicate_outcome.action is ExecutionFactAction.DUPLICATE
+    assert duplicate_outcome.fill_id is None
+    assert len(facts.fills) == 2
+    assert len(orders_authority.orders) == 1
+    assert ledger.snapshot.cash_balances[0].amount == CanonicalDecimal("800")
+    assert ledger.snapshot.position_balances[0].quantity == CanonicalDecimal("2")
+    assert ledger.snapshot.ledger_sequence == 3
+    queue.acknowledge(duplicate_lease)
+
+
+def test_submit_timeout_and_unknown_query_never_allow_second_send() -> None:
+    spec_set, orders_authority, orders = _orders()
+    order = orders[0]
+    tracker = OrderCommandTracker(orders_authority)
+    submit = tracker.begin_submit(order)
+    assert submit is not None
+    timeout_result = tracker.record_submit_result(submit, SubmissionAttemptState.UNCERTAIN)
+    assert timeout_result is SubmissionAttemptState.UNCERTAIN
+    unknown = _query(
+        order,
+        external_id="unknown",
+        outcome_code=OutcomeCode.RECONCILIATION_SUBMISSION_STILL_UNKNOWN,
+        occurred_at=TIME,
+        sequence=1,
+    )
+    not_sent = _query(
+        order,
+        external_id="not-sent",
+        outcome_code=OutcomeCode.RECONCILIATION_SUBMISSION_CONFIRMED_NOT_SUBMITTED,
+        occurred_at=TIME + timedelta(seconds=1),
+        sequence=2,
+    )
+    _source, queue, facts = _runtime(spec_set, orders_authority, (unknown, not_sent))
+    unknown_lease, unknown_outcome = _process_next(queue, facts)
+    assert unknown_outcome.action is ExecutionFactAction.UNRESOLVED
+    assert tracker.snapshot(order, facts).submission_state is SubmissionAttemptState.UNCERTAIN
+    assert tracker.snapshot(order, facts).projection is None
+    assert tracker.begin_submit(order) is None
+    with pytest.raises(OrderCommandError):
+        tracker.begin_cancel(order, facts)
+    queue.acknowledge(unknown_lease)
+
+    not_sent_lease, _ = _process_next(queue, facts)
+    view = tracker.snapshot(order, facts)
+    assert view.projection is not None
+    assert view.projection.projection_state is OrderProjectionState.DEFINITELY_NOT_SUBMITTED
+    assert tracker.begin_submit(order) is None
+    assert len(orders_authority.orders) == 1
+    queue.acknowledge(not_sent_lease)

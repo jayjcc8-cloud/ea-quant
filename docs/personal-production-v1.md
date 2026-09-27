@@ -50,8 +50,28 @@ persisted evidence without starting the Web service. The run guard compares conf
 executing any frozen strategy code, then uses the existing offline engine. Operational logs and a
 `candidate-binding.json` sidecar retain the accepted identity. Acceptance alone does not authorize
 Paper/Live execution. See [the Candidate usage contract](candidate-lifecycle.md) and
-[ADR 0047](adr/0047-accepted-candidate-loading-v1.md). The next work unit is PPV-08; continuous
+[ADR 0047](adr/0047-accepted-candidate-loading-v1.md). Continuous
 Paper composition and installed product acceptance remain PPV-11.
+
+## PPV-08 local Paper order command lifecycle
+
+Issue #224 adds `OrderCommandTracker` over an existing issued Order and its client submission
+identity. `begin_submit` reserves one transport attempt before any send; repeated calls return
+no send command. Pending, submitted, definitely-not-submitted and uncertain results remain
+distinct. A timeout or unknown query never permits blind resubmission, even if a later query
+proves that the original request was not submitted.
+
+Cancellation has its own single request and transport outcome. A request or accepted transport
+return does not cancel the Order: only the existing execution-fact authority can confirm that
+projection. Existing acknowledgement, rejection, partial/full Fill, expiry and cancellation
+semantics remain authoritative. Late trades after a terminal projection retain their Fill and
+reconciliation/halt evidence; duplicate facts do not create another economic effect.
+
+Direct tests use the existing Order/fact authorities and funded ledger, including independent
+cash, position and sequence expectations. The tracker owns no risk permission, Fill, balance or
+durable recovery state. Runtime composition must still authorize immediately before transport;
+an unknown process state must fail closed, without recreating a tracker to resend. The next
+work unit is PPV-09's local Paper adapter; no broker or continuous product entry is delivered here.
 
 ## PPV-01 execution-cost contract
 
@@ -285,7 +305,7 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | PPV-05 Backup & Restore | MISSING | E5/E13 | Consistent snapshot, retention, isolated restore and integrity checks | 02; final runtime persistence 12 | Quiesced or proven consistent backup, restore drill; no state repair |
 | PPV-06 Monitoring & Alerts | MISSING | E6/E13 | Signals, thresholds, delivery and alert test | 03/04/05; 13/14/15 operational states | One operator/channel; actionable liveness, reconciliation, disk and backup alerts |
 | PPV-07 Candidate V1 | SATISFIED | #208; Candidate contract above | Continuous Paper composition remains PPV-11 | Existing source/Holdout and frozen artifacts | Explicit decision, immutable identity, fresh evidence and pre-execution loading guard |
-| PPV-08 Order Lifecycle V1 | PARTIAL | E8 | Operational cancel/timeout/ambiguity and partial-fill integration | Existing order/fact authorities | Extend existing semantics; preserve late facts and dedup; no new OMS |
+| PPV-08 Order Lifecycle V1 | SATISFIED for local Paper commands | #224; contract above | Broker transport and continuous composition remain 09/11; crash recovery deferred | Existing order/fact authorities | Single submit/cancel attempt, explicit uncertainty, authoritative late facts and dedup; no new OMS |
 | PPV-09 Broker Contract V1 | PARTIAL | E8 | Bounded submit/cancel/query, client mapping and normalized failures | 08 | Narrow contract for one intended broker and paper adapter; no generic framework |
 | PPV-10 Market Event Loop | PARTIAL | E7 | Real-time feed, heartbeat, freshness, reconnect | 02/04; shared historical event contracts | One feed/instrument; preserve admission/time visibility and ordering |
 | PPV-11 Paper Trading Runtime | PARTIAL | E1/E7/E10/E11 | Continuous paper composition/adapter | 08/09/10; operational start also 12/13/14/15 | Shared owners and paper transport; no historical-backtest-as-soak claim |
