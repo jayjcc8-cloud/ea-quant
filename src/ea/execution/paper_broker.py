@@ -151,6 +151,7 @@ class PaperBroker:
         self._max_orders = max_orders
         self._max_ingresses = max_orders * 8
         self._records: dict[Sha256Digest, _PaperOrder] = {}
+        self._unknown_cancels: dict[Sha256Digest, tuple[CancelCommand, PaperCancelResult]] = {}
         self._issued: dict[IngressIdentity, tuple[bytes, bytes]] = {}
         self._fact_next = 1
         self._ingress_next = 1
@@ -236,9 +237,18 @@ class PaperBroker:
         """Cancel a pending local match and emit a separate confirmation fact."""
         order = self._require_command(command, CancelCommand)
         requested = require_utc(requested_at, field="requested_at")
+        retained_unknown = self._unknown_cancels.get(order.client_submission_key)
+        if retained_unknown is not None:
+            if retained_unknown[0] != command:
+                raise PaperBrokerError(OutcomeCode.CONFLICTING_ID, "cancel request differs")
+            return retained_unknown[1]
         record = self._records.get(order.client_submission_key)
         if record is None:
-            return PaperCancelResult(CancellationAttemptState.UNCERTAIN, ())
+            if len(self._unknown_cancels) >= self._max_orders:
+                raise PaperBrokerError(OutcomeCode.OUT_OF_RANGE, "Paper cancel history is full")
+            uncertain = PaperCancelResult(CancellationAttemptState.UNCERTAIN, ())
+            self._unknown_cancels[order.client_submission_key] = (command, uncertain)
+            return uncertain
         if record.cancel_command is not None:
             if record.cancel_command != command:
                 raise PaperBrokerError(OutcomeCode.CONFLICTING_ID, "cancel request differs")

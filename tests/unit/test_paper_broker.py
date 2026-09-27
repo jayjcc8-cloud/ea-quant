@@ -38,6 +38,7 @@ from ea.execution import (
     create_phase1_order_authority,
 )
 from ea.execution.order_lifecycle import (
+    CancelCommand,
     CancellationAttemptState,
     OrderCommandTracker,
     SubmissionAttemptState,
@@ -301,6 +302,34 @@ def test_paper_retained_source_proof_is_bounded_without_eviction() -> None:
         canonical_ingress_bytes=canonical_execution_fact_ingress_bytes(ack),
         canonical_fact_bytes=canonical_execution_fact_bytes(ack.fact),
     )
+
+
+def test_unknown_cancel_retry_retains_uncertainty_after_delayed_submit() -> None:
+    _spec, issued, (order, other) = _orders(2)
+    tracker = OrderCommandTracker(issued)
+    broker = PaperBroker(issued, source_namespace=SOURCE, max_orders=1)
+    submit = tracker.begin_submit(order)
+    assert submit is not None
+    cancel = CancelCommand(order, submit.client_submission_key, submit.execution_request_sha256)
+    unknown = broker.cancel(cancel, requested_at=TIME)
+    assert unknown.state is CancellationAttemptState.UNCERTAIN
+    other_submit = tracker.begin_submit(other)
+    assert other_submit is not None
+    with pytest.raises(PaperBrokerError) as error:
+        broker.cancel(
+            CancelCommand(
+                other, other_submit.client_submission_key, other_submit.execution_request_sha256
+            ),
+            requested_at=TIME,
+        )
+    assert error.value.code is OutcomeCode.OUT_OF_RANGE
+    submitted = broker.submit(submit, submitted_at=TIME)
+    assert submitted.state is SubmissionAttemptState.SUBMITTED
+    assert broker.cancel(cancel, requested_at=TIME + timedelta(seconds=1)) is unknown
+    # Retrying the unknown cancellation cannot silently cancel the delayed order.
+    matched = broker.on_market(_market(1, seconds=2))
+    assert len(matched) == 1
+    assert matched[0].fact.kind is ExecutionFactKind.TRADE
 
 
 def test_paper_latency_slippage_and_commission_follow_existing_policy() -> None:

@@ -84,8 +84,10 @@ Only the existing fact authority changes Order projections and creates Fills.
 The adapter emits canonical acknowledgement, cancellation, query and trade facts. A query for a
 filled Order redelivers its retained trade with the same dedup identity and a new ingress identity;
 direct tests prove one Fill and one cash/position effect. The adapter is also the read-only source
-issuance verifier for those exact bytes. Retention is bounded to at most 1,024 requests and eight
-times the configured request limit in ingress deliveries; capacity exhaustion rejects safely.
+issuance verifier for those exact bytes. Retention is bounded to at most 1,024 submit requests,
+the same bound for unknown cancellation results, and eight times the configured request limit
+in ingress deliveries; capacity exhaustion rejects safely. An unknown cancellation retains its
+original result even if a delayed submit arrives, so retrying cannot acquire a new effect.
 
 Matching uses the first newly admitted raw event strictly after submission plus configured
 latency, with existing adverse slippage, tick rounding and commission arithmetic. It fills the
