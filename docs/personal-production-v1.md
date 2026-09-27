@@ -97,6 +97,45 @@ Fill, ledger, cash or position authority and grants no pre-effect permission. PP
 freshness/risk admission, audit and the existing ledger path. State is process-local: crash recovery,
 real provider semantics, network connections and account credentials remain unsupported.
 
+## PPV-10 local market event loop
+
+Issue #230 adds `StreamingMarketRuntime` and an outer `LocalSimulatedMarketSource`. The inner
+runtime receives one event at a time with one pending market slot and a configured finite fact
+queue. It retains only the previous market envelope and current dispatch evidence; it does not
+replay historical backtests or grow a market-history registry. The source generates a current
+closed synthetic Bar per poll from a fixed price cycle, either for a finite count or until stop.
+
+Injected UTC controls event visibility and age; injected monotonic time detects feed stalls.
+Heartbeat alone never refreshes market freshness. Future events wait; duplicate, conflicting or
+regressing market emissions reject. This local stream requires strictly increasing event times;
+backfills and corrections at an older or equal Bar end are rejected. That restriction prevents
+non-adjacent record replay with constant retained state. Freshness uses the market event time,
+so a delayed old Bar cannot become fresh merely because it arrived now. Exhaustion and stale/stalled data stop new
+market dispatch with an explicit reason.
+
+Callbacks are serialized and receive a globally increasing dispatch sequence. The existing
+StrategySignalAuthority accepts only the exact active market proof, and execution facts require
+the bound source's exact issued bytes before the existing fact authority sees an active dispatch.
+A callback-generated ACK may sort before its triggering market at the same timestamp: streaming
+uses causal dispatch sequence across that boundary, rather than pretending all future roots were
+available for historical pre-sorting. Fact visibility and market input ordering remain enforced.
+
+The finite process smoke entry, from an environment with this package installed, is:
+
+```bash
+python -m ea.product.market_stream --events 20 --interval 0.1
+```
+
+It emits JSON market/heartbeat events and a final reason. Ctrl-C or SIGTERM requests a controlled
+stop; the finite count exits with `source_exhausted`. Stop or a failed market callback closes new
+market ingress and permits a bounded drain of already issued facts. A failed fact callback is
+retained as incomplete and is not automatically retried or reported as a clean close, including
+exit-class callback exceptions. The outer adapter releases the source on exit, including failure.
+
+This entry has no strategy, account or economic effects. Full accepted-Candidate Paper operation,
+durable audit, status/stop commands and installed economic acceptance remain PPV-11. There is no
+provider connection, reconnect, crash recovery, external order write or long-duration claim.
+
 ## PPV-01 execution-cost contract
 
 PPV-01 closes deterministic research execution costs. When read from merged main with
@@ -331,7 +370,7 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | PPV-07 Candidate V1 | SATISFIED | #208; Candidate contract above | Continuous Paper composition remains PPV-11 | Existing source/Holdout and frozen artifacts | Explicit decision, immutable identity, fresh evidence and pre-execution loading guard |
 | PPV-08 Order Lifecycle V1 | SATISFIED for local Paper commands | #224; contract above | Broker transport and continuous composition remain 09/11; crash recovery deferred | Existing order/fact authorities | Single submit/cancel attempt, explicit uncertainty, authoritative late facts and dedup; no new OMS |
 | PPV-09 Broker Contract V1 | SATISFIED for local Paper | #227; contract above | Continuous composition remains 11; vendor compatibility and crash recovery deferred | 08 | Bounded submit/cancel/query, stable client identity, canonical source-issued facts and normalized failures |
-| PPV-10 Market Event Loop | PARTIAL | E7 | Real-time feed, heartbeat, freshness, reconnect | 02/04; shared historical event contracts | One feed/instrument; preserve admission/time visibility and ordering |
+| PPV-10 Market Event Loop | SATISFIED for local simulation | #230; contract above | Provider connectivity/reconnect deferred; economic composition remains 11 | 02/04; existing market and fact contracts | Bounded incremental input, active proofs, visibility/freshness, heartbeat and controlled stop |
 | PPV-11 Paper Trading Runtime | PARTIAL | E1/E7/E10/E11 | Continuous paper composition/adapter | 08/09/10; operational start also 12/13/14/15 | Shared owners and paper transport; no historical-backtest-as-soak claim |
 | PPV-12 Runtime Recovery V1 | PARTIAL | E5/E10 | Durable outbound intent and uncertain-effect restart | 08/09/11; acceptance with 13 | Query/reconcile before new submissions; never blindly resend ambiguous orders |
 | PPV-13 Broker Reconciliation V1 | PARTIAL | E10 | External observations and continuous drift handling | 08/09/11; restart integration with 12 | Orders/fills/cash/positions; detect, retain and halt, no automatic balance repair |
