@@ -51,7 +51,9 @@ CI routes changed paths through `scripts/ci_routes.py`: docs-only changes run fo
 tests, Python pull requests run `quality`, and `main` runs installed-wheel smoke. Pull requests
 run installed Web E2E for UI, HTTP, shared engine/contract, dependency, build and example changes;
 the full browser job does not repeat on the merged-main push. Unknown paths take the conservative
-route. Frontend lint, types, unit tests and build run for Web/Node/CI changes. Release candidates
+route. A newly added Python module skips browser E2E only when the current installed Web/CLI import
+path cannot reach it; changed or removed modules and uncertain import analysis retain browser E2E.
+Frontend lint, types, unit tests and build run for Web/Node/CI changes. Release candidates
 run `full`; T2/T3 retain the exact-SHA candidate-full workflow. T0/T1 do not need it merely to
 prove more process.
 

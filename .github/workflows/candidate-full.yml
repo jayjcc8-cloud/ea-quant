@@ -51,6 +51,9 @@ jobs:
         env:
           EXPECTED_SHA: ${{ inputs.candidate_sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Classify candidate Web paths
         id: routes
         env:
@@ -65,7 +68,7 @@ jobs:
           if [[ "$PURPOSE" == "release_candidate" ]]; then
             route_args+=(--release)
           fi
-          git diff --no-renames --name-only -z "$base_sha" "$CANDIDATE_SHA" |
+          git diff --no-renames --name-status -z "$base_sha" "$CANDIDATE_SHA" |
             python scripts/ci_routes.py "${route_args[@]}"
 
   full:

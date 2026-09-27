@@ -33,6 +33,9 @@ jobs:
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Classify changed paths
         id: routes
         env:
@@ -53,7 +56,7 @@ jobs:
 
           git cat-file -e "$base_sha^{commit}"
           git cat-file -e "$HEAD_SHA^{commit}"
-          git diff --no-renames --name-only -z "$base_sha" "$HEAD_SHA" |
+          git diff --no-renames --name-status -z "$base_sha" "$HEAD_SHA" |
             python scripts/ci_routes.py
 
   governance:
