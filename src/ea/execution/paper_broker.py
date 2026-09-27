@@ -170,6 +170,22 @@ class PaperBroker:
     def spec_set(self) -> InstrumentExecutionSpecSet:
         return self._orders.spec_set
 
+    @property
+    def available(self) -> bool:
+        """True while this transport accepts a new outbound effect.
+
+        The in-process Paper adapter has no reconnect lifecycle, so availability
+        is constant here; a real provider under PPV-17 supplies the same signal.
+        """
+        return True
+
+    def submission_ages_seconds(self, *, now_utc: datetime) -> tuple[float, ...]:
+        """Ages of retained submissions in seconds, for recovery rate seeding."""
+        now = require_utc(now_utc, field="now_utc")
+        return tuple(
+            (now - record.submitted_at).total_seconds() for record in self._records.values()
+        )
+
     def has_issued_ingress(
         self,
         *,

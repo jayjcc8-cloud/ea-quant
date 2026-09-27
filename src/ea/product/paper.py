@@ -72,6 +72,7 @@ from ea.core.lifecycle import (
 from ea.core.market_data import SourceId
 from ea.core.paper import (
     canonical_paper_fact_dispatch_payload,
+    canonical_paper_operational_safety_payload,
     canonical_paper_order_construction_payload,
     canonical_paper_submission_payload,
     canonical_paper_submission_result_payload,
@@ -96,6 +97,12 @@ from ea.product.paper_recovery import (
 from ea.product.scenario import LoadedBacktestScenario
 from ea.reconciliation import create_phase1_reconciliation_authority
 from ea.risk.kill_switch import OperatorKillSwitchAuthority
+from ea.risk.operational_safety import (
+    OperationalSafetyAuthority,
+    OperationalSafetyInput,
+    OperationalSafetyLimits,
+    OperationalSafetyVerdict,
+)
 from ea.runtime.streaming import StreamingMarketRuntime, StreamPhase
 from ea.strategy import create_strategy_signal_authority
 from ea.strategy.catalog import LocalActionLogic
@@ -125,6 +132,7 @@ class PaperTradingSession:
         max_market_age_seconds: float = 5.0,
         stall_timeout_seconds: float = 5.0,
         kill_switch: OperatorKillSwitchAuthority | None = None,
+        operational_limits: OperationalSafetyLimits | None = None,
         crash_after: AuditRecordKind | None = None,
     ) -> None:
         if scenario.schema_version not in (4, 5):
@@ -132,6 +140,7 @@ class PaperTradingSession:
         self.scenario, self.binding, self.audit, self.clock = scenario, binding, audit, clock
         self.stop_requested, self.max_age = stop_requested, max_market_age_seconds
         self.kill_switch = kill_switch
+        self.monotonic = monotonic
         self._crash_after = crash_after
         self.run_id = binding.reference.run_id
         self.operations = ProductObservation(operational_logger)
@@ -178,6 +187,14 @@ class PaperTradingSession:
         )
         self.tracker = OrderCommandTracker(self.orders)
         self.broker = PaperBroker(self.orders, max_orders=2 * self.max_round_trips)
+        self.operational_safety = OperationalSafetyAuthority(
+            run_id=self.run_id,
+            limits=(
+                operational_limits
+                if operational_limits is not None
+                else self._default_operational_limits()
+            ),
+        )
         self.runtime = StreamingMarketRuntime(
             run_id=self.run_id,
             spec_set=scenario.spec_set,
@@ -232,6 +249,104 @@ class PaperTradingSession:
             spec_set=self.scenario.spec_set,
             entries=(Phase1PortfolioPolicyEntry(self.scenario.instrument, quantity),),
         )
+
+    def _default_operational_limits(self) -> OperationalSafetyLimits:
+        return OperationalSafetyLimits(
+            max_market_age_seconds=self.max_age,
+            max_daily_loss=Decimal(self.scenario.initial_cash.text),
+            max_total_exposure=Decimal(self.scenario.max_notional.text),
+            max_open_orders=2 * self.max_round_trips,
+            max_order_rate=2 * self.max_round_trips,
+            order_rate_window_seconds=60.0,
+            max_price_deviation_bps=250,
+        )
+
+    def _operational_safety_input(
+        self, order: Order, root: MarketDataEnvelope
+    ) -> OperationalSafetyInput:
+        snapshot = self.gate.ledger.snapshot
+        risk = self.gate.risk_authority.risk_state
+        reference_price = Decimal(str(root.payload.close))
+        cash = next(
+            (
+                Decimal(balance.amount.text)
+                for balance in snapshot.cash_balances
+                if balance.currency == self.scenario.funding_currency
+            ),
+            Decimal("0"),
+        )
+        position_mark = Decimal("0")
+        for balance in snapshot.position_balances:
+            if balance.instrument == self.scenario.instrument:
+                position_mark += Decimal(balance.quantity.text) * reference_price
+        daily_loss = Decimal(self.scenario.initial_cash.text) - (cash + position_mark)
+        worst_price = Decimal(self.price_bound.text)
+        outstanding = (
+            Decimal(self.pending.quantity.text) * worst_price
+            if self.pending is not None
+            else Decimal("0")
+        )
+        proposed_price = _quantized_historical_close(
+            root.payload.close,
+            side=order.side,
+            specification=self.spec,
+            slippage_bps=slippage_bps_from_identity(
+                self.scenario.execution_policy.identifier.value,
+                self.scenario.execution_policy.sha256.value,
+            ),
+        )
+        return OperationalSafetyInput(
+            kill_switch_halted=(
+                self.kill_switch is not None and self.kill_switch.effective_halted()
+            ),
+            reconciliation_healthy=(
+                not snapshot.open_reconciliation_refs
+                and not (risk.halted and risk.halt_reason is RiskHaltReason.RECONCILIATION_REQUIRED)
+            ),
+            market_age_seconds=(self.clock.now() - root.event_time).total_seconds(),
+            broker_available=self.broker.available,
+            strategy_live=self.runtime.phase is StreamPhase.RUNNING,
+            daily_loss=daily_loss,
+            current_exposure=position_mark,
+            outstanding_order_exposure=outstanding,
+            proposed_order_exposure=Decimal(order.quantity.text) * worst_price,
+            open_order_count=1 if self.pending is not None else 0,
+            proposed_effective_price=Decimal(proposed_price.text),
+            reference_price=reference_price,
+            order_identity=order.client_submission_key.value,
+            now_monotonic=self.monotonic(),
+        )
+
+    def _operational_authorize(self, order: Order, root: MarketDataEnvelope, sequence: int) -> bool:
+        """Authorize one outbound effect through the single safety gate.
+
+        Returns True only for ALLOW. A DENY or HALT is recorded as a durable
+        ``PAPER_OPERATIONAL_SAFETY`` audit record; HALT additionally engages the
+        authoritative ``EXTERNAL_SAFETY_HALT`` and stops the runtime, so no
+        unsafe state can ever reach the broker.
+        """
+        decision = self.operational_safety.authorize(self._operational_safety_input(order, root))
+        if decision.verdict is OperationalSafetyVerdict.ALLOW:
+            return True
+        self._append(
+            AuditRecordKind.PAPER_OPERATIONAL_SAFETY,
+            canonical_paper_operational_safety_payload(
+                self.run_id,
+                dispatch_sequence=sequence,
+                verdict=decision.verdict.value,
+                guard=decision.guard,
+                reason=decision.reason,
+                limit=decision.limit,
+                observed=decision.observed,
+                identity=decision.identity or order.client_submission_key.value,
+            ),
+        )
+        if decision.verdict is OperationalSafetyVerdict.HALT:
+            self.gate.risk_authority.engage_halt(
+                RiskHaltReason.EXTERNAL_SAFETY_HALT, root.available_at, sequence
+            )
+            self.runtime.request_stop()
+        return False
 
     def _append(self, kind: AuditRecordKind, payload: bytes) -> AuditAppendAcknowledgement:
         subject = audit_subject_digest(kind, payload)
@@ -409,6 +524,9 @@ class PaperTradingSession:
                 if not self._guard(order, root, sequence):
                     self._refresh(sequence)
                     return
+                if not self._operational_authorize(order, root, sequence):
+                    self._refresh(sequence)
+                    return
                 self._append(
                     AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION,
                     canonical_paper_submission_payload(
@@ -424,6 +542,9 @@ class PaperTradingSession:
                     ),
                 )
                 if not self._guard(order, root, sequence):
+                    self._refresh(sequence)
+                    return
+                if not self._operational_authorize(order, root, sequence):
                     self._refresh(sequence)
                     return
                 command = self.tracker.begin_submit(order)
@@ -471,6 +592,7 @@ class PaperTradingSession:
                     self.runtime.enqueue_fact(ingress)
                 if result.state is not SubmissionAttemptState.SUBMITTED:
                     raise ValueError("Paper transport did not confirm submission")
+                self.operational_safety.record_submission(self.monotonic())
         self._refresh(sequence)
 
     def on_fact(self, ingress: ExecutionFactIngress, sequence: int) -> None:
@@ -722,6 +844,7 @@ def restore_paper_trading_session(
     max_market_age_seconds: float = 5.0,
     stall_timeout_seconds: float = 5.0,
     kill_switch: OperatorKillSwitchAuthority | None = None,
+    operational_limits: OperationalSafetyLimits | None = None,
     crash_after: AuditRecordKind | None = None,
 ) -> PaperTradingSession:
     """Reconstruct a running Paper session from a reopened journal, then continue.
@@ -742,6 +865,7 @@ def restore_paper_trading_session(
     session.audit, session.clock = audit, clock
     session.stop_requested, session.max_age = stop_requested, max_market_age_seconds
     session.kill_switch = kill_switch
+    session.monotonic = monotonic
     session._crash_after = crash_after
     session.run_id = binding.reference.run_id
     session.operations = ProductObservation(operational_logger)
@@ -820,6 +944,18 @@ def restore_paper_trading_session(
     )
     session.tracker = broker_recovery.tracker
     session.broker = broker_recovery.broker
+    session.operational_safety = OperationalSafetyAuthority(
+        run_id=session.run_id,
+        limits=(
+            operational_limits
+            if operational_limits is not None
+            else session._default_operational_limits()
+        ),
+    )
+    session.operational_safety.seed_submissions(
+        session.broker.submission_ages_seconds(now_utc=clock.now()),
+        now_monotonic=monotonic(),
+    )
 
     session.runtime = StreamingMarketRuntime(
         run_id=session.run_id,

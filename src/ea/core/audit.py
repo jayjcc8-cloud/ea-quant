@@ -83,6 +83,7 @@ class AuditRecordKind(StrEnum):
     PAPER_FACT_DISPATCH = "paper.fact_dispatch"
     PAPER_SUBMISSION_RESULT = "paper.submission_result"
     PAPER_ORDER_CONSTRUCTION = "paper.order_construction"
+    PAPER_OPERATIONAL_SAFETY = "paper.operational_safety"
 
 
 class AuditSubjectKind(StrEnum):
@@ -104,6 +105,7 @@ class AuditSubjectKind(StrEnum):
     PAPER_FACT_DISPATCH = "paper_fact_dispatch"
     PAPER_SUBMISSION_RESULT = "paper_submission_result"
     PAPER_ORDER_CONSTRUCTION = "paper_order_construction"
+    PAPER_OPERATIONAL_SAFETY = "paper_operational_safety"
 
 
 AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
@@ -133,6 +135,7 @@ AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
     AuditRecordKind.PAPER_FACT_DISPATCH: AuditSubjectKind.PAPER_FACT_DISPATCH,
     AuditRecordKind.PAPER_SUBMISSION_RESULT: AuditSubjectKind.PAPER_SUBMISSION_RESULT,
     AuditRecordKind.PAPER_ORDER_CONSTRUCTION: AuditSubjectKind.PAPER_ORDER_CONSTRUCTION,
+    AuditRecordKind.PAPER_OPERATIONAL_SAFETY: AuditSubjectKind.PAPER_OPERATIONAL_SAFETY,
 }
 
 _LARGE_PAYLOAD_KINDS = frozenset(
@@ -382,6 +385,7 @@ _SUBJECT_DOMAIN_BY_KIND: dict[AuditRecordKind, bytes] = {
     AuditRecordKind.PAPER_FACT_DISPATCH: b"ea.audit-subject.paper-fact-dispatch.v1\0",
     AuditRecordKind.PAPER_SUBMISSION_RESULT: b"ea.audit-subject.paper-submission-result.v1\0",
     AuditRecordKind.PAPER_ORDER_CONSTRUCTION: b"ea.audit-subject.paper-order-construction.v1\0",
+    AuditRecordKind.PAPER_OPERATIONAL_SAFETY: b"ea.audit-subject.paper-operational-safety.v1\0",
 }
 
 
@@ -1358,6 +1362,7 @@ def require_canonical_audit_payload(
         AuditRecordKind.PAPER_FACT_DISPATCH,
         AuditRecordKind.PAPER_SUBMISSION_RESULT,
         AuditRecordKind.PAPER_ORDER_CONSTRUCTION,
+        AuditRecordKind.PAPER_OPERATIONAL_SAFETY,
     }:
         from ea.core.paper import require_paper_audit_document
 
@@ -1368,6 +1373,7 @@ def require_canonical_audit_payload(
                 AuditRecordKind.PAPER_FACT_DISPATCH: "ea.audit-paper-fact-dispatch.v1",
                 AuditRecordKind.PAPER_SUBMISSION_RESULT: ("ea.audit-paper-submission-result.v1"),
                 AuditRecordKind.PAPER_ORDER_CONSTRUCTION: ("ea.audit-paper-order-construction.v1"),
+                AuditRecordKind.PAPER_OPERATIONAL_SAFETY: ("ea.audit-paper-operational-safety.v1"),
             }[record_kind],
         )
     elif record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
