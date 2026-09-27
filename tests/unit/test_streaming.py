@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -130,6 +131,26 @@ def test_duplicate_conflict_order_and_pending_capacity_rejected() -> None:
         stream.receive_market(event(1, 2))
     with pytest.raises(StreamingRuntimeError, match="out-of-order"):
         stream.receive_market(event(0, 0))
+
+
+def test_non_adjacent_record_replay_and_old_revision_reject_without_history() -> None:
+    clock = ControlledClock()
+    stream = runtime(clock)
+    first = event(1, 1)
+    second = event(2, 2)
+    seen: list[MarketDataEnvelope] = []
+    for root in (first, second):
+        clock.advance(1.0)
+        stream.receive_market(root)
+        assert stream.poll(on_market=lambda item, _: seen.append(item), on_fact=lambda *_: None)
+    replay = replace(first, source_sequence=3, available_at=START + timedelta(seconds=3))
+    with pytest.raises(StreamingRuntimeError, match="event time"):
+        stream.receive_market(replay)
+    revision = replace(replay, revision=1)
+    with pytest.raises(StreamingRuntimeError, match="event time"):
+        stream.receive_market(revision)
+    assert seen == [first, second]
+    assert not stream.status().pending_market
 
 
 def test_stall_and_stale_market_fail_closed_without_heartbeat_refresh() -> None:
@@ -375,7 +396,10 @@ def test_market_callback_error_drains_already_issued_fact_then_closes_source() -
     assert source.closed
 
 
-def test_fact_callback_error_is_not_retried_or_reported_clean() -> None:
+@pytest.mark.parametrize("error_type", [RuntimeError, SystemExit, KeyboardInterrupt])
+def test_fact_callback_error_is_not_retried_or_reported_clean(
+    error_type: type[BaseException],
+) -> None:
     clock = ControlledClock(ORDER_TIME)
     spec_set, issued, (order,) = _orders()
     broker = PaperBroker(issued, source_namespace=FACT_SOURCE)
@@ -406,9 +430,10 @@ def test_fact_callback_error_is_not_retried_or_reported_clean() -> None:
 
     def on_fact(_ingress: ExecutionFactIngress, sequence: int) -> None:
         attempts.append(sequence)
-        raise RuntimeError("fact consumer failed")
+        if len(attempts) == 1:
+            raise error_type("fact consumer failed")
 
-    with pytest.raises(RuntimeError, match="fact consumer failed"):
+    with pytest.raises(error_type, match="fact consumer failed"):
         run_local_market_stream(
             source=source,
             runtime=stream,

@@ -107,8 +107,10 @@ closed synthetic Bar per poll from a fixed price cycle, either for a finite coun
 
 Injected UTC controls event visibility and age; injected monotonic time detects feed stalls.
 Heartbeat alone never refreshes market freshness. Future events wait; duplicate, conflicting or
-regressing market emissions reject. Freshness uses the market event time, so a delayed old Bar
-cannot become fresh merely because it arrived now. Exhaustion and stale/stalled data stop new
+regressing market emissions reject. This local stream requires strictly increasing event times;
+backfills and corrections at an older or equal Bar end are rejected. That restriction prevents
+non-adjacent record replay with constant retained state. Freshness uses the market event time,
+so a delayed old Bar cannot become fresh merely because it arrived now. Exhaustion and stale/stalled data stop new
 market dispatch with an explicit reason.
 
 Callbacks are serialized and receive a globally increasing dispatch sequence. The existing
@@ -127,8 +129,8 @@ python -m ea.product.market_stream --events 20 --interval 0.1
 It emits JSON market/heartbeat events and a final reason. Ctrl-C or SIGTERM requests a controlled
 stop; the finite count exits with `source_exhausted`. Stop or a failed market callback closes new
 market ingress and permits a bounded drain of already issued facts. A failed fact callback is
-retained as incomplete and is not automatically retried or reported as a clean close. The outer
-adapter releases the source on exit, including failure.
+retained as incomplete and is not automatically retried or reported as a clean close, including
+exit-class callback exceptions. The outer adapter releases the source on exit, including failure.
 
 This entry has no strategy, account or economic effects. Full accepted-Candidate Paper operation,
 durable audit, status/stop commands and installed economic acceptance remain PPV-11. There is no

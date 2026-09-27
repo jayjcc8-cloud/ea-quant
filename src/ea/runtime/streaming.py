@@ -231,6 +231,11 @@ class StreamingMarketRuntime:
                 raise StreamingRuntimeError("out-of-order market input")
             if event.logical_key == prior.logical_key and event.revision <= prior.revision:
                 raise StreamingRuntimeError("conflicting market revision")
+            # This local streaming profile accepts only forward event time.
+            # Historical corrections/backfills need a separate retained-history
+            # contract; never accept an old record again with fresh availability.
+            if event.event_time <= prior.event_time:
+                raise StreamingRuntimeError("market event time must strictly advance")
         key = runtime_root_order_key(event)
         if self._last_dispatch_key is not None and key <= self._last_dispatch_key:
             raise StreamingRuntimeError("out-of-order market input after dispatch")
@@ -382,7 +387,7 @@ class StreamingMarketRuntime:
                 self._pending_facts.remove(root)
                 self._fact_dispatches += 1
             return True
-        except Exception:
+        except BaseException:
             self._phase = StreamPhase.DRAINING
             self._reason = StreamStopReason.CALLBACK_ERROR
             self._pending_market = None
