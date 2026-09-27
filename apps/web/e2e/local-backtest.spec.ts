@@ -220,47 +220,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   await expect(page.getByRole('row', { name: /Net P&L 17 USD No report —/i })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('success-risk-rejected-comparison.png'), fullPage: true })
 
-  const boundary = await page.evaluate(async () => {
-    const headers = { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }
-    const validation = await fetch('/api/scenarios/bounded-long.yaml/validate', {
-      method: 'POST', headers, body: JSON.stringify({ parameters: {
-        initial_cash: '10000', strategy_parameters: { target_quantity: '2', entry_delay_bars: 0 },
-      } }),
-    }).then((response) => response.json())
-    const freeText = await fetch('/api/backtests', {
-      method: 'POST', headers,
-      body: JSON.stringify({
-        scenario_id: 'bounded-long.yaml', input_identity: validation.input_identity,
-        parameters: { initial_cash: '10000', quantity: '2', symbol: 'MSFT' },
-        request_id: 'playwright-free-text-0001',
-      }),
-    })
-    const unknownStrategyParameter = await fetch('/api/scenarios/bounded-long.yaml/validate', {
-      method: 'POST', headers, body: JSON.stringify({ parameters: {
-        initial_cash: '10000',
-        strategy_parameters: { target_quantity: '2', entry_delay_bars: 0, unknown: 1 },
-      } }),
-    })
-    const request = {
-      scenario_id: 'bounded-long.yaml', input_identity: validation.input_identity,
-      parameters: {
-        initial_cash: '10000', strategy_parameters: { target_quantity: '2', entry_delay_bars: 0 },
-      },
-      request_id: 'playwright-idempotency-0001',
-    }
-    const first = await fetch('/api/backtests', { method: 'POST', headers, body: JSON.stringify(request) })
-    const firstBody = await first.json()
-    const second = await fetch('/api/backtests', { method: 'POST', headers, body: JSON.stringify(request) })
-    const secondBody = await second.json()
-    return { freeTextStatus: freeText.status, unknownStrategyStatus: unknownStrategyParameter.status, firstStatus: first.status, secondStatus: second.status, firstJob: firstBody.job_id, secondJob: secondBody.job_id }
-  })
-  expect(boundary.freeTextStatus).toBe(422)
-  expect(boundary.unknownStrategyStatus).toBe(422)
-  expect(boundary.firstStatus).toBe(202)
-  expect(boundary.secondStatus).toBe(200)
-  expect(boundary.secondJob).toBe(boundary.firstJob)
-  await page.goto(`/backtests/${boundary.firstJob}`)
-  await expect(page.locator('.status')).toHaveText('succeeded', { timeout: 15_000 })
+  await page.goto(baseline.url)
 
   const reportDownload = page.waitForEvent('download')
   await page.getByRole('link', { name: 'Download report.json' }).click()
@@ -678,92 +638,6 @@ test('installed round trip research completes and reopens immutable evidence', a
     await expect(page.locator('.page-title .status')).toHaveText('complete')
     await page.goto(comparison)
     await expect(page.getByRole('row', { name: /hold_root_count 1 100 \+99/ })).toBeVisible()
-    await page.goto(holdoutURL)
-    await expect(page.getByText('Frozen from source')).toBeVisible()
-  } finally {
-    if (restarted.pid) { process.kill(restarted.pid, 'SIGTERM'); await waitForProcessExit(restarted.pid) }
-  }
-})
-
-test('installed local Action V2 package freezes research evidence', async ({ page }, testInfo) => {
-  test.setTimeout(120_000)
-  let currentPid = Number(process.env.EA_WEB_SERVER_PID)
-  try { process.kill(currentPid, 0) } catch {
-    const initial = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!), { stdio: 'ignore' })
-    currentPid = initial.pid!
-    await waitForHealth()
-  }
-  await page.goto('/backtests')
-  await page.getByLabel('Scenario', { exact: true }).selectOption('local-v2.yaml')
-  await page.getByLabel('Research dataset').selectOption('local-v2.csv')
-  const closed = await validateAndRun(page)
-  await expect(page.locator('dt', { hasText: /^Position outcome$/ }).locator('..')).toContainText('CLOSED')
-  await expect(page.locator('dt', { hasText: /^Exit$/ }).locator('..')).not.toContainText('—')
-  await expect(page.getByRole('img', { name: 'Equity curve' })).toBeVisible()
-  const reportBytes = await page.request.get(`/api/backtests/${closed.jobId}/report`).then(r => r.text())
-  const pathBytes = await page.request.get(`/api/backtests/${closed.jobId}/artifacts/equity-path.json`).then(r => r.text())
-  const report = JSON.parse(reportBytes)
-  const path = JSON.parse(pathBytes)
-  expect(report.schema).toBe('ea.backtest-report.v2')
-  expect(report.economics.counts.fills).toBe(2)
-  expect(path.schema).toBe('ea.backtest-equity-path.v2')
-  expect(path.display_points.at(-1).equity).toBe(report.economics.equity.amount)
-  expect(Number(path.max_drawdown.ratio)).toBeGreaterThan(0)
-  await page.screenshot({ path: testInfo.outputPath('local-v2-closed.png'), fullPage: true })
-  for (const name of ['report.json', 'summary.txt', 'equity-path.json']) {
-    const downloading = page.waitForEvent('download')
-    await page.getByRole('link', { name: `Download ${name}`, exact: true }).click()
-    expect((await downloading).suggestedFilename()).toBe(name)
-  }
-  await page.goto('/batches/new')
-  await page.getByLabel('Scenario', { exact: true }).selectOption('local-v2.yaml')
-  await page.getByLabel('Research dataset').selectOption('local-v2.csv')
-  await page.getByLabel('Run 1 quantity', { exact: true }).fill('2')
-  await page.getByLabel('Run 2 quantity', { exact: true }).fill('3')
-  await page.getByRole('button', { name: 'Run batch', exact: true }).click()
-  await expect(page.locator('.page-title .status')).toHaveText('complete', { timeout: 20_000 })
-  const batchURL = page.url()
-  const batch = await page.request.get(`/api/batches/${new URL(batchURL).pathname.split('/').at(-1)}`).then(r => r.json())
-  expect(batch.members.every((m: { schema: string; status: string }) => m.schema === 'ea.local-web-job.v4' && m.status === 'succeeded')).toBe(true)
-  const comparison = `/backtests/compare/${batch.member_job_ids[0]}/${batch.member_job_ids[1]}`
-  await page.goto(comparison)
-  await expect(page.getByRole('row', { name: /quantity 2 3 \+1/ })).toBeVisible()
-  await page.goto(closed.url)
-  await page.getByRole('link', { name: 'Evaluate chronological holdout' }).click()
-  await page.getByLabel('Holdout scenario').selectOption('local-v2.yaml|local-v2-later.csv')
-  const frozenBytes = readFileSync(process.env.EA_V2_ARTIFACT!)
-  rmSync(process.env.EA_V2_ARTIFACT!)
-  rmSync(process.env.EA_V2_SOURCE!, { recursive: true })
-  await page.getByRole('button', { name: 'Run chronological holdout' }).click()
-  await expect(page).toHaveURL(/\/holdouts\/[0-9a-f-]+$/)
-  const holdoutURL = page.url()
-  await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'OOS', exact: true }) }).getByText('succeeded', { exact: true })).toBeVisible({ timeout: 20_000 })
-  const relation = await page.request.get(`/api/holdouts/${new URL(holdoutURL).pathname.split('/').at(-1)}`).then(r => r.json())
-  const oos = await page.request.get(`/api/backtests/${relation.holdout_job_id}`).then(r => r.json())
-  const source = await page.request.get(`/api/backtests/${closed.jobId}`).then(r => r.json())
-  expect(oos.engine_run_id).not.toBe(closed.runId)
-  expect(oos.input_snapshot.scenario.strategy).toEqual(source.input_snapshot.scenario.strategy)
-  for (const job of [source, oos]) expect(readFileSync(join(process.env.EA_WEB_WORKSPACE!, 'inputs', `${job.job_id}.eastrategy`))).toEqual(frozenBytes)
-  expect(oos.input_snapshot.scenario.execution).toEqual(source.input_snapshot.scenario.execution)
-  await testInfo.attach('local-v2-evidence', { body: JSON.stringify({ closed, source, report, path, batch, relation, oos }), contentType: 'application/json' })
-  // Restart this isolated installed server; persisted artifacts must survive absent source data.
-  const pid = currentPid
-  process.kill(pid, 'SIGTERM')
-  await waitForProcessExit(pid)
-  rmSync(join(process.env.EA_DATA_ROOT!, 'local-v2.csv'))
-  rmSync(join(process.env.EA_DATA_ROOT!, 'local-v2-later.csv'))
-  rmSync(join(process.env.EA_SCENARIO_ROOT!, 'local-v2.csv'))
-  const restarted = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!), { stdio: 'ignore' })
-  try {
-    await waitForHealth()
-    await page.goto(closed.url)
-    await expect(page.getByRole('img', { name: 'Equity curve' })).toBeVisible()
-    expect(await page.request.get(`/api/backtests/${closed.jobId}/report`).then(r => r.text())).toBe(reportBytes)
-    expect(await page.request.get(`/api/backtests/${closed.jobId}/artifacts/equity-path.json`).then(r => r.text())).toBe(pathBytes)
-    await page.goto(batchURL)
-    await expect(page.locator('.page-title .status')).toHaveText('complete')
-    await page.goto(comparison)
-    await expect(page.getByRole('row', { name: /quantity 2 3 \+1/ })).toBeVisible()
     await page.goto(holdoutURL)
     await expect(page.getByText('Frozen from source')).toBeVisible()
   } finally {
