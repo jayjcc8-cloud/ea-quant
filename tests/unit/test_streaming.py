@@ -342,6 +342,46 @@ def test_unbounded_local_cycle_stops_and_releases_source() -> None:
     assert source.closed
 
 
+def test_stop_during_fetch_discards_returned_market_before_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ControlledClock()
+    stream = runtime(clock)
+    source = LocalSimulatedMarketSource(
+        instrument=INSTRUMENT,
+        source_id=SOURCE,
+        prices=(100.0,),
+        repeats=None,
+        bar_seconds=1.0,
+    )
+    stopping = False
+    next_event = source.next_event
+    seen: list[int] = []
+
+    def stop_during_fetch(now: datetime) -> MarketDataEnvelope | None:
+        nonlocal stopping
+        root = next_event(now)
+        stopping = True
+        return root
+
+    monkeypatch.setattr(source, "next_event", stop_during_fetch)
+    state = run_local_market_stream(
+        source=source,
+        runtime=stream,
+        clock=clock,
+        sleep=clock.advance,
+        poll_interval_seconds=1.0,
+        on_market=lambda _root, sequence: seen.append(sequence),
+        on_fact=lambda *_: None,
+        stop_requested=lambda: stopping,
+    )
+    assert seen == []
+    assert state.market_dispatches == 0
+    assert state.reason is StreamStopReason.STOP_REQUESTED
+    assert state.phase is StreamPhase.CLOSED
+    assert source.closed
+
+
 def test_market_callback_error_drains_already_issued_fact_then_closes_source() -> None:
     clock = ControlledClock(ORDER_TIME)
     spec_set, issued, (order,) = _orders()

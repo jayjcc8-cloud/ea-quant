@@ -162,13 +162,20 @@ def run_local_market_stream(
             except Exception:
                 runtime.fail_source()
                 raise
+            if stop_requested is not None and stop_requested():
+                runtime.request_stop()
+                break
             if event is None:
                 runtime.mark_source_exhausted()
                 break
             runtime.receive_market(event)
-            while runtime.poll(on_market=on_market, on_fact=on_fact):
-                pass
-            sleep(poll_interval_seconds)
+            while True:
+                if stop_requested is not None and stop_requested():
+                    runtime.request_stop()
+                if not runtime.poll(on_market=on_market, on_fact=on_fact):
+                    break
+            if runtime.phase is StreamPhase.RUNNING:
+                sleep(poll_interval_seconds)
         drain_facts()
         runtime.close()
         return runtime.status()
