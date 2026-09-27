@@ -345,6 +345,7 @@ def test_inner_execution_package_depends_only_on_core_and_itself() -> None:
             "ea.execution.authority",
             "ea.execution.fact_authority",
             "ea.execution.matcher",
+            "ea.execution.order_lifecycle",
         }
     )
     imported_ea_modules: set[str] = set()
