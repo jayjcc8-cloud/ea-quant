@@ -71,7 +71,31 @@ Direct tests use the existing Order/fact authorities and funded ledger, includin
 cash, position and sequence expectations. The tracker owns no risk permission, Fill, balance or
 durable recovery state. Runtime composition must still authorize immediately before transport;
 an unknown process state must fail closed, without recreating a tracker to resend. The next
-work unit is PPV-09's local Paper adapter; no broker or continuous product entry is delivered here.
+work unit is PPV-09's local Paper adapter below; continuous product entry remains PPV-11.
+
+## PPV-09 local Paper broker contract
+
+Issue #227 adds `PaperBrokerPort` and one in-process `PaperBroker` over actually issued Orders
+and PPV-08 submit/cancel commands. Exact request retries return retained results; conflicting
+identities reject. Missing current-run history returns unknown, never proof that a request was
+not sent. Transport outcomes distinguish definite no effect from an uncertain/lost response.
+Only the existing fact authority changes Order projections and creates Fills.
+
+The adapter emits canonical acknowledgement, cancellation, query and trade facts. A query for a
+filled Order redelivers its retained trade with the same dedup identity and a new ingress identity;
+direct tests prove one Fill and one cash/position effect. The adapter is also the read-only source
+issuance verifier for those exact bytes. Retention is bounded to at most 1,024 submit requests,
+the same bound for unknown cancellation results, and eight times the configured request limit
+in ingress deliveries; capacity exhaustion rejects safely. An unknown cancellation retains its
+original result even if a delayed submit arrives, so retrying cannot acquire a new effect.
+
+Matching uses the first newly admitted raw event strictly after submission plus configured
+latency, with existing adverse slippage, tick rounding and commission arithmetic. It fills the
+whole Order; volume participation and simulated partial fills are not claimed. Cancellation
+stops a pending local match and emits separate confirmation evidence. The adapter owns no second
+Fill, ledger, cash or position authority and grants no pre-effect permission. PPV-11 must compose
+freshness/risk admission, audit and the existing ledger path. State is process-local: crash recovery,
+real provider semantics, network connections and account credentials remain unsupported.
 
 ## PPV-01 execution-cost contract
 
@@ -306,7 +330,7 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | PPV-06 Monitoring & Alerts | MISSING | E6/E13 | Signals, thresholds, delivery and alert test | 03/04/05; 13/14/15 operational states | One operator/channel; actionable liveness, reconciliation, disk and backup alerts |
 | PPV-07 Candidate V1 | SATISFIED | #208; Candidate contract above | Continuous Paper composition remains PPV-11 | Existing source/Holdout and frozen artifacts | Explicit decision, immutable identity, fresh evidence and pre-execution loading guard |
 | PPV-08 Order Lifecycle V1 | SATISFIED for local Paper commands | #224; contract above | Broker transport and continuous composition remain 09/11; crash recovery deferred | Existing order/fact authorities | Single submit/cancel attempt, explicit uncertainty, authoritative late facts and dedup; no new OMS |
-| PPV-09 Broker Contract V1 | PARTIAL | E8 | Bounded submit/cancel/query, client mapping and normalized failures | 08 | Narrow contract for one intended broker and paper adapter; no generic framework |
+| PPV-09 Broker Contract V1 | SATISFIED for local Paper | #227; contract above | Continuous composition remains 11; vendor compatibility and crash recovery deferred | 08 | Bounded submit/cancel/query, stable client identity, canonical source-issued facts and normalized failures |
 | PPV-10 Market Event Loop | PARTIAL | E7 | Real-time feed, heartbeat, freshness, reconnect | 02/04; shared historical event contracts | One feed/instrument; preserve admission/time visibility and ordering |
 | PPV-11 Paper Trading Runtime | PARTIAL | E1/E7/E10/E11 | Continuous paper composition/adapter | 08/09/10; operational start also 12/13/14/15 | Shared owners and paper transport; no historical-backtest-as-soak claim |
 | PPV-12 Runtime Recovery V1 | PARTIAL | E5/E10 | Durable outbound intent and uncertain-effect restart | 08/09/11; acceptance with 13 | Query/reconcile before new submissions; never blindly resend ambiguous orders |
