@@ -333,15 +333,15 @@ def test_missing_candidate_binding_cannot_resume_as_legacy(
 def test_one_inspection_reads_each_evidence_file_once(
     selected: tuple[Path, str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from ea.strategy.package import read_regular
     from ea.web import candidate_evidence
 
     workspace, candidate_id, _ = selected
-    original = candidate_evidence.read_regular
     reads: list[Path] = []
 
     def read(path: Path, root: Path) -> bytes:
         reads.append(path)
-        return original(path, root)
+        return read_regular(path, root)
 
     monkeypatch.setattr(candidate_evidence, "read_regular", read)
     inspect_candidate_binding(workspace, candidate_id)
