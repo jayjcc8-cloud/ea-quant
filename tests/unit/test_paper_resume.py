@@ -12,7 +12,7 @@ from ea.core import AuditRecordKind, RunReference, Sha256Digest
 from ea.core.paper import canonical_paper_terminal_payload
 from ea.core.portfolio import portfolio_snapshot_digest
 from ea.core.risk import risk_state_snapshot_digest
-from ea.experiments.audit import create_posix_audit_journal
+from ea.experiments.audit import PosixAuditJournal, create_posix_audit_journal
 from ea.experiments.store import CanonicalAttemptManifest, LocalResultStore
 from ea.product import load_backtest_scenario
 from ea.product.paper import PaperTradingSession
@@ -28,7 +28,7 @@ def _build_attempt(
     tmp_path: Path,
     *,
     crash_after: AuditRecordKind | None,
-) -> tuple[LocalResultStore, object, PaperTradingSession, ControlledClock, Path]:
+) -> tuple[LocalResultStore, PosixAuditJournal, PaperTradingSession, ControlledClock, Path]:
     root = tmp_path / "results"
     root.mkdir()
     store = LocalResultStore(root.resolve())
@@ -71,7 +71,7 @@ def _drive_and_release(
     engine: PaperTradingSession,
     clock: ControlledClock,
     store: LocalResultStore,
-    journal: object,
+    journal: PosixAuditJournal,
     *,
     crash_after: AuditRecordKind | None,
 ) -> None:

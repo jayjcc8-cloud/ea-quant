@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
+from ea.product.offline_demo import _DemoAudit
 from ea.product.paper import restore_paper_trading_session
 from unit.test_paper_runtime import drive, session
 from unit.test_streaming import SOURCE
@@ -19,7 +21,7 @@ def test_resume_feed_continues_without_duplicate_effects(tmp_path: Path) -> None
     # Crash a partial run part-way: some Fills retained, one Order still open.
     engine, clock = session(tmp_path)
     drive(engine, clock, count=6)
-    records = tuple(engine.audit.records)
+    records = tuple(cast(_DemoAudit, engine.audit).records)
     partial_fills = len(engine.committed)
     assert 0 < partial_fills < 6
 

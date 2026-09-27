@@ -7,6 +7,7 @@ from ea.core.run import Sha256Digest
 from ea.reconciliation.broker import (
     BrokerObservedOrderState,
     BrokerOrderObservation,
+    BrokerOrderReconciliation,
     BrokerReconciliationResult,
     reconcile_broker_order,
 )
@@ -18,7 +19,9 @@ def _observation(state: BrokerObservedOrderState) -> BrokerOrderObservation:
     return BrokerOrderObservation(CLIENT_KEY, state, None)
 
 
-def _reconcile(local: OrderProjectionState | None, observed: BrokerObservedOrderState):
+def _reconcile(
+    local: OrderProjectionState | None, observed: BrokerObservedOrderState
+) -> BrokerOrderReconciliation:
     return reconcile_broker_order(local_state=local, observation=_observation(observed))
 
 

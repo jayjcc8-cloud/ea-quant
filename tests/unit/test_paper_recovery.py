@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 import yaml
@@ -28,6 +29,7 @@ from ea.product.market_stream import LocalSimulatedMarketSource
 from ea.product.offline_demo import _DemoAudit
 from ea.product.paper import PaperTradingSession
 from ea.product.paper_recovery import (
+    PaperBrokerRecovery,
     PaperOutboundClassification,
     PaperTerminalState,
     reconcile_paper_recovery,
@@ -123,7 +125,7 @@ def test_submitted_without_terminal_is_incomplete() -> None:
 def test_committed_run_is_sent_confirmed_and_complete(tmp_path: Path) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    scan = scan_paper_outbound_intents(engine.audit.records)
+    scan = scan_paper_outbound_intents(_records(engine))
     assert len(scan.intents) == 6
     assert all(
         intent.classification is PaperOutboundClassification.SENT_CONFIRMED
@@ -138,7 +140,7 @@ def test_intent_without_result_or_fact_is_unknown_and_incomplete(tmp_path: Path)
     drive(engine, clock)
     authorizations = [
         record
-        for record in engine.audit.records
+        for record in _records(engine)
         if record.record_kind is AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION
     ]
     # An authorization record with no result and no fact mirrors a crash after
@@ -151,7 +153,7 @@ def test_intent_without_result_or_fact_is_unknown_and_incomplete(tmp_path: Path)
 def test_joint_acceptance_recovers_a_committed_run_exactly_once(tmp_path: Path) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     scan = scan_paper_outbound_intents(records)
     broker_observations = recover_paper_broker_observation(records)
     joint = reconcile_paper_recovery(scan, broker_observations)
@@ -189,7 +191,7 @@ def test_joint_acceptance_resolves_no_broker_effect_to_not_sent() -> None:
 def test_joint_acceptance_detects_broker_divergence(tmp_path: Path) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     scan = scan_paper_outbound_intents(records)
     # Simulate an external broker that lost every fill: local knows six Fills,
     # the broker reports no order. This must halt, not silently recover.
@@ -208,7 +210,7 @@ def test_joint_acceptance_detects_broker_divergence(tmp_path: Path) -> None:
 def test_continuation_reconstructs_economic_state_exactly_once(tmp_path: Path) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     state = recover_paper_continuation(
         records,
         spec_set=engine.scenario.spec_set,
@@ -226,7 +228,7 @@ def test_continuation_reconstructs_economic_state_exactly_once(tmp_path: Path) -
 def test_recover_paper_orders_reconstructs_issued_orders(tmp_path: Path) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     recovered = recover_paper_orders(
         records,
         spec_set=engine.scenario.spec_set,
@@ -240,7 +242,7 @@ def test_recover_paper_orders_reconstructs_issued_orders(tmp_path: Path) -> None
 def test_recover_paper_order_contexts_reissues_orders(tmp_path: Path) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     policy = engine.gate.risk_authority.policy
     contexts = recover_paper_order_contexts(
         records,
@@ -292,7 +294,9 @@ def _crash_session(
     return engine, clock
 
 
-def _recover_broker(engine: PaperTradingSession, records: tuple[AuditRecord, ...]) -> object:
+def _recover_broker(
+    engine: PaperTradingSession, records: tuple[AuditRecord, ...]
+) -> PaperBrokerRecovery:
     policy = engine.gate.risk_authority.policy
     contexts = recover_paper_order_contexts(
         records,
@@ -312,12 +316,16 @@ def _recover_broker(engine: PaperTradingSession, records: tuple[AuditRecord, ...
     return recover_paper_broker(records, orders=authority, max_orders=2 * engine.max_round_trips)
 
 
+def _records(engine: PaperTradingSession) -> tuple[AuditRecord, ...]:
+    return tuple(cast(_DemoAudit, engine.audit).records)
+
+
 def test_recover_paper_broker_pins_filled_orders_and_round_trips_submitted_at(
     tmp_path: Path,
 ) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     recovery = _recover_broker(engine, records)
     assert len(recovery.filled_orders) == 6
     assert recovery.open_orders == ()
@@ -346,7 +354,7 @@ def test_recover_paper_broker_keeps_open_order_for_continuation(tmp_path: Path) 
     engine, clock = _crash_session(tmp_path, crash_after=AuditRecordKind.PAPER_SUBMISSION_RESULT)
     with pytest.raises(RuntimeError, match="crash injection"):
         drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     recovery = _recover_broker(engine, records)
     assert len(recovery.open_orders) == 1
     assert recovery.filled_orders == ()
@@ -374,7 +382,7 @@ def test_recover_paper_broker_keeps_open_order_for_continuation(tmp_path: Path) 
 def test_recover_paper_risk_refreshes_decodes_acknowledged_chain(tmp_path: Path) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    refreshes = recover_paper_risk_refreshes(tuple(engine.audit.records))
+    refreshes = recover_paper_risk_refreshes(_records(engine))
     assert len(refreshes) > 0
     assert refreshes[0].previous_refresh_sha256 is None
     for earlier, later in zip(refreshes, refreshes[1:], strict=False):
@@ -384,7 +392,7 @@ def test_recover_paper_risk_refreshes_decodes_acknowledged_chain(tmp_path: Path)
 def test_recover_paper_fact_authority_replays_exact_fills(tmp_path: Path) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     contexts = recover_paper_order_contexts(
         records,
         spec_set=engine.scenario.spec_set,
@@ -413,7 +421,7 @@ def test_recover_paper_economic_state_reconstructs_acknowledged_ledger(
 ) -> None:
     engine, clock = session(tmp_path)
     drive(engine, clock)
-    records = tuple(engine.audit.records)
+    records = _records(engine)
     economic = recover_paper_economic_state(
         records,
         run_id=engine.run_id,
