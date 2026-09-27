@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,8 @@ candidate_app = typer.Typer(
     help="Inspect accepted candidates and run their fixed offline configuration."
 )
 app.add_typer(candidate_app, name="candidate")
+paper_app = typer.Typer(help="Explicit local simulated Paper start, status and cooperative stop.")
+app.add_typer(paper_app, name="paper")
 
 
 data_app = typer.Typer(help="Inspect strict full-capture local OHLCV input.")
@@ -454,8 +457,90 @@ def candidate_run(
     typer.echo("live capability: unavailable")
 
 
-if __name__ == "__main__":
-    app()
+@paper_app.command("start")
+def paper_start(
+    context: typer.Context,
+    workspace: Annotated[Path, typer.Option("--workspace")],
+    candidate_id: Annotated[str, typer.Option("--candidate-id")],
+    scenario: Annotated[Path, typer.Option("--scenario")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    run_id: Annotated[str | None, typer.Option("--run-id")] = None,
+    prices: Annotated[
+        str, typer.Option("--prices", help="Fixed simulated price cycle, comma-separated.")
+    ] = "100",
+    interval: Annotated[float, typer.Option("--interval", min=0.01, max=10.0)] = 0.1,
+    event_limit: Annotated[int | None, typer.Option("--event-limit", min=1)] = None,
+) -> None:
+    """Start a fresh accepted Candidate in the local Paper simulator until stopped."""
+    config = cast(CliConfiguration, context.obj)
+    modes = (config.run_mode, os.environ.get("EA_RUN_MODE"))
+    if any(value is not None and value != "paper" for value in modes) or any(
+        value is not None
+        for value in (
+            config.config_path,
+            config.environment,
+            os.environ.get("EA_CONFIG_PATH"),
+            os.environ.get("EA_ENVIRONMENT"),
+        )
+    ):
+        typer.echo(
+            "Paper rejects Live and global configuration overrides; "
+            "use this command's local inputs.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    from ea.core import RunId
+    from ea.product.paper_run import run_local_paper
+
+    try:
+        completed = run_local_paper(
+            workspace,
+            candidate_id,
+            scenario,
+            output_root,
+            prices=tuple(float(value) for value in prices.split(",")),
+            interval=interval,
+            event_limit=event_limit,
+            run_id=None if run_id is None else RunId(run_id),
+            on_ready=lambda path: typer.echo(
+                canonical_json({"paper_started": str(path)}).decode("ascii")
+            ),
+        )
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+        typer.echo(f"Paper rejected: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=3) from None
+    typer.echo(canonical_json(completed).decode("ascii"))
+    if completed["state"] != "stopped":
+        raise typer.Exit(code=3)
+
+
+@paper_app.command("status")
+def paper_status(run_dir: Annotated[Path, typer.Option("--run-dir")]) -> None:
+    """Read acknowledged money and current writer-lease presence without mutation."""
+    from ea.product.paper_session import PaperSessionError, read_paper_status
+
+    try:
+        document = read_paper_status(run_dir.expanduser().absolute())
+    except PaperSessionError as error:
+        typer.echo(f"Paper status unavailable: {error}", err=True)
+        raise typer.Exit(code=3) from None
+    typer.echo(canonical_json(document).decode("ascii"))
+
+
+@paper_app.command("stop")
+def paper_stop(
+    run_dir: Annotated[Path, typer.Option("--run-dir")],
+    timeout: Annotated[float, typer.Option("--timeout", min=0.0)] = 10.0,
+) -> None:
+    """Request no new market decisions and wait for terminal state and lease release."""
+    from ea.product.paper_session import PaperSessionError, request_paper_stop
+
+    try:
+        document = request_paper_stop(run_dir.expanduser().absolute(), timeout_seconds=timeout)
+    except PaperSessionError as error:
+        typer.echo(f"Paper stop incomplete: {error}", err=True)
+        raise typer.Exit(code=3) from None
+    typer.echo(canonical_json(document).decode("ascii"))
 
 
 @strategy_app.command("pack")
@@ -484,3 +569,7 @@ def strategy_inspect(artifact: Annotated[Path, typer.Option("--artifact")]) -> N
         typer.echo(str(error), err=True)
         raise typer.Exit(2) from None
     typer.echo(canonical_json(package.document()).decode("ascii"))
+
+
+if __name__ == "__main__":
+    app()

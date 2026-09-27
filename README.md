@@ -2,9 +2,11 @@
 
 EA is an AI-native quantitative R&D and strategy promotion system in development.
 Its delivered offline Research Validation reduces Idea → Evidence-ready Candidate work; live is unavailable.
+Accepted Candidates can also run through [Mac-local Paper V1](docs/local-paper.md), using a
+generated local feed, the Paper broker, shared economic authorities and explicit start/status/stop.
 
 ## Current Phase and Health
-- Phase: **Research Validation — bounded repeated long round trips**
+- Phase: **Research Validation and Mac-local simulated Paper**
 - GitHub prerelease: **v0.2.0 published**
 - Merged baseline: **main healthy**
 - Live trading: **unavailable**

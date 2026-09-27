@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Research Validation — bounded repeated long-only offline research.**
+**Research Validation and Mac-local continuous simulated Paper.**
 **main healthy / live unavailable.**
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
@@ -22,19 +22,28 @@ external write, deployment, or live capability is part of this objective.
 
 ## Completed
 
+- Issue #232 / ADR 0049 adds `ea paper start/status/stop` for an explicitly invoked, accepted
+  V4/V5 Action V2 Candidate. One generated local feed and Paper broker use the existing economic
+  authorities, durable pre-effect/fact/ledger gates and correlated operational logs. Status exposes
+  acknowledged money, observed Fills, incomplete work and the existing writer lease. Stop and
+  controlled source failure close new decisions without implying liquidation; fresh attempts cannot
+  resume unknown state. Continuous refresh retention is bounded without changing historical replay.
+  See [Mac-local Paper usage and limits](local-paper.md). Installed acceptance belongs to the
+  implementation PR; no provider, VPS, crash recovery, long soak or Live readiness is claimed.
+
 - Issue #230 adds PPV-10's bounded streaming market loop, injected UTC/monotonic clocks,
   heartbeat, freshness/stall checks and local simulated source. Active dispatch proofs reuse
   existing strategy and source-issued execution-fact authority seams. Stop and source exhaustion
   cut off new market decisions; already issued facts drain within a bound, and callback failures
   retain an explicit reason. A finite real process entry is available; Candidate/risk/audit/ledger
-  product composition remains PPV-11. See the
+  product composition is delivered by PPV-11 above. See the
   [local market event loop](personal-production-v1.md#ppv-10-local-market-event-loop).
 
 - Issue #227 adds PPV-09's bounded local `PaperBroker` submit/cancel/query contract. Issued Order
   and client identities map to canonical execution facts; exact request retries retain the same
   effect and query redelivery preserves trade dedup identity. The adapter proves its own ingress
   bytes and reuses configured next-event latency, slippage and commission. It owns no Fill,
-  cash or position balance. Continuous feed and installed Paper composition remain PPV-10/11;
+  cash or position balance. PPV-10/11 compose the continuous local feed and Paper entry;
   vendor connectivity and crash recovery are not delivered. See the
   [local Paper broker contract](personal-production-v1.md#ppv-09-local-paper-broker-contract).
 
@@ -42,7 +51,7 @@ external write, deployment, or live capability is part of this objective.
   uncertainty blocks blind resend; cancel requests remain separate from fact confirmation.
   Existing execution facts retain partial/full and late Fills, terminal anomalies and dedup,
   with direct cash/position/ledger tests. The tracker grants no execution permission and provides
-  no crash recovery. Broker transport and continuous Paper remain PPV-09/11. See the
+  no crash recovery. PPV-09/11 provide local broker transport and continuous Paper. See the
   [order lifecycle contract](personal-production-v1.md#ppv-08-local-paper-order-command-lifecycle).
 
 - Issue #220 adds PPV-04 Structured Operational Logging V1 to the existing scenario runtime.
@@ -55,7 +64,8 @@ external write, deployment, or live capability is part of this objective.
   systemd service. Explicit activation and compatible application rollback preserve state;
   unknown downgrade compatibility fails closed. Linux CI exercises the installed supervisor path.
   Actual VPS deployment and reboot acceptance remain NOT_YET_HOST_VERIFIED. See
-  [runtime operations and limitations](production-runtime.md). Paper/Live remains unavailable.
+  [runtime operations and limitations](production-runtime.md). That host profile does not authorize
+  Paper or Live; the separately invoked Mac-local simulated Paper entry is described above.
 
 - Phase 1 delivery reset is complete; its offline and governance-freeze boundaries remain in force.
 
@@ -64,7 +74,8 @@ external write, deployment, or live capability is part of this objective.
 - Merged code already provides deterministic time/data handling, strategy interfaces, portfolio
   and risk controls, matching, execution facts, ledger, reconciliation, audit, and recovery
   components.
-- ADR 0027 fixes the offline-only product and fail-closed boundary.
+- ADR 0027 fixes the historical offline product boundary; ADR 0049 adds only explicit local
+  simulated Paper while preserving fail-closed economics and the denial of Live.
 - ADR 0029 freezes governance expansion and restores bounded T1 product delivery.
 - The installed `ea backtest validate --scenario FILE` command strictly validates
   `BacktestScenario v1` and selected local OHLCV without economic mutation.
@@ -236,7 +247,7 @@ external write, deployment, or live capability is part of this objective.
   ADR 0047 adds read-only accepted identity inspection and guarded offline execution through
   `ea candidate inspect/run`. Fresh artifact, parameter and configuration identity is checked
   before executable package loading; logs and `candidate-binding.json` retain the identity.
-  See [Candidate usage](candidate-lifecycle.md). Continuous Paper composition remains PPV-11.
+  See [Candidate usage](candidate-lifecycle.md) and the separate [Paper operation](local-paper.md).
 
 ## Incomplete
 
