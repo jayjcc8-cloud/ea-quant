@@ -156,7 +156,7 @@ No MULTI_ROUND_TRIP, reentry, shorting, reversal, multi-symbol/position, partial
 pyramiding, portfolio, optimizer, walk-forward, Monte Carlo, Paper/Live, Candidate runtime,
 automatic promotion, new metrics framework, generic state-machine/governance system or #125.
 
-## RepoKeel Retrieval Checkpoint
+## Retrieval Checkpoint
 
 FOUND=YES; USED=YES; UNDERSTOOD=YES (agent technical assessment). Reused the vault notes on
 commission identity/ledger facts, frozen strategy bytes, and relationship-only publication;

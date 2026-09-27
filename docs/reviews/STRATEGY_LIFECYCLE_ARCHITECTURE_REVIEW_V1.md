@@ -115,7 +115,7 @@ or an economic blocker. No runtime code, schema implementation, UI or product te
 
 `ARCHITECTURE_REVIEW_BLOCKED=NO`.
 
-## RepoKeel Retrieval Checkpoint
+## Retrieval Checkpoint
 
 FOUND=YES; USED=YES; UNDERSTOOD=YES (agent's technical understanding, not the user's).
 Read the engineering vault AGENTS.md and three relevant inbox notes: batch relationships,
