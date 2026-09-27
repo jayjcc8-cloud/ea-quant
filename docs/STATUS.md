@@ -2,8 +2,14 @@
 
 ## Current Phase
 
-**Research Validation and Mac-local continuous simulated Paper.**
+**Mac-local continuous simulated Paper.**
 **main healthy / live unavailable.**
+
+Product boundary: Mac-local simulated Paper = AVAILABLE; external Paper provider = NOT AVAILABLE;
+Live = NOT AVAILABLE; VPS host verification = NOT REQUIRED FOR CURRENT DEVELOPMENT. The M1
+Crash-safe Paper gate (PPV-12 Runtime Recovery + PPV-13 Broker Reconciliation + PPV-14 Kill Switch
++ resume-feed continuation) is SATISFIED. The next product gate is M2 (Operational-safe Paper):
+PPV-15 Production Risk Guards.
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
 authoritative checkpoint. GitHub Issues and pull requests carry mutable coordination state; this
@@ -21,6 +27,15 @@ available through a single-user Web UI served on loopback only. No broker, remot
 external write, deployment, or live capability is part of this objective.
 
 ## Completed
+
+- M1 Crash-safe Paper is delivered: PPV-12 Runtime Recovery (`product/paper_recovery.py`),
+  PPV-13 Broker Reconciliation (`reconciliation/broker.py`), PPV-14 Kill Switch
+  (`risk/kill_switch.py`) and resume-feed continuation (`restore_paper_trading_session` +
+  `ea paper resume`). Journal-replay recovery reconstructs the economic gate, re-issued Orders,
+  broker/tracker, refresh frontier and fact authority, then continues the feed with exactly-once
+  fill replay (proven: cash 986.8, 6 fills, reconciliation MATCH). A `crash_after` test seam
+  accepts a crash after any durable record kind. See
+  [Personal Production V1](personal-production-v1.md).
 
 - Issue #232 / ADR 0049 adds `ea paper start/status/stop` for an explicitly invoked, accepted
   V4/V5 Action V2 Candidate. One generated local feed and Paper broker use the existing economic
@@ -357,10 +372,13 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 
 ## Last Confirmed
 
-- Date: **2026-09-12** (Asia/Shanghai).
+- Date: **2026-09-27** (Asia/Shanghai).
 - The containing merged `main` commit and its CI are the authoritative durable-state checkpoint;
   the released product identity remains the exact commit and wheel recorded above.
 - Live capability: unavailable and prohibited.
+- External Paper provider: unavailable.
+- VPS host verification: not required for current development; VPS later verifies host attributes
+  only, never product logic.
 - GitHub prerelease: `v0.2.0` published; package registry: not published; deployment: not performed.
 
 ## Phase Completion Conditions

@@ -605,10 +605,35 @@ def create_portfolio_planning_authority(
     spec_set: InstrumentExecutionSpecSet,
     policy: Phase1PortfolioPolicy,
     execution_policy: ExecutionPolicyRef,
+    first_target_sequence: int = 1,
+    first_intent_sequence: int = 1,
+    result_count: int = 0,
+    last_new_signal_dispatch_sequence: int | None = None,
 ) -> PortfolioPlanningAuthority:
-    """Create one planning authority bound to an exact ledger and policy."""
+    """Create one planning authority bound to an exact ledger and policy.
+
+    ``first_target_sequence``, ``first_intent_sequence``, ``result_count`` and
+    ``last_new_signal_dispatch_sequence`` resume a recovered run whose planning
+    frontier already advanced; fresh runs start at sequence one with no prior
+    signal dispatch.
+    """
     if type(run_id) is not RunId:
         raise _fail(OutcomeCode.INVALID_TYPE, "run_id must be exact")
+    for name, sequence in (
+        ("first_target_sequence", first_target_sequence),
+        ("first_intent_sequence", first_intent_sequence),
+    ):
+        if type(sequence) is not int or not 1 <= sequence <= _MAX_UINT64:
+            raise _fail(OutcomeCode.OUT_OF_RANGE, f"{name} must be a positive uint64")
+    if type(result_count) is not int or not 0 <= result_count <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "result count must be a non-negative uint64")
+    if last_new_signal_dispatch_sequence is not None and (
+        type(last_new_signal_dispatch_sequence) is not int
+        or not 1 <= last_new_signal_dispatch_sequence <= _MAX_UINT64
+    ):
+        raise _fail(
+            OutcomeCode.OUT_OF_RANGE, "last new signal dispatch sequence must be a positive uint64"
+        )
     if type(ledger) is not PortfolioLedger:
         raise _fail(OutcomeCode.INVALID_TYPE, "ledger must be an exact PortfolioLedger")
     if type(spec_set) is not InstrumentExecutionSpecSet:
@@ -708,10 +733,10 @@ def create_portfolio_planning_authority(
     public = _create_portfolio_planning_authority_state(
         run_id=run_id,
         halted=False,
-        target_next=1,
-        intent_next=1,
-        last_new_signal_dispatch_sequence=None,
-        result_count=0,
+        target_next=first_target_sequence,
+        intent_next=first_intent_sequence,
+        last_new_signal_dispatch_sequence=last_new_signal_dispatch_sequence,
+        result_count=result_count,
         conflict=None,
     )
     value = object.__new__(PortfolioPlanningAuthority)

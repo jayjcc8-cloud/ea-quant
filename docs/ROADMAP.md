@@ -135,6 +135,10 @@ discipline without weakening safety contracts.
 
 ## EA Personal Production V1 — bounded planning
 
-[PPV-00 baseline and scope lock](personal-production-v1.md) records the inspected main
-capabilities, remaining work and dependency order for one strategy/server/account. It is
-planning only; it does not activate Paper, Live, deployment or the broader Phase 5 scope.
+[Personal Production V1](personal-production-v1.md) records the inspected main capabilities,
+remaining work and the maturity-gate execution order (GATE M1 .. M6) for one
+strategy/server/account. PPV numbering identifies capability, not execution order; PPV-01 .. PPV-11
+are delivered at their repository boundaries, and GATE M1 (PPV-12/13/14 crash-safe Paper) is
+SATISFIED. VPS is not a product-development prerequisite. This planning does not activate Paper,
+Live, deployment or the broader Phase 5 scope; the crash-safe Mac-local simulated Paper capability
+delivered through GATE M1 remains the current boundary.

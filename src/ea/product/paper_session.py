@@ -429,6 +429,12 @@ def read_paper_status(run_dir: Path) -> dict[str, Any]:
             return _observed_status(run_fd, outputs_fd, binding)
 
 
+def read_paper_binding(run_dir: Path) -> tuple[RunBinding, bytes]:
+    """Read and verify one bound manifest without touching the writer lease."""
+    with _attempt(run_dir) as (canonical, run_fd):
+        return _manifest(run_fd, canonical.name)
+
+
 def request_paper_stop(run_dir: Path, *, timeout_seconds: float = 10.0) -> dict[str, Any]:
     """Durably request cooperative stop and wait for terminal plus lease release."""
     if type(timeout_seconds) is not float or not isfinite(timeout_seconds) or timeout_seconds < 0:

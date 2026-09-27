@@ -81,6 +81,8 @@ class AuditRecordKind(StrEnum):
     RUN_TERMINAL = "run.terminal"
     PAPER_SUBMISSION_AUTHORIZATION = "paper.submission_authorization"
     PAPER_FACT_DISPATCH = "paper.fact_dispatch"
+    PAPER_SUBMISSION_RESULT = "paper.submission_result"
+    PAPER_ORDER_CONSTRUCTION = "paper.order_construction"
 
 
 class AuditSubjectKind(StrEnum):
@@ -100,6 +102,8 @@ class AuditSubjectKind(StrEnum):
     RUN_TERMINAL_STATE = "run_terminal_state"
     PAPER_SUBMISSION = "paper_submission"
     PAPER_FACT_DISPATCH = "paper_fact_dispatch"
+    PAPER_SUBMISSION_RESULT = "paper_submission_result"
+    PAPER_ORDER_CONSTRUCTION = "paper_order_construction"
 
 
 AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
@@ -127,6 +131,8 @@ AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
     AuditRecordKind.RUN_TERMINAL: AuditSubjectKind.RUN_TERMINAL_STATE,
     AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION: AuditSubjectKind.PAPER_SUBMISSION,
     AuditRecordKind.PAPER_FACT_DISPATCH: AuditSubjectKind.PAPER_FACT_DISPATCH,
+    AuditRecordKind.PAPER_SUBMISSION_RESULT: AuditSubjectKind.PAPER_SUBMISSION_RESULT,
+    AuditRecordKind.PAPER_ORDER_CONSTRUCTION: AuditSubjectKind.PAPER_ORDER_CONSTRUCTION,
 }
 
 _LARGE_PAYLOAD_KINDS = frozenset(
@@ -140,6 +146,7 @@ _LARGE_PAYLOAD_KINDS = frozenset(
         AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
         AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION,
         AuditRecordKind.PAPER_FACT_DISPATCH,
+        AuditRecordKind.PAPER_ORDER_CONSTRUCTION,
     }
 )
 
@@ -373,6 +380,8 @@ _SUBJECT_DOMAIN_BY_KIND: dict[AuditRecordKind, bytes] = {
     AuditRecordKind.RUN_TERMINAL: b"ea.audit-subject.run-terminal.v1\0",
     AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION: b"ea.audit-subject.paper-submission.v1\0",
     AuditRecordKind.PAPER_FACT_DISPATCH: b"ea.audit-subject.paper-fact-dispatch.v1\0",
+    AuditRecordKind.PAPER_SUBMISSION_RESULT: b"ea.audit-subject.paper-submission-result.v1\0",
+    AuditRecordKind.PAPER_ORDER_CONSTRUCTION: b"ea.audit-subject.paper-order-construction.v1\0",
 }
 
 
@@ -1347,14 +1356,23 @@ def require_canonical_audit_payload(
     if record_kind in {
         AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION,
         AuditRecordKind.PAPER_FACT_DISPATCH,
+        AuditRecordKind.PAPER_SUBMISSION_RESULT,
+        AuditRecordKind.PAPER_ORDER_CONSTRUCTION,
     }:
         from ea.core.paper import require_paper_audit_document
 
         require_paper_audit_document(
             document,
-            "ea.audit-paper-submission.v1"
-            if record_kind is AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION
-            else "ea.audit-paper-fact-dispatch.v1",
+            {
+                AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION: "ea.audit-paper-submission.v1",
+                AuditRecordKind.PAPER_FACT_DISPATCH: "ea.audit-paper-fact-dispatch.v1",
+                AuditRecordKind.PAPER_SUBMISSION_RESULT: (
+                    "ea.audit-paper-submission-result.v1"
+                ),
+                AuditRecordKind.PAPER_ORDER_CONSTRUCTION: (
+                    "ea.audit-paper-order-construction.v1"
+                ),
+            }[record_kind],
         )
     elif record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
         _require_dispatch_completed_payload(document)
