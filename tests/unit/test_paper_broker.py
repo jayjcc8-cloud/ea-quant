@@ -200,7 +200,11 @@ def test_paper_cancel_request_and_query_redelivery_have_no_economic_effect() -> 
     while queue.remaining:
         lease, outcome = _process_next(queue, facts)
         actions.append(outcome.action)
+        assert outcome.anomalies == ()
+        assert not outcome.requires_reconciliation
+        assert not outcome.halt_requested
         queue.acknowledge(lease)
+    assert actions[1] is ExecutionFactAction.DUPLICATE
     assert actions[-1] is ExecutionFactAction.DUPLICATE
     assert facts.fills == ()
     projection = facts.projection_for_order(order.order_id)
@@ -257,6 +261,18 @@ def test_paper_unknown_history_and_transport_outcomes_do_not_allow_resubmit() ->
     assert broker.query(Sha256Digest("a" * 64), observed_at=TIME).code is (
         OutcomeCode.RECONCILIATION_SUBMISSION_STILL_UNKNOWN
     )
+    # Recover retained acknowledgement evidence even when the submit reply was lost.
+    queue, facts = _paper_runtime(_spec, issued, broker, (query.ingress,))
+    lease, outcome = _process_next(queue, facts)
+    assert outcome.anomalies == ()
+    assert not outcome.requires_reconciliation
+    assert not outcome.halt_requested
+    queue.acknowledge(lease)
+    projection = facts.projection_for_order(order.order_id)
+    assert projection is not None
+    assert projection.projection_state is OrderProjectionState.ACKNOWLEDGED
+    assert facts.fills == ()
+    assert tracker.begin_submit(order) is None
 
 
 def test_paper_retained_source_proof_is_bounded_without_eviction() -> None:

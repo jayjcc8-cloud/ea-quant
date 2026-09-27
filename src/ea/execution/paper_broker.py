@@ -7,7 +7,7 @@ audit, and ledger boundaries when a runtime composes the Paper path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
@@ -39,7 +39,6 @@ from ea.core.execution_messages import (
     canonical_execution_request_bytes,
     create_execution_fact_ingress,
     create_lifecycle_execution_fact,
-    create_submission_query_execution_fact,
     create_trade_execution_fact,
     execution_request_digest,
     order_digest,
@@ -120,7 +119,6 @@ class _PaperOrder:
     cancel_command: CancelCommand | None = None
     cancel_result: PaperCancelResult | None = None
     terminal_fact: ExecutionFact | None = None
-    query_facts: dict[OutcomeCode, ExecutionFact] = field(default_factory=dict)
 
 
 @final
@@ -292,7 +290,6 @@ class PaperBroker:
         if observed < record.submitted_at:
             raise PaperBrokerError(OutcomeCode.OUT_OF_RANGE, "query precedes submission")
         fact: ExecutionFact | None
-        new_query_fact = False
         if record.state is _PaperOrderState.CANCELLED:
             fact = record.terminal_fact
             code = OutcomeCode.ORDER_CANCELLED
@@ -301,28 +298,13 @@ class PaperBroker:
             code = OutcomeCode.RECONCILIATION_SUBMISSION_CONFIRMED_FILLED
         else:
             code = OutcomeCode.RECONCILIATION_SUBMISSION_CONFIRMED_SUBMITTED
-            fact = record.query_facts.get(code)
-            if fact is None:
-                order = record.command.order
-                fact = create_submission_query_execution_fact(
-                    source_namespace=self._source,
-                    dedup_identity=SourceNativeSequence(self._fact_next),
-                    occurred_at=observed,
-                    provenance=self._provenance(
-                        b"query", canonical_execution_request_bytes(order), code.value.encode()
-                    ),
-                    outcome_code=code,
-                    subject_order=order,
-                    venue_order_id=record.venue_order_id,
-                )
-                new_query_fact = True
+            # A query reports the retained ACK, including after a lost submit
+            # reply. A new SUBMITTED fact would regress an ACKNOWLEDGED Order.
+            fact = record.submit_result.ingresses[0].fact
         if fact is None:
             raise PaperBrokerError(OutcomeCode.CONFLICTING_ID, "terminal fact is missing")
         ingress = self._ingress(fact, observed, self._ingress_next)
         self._retain((ingress,))
-        if new_query_fact:
-            record.query_facts[code] = fact
-            self._fact_next += 1
         self._ingress_next += 1
         return PaperQueryResult(code, ingress)
 
