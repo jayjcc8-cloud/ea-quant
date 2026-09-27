@@ -51,6 +51,9 @@ jobs:
         env:
           EXPECTED_SHA: ${{ inputs.candidate_sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Classify candidate Web paths
         id: routes
         env:
@@ -61,22 +64,12 @@ jobs:
           base_sha="$(git merge-base "$CANDIDATE_SHA" origin/main)"
           git cat-file -e "$base_sha^{commit}"
           git cat-file -e "$CANDIDATE_SHA^{commit}"
-          mapfile -t changed_files < <(
-            git diff --no-renames --name-only "$base_sha" "$CANDIDATE_SHA"
-          )
-
-          web=false
+          route_args=(--candidate)
           if [[ "$PURPOSE" == "release_candidate" ]]; then
-            web=true
+            route_args+=(--release)
           fi
-          for changed_file in "${changed_files[@]}"; do
-            case "$changed_file" in
-              apps/web/*|package.json|package-lock.json|npm-shrinkwrap.json|.github/workflows/*)
-                web=true
-                ;;
-            esac
-          done
-          printf 'web=%s\n' "$web" >> "$GITHUB_OUTPUT"
+          git diff --no-renames --name-status -z "$base_sha" "$CANDIDATE_SHA" |
+            python scripts/ci_routes.py "${route_args[@]}"
 
   full:
     needs: classify

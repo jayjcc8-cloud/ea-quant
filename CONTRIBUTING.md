@@ -46,10 +46,16 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
 
 `quality` checks the lock/environment boundary, isolated installed package, reproducibility gate,
 lint, format, types, tests, and doctor. `full` additionally proves byte-identical wheel builds and
-an installed wheel outside the repository. CI remains path-aware: docs-only changes run focused
-governance tests, Python pull requests run `quality`, `main` runs installed-wheel smoke, Web runs
-only for Web/Node/CI paths, and release candidates run `full`. T2/T3 use the existing exact-SHA
-candidate-full workflow; T0/T1 do not need it merely to prove more process.
+an installed wheel outside the repository. `quality` does not run the release-level dual build.
+CI routes changed paths through `scripts/ci_routes.py`: docs-only changes run focused governance
+tests, Python pull requests run `quality`, and `main` runs installed-wheel smoke. Pull requests
+run installed Web E2E for UI, HTTP, shared engine/contract, dependency, build and example changes;
+the full browser job does not repeat on the merged-main push. Unknown paths take the conservative
+route. A newly added Python module skips browser E2E only when the current installed Web/CLI import
+path cannot reach it; changed or removed modules and uncertain import analysis retain browser E2E.
+Frontend lint, types, unit tests and build run for Web/Node/CI changes. Release candidates
+run `full`; T2/T3 retain the exact-SHA candidate-full workflow. T0/T1 do not need it merely to
+prove more process.
 
 Tests must be deterministic and must not require private data. Secrets, broker credentials, and
 non-versionable datasets never enter Git.

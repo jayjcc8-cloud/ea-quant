@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -13,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts import bootstrap_local, verify  # noqa: E402
+from scripts import bootstrap_local, ci_routes, verify  # noqa: E402
 
 
 def test_ci_checks_out_and_asserts_the_event_commit() -> None:
@@ -28,15 +29,150 @@ def test_ci_checks_out_and_asserts_the_event_commit() -> None:
 def test_ci_routes_and_runs_installed_web_e2e() -> None:
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "examples/web-scenarios/*" in workflow
+    assert "python scripts/ci_routes.py" in workflow
+    assert "git diff --no-renames --name-status -z" in workflow
     assert "web_e2e:" in workflow
+    jobs = yaml.safe_load(workflow)["jobs"]
+    assert jobs["web_e2e"]["needs"] == ["classify", "quality"]
+    assert jobs["frontend"]["needs"] == "classify"
+    web_e2e_condition = jobs["web_e2e"]["if"]
+    assert "!cancelled()" in web_e2e_condition
+    assert "github.event_name == 'pull_request'" in web_e2e_condition
+    assert "needs.classify.outputs.web_e2e == 'true'" in web_e2e_condition
+    assert "needs.quality.result == 'success'" in web_e2e_condition
+    assert "needs.quality.result == 'skipped'" in web_e2e_condition
     assert "npx playwright install --with-deps chromium" in workflow
     assert "npm run test:e2e" in workflow
-    jobs = yaml.safe_load(workflow)["jobs"]
     web_steps = "\n".join(step.get("run", "") for step in jobs["web_e2e"]["steps"])
     assert "Reclaim hosted-runner audit headroom" in workflow
     assert "sudo rm -rf -- /usr/local/lib/android/sdk" in web_steps
     assert "required_bytes = 15 * 1024**3" in web_steps
+
+
+@pytest.mark.parametrize(
+    ("path", "python", "web", "web_e2e"),
+    [
+        ("src/ea/execution/matcher.py", True, False, True),
+        ("src/ea/core/execution_messages.py", True, False, True),
+        ("src/ea/web/service.py", True, False, True),
+        ("pyproject.toml", True, False, True),
+        ("build-constraints.txt", True, False, True),
+        ("apps/web/src/app.tsx", False, True, True),
+        ("examples/web-scenarios/flat.yaml", True, False, True),
+        ("tests/unit/test_execution_messages.py", True, False, False),
+        ("docs/STATUS.md", False, False, False),
+        ("unrecognized-build-input", True, True, True),
+    ],
+)
+def test_ci_routes_cover_shared_runtime_contracts_and_unknown_paths(
+    path: str, python: bool, web: bool, web_e2e: bool
+) -> None:
+    route = ci_routes.classify([path])
+    assert (route.python, route.web, route.web_e2e) == (python, web, web_e2e)
+
+
+def test_candidate_routes_keep_release_full_and_frontend_gate() -> None:
+    assert ci_routes.classify(["docs/STATUS.md"], candidate=True).web is False
+    assert ci_routes.classify(["apps/web/src/app.tsx"], candidate=True).web is True
+    assert ci_routes.classify(["docs/STATUS.md"], candidate=True, release=True).web is True
+    assert ci_routes.classify([], candidate=True).web is True
+
+
+def test_added_modules_only_skip_browser_when_outside_installed_imports(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    documents = {
+        "ea/__init__.py": "",
+        "ea/cli/__init__.py": "",
+        "ea/cli/app.py": "from ea.web import server\n",
+        "ea/web/__init__.py": "",
+        "ea/web/server.py": "from .service import create_app\n",
+        "ea/web/service.py": "from ea.execution import authority\n",
+        "ea/execution/__init__.py": "from .authority import authorize\n",
+        "ea/execution/authority.py": "from ea.core import messages\n",
+        "ea/execution/order_lifecycle.py": "from ea.core import messages\n",
+        "ea/core/__init__.py": "",
+        "ea/core/messages.py": "",
+    }
+    for name, contents in documents.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+    reachable = ci_routes.installed_python_modules(source)
+    assert reachable is not None
+    assert "ea.web.service" in reachable
+    assert "ea.execution" in reachable
+    assert "ea.execution.authority" in reachable
+    assert "ea.core.messages" in reachable
+    assert "ea.execution.order_lifecycle" not in reachable
+
+    standalone = "src/ea/execution/order_lifecycle.py"
+    added = ci_routes.classify(
+        [standalone, "tests/unit/test_order_lifecycle.py"],
+        added_paths=frozenset({standalone, "tests/unit/test_order_lifecycle.py"}),
+        source_root=source,
+    )
+    assert added.python is True
+    assert added.web_e2e is False
+    assert ci_routes.classify([standalone], source_root=source).web_e2e is True
+    assert (
+        ci_routes.classify(
+            [standalone], added_paths=frozenset({standalone}), source_root=source
+        ).web_e2e
+        is False
+    )
+    assert (
+        ci_routes.classify(
+            ["src/ea/execution/authority.py"],
+            added_paths=frozenset({"src/ea/execution/authority.py"}),
+            source_root=source,
+        ).web_e2e
+        is True
+    )
+
+    (source / "ea/web/server.py").write_text("import importlib\nimportlib.import_module(name)\n")
+    assert ci_routes.installed_python_modules(source) is None
+    assert (
+        ci_routes.classify(
+            [standalone], added_paths=frozenset({standalone}), source_root=source
+        ).web_e2e
+        is True
+    )
+
+
+def test_real_installed_graph_skips_independent_added_order_module(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    shutil.copytree(PROJECT_ROOT / "src" / "ea", source / "ea")
+    module = source / "ea" / "execution" / "order_lifecycle.py"
+    module.write_text("from ea.core import OrderId\n", encoding="utf-8")
+    path = "src/ea/execution/order_lifecycle.py"
+
+    reachable = ci_routes.installed_python_modules(source)
+    assert reachable is not None
+    assert "ea.execution.authority" in reachable
+    assert "ea.core.execution_messages" in reachable
+    assert "ea.execution.order_lifecycle" not in reachable
+    routes = ci_routes.classify(
+        [path, "tests/unit/test_order_lifecycle.py", "docs/STATUS.md"],
+        added_paths=frozenset({path, "tests/unit/test_order_lifecycle.py"}),
+        source_root=source,
+    )
+    assert routes.python is True
+    assert routes.governance is True
+    assert routes.web_e2e is False
+
+
+def test_route_parser_uses_git_status_not_path_name() -> None:
+    statuses = ci_routes.parse_change_statuses(
+        b"A\0src/ea/execution/order_lifecycle.py\0M\0src/ea/web/service.py\0"
+    )
+    assert statuses == {
+        "src/ea/execution/order_lifecycle.py": "A",
+        "src/ea/web/service.py": "M",
+    }
+    assert ci_routes.parse_change_statuses(b"T\0src/ea/execution/order_lifecycle.py\0") == {
+        "src/ea/execution/order_lifecycle.py": "T"
+    }
 
 
 def test_project_versions_come_from_pyproject() -> None:
