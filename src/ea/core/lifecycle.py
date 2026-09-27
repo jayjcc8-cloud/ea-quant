@@ -1495,6 +1495,61 @@ def create_audited_execution_fact_handoff(
     batch_acknowledgement: AuditAppendAcknowledgement,
     outcome_acknowledgement: AuditAppendAcknowledgement,
 ) -> AuditedExecutionFactHandoff:
+    return _audited_execution_fact_handoff(
+        outcome=outcome,
+        batch_acknowledgement=batch_acknowledgement,
+        outcome_acknowledgement=outcome_acknowledgement,
+        expected_dispatch_kind=AuditRecordKind.MATCHER_DISPATCH_BATCH,
+    )
+
+
+def create_paper_audited_execution_fact_handoff(
+    *,
+    ingress: ExecutionFactIngress,
+    outcome: ExecutionFactProcessingOutcome,
+    dispatch_acknowledgement: AuditAppendAcknowledgement,
+    outcome_acknowledgement: AuditAppendAcknowledgement,
+) -> AuditedExecutionFactHandoff:
+    """Bind an exact source ingress to its Paper dispatch and durable outcome."""
+    from ea.core.execution_messages import execution_fact_ingress_digest
+    from ea.core.paper import canonical_paper_fact_dispatch_payload
+
+    if (
+        type(outcome) is not ExecutionFactProcessingOutcome
+        or type(ingress) is not ExecutionFactIngress
+        or outcome.ingress_identity != ingress.identity
+        or outcome.ingress_sha256 != execution_fact_ingress_digest(ingress)
+        or outcome.run_id != dispatch_acknowledgement.binding.reference.run_id
+    ):
+        raise _fail(OutcomeCode.CONFLICTING_ID, "Paper handoff ingress binding conflicts")
+    payload = canonical_paper_fact_dispatch_payload(
+        ingress, outcome.runtime_dispatch_sequence, run_id=outcome.run_id
+    )
+    require_audit_acknowledgement(
+        dispatch_acknowledgement,
+        binding=outcome_acknowledgement.binding,
+        logical_key=AuditLogicalKey(
+            AuditRecordKind.PAPER_FACT_DISPATCH,
+            AuditSubjectKind.PAPER_FACT_DISPATCH,
+            audit_subject_digest(AuditRecordKind.PAPER_FACT_DISPATCH, payload),
+        ),
+        canonical_payload=payload,
+    )
+    return _audited_execution_fact_handoff(
+        outcome=outcome,
+        batch_acknowledgement=dispatch_acknowledgement,
+        outcome_acknowledgement=outcome_acknowledgement,
+        expected_dispatch_kind=AuditRecordKind.PAPER_FACT_DISPATCH,
+    )
+
+
+def _audited_execution_fact_handoff(
+    *,
+    outcome: ExecutionFactProcessingOutcome,
+    batch_acknowledgement: AuditAppendAcknowledgement,
+    outcome_acknowledgement: AuditAppendAcknowledgement,
+    expected_dispatch_kind: AuditRecordKind,
+) -> AuditedExecutionFactHandoff:
     if type(outcome) is not ExecutionFactProcessingOutcome:
         raise _fail(OutcomeCode.INVALID_TYPE, "handoff requires an exact processing outcome")
     outcome_payload = canonical_execution_fact_processing_outcome_bytes(outcome)
@@ -1511,7 +1566,7 @@ def create_audited_execution_fact_handoff(
     )
     if (
         batch_acknowledgement.binding != outcome_acknowledgement.binding
-        or batch_acknowledgement.record_kind is not AuditRecordKind.MATCHER_DISPATCH_BATCH
+        or batch_acknowledgement.record_kind is not expected_dispatch_kind
         or outcome.runtime_dispatch_sequence < 1
     ):
         raise _fail(OutcomeCode.CONFLICTING_ID, "handoff audit bindings conflict")

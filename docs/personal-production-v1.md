@@ -51,7 +51,7 @@ executing any frozen strategy code, then uses the existing offline engine. Opera
 `candidate-binding.json` sidecar retain the accepted identity. Acceptance alone does not authorize
 Paper/Live execution. See [the Candidate usage contract](candidate-lifecycle.md) and
 [ADR 0047](adr/0047-accepted-candidate-loading-v1.md). Continuous
-Paper composition and installed product acceptance remain PPV-11.
+PPV-11 provides the separate local Paper operation below.
 
 ## PPV-08 local Paper order command lifecycle
 
@@ -71,7 +71,7 @@ Direct tests use the existing Order/fact authorities and funded ledger, includin
 cash, position and sequence expectations. The tracker owns no risk permission, Fill, balance or
 durable recovery state. Runtime composition must still authorize immediately before transport;
 an unknown process state must fail closed, without recreating a tracker to resend. The next
-work unit is PPV-09's local Paper adapter below; continuous product entry remains PPV-11.
+work unit is PPV-09's local Paper adapter below; PPV-11 supplies the continuous product entry.
 
 ## PPV-09 local Paper broker contract
 
@@ -93,7 +93,7 @@ Matching uses the first newly admitted raw event strictly after submission plus 
 latency, with existing adverse slippage, tick rounding and commission arithmetic. It fills the
 whole Order; volume participation and simulated partial fills are not claimed. Cancellation
 stops a pending local match and emits separate confirmation evidence. The adapter owns no second
-Fill, ledger, cash or position authority and grants no pre-effect permission. PPV-11 must compose
+Fill, ledger, cash or position authority and grants no pre-effect permission. PPV-11 composes
 freshness/risk admission, audit and the existing ledger path. State is process-local: crash recovery,
 real provider semantics, network connections and account credentials remain unsupported.
 
@@ -133,8 +133,26 @@ retained as incomplete and is not automatically retried or reported as a clean c
 exit-class callback exceptions. The outer adapter releases the source on exit, including failure.
 
 This entry has no strategy, account or economic effects. Full accepted-Candidate Paper operation,
-durable audit, status/stop commands and installed economic acceptance remain PPV-11. There is no
+durable audit and status/stop commands are delivered separately by PPV-11 below. There is no
 provider connection, reconnect, crash recovery, external order write or long-duration claim.
+
+## PPV-11 Mac-local Paper V1
+
+Issue #232 / ADR 0049 delivers the explicit `ea paper start/status/stop` path for an ACCEPTED
+Action V2 V4/V5 Candidate, one simulated account and instrument. It composes the preceding units
+with the existing strategy, planning, risk, Order, execution-fact, Fill, ledger, reconciliation and
+POSIX audit owners. See [copyable commands, examples and failure semantics](local-paper.md).
+
+The process generates fresh local events until user stop or a declared source failure. Strategy
+round trips remain bounded by accepted configuration; completion does not fake source exhaustion.
+Current cash/notional and stop/freshness are checked at the durable submission boundary. Duplicate
+query facts retain evidence without duplicate money. Observational status distinguishes published
+balances from an observed Fill or incomplete internal advance. Stop releases the source/journal/
+store lease and does not liquidate. Existing/unknown attempts cannot resume or resend.
+
+This satisfies only the authorized Mac-local simulated product path. Installed acceptance uses a
+fixed wheel outside Git and records its finite actual interval in the PR. External provider
+compatibility, host operation, recovery and long-duration Paper gates remain unverified.
 
 ## PPV-01 execution-cost contract
 
@@ -364,14 +382,14 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | PPV-01 Execution Cost Closeout | SATISFIED | #213; #214; ADRs 0044/0045; execution-cost contract above | Liquidity explicitly DEFERRED | Existing research | Deterministic commission, slippage and latency; stop research realism expansion |
 | PPV-02 Production Runtime Profile | SATISFIED | #218; ADR 0046; runtime contract above | Target VPS deployment/boot acceptance NOT_YET_HOST_VERIFIED | Existing bundle and offline Web | One supervised loopback service, persistent workspace, explicit compatible activation/rollback |
 | PPV-03 Health & Readiness | PARTIAL | E6 | Dynamic fail-closed readiness | 02; final feed/recovery/broker signals from 10/12/13 | Distinguish alive from permitted to trade |
-| PPV-04 Structured Logging | SATISFIED | #220; logging contract above | Continuous-runtime composition remains PPV-11; infrastructure deferred | Existing audit and economic IDs | JSON events with causal IDs; economic behavior unchanged |
+| PPV-04 Structured Logging | SATISFIED | #220; logging contract above | PPV-11 integrates continuous local logging; infrastructure deferred | Existing audit and economic IDs | JSON events with causal IDs; economic behavior unchanged |
 | PPV-05 Backup & Restore | MISSING | E5/E13 | Consistent snapshot, retention, isolated restore and integrity checks | 02; final runtime persistence 12 | Quiesced or proven consistent backup, restore drill; no state repair |
 | PPV-06 Monitoring & Alerts | MISSING | E6/E13 | Signals, thresholds, delivery and alert test | 03/04/05; 13/14/15 operational states | One operator/channel; actionable liveness, reconciliation, disk and backup alerts |
-| PPV-07 Candidate V1 | SATISFIED | #208; Candidate contract above | Continuous Paper composition remains PPV-11 | Existing source/Holdout and frozen artifacts | Explicit decision, immutable identity, fresh evidence and pre-execution loading guard |
-| PPV-08 Order Lifecycle V1 | SATISFIED for local Paper commands | #224; contract above | Broker transport and continuous composition remain 09/11; crash recovery deferred | Existing order/fact authorities | Single submit/cancel attempt, explicit uncertainty, authoritative late facts and dedup; no new OMS |
-| PPV-09 Broker Contract V1 | SATISFIED for local Paper | #227; contract above | Continuous composition remains 11; vendor compatibility and crash recovery deferred | 08 | Bounded submit/cancel/query, stable client identity, canonical source-issued facts and normalized failures |
-| PPV-10 Market Event Loop | SATISFIED for local simulation | #230; contract above | Provider connectivity/reconnect deferred; economic composition remains 11 | 02/04; existing market and fact contracts | Bounded incremental input, active proofs, visibility/freshness, heartbeat and controlled stop |
-| PPV-11 Paper Trading Runtime | PARTIAL | E1/E7/E10/E11 | Continuous paper composition/adapter | 08/09/10; operational start also 12/13/14/15 | Shared owners and paper transport; no historical-backtest-as-soak claim |
+| PPV-07 Candidate V1 | SATISFIED | #208; Candidate contract above | PPV-11 composes local Paper; external operations deferred | Existing source/Holdout and frozen artifacts | Explicit decision, immutable identity, fresh evidence and pre-execution loading guard |
+| PPV-08 Order Lifecycle V1 | SATISFIED for local Paper commands | #224; contract above | 09/11 integrate local transport/runtime; crash recovery deferred | Existing order/fact authorities | Single submit/cancel attempt, explicit uncertainty, authoritative late facts and dedup; no new OMS |
+| PPV-09 Broker Contract V1 | SATISFIED for local Paper | #227; contract above | 11 integrates local runtime; vendor compatibility and crash recovery deferred | 08 | Bounded submit/cancel/query, stable client identity, canonical source-issued facts and normalized failures |
+| PPV-10 Market Event Loop | SATISFIED for local simulation | #230; contract above | Provider connectivity/reconnect deferred; 11 integrates local economics | 02/04; existing market and fact contracts | Bounded incremental input, active proofs, visibility/freshness, heartbeat and controlled stop |
+| PPV-11 Paper Trading Runtime | SATISFIED for Mac-local simulation | #232; local Paper usage above | External provider/host, recovery and long-duration validation remain deferred | Delivered 07/08/09/10/04; external operations still require later gates | Explicit installed start/status/stop, shared economics and durable audit, duplicate protection and truthful failure state |
 | PPV-12 Runtime Recovery V1 | PARTIAL | E5/E10 | Durable outbound intent and uncertain-effect restart | 08/09/11; acceptance with 13 | Query/reconcile before new submissions; never blindly resend ambiguous orders |
 | PPV-13 Broker Reconciliation V1 | PARTIAL | E10 | External observations and continuous drift handling | 08/09/11; restart integration with 12 | Orders/fills/cash/positions; detect, retain and halt, no automatic balance repair |
 | PPV-14 Kill Switch | PARTIAL | E9 | Operator strategy/account/global scopes and durable restart behavior | 02/08/09 | Reuse halt authorization seam; define pending orders and cancel semantics; no implicit liquidation |

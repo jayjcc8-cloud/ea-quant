@@ -528,6 +528,7 @@ def _create_economic_gate(
     execution_policy: ExecutionPolicyRef,
     risk_policy: Phase1RiskPolicy,
     initial_funding: InitialFunding | None = None,
+    retain_refresh_history: bool = True,
 ) -> _Phase1EconomicGate:
     ledger = portfolio.create_portfolio_ledger(run_id, spec_set)
     funding_outcome = (
@@ -544,6 +545,7 @@ def _create_economic_gate(
         spec_set=spec_set,
         policy_id=risk_policy.policy_id,
         policy_sha256=phase1_risk_policy_digest(risk_policy),
+        retain_history=retain_refresh_history,
     )
     frontier = create_acknowledged_lifecycle_frontier(
         initial_snapshot=ledger.snapshot, initial_risk_state=risk_authority.risk_state
@@ -574,6 +576,30 @@ def create_phase1_historical_economic_gate(
         execution_policy=execution_policy,
         risk_policy=risk_policy,
         initial_funding=initial_funding,
+    )
+
+
+def create_local_paper_economic_gate(
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    execution_policy: ExecutionPolicyRef,
+    risk_policy: Phase1RiskPolicy,
+    initial_funding: InitialFunding,
+) -> _Phase1EconomicGate:
+    """Use the shared economic owners with bounded continuous refresh retention.
+
+    The current refresh remains replayable. Earlier publications live in the
+    audit journal and cannot authorize a resumed in-memory Paper attempt.
+    Historical construction retains its original complete replay history.
+    """
+    return _create_economic_gate(
+        run_id,
+        spec_set,
+        execution_policy,
+        risk_policy,
+        initial_funding,
+        retain_refresh_history=False,
     )
 
 

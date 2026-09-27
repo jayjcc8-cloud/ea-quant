@@ -361,3 +361,38 @@ def test_action_v2_runtime_still_requires_complete_parameters_before_python(
         run_accepted_candidate(binding, path, tmp_path / "rejected-runs")
     assert calls == []
     assert not (tmp_path / "rejected-runs").exists()
+
+
+def test_accepted_candidate_paper_attempt_keeps_open_position_and_cannot_resume(
+    selected: tuple[Path, str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reuse this module's real Candidate evidence for the new outer journal seam."""
+    from ea.core import RunId
+    from ea.product.paper_run import run_local_paper
+    from ea.product.paper_session import read_paper_status
+
+    workspace, candidate_id, path = selected
+    output = tmp_path / "paper-runs"
+    result = run_local_paper(
+        workspace,
+        candidate_id,
+        path,
+        output,
+        prices=(10.0, 9.0, 11.0, 12.0),
+        interval=0.01,
+        event_limit=4,
+    )
+    assert result["state"] == "failed"
+    assert result["reason"] == "source_exhausted"
+    assert result["market_events"] == 4
+    assert result["fills"] == 1
+    assert result["position"] == "2"
+    assert result["terminal_durable"] is True
+    assert result["reconciliation"] == "match"
+    status = read_paper_status(Path(result["run_dir"]))
+    assert status["lease_held"] is False
+    assert status["ledger_sequence"] == 2
+    calls = no_module(monkeypatch)
+    with pytest.raises(ValueError, match="cannot resume"):
+        run_local_paper(workspace, candidate_id, path, output, run_id=RunId(result["run_id"]))
+    assert calls == []

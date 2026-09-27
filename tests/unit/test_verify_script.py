@@ -143,18 +143,18 @@ def test_added_modules_only_skip_browser_when_outside_installed_imports(tmp_path
 def test_real_installed_graph_skips_independent_added_order_module(tmp_path: Path) -> None:
     source = tmp_path / "src"
     shutil.copytree(PROJECT_ROOT / "src" / "ea", source / "ea")
-    module = source / "ea" / "execution" / "order_lifecycle.py"
+    module = source / "ea" / "execution" / "order_lifecycle_probe.py"
     module.write_text("from ea.core import OrderId\n", encoding="utf-8")
-    path = "src/ea/execution/order_lifecycle.py"
+    path = "src/ea/execution/order_lifecycle_probe.py"
 
     reachable = ci_routes.installed_python_modules(source)
     assert reachable is not None
     assert "ea.execution.authority" in reachable
     assert "ea.core.execution_messages" in reachable
-    assert "ea.execution.order_lifecycle" not in reachable
+    assert "ea.execution.order_lifecycle_probe" not in reachable
     routes = ci_routes.classify(
-        [path, "tests/unit/test_order_lifecycle.py", "docs/STATUS.md"],
-        added_paths=frozenset({path, "tests/unit/test_order_lifecycle.py"}),
+        [path, "tests/unit/test_order_lifecycle_probe.py", "docs/STATUS.md"],
+        added_paths=frozenset({path, "tests/unit/test_order_lifecycle_probe.py"}),
         source_root=source,
     )
     assert routes.python is True

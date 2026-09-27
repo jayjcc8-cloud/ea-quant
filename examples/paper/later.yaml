@@ -1,0 +1,47 @@
+data:
+  end_utc: '2026-01-04T09:43:00.000000Z'
+  fingerprint:
+    sha256: 6c34dd1dc351e034c31a2bbf78e8419ac94e0a6680d12502f100eb6d5d52134f
+    record_count: 12
+  path: later.csv
+  start_utc: '2026-01-04T09:31:00.000000Z'
+execution:
+  commission:
+    policy: deterministic-commission-v1
+    commission_bps: '10'
+  policy: phase1.next-bar-close.v1
+  slippage:
+    policy: deterministic-slippage-v1
+    slippage_bps: '100'
+  latency:
+    policy: deterministic-latency-v1
+    latency_ms: 0
+funding:
+  currency: USD
+  initial_cash: '1000'
+instrument:
+  contract_multiplier: '1'
+  currency_quantum: '0.01'
+  price_quantum: '0.01'
+  quantity_quantum: '1'
+  settlement_currency: USD
+  specification_id: xnas.aapl.v1
+  specification_set_id: scenario.xnas.aapl.v1
+  symbol: AAPL
+  venue: XNAS
+randomness_profile: none
+risk:
+  max_notional: '1000'
+  max_order_quantity: '5'
+  max_position_quantity: '5'
+schema_version: 5
+strategy:
+  action_contract: V2
+  id: bounded-long-hold-roots-v1
+  max_round_trips: 3
+  parameters:
+    entry_delay: 0
+    hold_root_count: 1
+    target_quantity: '2'
+  position_lifecycle: bounded-long-round-trips-v1
+  version: 1

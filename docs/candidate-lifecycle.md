@@ -35,4 +35,5 @@ deleting the binding cannot turn a Candidate attempt into a legacy unbound run. 
 bindings reject resume and reporting. CLI workspace aliases (including macOS `/var` paths) are
 resolved at entry, and optional V1 parameters use the same defaults as research. Existing unbound backtest and report commands keep
 their established behavior. This command performs one finite offline run. Continuous local Paper
-execution is composed in PPV-11; VPS and Live authorization remain denied.
+execution is available only through the separate [PPV-11 Paper operation](local-paper.md).
+Candidate ACCEPTED still does not start or authorize it implicitly; VPS and Live remain denied.
