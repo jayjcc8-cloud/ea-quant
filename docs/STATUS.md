@@ -22,6 +22,14 @@ external write, deployment, or live capability is part of this objective.
 
 ## Completed
 
+- Issue #227 adds PPV-09's bounded local `PaperBroker` submit/cancel/query contract. Issued Order
+  and client identities map to canonical execution facts; exact request retries retain the same
+  effect and query redelivery preserves trade dedup identity. The adapter proves its own ingress
+  bytes and reuses configured next-event latency, slippage and commission. It owns no Fill,
+  cash or position balance. Continuous feed and installed Paper composition remain PPV-10/11;
+  vendor connectivity and crash recovery are not delivered. See the
+  [local Paper broker contract](personal-production-v1.md#ppv-09-local-paper-broker-contract).
+
 - Issue #224 adds PPV-08 local Paper order command tracking over issued Orders. Submission
   uncertainty blocks blind resend; cancel requests remain separate from fact confirmation.
   Existing execution facts retain partial/full and late Fills, terminal anomalies and dedup,
