@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts import bootstrap_local, verify  # noqa: E402
+from scripts import bootstrap_local, ci_routes, verify  # noqa: E402
 
 
 def test_ci_checks_out_and_asserts_the_event_commit() -> None:
@@ -28,8 +28,11 @@ def test_ci_checks_out_and_asserts_the_event_commit() -> None:
 def test_ci_routes_and_runs_installed_web_e2e() -> None:
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "examples/web-scenarios/*" in workflow
+    assert "python scripts/ci_routes.py" in workflow
     assert "web_e2e:" in workflow
+    web_e2e_condition = yaml.safe_load(workflow)["jobs"]["web_e2e"]["if"]
+    assert "github.event_name == 'pull_request'" in web_e2e_condition
+    assert "needs.classify.outputs.web_e2e == 'true'" in web_e2e_condition
     assert "npx playwright install --with-deps chromium" in workflow
     assert "npm run test:e2e" in workflow
     jobs = yaml.safe_load(workflow)["jobs"]
@@ -37,6 +40,35 @@ def test_ci_routes_and_runs_installed_web_e2e() -> None:
     assert "Reclaim hosted-runner audit headroom" in workflow
     assert "sudo rm -rf -- /usr/local/lib/android/sdk" in web_steps
     assert "required_bytes = 15 * 1024**3" in web_steps
+
+
+@pytest.mark.parametrize(
+    ("path", "python", "web", "web_e2e"),
+    [
+        ("src/ea/execution/matcher.py", True, False, True),
+        ("src/ea/core/execution_messages.py", True, False, True),
+        ("src/ea/web/service.py", True, False, True),
+        ("pyproject.toml", True, False, True),
+        ("build-constraints.txt", True, False, True),
+        ("apps/web/src/app.tsx", False, True, True),
+        ("examples/web-scenarios/flat.yaml", True, False, True),
+        ("tests/unit/test_execution_messages.py", True, False, False),
+        ("docs/STATUS.md", False, False, False),
+        ("unrecognized-build-input", True, True, True),
+    ],
+)
+def test_ci_routes_cover_shared_runtime_contracts_and_unknown_paths(
+    path: str, python: bool, web: bool, web_e2e: bool
+) -> None:
+    route = ci_routes.classify([path])
+    assert (route.python, route.web, route.web_e2e) == (python, web, web_e2e)
+
+
+def test_candidate_routes_keep_release_full_and_frontend_gate() -> None:
+    assert ci_routes.classify(["docs/STATUS.md"], candidate=True).web is False
+    assert ci_routes.classify(["apps/web/src/app.tsx"], candidate=True).web is True
+    assert ci_routes.classify(["docs/STATUS.md"], candidate=True, release=True).web is True
+    assert ci_routes.classify([], candidate=True).web is True
 
 
 def test_project_versions_come_from_pyproject() -> None:

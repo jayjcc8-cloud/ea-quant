@@ -21,6 +21,7 @@ jobs:
       governance: ${{ steps.routes.outputs.governance }}
       python: ${{ steps.routes.outputs.python }}
       web: ${{ steps.routes.outputs.web }}
+      web_e2e: ${{ steps.routes.outputs.web_e2e }}
       ci: ${{ steps.routes.outputs.ci }}
     steps:
       - uses: actions/checkout@v7
@@ -52,60 +53,8 @@ jobs:
 
           git cat-file -e "$base_sha^{commit}"
           git cat-file -e "$HEAD_SHA^{commit}"
-          mapfile -t changed_files < <(git diff --no-renames --name-only "$base_sha" "$HEAD_SHA")
-
-          docs_only=true
-          governance=false
-          python=false
-          web=false
-          ci=false
-          if [[ "${#changed_files[@]}" -eq 0 ]]; then
-            docs_only=false
-          fi
-
-          for changed_file in "${changed_files[@]}"; do
-            case "$changed_file" in
-              .github/workflows/*)
-                ci=true
-                governance=true
-                python=true
-                web=true
-                docs_only=false
-                ;;
-              src/ea/web/*|src/ea/cli/*|src/ea/product/backtest.py|src/ea/product/reporting.py|src/ea/product/scenario.py|tests/unit/test_web*|tests/unit/test_cli_web.py|examples/web-scenarios/*|pyproject.toml|uv.lock)
-                python=true
-                web=true
-                docs_only=false
-                ;;
-              src/*|tests/*|scripts/*)
-                python=true
-                docs_only=false
-                ;;
-              apps/web/*|package.json|package-lock.json|npm-shrinkwrap.json)
-                web=true
-                docs_only=false
-                ;;
-              docs/fixtures/*)
-                governance=true
-                python=true
-                docs_only=false
-                ;;
-              docs/*|README.md|AGENTS.md|CONTRIBUTING.md|.governance/*|.github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE.md)
-                governance=true
-                ;;
-              *)
-                governance=true
-                docs_only=false
-                ;;
-            esac
-          done
-
-          printf 'docs_only=%s\n' "$docs_only" >> "$GITHUB_OUTPUT"
-          printf 'governance=%s\n' "$governance" >> "$GITHUB_OUTPUT"
-          printf 'python=%s\n' "$python" >> "$GITHUB_OUTPUT"
-          printf 'web=%s\n' "$web" >> "$GITHUB_OUTPUT"
-          printf 'ci=%s\n' "$ci" >> "$GITHUB_OUTPUT"
-          printf 'changed_files=%s\n' "${#changed_files[@]}"
+          git diff --no-renames --name-only -z "$base_sha" "$HEAD_SHA" |
+            python scripts/ci_routes.py
 
   governance:
     needs: classify
@@ -229,7 +178,9 @@ jobs:
 
   web_e2e:
     needs: classify
-    if: needs.classify.outputs.web == 'true'
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.classify.outputs.web_e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

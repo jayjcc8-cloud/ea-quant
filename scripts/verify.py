@@ -412,9 +412,10 @@ def verify_full(uv: str, config: ProjectConfig, env: Mapping[str, str]) -> None:
 
     wheel_a = single_wheel(wheel_a_dir)
     wheel_b = single_wheel(wheel_b_dir)
-    if wheel_a.read_bytes() != wheel_b.read_bytes():
+    wheel_a_bytes = wheel_a.read_bytes()
+    if wheel_a_bytes != wheel_b.read_bytes():
         raise VerificationError("isolated wheel builds are not byte-identical")
-    digest = hashlib.sha256(wheel_a.read_bytes()).hexdigest()
+    digest = hashlib.sha256(wheel_a_bytes).hexdigest()
     print(f"{digest}  {wheel_a}", flush=True)
     verify_wheel_metadata(wheel_a)
 
