@@ -113,7 +113,8 @@ def _container(manifest: bytes, source: bytes) -> bytes:
     return result.getvalue()
 
 
-def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> StrategyPackage:
+def inspect_package(payload: bytes, *, expected_sha256: str | None = None) -> StrategyPackage:
+    """Decode and verify immutable package bytes without executing their Python."""
     try:
         if type(payload) is not bytes or len(payload) > MAX_ARTIFACT_BYTES:
             raise ValueError
@@ -207,6 +208,11 @@ def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> S
         )
     except Exception:
         raise StrategyPackageError("strategy package validation failed") from None
+    return package
+
+
+def validate_package(payload: bytes, *, expected_sha256: str | None = None) -> StrategyPackage:
+    package = inspect_package(payload, expected_sha256=expected_sha256)
     package.module()
     return package
 

@@ -207,6 +207,14 @@ external write, deployment, or live capability is part of this objective.
   the original submission-time bound. Combined costs, frozen Web assumptions and supported resume
   retain this policy; source exhaustion preserves expiry without fabricated fills. Liquidity remains future work.
 
+- Issue #208 / ADR 0043 adds explicit research Candidates over verified source and chronological
+  Holdout evidence. Immutable exact-evidence fingerprints and human ACCEPTED/REJECTED reasons
+  persist under the existing workspace lock; decisions grant no execution permission. PPV-07 /
+  ADR 0047 adds read-only accepted identity inspection and guarded offline execution through
+  `ea candidate inspect/run`. Fresh artifact, parameter and configuration identity is checked
+  before executable package loading; logs and `candidate-binding.json` retain the identity.
+  See [Candidate usage](candidate-lifecycle.md). Continuous Paper composition remains PPV-11.
+
 ## Incomplete
 
 The v0.2.0 prerelease and bounded local Web research loop remain one deterministic offline
@@ -215,7 +223,7 @@ instruction-level or Web recovery, symbol/data editing, uploads, broader experim
 automatic optimization, broader performance analytics, remote strategy plugins, paper/live execution,
 package-registry publication, and deployment remain unavailable. Phase 1.1/#125 is closed not-planned (historical provenance). Research Foundation adds schema-driven strategies and immutable local artifacts to commission and Chronological Holdout.
 Path-aware Research Analysis V1 is delivered. PR #191 records the Strategy Lifecycle architecture
-review and Proposed ADR 0039; Candidate runtime remains deferred. Issue #192 / Accepted ADR 0040
+review and Proposed ADR 0039; Candidate runtime is delivered under Issue #208 / ADR 0043. Issue #192 / Accepted ADR 0040
 delivers SINGLE_LONG_ROUND_TRIP_V1 under Issue #195: one entry, one full exit and at most two
 Orders/Fills through existing offline owners. Action V2, Scenario V4, Result/Semantic V3 and
 Report V2 bind per-leg fees, open/closed economics and deterministic two-leg resume. Path V2
@@ -223,7 +231,7 @@ uses each acknowledged cash/position balance and the unchanged full-path drawdow
 Web Job V4 persists the new report/path versions; Run Detail, Batch, Comparison and Holdout use
 those verified artifacts, including restart/reopen without external CSV. Existing V1 routes
 remain unchanged. New metrics, optimizer, arbitrary multi-trade and Agent Research Tools remain
-future work. The next decision follows actual strategy/data research; Candidate remains deferred. Issue #200 separately authorizes bounded repeated long round trips;
+future work. The next decision follows actual strategy/data research; Candidate evidence and human decisions are delivered under Issue #208. Issue #200 separately authorizes bounded repeated long round trips;
 its research integration is delivered. Trade Analytics V1 is delivered under Issue #205; broader research validation remains bounded.
 
 ## Blockers
@@ -269,11 +277,14 @@ used for `v0.2.0` was limited to the GitHub tag and prerelease assets recorded a
 
 Proposed architecture (not implemented capabilities):
 
-- [ADR 0039 — Research Candidate Identity](adr/0039-strategy-lifecycle-and-research-candidate-identity-v1.md) — runtime deferred.
+- [ADR 0039 — Research Candidate Identity](adr/0039-strategy-lifecycle-and-research-candidate-identity-v1.md) — superseded for implementation by ADR 0043.
 
 ADR 0029 preserves ADR 0025 authority precedence while superseding its recursive delivery
 machinery and the delivery-process requirements of ADRs 0026 and 0028. Historical ADRs remain
 immutable. Merged code, tests, and CI remain the authority for actual behavior.
+
+- [ADR 0043 — Research Candidate Runtime V1](adr/0043-research-candidate-runtime-v1.md) — implements the proposed Candidate identity and decision contract.
+- [ADR 0047 — Accepted Candidate Loading V1](adr/0047-accepted-candidate-loading-v1.md) — guards frozen artifact/configuration loading and propagates accepted identity.
 
 ## Primary Issues
 

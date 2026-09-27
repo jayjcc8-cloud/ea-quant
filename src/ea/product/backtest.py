@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import ea
@@ -94,6 +94,9 @@ from ea.product.offline_demo import (
     _package_code_digest,
 )
 from ea.product.operational import ProductObservation, product_logger
+
+if TYPE_CHECKING:
+    from ea.product.candidate import AcceptedCandidateBinding
 from ea.product.scenario import (
     BacktestScenarioError,
     LoadedBacktestScenario,
@@ -348,6 +351,7 @@ def _attempt_manifest_bytes(
     lineage: Sha256Digest,
     risk_policy: Any,
     risk_context: dict[str, object],
+    candidate_binding_sha256: str | None = None,
 ) -> bytes:
     funding = InitialFunding(run_id, scenario.funding_currency, scenario.initial_cash)
     source_file_sha256 = sha256(scenario.data_path.read_bytes()).hexdigest()
@@ -395,6 +399,8 @@ def _attempt_manifest_bytes(
         },
         "schema": _ATTEMPT_SCHEMA,
     }
+    if candidate_binding_sha256 is not None:
+        document["candidate_binding_sha256"] = candidate_binding_sha256
     return _canonical_json(document)
 
 
@@ -1163,7 +1169,7 @@ def _load_verified_attempt(
             "scenario",
             "schema",
         }
-        if set(document) != expected_fields:
+        if set(document) not in (expected_fields, expected_fields | {"candidate_binding_sha256"}):
             raise ValueError("manifest fields conflict")
         scenario_document = document["scenario"]
         data_document = document["data"]
@@ -1182,6 +1188,18 @@ def _load_verified_attempt(
         raise BacktestResumeFailure("resume identity evidence is invalid", attempt) from None
     if document["schema"] != _ATTEMPT_SCHEMA or document["run_id"] != run_id.value:
         raise BacktestResumeFailure("resume identity evidence conflicts", attempt)
+    candidate_digest = document.get("candidate_binding_sha256")
+    if candidate_digest is not None:
+        try:
+            if (
+                sha256(read_regular(attempt / "candidate-binding.json", attempt)).hexdigest()
+                != candidate_digest
+            ):
+                raise ValueError("binding digest conflicts")
+        except (OSError, ValueError):
+            raise BacktestResumeFailure(
+                "candidate runtime attribution is invalid", attempt
+            ) from None
     try:
         package_path = attempt / "strategy.eastrategy"
         catalog = None
@@ -1202,6 +1220,7 @@ def _load_verified_attempt(
             lineage=recomputed_lineage,
             risk_policy=risk_policy,
             risk_context=risk_context,
+            candidate_binding_sha256=candidate_digest,
         )
     except Exception:
         raise BacktestResumeFailure(
@@ -1226,6 +1245,7 @@ def run_backtest_scenario(
     run_id: RunId | None = None,
     operational_logging: bool = True,
     operational_sink: Callable[[str], None] | None = None,
+    _candidate_binding: AcceptedCandidateBinding | None = None,
 ) -> BacktestRunResult:
     """Run one validated scenario through the existing offline authorities."""
     if type(scenario) is not LoadedBacktestScenario:
@@ -1234,6 +1254,11 @@ def run_backtest_scenario(
         run_id = RunId(str(uuid4()))
     elif type(run_id) is not RunId:
         raise BacktestRunError("run_id must be an exact RunId")
+    candidate_document = None
+    if _candidate_binding is not None:
+        from ea.product.candidate import candidate_run_document
+
+        candidate_document = candidate_run_document(_candidate_binding, scenario, run_id)
     output_root = _safe_output_root(output_root)
     risk_policy, risk_context = _risk_context(scenario)
     lineage = _lineage(scenario, risk_policy=risk_policy, risk_context=risk_context)
@@ -1243,6 +1268,9 @@ def run_backtest_scenario(
         lineage=lineage,
         risk_policy=risk_policy,
         risk_context=risk_context,
+        candidate_binding_sha256=(
+            None if candidate_document is None else sha256(candidate_document).hexdigest()
+        ),
     )
     binding = _binding(run_id, lineage, manifest_bytes)
     manifest = CanonicalAttemptManifest(binding.reference, manifest_bytes)
@@ -1256,6 +1284,8 @@ def run_backtest_scenario(
             prepared = store.prepare_canonical_attempt(manifest)
         except StoreCollisionError:
             raise BacktestRunError("fresh attempt directory could not be created") from None
+        if candidate_document is not None:
+            _write_or_verify(attempt / "candidate-binding.json", candidate_document)
         operational_logger = product_logger(
             attempt,
             scenario,
@@ -1263,6 +1293,7 @@ def run_backtest_scenario(
             operation="run",
             enabled=operational_logging,
             sink=operational_sink,
+            candidate_id=None if _candidate_binding is None else _candidate_binding.candidate_id,
         )
         operations = ProductObservation(operational_logger)
         operations.emit("run.started")
@@ -1354,6 +1385,12 @@ def resume_backtest_attempt(
 ) -> BacktestRunResult:
     """Verify and continue one supported durable frontier of the same attempt."""
     scenario, run_id, lineage, risk_policy, risk_context, manifest = _load_verified_attempt(run_dir)
+    from ea.product.candidate import retained_candidate_id
+
+    try:
+        candidate_id = retained_candidate_id(run_dir, scenario, run_id)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise BacktestResumeFailure("candidate runtime attribution is invalid", run_dir) from None
     attempt = run_dir
     store = LocalResultStore(attempt.parent)
     journal: Any | None = None
@@ -1412,6 +1449,7 @@ def resume_backtest_attempt(
                 scenario,
                 run_id,
                 operation="verify",
+                candidate_id=candidate_id,
                 enabled=operational_logging and operational_sink is not None,
                 sink=operational_sink,
             )
@@ -1464,6 +1502,7 @@ def resume_backtest_attempt(
                 scenario,
                 run_id,
                 operation="resume",
+                candidate_id=candidate_id,
                 enabled=operational_logging,
                 sink=operational_sink,
             )
@@ -1505,6 +1544,7 @@ def resume_backtest_attempt(
                 scenario,
                 run_id,
                 operation="resume",
+                candidate_id=candidate_id,
                 enabled=operational_logging,
                 sink=operational_sink,
             )
