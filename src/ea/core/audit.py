@@ -79,6 +79,8 @@ class AuditRecordKind(StrEnum):
     RUNTIME_FAILING_SAFETY_TRANSITION = "runtime.failing_safety_transition"
     RUNTIME_DISPATCH_COMPLETED = "runtime.dispatch_completed"
     RUN_TERMINAL = "run.terminal"
+    PAPER_SUBMISSION_AUTHORIZATION = "paper.submission_authorization"
+    PAPER_FACT_DISPATCH = "paper.fact_dispatch"
 
 
 class AuditSubjectKind(StrEnum):
@@ -96,6 +98,8 @@ class AuditSubjectKind(StrEnum):
     COORDINATOR_STATE = "coordinator_state"
     RUNTIME_DISPATCH = "runtime_dispatch"
     RUN_TERMINAL_STATE = "run_terminal_state"
+    PAPER_SUBMISSION = "paper_submission"
+    PAPER_FACT_DISPATCH = "paper_fact_dispatch"
 
 
 AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
@@ -121,6 +125,8 @@ AUDIT_SUBJECT_BY_RECORD_KIND: dict[AuditRecordKind, AuditSubjectKind] = {
     AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION: AuditSubjectKind.COORDINATOR_STATE,
     AuditRecordKind.RUNTIME_DISPATCH_COMPLETED: AuditSubjectKind.RUNTIME_DISPATCH,
     AuditRecordKind.RUN_TERMINAL: AuditSubjectKind.RUN_TERMINAL_STATE,
+    AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION: AuditSubjectKind.PAPER_SUBMISSION,
+    AuditRecordKind.PAPER_FACT_DISPATCH: AuditSubjectKind.PAPER_FACT_DISPATCH,
 }
 
 _LARGE_PAYLOAD_KINDS = frozenset(
@@ -132,6 +138,8 @@ _LARGE_PAYLOAD_KINDS = frozenset(
         AuditRecordKind.RECONCILIATION_ADJUSTMENT_AUTHORIZATION,
         AuditRecordKind.RECONCILIATION_ADJUSTMENT_OUTCOME,
         AuditRecordKind.SUBMISSION_PRE_EFFECT_AUTHORIZATION,
+        AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION,
+        AuditRecordKind.PAPER_FACT_DISPATCH,
     }
 )
 
@@ -363,6 +371,8 @@ _SUBJECT_DOMAIN_BY_KIND: dict[AuditRecordKind, bytes] = {
     AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION: (b"ea.audit-subject.failing-safety.v1\0"),
     AuditRecordKind.RUNTIME_DISPATCH_COMPLETED: (b"ea.audit-subject.dispatch-completed.v1\0"),
     AuditRecordKind.RUN_TERMINAL: b"ea.audit-subject.run-terminal.v1\0",
+    AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION: b"ea.audit-subject.paper-submission.v1\0",
+    AuditRecordKind.PAPER_FACT_DISPATCH: b"ea.audit-subject.paper-fact-dispatch.v1\0",
 }
 
 
@@ -1185,6 +1195,11 @@ _RUN_TERMINAL_V2_EXTRA_FIELDS = frozenset(
 def _require_run_terminal_payload(document: dict[str, object]) -> None:
     """Admit terminal v1 (pre-ledger history) and v2 (publication-frontier-bound)."""
     schema = document.get("schema")
+    if schema == "ea.audit-paper-terminal.v1":
+        from ea.core.paper import require_paper_audit_document
+
+        require_paper_audit_document(document, schema)
+        return
     if schema == "ea.audit-run-terminal.v1":
         fields = _AUDIT_PAYLOAD_FIELDS_BY_KIND[AuditRecordKind.RUN_TERMINAL]
     elif schema == "ea.audit-run-terminal.v2":
@@ -1329,7 +1344,19 @@ def require_canonical_audit_payload(
         ) from error
     if type(document) is not dict or _canonical_json(document) != canonical_payload:
         raise _fail(OutcomeCode.CONFLICTING_ID, "audit payload is not canonical JSON")
-    if record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
+    if record_kind in {
+        AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION,
+        AuditRecordKind.PAPER_FACT_DISPATCH,
+    }:
+        from ea.core.paper import require_paper_audit_document
+
+        require_paper_audit_document(
+            document,
+            "ea.audit-paper-submission.v1"
+            if record_kind is AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION
+            else "ea.audit-paper-fact-dispatch.v1",
+        )
+    elif record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:
         _require_dispatch_completed_payload(document)
     elif record_kind is AuditRecordKind.RUN_TERMINAL:
         _require_run_terminal_payload(document)

@@ -55,6 +55,63 @@ def _authority() -> Phase1PortfolioRiskRefreshAuthority:
     )
 
 
+def test_continuous_profile_retains_only_current_refresh_and_rejects_old_replay() -> None:
+    authority = create_phase1_portfolio_risk_refresh_authority(
+        run_id=RUN_ID,
+        spec_set=_spec_set(),
+        policy_id=POLICY_ID,
+        policy_sha256=POLICY_SHA256,
+        retain_history=False,
+    )
+    snapshot = create_portfolio_ledger(RUN_ID, _spec_set()).snapshot
+    state = _risk_state()
+    for sequence in range(1, 101):
+        refresh = authority.create_refresh(
+            snapshot=snapshot,
+            risk_state=state,
+            dispatch_sequence=sequence,
+            ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+            coordinator_running=True,
+            publication_window_clear=True,
+            candidate_matches_internal=True,
+        )
+        assert len(authority._state.replay_index) == 1
+    assert (
+        authority.resolve_refresh(
+            dispatch_sequence=100, ordered_ledger_ack_frontier_sha256=DIGESTS[1]
+        )
+        is refresh
+    )
+    assert (
+        authority.resolve_refresh(
+            dispatch_sequence=1, ordered_ledger_ack_frontier_sha256=DIGESTS[1]
+        )
+        is None
+    )
+    assert (
+        authority.create_refresh(
+            snapshot=snapshot,
+            risk_state=state,
+            dispatch_sequence=100,
+            ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+            coordinator_running=True,
+            publication_window_clear=True,
+            candidate_matches_internal=True,
+        )
+        is refresh
+    )
+    with pytest.raises(PortfolioRiskRefreshAuthorityError, match="contiguous"):
+        authority.create_refresh(
+            snapshot=snapshot,
+            risk_state=state,
+            dispatch_sequence=1,
+            ordered_ledger_ack_frontier_sha256=DIGESTS[1],
+            coordinator_running=True,
+            publication_window_clear=True,
+            candidate_matches_internal=True,
+        )
+
+
 def _snapshot_with_open_ref() -> PortfolioSnapshot:
     spec_set = _spec_set()
     ledger = create_portfolio_ledger(RUN_ID, spec_set)

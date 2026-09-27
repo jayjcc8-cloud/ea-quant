@@ -57,6 +57,7 @@ class _AuthorityState:
     next_sequence: int
     previous_refresh_sha256: Sha256Digest | None
     replay_index: MappingProxyType[_REFRESH_KEY, PortfolioRiskRefresh]
+    retain_history: bool
 
 
 @final
@@ -182,7 +183,7 @@ class Phase1PortfolioRiskRefreshAuthority:
             submission_permitted=submission_permitted,
             previous_refresh_sha256=state.previous_refresh_sha256,
         )
-        next_index = dict(state.replay_index)
+        next_index = dict(state.replay_index) if state.retain_history else {}
         next_index[key] = refresh
         self._state = _AuthorityState(
             run_id=state.run_id,
@@ -192,6 +193,7 @@ class Phase1PortfolioRiskRefreshAuthority:
             next_sequence=state.next_sequence + 1,
             previous_refresh_sha256=portfolio_risk_refresh_digest(refresh),
             replay_index=MappingProxyType(next_index),
+            retain_history=state.retain_history,
         )
         return refresh
 
@@ -204,6 +206,7 @@ def create_phase1_portfolio_risk_refresh_authority(
     policy_sha256: Sha256Digest,
     first_sequence: int = 1,
     first_previous_refresh_sha256: Sha256Digest | None = None,
+    retain_history: bool = True,
 ) -> Phase1PortfolioRiskRefreshAuthority:
     """Create one run/specification/policy-bound refresh authority.
 
@@ -214,6 +217,8 @@ def create_phase1_portfolio_risk_refresh_authority(
     """
     if type(run_id) is not RunId or type(spec_set) is not InstrumentExecutionSpecSet:
         raise _fail(OutcomeCode.INVALID_TYPE, "refresh authority binding must be exact")
+    if type(retain_history) is not bool:
+        raise _fail(OutcomeCode.INVALID_TYPE, "refresh retention must be an exact boolean")
     if type(policy_id) is not RiskPolicyId or type(policy_sha256) is not Sha256Digest:
         raise _fail(OutcomeCode.INVALID_TYPE, "refresh policy binding must be exact")
     if type(first_sequence) is not int or not 1 <= first_sequence <= (1 << 64) - 1:
@@ -242,6 +247,7 @@ def create_phase1_portfolio_risk_refresh_authority(
             next_sequence=first_sequence,
             previous_refresh_sha256=first_previous_refresh_sha256,
             replay_index=MappingProxyType({}),
+            retain_history=retain_history,
         ),
     )
     return value
