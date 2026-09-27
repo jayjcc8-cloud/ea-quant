@@ -23,6 +23,7 @@ def session(
     fail_on_fill: bool = False,
     cash: str = "1000",
     kill_switch: Any = None,
+    operational_limits: Any = None,
 ) -> tuple[PaperTradingSession, ControlledClock]:
     path = bounded_scenario(tmp_path)
     doc = yaml.safe_load(path.read_text())
@@ -55,6 +56,7 @@ def session(
         prices=(100.0,),
         stop_requested=lambda: False,
         kill_switch=kill_switch,
+        operational_limits=operational_limits,
     )
     return engine, clock
 

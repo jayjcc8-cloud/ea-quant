@@ -22,7 +22,7 @@ VPS_DEPLOYMENT=DENIED; LIVE_ORDER_AUTHORIZATION=DENIED. VPS target-host validati
 development precondition; it verifies only host attributes after the product is proven on Mac and
 one fixed artifact. Delivery now advances by maturity gates (see
 [EXECUTION_ORDER](#execution_order)); PPV numbering no longer sets the sequence. Next work:
-PPV-15 Production Risk Guards toward GATE M2.
+PPV-03/05/06 toward GATE M3.
 
 ## PPV-04 structured operational logging contract
 
@@ -221,12 +221,17 @@ Inspected 2026-09-27 (Asia/Shanghai).
   continues the feed with exactly-once fill replay. Kill switch (strategy/account/global,
   monotone halt) and broker reconciliation (MATCH/CONFLICT/UNKNOWN; halt, never auto-repair)
   are delivered for the local Paper path.
-- External Paper provider, Live, VPS host verification, production risk guards (PPV-15),
-  backup/restore, monitoring/alerting and long-duration soak are NOT AVAILABLE at this
+- M2 Operational-safe Paper = SATISFIED: PPV-15 Production Risk Guards. One
+  ``OperationalSafetyAuthority`` gates every broker outbound effect through a single contract
+  (kill switch, reconciliation, market freshness, broker health, strategy heartbeat, daily
+  loss, exposure, open orders, order rate and price deviation), each ALLOW/DENY/HALT with a
+  durable explainable reason. HALT resolves through the existing ``EXTERNAL_SAFETY_HALT``.
+- External Paper provider, Live, VPS host verification, backup/restore,
+  monitoring/alerting and long-duration soak are NOT AVAILABLE at this
   baseline. See [PRODUCT_BOUNDARY](#product-boundary).
 - KNOWN_FLAKY: `test_multi_dispatch_resume[dispatch_durable-2]` (backtest filesystem st_nlink
   race; NON_BLOCKING; not introduced by the M1 Paper path).
-- NEXT_PRODUCT_GATE = M2 (Operational-safe Paper): PPV-15 Production Risk Guards.
+- NEXT_PRODUCT_GATE = M3 (Self-operating Paper): PPV-03 + PPV-05 + PPV-06.
 
 ## GOALS
 
@@ -388,7 +393,7 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | PPV-12 Runtime Recovery V1 | SATISFIED for local Paper | `product/paper_recovery.py`; `test_paper_recovery.py`, `test_paper_resume.py`, `test_paper_resume_feed.py` | External provider recovery deferred | 08/09/11; joint acceptance with 13 | Query/reconcile before new submissions; never blindly resend ambiguous orders |
 | PPV-13 Broker Reconciliation V1 | SATISFIED for local Paper | `reconciliation/broker.py`; `test_broker_reconciliation.py` | External observations and continuous drift handling deferred | 08/09/11; restart integration with 12 | Orders/fills/cash/positions; detect, retain and halt, no automatic balance repair |
 | PPV-14 Kill Switch | SATISFIED for local Paper | `risk/kill_switch.py`; `test_kill_switch.py` | Real-broker cancel semantics deferred | 02/08/09 | Reuse halt authorization seam; define pending orders and cancel semantics; no implicit liquidation |
-| PPV-15 Production Risk Guards | PARTIAL | E9/E10 | Daily loss, exposure/open orders/rate/deviation/freshness/connectivity/liveness | 08/10/13/14 | Enforce immediately before outbound effects, retain reasons, test each guard |
+| PPV-15 Production Risk Guards | SATISFIED for local Paper | `risk/operational_safety.py`; `test_operational_safety.py`, `test_operational_safety_runtime.py` | External broker connectivity/deviation signals deferred | 08/10/13/14 | Enforce immediately before outbound effects, retain reasons, test each guard |
 | PPV-16 Fault Injection + Paper Soak | PARTIAL | E12 | Integrated faults and timed 72h/7d evidence | 01–15 complete for chosen path, including Candidate | Disconnect, duplicate/late facts, uncertain sends, crash, disk/audit failure, restart/restore |
 | PPV-17 One Real Broker | MISSING | E8/E11 | One vendor adapter and integration proof | 09/12/13/15/16 | Select one broker/account/instrument; offline fixtures first; connectivity/secrets separately authorized |
 | PPV-18 Explicit Live Authorization | PARTIAL | E11/WORKFLOW | Explicit bounded enablement with deny-by-default | 07/14/15/16/17 | Bind approval to account, candidate/artifact, limits, expiry and revocation; no permission from Candidate |

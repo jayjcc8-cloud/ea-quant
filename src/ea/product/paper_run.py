@@ -54,6 +54,7 @@ from ea.risk.kill_switch import (
     canonical_kill_switch_bytes,
     create_operator_kill_switch_authority,
 )
+from ea.risk.operational_safety import canonical_operational_safety_limits_bytes
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 
 
@@ -223,6 +224,10 @@ def run_local_paper(
         _write_once(
             attempt / "kill-switch.json",
             canonical_kill_switch_bytes(kill_switch),
+        )
+        _write_once(
+            attempt / "operational-safety.json",
+            canonical_operational_safety_limits_bytes(engine.operational_safety.limits),
         )
         if artifact is not None:
             _write_once(attempt / "strategy.eastrategy", artifact)

@@ -8,8 +8,9 @@
 Product boundary: Mac-local simulated Paper = AVAILABLE; external Paper provider = NOT AVAILABLE;
 Live = NOT AVAILABLE; VPS host verification = NOT REQUIRED FOR CURRENT DEVELOPMENT. The M1
 Crash-safe Paper gate (PPV-12 Runtime Recovery + PPV-13 Broker Reconciliation + PPV-14 Kill Switch
-+ resume-feed continuation) is SATISFIED. The next product gate is M2 (Operational-safe Paper):
-PPV-15 Production Risk Guards.
++ resume-feed continuation) and the M2 Operational-safe Paper gate (PPV-15 Production Risk
+Guards) are SATISFIED. The next product gate is M3 (Self-operating Paper): PPV-03 + PPV-05 +
+PPV-06.
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
 authoritative checkpoint. GitHub Issues and pull requests carry mutable coordination state; this
@@ -27,6 +28,16 @@ available through a single-user Web UI served on loopback only. No broker, remot
 external write, deployment, or live capability is part of this objective.
 
 ## Completed
+
+- PPV-15 Production Risk Guards delivers the M2 Operational-safe Paper gate. One
+  `OperationalSafetyAuthority` (`risk/operational_safety.py`) is the single non-bypassable gate
+  every broker outbound effect passes immediately before transport. Ten guards (kill switch,
+  reconciliation, market freshness, broker health, strategy heartbeat, daily loss, exposure,
+  open orders, order rate, price deviation) produce one closed ALLOW / DENY(reason) /
+  HALT(reason), each non-ALLOW recorded as a durable `PAPER_OPERATIONAL_SAFETY` audit record.
+  HALT resolves through the existing `EXTERNAL_SAFETY_HALT` risk halt and fails closed; DENY is
+  per-order. Recovery seeds the order-rate window from durable submission ages. See
+  [Personal Production V1](personal-production-v1.md).
 
 - M1 Crash-safe Paper is delivered: PPV-12 Runtime Recovery (`product/paper_recovery.py`),
   PPV-13 Broker Reconciliation (`reconciliation/broker.py`), PPV-14 Kill Switch

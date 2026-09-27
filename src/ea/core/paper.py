@@ -60,6 +60,15 @@ _SCHEMAS = {
         "pending_orders",
         "fill_count",
     },
+    "ea.audit-paper-operational-safety.v1": {
+        "dispatch_sequence",
+        "verdict",
+        "guard",
+        "reason",
+        "limit",
+        "observed",
+        "identity",
+    },
 }
 
 
@@ -107,6 +116,17 @@ def require_paper_audit_document(document: dict[str, Any], schema: str) -> None:
         reason = document["reason"]
         if type(reason) is not str or not 1 <= len(reason) <= 128:
             raise ValueError("Paper terminal reason is invalid")
+    if schema == "ea.audit-paper-operational-safety.v1":
+        if document["verdict"] not in {"deny", "halt"}:
+            raise ValueError("Paper operational safety verdict is invalid")
+        for field in ("guard", "reason", "identity"):
+            value = document[field]
+            if type(value) is not str or not 1 <= len(value) <= 256:
+                raise ValueError("Paper operational safety text field is invalid")
+        for field in ("limit", "observed"):
+            value = document[field]
+            if value is not None and (type(value) is not str or not 1 <= len(value) <= 128):
+                raise ValueError("Paper operational safety limit/observed is invalid")
     if schema == "ea.audit-paper-submission-result.v1":
         state = document["submission_state"]
         if state not in {"submitted", "definitely_not_submitted", "uncertain"}:
@@ -255,4 +275,36 @@ def canonical_paper_terminal_payload(
         pending_facts=pending_facts,
         pending_orders=pending_orders,
         fill_count=fill_count,
+    )
+
+
+def canonical_paper_operational_safety_payload(
+    run_id: RunId,
+    *,
+    dispatch_sequence: int,
+    verdict: str,
+    guard: str,
+    reason: str,
+    limit: str | None,
+    observed: str | None,
+    identity: str,
+) -> bytes:
+    """Durably record one DENY or HALT operational-safety decision.
+
+    The record carries the minimal explainable reason (guard, reason, relevant
+    limit, observed value and the affected order identity) so a restarted
+    operator can answer why a specific outbound effect did not reach the broker.
+    ALLOW decisions are not recorded here: the existing submission authorization
+    already durably acknowledges an allowed effect.
+    """
+    return _payload(
+        "ea.audit-paper-operational-safety.v1",
+        run_id,
+        dispatch_sequence=dispatch_sequence,
+        verdict=verdict,
+        guard=guard,
+        reason=reason,
+        limit=limit,
+        observed=observed,
+        identity=identity,
     )
