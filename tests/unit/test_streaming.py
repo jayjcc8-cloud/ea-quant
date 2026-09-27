@@ -162,7 +162,7 @@ def test_stall_and_stale_market_fail_closed_without_heartbeat_refresh() -> None:
     with pytest.raises(StreamingRuntimeError):
         stream.receive_market(event(1, 11))
     stream.close()
-    assert stream.phase is StreamPhase.CLOSED
+    assert stream.status().phase is StreamPhase.CLOSED
 
     other_clock = ControlledClock()
     stale = runtime(other_clock)
@@ -200,8 +200,12 @@ def test_stop_exhaustion_and_callback_failure_cut_off_market() -> None:
 
     failed = runtime(ControlledClock())
     failed.receive_market(event(1, 0))
+
+    def callback_failure(_root: MarketDataEnvelope, _sequence: int) -> None:
+        raise ZeroDivisionError("callback failed")
+
     with pytest.raises(ZeroDivisionError):
-        failed.poll(on_market=lambda *_: 1 / 0, on_fact=lambda *_: None)
+        failed.poll(on_market=callback_failure, on_fact=lambda *_: None)
     assert failed.reason is StreamStopReason.CALLBACK_ERROR
     failed.mark_source_exhausted()
     assert failed.reason is StreamStopReason.CALLBACK_ERROR
@@ -479,9 +483,14 @@ def test_future_issued_fact_waits_for_visibility_and_active_dispatch() -> None:
     assert not stream.poll(on_market=lambda *_: None, on_fact=lambda *_: None)
     clock.advance(2.0)
     seen: list[int] = []
+
+    def consume_fact(root: ExecutionFactIngress, sequence: int) -> None:
+        authority.process_ingress(root)
+        seen.append(sequence)
+
     assert stream.poll(
         on_market=lambda *_: pytest.fail("market dispatch occurred"),
-        on_fact=lambda root, sequence: (authority.process_ingress(root), seen.append(sequence)),
+        on_fact=consume_fact,
     )
     assert seen == [1]
     assert (
