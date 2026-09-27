@@ -582,6 +582,58 @@ def risk_evaluation_evidence_digest(evidence: RiskEvaluationEvidence) -> Sha256D
     )
 
 
+def create_risk_evaluation_result(
+    decision: RiskDecision,
+    evidence: RiskEvaluationEvidence,
+) -> RiskEvaluationResult:
+    """Re-prove one risk result from its decoded decision and evidence."""
+    if type(decision) is not RiskDecision or type(evidence) is not RiskEvaluationEvidence:
+        raise _fail(OutcomeCode.INVALID_TYPE, "risk result inputs must be exact")
+    return _create_risk_evaluation_result(decision, evidence)
+
+
+def decode_risk_evaluation_evidence(
+    payload: bytes,
+    *,
+    decision: RiskDecision,
+    policy: Phase1RiskPolicy,
+) -> RiskEvaluationEvidence:
+    """Decode and re-prove one canonical risk-evaluation evidence record.
+
+    The evidence is re-derived from the supplied decision and policy, then
+    round-tripped against the canonical bytes so any mismatch fails closed.
+    """
+    if type(payload) is not bytes:
+        raise _fail(OutcomeCode.INVALID_TYPE, "evidence payload must be exact bytes")
+    if type(decision) is not RiskDecision or type(policy) is not Phase1RiskPolicy:
+        raise _fail(OutcomeCode.INVALID_TYPE, "evidence decode context must be exact")
+    try:
+        document = json.loads(payload)
+    except (ValueError, TypeError) as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "evidence payload is not JSON") from error
+    if type(document) is not dict:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "evidence payload is not one object")
+    try:
+        evidence = _create_risk_evaluation_evidence(
+            decision=decision,
+            intent_sha256=Sha256Digest(document["intent_sha256"]),
+            portfolio_snapshot_version=document["portfolio_snapshot_version"],
+            portfolio_snapshot_sha256=Sha256Digest(document["portfolio_snapshot_sha256"]),
+            policy=policy,
+            risk_state_version=document["risk_state_version"],
+            reason_code=RiskReasonCode(document["reason_code"]),
+            decision_next_before=document["decision_next_before"],
+            decision_next_after=document["decision_next_after"],
+            approval_next_before=document["approval_next_before"],
+            approval_next_after=document["approval_next_after"],
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "evidence payload is invalid") from error
+    if canonical_risk_evaluation_evidence_bytes(evidence) != payload:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "evidence canonical round-trip conflicts")
+    return evidence
+
+
 _REASONS_BY_KIND = {
     RiskDecisionKind.ALLOW: frozenset({RiskReasonCode.WITHIN_LIMITS}),
     RiskDecisionKind.RESIZE: frozenset(

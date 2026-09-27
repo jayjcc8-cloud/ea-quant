@@ -11,19 +11,18 @@ remain outside the authorization below.
 
 ## Personal Production V2 Phase A
 
-The Product Owner authorizes sequential PPV-04 → PPV-07 → PPV-08 → PPV-09 → PPV-10 → PPV-11
-delivery, with each work unit merged before the next starts. The target is a real Mac-local
-continuous Paper runtime using simulated feed and Paper broker, an explicitly accepted candidate,
-existing strategy/risk/portfolio/ledger authorities and correlated operational logs. Accepted
-candidate status alone grants no execution permission. A real installed product-entry acceptance
-at PPV-11 must prove orders, fills, cash/equity, positions, duplicate protection, a failure path and
-controlled shutdown.
+The Product Owner authorized sequential PPV-04 → PPV-07 → PPV-08 → PPV-09 → PPV-10 → PPV-11
+delivery. Phase A is COMPLETE: `main` provides a real Mac-local continuous Paper runtime using a
+simulated feed and Paper broker, an explicitly accepted candidate, existing
+strategy/risk/portfolio/ledger authorities and correlated operational logs. Accepted candidate
+status alone grants no execution permission.
 
 REPO_DELIVERY, LOCAL_ACCEPTANCE, HOST_VALIDATION and LIVE_AUTHORIZATION are distinct claims.
-VPS_DEPLOYMENT=DENIED; LIVE_ORDER_AUTHORIZATION=DENIED. PPV-02 target-host validation remains
-NOT_YET_HOST_VERIFIED. PPV-03 readiness finalization, 05/06 infrastructure, 12/13 durable recovery
-and reconciliation finalization, 14/15 operational guards, 16 soak and 17–19 real broker/Live are
-deferred. No new governance system or execution engine is part of Phase A.
+VPS_DEPLOYMENT=DENIED; LIVE_ORDER_AUTHORIZATION=DENIED. VPS target-host validation is no longer a
+development precondition; it verifies only host attributes after the product is proven on Mac and
+one fixed artifact. Delivery now advances by maturity gates (see
+[EXECUTION_ORDER](#execution_order)); PPV numbering no longer sets the sequence. Next work:
+PPV-15 Production Risk Guards toward GATE M2.
 
 ## PPV-04 structured operational logging contract
 
@@ -209,29 +208,25 @@ See [ADR 0046](adr/0046-production-runtime-profile-v1.md).
 
 ## CURRENT_BASELINE
 
-Inspected 2026-09-23 (Asia/Shanghai).
+Inspected 2026-09-27 (Asia/Shanghai).
 
-- CURRENT_MAIN_SHA: `6fe950c435ac7b820f7b0587f2ccdd3e310e982c`.
-- Local main and `git ls-remote origin refs/heads/main` agreed.
-- Initial checkout: `/Users/mo/Documents/EA`; CURRENT_BRANCH: `main`;
-  WORKTREE_STATUS: clean (`git status --short` empty, including untracked files).
-- Writer: root Codex only; planning worktree `/Users/mo/Documents/EA-ppv-00`;
-  branch `codex/ppv-00-baseline`; exact base is the SHA above; tier T0.
-- Allowed changes: this document and its ROADMAP link. No runtime, tests, configuration,
-  Accepted ADRs or other worktrees changed. Merge order: independent documentation change;
-  recheck the baseline if other delivery merges first. No implementation PR chain.
-- Existing main CI: [successful run 35500232342](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/35500232342).
-  This is baseline CI, not CI for the new documentation.
-- Open metadata inspected: [#208 Candidate](https://github.com/jayjcc8-cloud/ea-quant/issues/208),
-  [#212 slippage](https://github.com/jayjcc8-cloud/ea-quant/issues/212),
-  [#214 latency](https://github.com/jayjcc8-cloud/ea-quant/issues/214).
-  [PR #213](https://github.com/jayjcc8-cloud/ea-quant/pull/213) is OPEN at
-  `198bce905646b1754050d89fa6a86c829bbc7f48`, with its applicable CI successful.
-  It is not main capability. Candidate and latency have separate local worktrees;
-  neither their presence nor Issue bodies prove delivery. No existing PPV Issue or canonical
-  production plan was found in the inspected open issues and tracked documentation.
-- User-provided PPV-00 request supplies this task's acceptance criteria. No Issue/PR was
-  created or changed remotely by this inspection.
+- CURRENT_MAIN_SHA: `afddf76291976306641a9b4dd10a85985c74e15c`.
+- CURRENT_BRANCH: `main`; WORKTREE_STATUS: clean.
+- PPV-11 = SATISFIED. Current capability = Mac-local continuous simulated Paper
+  (`ea paper start/status/stop`), one accepted Action V2 V4/V5 Candidate, one simulated
+  account/instrument, generated local feed, in-process Paper broker.
+- M1 Crash-safe Paper = SATISFIED: PPV-12 Runtime Recovery + PPV-13 Broker Reconciliation +
+  PPV-14 Kill Switch + resume-feed continuation. Journal-replay recovery reconstructs the
+  economic gate, re-issued Orders, broker/tracker, refresh frontier and fact authority, then
+  continues the feed with exactly-once fill replay. Kill switch (strategy/account/global,
+  monotone halt) and broker reconciliation (MATCH/CONFLICT/UNKNOWN; halt, never auto-repair)
+  are delivered for the local Paper path.
+- External Paper provider, Live, VPS host verification, production risk guards (PPV-15),
+  backup/restore, monitoring/alerting and long-duration soak are NOT AVAILABLE at this
+  baseline. See [PRODUCT_BOUNDARY](#product-boundary).
+- KNOWN_FLAKY: `test_multi_dispatch_resume[dispatch_durable-2]` (backtest filesystem st_nlink
+  race; NON_BLOCKING; not introduced by the M1 Paper path).
+- NEXT_PRODUCT_GATE = M2 (Operational-safe Paper): PPV-15 Production Risk Guards.
 
 ## GOALS
 
@@ -390,9 +385,9 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 | PPV-09 Broker Contract V1 | SATISFIED for local Paper | #227; contract above | 11 integrates local runtime; vendor compatibility and crash recovery deferred | 08 | Bounded submit/cancel/query, stable client identity, canonical source-issued facts and normalized failures |
 | PPV-10 Market Event Loop | SATISFIED for local simulation | #230; contract above | Provider connectivity/reconnect deferred; 11 integrates local economics | 02/04; existing market and fact contracts | Bounded incremental input, active proofs, visibility/freshness, heartbeat and controlled stop |
 | PPV-11 Paper Trading Runtime | SATISFIED for Mac-local simulation | #232; local Paper usage above | External provider/host, recovery and long-duration validation remain deferred | Delivered 07/08/09/10/04; external operations still require later gates | Explicit installed start/status/stop, shared economics and durable audit, duplicate protection and truthful failure state |
-| PPV-12 Runtime Recovery V1 | PARTIAL | E5/E10 | Durable outbound intent and uncertain-effect restart | 08/09/11; acceptance with 13 | Query/reconcile before new submissions; never blindly resend ambiguous orders |
-| PPV-13 Broker Reconciliation V1 | PARTIAL | E10 | External observations and continuous drift handling | 08/09/11; restart integration with 12 | Orders/fills/cash/positions; detect, retain and halt, no automatic balance repair |
-| PPV-14 Kill Switch | PARTIAL | E9 | Operator strategy/account/global scopes and durable restart behavior | 02/08/09 | Reuse halt authorization seam; define pending orders and cancel semantics; no implicit liquidation |
+| PPV-12 Runtime Recovery V1 | SATISFIED for local Paper | `product/paper_recovery.py`; `test_paper_recovery.py`, `test_paper_resume.py`, `test_paper_resume_feed.py` | External provider recovery deferred | 08/09/11; joint acceptance with 13 | Query/reconcile before new submissions; never blindly resend ambiguous orders |
+| PPV-13 Broker Reconciliation V1 | SATISFIED for local Paper | `reconciliation/broker.py`; `test_broker_reconciliation.py` | External observations and continuous drift handling deferred | 08/09/11; restart integration with 12 | Orders/fills/cash/positions; detect, retain and halt, no automatic balance repair |
+| PPV-14 Kill Switch | SATISFIED for local Paper | `risk/kill_switch.py`; `test_kill_switch.py` | Real-broker cancel semantics deferred | 02/08/09 | Reuse halt authorization seam; define pending orders and cancel semantics; no implicit liquidation |
 | PPV-15 Production Risk Guards | PARTIAL | E9/E10 | Daily loss, exposure/open orders/rate/deviation/freshness/connectivity/liveness | 08/10/13/14 | Enforce immediately before outbound effects, retain reasons, test each guard |
 | PPV-16 Fault Injection + Paper Soak | PARTIAL | E12 | Integrated faults and timed 72h/7d evidence | 01–15 complete for chosen path, including Candidate | Disconnect, duplicate/late facts, uncertain sends, crash, disk/audit failure, restart/restore |
 | PPV-17 One Real Broker | MISSING | E8/E11 | One vendor adapter and integration proof | 09/12/13/15/16 | Select one broker/account/instrument; offline fixtures first; connectivity/secrets separately authorized |
@@ -435,28 +430,42 @@ flowchart TD
   P18 --> P19[19 Small Live]
 ```
 
+## PRODUCT_BOUNDARY
+
+From `main` at the pinned `CURRENT_BASELINE`:
+
+```text
+Mac-local simulated Paper        = AVAILABLE
+External Paper provider          = NOT AVAILABLE
+Live                             = NOT AVAILABLE
+VPS host verification            = NOT REQUIRED FOR CURRENT DEVELOPMENT
+```
+
+VPS is not a product-development prerequisite. Product maturity is proven on Mac and on one fixed
+immutable artifact; VPS later verifies only host attributes (Linux/systemd, network, disk,
+permissions, reboot). Any work unit that makes actual VPS verification a functional acceptance
+precondition is scope drift.
+
 ## EXECUTION_ORDER
 
-1. **Next: PPV-01**, reconcile and close the already active execution-cost deliveries at exact
-   merged SHAs. Current main lacks slippage and latency; Candidate's selected evidence should
-   bind the final cost assumptions. Do not silently spend #208's repair budget or merge #213 here.
-2. PPV-02 and PPV-04 establish process/storage/logging boundaries; PPV-07 can then finish the
-   existing evidence selection path after PPV-01. This is not permission for parallel writers.
-3. PPV-08 → PPV-09, then PPV-10 and PPV-11 composition. Select the intended broker's required
-   semantics before freezing the narrow contract; defer real connectivity to PPV-17.
-4. PPV-12 and PPV-13 are implemented against the same paper interface and close with one joint
-   restart/reconciliation acceptance scenario. Neither can claim safe uncertain-send recovery
-   from local replay alone. This is a shared acceptance dependency, not a circular build graph.
-5. PPV-14 → PPV-15 before sustained paper operation. PPV-03 may start with local health earlier,
-   but readiness closes only when actual recovery/feed/reconciliation gates exist. PPV-05 closes
-   against the final persistent runtime layout. PPV-06 closes after those operational signals.
-6. PPV-16 faults and Gates A/B in Paper → PPV-17 → PPV-18 → explicitly authorized PPV-19.
-   Adaptation to the real broker must repeat relevant recovery/guard/reconnect evidence before
-   live enables. Gate C and D continue in the explicitly approved small-live environment.
+PPV numbering identifies capability, not execution order. Delivery now advances by product
+maturity gates. PPV-01 .. PPV-11 are SATISFIED at their repository-delivery boundaries above.
 
-The numeric listing is not a strict execution sequence: completing monitoring/readiness before
-runtime state exists would only prove placeholders. Existing full-fill historical matching cannot
-stand in for Paper, and shared reconciliation cannot stand in for a broker poller.
+```text
+GATE M1 Crash-safe Paper        <- PPV-12 + PPV-13 (joint restart/reconciliation acceptance)
+GATE M2 Operational-safe Paper  <- PPV-14 + PPV-15
+GATE M3 Self-operating Paper    <- PPV-03 + PPV-05 + PPV-06
+GATE M4 Local Production RC     <- PPV-16 (fault campaign + 72h + 7d Paper) + RC freeze
+GATE M5 Real Broker Ready       <- PPV-17 (one broker, one account, one instrument family)
+GATE M6 Personal Production     <- PPV-18 + PPV-19 (PERSONAL_PRODUCTION_VALIDATED=TRUE)
+```
+
+Immediate parallel wave: DOC-SYNC, PPV-12, PPV-13, PPV-14. PPV-15 waits for the PPV-13/14
+semantics. PPV-03/05/06, PPV-16, the Release Candidate freeze, and PPV-17..19 follow the gates in
+order. Do not start PPV-17 before GATE M4. PPV-12 and PPV-13 close with one joint ambiguous-submit
+crash/restart/reconcile integration; PPV-14 closes independently but composes with the same
+outbound safety boundary. Neither PPV-12 nor PPV-13 may claim safe uncertain-send recovery from
+local replay alone.
 
 ## PRODUCTION_GATES
 

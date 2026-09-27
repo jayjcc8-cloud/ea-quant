@@ -17,8 +17,17 @@ from ea.core import AuditRecordKind, RunId, RunReference, Sha256Digest, SourceId
 from ea.core.paper import canonical_paper_terminal_payload
 from ea.core.portfolio import portfolio_snapshot_digest
 from ea.core.risk import risk_state_snapshot_digest
-from ea.experiments.audit import PosixAuditJournal, create_posix_audit_journal
-from ea.experiments.store import CanonicalAttemptManifest, LocalResultStore
+from ea.experiments.audit import (
+    PosixAuditJournal,
+    create_posix_audit_journal,
+    reopen_posix_audit_journal,
+)
+from ea.experiments.store import (
+    CanonicalAttemptManifest,
+    LocalResultStore,
+    VerifiedIncompleteRecoveryBinding,
+    VerifiedTerminalRecoveryBinding,
+)
 from ea.observability import JsonlFileSink, OperationalContext, OperationalLogger
 from ea.product.backtest import _funding_document, _safe_output_root, _write_once
 from ea.product.candidate import (
@@ -33,8 +42,18 @@ from ea.product.market_stream import (
     run_local_market_stream,
 )
 from ea.product.paper import PaperTradingSession
-from ea.product.paper_session import PaperSessionWriter
+from ea.product.paper_recovery import (
+    PaperOutboundIntent,
+    reconcile_paper_recovery,
+    recover_paper_broker_observation,
+    scan_paper_outbound_intents,
+)
+from ea.product.paper_session import PaperSessionWriter, read_paper_binding
 from ea.product.scenario import _load_scenario_document
+from ea.risk.kill_switch import (
+    canonical_kill_switch_bytes,
+    create_operator_kill_switch_authority,
+)
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 
 
@@ -55,6 +74,7 @@ def run_local_paper(
     event_limit: int | None = None,
     run_id: RunId | None = None,
     on_ready: Callable[[Path], None] | None = None,
+    crash_after: AuditRecordKind | None = None,
 ) -> dict[str, Any]:
     """Explicitly start one fresh local simulation; no recovery or external transport."""
     if (
@@ -180,6 +200,7 @@ def run_local_paper(
         )
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, request_stop)
+        kill_switch = create_operator_kill_switch_authority(run_id)
         engine = PaperTradingSession(
             scenario,
             binding=manifest.binding,
@@ -192,10 +213,16 @@ def run_local_paper(
             operational_logger=logger,
             max_market_age_seconds=max(5.0, interval * 4),
             stall_timeout_seconds=max(5.0, interval * 4),
+            kill_switch=kill_switch,
+            crash_after=crash_after,
         )
         _write_once(
             attempt / "funding.json",
             _canonical(_funding_document(engine.funding, engine.gate.funding_outcome)),
+        )
+        _write_once(
+            attempt / "kill-switch.json",
+            canonical_kill_switch_bytes(kill_switch),
         )
         if artifact is not None:
             _write_once(attempt / "strategy.eastrategy", artifact)
@@ -282,3 +309,79 @@ def run_local_paper(
                         for signum, previous in previous_handlers.items():
                             signal.signal(signum, previous)
     return result
+
+
+def _intent_document(intent: PaperOutboundIntent) -> dict[str, Any]:
+    return {
+        "order_owner_sequence": intent.order_owner_sequence,
+        "classification": intent.classification.value,
+        "terminal": None if intent.terminal is None else intent.terminal.value,
+        "client_submission_key": (
+            None if intent.client_submission_key is None else intent.client_submission_key.value
+        ),
+        "execution_request_sha256": (
+            None
+            if intent.execution_request_sha256 is None
+            else intent.execution_request_sha256.value
+        ),
+        "venue_order_id": intent.venue_order_id,
+        "dispatch_sequence": intent.dispatch_sequence,
+    }
+
+
+def resume_local_paper(run_dir: Path) -> dict[str, Any]:
+    """Reopen one existing Paper attempt and admit or reject continued trading.
+
+    Restart admission (PPV-12): reopens the verified manifest, recovers the
+    audit journal, and scans durable outbound intents. A terminal attempt has no
+    incomplete work; an incomplete attempt that retains any ambiguous or
+    submitted-but-unresolved outbound intent reports ``reconciliation_required``
+    and must not be resent. This never repairs, rewrites or deletes state.
+    """
+    run_dir = run_dir.expanduser().absolute()
+    binding, manifest_bytes = read_paper_binding(run_dir)
+    manifest = CanonicalAttemptManifest(binding.reference, manifest_bytes)
+    store = LocalResultStore(_safe_output_root(run_dir.parent))
+    try:
+        verified = store.verify_recovery_attempt(manifest)
+        if type(verified) is VerifiedTerminalRecoveryBinding:
+            store.recover_terminal_attempt(verified)
+            return {
+                "state": "terminal",
+                "run_id": binding.reference.run_id.value,
+                "reconciliation_required": False,
+                "outbound_intents": [],
+                "incomplete_outbound_intents": [],
+            }
+        if type(verified) is VerifiedIncompleteRecoveryBinding:
+            recovered = store.recover_incomplete_attempt(verified)
+            journal = reopen_posix_audit_journal(recovered.audit)
+            try:
+                records = journal.recovery_records
+                scan = scan_paper_outbound_intents(records)
+                broker_observations = recover_paper_broker_observation(records)
+                joint = reconcile_paper_recovery(scan, broker_observations)
+            finally:
+                journal.close()
+            intents = [_intent_document(intent) for intent in scan.intents]
+            incomplete = [_intent_document(intent) for intent in scan.incomplete]
+            return {
+                "state": "incomplete",
+                "run_id": binding.reference.run_id.value,
+                "reconciliation_required": not joint.recovered,
+                "outbound_intents": intents,
+                "incomplete_outbound_intents": incomplete,
+                "joint": {
+                    "recovered": joint.recovered,
+                    "exactly_once": joint.exactly_once,
+                    "recovered_orders": joint.recovered_orders,
+                    "recovered_fills": joint.recovered_fills,
+                    "open_orders": list(joint.open_orders),
+                    "not_sent_orders": list(joint.not_sent_orders),
+                    "divergent_orders": list(joint.divergent_orders),
+                    "reason": joint.reason,
+                },
+            }
+        raise ValueError("unsupported paper recovery classification")
+    finally:
+        store.close()

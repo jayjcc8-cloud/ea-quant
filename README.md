@@ -4,10 +4,10 @@ EA is an AI-native quantitative R&D and strategy promotion system in development
 It provides offline Research Validation and explicit [Mac-local Paper V1](docs/local-paper.md); Live is unavailable.
 
 ## Current Phase and Health
-- Phase: **Research Validation and Mac-local simulated Paper**
+- Phase: **Mac-local simulated Paper** (external Paper provider: **not available**)
 - GitHub prerelease: **v0.2.0 published**
 - Merged baseline: **main healthy**
-- Live trading: **unavailable**
+- Live trading: **unavailable**; VPS host verification: **not required for current development**
 - Durable state: [STATUS](docs/STATUS.md); contribution rules: [WORKFLOW](docs/governance/WORKFLOW.md)
 
 The published v0.2.0 wheel does not provide `ea --version`. This README describes current `main`

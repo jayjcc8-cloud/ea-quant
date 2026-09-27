@@ -543,6 +543,21 @@ def paper_stop(
     typer.echo(canonical_json(document).decode("ascii"))
 
 
+@paper_app.command("resume")
+def paper_resume(run_dir: Annotated[Path, typer.Option("--run-dir")]) -> None:
+    """Reopen an existing attempt and admit or reject continued trading (no resend)."""
+    from ea.product.paper_run import resume_local_paper
+
+    try:
+        document = resume_local_paper(run_dir.expanduser().absolute())
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+        typer.echo(f"Paper resume rejected: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=3) from None
+    typer.echo(canonical_json(document).decode("ascii"))
+    if document["reconciliation_required"]:
+        raise typer.Exit(code=3)
+
+
 @strategy_app.command("pack")
 def strategy_pack(
     source: Annotated[Path, typer.Option("--source")],

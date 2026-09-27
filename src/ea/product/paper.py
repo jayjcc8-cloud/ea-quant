@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from decimal import Decimal, localcontext
 from typing import Any
 
-from ea.composition.lifecycle import create_local_paper_economic_gate
+from ea.composition.lifecycle import (
+    create_local_paper_economic_gate,
+    create_recovered_local_paper_economic_gate,
+)
 from ea.core import (
     AuditAppendAcknowledgement,
     AuditLogicalKey,
@@ -54,7 +57,7 @@ from ea.core import (
     risk_state_snapshot_digest,
     settle_product,
 )
-from ea.core.audit import AUDIT_SUBJECT_BY_RECORD_KIND, AuditAppendPort
+from ea.core.audit import AUDIT_SUBJECT_BY_RECORD_KIND, AuditAppendPort, AuditRecord
 from ea.core.commission import (
     commission_amount,
     commission_bps_from_identity,
@@ -67,16 +70,32 @@ from ea.core.lifecycle import (
     create_paper_audited_execution_fact_handoff,
 )
 from ea.core.market_data import SourceId
-from ea.core.paper import canonical_paper_fact_dispatch_payload, canonical_paper_submission_payload
+from ea.core.paper import (
+    canonical_paper_fact_dispatch_payload,
+    canonical_paper_order_construction_payload,
+    canonical_paper_submission_payload,
+    canonical_paper_submission_result_payload,
+)
 from ea.core.time import Clock
-from ea.execution import create_phase1_execution_fact_authority, create_phase1_order_authority
+from ea.execution import (
+    create_phase1_execution_fact_authority,
+    create_phase1_order_authority,
+    recover_phase1_execution_fact_authority_history,
+)
 from ea.execution.order_lifecycle import OrderCommandTracker, SubmissionAttemptState
 from ea.execution.paper_broker import PaperBroker
 from ea.observability import OperationalLogger
 from ea.portfolio import create_portfolio_ledger, create_portfolio_planning_authority
 from ea.product.operational import ProductObservation
+from ea.product.paper_recovery import (
+    recover_paper_broker,
+    recover_paper_economic_state,
+    recover_paper_fact_authority,
+    recover_paper_order_contexts,
+)
 from ea.product.scenario import LoadedBacktestScenario
 from ea.reconciliation import create_phase1_reconciliation_authority
+from ea.risk.kill_switch import OperatorKillSwitchAuthority
 from ea.runtime.streaming import StreamingMarketRuntime, StreamPhase
 from ea.strategy import create_strategy_signal_authority
 from ea.strategy.catalog import LocalActionLogic
@@ -105,11 +124,15 @@ class PaperTradingSession:
         operational_logger: OperationalLogger | None = None,
         max_market_age_seconds: float = 5.0,
         stall_timeout_seconds: float = 5.0,
+        kill_switch: OperatorKillSwitchAuthority | None = None,
+        crash_after: AuditRecordKind | None = None,
     ) -> None:
         if scenario.schema_version not in (4, 5):
             raise ValueError("local Paper requires an accepted Action V2 long-only configuration")
         self.scenario, self.binding, self.audit, self.clock = scenario, binding, audit, clock
         self.stop_requested, self.max_age = stop_requested, max_market_age_seconds
+        self.kill_switch = kill_switch
+        self._crash_after = crash_after
         self.run_id = binding.reference.run_id
         self.operations = ProductObservation(operational_logger)
         self._append(AuditRecordKind.RUN_PREPARED, canonical_run_prepared_audit_payload(binding))
@@ -222,6 +245,8 @@ class PaperTradingSession:
         require_audit_acknowledgement(
             ack, binding=self.binding, logical_key=key, canonical_payload=payload
         )
+        if self._crash_after is not None and kind is self._crash_after:
+            raise RuntimeError(f"paper crash injection after {kind.value}")
         return ack
 
     def _refresh(self, sequence: int, acks: tuple[AuditAppendAcknowledgement, ...] = ()) -> None:
@@ -308,6 +333,13 @@ class PaperTradingSession:
         )
         for ingress in self.broker.on_market(root):
             self.runtime.enqueue_fact(ingress)
+        if self.kill_switch is not None and self.kill_switch.effective_halted():
+            # A halt blocks only *new* outbound decisions; already submitted
+            # Orders keep draining their retained facts above. It never cancels,
+            # liquidates or mutates the ledger.
+            self.runtime.request_stop()
+            self._refresh(sequence)
+            return
         if (
             self.pending is None
             and len(self.committed) // 2 < self.max_round_trips
@@ -367,6 +399,12 @@ class PaperTradingSession:
                     not entering and order.quantity != self.quantity
                 ):
                     raise ValueError("Paper Order conflicts with position")
+                self._append(
+                    AuditRecordKind.PAPER_ORDER_CONSTRUCTION,
+                    canonical_paper_order_construction_payload(
+                        order, intent, risk.decision, risk.evidence, sequence
+                    ),
+                )
                 self.operations.order(order, signal)
                 if not self._guard(order, root, sequence):
                     self._refresh(sequence)
@@ -393,12 +431,35 @@ class PaperTradingSession:
                     raise ValueError("Paper submit attempt was already consumed")
                 self.issued.append(order)
                 self.pending = order
+                submitted_at = self.clock.now()
                 try:
-                    result = self.broker.submit(command, submitted_at=self.clock.now())
+                    result = self.broker.submit(command, submitted_at=submitted_at)
                 except BaseException:
                     self.tracker.record_submit_result(command, SubmissionAttemptState.UNCERTAIN)
+                    self._append(
+                        AuditRecordKind.PAPER_SUBMISSION_RESULT,
+                        canonical_paper_submission_result_payload(
+                            order,
+                            sequence,
+                            submitted_at=submitted_at,
+                            submission_state="uncertain",
+                            venue_order_id=None,
+                        ),
+                    )
                     raise
                 self.tracker.record_submit_result(command, result.state)
+                self._append(
+                    AuditRecordKind.PAPER_SUBMISSION_RESULT,
+                    canonical_paper_submission_result_payload(
+                        order,
+                        sequence,
+                        submitted_at=submitted_at,
+                        submission_state=result.state.value,
+                        venue_order_id=(
+                            None if result.venue_order_id is None else result.venue_order_id.value
+                        ),
+                    ),
+                )
                 self.operations.emit(
                     "broker.submitted",
                     broker="paper.local",
@@ -570,6 +631,9 @@ class PaperTradingSession:
             "heartbeat_count": stream.heartbeat_count,
             "incomplete": stream.failed_dispatch_kind is not None,
             "risk_halted": self.gate.risk_authority.risk_state.halted,
+            "kill_switch_halted": (
+                self.kill_switch.effective_halted() if self.kill_switch is not None else False
+            ),
         }
 
     def reconcile(self) -> str:
@@ -641,3 +705,193 @@ class PaperTradingSession:
             if outcome.outcome_code is not OutcomeCode.RECONCILIATION_MATCH:
                 raise ValueError("Paper local reconciliation failed")
         return "match"
+
+
+def restore_paper_trading_session(
+    scenario: LoadedBacktestScenario,
+    *,
+    binding: RunBinding,
+    audit: AuditAppendPort,
+    records: Iterable[AuditRecord],
+    clock: Clock,
+    monotonic: Callable[[], float],
+    source_id: SourceId,
+    prices: tuple[float, ...],
+    stop_requested: Callable[[], bool],
+    operational_logger: OperationalLogger | None = None,
+    max_market_age_seconds: float = 5.0,
+    stall_timeout_seconds: float = 5.0,
+    kill_switch: OperatorKillSwitchAuthority | None = None,
+    crash_after: AuditRecordKind | None = None,
+) -> PaperTradingSession:
+    """Reconstruct a running Paper session from a reopened journal, then continue.
+
+    Every authority is rebuilt from durable records: the ledger replays the
+    deduplicated Fills, the refresh authority and frontier resume the
+    acknowledged refresh chain, the Orders are re-issued, the tracker and broker
+    retain their submitted history, and the fact authority re-derives its
+    dedup/projection indexes by replaying dispatched ingresses. ``RUN_PREPARED``
+    is never re-appended, so the reopened journal continues at its next owner
+    sequence.
+    """
+    records = tuple(records)
+    if scenario.schema_version not in (4, 5):
+        raise ValueError("local Paper requires an accepted Action V2 long-only configuration")
+    session = object.__new__(PaperTradingSession)
+    session.scenario, session.binding = scenario, binding
+    session.audit, session.clock = audit, clock
+    session.stop_requested, session.max_age = stop_requested, max_market_age_seconds
+    session.kill_switch = kill_switch
+    session._crash_after = crash_after
+    session.run_id = binding.reference.run_id
+    session.operations = ProductObservation(operational_logger)
+    session.spec = scenario.spec_set.require(scenario.instrument)
+    session.max_round_trips = (
+        json.loads(scenario.canonical_bytes)["strategy"]["max_round_trips"]
+        if scenario.schema_version == 5
+        else 1
+    )
+    session.raw_price_bound = max(prices)
+    session.price_bound = _quantized_historical_close(
+        max(prices),
+        side=OrderSide.BUY,
+        specification=session.spec,
+        slippage_bps=slippage_bps_from_identity(
+            scenario.execution_policy.identifier.value, scenario.execution_policy.sha256.value
+        ),
+    )
+    policy = create_phase1_risk_policy(
+        policy_id=RiskPolicyId("paper.local.risk.v1"),
+        spec_set=scenario.spec_set,
+        execution_policy=scenario.execution_policy,
+        instrument_limits=(
+            InstrumentRiskLimit(
+                scenario.instrument, scenario.max_order_quantity, scenario.max_position_quantity
+            ),
+        ),
+    )
+    session.funding = InitialFunding(
+        session.run_id, scenario.funding_currency, scenario.initial_cash
+    )
+
+    economic = recover_paper_economic_state(
+        records,
+        run_id=session.run_id,
+        spec_set=scenario.spec_set,
+        execution_policy=scenario.execution_policy,
+        risk_policy=policy,
+        funding=session.funding,
+    )
+    session.gate = create_recovered_local_paper_economic_gate(
+        run_id=session.run_id,
+        spec_set=scenario.spec_set,
+        ledger=economic.ledger,
+        risk_authority=economic.risk_authority,
+        refresh_authority=economic.refresh_authority,
+        frontier=economic.frontier,
+    )
+
+    session.orders = create_phase1_order_authority(
+        run_id=session.run_id,
+        spec_set=scenario.spec_set,
+        execution_policy=scenario.execution_policy,
+        risk_policy=policy,
+        risk_result_verifier=economic.risk_authority,
+    )
+    # Re-issue each Order against the reconstructed risk authority, re-evaluating
+    # its intent at the exact ledger snapshot it was originally approved at so
+    # ``create_order`` can re-prove the issued result without a hidden repair.
+    contexts = recover_paper_order_contexts(
+        records,
+        spec_set=scenario.spec_set,
+        execution_policy=scenario.execution_policy,
+        risk_policy=policy,
+    )
+    evaluation_ledger = create_portfolio_ledger(session.run_id, scenario.spec_set)
+    evaluation_ledger.apply_initial_funding(session.funding)
+    for index, (intent, _result) in enumerate(contexts):
+        risk = economic.risk_authority.evaluate(intent, evaluation_ledger.snapshot)
+        session.orders.create_order(intent, risk)
+        if index < len(economic.fills):
+            evaluation_ledger.apply_fill(economic.fills[index])
+
+    broker_recovery = recover_paper_broker(
+        records, orders=session.orders, max_orders=2 * session.max_round_trips
+    )
+    session.tracker = broker_recovery.tracker
+    session.broker = broker_recovery.broker
+
+    session.runtime = StreamingMarketRuntime(
+        run_id=session.run_id,
+        spec_set=scenario.spec_set,
+        source_id=source_id,
+        clock=clock,
+        monotonic=monotonic,
+        max_market_age_seconds=max_market_age_seconds,
+        stall_timeout_seconds=stall_timeout_seconds,
+        fact_source=session.broker,
+        initial_dispatch_sequence=(
+            economic.final_refresh.dispatch_sequence if economic.final_refresh is not None else 0
+        ),
+    )
+    session.facts = recover_phase1_execution_fact_authority_history(
+        recover_paper_fact_authority(records, orders=session.orders),
+        order_verifier=session.orders,
+        dispatch_verifier=session.runtime,
+    )
+    # Resume the signal/planning sequence frontiers so a continued feed issues
+    # fresh Signals, Targets and Intents instead of colliding with the recovered
+    # ones. Each durable Order corresponds to exactly one Signal and one Intent.
+    signal_count = len(contexts)
+    last_new_dispatch_sequence = contexts[-1][0].dispatch_sequence if contexts else None
+    session.signals = create_strategy_signal_authority(
+        run_id=session.run_id,
+        verifier=session.runtime,
+        first_signal_sequence=signal_count + 1,
+        issuance_count=signal_count,
+        last_new_dispatch_sequence=last_new_dispatch_sequence,
+    )
+    target = (
+        CanonicalDecimal(str(scenario.strategy_parameters["target_quantity"]))
+        if scenario.strategy_package is None
+        else scenario.max_order_quantity
+    )
+    session.planner = create_portfolio_planning_authority(
+        run_id=session.run_id,
+        ledger=session.gate.ledger,
+        spec_set=scenario.spec_set,
+        policy=session._portfolio_policy(target),
+        execution_policy=scenario.execution_policy,
+        first_target_sequence=signal_count + 1,
+        first_intent_sequence=signal_count + 1,
+        result_count=signal_count,
+        last_new_signal_dispatch_sequence=last_new_dispatch_sequence,
+    )
+    logic = scenario.strategy_entry.factory(scenario.strategy_parameters)
+    if not isinstance(logic, (HoldRootsLogic, LocalActionLogic)):
+        raise ValueError("Paper strategy does not implement the Action V2 profile")
+    session.logic = logic
+
+    snapshot = economic.ledger.snapshot
+    session.quantity = next(
+        (
+            balance.quantity
+            for balance in snapshot.position_balances
+            if balance.instrument == scenario.instrument
+        ),
+        CanonicalDecimal("0"),
+    )
+    session.position_state = (
+        PositionState.LONG_OPEN if session.quantity.coefficient != 0 else PositionState.FLAT_INITIAL
+    )
+    session.issued = list(session.orders.orders)
+    session.committed = list(economic.fills)
+    session.pending = broker_recovery.open_orders[0] if broker_recovery.open_orders else None
+    session.duplicates = sum(
+        1 for outcome in session.facts.outcomes if outcome.action is ExecutionFactAction.DUPLICATE
+    )
+    session.last_market = None
+    session.completed_sequence = (
+        economic.final_refresh.dispatch_sequence if economic.final_refresh is not None else 0
+    )
+    return session

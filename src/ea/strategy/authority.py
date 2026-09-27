@@ -282,10 +282,27 @@ def create_strategy_signal_authority(
     *,
     run_id: RunId,
     verifier: ActiveMarketDispatchVerifierPort,
+    first_signal_sequence: int = 1,
+    issuance_count: int = 0,
+    last_new_dispatch_sequence: int | None = None,
 ) -> StrategySignalAuthority:
-    """Create one single-run signal authority."""
+    """Create one single-run signal authority.
+
+    ``first_signal_sequence``, ``issuance_count`` and
+    ``last_new_dispatch_sequence`` resume a recovered run whose signal frontier
+    already advanced; fresh runs start at sequence one with no prior dispatch.
+    """
     if type(run_id) is not RunId:
         raise _fail(OutcomeCode.INVALID_TYPE, "run_id must be an exact RunId")
+    if type(first_signal_sequence) is not int or not 1 <= first_signal_sequence <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "first signal sequence must be positive uint64")
+    if type(issuance_count) is not int or not 0 <= issuance_count <= _MAX_UINT64:
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "signal issuance count must be non-negative uint64")
+    if last_new_dispatch_sequence is not None and (
+        type(last_new_dispatch_sequence) is not int
+        or not 1 <= last_new_dispatch_sequence <= _MAX_UINT64
+    ):
+        raise _fail(OutcomeCode.OUT_OF_RANGE, "last new dispatch sequence must be positive uint64")
     try:
         operation = verifier.verify_active_market_dispatch
     except (AttributeError, TypeError) as error:
@@ -295,9 +312,9 @@ def create_strategy_signal_authority(
     public = _create_strategy_signal_authority_state(
         run_id=run_id,
         halted=False,
-        signal_next=1,
-        last_new_dispatch_sequence=None,
-        issuance_count=0,
+        signal_next=first_signal_sequence,
+        last_new_dispatch_sequence=last_new_dispatch_sequence,
+        issuance_count=issuance_count,
         conflict=None,
     )
     value = object.__new__(StrategySignalAuthority)

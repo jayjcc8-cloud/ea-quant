@@ -89,11 +89,17 @@ class StreamingMarketRuntime:
         stall_timeout_seconds: float,
         fact_source: ExecutionFactIssuanceVerifier | None = None,
         max_pending_facts: int = 64,
+        initial_dispatch_sequence: int = 0,
     ) -> None:
         if type(run_id) is not RunId or type(spec_set) is not InstrumentExecutionSpecSet:
             raise StreamingRuntimeError("run/spec bindings must be exact")
         if type(source_id) is not SourceId or not callable(clock.now) or not callable(monotonic):
             raise StreamingRuntimeError("source and injected clocks are required")
+        if (
+            type(initial_dispatch_sequence) is not int
+            or not 0 <= initial_dispatch_sequence < (1 << 64) - 1
+        ):
+            raise StreamingRuntimeError("initial dispatch sequence must be in 0..2^64-2")
         for value, name in (
             (max_market_age_seconds, "max_market_age_seconds"),
             (stall_timeout_seconds, "stall_timeout_seconds"),
@@ -133,7 +139,7 @@ class StreamingMarketRuntime:
         self._active_market: tuple[MarketDataEnvelope, bytes, int] | None = None
         self._active_fact: tuple[IngressIdentity, bytes, bytes, int] | None = None
         self._dispatching = False
-        self._dispatch_sequence = 0
+        self._dispatch_sequence = initial_dispatch_sequence
         self._market_dispatches = 0
         self._fact_dispatches = 0
         self._heartbeat_count = 0

@@ -603,6 +603,34 @@ def create_local_paper_economic_gate(
     )
 
 
+def create_recovered_local_paper_economic_gate(
+    *,
+    run_id: RunId,
+    spec_set: InstrumentExecutionSpecSet,
+    ledger: Any,
+    risk_authority: Any,
+    refresh_authority: Any,
+    frontier: Any,
+) -> _Phase1EconomicGate:
+    """Assemble a recovered Paper gate from journal-reconstructed authorities.
+
+    The ledger, risk authority, refresh authority and frontier are rebuilt from
+    the audit journal by the Paper recovery layer; this composition-only factory
+    wraps the recovered ledger in a fresh handoff authority and re-seals them
+    into the same economic gate a resumed ``PaperTradingSession`` drives.
+    """
+    ledger_authority = portfolio.create_phase1_ledger_handoff_authority(run_id, spec_set, ledger)
+    return _Phase1EconomicGate(
+        ledger=ledger,
+        ledger_handoff_authority=ledger_authority,
+        risk_authority=risk_authority,
+        risk_refresh_authority=refresh_authority,
+        frontier=frontier,
+        funding_outcome=None,
+        seal=_ECONOMIC_GATE_SEAL,
+    )
+
+
 def _require_economic_gate(
     *,
     run_id: RunId,

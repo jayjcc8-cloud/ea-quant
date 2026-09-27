@@ -388,6 +388,39 @@ class PaperBroker:
         self._last_market_bytes = market_bytes
         return tuple(ingress for _, _, ingress in staged)
 
+    def restore_filled(self, command: SubmitCommand, *, trade_fact: ExecutionFact) -> None:
+        """Bind an already-dispatched terminal trade onto a reconstructed record.
+
+        Restart reconstruction only: the fact authority already consumed this
+        trade before the crash, so a rebuilt broker must not match the Order
+        again when the feed resumes. This sets the exact terminal state
+        ``on_market`` would otherwise reach, without emitting a second ingress
+        or fact.
+        """
+        order = self._require_command(command, SubmitCommand)
+        if type(trade_fact) is not ExecutionFact:
+            raise PaperBrokerError(OutcomeCode.INVALID_TYPE, "terminal fact must be exact")
+        if trade_fact.kind is not ExecutionFactKind.TRADE:
+            raise PaperBrokerError(OutcomeCode.INVALID_TYPE, "terminal fact must be a trade")
+        if (
+            trade_fact.order_id != order.order_id
+            or trade_fact.client_submission_key != order.client_submission_key
+        ):
+            raise PaperBrokerError(OutcomeCode.CONFLICTING_ID, "trade fact Order identity differs")
+        record = self._records.get(order.client_submission_key)
+        if record is None or record.state is not _PaperOrderState.OPEN:
+            raise PaperBrokerError(
+                OutcomeCode.RECONCILIATION_SUBMISSION_STILL_UNKNOWN,
+                "no open reconstructed record to fill",
+            )
+        record.state = _PaperOrderState.FILLED
+        record.terminal_fact = trade_fact
+        # Mirror the terminal trade fact and its query redelivery the original
+        # broker issued, so a resumed feed never reuses a retained fact/ingress
+        # identity from the already-dispatched history.
+        self._fact_next += 1
+        self._ingress_next += 2
+
     def _require_command(
         self,
         command: SubmitCommand | CancelCommand,
