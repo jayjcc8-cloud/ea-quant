@@ -1,9 +1,7 @@
 # EA Quant Trading System
 
 EA is an AI-native quantitative R&D and strategy promotion system in development.
-Its delivered offline Research Validation reduces Idea → Evidence-ready Candidate work; live is unavailable.
-Accepted Candidates can also run through [Mac-local Paper V1](docs/local-paper.md), using a
-generated local feed, the Paper broker, shared economic authorities and explicit start/status/stop.
+It provides offline Research Validation and explicit [Mac-local Paper V1](docs/local-paper.md); Live is unavailable.
 
 ## Current Phase and Health
 - Phase: **Research Validation and Mac-local simulated Paper**
