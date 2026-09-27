@@ -1366,12 +1366,8 @@ def require_canonical_audit_payload(
             {
                 AuditRecordKind.PAPER_SUBMISSION_AUTHORIZATION: "ea.audit-paper-submission.v1",
                 AuditRecordKind.PAPER_FACT_DISPATCH: "ea.audit-paper-fact-dispatch.v1",
-                AuditRecordKind.PAPER_SUBMISSION_RESULT: (
-                    "ea.audit-paper-submission-result.v1"
-                ),
-                AuditRecordKind.PAPER_ORDER_CONSTRUCTION: (
-                    "ea.audit-paper-order-construction.v1"
-                ),
+                AuditRecordKind.PAPER_SUBMISSION_RESULT: ("ea.audit-paper-submission-result.v1"),
+                AuditRecordKind.PAPER_ORDER_CONSTRUCTION: ("ea.audit-paper-order-construction.v1"),
             }[record_kind],
         )
     elif record_kind is AuditRecordKind.RUNTIME_DISPATCH_COMPLETED:

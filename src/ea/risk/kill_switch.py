@@ -225,9 +225,7 @@ def canonical_kill_switch_bytes(authority: OperatorKillSwitchAuthority) -> bytes
         "schema": _SCHEMA,
         "run_id": state.run_id.value,
         "revision": state.revision,
-        "scopes": {
-            scope.value: _scope_document(state.scopes[scope]) for scope in _SCOPES
-        },
+        "scopes": {scope.value: _scope_document(state.scopes[scope]) for scope in _SCOPES},
     }
     return json.dumps(
         document,

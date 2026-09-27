@@ -456,9 +456,7 @@ class PaperTradingSession:
                         submitted_at=submitted_at,
                         submission_state=result.state.value,
                         venue_order_id=(
-                            None
-                            if result.venue_order_id is None
-                            else result.venue_order_id.value
+                            None if result.venue_order_id is None else result.venue_order_id.value
                         ),
                     ),
                 )
@@ -845,9 +843,7 @@ def restore_paper_trading_session(
     # fresh Signals, Targets and Intents instead of colliding with the recovered
     # ones. Each durable Order corresponds to exactly one Signal and one Intent.
     signal_count = len(contexts)
-    last_new_dispatch_sequence = (
-        contexts[-1][0].dispatch_sequence if contexts else None
-    )
+    last_new_dispatch_sequence = contexts[-1][0].dispatch_sequence if contexts else None
     session.signals = create_strategy_signal_authority(
         run_id=session.run_id,
         verifier=session.runtime,
@@ -886,9 +882,7 @@ def restore_paper_trading_session(
         CanonicalDecimal("0"),
     )
     session.position_state = (
-        PositionState.LONG_OPEN
-        if session.quantity.coefficient != 0
-        else PositionState.FLAT_INITIAL
+        PositionState.LONG_OPEN if session.quantity.coefficient != 0 else PositionState.FLAT_INITIAL
     )
     session.issued = list(session.orders.orders)
     session.committed = list(economic.fills)

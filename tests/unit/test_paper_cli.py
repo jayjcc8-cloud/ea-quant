@@ -50,8 +50,6 @@ def test_paper_help_exposes_the_actual_start_status_stop_entry() -> None:
 
 
 def test_paper_resume_rejects_a_missing_run_directory() -> None:
-    result = CliRunner().invoke(
-        app, ["paper", "resume", "--run-dir", "/missing/run-dir"]
-    )
+    result = CliRunner().invoke(app, ["paper", "resume", "--run-dir", "/missing/run-dir"])
     assert result.exit_code == 3
     assert "Paper resume rejected" in result.output

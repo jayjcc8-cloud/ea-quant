@@ -451,9 +451,7 @@ def recover_paper_fills(
         seen_facts.add(ingress.fact.fact_sha256)
         fills.append(
             create_fill(
-                fill_id=EconomicId(
-                    funding.run_id, EconomicOwnerKind.EXECUTION_FILL, fill_sequence
-                ),
+                fill_id=EconomicId(funding.run_id, EconomicOwnerKind.EXECUTION_FILL, fill_sequence),
                 fact=ingress.fact,
                 spec_set=spec_set,
             )

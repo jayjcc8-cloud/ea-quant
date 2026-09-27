@@ -309,9 +309,7 @@ def _recover_broker(engine: PaperTradingSession, records: tuple[AuditRecord, ...
     )
     for intent, result in contexts:
         authority.create_order(intent, result)
-    return recover_paper_broker(
-        records, orders=authority, max_orders=2 * engine.max_round_trips
-    )
+    return recover_paper_broker(records, orders=authority, max_orders=2 * engine.max_round_trips)
 
 
 def test_recover_paper_broker_pins_filled_orders_and_round_trips_submitted_at(
@@ -403,9 +401,7 @@ def test_recover_paper_fact_authority_replays_exact_fills(tmp_path: Path) -> Non
     for intent, result in contexts:
         authority.create_order(intent, result)
     facts = recover_paper_fact_authority(records, orders=authority)
-    fills = recover_paper_fills(
-        records, spec_set=engine.scenario.spec_set, funding=engine.funding
-    )
+    fills = recover_paper_fills(records, spec_set=engine.scenario.spec_set, funding=engine.funding)
     assert len(facts.fills) == 6
     assert [f.fill_id.owner_sequence for f in facts.fills] == [
         f.fill_id.owner_sequence for f in fills
@@ -426,9 +422,7 @@ def test_recover_paper_economic_state_reconstructs_acknowledged_ledger(
         risk_policy=engine.gate.risk_authority.policy,
         funding=engine.funding,
     )
-    cash = next(
-        balance.amount for balance in economic.ledger.snapshot.cash_balances
-    )
+    cash = next(balance.amount for balance in economic.ledger.snapshot.cash_balances)
     assert cash.text == "986.8"
     assert economic.final_refresh is not None
     assert (
