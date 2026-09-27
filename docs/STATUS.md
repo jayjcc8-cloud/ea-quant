@@ -22,6 +22,14 @@ external write, deployment, or live capability is part of this objective.
 
 ## Completed
 
+- Issue #230 adds PPV-10's bounded streaming market loop, injected UTC/monotonic clocks,
+  heartbeat, freshness/stall checks and local simulated source. Active dispatch proofs reuse
+  existing strategy and source-issued execution-fact authority seams. Stop and source exhaustion
+  cut off new market decisions; already issued facts drain within a bound, and callback failures
+  retain an explicit reason. A finite real process entry is available; Candidate/risk/audit/ledger
+  product composition remains PPV-11. See the
+  [local market event loop](personal-production-v1.md#ppv-10-local-market-event-loop).
+
 - Issue #227 adds PPV-09's bounded local `PaperBroker` submit/cancel/query contract. Issued Order
   and client identities map to canonical execution facts; exact request retries retain the same
   effect and query redelivery preserves trade dedup identity. The adapter proves its own ingress
