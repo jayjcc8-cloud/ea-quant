@@ -12,6 +12,7 @@ import pytest
 
 from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 from ea.experiments.store import CanonicalAttemptManifest, LocalResultStore
+from ea.product import paper_session as paper_session_module
 from ea.product.paper_session import (
     PaperSessionError,
     PaperSessionTimeout,
@@ -134,6 +135,84 @@ def test_stop_request_is_idempotent_and_timeout_retains_request(
     store.close()
     assert request_paper_stop(run_dir, timeout_seconds=0.0)["state"] == "stopped"
     assert stop.read_bytes() == first
+
+
+def test_stop_request_is_invisible_until_its_complete_bytes_are_published(
+    attempt: tuple[LocalResultStore, Path, RunBinding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, run_dir, binding = attempt
+    writer = PaperSessionWriter(run_dir, binding)
+    writer.publish({"state": "running"})
+    entered = threading.Event()
+    release = threading.Event()
+    original_write_all = paper_session_module._write_all
+    outcomes: list[BaseException] = []
+
+    def paused_write(descriptor: int, payload: bytes) -> None:
+        entered.set()
+        if not release.wait(timeout=2.0):
+            raise AssertionError("stop publication did not resume")
+        original_write_all(descriptor, payload)
+
+    monkeypatch.setattr(paper_session_module, "_write_all", paused_write)
+
+    def request() -> None:
+        try:
+            request_paper_stop(run_dir, timeout_seconds=0.0)
+        except PaperSessionTimeout:
+            return
+        except BaseException as error:
+            outcomes.append(error)
+
+    thread = threading.Thread(target=request)
+    thread.start()
+    try:
+        assert entered.wait(timeout=2.0)
+        assert writer.stop_requested() is False
+    finally:
+        release.set()
+        thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert outcomes == []
+    assert writer.stop_requested()
+
+
+def test_concurrent_identical_stop_requests_publish_one_valid_final_file(
+    attempt: tuple[LocalResultStore, Path, RunBinding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, run_dir, binding = attempt
+    writer = PaperSessionWriter(run_dir, binding)
+    writer.publish({"state": "running"})
+    barrier = threading.Barrier(2)
+    original_write_all = paper_session_module._write_all
+    outcomes: list[BaseException] = []
+
+    def synchronized_write(descriptor: int, payload: bytes) -> None:
+        original_write_all(descriptor, payload)
+        barrier.wait(timeout=2.0)
+
+    monkeypatch.setattr(paper_session_module, "_write_all", synchronized_write)
+
+    def request() -> None:
+        try:
+            request_paper_stop(run_dir, timeout_seconds=0.0)
+        except PaperSessionTimeout:
+            return
+        except BaseException as error:
+            outcomes.append(error)
+
+    threads = [threading.Thread(target=request) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+    assert all(not thread.is_alive() for thread in threads)
+    assert outcomes == []
+    assert writer.stop_requested()
+    outputs = run_dir / "outputs"
+    assert sorted(p.name for p in outputs.iterdir()) == ["paper-status.json", "paper-stop.json"]
 
 
 def test_stop_waits_for_terminal_and_released_writer_lease(

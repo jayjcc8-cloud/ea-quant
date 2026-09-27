@@ -297,26 +297,39 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 def _write_stop_once(outputs_fd: int, binding: RunBinding) -> None:
     if _stop_requested(outputs_fd, binding):
         return
+    payload = _stop_payload(binding)
+    temp_name = f".paper-stop.{uuid4().hex}.tmp"
     descriptor: int | None = None
     try:
         descriptor = os.open(
-            "paper-stop.json",
+            temp_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
             0o600,
             dir_fd=outputs_fd,
         )
         os.fchmod(descriptor, 0o600)
-        _write_all(descriptor, _stop_payload(binding))
+        _write_all(descriptor, payload)
         os.fsync(descriptor)
-        os.fsync(outputs_fd)
-    except FileExistsError:
+        os.close(descriptor)
+        descriptor = None
+        # Every legitimate requester for this bound attempt publishes identical
+        # bytes. Replacing a concurrent identical publication is idempotent;
+        # readers only ever see a complete final file, never the staging file.
         if not _stop_requested(outputs_fd, binding):
-            raise PaperSessionError("paper stop request appeared without valid bytes") from None
+            os.replace(
+                temp_name,
+                "paper-stop.json",
+                src_dir_fd=outputs_fd,
+                dst_dir_fd=outputs_fd,
+            )
+        os.fsync(outputs_fd)
     except OSError as error:
         raise PaperSessionError("paper stop request could not be written durably") from error
     finally:
         if descriptor is not None:
             os.close(descriptor)
+        with suppress(FileNotFoundError):
+            os.unlink(temp_name, dir_fd=outputs_fd)
 
 
 class PaperSessionWriter:
