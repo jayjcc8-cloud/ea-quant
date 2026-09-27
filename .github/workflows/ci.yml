@@ -177,10 +177,12 @@ jobs:
           npm run build
 
   web_e2e:
-    needs: classify
+    needs: [classify, quality]
     if: >-
+      !cancelled() &&
       github.event_name == 'pull_request' &&
-      needs.classify.outputs.web_e2e == 'true'
+      needs.classify.outputs.web_e2e == 'true' &&
+      (needs.quality.result == 'success' || needs.quality.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

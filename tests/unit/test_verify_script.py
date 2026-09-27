@@ -30,12 +30,17 @@ def test_ci_routes_and_runs_installed_web_e2e() -> None:
 
     assert "python scripts/ci_routes.py" in workflow
     assert "web_e2e:" in workflow
-    web_e2e_condition = yaml.safe_load(workflow)["jobs"]["web_e2e"]["if"]
+    jobs = yaml.safe_load(workflow)["jobs"]
+    assert jobs["web_e2e"]["needs"] == ["classify", "quality"]
+    assert jobs["frontend"]["needs"] == "classify"
+    web_e2e_condition = jobs["web_e2e"]["if"]
+    assert "!cancelled()" in web_e2e_condition
     assert "github.event_name == 'pull_request'" in web_e2e_condition
     assert "needs.classify.outputs.web_e2e == 'true'" in web_e2e_condition
+    assert "needs.quality.result == 'success'" in web_e2e_condition
+    assert "needs.quality.result == 'skipped'" in web_e2e_condition
     assert "npx playwright install --with-deps chromium" in workflow
     assert "npm run test:e2e" in workflow
-    jobs = yaml.safe_load(workflow)["jobs"]
     web_steps = "\n".join(step.get("run", "") for step in jobs["web_e2e"]["steps"])
     assert "Reclaim hosted-runner audit headroom" in workflow
     assert "sudo rm -rf -- /usr/local/lib/android/sdk" in web_steps
