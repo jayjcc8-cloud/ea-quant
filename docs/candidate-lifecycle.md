@@ -30,6 +30,9 @@ distribution recorded by the research evidence; an upgrade requires new research
 strategy; an arbitrary Python filename is never an accepted-candidate selector.
 
 Each new attempt retains `candidate-binding.json`, normal economic evidence and correlated
-`operational.jsonl` events with candidate_id. Existing unbound backtest and report commands keep
+`operational.jsonl` events with candidate_id. Its existing manifest pins the binding digest, so
+deleting the binding cannot turn a Candidate attempt into a legacy unbound run. Missing or changed
+bindings reject resume and reporting. CLI workspace aliases (including macOS `/var` paths) are
+resolved at entry, and optional V1 parameters use the same defaults as research. Existing unbound backtest and report commands keep
 their established behavior. This command performs one finite offline run. Continuous local Paper
 execution is composed in PPV-11; VPS and Live authorization remain denied.

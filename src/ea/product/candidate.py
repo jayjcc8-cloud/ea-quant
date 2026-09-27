@@ -27,9 +27,10 @@ from ea.product.scenario import (
     _load_scenario_document,
     _ScenarioInput,
 )
-from ea.strategy.catalog import ResearchStrategyCatalogV1
-from ea.strategy.package import StrategyPackage, read_regular, validate_package
-from ea.strategy.registry import project_parameters
+from ea.strategy.catalog import LocalActionEntry, ResearchStrategyCatalogV1, package_entry
+from ea.strategy.package import StrategyPackage, StrategyPackageV1, inspect_package, read_regular
+from ea.strategy.registry import BUILTIN_STRATEGIES, project_parameters
+from ea.strategy.sdk_v2 import BOUNDED_ROUND_TRIP_STRATEGY, ROUND_TRIP_STRATEGY
 from ea.web.candidate_evidence import CandidateEvidenceReader
 from ea.web.candidates import _digest as require_digest
 from ea.web.candidates import _uuid, canonical
@@ -161,13 +162,17 @@ def load_accepted_candidate(
     ):
         if expected is not None and expected != actual:
             raise ValueError("accepted candidate loading identity conflicts")
+    return _load_binding(binding)
+
+
+def _load_binding(binding: AcceptedCandidateBinding) -> AcceptedCandidateBinding:
     implementation = binding.document()["implementation"]
     if implementation["code_sha256"] != _package_code_digest().value or implementation[
         "distribution"
     ] != {"name": "ea-quant", "version": __version__}:
         raise ValueError("accepted candidate requires its recorded EA code and distribution")
     if binding._artifact_bytes is not None:
-        package = validate_package(binding._artifact_bytes, expected_sha256=binding.artifact_sha256)
+        package = inspect_package(binding._artifact_bytes, expected_sha256=binding.artifact_sha256)
         record = json.loads(binding._record_bytes)
         strategy = record["projection"]["strategy"]
         if (
@@ -176,8 +181,9 @@ def load_accepted_candidate(
             or package.descriptor.strategy_version != strategy["version"]
         ):
             raise ValueError("accepted package descriptor conflicts with candidate")
+        package.module()
         return _binding(
-            workspace,
+            binding.workspace,
             record,
             json.loads(binding._configuration_bytes),
             binding._artifact_bytes,
@@ -189,12 +195,17 @@ def load_accepted_candidate(
 def _require_binding(binding: AcceptedCandidateBinding) -> None:
     if type(binding) is not AcceptedCandidateBinding or binding._seal is not _BINDING_SEAL:
         raise ValueError("runtime requires a verified accepted candidate binding")
+
+
+def _refresh_binding(binding: AcceptedCandidateBinding) -> AcceptedCandidateBinding:
+    _require_binding(binding)
     fresh = inspect_candidate_binding(binding.workspace, binding.candidate_id)
     if fresh._record_bytes != binding._record_bytes or fresh.document() != binding.document():
         raise ValueError("accepted candidate changed before runtime loading")
+    return fresh
 
 
-def _preflight(path: Path) -> dict[str, Any]:
+def _preflight(path: Path, binding: AcceptedCandidateBinding) -> dict[str, Any]:
     """Decode strict schema/defaults without consulting or executing any package."""
     raw = _load_document(path)
     models: dict[int, Any] = {
@@ -213,6 +224,26 @@ def _preflight(path: Path) -> dict[str, Any]:
             document["execution"].pop(field)
     if version in (4, 5) and document["strategy"].get("source") is None:
         document["strategy"].pop("source")
+    strategy = document["strategy"]
+    if version >= 2:
+        if binding._artifact_bytes is not None:
+            package = inspect_package(
+                binding._artifact_bytes, expected_sha256=binding.artifact_sha256
+            )
+            entry = (
+                package_entry(package)
+                if isinstance(package, StrategyPackageV1)
+                else LocalActionEntry(package)
+            )
+            strategy["parameters"] = entry.normalize(strategy["parameters"])
+        elif version == 2:
+            strategy["parameters"] = BUILTIN_STRATEGIES.get(
+                strategy["id"], strategy["version"]
+            ).normalize(strategy["parameters"])
+        else:
+            strategy["parameters"] = (
+                BOUNDED_ROUND_TRIP_STRATEGY if version == 5 else ROUND_TRIP_STRATEGY
+            ).normalize(strategy["parameters"])
     return document
 
 
@@ -220,18 +251,12 @@ def run_accepted_candidate(
     binding: AcceptedCandidateBinding, scenario_path: Path, output_root: Path
 ) -> BacktestRunResult:
     """Run one explicit offline scenario using only its accepted immutable configuration."""
-    _require_binding(binding)
+    fresh = _refresh_binding(binding)
     path = scenario_path.resolve(strict=True)
-    document = _preflight(path)
+    document = _preflight(path, fresh)
     if _configuration(document) != binding._configuration_bytes:
         raise ValueError("runtime scenario differs from accepted normalized configuration")
-    loaded = load_accepted_candidate(
-        binding.workspace,
-        binding.candidate_id,
-        expected_artifact_sha256=binding.artifact_sha256,
-        expected_configuration_sha256=binding.configuration_sha256,
-        expected_parameters_sha256=binding.parameters_sha256,
-    )
+    loaded = _load_binding(fresh)
     catalog = ResearchStrategyCatalogV1(
         () if loaded.strategy_package is None else (loaded.strategy_package,)
     )

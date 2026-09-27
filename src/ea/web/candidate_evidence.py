@@ -31,12 +31,17 @@ class CandidateEvidenceReader:
         self.jobs_dir = workspace / "jobs"
         self.inputs_dir = workspace / "inputs"
         self.reports_dir = workspace / "reports"
+        # One reader is one admission snapshot, never a cross-operation cache.
+        self._bytes: dict[Path, bytes] = {}
+        self._jobs: dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = {}
 
     def _job_path(self, job_id: str) -> Path:
         bundle = self.jobs_dir / job_id
         return bundle / "job.json" if bundle.is_dir() else self.jobs_dir / f"{job_id}.json"
 
     def read(self, path: Path) -> bytes:
+        if path in self._bytes:
+            return self._bytes[path]
         if not path.is_relative_to(self.workspace):
             raise ValueError("candidate evidence is outside workspace")
         for parent in (path, *path.parents):
@@ -44,10 +49,14 @@ class CandidateEvidenceReader:
                 raise ValueError("candidate evidence path is not regular")
             if parent == self.workspace:
                 break
-        return read_regular(path, path.parent)
+        payload = read_regular(path, path.parent)
+        self._bytes[path] = payload
+        return payload
 
     def job(self, job_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         candidates._uuid(job_id)
+        if job_id in self._jobs:
+            return self._jobs[job_id]
         from ea.web.service import _decode_job
 
         job = _decode_job(self.read(self._job_path(job_id)))
@@ -146,7 +155,9 @@ class CandidateEvidenceReader:
             "code_sha256": source["code_sha256"],
             "distribution": source["distribution"],
         }
-        return evidence, strategy_identity, scenario
+        result = (evidence, strategy_identity, scenario)
+        self._jobs[job_id] = result
+        return result
 
     def projection(self, validation_id: str, holdout_job_id: str) -> dict[str, Any]:
         candidates._uuid(validation_id)

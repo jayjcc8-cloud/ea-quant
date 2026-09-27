@@ -22,10 +22,7 @@ from ea.web.service import WebService
 from unit.test_local_bounded_round_trips_v1 import local_v3
 
 
-@pytest.fixture(scope="module")
-def candidate_evidence(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    root = tmp_path_factory.mktemp("candidate-runtime")
-    path, packages, _ = local_v3(root)
+def _create_candidate_evidence(root: Path, path: Path, packages: Path | None) -> Path:
     document = yaml.safe_load(path.read_text())
     data_path = path.parent / document["data"]["path"]
     payload = data_path.read_bytes()
@@ -77,6 +74,13 @@ def candidate_evidence(tmp_path_factory: pytest.TempPathFactory) -> Path:
         json.dumps({"candidate_id": record["candidate_id"], "scenario": path.name})
     )
     return root
+
+
+@pytest.fixture(scope="module")
+def candidate_evidence(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("candidate-runtime")
+    path, packages, _ = local_v3(root)
+    return _create_candidate_evidence(root, path, packages)
 
 
 @pytest.fixture
@@ -240,3 +244,120 @@ def test_previously_loaded_binding_is_rechecked_before_running(
         run_accepted_candidate(binding, scenario, tmp_path / "runs")
     assert calls == []
     assert not (tmp_path / "runs").exists()
+
+
+@pytest.mark.parametrize("strategy_kind", ["local-v1", "builtin-v2"])
+def test_accepted_runtime_reuses_research_parameter_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strategy_kind: str
+) -> None:
+    from ea.product import load_backtest_scenario
+    from ea.strategy.package import canonical_json, pack_strategy
+    from unit.test_local_strategy_package import local_scenario
+    from unit.test_scenario_v2 import write_v2
+
+    marker = tmp_path / "python-executed"
+    packages = None
+    if strategy_kind == "local-v1":
+        path, packages, _ = local_scenario(tmp_path)
+        source = tmp_path / "source"
+        manifest = json.loads((source / "manifest.json").read_bytes())
+        manifest["strategy"]["parameters"][0]["required"] = False
+        (source / "manifest.json").write_bytes(canonical_json(manifest))
+        strategy = source / "strategy.py"
+        strategy.write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n"
+            + strategy.read_text()
+        )
+        (packages / "threshold.eastrategy").unlink()
+        package = pack_strategy(source, packages / "threshold.eastrategy")
+        document = yaml.safe_load(path.read_text())
+        document["strategy"]["source"]["artifact_sha256"] = package.identity.artifact_sha256
+        document["strategy"]["parameters"].pop("threshold_price")
+        path.write_text(yaml.safe_dump(document))
+    else:
+        path = write_v2(tmp_path / "scenarios")
+    normalized = load_backtest_scenario(path, strategy_root=packages).strategy_parameters
+    _create_candidate_evidence(tmp_path, path, packages)
+    selection = json.loads((tmp_path / "selection.json").read_bytes())
+    binding = inspect_candidate_binding(tmp_path / "workspace", selection["candidate_id"])
+    marker.unlink(missing_ok=True)
+    attempt = run_accepted_candidate(binding, path, tmp_path / "runs").output_directory
+    scenario = json.loads((attempt / "manifest.json").read_bytes())["scenario"]["canonical"]
+    assert scenario["strategy"]["parameters"] == normalized
+    if strategy_kind == "local-v1":
+        assert normalized["threshold_price"] == "1"
+        assert marker.read_text() == "executed"
+    marker.unlink(missing_ok=True)
+    document = yaml.safe_load(path.read_text())
+    document["strategy"]["parameters"].update(
+        {"threshold_price": "3"} if strategy_kind == "local-v1" else {"target_quantity": "3"}
+    )
+    path.write_text(yaml.safe_dump(document))
+    calls = no_module(monkeypatch)
+    with pytest.raises(ValueError, match="accepted normalized configuration"):
+        run_accepted_candidate(binding, path, tmp_path / "rejected-runs")
+    assert calls == []
+    assert not marker.exists()
+    assert not (tmp_path / "rejected-runs").exists()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_missing_candidate_binding_cannot_resume_as_legacy(
+    selected: tuple[Path, str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupted: bool,
+) -> None:
+    from ea.product import backtest as backtest_module
+    from ea.product.backtest import BacktestResumeFailure
+    from unit.test_backtest_resume import _AbruptInterruption, _interrupt_at
+
+    workspace, candidate_id, scenario = selected
+    if interrupted:
+        _interrupt_at(monkeypatch, "funding_durable")
+        with pytest.raises(_AbruptInterruption):
+            run_accepted_candidate(
+                inspect_candidate_binding(workspace, candidate_id), scenario, tmp_path / "runs"
+            )
+        attempt = next((tmp_path / "runs").iterdir())
+        monkeypatch.setattr(backtest_module, "_TEST_INTERRUPT", None)
+    else:
+        attempt = run_accepted_candidate(
+            inspect_candidate_binding(workspace, candidate_id), scenario, tmp_path / "runs"
+        ).output_directory
+    (attempt / "candidate-binding.json").unlink()
+    with pytest.raises(BacktestResumeFailure, match="candidate"):
+        resume_backtest_attempt(attempt)
+
+
+def test_one_inspection_reads_each_evidence_file_once(
+    selected: tuple[Path, str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ea.web import candidate_evidence
+
+    workspace, candidate_id, _ = selected
+    original = candidate_evidence.read_regular
+    reads: list[Path] = []
+
+    def read(path: Path, root: Path) -> bytes:
+        reads.append(path)
+        return original(path, root)
+
+    monkeypatch.setattr(candidate_evidence, "read_regular", read)
+    inspect_candidate_binding(workspace, candidate_id)
+    assert reads and len(reads) == len(set(reads))
+
+
+def test_action_v2_runtime_still_requires_complete_parameters_before_python(
+    selected: tuple[Path, str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, candidate_id, path = selected
+    binding = inspect_candidate_binding(workspace, candidate_id)
+    document = yaml.safe_load(path.read_text())
+    document["strategy"]["parameters"].pop("quantity")
+    path.write_text(yaml.safe_dump(document))
+    calls = no_module(monkeypatch)
+    with pytest.raises(ValueError):
+        run_accepted_candidate(binding, path, tmp_path / "rejected-runs")
+    assert calls == []
+    assert not (tmp_path / "rejected-runs").exists()

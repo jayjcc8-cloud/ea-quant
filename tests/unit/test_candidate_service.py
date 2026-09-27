@@ -8,6 +8,19 @@ from unit.test_web_api import ORIGIN, _settings, _wait
 from unit.test_web_holdout import _request, _source, _target
 
 
+def test_candidates_directory_cannot_escape_workspace(tmp_path: Path) -> None:
+    from ea.web.service import WebBoundaryError, WebService
+
+    settings = _settings(tmp_path)
+    settings.workspace.mkdir(exist_ok=True)
+    external = tmp_path / "external"
+    external.mkdir()
+    (settings.workspace / "candidates").symlink_to(external, target_is_directory=True)
+    with pytest.raises(WebBoundaryError, match="candidates resolves outside"):
+        WebService(settings.scenario_root, settings.workspace)
+    assert list(external.iterdir()) == []
+
+
 def test_candidate_reopens_after_source_deletion_and_rejects_changed_evidence(
     tmp_path: Path,
 ) -> None:

@@ -351,6 +351,7 @@ def _attempt_manifest_bytes(
     lineage: Sha256Digest,
     risk_policy: Any,
     risk_context: dict[str, object],
+    candidate_binding_sha256: str | None = None,
 ) -> bytes:
     funding = InitialFunding(run_id, scenario.funding_currency, scenario.initial_cash)
     source_file_sha256 = sha256(scenario.data_path.read_bytes()).hexdigest()
@@ -398,6 +399,8 @@ def _attempt_manifest_bytes(
         },
         "schema": _ATTEMPT_SCHEMA,
     }
+    if candidate_binding_sha256 is not None:
+        document["candidate_binding_sha256"] = candidate_binding_sha256
     return _canonical_json(document)
 
 
@@ -1166,7 +1169,7 @@ def _load_verified_attempt(
             "scenario",
             "schema",
         }
-        if set(document) != expected_fields:
+        if set(document) not in (expected_fields, expected_fields | {"candidate_binding_sha256"}):
             raise ValueError("manifest fields conflict")
         scenario_document = document["scenario"]
         data_document = document["data"]
@@ -1185,6 +1188,18 @@ def _load_verified_attempt(
         raise BacktestResumeFailure("resume identity evidence is invalid", attempt) from None
     if document["schema"] != _ATTEMPT_SCHEMA or document["run_id"] != run_id.value:
         raise BacktestResumeFailure("resume identity evidence conflicts", attempt)
+    candidate_digest = document.get("candidate_binding_sha256")
+    if candidate_digest is not None:
+        try:
+            if (
+                sha256(read_regular(attempt / "candidate-binding.json", attempt)).hexdigest()
+                != candidate_digest
+            ):
+                raise ValueError("binding digest conflicts")
+        except (OSError, ValueError):
+            raise BacktestResumeFailure(
+                "candidate runtime attribution is invalid", attempt
+            ) from None
     try:
         package_path = attempt / "strategy.eastrategy"
         catalog = None
@@ -1205,6 +1220,7 @@ def _load_verified_attempt(
             lineage=recomputed_lineage,
             risk_policy=risk_policy,
             risk_context=risk_context,
+            candidate_binding_sha256=candidate_digest,
         )
     except Exception:
         raise BacktestResumeFailure(
@@ -1252,6 +1268,9 @@ def run_backtest_scenario(
         lineage=lineage,
         risk_policy=risk_policy,
         risk_context=risk_context,
+        candidate_binding_sha256=(
+            None if candidate_document is None else sha256(candidate_document).hexdigest()
+        ),
     )
     binding = _binding(run_id, lineage, manifest_bytes)
     manifest = CanonicalAttemptManifest(binding.reference, manifest_bytes)

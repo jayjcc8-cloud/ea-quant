@@ -701,6 +701,7 @@ class WebService:
         self.reports_dir = _directory(self.workspace / "reports", label="report root", create=True)
         for directory, label in (
             (self.jobs_dir, "job index"),
+            (self.candidates_dir, "candidates"),
             (self.batches_dir, "batch index"),
             (self.inputs_dir, "input store"),
             (self.runs_dir, "attempt root"),
