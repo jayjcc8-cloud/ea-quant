@@ -10,6 +10,8 @@ from ea.risk.operational_safety import (
     OperationalSafetyInput,
     OperationalSafetyLimits,
     OperationalSafetyVerdict,
+    canonical_operational_safety_limits_bytes,
+    restore_operational_safety_limits,
 )
 
 RUN_ID = RunId("12345678-1234-4234-8234-123456789abc")
@@ -225,3 +227,9 @@ def test_seed_submissions_rebuilds_rate_window() -> None:
     decision = authority.authorize(_input(now_monotonic=4.0))
     assert decision.verdict is OperationalSafetyVerdict.DENY
     assert decision.guard == "order_rate"
+
+
+def test_limits_round_trip() -> None:
+    limits = _limits(max_daily_loss=Decimal("50"), max_open_orders=5)
+    restored = restore_operational_safety_limits(canonical_operational_safety_limits_bytes(limits))
+    assert restored == limits

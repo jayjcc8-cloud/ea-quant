@@ -266,7 +266,32 @@ class PaperTradingSession:
     ) -> OperationalSafetyInput:
         snapshot = self.gate.ledger.snapshot
         risk = self.gate.risk_authority.risk_state
-        reference_price = Decimal(str(root.payload.close))
+        reference_price = _quantized_historical_close(
+            root.payload.close, side=OrderSide.BUY, specification=self.spec
+        )
+        slippage = slippage_bps_from_identity(
+            self.scenario.execution_policy.identifier.value,
+            self.scenario.execution_policy.sha256.value,
+        )
+        proposed_price = _quantized_historical_close(
+            root.payload.close,
+            side=order.side,
+            specification=self.spec,
+            slippage_bps=slippage,
+        )
+
+        def notional(price: CanonicalDecimal, quantity: CanonicalDecimal) -> Decimal:
+            if quantity.coefficient == 0:
+                return Decimal("0")
+            settled = settle_product(
+                price, quantity, self.spec.contract_multiplier, self.spec.currency_quantum
+            )
+            return Decimal(settled.amount.text)
+
+        def signed_notional(side: OrderSide, quantity: CanonicalDecimal) -> Decimal:
+            value = notional(self.price_bound, quantity)
+            return value if side is OrderSide.BUY else -value
+
         cash = next(
             (
                 Decimal(balance.amount.text)
@@ -275,25 +300,20 @@ class PaperTradingSession:
             ),
             Decimal("0"),
         )
-        position_mark = Decimal("0")
-        for balance in snapshot.position_balances:
-            if balance.instrument == self.scenario.instrument:
-                position_mark += Decimal(balance.quantity.text) * reference_price
+        position_quantity = next(
+            (
+                balance.quantity
+                for balance in snapshot.position_balances
+                if balance.instrument == self.scenario.instrument
+            ),
+            CanonicalDecimal("0"),
+        )
+        position_mark = notional(reference_price, position_quantity)
         daily_loss = Decimal(self.scenario.initial_cash.text) - (cash + position_mark)
-        worst_price = Decimal(self.price_bound.text)
         outstanding = (
-            Decimal(self.pending.quantity.text) * worst_price
+            signed_notional(self.pending.side, self.pending.quantity)
             if self.pending is not None
             else Decimal("0")
-        )
-        proposed_price = _quantized_historical_close(
-            root.payload.close,
-            side=order.side,
-            specification=self.spec,
-            slippage_bps=slippage_bps_from_identity(
-                self.scenario.execution_policy.identifier.value,
-                self.scenario.execution_policy.sha256.value,
-            ),
         )
         return OperationalSafetyInput(
             kill_switch_halted=(
@@ -309,10 +329,10 @@ class PaperTradingSession:
             daily_loss=daily_loss,
             current_exposure=position_mark,
             outstanding_order_exposure=outstanding,
-            proposed_order_exposure=Decimal(order.quantity.text) * worst_price,
+            proposed_order_exposure=signed_notional(order.side, order.quantity),
             open_order_count=1 if self.pending is not None else 0,
             proposed_effective_price=Decimal(proposed_price.text),
-            reference_price=reference_price,
+            reference_price=Decimal(reference_price.text),
             order_identity=order.client_submission_key.value,
             now_monotonic=self.monotonic(),
         )

@@ -21,7 +21,7 @@ def _limits(
     max_daily_loss: Decimal = Decimal("1000"),
     max_total_exposure: Decimal = Decimal("1000"),
     max_open_orders: int = 2,
-    max_order_rate: int = 4,
+    max_order_rate: int = 20,
     order_rate_window_seconds: float = 60.0,
     max_price_deviation_bps: int = 250,
 ) -> OperationalSafetyLimits:
@@ -74,3 +74,12 @@ def test_exposure_deny_blocks_broker_effect_without_halting(tmp_path: Path) -> N
     payload = json.loads(records[0].canonical_payload)
     assert payload["verdict"] == "deny"
     assert payload["guard"] == "exposure"
+
+
+def test_exposure_guard_allows_risk_reducing_exit(tmp_path: Path) -> None:
+    # A closing SELL nets against the long position, so a limit that admits the
+    # entry must also admit the exit (no double-count of the reducing order).
+    engine, clock = session(tmp_path, operational_limits=_limits(max_total_exposure=Decimal("300")))
+    drive(engine, clock)
+    assert engine.status()["fills"] == 6
+    assert _safety_records(engine) == []

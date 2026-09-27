@@ -25,6 +25,7 @@ transport. There is exactly one guard implementation, never two.
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
@@ -35,12 +36,15 @@ from typing import final
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunId
 
+_LIMITS_SCHEMA = "ea.operational-safety-limits.v1"
+
 _ALLOW_DECISION: OperationalSafetyDecision
 
 _ERROR_CODES = frozenset(
     {
         OutcomeCode.INVALID_TYPE,
         OutcomeCode.OUT_OF_RANGE,
+        OutcomeCode.CONFLICTING_ID,
     }
 )
 
@@ -241,7 +245,7 @@ class OperationalSafetyAuthority:
             return _decision(
                 OperationalSafetyVerdict.HALT,
                 "reconciliation",
-                "broker reconciliation is not MATCH",
+                "unresolved reconciliation state",
                 identity=identity,
             )
         if safety_input.market_age_seconds > limits.max_market_age_seconds:
@@ -361,10 +365,54 @@ class OperationalSafetyAuthority:
 
 def _price_deviation_bps(proposed: Decimal, reference: Decimal) -> Decimal:
     if reference == 0:
-        return Decimal("0")
+        # A zero reference price has no meaningful deviation; fail closed.
+        return Decimal("Infinity") if proposed != 0 else Decimal("0")
     with localcontext() as context:
         context.prec = 100
         return (abs(proposed - reference) / reference) * Decimal(10000)
+
+
+def canonical_operational_safety_limits_bytes(limits: OperationalSafetyLimits) -> bytes:
+    """Return the canonical durable document for the configured limits."""
+    if type(limits) is not OperationalSafetyLimits:
+        raise _fail(OutcomeCode.INVALID_TYPE, "limits must be an exact OperationalSafetyLimits")
+    document = {
+        "schema": _LIMITS_SCHEMA,
+        "max_market_age_seconds": limits.max_market_age_seconds,
+        "max_daily_loss": str(limits.max_daily_loss),
+        "max_total_exposure": str(limits.max_total_exposure),
+        "max_open_orders": limits.max_open_orders,
+        "max_order_rate": limits.max_order_rate,
+        "order_rate_window_seconds": limits.order_rate_window_seconds,
+        "max_price_deviation_bps": limits.max_price_deviation_bps,
+    }
+    return json.dumps(
+        document, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode("ascii")
+
+
+def restore_operational_safety_limits(payload: bytes) -> OperationalSafetyLimits:
+    """Rebuild configured limits; a malformed document fails closed."""
+    if type(payload) is not bytes:
+        raise _fail(OutcomeCode.INVALID_TYPE, "limits payload must be exact bytes")
+    try:
+        document = json.loads(payload)
+    except (RecursionError, UnicodeError, ValueError) as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "limits payload is malformed JSON") from error
+    if type(document) is not dict or document.get("schema") != _LIMITS_SCHEMA:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "limits schema conflicts")
+    try:
+        return OperationalSafetyLimits(
+            max_market_age_seconds=document["max_market_age_seconds"],
+            max_daily_loss=Decimal(document["max_daily_loss"]),
+            max_total_exposure=Decimal(document["max_total_exposure"]),
+            max_open_orders=document["max_open_orders"],
+            max_order_rate=document["max_order_rate"],
+            order_rate_window_seconds=document["order_rate_window_seconds"],
+            max_price_deviation_bps=document["max_price_deviation_bps"],
+        )
+    except (KeyError, TypeError, ValueError, OperationalSafetyError) as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, "limits payload conflicts") from error
 
 
 _ALLOW_DECISION = OperationalSafetyDecision(
