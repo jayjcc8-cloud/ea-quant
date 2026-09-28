@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Per-user LaunchAgent that schedules the EXISTING `ea paper backup` command.
+
+  This is the only scheduler. There is no cron, no APScheduler, and no new
+  scheduling code in EA: launchd supplies the clock and `ea-runtime backup`
+  supplies the one command invocation per tick.
+
+  `ea paper backup` is not an online snapshot by construction: it refuses a
+  held writer lease. A tick therefore captures the newest attempt whose writer
+  has released, and does nothing when every attempt is still live or already
+  captured. A refused or skipped tick publishes no backup and mutates no
+  authoritative byte.
+
+  Placeholders are substituted by `ea-runtime install`; this file is a template,
+  never a live unit.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ea.paper-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__SUPERVISOR_DIR__/ea-runtime</string>
+    <string>backup</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__HOME_EA__</string>
+  <!-- One bounded tick every BACKUP_INTERVAL_SECONDS. The job exits on its
+       own; it is not kept alive and its exit status is not a restart trigger. -->
+  <key>StartInterval</key>
+  <integer>__BACKUP_INTERVAL_SECONDS__</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME_EA__/logs/backup.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME_EA__/logs/backup.err.log</string>
+</dict>
+</plist>

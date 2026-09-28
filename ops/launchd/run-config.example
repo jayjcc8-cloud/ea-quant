@@ -1,0 +1,43 @@
+# Pinned inputs for the supervised local Paper run on this Mac.
+#
+# Copy this file to ~/EA/supervisor/run-config.env, edit the paths for this
+# host, then run ~/EA/supervisor/ea-runtime install.
+#
+# Every value here is an explicit operator choice. Nothing in this file is a
+# safety limit: the risk limits, kill switch and admission rules are owned by
+# the accepted Candidate and the installed EA, never by the supervisor.
+#
+# This file is sourced by POSIX sh. Keep it to simple NAME=value assignments.
+
+# The installed EA entrypoint that runs the supervised foreground process.
+# Use the venv that owns the accepted Candidate's recorded code digest.
+EA_BIN=/Users/mo/Documents/EA/venv/bin/ea
+
+# Workspace holding the ACCEPTED Candidate (ea web serve --workspace).
+WORKSPACE=/Users/mo/EA/workspace
+
+# The ACCEPTED Candidate identifier; an EVALUATED or rejected one is refused.
+CANDIDATE_ID=00000000-0000-4000-8000-000000000000
+
+# The accepted scenario whose normalized configuration matches that Candidate.
+SCENARIO=/Users/mo/EA/inputs/source.yaml
+
+# Attempt root. Every supervised launch creates one fresh run directory here.
+RUNTIME_ROOT=/Users/mo/EA/runtime
+
+# Fixed simulated price cycle and market interval, passed through unchanged.
+PRICES=100
+INTERVAL=0.1
+
+# Optional simulated event bound. Empty means "run until stopped".
+EVENT_LIMIT=
+
+# Scheduled `ea paper backup` target, retention, and cadence in seconds.
+BACKUP_ROOT=/Users/mo/EA/backups
+BACKUP_KEEP=5
+BACKUP_INTERVAL_SECONDS=300
+
+# Restart throttle handed to launchd. This bounds how often launchd may start
+# this job again after an unsuccessful exit. It is not a retry budget and it
+# never restarts a clean stop.
+THROTTLE_INTERVAL_SECONDS=10

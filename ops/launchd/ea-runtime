@@ -1,0 +1,488 @@
+#!/bin/sh
+#
+# EA local Paper runtime operator for macOS launchd.
+#
+# This is the thinnest operator layer that makes `ea` autonomous on this Mac:
+# launchd supplies process lifetime and the clock, and the existing `ea paper
+# start|stop|status|backup` commands remain the only authority over trading,
+# money and evidence. This script adds no scheduler, no process manager, no
+# watchdog and no database. It never decides anything about trading; it starts,
+# observes and stops one foreground `ea paper start`, and it schedules the
+# existing `ea paper backup`.
+#
+# Operator surface (the normal way to drive this; raw launchctl is not needed):
+#
+#   ea-runtime install [--config PATH]   render and load both LaunchAgents
+#   ea-runtime uninstall                 unload and remove both LaunchAgents
+#   ea-runtime start                     re-arm and wait for a live supervised run
+#   ea-runtime stop                      cooperative stop, then confirm it stayed stopped
+#   ea-runtime status                    launchd state (stderr) + `ea paper status` (stdout)
+#   ea-runtime reload                    re-render both LaunchAgents from the config
+#   ea-runtime log [paper|backup]        tail the launchd-captured output
+#
+# launchd targets (also runnable by hand for inspection):
+#
+#   ea-runtime run                       one supervised foreground Paper attempt
+#   ea-runtime backup                    one scheduled `ea paper backup` tick
+#
+# Environment overrides, used by the host acceptance script so it never touches
+# the real ~/EA or the real ~/Library/LaunchAgents:
+#
+#   EA_RUNTIME_HOME          default $HOME/EA
+#   EA_LAUNCH_AGENTS_DIR     default $HOME/Library/LaunchAgents
+#   EA_LAUNCHCTL             default launchctl (a stub is used in unit tests)
+#   EA_RUNTIME_NO_BOOTSTRAP  when non-empty, render but do not call launchctl
+#
+set -eu
+
+HOME_EA=${EA_RUNTIME_HOME:-${HOME:?HOME must be set for the EA runtime operator}/EA}
+SUPERVISOR_DIR=$HOME_EA/supervisor
+STATE_DIR=$SUPERVISOR_DIR/state
+LOG_DIR=$HOME_EA/logs
+AGENTS_DIR=${EA_LAUNCH_AGENTS_DIR:-${HOME}/Library/LaunchAgents}
+LAUNCHCTL=${EA_LAUNCHCTL:-launchctl}
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+
+PAPER_LABEL=com.ea.paper
+BACKUP_LABEL=com.ea.paper-backup
+CONFIG=$SUPERVISOR_DIR/run-config.env
+HISTORY=$STATE_DIR/launch-history.jsonl
+CURRENT_RUN=$STATE_DIR/current-run
+
+die() {
+    printf 'ea-runtime: %s\n' "$1" >&2
+    exit 2
+}
+
+note() {
+    printf '%s\n' "$1" >&2
+}
+
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
+
+CONFIG_KEYS='EA_BIN WORKSPACE CANDIDATE_ID SCENARIO RUNTIME_ROOT BACKUP_ROOT PRICES INTERVAL
+BACKUP_KEEP BACKUP_INTERVAL_SECONDS THROTTLE_INTERVAL_SECONDS'
+
+# The config is a checked data file, not a program: every line must be a plain
+# NAME=literal assignment, so a stray shell fragment in it can never execute and
+# every value is exactly the bytes the operator wrote.
+validate_config_file() {
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            '' | '#'*) continue ;;
+            [A-Za-z_]*=*) ;;
+            *) die "config line is not a NAME=value assignment: $line" ;;
+        esac
+        key=${line%%=*}
+        value=${line#*=}
+        case "$key" in
+            *[!A-Za-z0-9_]*) die "config key is not a plain name: $key" ;;
+        esac
+        case "$value" in
+            *[!A-Za-z0-9_./,:@+-]*)
+                die "$key must be one plain literal without spaces or shell characters" ;;
+        esac
+    done < "$CONFIG"
+}
+
+load_config() {
+    [ -f "$CONFIG" ] || die "missing config $CONFIG (copy run-config.example there first)"
+    validate_config_file
+    # shellcheck source=/dev/null
+    . "$CONFIG"
+    missing=
+    for key in $CONFIG_KEYS; do
+        eval "value=\${$key:-}"
+        [ -n "$value" ] || missing="$missing $key"
+    done
+    [ -z "$missing" ] || die "config is missing required keys:$missing"
+
+    for key in EA_BIN WORKSPACE SCENARIO RUNTIME_ROOT BACKUP_ROOT; do
+        eval "value=\${$key}"
+        case "$value" in
+            /*) ;;
+            *) die "$key must be an absolute path" ;;
+        esac
+        case "$value" in
+            *[![:print:]]* | *[[:space:]]*)
+                die "$key must not contain whitespace or control characters" ;;
+        esac
+    done
+    case "$CANDIDATE_ID" in
+        *[!0-9a-f-]*) die "CANDIDATE_ID must be a lowercase UUID" ;;
+    esac
+    [ "${#CANDIDATE_ID}" -eq 36 ] || die "CANDIDATE_ID must be a lowercase UUID"
+
+    for key in BACKUP_KEEP BACKUP_INTERVAL_SECONDS THROTTLE_INTERVAL_SECONDS; do
+        eval "value=\${$key}"
+        case "$value" in
+            '' | *[!0-9]*) die "$key must be a positive integer" ;;
+        esac
+        [ "$value" -ge 1 ] || die "$key must be a positive integer"
+    done
+    event_limit=${EVENT_LIMIT:-}
+    if [ -n "$event_limit" ]; then
+        case "$event_limit" in *[!0-9]*) die "EVENT_LIMIT must be a positive integer" ;; esac
+        [ "$event_limit" -ge 1 ] || die "EVENT_LIMIT must be a positive integer"
+    fi
+
+    case "$SUPERVISOR_DIR" in
+        *[![:print:]]*) die "the supervisor directory must be printable text" ;;
+    esac
+    # The plists are rendered with sed, so the substituted paths must not carry
+    # sed or shell metacharacters. Refusing them is deterministic and checkable;
+    # guessing an escaping scheme is not.
+    case "$SUPERVISOR_DIR" in
+        *"|"* | *"&"* | *"\\"* | *"'"* | *'"'* | *'$'*)
+            die "the supervisor directory must not contain sed or shell metacharacters" ;;
+    esac
+}
+
+require_installed() {
+    [ -x "$SUPERVISOR_DIR/ea-runtime" ] || die "$SUPERVISOR_DIR/ea-runtime is not installed"
+    [ -f "$LOG_DIR/paper.out.log" ] || die "logs are not set up; run: ea-runtime install"
+}
+
+# ---------------------------------------------------------------------------
+# launchd plumbing
+# ---------------------------------------------------------------------------
+
+domain_target() {
+    printf 'gui/%s\n' "$(id -u)"
+}
+
+label_target() {
+    printf 'gui/%s/%s\n' "$(id -u)" "$1"
+}
+
+bootstrapped() {
+    "$LAUNCHCTL" print "$(label_target "$1")" >/dev/null 2>&1
+}
+
+job_field() {
+    "$LAUNCHCTL" print "$(label_target "$1")" 2>/dev/null |
+        sed -n "s/^[[:space:]]*$2 = //p" | head -n 1
+}
+
+bootstrap_label() {
+    label=$1
+    plist=$AGENTS_DIR/$label.plist
+    [ -f "$plist" ] || die "$plist is not rendered"
+    if bootstrapped "$label"; then
+        "$LAUNCHCTL" bootout "$(label_target "$label")" >/dev/null 2>&1 || true
+        # bootout is asynchronous about releasing the label; wait it out rather
+        # than racing the next bootstrap.
+        tries=0
+        while bootstrapped "$label" && [ "$tries" -lt 40 ]; do
+            sleep 0.25
+            tries=$((tries + 1))
+        done
+    fi
+    "$LAUNCHCTL" bootstrap "$(domain_target)" "$plist"
+}
+
+render_one() {
+    template=$1
+    label=$2
+    throttle=$3
+    interval=$4
+    output=$AGENTS_DIR/$label.plist
+    [ -f "$template" ] || die "missing template $template"
+    mkdir -p "$AGENTS_DIR"
+    sed -e "s|__SUPERVISOR_DIR__|$SUPERVISOR_DIR|g" \
+        -e "s|__HOME_EA__|$HOME_EA|g" \
+        -e "s|__THROTTLE_SECONDS__|$throttle|g" \
+        -e "s|__BACKUP_INTERVAL_SECONDS__|$interval|g" \
+        "$template" > "$output.new"
+    mv -f "$output.new" "$output"
+    note "rendered $output"
+}
+
+render_all() {
+    load_config
+    render_one "$SUPERVISOR_DIR/templates/$PAPER_LABEL.plist.in" "$PAPER_LABEL" \
+        "$THROTTLE_INTERVAL_SECONDS" "$BACKUP_INTERVAL_SECONDS"
+    render_one "$SUPERVISOR_DIR/templates/$BACKUP_LABEL.plist.in" "$BACKUP_LABEL" \
+        "$THROTTLE_INTERVAL_SECONDS" "$BACKUP_INTERVAL_SECONDS"
+}
+
+load_all() {
+    bootstrap_label "$PAPER_LABEL"
+    bootstrap_label "$BACKUP_LABEL"
+}
+
+unload_all() {
+    for label in "$PAPER_LABEL" "$BACKUP_LABEL"; do
+        if bootstrapped "$label"; then
+            "$LAUNCHCTL" bootout "$(label_target "$label")" >/dev/null 2>&1 || true
+            note "booted out $label"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# operator surface
+# ---------------------------------------------------------------------------
+
+cmd_install() {
+    config=$1
+    [ -f "$SELF_DIR/$PAPER_LABEL.plist.in" ] ||
+        die "install must be run from the repository checkout (ops/launchd)"
+    if [ -z "$config" ]; then
+        config=$CONFIG
+        [ -f "$config" ] ||
+            die "no config at $config; copy $SELF_DIR/run-config.example there and edit it"
+    fi
+    [ -f "$config" ] || die "config $config does not exist"
+
+    mkdir -p "$SUPERVISOR_DIR/templates" "$STATE_DIR" "$LOG_DIR" "$AGENTS_DIR"
+    chmod 700 "$HOME_EA" "$SUPERVISOR_DIR" "$STATE_DIR" "$LOG_DIR"
+    cp "$SELF_DIR/ea-runtime" "$SUPERVISOR_DIR/ea-runtime"
+    chmod 700 "$SUPERVISOR_DIR/ea-runtime"
+    cp "$SELF_DIR/$PAPER_LABEL.plist.in" "$SELF_DIR/$BACKUP_LABEL.plist.in" \
+        "$SELF_DIR/run-config.example" "$SUPERVISOR_DIR/templates/"
+    if ! cmp -s "$config" "$CONFIG" 2>/dev/null; then
+        cp "$config" "$CONFIG"
+    fi
+    chmod 600 "$CONFIG"
+    : > "$LOG_DIR/paper.out.log"
+    : > "$LOG_DIR/paper.err.log"
+    : > "$LOG_DIR/backup.out.log"
+    : > "$LOG_DIR/backup.err.log"
+
+    render_all
+    if [ -n "${EA_RUNTIME_NO_BOOTSTRAP:-}" ]; then
+        note "EA_RUNTIME_NO_BOOTSTRAP set; rendered without loading launchd"
+        return 0
+    fi
+    load_all
+    note "installed $PAPER_LABEL and $BACKUP_LABEL"
+}
+
+cmd_reload() {
+    render_all
+    if [ -n "${EA_RUNTIME_NO_BOOTSTRAP:-}" ]; then
+        return 0
+    fi
+    load_all
+}
+
+cmd_uninstall() {
+    unload_all
+    for label in "$PAPER_LABEL" "$BACKUP_LABEL"; do
+        if [ -f "$AGENTS_DIR/$label.plist" ]; then
+            rm -f "$AGENTS_DIR/$label.plist"
+            note "removed $AGENTS_DIR/$label.plist"
+        fi
+    done
+}
+
+current_run_dir() {
+    [ -f "$CURRENT_RUN" ] || return 1
+    run_dir=$(head -n 1 "$CURRENT_RUN")
+    [ -n "$run_dir" ] || return 1
+    printf '%s\n' "$run_dir"
+}
+
+cmd_start() {
+    load_config
+    require_installed
+    label=$PAPER_LABEL
+    if ! bootstrapped "$label"; then
+        note "$label is not loaded; loading it"
+        bootstrap_label "$label"
+    fi
+    previous=$(current_run_dir || true)
+    if [ "$(job_field "$label" state)" = "running" ]; then
+        note "$label is already running; start is a no-op, never a second writer"
+        if [ -n "$previous" ]; then
+            printf '%s\n' "$previous"
+        fi
+        return 0
+    fi
+    # kickstart starts the job only when it is not already running, so calling
+    # start on a live supervised run can never create a second writer.
+    "$LAUNCHCTL" kickstart "$(label_target "$label")"
+    deadline=$(( $(date +%s) + ${EA_RUNTIME_START_TIMEOUT_SECONDS:-90} ))
+    while [ "$(date +%s)" -le "$deadline" ]; do
+        candidate=$(current_run_dir || true)
+        if [ -n "$candidate" ] && [ "$candidate" != "$previous" ] &&
+            [ -d "$candidate" ]; then
+            if "$EA_BIN" paper status --run-dir "$candidate" 2>/dev/null |
+                grep -q '"lease_held":true'; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        fi
+        sleep 0.5
+    done
+    die "no live supervised attempt appeared within the start timeout"
+}
+
+cmd_stop() {
+    load_config
+    run_dir=$(current_run_dir) || die "no supervised attempt has been launched yet"
+    [ -d "$run_dir" ] || die "recorded attempt $run_dir does not exist"
+    # Cooperative stop: this writes the durable stop request and waits for a
+    # terminal state and lease release. It never signals an unrelated PID.
+    "$EA_BIN" paper stop --run-dir "$run_dir" --timeout "${EA_RUNTIME_STOP_TIMEOUT_SECONDS:-30}"
+    # The supervised process exits 0, so launchd must leave it stopped.
+    tries=0
+    while [ "$tries" -lt 40 ]; do
+        state=$(job_field "$PAPER_LABEL" state || true)
+        if [ "$state" = "not running" ] || [ -z "$state" ]; then
+            printf 'supervised run stopped: %s\n' "$run_dir"
+            return 0
+        fi
+        sleep 0.25
+        tries=$((tries + 1))
+    done
+    die "the supervised job did not settle into a stopped state"
+}
+
+cmd_status() {
+    load_config
+    {
+        printf 'label: %s\n' "$PAPER_LABEL"
+        printf 'launchd-state: %s\n' "$(job_field "$PAPER_LABEL" state || printf 'unknown')"
+        printf 'launchd-pid: %s\n' "$(job_field "$PAPER_LABEL" pid || printf '0')"
+        printf 'launchd-runs: %s\n' "$(job_field "$PAPER_LABEL" runs || printf '0')"
+        printf 'launchd-last-exit-code: %s\n' \
+            "$(job_field "$PAPER_LABEL" 'last exit code' || printf 'unknown')"
+        printf 'backup-launchd-runs: %s\n' "$(job_field "$BACKUP_LABEL" runs || printf '0')"
+    } >&2
+    run_dir=$(current_run_dir || true)
+    if [ -z "$run_dir" ]; then
+        printf '{"state":"unstarted","reason":"no supervised attempt has been launched"}\n'
+        return 0
+    fi
+    printf '{"run_dir":%s}\n' "$(printf '"%s"' "$run_dir")" >&2
+    "$EA_BIN" paper status --run-dir "$run_dir"
+}
+
+cmd_log() {
+    which=${1:-paper}
+    case "$which" in
+        paper) tail -n "${EA_RUNTIME_LOG_LINES:-40}" "$LOG_DIR/paper.out.log" "$LOG_DIR/paper.err.log" ;;
+        backup) tail -n "${EA_RUNTIME_LOG_LINES:-40}" "$LOG_DIR/backup.out.log" "$LOG_DIR/backup.err.log" ;;
+        *) die "usage: ea-runtime log [paper|backup]" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# launchd targets
+# ---------------------------------------------------------------------------
+
+cmd_run() {
+    load_config
+    mkdir -p "$STATE_DIR"
+    # A crash replacement must never collide with the attempt it replaces, and
+    # an existing attempt is never resumed or resent. Every supervised launch
+    # therefore mints one fresh attempt identity here.
+    run_id=$(uuidgen | tr 'ABCDEF' 'abcdef')
+    run_dir=$RUNTIME_ROOT/$run_id
+    printf '%s\n' "$run_dir" > "$STATE_DIR/.current-run.$$"
+    mv -f "$STATE_DIR/.current-run.$$" "$CURRENT_RUN"
+    printf '{"event":"launch","run_id":"%s","run_dir":"%s","pid":%s,"started_at":"%s"}\n' \
+        "$run_id" "$run_dir" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$HISTORY"
+
+    # `ea paper start` rejects these three; unset them explicitly rather than
+    # relying on launchd's clean environment being incidental.
+    unset EA_CONFIG_PATH EA_ENVIRONMENT EA_RUN_MODE
+
+    set -- "$EA_BIN" paper start \
+        --workspace "$WORKSPACE" \
+        --candidate-id "$CANDIDATE_ID" \
+        --scenario "$SCENARIO" \
+        --output-root "$RUNTIME_ROOT" \
+        --run-id "$run_id" \
+        --prices "$PRICES" \
+        --interval "$INTERVAL"
+    if [ -n "${EVENT_LIMIT:-}" ]; then
+        set -- "$@" --event-limit "$EVENT_LIMIT"
+    fi
+    # exec, never background: launchd's PID becomes the Paper PID, so the
+    # supervised process and the trading process are the same process and an
+    # abnormal kill cannot leave an orphan still trading.
+    exec "$@"
+}
+
+already_captured() {
+    for existing in "$BACKUP_ROOT"/backup-*-"$1"; do
+        if [ -d "$existing" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+cmd_backup() {
+    load_config
+    [ -d "$RUNTIME_ROOT" ] || {
+        printf 'no attempt root at %s yet; nothing to capture\n' "$RUNTIME_ROOT"
+        return 0
+    }
+    # Newest attempt first. Paths are validated whitespace-free above, and the
+    # attempt name is checked below, so this word split is safe.
+    for entry in $(ls -1dt "$RUNTIME_ROOT"/*/ 2>/dev/null || true); do
+        entry=${entry%/}
+        run_id=${entry##*/}
+        case "$run_id" in
+            *[!0-9a-f-]*) continue ;;
+        esac
+        [ "${#run_id}" -eq 36 ] || continue
+        if already_captured "$run_id"; then
+            continue
+        fi
+        status=$("$EA_BIN" paper status --run-dir "$entry" 2>/dev/null) || continue
+        # A held writer lease is not quiesced, so `ea paper backup` refuses it
+        # by construction. Skip it and never force, copy or repair anything.
+        case "$status" in
+            *'"lease_held":false'*) ;;
+            *) continue ;;
+        esac
+        printf 'capturing %s\n' "$entry"
+        "$EA_BIN" paper backup --run-dir "$entry" --backup-root "$BACKUP_ROOT" \
+            --keep "$BACKUP_KEEP"
+        return $?
+    done
+    printf 'no settled attempt needs capture\n'
+    return 0
+}
+
+usage() {
+    sed -n '2,40p' "$0" | sed -n 's/^# \{0,1\}//p'
+}
+
+main() {
+    command=${1:-}
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+    case "$command" in
+        install)
+            config=
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --config) config=${2:-}; shift 2 ;;
+                    *) die "usage: ea-runtime install [--config PATH]" ;;
+                esac
+            done
+            cmd_install "$config"
+            ;;
+        uninstall) cmd_uninstall ;;
+        start) cmd_start ;;
+        stop) cmd_stop ;;
+        status) cmd_status ;;
+        reload) cmd_reload ;;
+        log) cmd_log "${1:-paper}" ;;
+        run) cmd_run ;;
+        backup) cmd_backup ;;
+        help | --help | -h | '') usage ;;
+        *) die "unknown command '$command' (try: ea-runtime help)" ;;
+    esac
+}
+
+main "$@"
