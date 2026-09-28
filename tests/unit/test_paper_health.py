@@ -43,6 +43,7 @@ from ea.product.paper_health import (
     RuntimeState,
     StorageState,
     StrategyHeartbeatState,
+    TradePermissionBasis,
     build_paper_health,
     canonical_paper_health_bytes,
     decode_paper_health,
@@ -306,6 +307,69 @@ def test_zero_effect_probe_does_not_change_a_later_real_decision() -> None:
         before.guard,
         before.observed,
     )
+
+
+# --- the probe's blind spot is pinned, not implied ---------------------------
+
+
+def test_permitted_probe_does_not_cover_a_price_deviating_order(tmp_path: Path) -> None:
+    # The probe is proposal-independent. On one healthy running session the
+    # projection reads permitted while a real order priced far from the market
+    # reference is still denied -- both verdicts correct, and the document says
+    # which question it answered.
+    engine, clock = session(tmp_path)
+    observed: list[tuple[PaperHealthSnapshot, PaperSafetyObservation]] = []
+    original = engine.on_market
+
+    def observing(root: Any, sequence: int) -> None:
+        original(root, sequence)
+        if not observed:
+            # One instant: the projection and the real proposal are judged from
+            # exactly the same observed operational state.
+            observed.append(
+                (
+                    engine.health(
+                        recovery_state=RecoveryState.NOT_REQUIRED,
+                        storage_state=StorageState.AVAILABLE,
+                    ),
+                    engine._safety_observation(root),
+                )
+            )
+
+    engine.on_market = observing  # type: ignore[method-assign]
+    drive(engine, clock)
+
+    snapshot, safety = observed[0]
+    assert snapshot.trade_permitted is True
+    assert snapshot.trade_permission_basis is TradePermissionBasis.ZERO_EFFECT_PROBE
+    # The emitted document names the guard the probe could not exercise.
+    assert snapshot.trade_permission_unexercised_guards == ("price_deviation",)
+    assert snapshot.document()["trade_permission_unexercised_guards"] == ["price_deviation"]
+
+    # The same observed state through an authority with rate headroom, so the
+    # price guard is the one under test: the probe is permitted, and a real
+    # order away from the reference is denied by exactly the guard the probe
+    # cannot reach.
+    authority = _authority(max_order_rate=100)
+    assert authority.authorize(safety.probe_input()).verdict is OperationalSafetyVerdict.ALLOW
+    decision = authority.authorize(
+        safety.proposed_input(
+            proposed_order_exposure=Decimal("10"),
+            proposed_effective_price=safety.reference_price * Decimal("2"),
+            order_identity="order-far-from-reference",
+        )
+    )
+    assert decision.verdict is OperationalSafetyVerdict.DENY
+    assert decision.guard == "price_deviation"
+
+
+def test_unexercised_guards_are_part_of_the_contract() -> None:
+    document = _health().document()
+    document["trade_permission_unexercised_guards"] = []
+    with pytest.raises(PaperHealthError, match="unexercised guards"):
+        decode_paper_health(document)
+    with pytest.raises(PaperHealthError, match="trade_permission_basis"):
+        decode_paper_health({**document, "trade_permission_basis": "guessed"})
 
 
 def test_reason_codes_never_claim_to_enumerate_every_guard() -> None:

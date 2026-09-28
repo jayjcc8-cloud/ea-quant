@@ -178,10 +178,14 @@ def run_local_paper(
     def project_health() -> dict[str, Any]:
         """Project this running session's read-only operational health.
 
-        The projection is an observation that runs inside the trading loop, so
-        it must never fail the run: any failure is published as an explicit
-        unavailable marker instead. An observation can never be a reason to
-        stop trading; only the owning authorities decide that.
+        The projection is an observation that runs inside the trading loop, so a
+        failure must never fail the run: it is published as an explicit
+        unavailable marker instead. An observation can never be a reason to stop
+        trading; only the owning authorities decide that.
+
+        Only ``Exception`` is caught. ``KeyboardInterrupt``, ``SystemExit`` and
+        ``GeneratorExit`` are control flow rather than projection failures, and
+        an operator stopping the process must still stop it.
         """
         assert engine is not None
         try:
@@ -192,7 +196,7 @@ def run_local_paper(
                 recovery_state=RecoveryState.NOT_REQUIRED,
                 storage_state=StorageState.AVAILABLE,
             ).document()
-        except BaseException as error:  # noqa: BLE001 - an observation never halts a run
+        except Exception as error:  # noqa: BLE001 - an observation never halts a run
             return paper_health_unavailable_document(detail=f"{type(error).__name__}: {error}")
 
     def publish() -> None:

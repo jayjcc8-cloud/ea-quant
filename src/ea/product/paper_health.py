@@ -16,6 +16,18 @@ This module separates three questions that must never be conflated:
   permits for an outbound effect at this instant. It is obtained by calling
   ``authorize`` with a zero-effect probe and is never derived here.
 
+  A permitted ``trade_permitted`` is a statement about SYSTEM STATE, not about
+  any particular order. The probe proposes nothing and prices it exactly at the
+  market reference, so it structurally cannot exercise the ``price_deviation``
+  guard, and its ``exposure`` and ``order_rate`` outcomes can only reflect the
+  headroom that already exists. A zero-effect probe therefore answers "do the
+  proposal-independent operational gates currently permit an outbound effect",
+  and NOT "will this specific order be accepted": a real order priced away from
+  the reference can still return ``DENY``/``price_deviation`` at submission
+  while the projection reads permitted. Both verdicts are correct. The document
+  states its own scope in ``trade_permission_basis`` and names the guards the
+  probe could not exercise in ``trade_permission_unexercised_guards``.
+
 This is an observation surface, never a second safety engine. It owns no halt,
 no threshold, no portfolio and no order registry, and it can only report what
 the owning authorities already decided. Operator halt is therefore visible as
@@ -66,6 +78,14 @@ RUNTIME_FAULTED = "runtime.faulted"
 PROJECTION_STALE = "projection.stale"
 TRADE_NO_MARKET_REFERENCE = "trade_permission.no_market_reference"
 _TRADE_PERMISSION_PREFIX = "trade_permission."
+
+# The guards a zero-effect probe structurally cannot exercise. The probe prices
+# its (nonexistent) effect exactly at the market reference, so the deviation it
+# presents is always zero and ``price_deviation`` can never fire on it. The
+# ``exposure`` and ``order_rate`` guards are still evaluated -- they simply can
+# only reflect headroom that already exists. This is a statement about the
+# probe, not a threshold: the authority keeps its own limits untouched.
+PROBE_UNEXERCISED_GUARDS: tuple[str, ...] = ("price_deviation",)
 
 # A health slot is either one full projection or one explicit "no projection was
 # produced" marker. The marker exists so a failed observation is published as
@@ -170,6 +190,20 @@ class KillSwitchProjectionState(StrEnum):
     NOT_CONFIGURED = "not_configured"
 
 
+class TradePermissionBasis(StrEnum):
+    """How the reported ``trade_permitted`` was obtained.
+
+    ``ZERO_EFFECT_PROBE`` is a statement about system state, never about a
+    particular order: the probe proposes nothing, so it cannot exercise
+    ``price_deviation`` and its exposure and rate outcomes only reflect the
+    headroom that already exists. ``NO_MARKET_REFERENCE`` means no probe could
+    be formed at all, which always reports ``trade_permitted`` false.
+    """
+
+    ZERO_EFFECT_PROBE = "zero_effect_probe"
+    NO_MARKET_REFERENCE = "no_market_reference"
+
+
 @final
 @dataclass(frozen=True, slots=True)
 class PaperSafetyObservation:
@@ -223,6 +257,15 @@ class PaperSafetyObservation:
         The probe proposes nothing, so it can only reveal the guards that are
         already blocking regardless of the effect being proposed. The probe
         identity is a constant marker, never an Order identity.
+
+        Because it proposes nothing and prices at the reference, the probe
+        structurally cannot exercise ``price_deviation``: the deviation it
+        presents is always exactly zero. Its ``exposure`` and ``order_rate``
+        outcomes likewise reflect only the headroom that already exists, since
+        neither can see a proposal that is not there. A verdict from this input
+        is therefore a statement about system state, not about any particular
+        order -- an order priced away from the reference can still be denied
+        while a probe on the same state is permitted.
         """
         return OperationalSafetyInput(
             kill_switch_halted=self.kill_switch_halted,
@@ -327,7 +370,15 @@ class PaperHealthObservation:
 @final
 @dataclass(frozen=True, slots=True)
 class PaperHealthSnapshot:
-    """One read-only projection of liveness, readiness and trade permission."""
+    """One read-only projection of liveness, readiness and trade permission.
+
+    ``trade_permitted`` states what the proposal-independent operational gates
+    permit right now, which is not the same as "this order will be accepted".
+    ``trade_permission_basis`` records how it was obtained and
+    ``trade_permission_unexercised_guards`` names the guards the probe could not
+    exercise, so an operator can tell the two questions apart without reading
+    this source.
+    """
 
     process_alive: bool
     runtime_ready: bool
@@ -344,6 +395,8 @@ class PaperHealthSnapshot:
     reason_codes: tuple[str, ...]
     trade_blocking_guard: str | None
     trade_reason: str | None
+    trade_permission_basis: TradePermissionBasis
+    trade_permission_unexercised_guards: tuple[str, ...]
     observed_at: datetime
     run_id: RunId
     candidate_id: str | None
@@ -362,11 +415,27 @@ class PaperHealthSnapshot:
             ("strategy_heartbeat_state", StrategyHeartbeatState),
             ("storage_state", StorageState),
             ("kill_switch_state", KillSwitchProjectionState),
+            ("trade_permission_basis", TradePermissionBasis),
         ):
             if type(getattr(self, name)) is not expected:
                 raise _fail(
                     OutcomeCode.INVALID_TYPE, f"{name} must be an exact {expected.__name__}"
                 )
+        # The probe's blind spot is part of the contract, not a build detail.
+        expected_guards = (
+            PROBE_UNEXERCISED_GUARDS
+            if self.trade_permission_basis is TradePermissionBasis.ZERO_EFFECT_PROBE
+            else ()
+        )
+        if self.trade_permission_unexercised_guards != expected_guards:
+            raise _fail(
+                OutcomeCode.CONFLICTING_ID,
+                "unexercised guards must follow the trade permission basis",
+            )
+        if self.trade_permitted and (
+            self.trade_permission_basis is TradePermissionBasis.NO_MARKET_REFERENCE
+        ):
+            raise _fail(OutcomeCode.CONFLICTING_ID, "a probe-less basis never permits a trade")
         if self.schema != PAPER_HEALTH_SCHEMA:
             raise _fail(OutcomeCode.CONFLICTING_ID, "health schema conflicts")
         if type(self.reason_codes) is not tuple or any(
@@ -424,6 +493,8 @@ class PaperHealthSnapshot:
             "reason_codes": list(self.reason_codes),
             "trade_blocking_guard": self.trade_blocking_guard,
             "trade_reason": self.trade_reason,
+            "trade_permission_basis": self.trade_permission_basis.value,
+            "trade_permission_unexercised_guards": list(self.trade_permission_unexercised_guards),
             "observed_at": self.observed_at.isoformat(),
         }
 
@@ -531,9 +602,11 @@ def build_paper_health(
     trade_reason: str | None = None
     if observation.safety is None:
         trade_permitted = False
+        basis = TradePermissionBasis.NO_MARKET_REFERENCE
         reasons.add(TRADE_NO_MARKET_REFERENCE)
     else:
         decision = authority.authorize(observation.safety.probe_input())
+        basis = TradePermissionBasis.ZERO_EFFECT_PROBE
         trade_permitted = decision.verdict is OperationalSafetyVerdict.ALLOW
         if not trade_permitted:
             blocking_guard = decision.guard
@@ -556,6 +629,10 @@ def build_paper_health(
         reason_codes=tuple(sorted(reasons)),
         trade_blocking_guard=blocking_guard,
         trade_reason=trade_reason,
+        trade_permission_basis=basis,
+        trade_permission_unexercised_guards=(
+            PROBE_UNEXERCISED_GUARDS if basis is TradePermissionBasis.ZERO_EFFECT_PROBE else ()
+        ),
         observed_at=observation.observed_at,
         run_id=observation.run_id,
         candidate_id=observation.candidate_id,
@@ -616,6 +693,14 @@ def decode_paper_health(document: object) -> PaperHealthSnapshot:
     codes = document.get("reason_codes")
     if type(codes) is not list or any(type(code) is not str or not code.strip() for code in codes):
         raise _fail(OutcomeCode.INVALID_TYPE, "health reason_codes must be one list of strings")
+    unexercised = document.get("trade_permission_unexercised_guards")
+    if type(unexercised) is not list or any(
+        type(guard) is not str or not guard.strip() for guard in unexercised
+    ):
+        raise _fail(
+            OutcomeCode.INVALID_TYPE,
+            "health trade_permission_unexercised_guards must be one list of strings",
+        )
     try:
         run_id = RunId(_require_str(document, "run_id"))
     except (TypeError, ValueError) as error:
@@ -648,6 +733,10 @@ def decode_paper_health(document: object) -> PaperHealthSnapshot:
             reason_codes=tuple(codes),
             trade_blocking_guard=blocking_guard,
             trade_reason=trade_reason,
+            trade_permission_basis=_require_enum(
+                document, "trade_permission_basis", TradePermissionBasis
+            ),
+            trade_permission_unexercised_guards=tuple(unexercised),
             observed_at=parsed,
             run_id=run_id,
             candidate_id=candidate_id,
