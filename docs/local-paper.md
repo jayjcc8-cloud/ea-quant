@@ -105,5 +105,34 @@ an external broker account confirmation.
 Global `--config`, `--environment`, `EA_CONFIG_PATH`, `EA_ENVIRONMENT` and any explicit run mode
 other than `paper` are rejected without loading configuration. Feed buffering, strategy/order
 history and current refresh retention are bounded; the audit journal's existing resource caps fail
-closed. This deliverable does not establish crash recovery, long-duration stability, 72-hour soak,
-real-provider semantics, VPS operation or Live safety.
+closed. Local crash recovery is delivered by M1 (`ea paper resume`, journal replay, reconciliation
+and kill switch); M3 adds the read-only health projection, quiesced backup/restore and the local
+alert stream described below. This path still does not establish long-duration stability, 72-hour
+soak, real-provider semantics or crash recovery against an external provider, VPS operation, or
+Live safety.
+
+## Self-operation: health, backup, restore and alerts
+
+`ea paper status` returns one read-only health projection alongside acknowledged money. It
+separates three questions that must never be collapsed: `process_alive` (LIVENESS, from the
+writer lease), `runtime_ready` (READINESS, dependencies and authoritative state consistent) and
+`trade_permitted` (TRADE_PERMISSION, PPV-15's own verdict, with `trade_blocking_guard` and
+`trade_reason`). `reason_codes` names every condition behind a not-ready or not-permitted answer.
+An operator halt appears as a halt, never as a process failure.
+
+`ea paper backup --run-dir DIR --backup-root ROOT [--keep N]` captures only authoritative state
+(the journal, manifest, funding, kill switch, operational-safety limits, strategy) while the
+writer lease is released, and refuses a held lease or an existing target. Derived, regenerable,
+ephemeral and secret state is never captured. `ea paper backup inspect --backup DIR` re-verifies
+the capture against its own manifest; `ea paper restore --backup DIR --run-dir NEWDIR` verifies
+first, then materialises a new isolated attempt that reopens through the existing recovery path.
+The source backup is immutable and a live workspace is never overwritten in place.
+
+`ea paper alerts evaluate --run-dir DIR` observes nine signals and updates one durable local alert
+stream. Alerts carry `alert_id`, `type`, `severity`, `state` (ACTIVE/RESOLVED), `first_seen`,
+`last_seen`, `run_id`/`account_id`, `reason` and a required `operator_action`. A repeated
+observation updates the existing alert rather than creating another. A signal that cannot be
+observed is published as `unavailable`, never as healthy, so an unreadable projection is never
+mistaken for a good one. Alerting is observation only: it repairs no ledger, lifts no kill switch,
+modifies no reconciliation, restores no trading and resends no order. Alert delivery is the local
+stream and CLI inspection; no external paging, chat or metrics service is integrated.

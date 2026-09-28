@@ -8,9 +8,10 @@
 Product boundary: Mac-local simulated Paper = AVAILABLE; external Paper provider = NOT AVAILABLE;
 Live = NOT AVAILABLE; VPS host verification = NOT REQUIRED FOR CURRENT DEVELOPMENT. The M1
 Crash-safe Paper gate (PPV-12 Runtime Recovery + PPV-13 Broker Reconciliation + PPV-14 Kill Switch
-+ resume-feed continuation) and the M2 Operational-safe Paper gate (PPV-15 Production Risk
-Guards) are SATISFIED. The next product gate is M3 (Self-operating Paper): PPV-03 + PPV-05 +
-PPV-06.
++ resume-feed continuation), the M2 Operational-safe Paper gate (PPV-15 Production Risk Guards)
+and the M3 Self-operating Paper gate (PPV-03 Health & Readiness + PPV-05 Backup & Restore +
+PPV-06 Monitoring & Alerts) are SATISFIED. The next product gate is M4 (Local Production RC):
+PPV-16 fault campaign and the 72-hour / 7-day Paper soak.
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
 authoritative checkpoint. GitHub Issues and pull requests carry mutable coordination state; this
@@ -28,6 +29,24 @@ available through a single-user Web UI served on loopback only. No broker, remot
 external write, deployment, or live capability is part of this objective.
 
 ## Completed
+
+- M3 Self-operating Paper is delivered: PPV-03 Health & Readiness + PPV-05 Backup & Restore +
+  PPV-06 Monitoring & Alerts. `ea paper status` publishes one read-only health projection that
+  separates LIVENESS (writer-lease truth) from READINESS (dependencies and authoritative state
+  consistent) from TRADE_PERMISSION (PPV-15's real verdict). PPV-03 observes the existing
+  authority and never recomputes daily loss, exposure, price deviation or order rate; an operator
+  halt is reported as an operator halt, never as process failure. `ea paper backup` captures the
+  authoritative set only, under a released writer lease, into an immutable directory with one
+  boundary integrity identity, and `ea paper restore` materialises it into a NEW isolated
+  attempt that reopens through the existing M1 recovery path. State is classified AUTHORITATIVE /
+  DERIVED / REGENERABLE / EPHEMERAL / SECRET, and only AUTHORITATIVE state is captured, so a
+  regenerable projection is never mistaken for evidence.
+  `ea paper alerts evaluate` observes nine signals and maintains one durable local alert stream
+  with ACTIVE / RESOLVED state, identity-derived `alert_id`, first_seen / last_seen dedup and an
+  operator action. An unobservable signal is published as `unavailable`, never as healthy, and a
+  missing run projection is never replaced by re-deriving liveness from the lease. Alerting is
+  observation only: it repairs no ledger, lifts no kill switch, modifies no reconciliation and
+  resends no order. See [Personal Production V1](personal-production-v1.md).
 
 - PPV-15 Production Risk Guards delivers the M2 Operational-safe Paper gate. One
   `OperationalSafetyAuthority` (`risk/operational_safety.py`) is the single non-bypassable gate
@@ -55,7 +74,9 @@ external write, deployment, or live capability is part of this objective.
   controlled source failure close new decisions without implying liquidation; fresh attempts cannot
   resume unknown state. Continuous refresh retention is bounded without changing historical replay.
   See [Mac-local Paper usage and limits](local-paper.md). Installed acceptance belongs to the
-  implementation PR; no provider, VPS, crash recovery, long soak or Live readiness is claimed.
+  implementation PR; no provider, VPS, crash recovery, long soak or Live readiness is claimed by
+  #232 itself. Local crash recovery was delivered afterwards by M1 (#234); provider recovery is
+  still not delivered.
 
 - Issue #230 adds PPV-10's bounded streaming market loop, injected UTC/monotonic clocks,
   heartbeat, freshness/stall checks and local simulated source. Active dispatch proofs reuse
@@ -70,14 +91,16 @@ external write, deployment, or live capability is part of this objective.
   effect and query redelivery preserves trade dedup identity. The adapter proves its own ingress
   bytes and reuses configured next-event latency, slippage and commission. It owns no Fill,
   cash or position balance. PPV-10/11 compose the continuous local feed and Paper entry;
-  vendor connectivity and crash recovery are not delivered. See the
+  vendor connectivity is not delivered, and the crash recovery deferred by #227 was delivered
+  for the local path by M1 (#234). See the
   [local Paper broker contract](personal-production-v1.md#ppv-09-local-paper-broker-contract).
 
 - Issue #224 adds PPV-08 local Paper order command tracking over issued Orders. Submission
   uncertainty blocks blind resend; cancel requests remain separate from fact confirmation.
   Existing execution facts retain partial/full and late Fills, terminal anomalies and dedup,
   with direct cash/position/ledger tests. The tracker grants no execution permission and provides
-  no crash recovery. PPV-09/11 provide local broker transport and continuous Paper. See the
+  no crash recovery of its own; PPV-09/11 provide local broker transport and continuous Paper, and
+  M1 (#234) later added local crash recovery. See the
   [order lifecycle contract](personal-production-v1.md#ppv-08-local-paper-order-command-lifecycle).
 
 - Issue #220 adds PPV-04 Structured Operational Logging V1 to the existing scenario runtime.
@@ -383,7 +406,7 @@ immutable. Merged code, tests, and CI remain the authority for actual behavior.
 
 ## Last Confirmed
 
-- Date: **2026-09-27** (Asia/Shanghai).
+- Date: **2026-09-28** (Asia/Shanghai).
 - The containing merged `main` commit and its CI are the authoritative durable-state checkpoint;
   the released product identity remains the exact commit and wheel recorded above.
 - Live capability: unavailable and prohibited.
