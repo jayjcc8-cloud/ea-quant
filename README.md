@@ -1,111 +1,108 @@
 # EA Quant Trading System
+EA is an AI-native quantitative R&D and strategy-promotion system in development. Current `main`
+supports deterministic offline research plus **Mac-local continuous simulated Paper** under macOS
+`launchd`. External Paper providers and Live trading remain unavailable.
 
-EA is an AI-native quantitative R&D and strategy promotion system in development.
-It provides offline Research Validation and explicit [Mac-local Paper V1](docs/local-paper.md); Live is unavailable.
+## Current Status
+| Capability | Status |
+| --- | --- |
+| Offline research / backtest | **AVAILABLE** |
+| Mac-local simulated Paper + crash/recovery/backup/alerts | **AVAILABLE** |
+| macOS LaunchAgent runtime operator | **AVAILABLE** |
+| M4 long-duration / 72h Gate | **NOT YET SATISFIED** |
+| External Paper provider | **NOT AVAILABLE** |
+| Live trading | **DENIED / NOT AVAILABLE** |
 
-## Current Phase and Health
-- Phase: **Mac-local self-operating simulated Paper** — local crash recovery, health/readiness, backup/restore and alerting **available**; external Paper provider: **not available**
-- GitHub prerelease: **v0.2.0 published**
-- Merged baseline: **main healthy**
-- Live trading: **unavailable**; VPS host verification: **not required for current development**
-- Durable state: [STATUS](docs/STATUS.md); contribution rules: [WORKFLOW](docs/governance/WORKFLOW.md)
+Durable state: [STATUS](docs/STATUS.md) · Delivery workflow: [WORKFLOW](docs/governance/WORKFLOW.md) ·
+Paper product: [local-paper.md](docs/local-paper.md) · macOS operator: [local-paper-runtime.md](docs/local-paper-runtime.md)
 
-The published v0.2.0 wheel does not provide `ea --version`. This README describes current `main`
-and a candidate wheel built from it; the next version and any later release require a separate
-Product Owner decision.
+> The published `v0.2.0` prerelease predates the current Mac-local Paper runtime. For Paper testing,
+> use the reviewed Candidate-compatible EA installation.
 
-## Installed Wheel: First Strict Report
+## Local Paper Test — Quick Start
+Normal unattended local testing should use `~/EA/supervisor/ea-runtime`. `launchd` owns process
+lifetime; `ea paper start|stop|status|backup` remain authoritative for Paper state and evidence.
 
-Use the `uv` version declared in `pyproject.toml` to provision Python 3.12, plus the candidate wheel
-supplied to you. Start in an empty directory; only `WHEEL` needs to be changed. This path does not
-require a source checkout or editable install.
+### 1. Preconditions
+Use macOS, keep the machine on AC for unattended tests, and prepare one **ACCEPTED** Candidate with
+its matching installed `ea`, workspace and scenario. If needed, first follow
+[Install and prepare one Candidate](docs/local-paper.md#install-and-prepare-one-candidate).
 
+### 2. One-time host setup
+From the repository checkout:
 ```bash
-WHEEL=/absolute/path/to/the-candidate-wheel.whl
-uv venv --python 3.12 user-env
-uv pip install --python user-env/bin/python "$WHEEL"
-EA="$PWD/user-env/bin/ea"
-"$EA" --version
-mkdir input runs reports
+mkdir -p ~/EA/{runtime,workspace,inputs,logs,evidence,backups,supervisor}
+cp ops/launchd/run-config.example ~/EA/supervisor/run-config.env
+${EDITOR:-vi} ~/EA/supervisor/run-config.env
 ```
-
-Create `input/prices.csv` with these exact bytes:
-
-<!-- first-use-prices.csv:start -->
-```csv
-schema_version,venue,symbol,interval_start,interval_end,adjustment,open,high,low,close,volume,source,source_sequence,revision,available_at
-1,XNAS,AAPL,2026-01-02T09:31:00.000000Z,2026-01-02T09:32:00.000000Z,raw,100.5,102.0,100.0,101.5,12.0,user.local,2,0,2026-01-02T09:32:00.000000Z
-1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100.0,101.0,99.0,100.5,10.0,user.local,0,0,2026-01-02T09:31:00.000000Z
-1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100.0,101.5,99.0,101.0,11.0,user.local,1,1,2026-01-02T09:31:30.000000Z
-1,XNAS,AAPL,2026-01-02T09:32:00.000000Z,2026-01-02T09:33:00.000000Z,raw,108.0,111.0,107.0,110.0,9.0,user.local,3,0,2026-01-02T09:33:00.000000Z
-```
-<!-- first-use-prices.csv:end -->
-
-Create `input/scenario.yaml`:
-
-<!-- first-use-scenario.yaml:start -->
-```yaml
-schema_version: 1
-data:
-  path: prices.csv
-  start_utc: '2026-01-02T09:31:00.000000Z'
-  end_utc: '2026-01-02T09:34:00.000000Z'
-  fingerprint:
-    sha256: c95c6182ba68d8c03726336172b5ce089c464fdd87ba28cb4444460fcdbae2fb
-    record_count: 4
-instrument:
-  venue: XNAS
-  symbol: AAPL
-  specification_id: xnas.aapl.v1
-  specification_set_id: scenario.xnas.aapl.v1
-  settlement_currency: USD
-  price_quantum: '0.01'
-  quantity_quantum: '1'
-  currency_quantum: '0.01'
-  contract_multiplier: '1'
-strategy:
-  id: always-flat-v1
-funding: {currency: USD, initial_cash: '10000'}
-risk: {max_order_quantity: '5', max_position_quantity: '5', max_notional: '1000'}
-execution: {policy: phase1.next-bar-close.v1}
-randomness_profile: none
-```
-<!-- first-use-scenario.yaml:end -->
-
-Validate, create one fresh attempt, verify completed-resume behavior, and publish its report:
-
+Verify `EA_BIN`, `WORKSPACE`, `CANDIDATE_ID`, `SCENARIO`, `RUNTIME_ROOT`, `BACKUP_ROOT`,
+`PRICES`, `INTERVAL`, backup cadence and restart throttle, then install:
 ```bash
-"$EA" backtest validate --scenario "$PWD/input/scenario.yaml"
-"$EA" backtest run --scenario "$PWD/input/scenario.yaml" --output-root "$PWD/runs"
-ATTEMPT_DIR="$(find "$PWD/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-test -n "$ATTEMPT_DIR"
-"$EA" backtest resume --run-dir "$ATTEMPT_DIR"
-"$EA" backtest report --run-dir "$ATTEMPT_DIR" --output-dir "$PWD/reports/first"
-sed -n '1,20p' "$PWD/reports/first/summary.txt"
+sh ops/launchd/ea-runtime install --config ~/EA/supervisor/run-config.env
 ```
+`install` loads `com.ea.paper` and `com.ea.paper-backup`. Paper uses `RunAtLoad`, so the first
+attempt may already be running; `start` is safe and does not create a second writer.
 
-`--output-root` is the parent. A strict fresh run creates the actual UUID attempt directory below
-it and prints that attempt's `result.json`; `resume` and `report` require the UUID directory.
-
-### RESET Compatibility Demo
-
-Omitting `--scenario` runs the fixed compatibility demo at `demo-runs/phase1-demo-v1`:
-
+### 3. Start, observe and stop
 ```bash
-"$EA" backtest run --output-root "$PWD/demo-runs"
+EA_RUNTIME=~/EA/supervisor/ea-runtime
+"$EA_RUNTIME" start
+"$EA_RUNTIME" status
+"$EA_RUNTIME" log paper
+```
+Useful while running:
+```bash
+"$EA_RUNTIME" log backup
+"$EA_RUNTIME" backup
+cat ~/EA/supervisor/state/current-run
+```
+Stop cooperatively:
+```bash
+"$EA_RUNTIME" stop
+"$EA_RUNTIME" status
+```
+Restart later with `"$EA_RUNTIME" start`.
+
+Runtime semantics:
+- start on an already-running job is a no-op; there is no second writer;
+- crash / SIGKILL creates a **fresh attempt with a new run ID**;
+- cooperative stop exits successfully and stays stopped while the agent remains loaded;
+- status/logs are observations, not a second source of trading truth;
+- login/reboot can start Paper again because the LaunchAgent uses `RunAtLoad`.
+
+To remain stopped across reboot:
+```bash
+launchctl disable gui/$(id -u)/com.ea.paper
+# before intentionally running again:
+launchctl enable gui/$(id -u)/com.ea.paper
+"$EA_RUNTIME" start
 ```
 
-The RESET demo is run-only and does not support `resume` or `report`; those commands fail closed
-because the demo intentionally does not create a complete strict-attempt evidence set.
-## Installed Wheel: Local Web Research Loop
+### 4. Keep the Mac awake for short tests
+The operator does not change power settings. On AC, use a temporary assertion when needed:
+```bash
+caffeinate -s
+```
+Do not treat this as 72h Gate configuration. Persistent AC sleep settings belong to Gate
+preparation, where the previous value is recorded and restored afterwards; ordinary startup does
+not require changing `pmset`.
 
-The bounded research loop uses a versioned schema-driven Strategy Contract, verified with
-`bounded-long-v1` and `moving-average-entry-v1`. Generic parameters flow through history/reuse,
-2-10 member batches, comparison and Chronological Holdout; see the [Web README](apps/web/README.md).
+### 5. Real-host acceptance
+```bash
+uv run --no-project --python 3.12 python scripts/accept_local_paper_runtime.py
+```
+This exercises the real LaunchAgents, installed `ea`, crash replacement, M1 recovery /
+reconciliation, scheduled backup and intentional stop/start behavior. Evidence is written below
+`~/EA/evidence/`. Unless `--keep-installed` is used, the script cleans up its agents.
+
+## Other Entry Points
+- Direct Paper debugging: [local-paper.md](docs/local-paper.md#start-observe-and-stop)
+- Candidate lifecycle: [candidate-lifecycle.md](docs/candidate-lifecycle.md)
+- Strategy / backtest CLI: [local-strategy-package-v1.md](docs/local-strategy-package-v1.md)
+- Local Web research: [apps/web/README.md](apps/web/README.md)
+- Runtime/failure details: [local-paper-runtime.md](docs/local-paper-runtime.md)
+
 ## Contributor Setup
-
-From a source checkout, use the exact `uv` version declared in `pyproject.toml`:
-
 ```bash
 python3 scripts/bootstrap_local.py
 venv/bin/ea doctor
@@ -114,7 +111,8 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
 ```
 
 ## Product Boundary
-Built-ins and trusted local strategies run offline. See [local strategy tools and SDK](docs/local-strategy-package-v1.md).
-`.eastrategy` contains executable Python and should only be loaded from sources the user trusts.
-This is not a Python sandbox. AI, datasets, optimization, paper/live and deployment remain unavailable.
-Bounded repeated trades: [Package V3 and lifecycle](docs/local-strategy-package-v1.md#bounded-repeated-long-round-trips).
+Mac-local Paper is simulated and uses an in-process feed/broker; it does not connect to an external
+account. Live remains unavailable and denied. Long-duration 72h/7-day stability is not yet
+established. VPS verification is not required for the current local-development phase.
+`.eastrategy` is trusted executable Python, not a sandbox. AI interpretation is not runtime
+trading authority. See [STATUS](docs/STATUS.md) for the durable current boundary.
