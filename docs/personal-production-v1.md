@@ -22,7 +22,7 @@ VPS_DEPLOYMENT=DENIED; LIVE_ORDER_AUTHORIZATION=DENIED. VPS target-host validati
 development precondition; it verifies only host attributes after the product is proven on Mac and
 one fixed artifact. Delivery now advances by maturity gates (see
 [EXECUTION_ORDER](#execution_order)); PPV numbering no longer sets the sequence. Next work:
-PPV-03/05/06 toward GATE M3.
+PPV-16 toward GATE M4.
 
 ## PPV-04 structured operational logging contract
 
@@ -93,8 +93,9 @@ latency, with existing adverse slippage, tick rounding and commission arithmetic
 whole Order; volume participation and simulated partial fills are not claimed. Cancellation
 stops a pending local match and emits separate confirmation evidence. The adapter owns no second
 Fill, ledger, cash or position authority and grants no pre-effect permission. PPV-11 composes
-freshness/risk admission, audit and the existing ledger path. State is process-local: crash recovery,
-real provider semantics, network connections and account credentials remain unsupported.
+freshness/risk admission, audit and the existing ledger path. State is process-local as delivered
+by #227: crash recovery was deferred there and delivered for the local path by M1 (#234); real
+provider semantics, network connections and account credentials remain unsupported.
 
 ## PPV-10 local market event loop
 
@@ -132,8 +133,9 @@ retained as incomplete and is not automatically retried or reported as a clean c
 exit-class callback exceptions. The outer adapter releases the source on exit, including failure.
 
 This entry has no strategy, account or economic effects. Full accepted-Candidate Paper operation,
-durable audit and status/stop commands are delivered separately by PPV-11 below. There is no
-provider connection, reconnect, crash recovery, external order write or long-duration claim.
+durable audit and status/stop commands are delivered separately by PPV-11 below. #230 itself claims
+no provider connection, reconnect, crash recovery, external order write or long-duration operation;
+local crash recovery was delivered afterwards by M1 (#234).
 
 ## PPV-11 Mac-local Paper V1
 
@@ -208,9 +210,9 @@ See [ADR 0046](adr/0046-production-runtime-profile-v1.md).
 
 ## CURRENT_BASELINE
 
-Inspected 2026-09-27 (Asia/Shanghai).
+Inspected 2026-09-28 (Asia/Shanghai).
 
-- CURRENT_MAIN_SHA: `afddf76291976306641a9b4dd10a85985c74e15c`.
+- CURRENT_MAIN_SHA: `7e51dd3011bfb0a2f36db350da7e7a2191bd4a9d`.
 - CURRENT_BRANCH: `main`; WORKTREE_STATUS: clean.
 - PPV-11 = SATISFIED. Current capability = Mac-local continuous simulated Paper
   (`ea paper start/status/stop`), one accepted Action V2 V4/V5 Candidate, one simulated
@@ -226,12 +228,24 @@ Inspected 2026-09-27 (Asia/Shanghai).
   (kill switch, reconciliation, market freshness, broker health, strategy heartbeat, daily
   loss, exposure, open orders, order rate and price deviation), each ALLOW/DENY/HALT with a
   durable explainable reason. HALT resolves through the existing ``EXTERNAL_SAFETY_HALT``.
-- External Paper provider, Live, VPS host verification, backup/restore,
-  monitoring/alerting and long-duration soak are NOT AVAILABLE at this
-  baseline. See [PRODUCT_BOUNDARY](#product-boundary).
+- M3 Self-operating Paper = SATISFIED: PPV-03 Health & Readiness + PPV-05 Backup & Restore +
+  PPV-06 Monitoring & Alerts. One read-only projection separates liveness (writer lease),
+  readiness (dependency and authoritative-state consistency) and trade permission (PPV-15's own
+  verdict); PPV-03 observes the authority and never recomputes daily loss, exposure, price
+  deviation or order rate, and an operator halt is never reported as process failure. Backup is
+  quiesced and consistent rather than an online snapshot: only AUTHORITATIVE state is captured,
+  under a released lease, with one boundary integrity identity and keep-last-N retention, and
+  restore materialises a new isolated attempt that reopens through the existing M1 recovery path
+  without editing a journal, ledger, manifest or conflict file. Alerting observes nine signals
+  into one durable local stream with identity-derived ids, ACTIVE/RESOLVED dedup and a required
+  operator action; an unobservable signal is `unavailable`, never healthy, and alerting is never
+  authority.
+- External Paper provider, Live, VPS host verification and long-duration soak are NOT AVAILABLE
+  at this baseline; backup/restore and monitoring/alerting are local-only. See
+  [PRODUCT_BOUNDARY](#product-boundary).
 - KNOWN_FLAKY: `test_multi_dispatch_resume[dispatch_durable-2]` (backtest filesystem st_nlink
   race; NON_BLOCKING; not introduced by the M1 Paper path).
-- NEXT_PRODUCT_GATE = M3 (Self-operating Paper): PPV-03 + PPV-05 + PPV-06.
+- NEXT_PRODUCT_GATE = M4 (Local Production RC): PPV-16 fault campaign + 72h/7d Paper soak.
 
 ## GOALS
 
@@ -381,13 +395,13 @@ Dependencies below are closure prerequisites; bounded design may begin before al
 |---|---|---|---|---|---|
 | PPV-01 Execution Cost Closeout | SATISFIED | #213; #214; ADRs 0044/0045; execution-cost contract above | Liquidity explicitly DEFERRED | Existing research | Deterministic commission, slippage and latency; stop research realism expansion |
 | PPV-02 Production Runtime Profile | SATISFIED | #218; ADR 0046; runtime contract above | Target VPS deployment/boot acceptance NOT_YET_HOST_VERIFIED | Existing bundle and offline Web | One supervised loopback service, persistent workspace, explicit compatible activation/rollback |
-| PPV-03 Health & Readiness | PARTIAL | E6 | Dynamic fail-closed readiness | 02; final feed/recovery/broker signals from 10/12/13 | Distinguish alive from permitted to trade |
+| PPV-03 Health & Readiness | SATISFIED for local Paper | `product/paper_health.py`; `test_paper_health.py`; `ea paper status` | External provider/host readiness signals deferred | 02; feed/recovery/broker signals from 10/12/13 | Distinguish liveness from readiness from trade permission; observe the existing authority, never recompute it |
 | PPV-04 Structured Logging | SATISFIED | #220; logging contract above | PPV-11 integrates continuous local logging; infrastructure deferred | Existing audit and economic IDs | JSON events with causal IDs; economic behavior unchanged |
-| PPV-05 Backup & Restore | MISSING | E5/E13 | Consistent snapshot, retention, isolated restore and integrity checks | 02; final runtime persistence 12 | Quiesced or proven consistent backup, restore drill; no state repair |
-| PPV-06 Monitoring & Alerts | MISSING | E6/E13 | Signals, thresholds, delivery and alert test | 03/04/05; 13/14/15 operational states | One operator/channel; actionable liveness, reconciliation, disk and backup alerts |
+| PPV-05 Backup & Restore | SATISFIED for local Paper | `product/paper_backup.py`; `test_paper_backup.py`; `ea paper backup/inspect/restore` | Cloud/object storage, incremental and dedup engines deferred | 02; runtime persistence 12 | Quiesced consistent backup, keep-last-N retention, isolated restore; restore reopens through the existing recovery path and never repairs state |
+| PPV-06 Monitoring & Alerts | SATISFIED for local Paper | `product/paper_alerts.py`; `test_paper_alerts.py`; `ea paper alerts evaluate` | External paging/chat/metrics delivery deferred | 03/04/05; 13/14/15 operational states | Observe nine signals, one durable local alert stream, identity-derived alert ids, ACTIVE/RESOLVED dedup and an operator action; observation only, never authority |
 | PPV-07 Candidate V1 | SATISFIED | #208; Candidate contract above | PPV-11 composes local Paper; external operations deferred | Existing source/Holdout and frozen artifacts | Explicit decision, immutable identity, fresh evidence and pre-execution loading guard |
-| PPV-08 Order Lifecycle V1 | SATISFIED for local Paper commands | #224; contract above | 09/11 integrate local transport/runtime; crash recovery deferred | Existing order/fact authorities | Single submit/cancel attempt, explicit uncertainty, authoritative late facts and dedup; no new OMS |
-| PPV-09 Broker Contract V1 | SATISFIED for local Paper | #227; contract above | 11 integrates local runtime; vendor compatibility and crash recovery deferred | 08 | Bounded submit/cancel/query, stable client identity, canonical source-issued facts and normalized failures |
+| PPV-08 Order Lifecycle V1 | SATISFIED for local Paper commands | #224; contract above | 09/11 integrated local transport/runtime; local crash recovery delivered by M1 (#234); external recovery deferred | Existing order/fact authorities | Single submit/cancel attempt, explicit uncertainty, authoritative late facts and dedup; no new OMS |
+| PPV-09 Broker Contract V1 | SATISFIED for local Paper | #227; contract above | 11 integrated local runtime; local crash recovery delivered by M1 (#234); vendor compatibility and provider-side recovery deferred | 08 | Bounded submit/cancel/query, stable client identity, canonical source-issued facts and normalized failures |
 | PPV-10 Market Event Loop | SATISFIED for local simulation | #230; contract above | Provider connectivity/reconnect deferred; 11 integrates local economics | 02/04; existing market and fact contracts | Bounded incremental input, active proofs, visibility/freshness, heartbeat and controlled stop |
 | PPV-11 Paper Trading Runtime | SATISFIED for Mac-local simulation | #232; local Paper usage above | External provider/host, recovery and long-duration validation remain deferred | Delivered 07/08/09/10/04; external operations still require later gates | Explicit installed start/status/stop, shared economics and durable audit, duplicate protection and truthful failure state |
 | PPV-12 Runtime Recovery V1 | SATISFIED for local Paper | `product/paper_recovery.py`; `test_paper_recovery.py`, `test_paper_resume.py`, `test_paper_resume_feed.py` | External provider recovery deferred | 08/09/11; joint acceptance with 13 | Query/reconcile before new submissions; never blindly resend ambiguous orders |
@@ -465,9 +479,9 @@ GATE M5 Real Broker Ready       <- PPV-17 (one broker, one account, one instrume
 GATE M6 Personal Production     <- PPV-18 + PPV-19 (PERSONAL_PRODUCTION_VALIDATED=TRUE)
 ```
 
-Immediate parallel wave: DOC-SYNC, PPV-12, PPV-13, PPV-14. PPV-15 waits for the PPV-13/14
-semantics. PPV-03/05/06, PPV-16, the Release Candidate freeze, and PPV-17..19 follow the gates in
-order. Do not start PPV-17 before GATE M4. PPV-12 and PPV-13 close with one joint ambiguous-submit
+M1 closed with PPV-12/13/14; M2 closed with PPV-15; M3 closed with PPV-03/05/06. The next wave is
+PPV-16 toward GATE M4, followed by the Release Candidate freeze and PPV-17..19 in gate order. Do
+not start PPV-17 before GATE M4. PPV-12 and PPV-13 closed with one joint ambiguous-submit
 crash/restart/reconcile integration; PPV-14 closes independently but composes with the same
 outbound safety boundary. Neither PPV-12 nor PPV-13 may claim safe uncertain-send recovery from
 local replay alone.
