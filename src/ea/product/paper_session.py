@@ -13,6 +13,7 @@ import stat
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
 from hashlib import sha256
 from math import isfinite
 from pathlib import Path
@@ -20,11 +21,22 @@ from typing import Any
 from uuid import uuid4
 
 from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
+from ea.product.paper_health import (
+    PaperHealthError,
+    decode_paper_health,
+    is_paper_health_unavailable,
+    observed_paper_health,
+)
 
 _MANIFEST_SCHEMA = "ea.local-paper-attempt.v1"
 _STATUS_SCHEMA = "ea.local-paper-status.v1"
 _STOP_SCHEMA = "ea.local-paper-stop.v1"
 _MAX_FILE_BYTES = 65_536
+# Reader-side freshness bound for the durable health projection. It is a marker
+# for the reader, not a readiness or safety threshold: a projection older than
+# this cannot attest the current readiness of a run, and either way a released
+# writer lease always marks it stale.
+_DEFAULT_MAX_PROJECTION_AGE_SECONDS = 5.0
 _STATES = frozenset({"starting", "running", "stopping", "stopped", "failed"})
 _TERMINAL = frozenset({"stopped", "failed"})
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -205,6 +217,19 @@ def _manifest(run_fd: int, run_name: str) -> tuple[RunBinding, bytes]:
     )
 
 
+def _require_health(document: dict[str, Any]) -> None:
+    """A published health slot must decode; untrusted bytes fail closed."""
+    if "health" not in document:
+        return
+    slot = document["health"]
+    if is_paper_health_unavailable(slot):
+        return
+    try:
+        decode_paper_health(slot)
+    except PaperHealthError as error:
+        raise PaperSessionError("paper status health projection conflicts") from error
+
+
 def _status_document(payload: bytes, binding: RunBinding) -> dict[str, Any]:
     document = _decode_object(payload, name="paper status")
     if (
@@ -222,6 +247,7 @@ def _status_document(payload: bytes, binding: RunBinding) -> dict[str, Any]:
         or _encode_object(document, name="paper status") != payload
     ):
         raise PaperSessionError("paper status identity or schema conflicts")
+    _require_health(document)
     return document
 
 
@@ -252,7 +278,14 @@ def _lease_held(run_fd: int) -> bool:
                 os.close(descriptor)
 
 
-def _observed_status(run_fd: int, outputs_fd: int, binding: RunBinding) -> dict[str, Any]:
+def _observed_status(
+    run_fd: int,
+    outputs_fd: int,
+    binding: RunBinding,
+    *,
+    now: datetime | None = None,
+    max_projection_age_seconds: float = _DEFAULT_MAX_PROJECTION_AGE_SECONDS,
+) -> dict[str, Any]:
     payload = _read_file(outputs_fd, "paper-status.json")
     assert payload is not None
     document = _status_document(payload, binding)
@@ -262,6 +295,21 @@ def _observed_status(run_fd: int, outputs_fd: int, binding: RunBinding) -> dict[
     if document["state"] not in _TERMINAL and not held:
         result["state"] = "interrupted"
         result["reason"] = "writer_lease_missing"
+    if "health" in document:
+        slot = document["health"]
+        if is_paper_health_unavailable(slot):
+            result["health"] = dict(slot)
+        else:
+            # Liveness is the live lease observation, never the value the
+            # publishing writer recorded, and durability is not currency: an
+            # offline reader can never claim a current readiness verdict from
+            # frozen bytes.
+            result["health"] = observed_paper_health(
+                slot,
+                process_alive=held,
+                now=datetime.now(UTC) if now is None else now,
+                max_projection_age_seconds=max_projection_age_seconds,
+            )
     return result
 
 
@@ -380,6 +428,7 @@ class PaperSessionWriter:
             and type(assembled["reason"]) is not str
         ):
             raise PaperSessionError("paper status reason must be text or null")
+        _require_health(assembled)
         payload = _encode_object(assembled, name="paper status")
         with self._open_bound() as (run_fd, outputs_fd):
             if not _lease_held(run_fd):
@@ -421,12 +470,34 @@ class PaperSessionWriter:
             return _stop_requested(outputs_fd, self._binding)
 
 
-def read_paper_status(run_dir: Path) -> dict[str, Any]:
-    """Read one bound status and overlay the actual writer lease observation."""
+def read_paper_status(
+    run_dir: Path,
+    *,
+    now: datetime | None = None,
+    max_projection_age_seconds: float = _DEFAULT_MAX_PROJECTION_AGE_SECONDS,
+) -> dict[str, Any]:
+    """Read one bound status and overlay the actual writer lease observation.
+
+    The returned document carries the health projection under ``"health"``
+    whenever the writer published one, with liveness and currency re-observed
+    here rather than trusted from the durable bytes.
+    """
+    if (
+        type(max_projection_age_seconds) is not float
+        or not isfinite(max_projection_age_seconds)
+        or max_projection_age_seconds <= 0
+    ):
+        raise PaperSessionError("projection age bound must be a positive finite float")
     with _attempt(run_dir) as (canonical, run_fd):
         binding, _ = _manifest(run_fd, canonical.name)
         with _child_directory(run_fd, "outputs") as outputs_fd:
-            return _observed_status(run_fd, outputs_fd, binding)
+            return _observed_status(
+                run_fd,
+                outputs_fd,
+                binding,
+                now=now,
+                max_projection_age_seconds=max_projection_age_seconds,
+            )
 
 
 def read_paper_binding(run_dir: Path) -> tuple[RunBinding, bytes]:

@@ -6,13 +6,30 @@ import stat
 import threading
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 from ea.experiments.store import CanonicalAttemptManifest, LocalResultStore
 from ea.product import paper_session as paper_session_module
+from ea.product.paper_health import (
+    BrokerState,
+    KillSwitchProjectionState,
+    MarketState,
+    PaperHealthObservation,
+    PaperSafetyObservation,
+    ReconciliationState,
+    RecoveryState,
+    RuntimeState,
+    StorageState,
+    StrategyHeartbeatState,
+    build_paper_health,
+    paper_health_unavailable_document,
+)
 from ea.product.paper_session import (
     PaperSessionError,
     PaperSessionTimeout,
@@ -20,9 +37,58 @@ from ea.product.paper_session import (
     read_paper_status,
     request_paper_stop,
 )
+from ea.risk.operational_safety import (
+    OperationalSafetyAuthority,
+    OperationalSafetyLimits,
+)
 
 RUN_ID = RunId("123e4567-e89b-42d3-a456-426614174000")
 LINEAGE = Sha256Digest("1" * 64)
+OBSERVED_AT = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def _health_document(observed_at: datetime) -> dict[str, Any]:
+    return build_paper_health(
+        PaperHealthObservation(
+            process_alive=True,
+            runtime_state=RuntimeState.RUNNING,
+            recovery_state=RecoveryState.NOT_REQUIRED,
+            reconciliation_state=ReconciliationState.CLEAN,
+            market_state=MarketState.FRESH,
+            broker_state=BrokerState.AVAILABLE,
+            strategy_heartbeat_state=StrategyHeartbeatState.LIVE,
+            storage_state=StorageState.AVAILABLE,
+            kill_switch_state=KillSwitchProjectionState.ACTIVE,
+            safety=PaperSafetyObservation(
+                kill_switch_halted=False,
+                reconciliation_healthy=True,
+                market_age_seconds=0.5,
+                broker_available=True,
+                strategy_live=True,
+                daily_loss=Decimal("0"),
+                current_exposure=Decimal("0"),
+                outstanding_order_exposure=Decimal("0"),
+                open_order_count=0,
+                reference_price=Decimal("100"),
+                now_monotonic=1_000.0,
+            ),
+            observed_at=observed_at,
+            run_id=RUN_ID,
+            candidate_id="candidate-1",
+        ),
+        authority=OperationalSafetyAuthority(
+            run_id=RUN_ID,
+            limits=OperationalSafetyLimits(
+                max_market_age_seconds=5.0,
+                max_daily_loss=Decimal("1000"),
+                max_total_exposure=Decimal("1000"),
+                max_open_orders=6,
+                max_order_rate=6,
+                order_rate_window_seconds=60.0,
+                max_price_deviation_bps=250,
+            ),
+        ),
+    ).document()
 
 
 @pytest.fixture
@@ -114,6 +180,80 @@ def test_terminal_status_with_lease_is_still_exiting(
     status = read_paper_status(run_dir)
     assert status["state"] == "stopped"
     assert status["lease_held"] is False
+
+
+def test_status_surfaces_health_with_live_liveness(
+    attempt: tuple[LocalResultStore, Path, RunBinding],
+) -> None:
+    _, run_dir, binding = attempt
+    writer = PaperSessionWriter(run_dir, binding)
+    writer.publish({"state": "running", "health": _health_document(OBSERVED_AT)})
+    health = read_paper_status(run_dir, now=OBSERVED_AT + timedelta(seconds=1))["health"]
+    assert health["schema"] == "ea.paper-health.v1"
+    assert health["process_alive"] is True
+    assert health["projection_stale"] is False
+    assert health["runtime_ready"] is True
+    assert health["trade_permitted"] is True
+    assert health["age_seconds"] == 1.0
+    assert health["reason_codes"] == []
+
+
+def test_status_marks_an_aged_health_projection_stale(
+    attempt: tuple[LocalResultStore, Path, RunBinding],
+) -> None:
+    _, run_dir, binding = attempt
+    writer = PaperSessionWriter(run_dir, binding)
+    writer.publish({"state": "running", "health": _health_document(OBSERVED_AT)})
+    # The writer lease is still held, yet the projection is older than the
+    # reader's freshness bound: durable bytes are not a current verdict.
+    status = read_paper_status(run_dir, now=OBSERVED_AT + timedelta(seconds=30))
+    health = status["health"]
+    assert status["lease_held"] is True
+    assert health["projection_stale"] is True
+    assert health["runtime_ready"] is False
+    assert health["age_seconds"] == 30.0
+    # Aged bytes are not process death, so liveness is untouched.
+    assert health["process_alive"] is True
+    assert health["reason_codes"] == ["projection.stale"]
+
+
+def test_status_overrides_health_liveness_when_the_lease_is_gone(
+    attempt: tuple[LocalResultStore, Path, RunBinding],
+) -> None:
+    store, run_dir, binding = attempt
+    writer = PaperSessionWriter(run_dir, binding)
+    writer.publish({"state": "running", "health": _health_document(OBSERVED_AT)})
+    store.close()
+    status = read_paper_status(run_dir, now=OBSERVED_AT + timedelta(seconds=1))
+    health = status["health"]
+    assert status["lease_held"] is False
+    assert health["process_alive"] is False
+    assert health["projection_stale"] is True
+    assert health["runtime_ready"] is False
+    assert health["reason_codes"] == ["liveness.not_alive", "projection.stale"]
+    # PPV-15's own verdict is never re-derived by a reader.
+    assert health["trade_permitted"] is True
+
+
+def test_status_surfaces_an_explicit_unavailable_health_marker(
+    attempt: tuple[LocalResultStore, Path, RunBinding],
+) -> None:
+    _, run_dir, binding = attempt
+    writer = PaperSessionWriter(run_dir, binding)
+    writer.publish({"state": "running", "health": paper_health_unavailable_document(detail="boom")})
+    health = read_paper_status(run_dir)["health"]
+    assert health["schema"] == "ea.paper-health-unavailable.v1"
+    assert health["available"] is False
+
+
+def test_publisher_rejects_a_malformed_health_projection(
+    attempt: tuple[LocalResultStore, Path, RunBinding],
+) -> None:
+    _, run_dir, binding = attempt
+    writer = PaperSessionWriter(run_dir, binding)
+    with pytest.raises(PaperSessionError, match="health"):
+        writer.publish({"state": "running", "health": {"schema": "ea.paper-health.v1"}})
+    assert not (run_dir / "outputs" / "paper-status.json").exists()
 
 
 def test_stop_request_is_idempotent_and_timeout_retains_request(
