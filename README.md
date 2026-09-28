@@ -13,8 +13,8 @@ supports deterministic offline research plus **Mac-local continuous simulated Pa
 | External Paper provider | **NOT AVAILABLE** |
 | Live trading | **DENIED / NOT AVAILABLE** |
 
-Durable state: [STATUS](docs/STATUS.md) · Paper product: [local-paper.md](docs/local-paper.md) ·
-macOS operator: [local-paper-runtime.md](docs/local-paper-runtime.md)
+Durable state: [STATUS](docs/STATUS.md) · Delivery workflow: [WORKFLOW](docs/governance/WORKFLOW.md) ·
+Paper product: [local-paper.md](docs/local-paper.md) · macOS operator: [local-paper-runtime.md](docs/local-paper-runtime.md)
 
 > The published `v0.2.0` prerelease predates the current Mac-local Paper runtime. For Paper testing,
 > use the reviewed Candidate-compatible EA installation.
