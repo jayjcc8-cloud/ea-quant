@@ -51,6 +51,11 @@ candidate_app = typer.Typer(
 app.add_typer(candidate_app, name="candidate")
 paper_app = typer.Typer(help="Explicit local simulated Paper start, status and cooperative stop.")
 app.add_typer(paper_app, name="paper")
+backup_app = typer.Typer(
+    help="Quiesced consistent backup, verification and isolated restore of Paper attempts.",
+    invoke_without_command=True,
+)
+paper_app.add_typer(backup_app, name="backup")
 
 
 data_app = typer.Typer(help="Inspect strict full-capture local OHLCV input.")
@@ -556,6 +561,83 @@ def paper_resume(run_dir: Annotated[Path, typer.Option("--run-dir")]) -> None:
     typer.echo(canonical_json(document).decode("ascii"))
     if document["reconciliation_required"]:
         raise typer.Exit(code=3)
+
+
+def _paper_backup_failure(operation: str, error: Exception) -> typer.Exit:
+    """Map one backup refusal onto the shared Paper exit-code contract."""
+    from ea.product.paper_backup import PaperBackupInputError, PaperBackupRefused
+
+    if isinstance(error, PaperBackupInputError):
+        typer.echo(f"Paper {operation} input error: {error}", err=True)
+        return typer.Exit(code=2)
+    if isinstance(error, PaperBackupRefused):
+        typer.echo(f"Paper {operation} refused: {error}", err=True)
+        return typer.Exit(code=3)
+    typer.echo(f"Paper {operation} failed: {type(error).__name__}: {error}", err=True)
+    return typer.Exit(code=1)
+
+
+@backup_app.callback()
+def paper_backup(
+    context: typer.Context,
+    run_dir: Annotated[Path | None, typer.Option("--run-dir")] = None,
+    backup_root: Annotated[Path | None, typer.Option("--backup-root")] = None,
+    keep: Annotated[int, typer.Option("--keep", min=1)] = 5,
+) -> None:
+    """Capture one quiesced attempt; `ea paper backup inspect` verifies an existing one."""
+    if context.invoked_subcommand is not None:
+        return
+    if run_dir is None or backup_root is None:
+        typer.echo(
+            "Paper backup requires --run-dir and --backup-root, or the inspect subcommand.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    from ea.product.paper_backup import PaperBackupError, create_paper_backup
+
+    try:
+        result = create_paper_backup(
+            run_dir.expanduser().absolute(),
+            backup_root.expanduser().absolute(),
+            keep=keep,
+        )
+    except PaperBackupError as error:
+        raise _paper_backup_failure("backup", error) from None
+    typer.echo(canonical_json(result.document()).decode("ascii"))
+
+
+@backup_app.command("inspect")
+def paper_backup_inspect(backup: Annotated[Path, typer.Option("--backup")]) -> None:
+    """Verify one backup is internally consistent and print its published manifest.
+
+    ``verified`` means the recorded identity, the captured attempt manifest and
+    the captured journal all agree with each other. It is not a signature:
+    nothing anchors a backup to a trusted third party.
+    """
+    from ea.product.paper_backup import PaperBackupError, inspect_paper_backup
+
+    try:
+        manifest = inspect_paper_backup(backup.expanduser().absolute())
+    except PaperBackupError as error:
+        raise _paper_backup_failure("backup inspect", error) from None
+    typer.echo(canonical_json({**manifest.document(), "verified": True}).decode("ascii"))
+
+
+@paper_app.command("restore")
+def paper_restore(
+    backup: Annotated[Path, typer.Option("--backup")],
+    run_dir: Annotated[Path, typer.Option("--run-dir")],
+) -> None:
+    """Restore one backup into a new isolated attempt; never overwrites a live one."""
+    from ea.product.paper_backup import PaperBackupError, restore_paper_backup
+
+    try:
+        result = restore_paper_backup(
+            backup.expanduser().absolute(), run_dir.expanduser().absolute()
+        )
+    except PaperBackupError as error:
+        raise _paper_backup_failure("restore", error) from None
+    typer.echo(canonical_json(result.document()).decode("ascii"))
 
 
 @strategy_app.command("pack")
