@@ -23,6 +23,11 @@ ADRs. This is a contributor entry point, not a second workflow.
 Direct pushes to `main` are forbidden. Pull requests normally use squash merge. Accepted ADRs are
 immutable; supersede them under [`docs/adr/`](docs/adr/).
 
+In this solo-maintained repository, "independent review" means an independent review context — a
+fresh reviewer agent that does not inherit the implementer's conclusions — not a second human or
+GitHub identity. See [the governance workflow](docs/governance/WORKFLOW.md) for the full
+definition.
+
 ## Local Environment
 
 Requirements are read from `pyproject.toml`; do not duplicate version pins in task documentation.
