@@ -16,6 +16,14 @@ the M1 recovery path flocks that path and cannot adopt a copied one.
 Restore materialises a new isolated attempt through the store's own attempt
 preparation, so the M1 recovery path -- not this module -- remains the only
 authority on whether a restored attempt is usable.
+
+Integrity here means *internal consistency*, not authenticity. The boundary
+digest and the recorded identity prove that a backup is exactly the set of bytes
+it claims to be and that those bytes agree with each other; they are not a
+signature and are not anchored anywhere outside the backup. ``inspect`` reporting
+``verified: true`` therefore means "internally consistent", and someone who can
+already write to both the backup root and the attempt root is explicitly outside
+this threat model.
 """
 
 from __future__ import annotations
@@ -34,10 +42,29 @@ from typing import Any, cast, final
 from uuid import uuid4
 
 from ea import __version__
-from ea.core.run import RunId, RunReference, Sha256Digest
+from ea.core.audit import (
+    AUDIT_FRAME_DIGEST_DOMAIN,
+    MAX_AUDIT_HEADER_BYTES,
+    MAX_LARGE_AUDIT_PAYLOAD_BYTES,
+    AuditContractError,
+    AuditRecordKind,
+    AuditSubjectKind,
+    canonical_run_prepared_audit_payload,
+    decode_audit_record,
+)
+from ea.core.run import RunBinding, RunId, RunReference, Sha256Digest
 from ea.experiments._manifest_wire import canonical_json_bytes, digest
-from ea.experiments.audit import AUDIT_JOURNAL_NAME, MAX_AUDIT_JOURNAL_BYTES
-from ea.experiments.store import CanonicalAttemptManifest, LocalResultStore, StoreError
+from ea.experiments.audit import (
+    AUDIT_JOURNAL_NAME,
+    AUDIT_JOURNAL_PREAMBLE,
+    MAX_AUDIT_JOURNAL_BYTES,
+)
+from ea.experiments.store import (
+    CanonicalAttemptManifest,
+    LocalResultStore,
+    StoreCollisionError,
+    StoreError,
+)
 from ea.product.backtest import BacktestRunError, _safe_output_root
 from ea.product.paper_session import PaperSessionError, _attempt, _lease_held, _manifest
 from ea.strategy.package import MAX_ARTIFACT_BYTES
@@ -361,6 +388,14 @@ def _discard_directory(path: Path) -> None:
         return
 
 
+def _discard_empty_directory(path: Path) -> None:
+    """Best-effort removal of a root this call created; never removes content."""
+    try:
+        os.rmdir(path)
+    except OSError:
+        return
+
+
 def _write_all(descriptor: int, payload: bytes) -> None:
     remaining = memoryview(payload)
     while remaining:
@@ -521,6 +556,118 @@ def _verify_entries(root_fd: int, entries: tuple[PaperBackupEntry, ...]) -> None
             raise PaperBackupRefused(f"{entry.path} does not match its recorded integrity")
 
 
+def _read_first_journal_frame(files_fd: int) -> tuple[bytes, bytes]:
+    """Read the first captured journal frame's header and payload, read-only.
+
+    ``reopen_posix_audit_journal`` appends a RUN_PREPARED record, so it can never
+    be pointed at a captured copy: it would mutate the very bytes being verified.
+    Only the frame boundary is located here, and every field is then validated by
+    the audit module's own decoder against the captured binding.
+    """
+    spec = _SPEC_BY_PATH[_JOURNAL_PATH]
+
+    def exact(descriptor: int, size: int, offset: int) -> bytes:
+        chunk = os.pread(descriptor, size, offset)
+        if len(chunk) != size:
+            raise PaperBackupRefused("captured journal is truncated before its first frame")
+        return chunk
+
+    with (
+        _entry_parent(files_fd, _JOURNAL_PATH) as parent_fd,
+        _opened_entry(parent_fd, spec) as (descriptor, _),
+    ):
+        offset = len(AUDIT_JOURNAL_PREAMBLE)
+        if exact(descriptor, offset, 0) != AUDIT_JOURNAL_PREAMBLE:
+            raise PaperBackupRefused("captured journal preamble is invalid")
+        raw_header_length = exact(descriptor, 8, offset)
+        header_length = int.from_bytes(raw_header_length, "big")
+        if not 1 <= header_length <= MAX_AUDIT_HEADER_BYTES:
+            raise PaperBackupRefused("captured journal header length is outside the v1 bound")
+        offset += 8
+        header = exact(descriptor, header_length, offset)
+        offset += header_length
+        raw_payload_length = exact(descriptor, 8, offset)
+        payload_length = int.from_bytes(raw_payload_length, "big")
+        if not 1 <= payload_length <= MAX_LARGE_AUDIT_PAYLOAD_BYTES:
+            raise PaperBackupRefused("captured journal payload length is outside the v1 bound")
+        offset += 8
+        payload = exact(descriptor, payload_length, offset)
+        offset += payload_length
+        checksum = exact(descriptor, 32, offset)
+    framed = raw_header_length + header + raw_payload_length + payload
+    if checksum != sha256(AUDIT_FRAME_DIGEST_DOMAIN + framed).digest():
+        raise PaperBackupRefused("captured journal first frame checksum is invalid")
+    return header, payload
+
+
+def _require_journal_binding(files_fd: int, binding: RunBinding) -> None:
+    """Cross-check the captured journal against the captured attempt identity.
+
+    The journal's own header carries run id, lineage and manifest digest, so a
+    journal captured from a different attempt is refused here rather than later
+    as a failed M1 reopen. This is read-only: no record is ever appended.
+    """
+    header, payload = _read_first_journal_frame(files_fd)
+    try:
+        record = decode_audit_record(
+            binding=binding, canonical_header=header, canonical_payload=payload
+        )
+    except AuditContractError as error:
+        raise PaperBackupRefused(
+            "captured journal does not bind to the captured attempt"
+        ) from error
+    if (
+        record.record_kind is not AuditRecordKind.RUN_PREPARED
+        or record.subject_kind is not AuditSubjectKind.RUN_MANIFEST
+        or record.subject_sha256 != binding.manifest_sha256
+        or record.canonical_payload != canonical_run_prepared_audit_payload(binding)
+    ):
+        raise PaperBackupRefused(
+            "captured journal does not begin with the captured attempt preparation"
+        )
+
+
+def _require_recorded_identity(files_fd: int, manifest: PaperBackupManifest) -> bytes:
+    """Bind every recorded identity field to the captured attempt manifest bytes.
+
+    Without this the recorded run id, lineage, digest and candidate block would be
+    free-floating claims: a tampered manifest could report one identity while the
+    captured bytes carry another, and a tampered run id would even decide the
+    directory a restore writes to.
+    """
+    with _entry_parent(files_fd, _MANIFEST_NAME) as parent_fd:
+        payload = _read_entry_payload(parent_fd, _SPEC_BY_PATH[_MANIFEST_NAME])
+    if sha256(payload).hexdigest() != manifest.attempt_manifest_sha256.value:
+        raise PaperBackupRefused(
+            "captured attempt manifest does not match the recorded manifest digest"
+        )
+    try:
+        document = json.loads(payload)
+    except (RecursionError, UnicodeError, ValueError) as error:
+        raise PaperBackupRefused("captured attempt manifest is malformed JSON") from error
+    if type(document) is not dict:
+        raise PaperBackupRefused("captured attempt manifest must be one JSON object")
+    try:
+        run_id = RunId(document["run_id"])
+        lineage_sha256 = Sha256Digest(document["lineage_sha256"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise PaperBackupRefused("captured attempt manifest identity is malformed") from error
+    if run_id != manifest.run_id or lineage_sha256 != manifest.lineage_sha256:
+        raise PaperBackupRefused("backup run identity conflicts with the captured attempt")
+    raw = document.get("candidate")
+    candidate = dict(raw) if type(raw) is dict and raw else None
+    if candidate != manifest.candidate:
+        raise PaperBackupRefused("backup candidate identity conflicts with the captured attempt")
+    candidate_id = None if candidate is None else candidate.get("candidate_id")
+    if (
+        manifest.candidate_id != (candidate_id if type(candidate_id) is str else None)
+        or manifest.artifact_sha256 != _optional_digest(candidate, "artifact_sha256")
+        or manifest.configuration_sha256 != _optional_digest(candidate, "configuration_sha256")
+    ):
+        raise PaperBackupRefused("backup candidate fields conflict with the captured attempt")
+    return payload
+
+
 def _copy_entry(
     destination_fd: int, spec: _AuthoritativeFile, source_parent_fd: int
 ) -> PaperBackupEntry | None:
@@ -604,27 +751,49 @@ def _backup_name(created_at: datetime, run_id: RunId) -> str:
     return f"{_BACKUP_ROOT_PREFIX}{created_at.strftime('%Y%m%dT%H%M%S%fZ')}-{run_id.value}"
 
 
-def _apply_retention(root: Path, keep: int) -> tuple[str, ...]:
-    """Deterministically keep only the newest ``keep`` published backups.
+def _owned_backups(root: Path, run_id: RunId) -> tuple[str, ...]:
+    """Names of published backups this module can positively identify as its own.
 
-    Names sort chronologically because the stamp prefix is fixed-width UTC. A
-    directory that cannot be removed is left for the next backup rather than
-    failing one that is already published.
+    A directory is only ever prunable when it holds a canonical ``backup.json``
+    whose manifest names *this* run. A name prefix is not ownership: the backup
+    root is an operator directory that may hold hand-made archives or other
+    runs' backups, and retention must never delete what it cannot verify.
+    """
+    owned: list[str] = []
+    for entry in os.scandir(root):
+        if not entry.name.startswith(_BACKUP_ROOT_PREFIX):
+            continue
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        try:
+            if _read_backup_manifest(Path(entry.path)).run_id == run_id:
+                owned.append(entry.name)
+        except (PaperBackupError, OSError):
+            continue
+    return tuple(sorted(owned))
+
+
+def _apply_retention(root: Path, run_id: RunId, published: str, keep: int) -> tuple[str, ...]:
+    """Deterministically keep only the newest ``keep`` backups of one run.
+
+    Names sort chronologically because the stamp prefix is fixed-width UTC. The
+    backup just published is never a pruning candidate, so a backwards clock
+    cannot make it delete itself after its path has been reported. A directory
+    that cannot be removed is left for the next backup rather than failing one
+    that is already published.
     """
     try:
-        names = sorted(
-            entry.name
-            for entry in os.scandir(root)
-            if entry.name.startswith(_BACKUP_ROOT_PREFIX) and entry.is_dir(follow_symlinks=False)
-        )
+        owned = _owned_backups(root, run_id)
     except OSError as error:
         raise PaperBackupRefused("backup root could not be listed for retention") from error
-    stale = names[:-keep] if keep < len(names) else []
+    stale = tuple(name for name in (owned[: max(0, len(owned) - keep)]) if name != published)
     for name in stale:
         _discard_directory(root / name)
     if stale:
         _fsync_directory(root)
-    return tuple(stale)
+    if not (root / published).is_dir():
+        raise PaperBackupRefused("the published backup did not survive retention")
+    return stale
 
 
 def _optional_digest(candidate: dict[str, Any] | None, key: str) -> str | None:
@@ -677,7 +846,6 @@ def create_paper_backup(
         raise PaperBackupInputError("backup retention must keep at least one backup")
     if not isinstance(run_dir, Path) or not run_dir.is_absolute():
         raise PaperBackupInputError("run_dir must be an absolute Path")
-    root = _safe_root(backup_root, name="backup root")
     created_at = datetime.now(UTC)
     try:
         with _attempt(run_dir) as (canonical, run_fd):
@@ -686,6 +854,9 @@ def create_paper_backup(
                 raise PaperBackupRefused(
                     "writer lease is held; quiesce the attempt before capturing it"
                 )
+            # The backup root is only created once the capture is known to be
+            # permitted, so a refusal leaves the operator's filesystem untouched.
+            root = _safe_root(backup_root, name="backup root")
             name = _backup_name(created_at, binding.reference.run_id)
             staging = _create_directory(root, f".{name}.{uuid4().hex}.tmp")
             try:
@@ -712,7 +883,11 @@ def create_paper_backup(
                 # the capture may interleave with new evidence: publish nothing.
                 _discard_directory(root / name)
                 raise PaperBackupRefused("writer lease was acquired while the attempt was captured")
-            return PaperBackupResult(root / name, manifest, _apply_retention(root, keep))
+            return PaperBackupResult(
+                root / name,
+                manifest,
+                _apply_retention(root, binding.reference.run_id, name, keep),
+            )
     except PaperBackupRefused:
         raise
     except PaperSessionError as error:
@@ -724,11 +899,26 @@ def create_paper_backup(
 
 
 def inspect_paper_backup(backup_dir: Path) -> PaperBackupManifest:
-    """Re-verify one backup against its boundary digest and return its manifest."""
+    """Re-verify one backup's internal consistency and return its manifest.
+
+    ``verified`` means internally consistent, not authentic: the recorded identity
+    is bound to the captured bytes, and the captured journal is bound to the
+    captured attempt, but nothing here anchors either to a trusted third party.
+    """
     directory = _existing_directory(backup_dir, name="backup")
     manifest = _read_backup_manifest(directory)
     files_fd = os.open(directory / _FILES_DIRECTORY, _DIR_FLAGS)
     try:
+        # Cheap identity checks first, so a tampered claim is refused without
+        # hashing the whole authoritative set.
+        _require_recorded_identity(files_fd, manifest)
+        _require_journal_binding(
+            files_fd,
+            RunBinding(
+                RunReference(manifest.run_id, manifest.lineage_sha256),
+                manifest.attempt_manifest_sha256,
+            ),
+        )
         _verify_entries(files_fd, manifest.entries)
     except PaperBackupRefused:
         raise
@@ -812,6 +1002,9 @@ def restore_paper_backup(backup_dir: Path, run_dir: Path) -> PaperRestoreResult:
     The backup is fully verified first, so an integrity failure is always
     reported before any state is created at the target. The target attempt
     directory is never an existing one, and the source backup is never modified.
+    A refused or failed restore leaves nothing behind: the reservation the store
+    makes is this call's to remove, because the store deliberately keeps a
+    poisoned directory that would otherwise block every later retry.
     """
     if not isinstance(run_dir, Path) or not run_dir.is_absolute():
         raise PaperBackupInputError("run_dir must be an absolute Path")
@@ -819,13 +1012,17 @@ def restore_paper_backup(backup_dir: Path, run_dir: Path) -> PaperRestoreResult:
     directory = _existing_directory(backup_dir, name="backup")
     if run_dir.name != manifest.run_id.value:
         raise PaperBackupInputError("run_dir must be named by the backup run id")
+    # Refuse an existing target before creating its parent, so a refusal is
+    # side-effect free on the operator's filesystem.
+    requested = run_dir.parent / run_dir.name
+    if requested.is_symlink() or requested.exists():
+        raise PaperBackupRefused("restore target already exists; it is never overwritten")
+    created_root = not run_dir.parent.exists()
     target_root = _safe_root(run_dir.parent, name="restore root")
     target = target_root / run_dir.name
-    if target.is_symlink() or target.exists():
-        raise PaperBackupRefused("restore target already exists; it is never overwritten")
     files_fd: int | None = None
     store: LocalResultStore | None = None
-    materialised = False
+    reserved = False
     try:
         files_fd = os.open(directory / _FILES_DIRECTORY, _DIR_FLAGS)
         with _entry_parent(files_fd, _MANIFEST_NAME) as parent_fd:
@@ -834,23 +1031,33 @@ def restore_paper_backup(backup_dir: Path, run_dir: Path) -> PaperRestoreResult:
         # Preparation reserves the attempt durably, publishes the exact manifest
         # bytes and creates the fresh empty writer-lease carrier the M1 recovery
         # path flocks; a copied carrier could never take that lease.
-        store.prepare_canonical_attempt(
-            CanonicalAttemptManifest(
-                RunReference(manifest.run_id, manifest.lineage_sha256), manifest_payload
+        try:
+            store.prepare_canonical_attempt(
+                CanonicalAttemptManifest(
+                    RunReference(manifest.run_id, manifest.lineage_sha256), manifest_payload
+                )
             )
-        )
-        materialised = True
+        except StoreCollisionError:
+            # The target appeared between the check above and the reservation, so
+            # it belongs to someone else and is never discarded.
+            raise
+        except BaseException:
+            reserved = True
+            raise
+        reserved = True
         _materialise(target, files_fd, manifest)
         store.close()
         store = None
-    except PaperBackupError:
-        if materialised:
+    except BaseException as error:
+        if reserved:
             _discard_directory(target)
+            if created_root:
+                _discard_empty_directory(target_root)
+        if isinstance(error, PaperBackupError):
+            raise
+        if isinstance(error, (StoreError, OSError, ValueError, KeyError, TypeError)):
+            raise PaperBackupRefused("restore could not be completed") from error
         raise
-    except (StoreError, OSError, ValueError, KeyError, TypeError) as error:
-        if materialised:
-            _discard_directory(target)
-        raise PaperBackupRefused("restore could not be completed") from error
     finally:
         if store is not None:
             store.close()

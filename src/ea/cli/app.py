@@ -608,7 +608,12 @@ def paper_backup(
 
 @backup_app.command("inspect")
 def paper_backup_inspect(backup: Annotated[Path, typer.Option("--backup")]) -> None:
-    """Re-verify one backup's boundary digest and print its published manifest."""
+    """Verify one backup is internally consistent and print its published manifest.
+
+    ``verified`` means the recorded identity, the captured attempt manifest and
+    the captured journal all agree with each other. It is not a signature:
+    nothing anchors a backup to a trusted third party.
+    """
     from ea.product.paper_backup import PaperBackupError, inspect_paper_backup
 
     try:
