@@ -159,7 +159,7 @@ Important runtime semantics:
 - a crash / SIGKILL is replaced by a fresh attempt;
 - an intentional cooperative stop stays stopped while the current LaunchAgent remains loaded;
 - every supervised launch receives a fresh run ID;
-- `latest` status/log files are observations, not a second source of trading truth.
+- status and log projections are observations, not a second source of trading truth.
 
 ### 6. Keep the Mac awake during short local tests
 
