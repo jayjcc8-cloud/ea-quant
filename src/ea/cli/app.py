@@ -56,6 +56,11 @@ backup_app = typer.Typer(
     invoke_without_command=True,
 )
 paper_app.add_typer(backup_app, name="backup")
+alerts_app = typer.Typer(
+    help="Observe the nine Paper signals and read the host alert stream. Observation only.",
+    invoke_without_command=True,
+)
+paper_app.add_typer(alerts_app, name="alerts")
 
 
 data_app = typer.Typer(help="Inspect strict full-capture local OHLCV input.")
@@ -638,6 +643,111 @@ def paper_restore(
     except PaperBackupError as error:
         raise _paper_backup_failure("restore", error) from None
     typer.echo(canonical_json(result.document()).decode("ascii"))
+
+
+def _paper_alert_failure(operation: str, error: Exception) -> typer.Exit:
+    """Map one alert-boundary failure onto the shared Paper exit-code contract."""
+    from ea.product.paper_alerts import PaperAlertUnavailable
+
+    if isinstance(error, PaperAlertUnavailable):
+        typer.echo(f"Paper alerts unavailable: {error}", err=True)
+        return typer.Exit(code=3)
+    typer.echo(f"Paper alerts {operation} input error: {error}", err=True)
+    return typer.Exit(code=2)
+
+
+@alerts_app.callback()
+def paper_alerts(context: typer.Context) -> None:
+    """Observe the nine signals into the durable host stream, or read one back."""
+    if context.invoked_subcommand is None:
+        typer.echo("Paper alerts requires the evaluate or show subcommand.", err=True)
+        raise typer.Exit(code=2)
+
+
+@alerts_app.command("evaluate")
+def paper_alerts_evaluate(
+    run_dir: Annotated[Path, typer.Option("--run-dir")],
+    stream: Annotated[Path, typer.Option("--stream")],
+    backup_root: Annotated[Path | None, typer.Option("--backup-root")] = None,
+    disk_path: Annotated[Path | None, typer.Option("--disk-path")] = None,
+    host_id: Annotated[str | None, typer.Option("--host-id")] = None,
+    not_ready_seconds: Annotated[float, typer.Option("--not-ready-seconds", min=0.001)] = 300.0,
+    backup_stale_seconds: Annotated[
+        float, typer.Option("--backup-stale-seconds", min=0.001)
+    ] = 129_600.0,
+    disk_free_floor_bytes: Annotated[int, typer.Option("--disk-free-floor-bytes", min=0)] = 5
+    * 1024**3,
+) -> None:
+    """Observe the nine signals once and publish them to the durable host stream.
+
+    Every threshold here is this command's own alerting policy. None of them is a
+    safety limit, and none of them can permit, block or resend anything: this
+    command observes and delivers, and it is never read by a trading decision.
+    """
+    from ea.product.market_stream import RealUtcClock
+    from ea.product.paper_alert_evaluation import evaluate_paper_alerts
+    from ea.product.paper_alerts import (
+        AlertThresholds,
+        PaperAlertError,
+        PaperAlertStreamAbsent,
+        PaperAlertUnavailable,
+        read_alert_stream,
+        require_host_id,
+        write_alert_stream,
+    )
+
+    try:
+        thresholds = AlertThresholds(
+            not_ready_seconds=not_ready_seconds,
+            backup_stale_seconds=backup_stale_seconds,
+            disk_free_floor_bytes=disk_free_floor_bytes,
+        )
+        scope = require_host_id(platform.node() if host_id is None else host_id)
+        absolute_stream = stream.expanduser().absolute()
+        absolute_run = run_dir.expanduser().absolute()
+    except PaperAlertError as error:
+        raise _paper_alert_failure("evaluate", error) from None
+
+    try:
+        previous = read_alert_stream(absolute_stream)
+    except PaperAlertStreamAbsent:
+        previous = None
+    except PaperAlertUnavailable as error:
+        # A stream that exists but cannot be read is never replaced: overwriting
+        # it is how an open alert would silently disappear.
+        raise _paper_alert_failure("evaluate", error) from None
+
+    try:
+        evaluation = evaluate_paper_alerts(
+            run_dir=absolute_run,
+            clock=RealUtcClock(),
+            backup_root=None if backup_root is None else backup_root.expanduser().absolute(),
+            disk_path=None if disk_path is None else disk_path.expanduser().absolute(),
+            thresholds=thresholds,
+        )
+        document = evaluation.project(host_id=scope, previous=previous, thresholds=thresholds)
+        write_alert_stream(absolute_stream, document)
+    except PaperAlertUnavailable as error:
+        raise _paper_alert_failure("evaluate", error) from None
+    except PaperAlertError as error:
+        raise _paper_alert_failure("evaluate", error) from None
+    typer.echo(canonical_json(document.document()).decode("ascii"))
+
+
+@alerts_app.command("show")
+def paper_alerts_show(stream: Annotated[Path, typer.Option("--stream")]) -> None:
+    """Print the durable host alert stream without mutation.
+
+    Exit code 3 means the stream is unavailable, never that no alert is open: an
+    unreadable stream must not be reported as a healthy, empty one.
+    """
+    from ea.product.paper_alerts import PaperAlertUnavailable, read_alert_stream
+
+    try:
+        document = read_alert_stream(stream.expanduser().absolute())
+    except PaperAlertUnavailable as error:
+        raise _paper_alert_failure("show", error) from None
+    typer.echo(canonical_json(document.document()).decode("ascii"))
 
 
 @strategy_app.command("pack")

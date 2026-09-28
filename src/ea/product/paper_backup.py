@@ -35,7 +35,7 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast, final
@@ -927,6 +927,87 @@ def inspect_paper_backup(backup_dir: Path) -> PaperBackupManifest:
     finally:
         os.close(files_fd)
     return manifest
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class VerifiedPaperBackup:
+    """One published backup whose recorded integrity re-verified, read-only."""
+
+    backup_dir: Path
+    manifest: PaperBackupManifest
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.backup_dir, Path):
+            raise PaperBackupError("a verified backup requires one Path")
+        if type(self.manifest) is not PaperBackupManifest:
+            raise PaperBackupError("a verified backup requires one exact manifest")
+        if type(self.created_at) is not datetime or self.created_at.utcoffset() != timedelta(0):
+            raise PaperBackupError("a verified backup requires one UTC creation instant")
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "backup_dir": str(self.backup_dir),
+            "created_at": self.created_at.isoformat(),
+            "verified": True,
+            **self.manifest.document(),
+        }
+
+
+def latest_verified_paper_backup(
+    backup_root: Path, *, run_id: RunId | None = None
+) -> VerifiedPaperBackup | None:
+    """Return the newest backup whose contents still re-verify, or ``None``.
+
+    This is the read-only observation PPV-06 needs to age a backup, and it owns
+    no second reading of the backup format: every candidate is judged by
+    :func:`inspect_paper_backup`, which is the same verification an operator
+    runs by hand. A candidate that fails verification is skipped rather than
+    reported, because the question is "how old is the newest backup that is
+    actually usable", not "how old is the newest directory that looks like one".
+
+    ``run_id`` narrows the question to one attempt; without it the newest
+    verified backup on the host answers, which is the host-level fact PPV-06
+    alerts on. Nothing here mutates the root or any backup.
+    """
+    if not isinstance(backup_root, Path) or not backup_root.is_absolute():
+        raise PaperBackupInputError("backup root must be an absolute Path")
+    if run_id is not None and type(run_id) is not RunId:
+        raise PaperBackupInputError("run_id must be an exact RunId or absent")
+    directory = _existing_directory(backup_root, name="backup root")
+    try:
+        names = tuple(
+            entry.name
+            for entry in os.scandir(directory)
+            if entry.name.startswith(_BACKUP_ROOT_PREFIX) and entry.is_dir(follow_symlinks=False)
+        )
+    except OSError as error:
+        raise PaperBackupInputError("backup root could not be listed") from error
+
+    # Order by the recorded creation instant, which is the manifest's own claim
+    # and is re-verified below; the directory name is only a tie-break.
+    dated: list[tuple[str, str]] = []
+    for name in names:
+        try:
+            header = _read_backup_manifest(directory / name)
+        except (PaperBackupError, OSError):
+            continue
+        if run_id is not None and header.run_id != run_id:
+            continue
+        dated.append((header.created_at, name))
+    for _, name in sorted(dated, reverse=True):
+        candidate = directory / name
+        try:
+            manifest = inspect_paper_backup(candidate)
+        except (PaperBackupError, OSError):
+            continue
+        return VerifiedPaperBackup(
+            backup_dir=candidate,
+            manifest=manifest,
+            created_at=datetime.strptime(manifest.created_at, _STAMP_FORMAT).replace(tzinfo=UTC),
+        )
+    return None
 
 
 def _read_backup_manifest(directory: Path) -> PaperBackupManifest:
