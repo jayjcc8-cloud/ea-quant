@@ -444,10 +444,22 @@ cmd_backup() {
             *) continue ;;
         esac
         printf 'capturing %s\n' "$entry"
-        "$EA_BIN" paper backup --run-dir "$entry" --backup-root "$BACKUP_ROOT" \
-            --keep "$BACKUP_KEEP"
-        return $?
+        if "$EA_BIN" paper backup --run-dir "$entry" --backup-root "$BACKUP_ROOT" \
+            --keep "$BACKUP_KEEP"; then
+            return 0
+        else
+            # One attempt that this command refuses must not block every later
+            # capture, and it must not be repaired, forced or captured
+            # partially. Report it and try the next settled attempt.
+            refused=$?
+            printf 'capture refused for %s (exit %s); trying the next attempt\n' \
+                "$entry" "$refused" >&2
+        fi
     done
+    if [ -n "${refused:-}" ]; then
+        printf 'no attempt could be captured; the last refusal exited %s\n' "$refused" >&2
+        return "$refused"
+    fi
     printf 'no settled attempt needs capture\n'
     return 0
 }

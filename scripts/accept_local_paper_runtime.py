@@ -166,9 +166,21 @@ def wait_for(predicate: Any, *, timeout: float, interval: float = 0.5) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def operator(home_ea: Path, *args: str, check: bool = True) -> tuple[int, str]:
+OPERATOR_SOURCE = REPO / "ops" / "launchd" / "ea-runtime"
+
+
+def operator(
+    home_ea: Path, *args: str, check: bool = True, source: bool = False
+) -> tuple[int, str]:
+    """Drive the operator surface; `source=True` drives the checkout copy.
+
+    `install` is deliberately a checkout operation: it is the step that copies
+    the operator into ~/EA/supervisor, so it cannot be run from the copy it is
+    about to create.
+    """
+    script = OPERATOR_SOURCE if source else home_ea / "supervisor" / "ea-runtime"
     completed = subprocess.run(
-        ["/bin/sh", str(home_ea / "supervisor" / "ea-runtime"), *args],
+        ["/bin/sh", str(script), *args],
         capture_output=True,
         text=True,
         check=False,
@@ -195,10 +207,18 @@ def launch_history(home_ea: Path) -> list[dict[str, Any]]:
     path = home_ea / "supervisor" / "state" / "launch-history.jsonl"
     if not path.is_file():
         return []
+    lines = path.read_text(encoding="utf-8").splitlines()
     events: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
             events.append(json.loads(line))
+        except ValueError:
+            # A reader can catch the final append mid-write; only a trailing
+            # partial line is expected, and a torn one is not evidence.
+            if index != len(lines) - 1:
+                raise
     return events
 
 
@@ -419,6 +439,11 @@ def host_continuity() -> dict[str, Any]:
         "uptime": optional("uptime"),
         "battery": optional("pmset", "-g", "batt"),
         "power_settings": optional("pmset", "-g", "custom"),
+        # The effective settings and whatever is currently holding sleep off are
+        # what decide whether an unattended run survives; the profiles alone do
+        # not say which of them is in force.
+        "power_settings_effective": optional("pmset", "-g"),
+        "power_assertions": optional("pmset", "-g", "assertions"),
         "disk_free_bytes": filesystem.f_bavail * filesystem.f_frsize,
         "disk_human": optional("df", "-h", str(Path.home())),
         "note": (
@@ -567,15 +592,20 @@ def drill_b(home_ea: Path, runtime_root: Path) -> dict[str, Any]:
 def drill_c(home_ea: Path, backup_root: Path, timeout: float) -> dict[str, Any]:
     supervisor = home_ea / "supervisor"
     before_runs = int(launchd_fields(BACKUP_LABEL).get("runs", "0") or "0")
+    before = sorted(path.name for path in backup_directories(backup_root))
     observed: dict[str, Any] = {}
 
     def fired() -> dict[str, Any] | None:
         fields = launchd_fields(BACKUP_LABEL)
         runs = int(fields.get("runs", "0") or "0")
+        names = sorted(path.name for path in backup_directories(backup_root))
         observed["launchd"] = fields
         observed["runs"] = runs
-        observed["backups"] = [str(path) for path in backup_directories(backup_root)]
-        if runs > before_runs and observed["backups"]:
+        observed["backups"] = names
+        observed["published"] = sorted(set(names) - set(before))
+        # A tick that only re-reports a capture from an earlier run proves
+        # nothing, so require the set of published backups to have grown.
+        if runs > before_runs and observed["published"]:
             return fields
         return None
 
@@ -583,10 +613,9 @@ def drill_c(home_ea: Path, backup_root: Path, timeout: float) -> dict[str, Any]:
         raise AcceptanceError(
             f"drill C: the scheduled backup job did not fire within {timeout:.0f}s"
         )
-    backups = backup_directories(backup_root)
-    newest = backups[-1]
+    published = backup_root / observed["published"][-1]
     inspect_code, inspect_document = run_json(
-        str(EA), "paper", "backup", "inspect", "--backup", str(newest), check=False
+        str(EA), "paper", "backup", "inspect", "--backup", str(published), check=False
     )
     log = supervisor.parent / "logs"
     result = {
@@ -594,8 +623,10 @@ def drill_c(home_ea: Path, backup_root: Path, timeout: float) -> dict[str, Any]:
         "backup_job_runs_before": before_runs,
         "backup_job_runs_after": observed["runs"],
         "backup_root": str(backup_root),
-        "backups": [str(path) for path in backups],
-        "backup": str(newest),
+        "backups_before": before,
+        "backups_after": observed["backups"],
+        "backups_published_by_this_tick": observed["published"],
+        "backup": str(published),
         "inspect_exit_code": inspect_code,
         "inspect_document": inspect_document,
         "launchd": observed["launchd"],
@@ -609,8 +640,12 @@ def drill_c(home_ea: Path, backup_root: Path, timeout: float) -> dict[str, Any]:
     failures = []
     if observed["runs"] <= before_runs:
         failures.append("the backup LaunchAgent did not record a new scheduled run")
+    if not observed["published"]:
+        failures.append("the scheduled tick published no new backup")
     if inspect_code != 0 or not (inspect_document or {}).get("verified"):
         failures.append("ea paper backup inspect did not verify the captured backup")
+    if (inspect_document or {}).get("run", {}).get("run_id") not in published.name:
+        failures.append("the verified backup does not name the attempt it claims to capture")
     result["failures"] = failures
     result["result"] = "PASS" if not failures else "FAIL"
     return result
@@ -661,6 +696,11 @@ def drill_d(home_ea: Path, runtime_root: Path) -> dict[str, Any]:
         "stop_exit_code": stop_code,
         "stop_output_tail": stop_output[-1000:],
         "stopped_run_dir": str(stopped_run),
+        # The attempt stopped here is the one launchd started after drill B's
+        # SIGKILL, so this is that replacement's own reconciliation output.
+        "stopped_candidate_id": stopped_status.get("candidate_id"),
+        "stopped_reconciliation": stopped_status.get("reconciliation"),
+        "stopped_terminal_durable": stopped_status.get("terminal_durable"),
         "stopped_state": stopped_status.get("state"),
         "stopped_lease_held": stopped_status.get("lease_held"),
         "stopped_reason": stopped_status.get("reason"),
@@ -701,7 +741,7 @@ def drill_d(home_ea: Path, runtime_root: Path) -> dict[str, Any]:
 
 
 def install(home_ea: Path, config: Path) -> dict[str, Any]:
-    code, output = operator(home_ea, "install", "--config", str(config), check=False)
+    code, output = operator(home_ea, "install", "--config", str(config), check=False, source=True)
     if code != 0:
         raise AcceptanceError(f"ea-runtime install failed with {code}: {output}")
     agents = Path.home() / "Library" / "LaunchAgents"
