@@ -42,6 +42,11 @@ from ea.product.market_stream import (
     run_local_market_stream,
 )
 from ea.product.paper import PaperTradingSession
+from ea.product.paper_health import (
+    RecoveryState,
+    StorageState,
+    paper_health_unavailable_document,
+)
 from ea.product.paper_recovery import (
     PaperOutboundIntent,
     reconcile_paper_recovery,
@@ -170,9 +175,30 @@ def run_local_paper(
         assert writer is not None
         return stopping.is_set() or writer.stop_requested()
 
+    def project_health() -> dict[str, Any]:
+        """Project this running session's read-only operational health.
+
+        The projection is an observation that runs inside the trading loop, so
+        it must never fail the run: any failure is published as an explicit
+        unavailable marker instead. An observation can never be a reason to
+        stop trading; only the owning authorities decide that.
+        """
+        assert engine is not None
+        try:
+            return engine.health(
+                candidate_id=candidate_id,
+                # A fresh explicit start has no restart admission to satisfy,
+                # and this process holds the durable store and its lease.
+                recovery_state=RecoveryState.NOT_REQUIRED,
+                storage_state=StorageState.AVAILABLE,
+            ).document()
+        except BaseException as error:  # noqa: BLE001 - an observation never halts a run
+            return paper_health_unavailable_document(detail=f"{type(error).__name__}: {error}")
+
     def publish() -> None:
         assert writer is not None and engine is not None
         result.update(engine.status())
+        result["health"] = project_health()
         result["updated_at"] = clock.now().isoformat()
         result["operational_log_failures"] = logger.failure_count
         writer.publish(result)

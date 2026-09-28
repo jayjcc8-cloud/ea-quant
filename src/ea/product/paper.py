@@ -88,6 +88,20 @@ from ea.execution.paper_broker import PaperBroker
 from ea.observability import OperationalLogger
 from ea.portfolio import create_portfolio_ledger, create_portfolio_planning_authority
 from ea.product.operational import ProductObservation
+from ea.product.paper_health import (
+    BrokerState,
+    KillSwitchProjectionState,
+    PaperHealthObservation,
+    PaperHealthSnapshot,
+    PaperSafetyObservation,
+    ReconciliationState,
+    RecoveryState,
+    StorageState,
+    StrategyHeartbeatState,
+    build_paper_health,
+    market_state_from_stream,
+    runtime_state_from_stream,
+)
 from ea.product.paper_recovery import (
     recover_paper_broker,
     recover_paper_economic_state,
@@ -261,37 +275,39 @@ class PaperTradingSession:
             max_price_deviation_bps=250,
         )
 
-    def _operational_safety_input(
-        self, order: Order, root: MarketDataEnvelope
-    ) -> OperationalSafetyInput:
+    def _notional(self, price: CanonicalDecimal, quantity: CanonicalDecimal) -> Decimal:
+        if quantity.coefficient == 0:
+            return Decimal("0")
+        settled = settle_product(
+            price, quantity, self.spec.contract_multiplier, self.spec.currency_quantum
+        )
+        return Decimal(settled.amount.text)
+
+    def _signed_notional(self, side: OrderSide, quantity: CanonicalDecimal) -> Decimal:
+        value = self._notional(self.price_bound, quantity)
+        return value if side is OrderSide.BUY else -value
+
+    def _market_age_seconds(self, root: MarketDataEnvelope) -> float:
+        return (self.clock.now() - root.event_time).total_seconds()
+
+    def _reconciliation_clean(self) -> bool:
+        """True when no ledger reference and no halt leaves broker state unresolved."""
         snapshot = self.gate.ledger.snapshot
         risk = self.gate.risk_authority.risk_state
+        return not snapshot.open_reconciliation_refs and not (
+            risk.halted and risk.halt_reason is RiskHaltReason.RECONCILIATION_REQUIRED
+        )
+
+    def _safety_observation(self, root: MarketDataEnvelope) -> PaperSafetyObservation:
+        """Observed operational state in the shape PPV-15 consumes.
+
+        Shared by the real outbound authorization and the read-only health probe
+        so the two can never disagree about what was observed.
+        """
+        snapshot = self.gate.ledger.snapshot
         reference_price = _quantized_historical_close(
             root.payload.close, side=OrderSide.BUY, specification=self.spec
         )
-        slippage = slippage_bps_from_identity(
-            self.scenario.execution_policy.identifier.value,
-            self.scenario.execution_policy.sha256.value,
-        )
-        proposed_price = _quantized_historical_close(
-            root.payload.close,
-            side=order.side,
-            specification=self.spec,
-            slippage_bps=slippage,
-        )
-
-        def notional(price: CanonicalDecimal, quantity: CanonicalDecimal) -> Decimal:
-            if quantity.coefficient == 0:
-                return Decimal("0")
-            settled = settle_product(
-                price, quantity, self.spec.contract_multiplier, self.spec.currency_quantum
-            )
-            return Decimal(settled.amount.text)
-
-        def signed_notional(side: OrderSide, quantity: CanonicalDecimal) -> Decimal:
-            value = notional(self.price_bound, quantity)
-            return value if side is OrderSide.BUY else -value
-
         cash = next(
             (
                 Decimal(balance.amount.text)
@@ -308,33 +324,104 @@ class PaperTradingSession:
             ),
             CanonicalDecimal("0"),
         )
-        position_mark = notional(reference_price, position_quantity)
+        position_mark = self._notional(reference_price, position_quantity)
         daily_loss = Decimal(self.scenario.initial_cash.text) - (cash + position_mark)
         outstanding = (
-            signed_notional(self.pending.side, self.pending.quantity)
+            self._signed_notional(self.pending.side, self.pending.quantity)
             if self.pending is not None
             else Decimal("0")
         )
-        return OperationalSafetyInput(
+        return PaperSafetyObservation(
             kill_switch_halted=(
                 self.kill_switch is not None and self.kill_switch.effective_halted()
             ),
-            reconciliation_healthy=(
-                not snapshot.open_reconciliation_refs
-                and not (risk.halted and risk.halt_reason is RiskHaltReason.RECONCILIATION_REQUIRED)
-            ),
-            market_age_seconds=(self.clock.now() - root.event_time).total_seconds(),
+            reconciliation_healthy=self._reconciliation_clean(),
+            market_age_seconds=self._market_age_seconds(root),
             broker_available=self.broker.available,
             strategy_live=self.runtime.phase is StreamPhase.RUNNING,
             daily_loss=daily_loss,
             current_exposure=position_mark,
             outstanding_order_exposure=outstanding,
-            proposed_order_exposure=signed_notional(order.side, order.quantity),
             open_order_count=1 if self.pending is not None else 0,
-            proposed_effective_price=Decimal(proposed_price.text),
             reference_price=Decimal(reference_price.text),
-            order_identity=order.client_submission_key.value,
             now_monotonic=self.monotonic(),
+        )
+
+    def _operational_safety_input(
+        self, order: Order, root: MarketDataEnvelope
+    ) -> OperationalSafetyInput:
+        observation = self._safety_observation(root)
+        slippage = slippage_bps_from_identity(
+            self.scenario.execution_policy.identifier.value,
+            self.scenario.execution_policy.sha256.value,
+        )
+        proposed_price = _quantized_historical_close(
+            root.payload.close,
+            side=order.side,
+            specification=self.spec,
+            slippage_bps=slippage,
+        )
+        return observation.proposed_input(
+            proposed_order_exposure=self._signed_notional(order.side, order.quantity),
+            proposed_effective_price=Decimal(proposed_price.text),
+            order_identity=order.client_submission_key.value,
+        )
+
+    def health(
+        self,
+        *,
+        candidate_id: str | None = None,
+        recovery_state: RecoveryState = RecoveryState.UNKNOWN,
+        storage_state: StorageState = StorageState.UNKNOWN,
+    ) -> PaperHealthSnapshot:
+        """Project the read-only operational health of this running session.
+
+        Liveness is self-evident here: this process is executing the projection,
+        which is the same truth the durable writer lease records. Recovery
+        admission and storage attestation belong to the composition root, so
+        both default to unattested and an unattested dependency never reads
+        ready. Trade permission is the PPV-15 zero-effect probe over exactly the
+        state a real outbound check would observe.
+        """
+        stream = self.runtime.status()
+        root = self.last_market
+        return build_paper_health(
+            PaperHealthObservation(
+                process_alive=True,
+                runtime_state=runtime_state_from_stream(stream),
+                recovery_state=recovery_state,
+                reconciliation_state=(
+                    ReconciliationState.CLEAN
+                    if self._reconciliation_clean()
+                    else ReconciliationState.UNRESOLVED
+                ),
+                market_state=market_state_from_stream(
+                    stream,
+                    market_age_seconds=(None if root is None else self._market_age_seconds(root)),
+                    max_market_age_seconds=(self.operational_safety.limits.max_market_age_seconds),
+                ),
+                broker_state=(
+                    BrokerState.AVAILABLE if self.broker.available else BrokerState.UNAVAILABLE
+                ),
+                strategy_heartbeat_state=(
+                    StrategyHeartbeatState.LIVE
+                    if self.runtime.phase is StreamPhase.RUNNING
+                    else StrategyHeartbeatState.NOT_LIVE
+                ),
+                storage_state=storage_state,
+                kill_switch_state=(
+                    KillSwitchProjectionState.NOT_CONFIGURED
+                    if self.kill_switch is None
+                    else KillSwitchProjectionState.HALTED
+                    if self.kill_switch.effective_halted()
+                    else KillSwitchProjectionState.ACTIVE
+                ),
+                safety=None if root is None else self._safety_observation(root),
+                observed_at=self.clock.now(),
+                run_id=self.run_id,
+                candidate_id=candidate_id,
+            ),
+            authority=self.operational_safety,
         )
 
     def _operational_authorize(self, order: Order, root: MarketDataEnvelope, sequence: int) -> bool:
