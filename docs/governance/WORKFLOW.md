@@ -103,6 +103,17 @@ T0 needs no independent model review. T1 uses one Reviewer. T2/T3 use one fresh 
 adversarial Reviewer on exact HEAD. Additional domain advice is non-authoritative unless the
 Product Owner explicitly requests it.
 
+### Independent review in a solo-maintained repository
+
+"Independent" describes the review context, not the reviewer's identity. It does not require a
+second human or a second GitHub account. A qualifying independent review: (1) runs after
+implementation completes; (2) uses a fresh reviewer agent/context that does not inherit the
+implementer's conclusions; (3) inspects the exact PR head/diff; (4) has no write authority during
+review; (5) reports blockers explicitly; and (6) leaves review evidence before merge. The Product
+Owner merges with the same GitHub account after the independent review passes. Self-approval is
+still forbidden: the required separation is implementation context ≠ review context, never
+"author merges without any review".
+
 ## Merge Gates
 
 - **T0:** scoped diff and required CI pass.
