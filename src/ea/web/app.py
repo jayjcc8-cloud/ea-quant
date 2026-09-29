@@ -107,6 +107,8 @@ class WebSettings:
     port: int
     strategy_root: Path | None = None
     data_root: Path | None = None
+    runtime_root: Path | None = None
+    alerts_stream: Path | None = None
 
     @property
     def trusted_origin(self) -> str:
@@ -145,6 +147,15 @@ def create_app(settings: WebSettings) -> Any:
         raise WebBoundaryError("strategy and UI roots must not overlap")
     if settings.data_root is not None and roots_overlap(settings.data_root.resolve(), ui_root):
         raise WebBoundaryError("data and UI roots must not overlap")
+    if settings.runtime_root is not None:
+        if not settings.runtime_root.is_absolute():
+            raise WebBoundaryError("runtime root must be absolute")
+        if roots_overlap(
+            settings.runtime_root.resolve(), scenario_root, workspace_root, ui_root
+        ):
+            raise WebBoundaryError("runtime root must be separate from the Web roots")
+    if settings.alerts_stream is not None and not settings.alerts_stream.is_absolute():
+        raise WebBoundaryError("alerts stream must be an absolute path")
     service = WebService(
         scenario_root,
         workspace_root,
@@ -436,6 +447,54 @@ def create_app(settings: WebSettings) -> Any:
             return error(404, "artifact_not_found", str(caught))
         except ReportUnavailableError as caught:
             return error(409, "report_unavailable", str(caught))
+
+    from fastapi import Query
+
+    from ea.web import radian
+    from ea.web.settings import RadianSettings
+
+    @app.get("/api/workspace/overview")
+    def workspace_overview() -> object:
+        try:
+            return radian.overview(
+                service,
+                runtime_root=settings.runtime_root,
+                alerts_stream=settings.alerts_stream,
+                settings=RadianSettings(RadianSettings.default_path()),
+            )
+        except (WebBoundaryError, ValueError, OSError) as caught:
+            return error(500, "workspace_overview_unavailable", str(caught))
+
+    @app.get("/api/paper/overview")
+    def paper_overview_route(run_id: str | None = None) -> object:
+        try:
+            return radian.paper_overview(settings.runtime_root, run_id=run_id)
+        except (WebBoundaryError, ValueError, OSError) as caught:
+            return error(500, "paper_overview_unavailable", str(caught))
+
+    @app.get("/api/paper/events")
+    def paper_events_route(
+        run_id: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> object:
+        try:
+            return radian.paper_events(settings.runtime_root, run_id=run_id, limit=limit)
+        except (WebBoundaryError, ValueError, OSError) as caught:
+            return error(500, "paper_events_unavailable", str(caught))
+
+    @app.get("/api/search")
+    def search_route(q: str = Query(min_length=2, max_length=200)) -> object:
+        try:
+            return radian.search(service, q)
+        except (WebBoundaryError, ValueError, OSError) as caught:
+            return error(500, "search_unavailable", str(caught))
+
+    @app.get("/api/settings/status")
+    def settings_status_route() -> object:
+        try:
+            return RadianSettings(RadianSettings.default_path()).status()
+        except ValueError as caught:
+            return error(500, "settings_unavailable", str(caught))
 
     @app.get("/{full_path:path}")
     def frontend(full_path: str) -> Response:

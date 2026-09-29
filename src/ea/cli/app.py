@@ -306,6 +306,22 @@ def web_serve(
     ] = 8765,
     strategy_root: Annotated[Path | None, typer.Option("--strategy-root")] = None,
     data_root: Annotated[Path | None, typer.Option("--data-root")] = None,
+    runtime_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-root",
+            help="Optional supervised Paper runtime root; enables the read-only operations views.",
+            metavar="DIR",
+        ),
+    ] = None,
+    alerts_stream: Annotated[
+        Path | None,
+        typer.Option(
+            "--alerts-stream",
+            help="Optional durable alert stream file read for the workspace attention list.",
+            metavar="FILE",
+        ),
+    ] = None,
 ) -> None:
     """Serve the real offline Web backtest loop from explicit local roots."""
     try:
@@ -323,6 +339,26 @@ def web_serve(
     ):
         typer.echo("web input error: scenario, workspace, and UI roots must not overlap", err=True)
         raise typer.Exit(code=2)
+    resolved_runtime: Path | None = None
+    if runtime_root is not None:
+        try:
+            resolved_runtime = runtime_root.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            typer.echo("web input error: runtime root cannot be resolved", err=True)
+            raise typer.Exit(code=2) from None
+        if any(
+            resolved_runtime.is_relative_to(root) or root.is_relative_to(resolved_runtime)
+            for root in roots
+        ):
+            typer.echo("web input error: runtime root must not overlap the Web roots", err=True)
+            raise typer.Exit(code=2)
+    resolved_alerts: Path | None = None
+    if alerts_stream is not None:
+        try:
+            resolved_alerts = alerts_stream.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            typer.echo("web input error: alerts stream cannot be resolved", err=True)
+            raise typer.Exit(code=2) from None
     try:
         from ea.web.app import WebSettings
         from ea.web.server import WebDependencyError, serve_local_web
@@ -335,6 +371,8 @@ def web_serve(
                 port=port,
                 strategy_root=strategy_root,
                 data_root=data_root,
+                runtime_root=resolved_runtime,
+                alerts_stream=resolved_alerts,
             )
         )
     except WebDependencyError as error:

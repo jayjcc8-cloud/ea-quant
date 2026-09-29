@@ -977,6 +977,25 @@ class WebService:
             except KeyError:
                 raise JobNotFoundError("job was not found in this workspace") from None
 
+    def list_batches(self) -> list[dict[str, object]]:
+        """Return one persisted summary per batch, newest first, without members."""
+        with self._lock:
+            summaries: list[dict[str, object]] = []
+            for record in self._batches.values():
+                running = any(
+                    self._jobs[job_id].status in {"accepted", "running"}
+                    for job_id in record.member_job_ids
+                )
+                summaries.append(
+                    {
+                        **record.document(),
+                        "member_count": len(record.member_job_ids),
+                        "status": "running" if running else "complete",
+                    }
+                )
+            summaries.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+            return summaries
+
     def get_batch(self, batch_id: str) -> dict[str, object]:
         with self._lock:
             try:
