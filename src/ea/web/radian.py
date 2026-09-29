@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ea.product.paper_alerts import (
     AlertState,
@@ -185,7 +185,10 @@ def _paper_attention(paper: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": f"{run_id}:interrupted",
                 "kind": "paper",
                 "severity": "high",
-                "message": f"Supervised Paper run {run_id} is interrupted: {paper.get('reason') or 'writer lease missing'}",
+                "message": (
+                    f"Supervised Paper run {run_id} is interrupted: "
+                    f"{paper.get('reason') or 'writer lease missing'}"
+                ),
                 "observed_at": paper.get("updated_at"),
                 "run_id": run_id,
             }
@@ -221,7 +224,10 @@ def _paper_attention(paper: dict[str, Any]) -> list[dict[str, Any]]:
                     "id": f"{run_id}:trade-blocking",
                     "kind": "paper",
                     "severity": "high",
-                    "message": f"Paper trade blocking guard engaged: {health['trade_blocking_guard']}",
+                    "message": (
+                        "Paper trade blocking guard engaged: "
+                        f"{health['trade_blocking_guard']}"
+                    ),
                     "observed_at": health.get("observed_at"),
                     "run_id": run_id,
                 }
@@ -260,7 +266,7 @@ def _job_attention(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _scenario_label(service: WebService, scenario_id: str) -> dict[str, Any] | None:
-    for scenario in service.registry.list():
+    for scenario in (cast(dict[str, Any], item) for item in service.registry.list()):
         if scenario.get("scenario_id") == scenario_id:
             summary = scenario.get("summary") or {}
             strategy = scenario.get("strategy_descriptor") or {}
@@ -351,9 +357,7 @@ def overview(
     recent_work = recent_work[:_RECENT_WORK_LIMIT]
 
     paper = paper_overview(runtime_root)
-    attention = (
-        _paper_attention(paper) + _job_attention(jobs) + _alert_attention(alerts_stream)
-    )
+    attention = _paper_attention(paper) + _job_attention(jobs) + _alert_attention(alerts_stream)
     attention = attention[:_ATTENTION_LIMIT]
 
     settings_status = (settings or RadianSettings(RadianSettings.default_path())).status()
@@ -384,7 +388,7 @@ def search(
         def matches(*values: object) -> bool:
             return any(needle in str(value).lower() for value in values)
 
-        for scenario in service.registry.list():
+        for scenario in (cast(dict[str, Any], item) for item in service.registry.list()):
             summary = scenario.get("summary") or {}
             if matches(
                 scenario.get("scenario_id"),

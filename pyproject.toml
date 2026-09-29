@@ -28,6 +28,7 @@ dev = [
 web = [
   "fastapi>=0.141.1",
   "uvicorn>=0.52.4",
+  "httpx2>=2.12.0",
 ]
 
 [project.scripts]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 import yaml
@@ -76,7 +76,11 @@ def test_settings_save_load_and_secret_exclusion(
     store.save(
         {
             "schema": "radian.settings.v1",
-            "model": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001", "api_key": "sk-secret"},
+            "model": {
+                "provider": "anthropic",
+                "model": "claude-haiku-4-5-20251001",
+                "api_key": "sk-secret",
+            },
         }
     )
     status = store.status()
@@ -156,7 +160,9 @@ def test_paper_events_reads_tail_and_skips_broken_lines(tmp_path: Path) -> None:
 # --- overview and search ----------------------------------------------------
 
 
-def test_overview_empty_workspace_is_honest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_overview_empty_workspace_is_honest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RADIAN_SETTINGS_FILE", str(tmp_path / "settings.json"))
     service = _service(tmp_path)
     try:
@@ -192,9 +198,7 @@ def test_search_minimum_query_length_is_enforced_by_api(tmp_path: Path) -> None:
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "invalid_host"
         # With the trusted loopback host, the query bound is enforced.
-        response = client.get(
-            "/api/search", params={"q": "a"}, headers={"host": "127.0.0.1:8765"}
-        )
+        response = client.get("/api/search", params={"q": "a"}, headers={"host": "127.0.0.1:8765"})
         assert response.status_code == 422
 
 
@@ -203,18 +207,14 @@ def test_workspace_overview_api_endpoint(tmp_path: Path, monkeypatch: pytest.Mon
     app = create_app(_settings(tmp_path))
     client = TestClient(app)
     with client:
-        response = client.get(
-            "/api/workspace/overview", headers={"host": "127.0.0.1:8765"}
-        )
+        response = client.get("/api/workspace/overview", headers={"host": "127.0.0.1:8765"})
         assert response.status_code == 200, response.text
         document = response.json()
         assert document["schema"] == "radian.workspace-overview.v1"
         assert document["paper"]["available"] is False
         assert document["paper"]["reason"] == "runtime_root_not_configured"
         assert document["model"]["configured"] is False
-        settings_response = client.get(
-            "/api/settings/status", headers={"host": "127.0.0.1:8765"}
-        )
+        settings_response = client.get("/api/settings/status", headers={"host": "127.0.0.1:8765"})
         assert settings_response.status_code == 200
         assert settings_response.json()["configured"] is False
 
@@ -229,5 +229,7 @@ def test_web_settings_accept_runtime_root_and_alerts_stream(tmp_path: Path) -> N
 
 
 def test_web_settings_reject_relative_runtime_root(tmp_path: Path) -> None:
-    with pytest.raises(Exception):
+    from ea.web.service import WebBoundaryError
+
+    with pytest.raises(WebBoundaryError):
         create_app(_settings(tmp_path, runtime_root=Path("relative/path")))

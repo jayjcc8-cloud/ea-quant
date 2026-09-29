@@ -97,6 +97,32 @@ class ScenarioValidationRequest(BaseModel):
     parameters: BacktestParameters | None = None
 
 
+class ResearchTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    idea: str = Field(min_length=1, max_length=4000)
+
+
+class ResearchSpecEdit(BaseModel):
+    """Optional partial edit of the unconfirmed draft spec."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    strategy_id: str | None = None
+    venue: str | None = None
+    symbol: str | None = None
+    initial_cash: str | None = None
+    rationale: str | None = None
+    scenario_id: str | None = None
+    dataset_id: str | None = None
+    parameters: dict[str, Any] | None = None
+    assumptions: list[str] | None = None
+
+
+class ResearchConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    auto_run: bool = True
+
+
 @dataclass(frozen=True, slots=True)
 class WebSettings:
     """Explicit filesystem and loopback boundaries for one local service."""
@@ -150,9 +176,7 @@ def create_app(settings: WebSettings) -> Any:
     if settings.runtime_root is not None:
         if not settings.runtime_root.is_absolute():
             raise WebBoundaryError("runtime root must be absolute")
-        if roots_overlap(
-            settings.runtime_root.resolve(), scenario_root, workspace_root, ui_root
-        ):
+        if roots_overlap(settings.runtime_root.resolve(), scenario_root, workspace_root, ui_root):
             raise WebBoundaryError("runtime root must be separate from the Web roots")
     if settings.alerts_stream is not None and not settings.alerts_stream.is_absolute():
         raise WebBoundaryError("alerts stream must be an absolute path")
@@ -495,6 +519,100 @@ def create_app(settings: WebSettings) -> Any:
             return RadianSettings(RadianSettings.default_path()).status()
         except ValueError as caught:
             return error(500, "settings_unavailable", str(caught))
+
+    from ea.web.research import (
+        InvalidSpecError,
+        ResearchOrchestrator,
+        ResearchStore,
+        ResearchTaskError,
+        TaskConflictError,
+        TaskNotFoundError,
+        TaskStateError,
+    )
+
+    research_store = ResearchStore(workspace_root)
+    research_orchestrator = ResearchOrchestrator(
+        research_store, service, RadianSettings(RadianSettings.default_path())
+    )
+
+    @app.post("/api/research/tasks", status_code=201)
+    def create_research_task(request: ResearchTaskRequest) -> object:
+        try:
+            task = research_orchestrator.create(request.idea)
+            return task.document()
+        except TaskConflictError as caught:
+            return error(409, "research_task_exists", str(caught))
+        except InvalidSpecError as caught:
+            return error(422, "spec_invalid", str(caught))
+        except ResearchTaskError as caught:
+            return error(422, "research_task_invalid", str(caught))
+
+    @app.get("/api/research/tasks")
+    def list_research_tasks() -> object:
+        return {"tasks": [task.document() for task in research_store.list()]}
+
+    @app.get("/api/research/tasks/{task_id}")
+    def get_research_task(task_id: str) -> object:
+        try:
+            refreshed = research_orchestrator.refresh(task_id)
+            return refreshed.document()
+        except TaskNotFoundError as caught:
+            return error(404, "research_task_not_found", str(caught))
+        except ResearchTaskError as caught:
+            return error(422, "research_task_invalid", str(caught))
+
+    @app.patch("/api/research/tasks/{task_id}/spec")
+    def edit_research_spec(task_id: str, request: ResearchSpecEdit) -> object:
+        try:
+            fields = {
+                key: value for key, value in request.model_dump().items() if value is not None
+            }
+            task = research_orchestrator.edit_spec(task_id, fields)
+            return task.document()
+        except TaskNotFoundError as caught:
+            return error(404, "research_task_not_found", str(caught))
+        except (InvalidSpecError, TaskStateError) as caught:
+            return error(409, "spec_edit_rejected", str(caught))
+        except ResearchTaskError as caught:
+            return error(422, "research_task_invalid", str(caught))
+
+    @app.post("/api/research/tasks/{task_id}/confirm")
+    def confirm_research_task(
+        task_id: str, request: ResearchConfirmRequest | None = None
+    ) -> object:
+        try:
+            task = research_orchestrator.confirm(
+                task_id, auto_run=True if request is None else request.auto_run
+            )
+            return task.document()
+        except TaskNotFoundError as caught:
+            return error(404, "research_task_not_found", str(caught))
+        except (InvalidSpecError, TaskStateError) as caught:
+            return error(409, "confirm_rejected", str(caught))
+        except ResearchTaskError as caught:
+            return error(422, "research_task_invalid", str(caught))
+
+    @app.post("/api/research/tasks/{task_id}/retry")
+    def retry_research_task(task_id: str) -> object:
+        try:
+            task = research_orchestrator.retry(task_id)
+            return task.document()
+        except TaskNotFoundError as caught:
+            return error(404, "research_task_not_found", str(caught))
+        except TaskStateError as caught:
+            return error(409, "retry_rejected", str(caught))
+        except ResearchTaskError as caught:
+            return error(422, "research_task_invalid", str(caught))
+
+    @app.post("/api/research/tasks/{task_id}/cancel")
+    def cancel_research_task(task_id: str) -> object:
+        try:
+            task = research_orchestrator.cancel(task_id)
+            return task.document()
+        except TaskNotFoundError as caught:
+            return error(404, "research_task_not_found", str(caught))
+        except ResearchTaskError as caught:
+            return error(422, "research_task_invalid", str(caught))
 
     @app.get("/{full_path:path}")
     def frontend(full_path: str) -> Response:

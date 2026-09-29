@@ -14,11 +14,14 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _ALLOWED_PROVIDERS = frozenset({"anthropic"})
 _SCHEMA = "radian.settings.v1"
 _MAX_BYTES = 64 * 1024
+_DEFAULT_MAX_MODEL_CALLS = 10
+_DEFAULT_MAX_BACKTESTS = 5
+_MAX_RESEARCH_BOUND = 100
 
 
 class RadianSettingsError(ValueError):
@@ -49,7 +52,7 @@ class RadianSettings:
         if len(payload) > _MAX_BYTES:
             raise RadianSettingsError("settings file exceeds the supported size")
         try:
-            document = json.loads(payload.decode("utf-8"))
+            document = cast(dict[str, Any], json.loads(payload.decode("utf-8")))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RadianSettingsError("settings file is not valid JSON") from error
         _validate(document)
@@ -83,15 +86,17 @@ class RadianSettings:
     def status(self) -> dict[str, Any]:
         """Project the model configuration without exposing any secret."""
         try:
-            model = self.load().get("model") or {}
+            document = self.load()
         except RadianSettingsError:
-            model = {}
+            document = {}
+        model = document.get("model") or {}
         configured = (
             isinstance(model, dict)
             and model.get("provider") in _ALLOWED_PROVIDERS
             and bool(model.get("model"))
             and (bool(model.get("api_key")) or bool(model.get("api_key_env")))
         )
+        research = document.get("research") or {}
         return {
             "schema": "radian.settings-status.v1",
             "settings_file": str(self.path),
@@ -100,6 +105,10 @@ class RadianSettings:
             "model": model.get("model") if isinstance(model, dict) else None,
             "base_url": model.get("base_url") if isinstance(model, dict) else None,
             "api_key_env": model.get("api_key_env") if isinstance(model, dict) else None,
+            "research_budget": {
+                "max_model_calls": _budget(research, "max_model_calls", _DEFAULT_MAX_MODEL_CALLS),
+                "max_backtests": _budget(research, "max_backtests", _DEFAULT_MAX_BACKTESTS),
+            },
         }
 
 
@@ -121,3 +130,23 @@ def _validate(document: object) -> None:
         raise RadianSettingsError(
             f"model provider must be one of: {', '.join(sorted(_ALLOWED_PROVIDERS))}"
         )
+    research = document.get("research")
+    if research is None:
+        return
+    if not isinstance(research, dict):
+        raise RadianSettingsError("research settings must be one object")
+    for key in ("max_model_calls", "max_backtests"):
+        value = research.get(key)
+        if value is not None and (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not 1 <= value <= _MAX_RESEARCH_BOUND
+        ):
+            raise RadianSettingsError(f"research budget {key} must be an integer from 1 to 100")
+
+
+def _budget(document: object, key: str, default: int) -> int:
+    value = document.get(key) if isinstance(document, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= _MAX_RESEARCH_BOUND:
+        return value
+    return default
