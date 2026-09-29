@@ -66,6 +66,7 @@ from ea.core import (
     phase1_risk_policy_digest,
     portfolio_snapshot_digest,
 )
+from ea.core.economics import _scaled_text
 from ea.core.encoding import canonical_json_bytes
 from ea.data import (
     create_phase1_historical_market_data_source,
@@ -180,19 +181,6 @@ def _binding(run_id: RunId, lineage: Sha256Digest, manifest: bytes) -> RunBindin
         RunReference(run_id, lineage),
         Sha256Digest(sha256(manifest).hexdigest()),
     )
-
-
-def _scaled_text(coefficient: int, scale: int) -> str:
-    if coefficient == 0:
-        return "0"
-    sign = "-" if coefficient < 0 else ""
-    digits = str(abs(coefficient))
-    if scale:
-        digits = digits.rjust(scale + 1, "0")
-        text = f"{digits[:-scale]}.{digits[-scale:]}".rstrip("0").rstrip(".")
-    else:
-        text = digits
-    return sign + text
 
 
 def _upper_price_bound(scenario: LoadedBacktestScenario) -> CanonicalDecimal:
