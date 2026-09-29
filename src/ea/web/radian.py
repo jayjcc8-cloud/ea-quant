@@ -192,7 +192,8 @@ def _paper_attention(paper: dict[str, Any]) -> list[dict[str, Any]]:
         )
     health = paper.get("health")
     if isinstance(health, dict):
-        for code in health.get("reason_codes") or []:
+        reason_codes = list(health.get("reason_codes") or [])
+        for code in reason_codes:
             items.append(
                 {
                     "id": f"{run_id}:{code}",
@@ -203,7 +204,7 @@ def _paper_attention(paper: dict[str, Any]) -> list[dict[str, Any]]:
                     "run_id": run_id,
                 }
             )
-        if health.get("projection_stale"):
+        if health.get("projection_stale") and "projection.stale" not in reason_codes:
             items.append(
                 {
                     "id": f"{run_id}:stale",
