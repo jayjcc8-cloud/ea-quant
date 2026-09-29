@@ -750,6 +750,50 @@ def paper_alerts_show(stream: Annotated[Path, typer.Option("--stream")]) -> None
     typer.echo(canonical_json(document.document()).decode("ascii"))
 
 
+@paper_app.command("observer")
+def paper_observer(
+    run_dir: Annotated[Path, typer.Option("--run-dir")],
+    alert_stream: Annotated[Path | None, typer.Option("--alert-stream")] = None,
+    backup_root: Annotated[Path | None, typer.Option("--backup-root")] = None,
+    claude_bin: Annotated[str, typer.Option("--claude-bin")] = os.environ.get(
+        "EA_OBSERVER_CLAUDE_BIN", "claude"
+    ),
+    timeout: Annotated[float, typer.Option("--timeout", min=1.0)] = float(
+        os.environ.get("EA_OBSERVER_TIMEOUT_SECONDS", "120")
+    ),
+    log_lines: Annotated[int, typer.Option("--log-lines", min=1, max=500)] = 200,
+) -> None:
+    """Run the read-only Claude diagnostic observer over existing Paper evidence.
+
+    Reads the existing Paper status, alert stream, backup and operational-log
+    read models, hands one bounded evidence package to a headless tool-less
+    ``claude`` turn, and prints the structured assessment. Nothing is written
+    anywhere: the observer cannot start, stop, repair or authorize anything.
+
+    Exit code 3 means the Paper evidence could not be read. A missing, failed,
+    timed-out or malformed Claude is not a Paper failure: the document reports
+    ``observer_status: unavailable`` and this command still exits 0.
+    """
+    from ea.product.paper_observer import PaperObserverError, run_observer
+    from ea.product.paper_session import PaperSessionError
+
+    try:
+        document = run_observer(
+            run_dir=run_dir.expanduser().absolute(),
+            alert_stream_path=None
+            if alert_stream is None
+            else alert_stream.expanduser().absolute(),
+            backup_root=None if backup_root is None else backup_root.expanduser().absolute(),
+            claude_bin=Path(claude_bin),
+            timeout_seconds=timeout,
+            max_log_lines=log_lines,
+        )
+    except (PaperObserverError, PaperSessionError) as error:
+        typer.echo(f"Paper observer unavailable: {error}", err=True)
+        raise typer.Exit(code=3) from None
+    typer.echo(canonical_json(document).decode("ascii"))
+
+
 @strategy_app.command("pack")
 def strategy_pack(
     source: Annotated[Path, typer.Option("--source")],
