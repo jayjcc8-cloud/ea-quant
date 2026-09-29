@@ -136,3 +136,16 @@ observed is published as `unavailable`, never as healthy, so an unreadable proje
 mistaken for a good one. Alerting is observation only: it repairs no ledger, lifts no kill switch,
 modifies no reconciliation, restores no trading and resends no order. Alert delivery is the local
 stream and CLI inspection; no external paging, chat or metrics service is integrated.
+
+`ea paper observer --run-dir DIR [--alert-stream PATH] [--backup-root ROOT] [--claude-bin BIN]
+[--timeout SECONDS] [--log-lines N]` runs one on-demand, read-only Claude diagnostic over the
+existing evidence: the status/health projection, the alert stream, the newest verified backup
+(summarised with the gate's own freshness) and a bounded tail of the operational log. Claude runs
+headless with no tools and exactly one turn, and returns one bounded structured assessment
+(summary, severity, observations, anomalies, evidence references, root causes, suggested operator
+actions). The observer writes nothing anywhere, and it is advisory only: it cannot start, stop or
+reload the runtime, place or cancel orders, change limits, repair state, restore backups or change
+a deterministic gate verdict. A missing, timed-out or malformed Claude reports
+`observer_status: unavailable` with a reason — the Paper runtime itself is never reported as
+failed because the observer failed — and every deterministic PASS / FAIL / INVALID stays exactly
+as the gate produced it.
