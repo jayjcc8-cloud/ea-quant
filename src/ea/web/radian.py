@@ -334,7 +334,7 @@ def overview(
             }
         )
     for candidate in candidates:
-        strategy = candidate.get("strategy") or {}
+        strategy = (candidate.get("projection") or {}).get("strategy") or {}
         recent_work.append(
             {
                 "id": str(candidate["candidate_id"]),
@@ -434,7 +434,7 @@ def search(
                     }
                 )
         for candidate in service.list_candidates():
-            strategy = candidate.get("strategy") or {}
+            strategy = (candidate.get("projection") or {}).get("strategy") or {}
             if matches(candidate.get("candidate_id"), strategy.get("id")):
                 results.append(
                     {
