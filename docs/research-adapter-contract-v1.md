@@ -1,8 +1,9 @@
 # Research Adapter Contract V1
 
-RF-01.1 deliverable. This is the frozen one-way contract from an offline mature research
-framework into EA, as required by RF-00 §8 row RF-01.1 ("a written contract for seams B and C: the
-parameter-vector schema, the `strategy.py` template, and the emit rules").
+RF-01.1 deliverable, 2026-09-29. Scope: based on `d2077d8` (the RF-00 branch head; RF-00 is PR
+#249, open at the time of writing). This is the frozen one-way contract from an offline mature
+research framework into EA, as required by RF-00 §8 row RF-01.1 ("a written contract for seams B and
+C: the parameter-vector schema, the `strategy.py` template, and the emit rules").
 
 This document is **normative but inert**. It defines interfaces only. It adds no production code,
 no dependency, no runtime change, no Package V4 implementation, and no architecture refactor. Every
@@ -22,31 +23,40 @@ description of an already-registered capture — never a new data path.
 | Field | Type / source | Rule |
 |---|---|---|
 | `capture_path` | absolute path to a registered capture | MUST resolve to a regular file; MUST NOT be a symlink (`read_regular`, `src/ea/strategy/package.py:220`) |
+| `dataset_id` | filename, `[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.csv` | **Catalog/reference identity only.** MUST NOT be used as evidence of *which* data was used (ADR 0037:24). |
+| `source_bytes_sha256` | hex SHA-256 over the validated original bytes | Source provenance: which bytes were read (ADR 0037:24). |
 | `profile` | `"ea-phase1-ohlcv-csv-v1"` | MUST equal `PHASE1_HISTORICAL_MARKET_PROFILE` (`src/ea/runtime/historical.py:51`) |
-| `data_sha256` | hex SHA-256 | The immutable source fingerprint. Computed by EA, never by research. |
+| `data_sha256` | hex SHA-256, domain `b"ea.market-data.v1\0"` | The immutable **economic** fingerprint, folded over per-event length-prefixed canonical records plus a final record count (`src/ea/data/fingerprint.py:15,19`). Computed by EA, never by research. |
 | `record_count` | int | With `data_sha256`, the whole of EA's `_FingerprintInput` (`src/ea/product/scenario.py:99`) |
 | `instrument` | `venue`, `symbol`, `specification_id`, `specification_set_id`, `settlement_currency`, `price_quantum`, `quantity_quantum`, `currency_quantum`, `contract_multiplier` | Exactly **one** instrument (ADR 0037); this is the full `_InstrumentInput` (`src/ea/product/scenario.py:111`) |
-| `window` | `start_utc`, `end_utc` | Exactly `_DataInput.start_utc` / `.end_utc` (`src/ea/product/scenario.py:104`); the replay window is a property of the capture, not of the research run |
+| `window` | `start_utc`, `end_utc` | Exactly `_DataInput.start_utc` / `.end_utc` (`src/ea/product/scenario.py:104`); canonically formatted `%Y-%m-%dT%H:%M:%S.%fZ` or rejected as "must be canonical UTC" (`scenario.py:415-421`). The replay window is a property of the capture, not of the research run. |
 
 Rules:
 
 1. Research MUST treat `ResearchInput` as read-only. There is **no write-back**: research MUST NOT
    write to EA capture storage, the workspace, the runtime root, or any EA durable state.
-2. Identity is the fingerprint. Two `ResearchInput`s with different `data_sha256` or
-   `record_count` are different inputs; a re-derived capture with the same path is a **different**
-   input and MUST NOT be treated as the same evidence.
-3. Research MUST NOT invent instrument fields, quanta, or a settlement currency. If the capture's
+2. Capture identity has **three layers with different weight** (ADR 0037:24-26): `dataset_id` is a
+   catalog/reference name, `source_bytes_sha256` is source provenance, and only
+   `data_sha256` + `record_count` + the replay window are **economic** identity. Research MUST cite
+   the economic identity when recording which data it used, and MUST NOT cite `dataset_id` alone.
+3. Identity is the fingerprint. Two `ResearchInput`s with different `data_sha256` or
+   `record_count` are different inputs; a re-derived capture at the same path is a **different**
+   input, because the path and `dataset_id` are unchanged while the bytes are not. Research MUST
+   NOT treat it as the same evidence.
+4. Research MUST NOT invent instrument fields, quanta, or a settlement currency. If the capture's
    instrument does not match a scenario's `_InstrumentInput`, the emitted artifact is invalid and
    EA will reject it — research must not "repair" it.
-4. `ResearchInput` carries **no** economic authority: no fills, cash, fees, position, P&L, or
+5. `ResearchInput` carries **no** economic authority: no fills, cash, fees, position, P&L, or
    admission state. Those remain EA's alone (RF-00 §3 KEEP).
-5. The research-side *materialization* of this input (a CSV or panel form) is RF-01.2's business.
+6. The research-side *materialization* of this input (a CSV or panel form) is RF-01.2's business.
    That form is derived, disposable, and never a source of truth — EA's capture and fingerprint
    remain canonical (RF-00 §10, Qlib `.bin` lock-in risk).
 
 ## 2. OUTPUT CONTRACT
 
-Seams B and C. The pipeline is exactly:
+Seams B and C. The component that spans them is the **`StrategyEmitter`** — the same thing RF-00 §8
+calls the "Package emitter" (slice RF-01.4). It is the only research-side component that writes an
+EA artifact. Its pipeline is exactly:
 
 ```
 ResearchCandidateSpec
@@ -55,6 +65,10 @@ strategy.py + manifest.json
       ↓
 ordinary .eastrategy
 ```
+
+The `StrategyEmitter` has no EA-side counterpart and no EA authority: it produces bytes, and EA
+alone decides whether those bytes are a valid package. §2.1 fixes its input, §2.2–§2.3 its emitted
+content, §2.4 the only permitted way to produce the container.
 
 ### 2.1 ResearchCandidateSpec
 
@@ -260,6 +274,17 @@ A framework's metric, backtest, or ranking MUST NOT be cited as evidence for any
 behaviour — not in a report, not in a Candidate record, not in a PR body. The framework's numbers
 describe the framework's own model of the market; EA's describe what EA did.
 
+The boundary is enforced, not merely stated: a Candidate cannot exist without **two independent
+succeeded EA jobs** — a source run and a chronological holdout — each carrying persisted report and
+path evidence (`candidate requires completed snapshot and path evidence`,
+`src/ea/web/candidate_evidence.py:71`; `candidate requires independent evidence`,
+`src/ea/web/candidates.py:127`). The evidence record per job is exactly `job_id`, `run_id`,
+`input_sha256`, `scenario_sha256`, `data_sha256`, `record_count`, `report_sha256`,
+`equity_path_sha256`, `code_sha256`, `distribution` (`candidate_evidence.py:146-156`). There is no
+field in that set a research framework can populate. The only transition that needs this evidence
+is creation, into `EVALUATED`; the later `ACCEPTED`/`REJECTED` decision is a human one and requires
+a reason, not a new EA run (`src/ea/web/candidates.py:188`).
+
 ### 5.2 Selection boundary — research proposes, it never disposes
 
 Research tooling MAY propose and search parameter sets **outside** the delivered EA product
@@ -309,6 +334,7 @@ MUST NOT invent new error surfaces.
 | Invalid parameter vector at run time | generated `validate_parameters` | `ValueError` | Scenario validation fails; the run does not start. |
 | Ambiguous / open action object, float quantity | `decode_action` | `ValueError` | The run fails closed. |
 | Capture fingerprint mismatch | EA scenario validation | scenario invalid | Research MUST fail, not re-derive a "matching" fingerprint. |
+| Unknown, missing or mistyped scenario field; duplicate YAML key; non-canonical UTC | `_StrictModel` (`extra="forbid"`, `frozen=True`) and the unique-key loader | `BacktestScenarioError`: `unknown field '<dot.path>'`, `invalid field '...'`, or `must be canonical UTC` (`src/ea/product/scenario.py:96,380,421`) | The run does not start. Research MUST NOT rewrite the scenario to guess intent. |
 
 Rules:
 
@@ -381,12 +407,14 @@ evidence.
 **Invariants.** Runs strictly offline; imports no EA economic module (§4); terminates at "N
 parameter sets with EA evidence" and no further (§5.2); MUST NOT rank, select, promote, or
 auto-accept — ordering, if any, MUST be presented as unscored enumeration, not as a
-recommendation (ADR 0032:58, ADR 0034:48); must respect the bounded-combination bound of ADR 0032.
+recommendation (ADR 0032:58, ADR 0034:48); must respect ADR 0032's bound that a batch binds one
+registered strategy/scenario and contains **2–10 member jobs** (ADR 0032:24).
 
-### RF-01.4 — Package emitter
+### RF-01.4 — `StrategyEmitter` (package emitter)
 
 **Interface.** Given one `ResearchCandidateSpec`, emit a canonical `.eastrategy` via `pack_strategy`
-(§2.4) and a provenance record (§7).
+(§2.4) and a provenance record (§7). This slice is the concrete implementation of the
+`StrategyEmitter` defined in §2.
 
 **Invariants.** Byte-exact canonical manifest via EA's packer only; exactly two members; never
 overwrite; fail closed with no artifact on any error (§6); the generated `strategy.py` recomputes
@@ -414,6 +442,8 @@ RF-01.1 (this contract)
 
 ## 10. Deliverable checklist
 
+Acceptance sections:
+
 | Required | Where |
 |---|---|
 | INPUT CONTRACT | §1 |
@@ -425,3 +455,16 @@ RF-01.1 (this contract)
 | PROVENANCE CONTRACT | §7 |
 | RF-01.2 / 1.3 / 1.4 interfaces | §8 |
 | Future model boundary deferred | §3.4 |
+
+The eight defined objects, and where each is fixed:
+
+| Defined object | Where |
+|---|---|
+| `ResearchInput` — capture identity, fingerprint, instrument, time range, no write-back | §1 |
+| `ResearchCandidateSpec` — rule identity, canonical parameters, provenance, framework metadata, source identity, no execution-result authority | §2.1 |
+| `StrategyEmitter` — `ResearchCandidateSpec` → `strategy.py` + manifest → ordinary `.eastrategy` | §2, §2.4, §8 |
+| Numeric boundary — may cross / must be recomputed / must never enter | §3 |
+| Dependency boundary — where research dependencies live, and the four they must not enter | §4 |
+| Evaluation boundary — framework result is never EA evidence | §5.1 |
+| Selection boundary — may propose, may never accept or authorize | §5.2 |
+| Future model boundary — explicitly deferred, no Package V4 implementation invented | §3.4 |
