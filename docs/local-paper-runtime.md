@@ -89,16 +89,29 @@ rather than assuming it:
   second, unsupervised Paper process against the same Candidate, with its own attempt directory,
   writer lease and audit journal, and a later `ea-runtime stop` would aim at the attempt the
   agent recorded rather than at the manual process. `ea-runtime uninstall` unloads the agent and
-  frees the manual path again.
-- `ea-runtime reload` refuses while the run is live. Reload re-renders and then boots the label
-  out and back in, and `RunAtLoad` starts a fresh attempt; because `start` kickstarts the
-  already-loaded definition, accepting a new config is `stop`, `reload`, then `start`.
+  frees the manual path again. That check fails **closed**: if launchd cannot be reached at all
+  (an `ssh` session with no GUI domain, say), the run is refused rather than read as "not loaded",
+  because "I cannot tell" must not be the answer that mints a second writer. Use the product CLI
+  `ea paper start` for a hand-run.
+- `ea-runtime reload` and `ea-runtime install` refuse while the run is live. Both re-render and
+  then boot the label out and back in, and `RunAtLoad` starts a fresh attempt; because `start`
+  kickstarts the already-loaded definition, accepting a new config is `stop`, then `reload` or
+  `install`, then `start`.
 - `EVENT_LIMIT` must be empty. `ea paper start` ends a bounded run with a non-zero
   source-exhaustion exit, and `KeepAlive{SuccessfulExit=false}` restarts an unsuccessful exit by
   design, so a bounded supervised profile would restart forever, minting one attempt directory,
-  writer lease and audit journal per restart. `install`, `reload` and `start` refuse a non-empty
-  value before anything is rendered or armed. A bounded run belongs on the direct
+  writer lease and audit journal per restart. `install`, `reload`, `start` and `run` refuse a
+  non-empty value before anything is written, rendered or armed — `install` validates the config
+  you hand it before it copies it over the pinned one. A bounded run belongs on the direct
   `ea paper start --event-limit N` CLI, which no supervisor restarts.
+
+  `stop`, `status`, `log` and `uninstall` deliberately keep working on a config that carries an
+  `EVENT_LIMIT`, so a machine pinned to a bounded config can still be recovered.
+
+Upgrading an already-installed host is `ea-runtime install` from the new checkout: it re-copies
+the runner, re-renders both plists and reloads both labels. Replacing only
+`~/EA/supervisor/ea-runtime` by hand does **not** re-render the plist, and an old plist's argv
+would then be refused by the new runner on every launch.
 
 ## Why this distinguishes a crash from an intentional stop
 

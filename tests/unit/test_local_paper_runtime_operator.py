@@ -83,6 +83,13 @@ def _stub_launchctl(directory: Path) -> Path:
         'case "$1" in\n'
         "  print)\n"
         "    target=$2; label=${target##*/}\n"
+        "    # A dotless target is the gui/<uid> domain itself, not a job: launchd\n"
+        "    # answers for a domain it owns even when no job is loaded, and the\n"
+        "    # runner uses exactly that to tell 'not loaded' from 'cannot ask'.\n"
+        "    case $label in\n"
+        "      *.*) ;;\n"
+        '      *) printf "%s = {\\n}\\n" "$target"; exit 0 ;;\n'
+        "    esac\n"
         '    [ -f "$state/$label.loaded" ] || exit 1\n'
         '    printf "%s = {\\n" "$target"\n'
         '    printf "\\tstate = %s\\n" "$(cat "$state/$label.state")"\n'
@@ -193,6 +200,18 @@ class Harness:
 
     def mark_running(self, label: str = PAPER_LABEL) -> None:
         (self.launchd_state / f"{label}.state").write_text("running\n", encoding="utf-8")
+
+    def pin_bounded_config(self, value: str = "40") -> None:
+        """Pin a bounded profile the way an older install or a hand-edit would.
+
+        The worker commands read the *pinned* config, so this is the only way to
+        put a host into the state those guards are about.
+        """
+        path = self.supervisor / "run-config.env"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("EVENT_LIMIT=\n", f"EVENT_LIMIT={value}\n"),
+            encoding="utf-8",
+        )
 
     def install(self, **overrides: str) -> subprocess.CompletedProcess[str]:
         return self.run("install", "--config", str(self.config(**overrides)))
@@ -320,14 +339,60 @@ def test_a_bounded_profile_is_refused_before_it_can_become_a_restart_loop(
     directory, writer lease and audit journal on every restart, forever. The
     profile is refused instead of being given a cleverer restart policy.
     """
-    bounded = harness.config(EVENT_LIMIT="40")
+    # A good install first, so the refusal has something it could have damaged.
+    harness.install()
+    pinned = harness.supervisor / "run-config.env"
+    pinned_before = pinned.read_bytes()
+    plist_before = (harness.agents / f"{PAPER_LABEL}.plist").read_bytes()
+    log = harness.home_ea / "logs" / "paper.err.log"
+    log.write_text("previous run\n", encoding="utf-8")
+
+    bounded = harness.root / "bounded-config.env"
+    bounded.write_text(
+        pinned_before.decode("utf-8").replace("EVENT_LIMIT=\n", "EVENT_LIMIT=40\n"),
+        encoding="utf-8",
+    )
     completed = harness.run("install", "--config", str(bounded), check=False)
     assert completed.returncode != 0
     assert "EVENT_LIMIT must be empty" in completed.stderr
-    # Refused before anything was rendered, so no unit exists to restart.
-    assert not (harness.agents / f"{PAPER_LABEL}.plist").exists()
-    assert harness.run("run", check=False).returncode != 0
+    # Refused before ANY mutation: install copies the config over the pinned one
+    # and truncates the logs after this point, so a refusal any later would
+    # leave an already-installed host pinned to a config that can never launch.
+    assert (harness.agents / f"{PAPER_LABEL}.plist").read_bytes() == plist_before
+    assert pinned.read_bytes() == pinned_before
+    assert log.read_text(encoding="utf-8") == "previous run\n"
     assert harness.argv() == []
+
+
+@pytest.mark.parametrize("command", [("install",), ("reload",), ("start",), ("run",)])
+def test_every_arming_path_refuses_a_pinned_bounded_profile(
+    harness: Harness, command: tuple[str, ...]
+) -> None:
+    """A host can already be pinned to a bounded profile: an older install wrote
+    one, or an operator hand-edited the file. Every path that would render, arm
+    or launch it must refuse, not just the one that reads a --config argument."""
+    harness.install()
+    harness.pin_bounded_config()
+    refused = harness.run(*command, check=False)
+    assert refused.returncode != 0
+    assert "EVENT_LIMIT must be empty" in refused.stderr
+    assert harness.argv() == []
+
+
+@pytest.mark.parametrize("command", [("log",), ("uninstall",), ("status",), ("stop",)])
+def test_a_pinned_bounded_profile_never_blocks_recovery(
+    harness: Harness, command: tuple[str, ...]
+) -> None:
+    """The other half of item 1: refusing to ARM a bounded profile must not
+    strand a machine already pinned to one. `log` and `uninstall` work outright;
+    `status` and `stop` are never refused for the bound, though on a host with
+    no attempt yet they may still fail for their own reasons."""
+    harness.install()
+    harness.pin_bounded_config()
+    completed = harness.run(*command, check=False)
+    assert "EVENT_LIMIT must be empty" not in completed.stderr
+    if command in (("log",), ("uninstall",)):
+        assert completed.returncode == 0, completed.stderr
 
 
 def test_a_manual_run_is_refused_while_the_launch_agent_is_loaded(harness: Harness) -> None:
@@ -355,6 +420,29 @@ def test_a_manual_run_is_refused_while_the_launch_agent_is_loaded(harness: Harne
     assert harness.run("run", check=False).returncode == 0
 
 
+def test_a_manual_run_fails_closed_when_launchd_cannot_be_reached(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A negative answer is only worth something if launchd is answering.
+
+    Over a non-GUI session (ssh, or a broken EA_LAUNCHCTL) every `launchctl
+    print` fails, including the one for a label that IS loaded. Reading that as
+    "not loaded" would let a hand-run become the second writer the guard exists
+    to prevent, so "cannot tell" must refuse rather than allow.
+    """
+    harness.install()
+    monkeypatch.setenv("EA_LAUNCHCTL", "/nonexistent-launchctl")
+    refused = harness.run("run", check=False)
+    assert refused.returncode != 0
+    assert "launchd is not answering" in refused.stderr
+    assert harness.argv() == []
+
+    # The supervised path is unaffected: launchd runs the job in its own GUI
+    # domain, and the flag is what tells the runner it came from the plist.
+    assert harness.run("run", "--supervised", check=False).returncode == 0
+    assert harness.argv()[0].startswith("paper start ")
+
+
 def test_reload_refuses_to_restart_a_live_run(harness: Harness) -> None:
     """#243 item 3.
 
@@ -368,13 +456,34 @@ def test_reload_refuses_to_restart_a_live_run(harness: Harness) -> None:
     refused = harness.run("reload", check=False, armed=True)
     assert refused.returncode != 0
     assert "reload would restart it" in refused.stderr
+    # Refused before it wrote anything, so the live run's definition is intact.
+    assert harness.plist(PAPER_LABEL)["ThrottleInterval"] == 10
 
-    # A stopped profile may accept a re-render, and stays stopped afterwards.
+    # A stopped profile may accept a re-render, and the new render really lands.
     (harness.launchd_state / f"{PAPER_LABEL}.state").write_text("not running\n", encoding="utf-8")
+    harness.config(THROTTLE_INTERVAL_SECONDS="30")
     assert harness.run("reload", check=False, armed=True).returncode == 0
-    assert (harness.launchd_state / f"{PAPER_LABEL}.state").read_text(encoding="utf-8").strip() == (
-        "not running"
+    assert harness.plist(PAPER_LABEL)["ThrottleInterval"] == 30
+    assert (harness.launchd_state / f"{PAPER_LABEL}.loaded").exists()
+
+
+def test_install_refuses_to_restart_a_live_run(harness: Harness) -> None:
+    """`install` is the same door as `reload`: it re-renders and then boots the
+    label out and back in, so RunAtLoad would silently start a fresh attempt on
+    a live run. The refusal covers it for the same reason."""
+    harness.run("install", "--config", str(harness.config()), armed=True)
+    harness.mark_running()
+    refused = harness.run(
+        "install",
+        "--config",
+        str(harness.config(THROTTLE_INTERVAL_SECONDS="30")),
+        check=False,
+        armed=True,
     )
+    assert refused.returncode != 0
+    assert "install would restart it" in refused.stderr
+    # Refused before it re-rendered: the live definition still has the old value.
+    assert harness.plist(PAPER_LABEL)["ThrottleInterval"] == 10
 
 
 @pytest.mark.parametrize(

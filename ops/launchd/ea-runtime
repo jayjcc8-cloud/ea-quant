@@ -76,6 +76,7 @@ BACKUP_KEEP BACKUP_INTERVAL_SECONDS THROTTLE_INTERVAL_SECONDS'
 # NAME=literal assignment, so a stray shell fragment in it can never execute and
 # every value is exactly the bytes the operator wrote.
 validate_config_file() {
+    file=${1:-$CONFIG}
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             '' | '#'*) continue ;;
@@ -91,7 +92,7 @@ validate_config_file() {
             *[!A-Za-z0-9_./,:@+-]*)
                 die "$key must be one plain literal without spaces or shell characters" ;;
         esac
-    done < "$CONFIG"
+    done < "$file"
 }
 
 load_config() {
@@ -180,6 +181,15 @@ bootstrapped() {
     "$LAUNCHCTL" print "$(label_target "$1")" >/dev/null 2>&1
 }
 
+# A negative answer is only worth anything if launchd is answering at all. Over a
+# non-GUI session -- ssh, a launchd-less container, a broken LAUNCHCTL -- every
+# `launchctl print` fails, including the one for a label that IS loaded. Reading
+# that as "the agent is not loaded" would let a hand-run become a second writer,
+# so the manual path asks this first and refuses when launchd cannot be reached.
+launchd_readable() {
+    "$LAUNCHCTL" print "$(domain_target)" >/dev/null 2>&1
+}
+
 job_field() {
     "$LAUNCHCTL" print "$(label_target "$1")" 2>/dev/null |
         sed -n "s/^[[:space:]]*$2 = //p" | head -n 1
@@ -256,6 +266,26 @@ cmd_install() {
             die "no config at $config; copy $SELF_DIR/run-config.example there and edit it"
     fi
     [ -f "$config" ] || die "config $config does not exist"
+
+    # Both refusals happen BEFORE this command mutates anything. Below, install
+    # copies $config over the pinned config, truncates the four log files and
+    # only then re-renders -- so a refusal any later would leave the machine
+    # pinned to a config that can never launch, which an already-loaded agent
+    # would then fail on at every restart. Validating the GIVEN file here, not
+    # the pinned one, is what makes the refusal precede the copy.
+    validate_config_file "$config"
+    if ! ( . "$config"; require_unbounded_profile ); then
+        exit 2
+    fi
+
+    # install re-renders and then boots the label out and back in, and RunAtLoad
+    # starts a fresh attempt. On a live run that is a silent restart, so it is
+    # refused for the same reason `reload` is: accepting a new config is
+    # stop, install, then start.
+    if [ -z "${EA_RUNTIME_NO_BOOTSTRAP:-}" ] &&
+        [ "$(job_field "$PAPER_LABEL" state)" = "running" ]; then
+        die "$PAPER_LABEL is running; install would restart it as a fresh attempt. Run 'ea-runtime stop' first"
+    fi
 
     mkdir -p "$SUPERVISOR_DIR/templates" "$STATE_DIR" "$LOG_DIR" "$AGENTS_DIR"
     chmod 700 "$HOME_EA" "$SUPERVISOR_DIR" "$STATE_DIR" "$LOG_DIR"
@@ -413,6 +443,10 @@ cmd_run() {
         '') ;;
         *) die "usage: ea-runtime run [--supervised]" ;;
     esac
+    case "${2:-}" in
+        '') ;;
+        *) die "usage: ea-runtime run [--supervised]" ;;
+    esac
     load_config
     require_unbounded_profile
     # The loaded LaunchAgent is the single writer. A hand-run `ea-runtime run`
@@ -422,8 +456,18 @@ cmd_run() {
     # process would keep trading, unobserved, with its own writer lease. Only
     # the rendered plist passes --supervised, so a run without it is refused
     # while the agent is loaded; `ea-runtime uninstall` frees the manual path.
-    if [ -z "$supervised" ] && bootstrapped "$PAPER_LABEL"; then
-        die "$PAPER_LABEL is loaded; refusing an unsupervised run. Use 'ea-runtime start', or 'ea-runtime uninstall' to free the manual path"
+    #
+    # This guard fails CLOSED, unlike a simple "is it loaded?" test: an
+    # unreadable launchd is refused rather than read as "not loaded", because
+    # the whole point is that a second writer must not be mintable by accident.
+    # A hand-run for inspection uses the product CLI, `ea paper start`.
+    if [ -z "$supervised" ]; then
+        if bootstrapped "$PAPER_LABEL"; then
+            die "$PAPER_LABEL is loaded; refusing an unsupervised run. Use 'ea-runtime start', or 'ea-runtime uninstall' to free the manual path"
+        fi
+        if ! launchd_readable; then
+            die "cannot confirm that $PAPER_LABEL is unloaded (launchd is not answering); refusing an unsupervised run. Use 'ea paper start' for a hand-run"
+        fi
     fi
     mkdir -p "$STATE_DIR"
     # A crash replacement must never collide with the attempt it replaces, and
