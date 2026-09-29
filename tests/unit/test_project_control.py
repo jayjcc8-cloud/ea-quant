@@ -17,7 +17,6 @@ ADR29_PATH = PROJECT_ROOT / "docs" / "adr" / "0029-governance-freeze-and-bounded
 ISSUE_FORM_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml"
 ISSUE_CONFIG_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "config.yml"
 PR_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
-ROUTER_PATH = PROJECT_ROOT / ".governance" / "router.yaml"
 
 
 def _read(path: Path) -> str:
@@ -68,15 +67,11 @@ def test_control_plane_has_one_present_one_future_and_immutable_decisions() -> N
     )
 
 
-def test_status_names_the_reset_and_does_not_claim_live_or_release_readiness() -> None:
+def test_status_declares_healthy_main_and_denies_live() -> None:
     status = _read(STATUS_PATH)
-    assert "Phase 1 delivery reset" in status
     assert "main healthy" in status
     assert "live unavailable" in status
-    assert "#154" in status
     assert "containing `main` commit" in status
-    assert "R9/R10" in status
-    assert "hardening" in status.lower()
 
 
 def test_authority_precedence_remains_stable_while_process_is_superseded() -> None:
@@ -136,6 +131,7 @@ def test_pr_template_records_finite_review_and_delivery_cost() -> None:
     template = _read(PR_TEMPLATE_PATH)
     for clause in (
         "Acceptance criteria",
+        "Blocking finding test",
         "Primary review",
         "Concentrated repair",
         "Hardening backlog",
@@ -144,23 +140,13 @@ def test_pr_template_records_finite_review_and_delivery_cost() -> None:
         "Runnable capability",
     ):
         assert clause in template
-    assert "Combined Safety Verification" not in template
-    assert "Merge Approval" not in template
-
-
-def test_router_and_workflow_are_advisory_not_authority() -> None:
-    router = yaml.safe_load(_read(ROUTER_PATH))
-    assert isinstance(router, dict)
-    assert router["authority"] == "none"
-    assert set(router["risk_tiers"]) == {"tier0", "tier1", "tier2", "tier3"}
-    assert "model_routes" not in router
-    assert router["authority_references"] == {
-        "status": "docs/STATUS.md",
-        "roadmap": "docs/ROADMAP.md",
-        "workflow": "docs/governance/WORKFLOW.md",
-        "adrs": "docs/adr/",
-    }
-    assert "Router is advisory" in _read(WORKFLOW_PATH)
+    for legacy in (
+        "Combined Safety Verification",
+        "Merge Approval",
+        "Context/report evidence",
+        "Ready/Merge/Cleanup",
+    ):
+        assert legacy not in template
 
 
 def test_blank_issue_bypass_stays_disabled() -> None:

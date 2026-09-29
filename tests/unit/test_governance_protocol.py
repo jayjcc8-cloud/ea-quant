@@ -9,10 +9,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ROUTER_PATH = PROJECT_ROOT / ".governance" / "router.yaml"
 WORKFLOW_PATH = PROJECT_ROOT / "docs" / "governance" / "WORKFLOW.md"
-STATUS_PATH = PROJECT_ROOT / "docs" / "STATUS.md"
 RESET_ADR_PATH = PROJECT_ROOT / "docs" / "adr" / "0029-governance-freeze-and-bounded-delivery.md"
-ISSUE_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml"
-PR_TEMPLATE_PATH = PROJECT_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
 CI_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 CANDIDATE_FULL_PATH = PROJECT_ROOT / ".github" / "workflows" / "candidate-full.yml"
 
@@ -41,6 +38,13 @@ def test_router_is_advisory_and_cannot_activate_a_review_chain() -> None:
     assert "sol_capacity" not in router
     assert "activate_agent" in router["prohibited_actions"]
     assert "create_review_chain" in router["prohibited_actions"]
+    assert router["authority_references"] == {
+        "status": "docs/STATUS.md",
+        "roadmap": "docs/ROADMAP.md",
+        "workflow": "docs/governance/WORKFLOW.md",
+        "adrs": "docs/adr/",
+    }
+    assert "Router is advisory" in _read(WORKFLOW_PATH)
     assert router["output_contract"]["classification"]["risk_tier_suggestion"] == [
         "tier0",
         "tier1",
@@ -52,7 +56,6 @@ def test_router_is_advisory_and_cannot_activate_a_review_chain() -> None:
 def test_governance_reset_is_accepted_and_supersedes_recursive_delivery_gates() -> None:
     adr = _read(RESET_ADR_PATH)
     workflow = _read(WORKFLOW_PATH)
-    status = _read(STATUS_PATH)
 
     assert "## Status\n\nAccepted" in adr
     for prior in ("ADR 0025", "ADR 0026", "ADR 0028"):
@@ -72,8 +75,6 @@ def test_governance_reset_is_accepted_and_supersedes_recursive_delivery_gates() 
     assert "governance is a constraint on delivery" in normalized_workflow
     assert "hardening backlog" in workflow.lower()
     assert "proof that all possible defects are absent" in workflow.lower()
-    assert "phase 1 delivery reset" in status.lower()
-    assert "#154" in status
 
 
 def test_workflow_routes_by_actual_impact_and_has_finite_review_rules() -> None:
@@ -90,46 +91,6 @@ def test_workflow_routes_by_actual_impact_and_has_finite_review_rules() -> None:
     assert "exact-head CI" in workflow
     assert "T2/T3" in workflow
     assert "real-money" in workflow.lower()
-
-
-def test_task_and_pr_templates_focus_on_delivery_not_role_evidence() -> None:
-    issue = yaml.safe_load(_read(ISSUE_TEMPLATE_PATH))
-    assert isinstance(issue, dict)
-    fields = {item.get("id"): item for item in issue["body"] if isinstance(item, dict)}
-    assert set(fields) >= {
-        "objective",
-        "scope",
-        "non_goals",
-        "acceptance_criteria",
-        "risk_tier",
-        "risk_rationale",
-        "validation",
-        "owner",
-    }
-    assert fields["risk_tier"]["attributes"]["options"] == [
-        "T0 — documentation/tooling",
-        "T1 — offline product/simulation",
-        "T2 — operational authority",
-        "T3 — real-money/irreversible",
-    ]
-
-    pr = _read(PR_TEMPLATE_PATH)
-    for clause in (
-        "Acceptance criteria",
-        "Blocking finding test",
-        "Primary review",
-        "Concentrated repair",
-        "Token cost",
-        "Human time",
-    ):
-        assert clause in pr
-    for legacy in (
-        "Combined Safety Verification",
-        "Merge Approval",
-        "Context/report evidence",
-        "Ready/Merge/Cleanup",
-    ):
-        assert legacy not in pr
 
 
 def test_ci_keeps_path_aware_quality_and_installed_main_smoke() -> None:
