@@ -102,12 +102,23 @@ _SUCCESS_ASSESSMENT = (
 )
 
 
-def _stub_claude(tmp_path: Path, *, body: str, exit_code: int = 0, capture: bool = False) -> Path:
-    """A stand-in for the real `claude` CLI: no tools, just the observer contract."""
+def _stub_claude(
+    tmp_path: Path, *, body: str, exit_code: int = 0, capture: bool = False, record: bool = False
+) -> Path:
+    """A stand-in for the real `claude` CLI: no tools, just the observer contract.
+
+    With ``record`` the stub writes its own argv and working directory to the
+    ``OBSERVER_CAPTURE`` file (one line per argument, then ``cwd=<dir>``), so a
+    test can assert exactly how the observer invokes Claude.
+    """
     script = tmp_path / "claude-stub"
     lines = ["#!/bin/sh", "cat >/dev/null"]
     if capture:
         lines[1] = 'cat >"$OBSERVER_CAPTURE"'
+    if record:
+        lines.append(
+            '{ printf \'%s\\n\' "$@"; printf \'cwd=%s\\n\' "$(pwd)"; } >>"$OBSERVER_CAPTURE"'
+        )
     if exit_code != 0:
         lines.append("printf '%s\\n' 'stub failure' >&2")
         lines.append(f"exit {exit_code}")
@@ -274,6 +285,53 @@ def test_end_to_end_claude_receives_only_the_intended_evidence(
     assert received["alert_stream"]["available"] is True
     assert received["alert_stream"]["host_id"] == "observer-test-host"
     assert received["backup"]["available"] is False
+
+
+def test_claude_child_is_mechanically_tool_free(
+    attempt: tuple[LocalResultStore, Path, RunBinding],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-tools boundary is the invocation itself, not prompt prose.
+
+    The recorded argv must disable every tool (``--tools ""``), refuse the
+    inherited settings files and MCP servers (``--restricted``,
+    ``--strict-mcp-config``), and pin the working directory to "/"; no evidence
+    content may ever appear in the argv.
+    """
+    _, run_dir, binding = attempt
+    writer = PaperSessionWriter(run_dir, binding)
+    writer.publish({"state": "running"})
+    (run_dir / "outputs" / "operational.jsonl").write_text(
+        '{"schema":"ea.operational-log.v1","event":"injected evidence marker"}\n'
+    )
+    capture = tmp_path / "invocation-record.txt"
+    monkeypatch.setenv("OBSERVER_CAPTURE", str(capture))
+
+    document = run_observer(
+        run_dir=run_dir,
+        claude_bin=_stub_claude(tmp_path, body=_SUCCESS_ASSESSMENT, record=True),
+        timeout_seconds=10.0,
+        observed_at=OBSERVED_AT,
+    )
+
+    assert document["observer_status"] == "available"
+    lines = capture.read_text().splitlines()
+    # One line per argument (the empty --tools value is the empty line), then
+    # the recorded working directory.
+    assert lines[-1] == "cwd=/"
+    assert lines[:-1] == [
+        "-p",
+        "--output-format",
+        "json",
+        "--max-turns",
+        "1",
+        "--tools",
+        "",
+        "--restricted",
+        "--strict-mcp-config",
+    ]
+    assert "injected evidence marker" not in capture.read_text()
 
 
 def test_evidence_builder_rejects_documents_that_are_not_the_read_models(
@@ -534,6 +592,10 @@ def test_observer_module_imports_no_authority_and_no_mutation_primitive() -> Non
         assert forbidden not in source, f"observer source must never contain {forbidden!r}"
     # The only subprocess is the single tool-less claude turn, argv as a list.
     assert source.count("subprocess.run(") == 1
+    # The no-tools boundary is enforced by the fixed argv and pinned cwd, in
+    # code -- never left to an instruction the model could disregard.
+    for enforcement in ("--tools", "--restricted", "--strict-mcp-config", "cwd=_CLAUDE_CWD"):
+        assert enforcement in source, f"observer source must enforce {enforcement!r}"
     # The only open call is the read-only descriptor open.
     assert "os.open(" in source
     assert "open(" not in source.replace("os.open(", "")

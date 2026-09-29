@@ -23,8 +23,11 @@ and a bounded tail of the attempt's operational log. The evidence document is a
 closed schema built by a pure function of those already-read documents, so the
 only thing Claude ever sees is the intended evidence.
 
-Claude runs headless (``claude -p``), with no tools, exactly one turn, a fixed
-system prompt and a hard wall-clock and output bound. When Claude is missing,
+Claude runs headless (``claude -p``) with the tool surface disabled by the argv
+itself -- ``--tools "" --restricted --strict-mcp-config``, a pinned working
+directory and a fixed system prompt -- plus a hard wall-clock and output bound.
+The no-tools boundary is enforced by the invocation, not by an instruction the
+model could disregard. When Claude is missing,
 unauthenticated, times out, fails or returns malformed output, the observation
 still succeeds: the returned document reports ``observer_status: unavailable``
 with a bounded reason, and the Paper runtime itself is never reported as failed
@@ -85,6 +88,29 @@ _MAX_OPERATIONAL_LOG_LINE_BYTES = 512
 _MAX_REASON_BYTES = 512
 
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+# The child's fixed argv tail. ``--tools ""`` disables every built-in tool,
+# ``--restricted`` removes the code-running tools, WebFetch and the inherited
+# user/project/local settings files (so no permissions allowlist can pre-approve
+# anything), and ``--strict-mcp-config`` skips MCP servers entirely: the child
+# receives no tool definitions at all, so tool-call-shaped output is inert text.
+_CLAUDE_ARGV_TAIL = (
+    "-p",
+    "--output-format",
+    "json",
+    "--max-turns",
+    "1",
+    "--tools",
+    "",
+    "--restricted",
+    "--strict-mcp-config",
+)
+
+# The child's working directory. "/" carries no project CLAUDE.md or settings,
+# so the prompt context is exactly what this module sends. The caller's
+# environment is still inherited (that is where Claude authentication lives),
+# but with no tools and no settings files nothing in it can grant action.
+_CLAUDE_CWD = "/"
 
 _STATUS_KEYS = frozenset({"schema", "run_id", "manifest_sha256", "state", "lease_held"})
 _ASSESSMENT_KEYS = frozenset(
@@ -556,7 +582,9 @@ You cannot start, stop, restart, place orders, change limits, repair state, \
 restore backups or change any verdict.
 8. If the evidence is missing a source (available: false), say so rather than \
 assuming it is healthy. Do not report the Paper runtime as failed merely \
-because a source or the observer is limited."""
+because a source or the observer is limited.
+9. Never emit tool-call or function-call syntax of any kind: you have no tools \
+and such text is dead output. Answer from the evidence document alone."""
 
 
 def build_observer_prompt(evidence: dict[str, Any]) -> str:
@@ -600,11 +628,13 @@ def invoke_claude(
     """Run one headless, tool-less Claude turn and return its raw result text.
 
     The argv is a fixed list with no shell, so nothing in the evidence can
-    become a command. The child runs with the caller's environment (that is
-    where Claude authentication lives) and gets exactly one turn, no tools, and
-    a hard wall-clock and output bound. Every failure mode -- missing binary,
-    authentication failure, non-zero exit, timeout, oversized output -- is a
-    bounded :class:`PaperObserverUnavailable`, never a Paper failure.
+    become a command, and the tool surface is disabled by the argv itself --
+    ``--tools ""`` plus ``--restricted`` plus ``--strict-mcp-config`` -- not by
+    any instruction the model could disregard. The child gets exactly one turn,
+    a pinned working directory and a hard wall-clock and output bound. Every
+    failure mode -- missing binary, authentication failure, non-zero exit,
+    timeout, oversized output -- is a bounded :class:`PaperObserverUnavailable`,
+    never a Paper failure.
     """
     if not isinstance(claude_bin, Path):
         raise _fail(OutcomeCode.INVALID_TYPE, "claude_bin must be an exact Path")
@@ -614,10 +644,11 @@ def invoke_claude(
         raise _fail(OutcomeCode.INVALID_TYPE, "prompt must be non-empty text")
     try:
         completed = subprocess.run(
-            [str(claude_bin), "-p", "--output-format", "json", "--max-turns", "1"],
+            [str(claude_bin), *_CLAUDE_ARGV_TAIL],
             input=prompt,
             text=True,
             capture_output=True,
+            cwd=_CLAUDE_CWD,
             timeout=timeout_seconds,
             check=False,
         )
