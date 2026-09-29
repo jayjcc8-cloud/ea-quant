@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
 
+from ea.core.encoding import canonical_json_bytes
 from ea.core.run import DataFingerprint, ReplayWindow, Sha256Digest
 
 _LINEAGE_DOMAIN = b"ea.backtest-lineage.v1\0"
@@ -44,13 +44,7 @@ class RandomnessProfile(StrEnum):
 
 def _canonical_json(document: object) -> bytes:
     try:
-        return json.dumps(
-            document,
-            ensure_ascii=True,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("ascii")
+        return canonical_json_bytes(document)
     except (TypeError, UnicodeEncodeError, ValueError) as error:
         raise BacktestIdentityError("identity projection must be canonical JSON") from error
 
