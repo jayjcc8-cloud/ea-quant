@@ -99,6 +99,8 @@ Rules:
    `type` MUST be `"integer"` or `"decimal"`; `required` MUST be a JSON boolean; `default` MUST be
    an exact `int` for `integer` and an `ea-decimal-v1` string for `decimal`, with
    `static_minimum` / `static_maximum` the same type or `null`. A float anywhere is a violation.
+   Parameter names MUST be unique (`registry.py:78`), and `static_minimum > static_maximum` is
+   rejected as "invalid parameter bounds" (`registry.py:42`).
 4. The manifest MUST be produced by EA's own packer, never hand-written (§2.4).
 
 ### 2.3 `strategy.py`
@@ -154,6 +156,10 @@ Rules:
 4. Each member MUST be ≤ 1 MiB; the artifact ≤ 2 MiB + 4096 (`package.py:19`).
 5. An emitted artifact is valid only if `inspect_package` accepts it. Emitting the package **is**
    the validation step; the adapter MUST NOT report success on a packer failure.
+6. The EA-side commands are `ea strategy pack --source <abs dir> --output <abs .eastrategy>` and
+   `ea strategy validate --artifact <abs .eastrategy>`; `ea strategy inspect` is an exact alias of
+   `validate` (`src/ea/cli/app.py:753-778`). Every `StrategyPackageError` exits **2** and prints the
+   stable message to stderr. The adapter MUST propagate that non-zero exit rather than swallow it.
 
 ## 3. NUMERIC BOUNDARY
 
@@ -168,6 +174,13 @@ Only a small, literal numeric vector: ≤ 32 `ParameterV1` values, each `integer
 - A decimal parameter MUST be serialized as an `ea-decimal-v1` string. Emitting a JSON float is a
   contract violation; `ParameterV1._typed` rejects a non-`str` decimal
   (`src/ea/strategy/registry.py:49`).
+- A decimal string MUST be in canonical form: `_DECIMAL_PATTERN`
+  `0|-?(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9])` (`src/ea/core/economics.py:32`). No
+  exponent, no leading `+`, no leading zeros, and **no trailing fractional zero** — `"0.50"` is
+  not canonically `"0.5"` and is rejected. Limits: ≤ 38 significant digits, ≤ 20 integer digits,
+  ≤ 18 fractional digits (`economics.py:28-30`); `inf`/`nan` are forbidden (`economics.py:36`).
+  A research-side formatter that emits `repr()` or `str(float)` will violate this; the adapter MUST
+  quantize and canonically format before emitting.
 - Fitted coefficients ride here as ordinary parameters. This is a **zero-contract-change** path
   (RF-00 §3 ADAPT).
 
