@@ -379,6 +379,43 @@ def test_every_arming_path_refuses_a_pinned_bounded_profile(
     assert harness.argv() == []
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [{"WORKSPACE": "relative/workspace"}, {"CANDIDATE_ID": "not-a-uuid"}, {"BACKUP_KEEP": "0"}],
+)
+def test_install_validates_the_given_config_before_it_mutates_anything(
+    harness: Harness, overrides: dict[str, str]
+) -> None:
+    """Every check install can make, it makes before it touches the machine.
+
+    install copies its config over the pinned one and truncates the four log
+    files, so a config it later refuses would leave an already-installed host
+    pinned to a config that can never launch. The refusal has to come first for
+    ALL of the validation, not only the bounded-profile check.
+    """
+    harness.install()
+    pinned = harness.supervisor / "run-config.env"
+    pinned_before = pinned.read_bytes()
+    log = harness.home_ea / "logs" / "paper.err.log"
+    log.write_text("previous run\n", encoding="utf-8")
+
+    variant = harness.root / "variant-config.env"
+    variant.write_text(
+        "".join(
+            f"{line.split('=', 1)[0]}={overrides[line.split('=', 1)[0]]}\n"
+            if line.split("=", 1)[0] in overrides
+            else f"{line}\n"
+            for line in pinned_before.decode("utf-8").splitlines()
+        ),
+        encoding="utf-8",
+    )
+    completed = harness.run("install", "--config", str(variant), check=False)
+    assert completed.returncode != 0
+    assert "ea-runtime: " in completed.stderr
+    assert pinned.read_bytes() == pinned_before
+    assert log.read_text(encoding="utf-8") == "previous run\n"
+
+
 @pytest.mark.parametrize("command", [("log",), ("uninstall",), ("status",), ("stop",)])
 def test_a_pinned_bounded_profile_never_blocks_recovery(
     harness: Harness, command: tuple[str, ...]

@@ -96,10 +96,12 @@ validate_config_file() {
 }
 
 load_config() {
-    [ -f "$CONFIG" ] || die "missing config $CONFIG (copy run-config.example there first)"
-    validate_config_file
+    config_file=${1:-$CONFIG}
+    [ -f "$config_file" ] ||
+        die "missing config $config_file (copy run-config.example there first)"
+    validate_config_file "$config_file"
     # shellcheck source=/dev/null
-    . "$CONFIG"
+    . "$config_file"
     missing=
     for key in $CONFIG_KEYS; do
         eval "value=\${$key:-}"
@@ -268,15 +270,13 @@ cmd_install() {
     [ -f "$config" ] || die "config $config does not exist"
 
     # Both refusals happen BEFORE this command mutates anything. Below, install
-    # copies $config over the pinned config, truncates the four log files and
+    # copies the config over the pinned config, truncates the four log files and
     # only then re-renders -- so a refusal any later would leave the machine
     # pinned to a config that can never launch, which an already-loaded agent
     # would then fail on at every restart. Validating the GIVEN file here, not
     # the pinned one, is what makes the refusal precede the copy.
-    validate_config_file "$config"
-    if ! ( . "$config"; require_unbounded_profile ); then
-        exit 2
-    fi
+    load_config "$config"
+    require_unbounded_profile
 
     # install re-renders and then boots the label out and back in, and RunAtLoad
     # starts a fresh attempt. On a live run that is a silent restart, so it is
