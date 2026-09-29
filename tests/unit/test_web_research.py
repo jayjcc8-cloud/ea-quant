@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -75,8 +75,8 @@ class FakeProvider:
         snapshot = dict(kwargs)
         snapshot["messages"] = [dict(item) for item in kwargs.get("messages") or []]
         self.calls.append(snapshot)
-        response = self.responses.pop(0)
-        if isinstance(response, Exception):
+        response: ModelResponse | BaseException = self.responses.pop(0)
+        if isinstance(response, BaseException):
             raise response
         return response
 
@@ -93,16 +93,22 @@ def _response(tool_calls: list[dict[str, Any]], **extra: Any) -> ModelResponse:
     return ModelResponse(tool_calls=tuple(tool_calls), **defaults)
 
 
-def _orchestrator(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, responses: list[Any] | None
-) -> tuple[ResearchOrchestrator, WebService, FakeProvider | None]:
+def _orchestrator(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> ResearchOrchestrator:
+    """Orchestrator with the real provider; no model is configured by default."""
+    store = ResearchStore(tmp_path / "workspace")
+    service = _service(tmp_path)
+    return ResearchOrchestrator(store, service, _settings_store(tmp_path, monkeypatch))
+
+
+def _fake_orchestrator(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, responses: list[Any]
+) -> tuple[ResearchOrchestrator, WebService, FakeProvider]:
+    """Orchestrator with a scripted provider that never touches the network."""
     store = ResearchStore(tmp_path / "workspace")
     service = _service(tmp_path)
     orchestrator = ResearchOrchestrator(store, service, _settings_store(tmp_path, monkeypatch))
-    if responses is None:
-        return orchestrator, service, None
     provider = FakeProvider(responses)
-    orchestrator._provider = provider  # noqa: SLF001 — test seam, same interface
+    cast(Any, orchestrator)._provider = provider  # test seam, same interface
     return orchestrator, service, provider
 
 
@@ -162,7 +168,7 @@ def test_store_roundtrip_and_dedup(tmp_path: Any) -> None:
 def test_create_without_model_configuration_fails_honestly(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, _service, _provider = _orchestrator(tmp_path, monkeypatch, None)
+    orchestrator = _orchestrator(tmp_path, monkeypatch)
     task = orchestrator.create("Trade AAPL momentum")
     assert task.status == "failed"
     assert task.error == {
@@ -177,7 +183,7 @@ def test_create_without_model_configuration_fails_honestly(
 def test_proposal_succeeds_with_valid_tool_call(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, _service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, _service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     catalog = orchestrator._catalog()  # noqa: SLF001
     strategy = catalog[0]["strategy_id"]
     proposal = _response(
@@ -196,7 +202,7 @@ def test_proposal_succeeds_with_valid_tool_call(
 def test_proposal_declares_unsupported_and_keeps_gap(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, _service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, _service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     provider.responses.append(
         _response(
             [
@@ -218,7 +224,7 @@ def test_proposal_declares_unsupported_and_keeps_gap(
 def test_proposal_rejects_unknown_strategy_then_succeeds(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, _service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, _service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     catalog = orchestrator._catalog()  # noqa: SLF001
     strategy = catalog[0]["strategy_id"]
     instrument = catalog[0]["instrument"] or {"venue": "XNAS", "symbol": "AAPL"}
@@ -261,7 +267,7 @@ def test_proposal_rejects_unknown_strategy_then_succeeds(
 def test_proposal_without_tool_call_fails_without_inventing_a_spec(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, _service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, _service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     provider.responses.append(_response([], text="I cannot help with trading."))
     task = orchestrator.create("Do something with markets")
     assert task.status == "failed"
@@ -275,7 +281,7 @@ def test_proposal_without_tool_call_fails_without_inventing_a_spec(
 def test_confirm_runs_a_real_backtest_and_tracks_usage(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     catalog = orchestrator._catalog()  # noqa: SLF001
     strategy = catalog[0]["strategy_id"]
     proposal = _response(
@@ -297,7 +303,7 @@ def test_confirm_runs_a_real_backtest_and_tracks_usage(
 def test_confirm_without_run_keeps_confirmed_spec(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, _service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, _service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     catalog = orchestrator._catalog()  # noqa: SLF001
     strategy = catalog[0]["strategy_id"]
     proposal = _response(
@@ -316,7 +322,7 @@ def test_confirm_without_run_keeps_confirmed_spec(
 def test_edit_spec_is_validated_against_the_catalog(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, _service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, _service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     catalog = orchestrator._catalog()  # noqa: SLF001
     strategy = catalog[0]["strategy_id"]
     proposal = _response(
@@ -338,7 +344,7 @@ def test_edit_spec_is_validated_against_the_catalog(
 
 
 def test_cancel_blocks_retry_and_confirm(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    orchestrator, _service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, _service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     catalog = orchestrator._catalog()  # noqa: SLF001
     strategy = catalog[0]["strategy_id"]
     proposal = _response(
@@ -358,7 +364,7 @@ def test_cancel_blocks_retry_and_confirm(tmp_path: Any, monkeypatch: pytest.Monk
 def test_retry_only_for_failed_tasks_and_reuses_the_same_task(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orchestrator, _service, _provider = _orchestrator(tmp_path, monkeypatch, None)
+    orchestrator = _orchestrator(tmp_path, monkeypatch)
     task = orchestrator.create("Retry will still fail without a model")
     assert task.status == "failed"
     with pytest.raises(TaskNotFoundError):
@@ -370,7 +376,7 @@ def test_retry_only_for_failed_tasks_and_reuses_the_same_task(
 
 
 def test_model_call_budget_is_enforced(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    orchestrator, _service, _provider = _orchestrator(tmp_path, monkeypatch, None)
+    orchestrator = _orchestrator(tmp_path, monkeypatch)
     task = orchestrator.create("budget probe")  # fails on missing model, but task exists
     exhausted = replace(
         task, usage={"model_calls": 10, "input_tokens": 0, "output_tokens": 0, "backtests": 0}
@@ -380,7 +386,7 @@ def test_model_call_budget_is_enforced(tmp_path: Any, monkeypatch: pytest.Monkey
 
 
 def test_duplicate_active_idea_is_rejected(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    orchestrator, _service, provider = _orchestrator(tmp_path, monkeypatch, [])
+    orchestrator, _service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     catalog = orchestrator._catalog()  # noqa: SLF001
     strategy = catalog[0]["strategy_id"]
     proposal = _response(
