@@ -18,6 +18,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from ea.core import RunId
+from ea.core.encoding import canonical_json_bytes
 from ea.product import (
     BacktestRunFailure,
     BacktestScenarioError,
@@ -103,16 +104,7 @@ class ReportUnavailableError(WebBoundaryError):
 
 
 def _canonical_json(document: object) -> bytes:
-    return (
-        json.dumps(
-            document,
-            ensure_ascii=True,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("ascii")
-        + b"\n"
-    )
+    return canonical_json_bytes(document) + b"\n"
 
 
 def _directory(path: Path, *, label: str, create: bool) -> Path:
