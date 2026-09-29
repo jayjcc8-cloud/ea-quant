@@ -66,6 +66,7 @@ from ea.core import (
     phase1_risk_policy_digest,
     portfolio_snapshot_digest,
 )
+from ea.core.encoding import canonical_json_bytes
 from ea.data import (
     create_phase1_historical_market_data_source,
     create_phase1_historical_market_source_bridge,
@@ -167,13 +168,7 @@ class _AttemptFailure(Exception):
 
 
 def _canonical_json(document: object) -> bytes:
-    return json.dumps(
-        document,
-        ensure_ascii=True,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("ascii")
+    return canonical_json_bytes(document)
 
 
 def _component_digest(domain: bytes, document: object) -> Sha256Digest:
