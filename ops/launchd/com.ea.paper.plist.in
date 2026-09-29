@@ -30,6 +30,12 @@
     <string>/bin/sh</string>
     <string>__SUPERVISOR_DIR__/ea-runtime</string>
     <string>run</string>
+    <!--
+      This flag is what makes the job the single writer: `ea-runtime run`
+      without it is refused while this label is loaded, so a hand-run cannot
+      become a second, unsupervised Paper process.
+    -->
+    <string>--supervised</string>
   </array>
   <key>WorkingDirectory</key>
   <string>__HOME_EA__</string>

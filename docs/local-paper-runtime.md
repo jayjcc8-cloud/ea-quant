@@ -79,6 +79,27 @@ $EA uninstall  # boot out both jobs and remove both plists
 terminal state and a released writer lease; it never signals an unrelated PID, and it never
 liquidation-sells.
 
+### One supervised writer, and only one
+
+The job the plist loads is the single writer for this Candidate, and the runner enforces that
+rather than assuming it:
+
+- The rendered plist is the only caller that passes `ea-runtime run --supervised`. A `run`
+  **without** that flag is refused while the paper LaunchAgent is loaded: a hand-run would be a
+  second, unsupervised Paper process against the same Candidate, with its own attempt directory,
+  writer lease and audit journal, and a later `ea-runtime stop` would aim at the attempt the
+  agent recorded rather than at the manual process. `ea-runtime uninstall` unloads the agent and
+  frees the manual path again.
+- `ea-runtime reload` refuses while the run is live. Reload re-renders and then boots the label
+  out and back in, and `RunAtLoad` starts a fresh attempt; because `start` kickstarts the
+  already-loaded definition, accepting a new config is `stop`, `reload`, then `start`.
+- `EVENT_LIMIT` must be empty. `ea paper start` ends a bounded run with a non-zero
+  source-exhaustion exit, and `KeepAlive{SuccessfulExit=false}` restarts an unsuccessful exit by
+  design, so a bounded supervised profile would restart forever, minting one attempt directory,
+  writer lease and audit journal per restart. `install`, `reload` and `start` refuse a non-empty
+  value before anything is rendered or armed. A bounded run belongs on the direct
+  `ea paper start --event-limit N` CLI, which no supervisor restarts.
+
 ## Why this distinguishes a crash from an intentional stop
 
 `com.ea.paper.plist` uses the launchd-native rule, and nothing else:

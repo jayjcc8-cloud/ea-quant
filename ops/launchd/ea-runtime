@@ -20,17 +20,24 @@
 #   ea-runtime reload                    re-render both LaunchAgents from the config
 #   ea-runtime log [paper|backup]        tail the launchd-captured output
 #
-# launchd targets (also runnable by hand for inspection):
+# launchd targets:
 #
-#   ea-runtime run                       one supervised foreground Paper attempt
+#   ea-runtime run --supervised          one supervised foreground Paper attempt
 #   ea-runtime backup                    one scheduled `ea paper backup` tick
+#
+# `run` is the supervised entrypoint, not a manual one. Only the rendered plist
+# passes --supervised, and a `run` without it is refused while the paper
+# LaunchAgent is loaded: a hand-run would be a second, unsupervised Paper
+# process against the same Candidate, writing its own attempt directory, which a
+# later `ea-runtime stop` would then not be aiming at. `ea-runtime uninstall`
+# unloads the agent and frees the manual path again.
 #
 # Environment overrides, used by the host acceptance script so it never touches
 # the real ~/EA or the real ~/Library/LaunchAgents:
 #
 #   EA_RUNTIME_HOME          default $HOME/EA
 #   EA_LAUNCH_AGENTS_DIR     default $HOME/Library/LaunchAgents
-#   EA_LAUNCHCTL             default launchctl (a stub is used in unit tests)
+#   EA_LAUNCHCTL             default launchctl (unit tests point this at a stub)
 #   EA_RUNTIME_NO_BOOTSTRAP  when non-empty, render but do not call launchctl
 #
 set -eu
@@ -122,11 +129,10 @@ load_config() {
         esac
         [ "$value" -ge 1 ] || die "$key must be a positive integer"
     done
-    event_limit=${EVENT_LIMIT:-}
-    if [ -n "$event_limit" ]; then
-        case "$event_limit" in *[!0-9]*) die "EVENT_LIMIT must be a positive integer" ;; esac
-        [ "$event_limit" -ge 1 ] || die "EVENT_LIMIT must be a positive integer"
-    fi
+    # EVENT_LIMIT is deliberately not validated here. It is refused outright by
+    # require_unbounded_profile on every path that arms or runs the supervised
+    # profile, while stop/status/log/uninstall must keep working on a config that
+    # carries one, so an operator can always recover the machine.
 
     case "$SUPERVISOR_DIR" in
         *[![:print:]]*) die "the supervisor directory must be printable text" ;;
@@ -143,6 +149,19 @@ load_config() {
 require_installed() {
     [ -x "$SUPERVISOR_DIR/ea-runtime" ] || die "$SUPERVISOR_DIR/ea-runtime is not installed"
     [ -f "$LOG_DIR/paper.out.log" ] || die "logs are not set up; run: ea-runtime install"
+}
+
+# A bounded simulated source is not a supported supervised profile. `ea paper
+# start` ends a bounded run with a non-zero source-exhaustion exit, and the
+# paper LaunchAgent restarts an unsuccessful exit by design, so a non-empty
+# EVENT_LIMIT would become an unbounded restart loop that mints one fresh
+# attempt directory, writer lease and audit journal per restart. The supervised
+# profile is therefore "run until stopped", and the bound is refused before
+# anything is rendered, armed or launched. It stays available on the direct
+# `ea paper start --event-limit` CLI, which no supervisor restarts.
+require_unbounded_profile() {
+    [ -z "${EVENT_LIMIT:-}" ] ||
+        die "EVENT_LIMIT must be empty for the supervised runtime; an exhausted bounded run is restarted forever by launchd"
 }
 
 # ---------------------------------------------------------------------------
@@ -202,6 +221,7 @@ render_one() {
 
 render_all() {
     load_config
+    require_unbounded_profile
     render_one "$SUPERVISOR_DIR/templates/$PAPER_LABEL.plist.in" "$PAPER_LABEL" \
         "$THROTTLE_INTERVAL_SECONDS" "$BACKUP_INTERVAL_SECONDS"
     render_one "$SUPERVISOR_DIR/templates/$BACKUP_LABEL.plist.in" "$BACKUP_LABEL" \
@@ -262,6 +282,16 @@ cmd_install() {
 }
 
 cmd_reload() {
+    # Re-rendering alone is harmless, but accepting the re-render boots the
+    # label out and back in, and RunAtLoad then starts a fresh attempt. On a
+    # running profile that is a silent restart, and because `start` kickstarts
+    # the already-loaded definition a later stop/start would not even pick the
+    # new render up. So reload refuses while the run is live, before it writes
+    # anything: stop explicitly, reload, then start.
+    if [ -z "${EA_RUNTIME_NO_BOOTSTRAP:-}" ] &&
+        [ "$(job_field "$PAPER_LABEL" state)" = "running" ]; then
+        die "$PAPER_LABEL is running; reload would restart it as a fresh attempt. Run 'ea-runtime stop' first"
+    fi
     render_all
     if [ -n "${EA_RUNTIME_NO_BOOTSTRAP:-}" ]; then
         return 0
@@ -289,6 +319,7 @@ current_run_dir() {
 cmd_start() {
     load_config
     require_installed
+    require_unbounded_profile
     label=$PAPER_LABEL
     if ! bootstrapped "$label"; then
         note "$label is not loaded; loading it"
@@ -376,7 +407,24 @@ cmd_log() {
 # ---------------------------------------------------------------------------
 
 cmd_run() {
+    supervised=
+    case "${1:-}" in
+        --supervised) supervised=1 ;;
+        '') ;;
+        *) die "usage: ea-runtime run [--supervised]" ;;
+    esac
     load_config
+    require_unbounded_profile
+    # The loaded LaunchAgent is the single writer. A hand-run `ea-runtime run`
+    # would be a second, unsupervised Paper process against the same Candidate:
+    # a fresh attempt directory keeps the two sets of files apart, but a later
+    # `ea-runtime stop` aims at the attempt the agent recorded, so the manual
+    # process would keep trading, unobserved, with its own writer lease. Only
+    # the rendered plist passes --supervised, so a run without it is refused
+    # while the agent is loaded; `ea-runtime uninstall` frees the manual path.
+    if [ -z "$supervised" ] && bootstrapped "$PAPER_LABEL"; then
+        die "$PAPER_LABEL is loaded; refusing an unsupervised run. Use 'ea-runtime start', or 'ea-runtime uninstall' to free the manual path"
+    fi
     mkdir -p "$STATE_DIR"
     # A crash replacement must never collide with the attempt it replaces, and
     # an existing attempt is never resumed or resent. Every supervised launch
@@ -400,9 +448,9 @@ cmd_run() {
         --run-id "$run_id" \
         --prices "$PRICES" \
         --interval "$INTERVAL"
-    if [ -n "${EVENT_LIMIT:-}" ]; then
-        set -- "$@" --event-limit "$EVENT_LIMIT"
-    fi
+    # No --event-limit is ever passed: the supervised profile is unbounded by
+    # construction, and require_unbounded_profile refused a bounded config
+    # before this point.
     # exec, never background: launchd's PID becomes the Paper PID, so the
     # supervised process and the trading process are the same process and an
     # abnormal kill cannot leave an orphan still trading.
@@ -465,7 +513,7 @@ cmd_backup() {
 }
 
 usage() {
-    sed -n '2,40p' "$0" | sed -n 's/^# \{0,1\}//p'
+    sed -n '2,60p' "$0" | sed -n 's/^# \{0,1\}//p'
 }
 
 main() {
@@ -490,7 +538,7 @@ main() {
         status) cmd_status ;;
         reload) cmd_reload ;;
         log) cmd_log "${1:-paper}" ;;
-        run) cmd_run ;;
+        run) cmd_run "${1:-}" ;;
         backup) cmd_backup ;;
         help | --help | -h | '') usage ;;
         *) die "unknown command '$command' (try: ea-runtime help)" ;;

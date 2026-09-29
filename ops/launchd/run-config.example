@@ -29,7 +29,12 @@ RUNTIME_ROOT=/Users/mo/EA/runtime
 PRICES=100
 INTERVAL=0.1
 
-# Optional simulated event bound. Empty means "run until stopped".
+# Simulated event bound. Must stay empty: the supervised profile is "run until
+# stopped", and a bounded run ends with a non-zero source-exhaustion exit, which
+# launchd would restart as a brand-new attempt forever. `ea-runtime install`,
+# `ea-runtime reload` and `ea-runtime start` refuse a non-empty value. A bounded
+# run belongs on the direct `ea paper start --event-limit N` CLI, which no
+# supervisor restarts.
 EVENT_LIMIT=
 
 # Scheduled `ea paper backup` target, retention, and cadence in seconds.
