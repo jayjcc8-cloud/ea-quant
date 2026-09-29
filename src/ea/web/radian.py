@@ -225,8 +225,7 @@ def _paper_attention(paper: dict[str, Any]) -> list[dict[str, Any]]:
                     "kind": "paper",
                     "severity": "high",
                     "message": (
-                        "Paper trade blocking guard engaged: "
-                        f"{health['trade_blocking_guard']}"
+                        f"Paper trade blocking guard engaged: {health['trade_blocking_guard']}"
                     ),
                     "observed_at": health.get("observed_at"),
                     "run_id": run_id,
