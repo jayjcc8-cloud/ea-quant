@@ -1,0 +1,57 @@
+{
+  "incomplete_outbound_intents": [
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "5e42032c5a62f6410cde571a180e7abc856e11775f35b7448b5bb50a8c36d81f",
+      "dispatch_sequence": 11,
+      "execution_request_sha256": "eef1e8fb2e58083db9d2bed2cc8418a63c17ff171a97b907cec23db8d75e6c84",
+      "order_owner_sequence": 3,
+      "terminal": null,
+      "venue_order_id": "paper-5e42032c5a62f6410cde571a180e7abc856e11775f35b7448b5bb50a8c36d81f"
+    }
+  ],
+  "joint": {
+    "divergent_orders": [],
+    "exactly_once": true,
+    "not_sent_orders": [],
+    "open_orders": [
+      3
+    ],
+    "reason": null,
+    "recovered": true,
+    "recovered_fills": 2,
+    "recovered_orders": 3
+  },
+  "outbound_intents": [
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "fabc8cb93366fa7eb0eb9f6afc04f29b9b0c38278728e3f0f60b4d0ec809043f",
+      "dispatch_sequence": 1,
+      "execution_request_sha256": "1a4fa2f2f011a61a7c94c0b53ad9ff7d00c4149404204259439d3e5a0f672047",
+      "order_owner_sequence": 1,
+      "terminal": "filled",
+      "venue_order_id": "paper-fabc8cb93366fa7eb0eb9f6afc04f29b9b0c38278728e3f0f60b4d0ec809043f"
+    },
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "1f02ce4cc1dd2e189ee975180a678732a8b7809fe7a51a635cc0d2c5c40e3ca2",
+      "dispatch_sequence": 6,
+      "execution_request_sha256": "9e565736cd1fde1efd09eea5bf509cc08ef319a27deb53003220f1785a637912",
+      "order_owner_sequence": 2,
+      "terminal": "filled",
+      "venue_order_id": "paper-1f02ce4cc1dd2e189ee975180a678732a8b7809fe7a51a635cc0d2c5c40e3ca2"
+    },
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "5e42032c5a62f6410cde571a180e7abc856e11775f35b7448b5bb50a8c36d81f",
+      "dispatch_sequence": 11,
+      "execution_request_sha256": "eef1e8fb2e58083db9d2bed2cc8418a63c17ff171a97b907cec23db8d75e6c84",
+      "order_owner_sequence": 3,
+      "terminal": null,
+      "venue_order_id": "paper-5e42032c5a62f6410cde571a180e7abc856e11775f35b7448b5bb50a8c36d81f"
+    }
+  ],
+  "reconciliation_required": false,
+  "run_id": "76310421-d233-42f0-90c8-34e13900b9ec",
+  "state": "incomplete"
+}

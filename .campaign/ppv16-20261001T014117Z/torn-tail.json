@@ -1,0 +1,14 @@
+{
+  "checks": [
+    "admission matches the durable-record truth exactly"
+  ],
+  "drill": "torn-tail",
+  "fault_classes": [
+    "DURABLE_WRITE_FAILURE",
+    "RESTART_RECOVERY",
+    "EVIDENCE_TRUTHFUL"
+  ],
+  "seam": "deterministic partial frame appended to a real killed attempt's journal; ea paper resume reopens with permit_torn_tail",
+  "source_run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/d50f5170-3051-4797-9762-8fe54c061051",
+  "verdict": "PASS"
+}

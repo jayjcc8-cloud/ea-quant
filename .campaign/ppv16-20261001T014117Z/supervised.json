@@ -1,0 +1,21 @@
+{
+  "checks": [
+    "isolated rig at /tmp/ppv16-fault-campaign-16fb3322833e: launchd-spawned jobs in this session carry no TCC grant for ~/Documents, so the rig (copied venv with a non-editable ea install, fixtures, runtime home) lives under /tmp",
+    "shell-level fail-closed: 'ea-runtime run --supervised' without HOME refuses (exit 1), no state written",
+    "single writer pid 2326 for attempt 6ea29ffa-0a48-44a5-a752-83467fa9545a",
+    "launchd replaced pid 2326 with 2393, fresh attempt 808e5f28-3340-4c15-b8ee-8a473ff0b410, single writer",
+    "admission matches the durable-record truth exactly",
+    "intentional stop stays stopped past the throttle; crash restarts"
+  ],
+  "drill": "supervised",
+  "fault_classes": [
+    "PROCESS_CRASH",
+    "RESTART_RECOVERY",
+    "RECONCILIATION_AFTER_FAULT",
+    "NO_DUPLICATE_ECONOMIC_EFFECT",
+    "EVIDENCE_TRUTHFUL"
+  ],
+  "killed_attempt": "/tmp/ppv16-fault-campaign-16fb3322833e/ea-home/EA/runtime/6ea29ffa-0a48-44a5-a752-83467fa9545a",
+  "seam": "real launchd LaunchAgents in an isolated EA_RUNTIME_HOME; SIGKILL of the supervised PID; ea-runtime stop for the intentional stop",
+  "verdict": "PASS"
+}

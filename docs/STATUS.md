@@ -10,8 +10,14 @@ Live = NOT AVAILABLE; VPS host verification = NOT REQUIRED FOR CURRENT DEVELOPME
 Crash-safe Paper gate (PPV-12 Runtime Recovery + PPV-13 Broker Reconciliation + PPV-14 Kill Switch
 + resume-feed continuation), the M2 Operational-safe Paper gate (PPV-15 Production Risk Guards)
 and the M3 Self-operating Paper gate (PPV-03 Health & Readiness + PPV-05 Backup & Restore +
-PPV-06 Monitoring & Alerts) are SATISFIED. The next product gate is M4 (Local Production RC):
-PPV-16 fault campaign and the 72-hour / 7-day Paper soak.
+PPV-06 Monitoring & Alerts) are SATISFIED. The M4 fault phase is SATISFIED: the PPV-16
+integrated fault campaign (issue #254) proved the required failure classes — feed
+interruption, duplicate/late facts, uncertain submit, process crash under launchd
+supervision, durable-write failure, restart recovery/reconciliation, backup/restore —
+over the existing runtime boundaries with zero product-code repairs; the campaign matrix,
+drill tooling and evidence are recorded under `.campaign/`. The remaining M4 steps are
+WU-5 Gate Prep (including #243 item 5 retention re-capture), RC freeze, and the 72-hour /
+7-day Paper soak. LIVE remains DENIED.
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
 authoritative checkpoint. GitHub Issues and pull requests carry mutable coordination state; this
