@@ -902,7 +902,7 @@ def paper_gate_lock(
     """
     from ea.core.time import require_utc
     from ea.product.market_stream import RealUtcClock
-    from ea.product.paper_evidence import GateType
+    from ea.product.paper_evidence import GateType, PaperEvidenceError
     from ea.product.paper_gate_prep import (
         PaperGatePrepError,
         current_gate_identity,
@@ -936,6 +936,13 @@ def paper_gate_lock(
             started_at=stamp,
         )
         lock_gate_identity(identity_path.expanduser().absolute(), identity)
+    except PaperEvidenceError as error:
+        # The frozen WU-2 contract validates the operator's gate id, and a label
+        # it rejects is input rather than a refusal: report it on the same exit-2
+        # surface as the other lock arguments instead of letting it escape as a
+        # traceback. Nothing has been written at this point.
+        typer.echo(f"Paper gate lock input error: {error}", err=True)
+        raise typer.Exit(code=2) from None
     except PaperGatePrepError as error:
         typer.echo(f"Paper gate lock refused: {error}", err=True)
         raise typer.Exit(code=3) from None

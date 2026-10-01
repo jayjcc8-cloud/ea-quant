@@ -646,6 +646,48 @@ def test_cli_snapshot_rejects_an_unknown_supervisor_state(tmp_path: Path) -> Non
     assert result.exit_code == 2
 
 
+def test_cli_gate_lock_reports_an_invalid_gate_id_as_input(tmp_path: Path) -> None:
+    """A label the frozen contract rejects is input, not a crash.
+
+    ``PaperGateIdentity`` validates the operator's gate id, so a bad label used to
+    escape this command as a traceback instead of the exit-2 input surface the
+    other lock arguments already use. Nothing is written either way.
+    """
+    config, launchd = _operator_surface(tmp_path)
+    identity = tmp_path / "gate-identity.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "paper",
+            "gate",
+            "lock",
+            "--identity",
+            str(identity),
+            "--gate-id",
+            "BAD ID",
+            "--gate-type",
+            "72h",
+            "--repo",
+            str(REPO),
+            "--config",
+            str(config),
+            "--launchd-dir",
+            str(launchd),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Paper gate lock input error:" in result.stderr
+    assert "gate_id" in result.stderr
+    # Only the deliberate exit terminated the command. The frozen contract's
+    # PaperEvidenceError is caught here, so it never reaches the runner as itself
+    # and never renders as a traceback.
+    assert isinstance(result.exception, SystemExit)
+    assert result.stdout == ""
+    assert not identity.exists()
+
+
 def test_cli_gate_lock_then_evaluate_is_the_only_path_to_a_verdict(tmp_path: Path) -> None:
     """Locking starts nothing; evaluating is a reading of the lock.
 

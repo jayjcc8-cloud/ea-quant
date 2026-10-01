@@ -191,6 +191,26 @@ from it, and no other command reads it. A refused or failed capture writes nothi
 attempt stays eligible; an attempt captured before this file existed still reads as captured
 through its backup directory.
 
+### Making an attempt capture-eligible again
+
+`captured-runs` is deliberately independent of `BACKUP_ROOT`. Retention only prunes inside the
+backup root it is given, so normal retention can never remove a marker entry — that is exactly why
+the file exists, and it is also why moving or replacing the backup root does not re-capture the
+attempts already recorded in it.
+
+The one exceptional case where a run must become eligible again — the backup root was intentionally
+moved or replaced, or a capture was found corrupt and deleted — is recovered by hand:
+
+1. Confirm the run really is uncaptured in the root you now use, for example with
+   `ea paper backup inspect --backup DIR`.
+2. Delete that run's single line from `~/EA/supervisor/state/captured-runs`.
+3. Let the next `ea-runtime backup` tick capture it into the current root as usual.
+
+Deleting the line is an exceptional operator recovery action, not cleanup, and it must never be
+part of routine retention or gate preparation. It restores nothing, replays nothing, reconciles
+nothing and authorizes nothing — it only makes that one settled attempt eligible for the existing
+capture path again, and `ea paper backup` still applies every one of its own refusals.
+
 ## Gate preparation
 
 The M4 release-candidate gates (72h, 7d) are judged by the frozen WU-2 contract:
