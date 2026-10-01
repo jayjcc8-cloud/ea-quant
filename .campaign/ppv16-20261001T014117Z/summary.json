@@ -1,0 +1,18 @@
+{
+  "campaign": "PPV-16",
+  "evidence_root": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/ppv16-20261001T014117Z",
+  "live": "DENIED",
+  "phase": "M4 fault phase only",
+  "start_main_sha": "4a012ea784788ce9371f8dd6b47fdeb7458428ad",
+  "verdicts": {
+    "backup-restore": "PASS",
+    "baseline": "PASS",
+    "durable-write": "PASS",
+    "feed": "PASS",
+    "observer": "PASS",
+    "storm": "PASS",
+    "supervised": "PASS",
+    "torn-tail": "PASS",
+    "uncertain": "PASS"
+  }
+}

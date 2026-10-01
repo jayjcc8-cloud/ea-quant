@@ -1,0 +1,159 @@
+{
+  "drill": "storm",
+  "fault_classes": [
+    "UNCERTAIN_SUBMIT",
+    "PROCESS_CRASH",
+    "RESTART_RECOVERY",
+    "RECONCILIATION_AFTER_FAULT",
+    "NO_DUPLICATE_ECONOMIC_EFFECT",
+    "EVIDENCE_TRUTHFUL"
+  ],
+  "kills": [
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 0,
+      "intent_count": 1,
+      "phase": "after_start",
+      "recovered_fills": 1,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/540370ef-0d81-4750-b19c-8224fbbcd874",
+      "target": 0
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 1,
+      "intent_count": 2,
+      "phase": "after_start",
+      "recovered_fills": 1,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/d38f3167-7097-4433-99db-6c7c249e6468",
+      "target": 0
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 2,
+      "intent_count": 2,
+      "phase": "fills",
+      "recovered_fills": 2,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/1432c3a6-080c-41b9-b6b2-325a108e51cf",
+      "target": 1
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 3,
+      "intent_count": 3,
+      "phase": "fills",
+      "recovered_fills": 2,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/76310421-d233-42f0-90c8-34e13900b9ec",
+      "target": 1
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 4,
+      "intent_count": 3,
+      "phase": "fills",
+      "recovered_fills": 2,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/e2d096ea-5171-40a5-ae54-ec61fbe30ea7",
+      "target": 2
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 5,
+      "intent_count": 3,
+      "phase": "fills",
+      "recovered_fills": 3,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/2cd70a81-2733-41d2-9252-ba0abbc09ead",
+      "target": 2
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 6,
+      "intent_count": 4,
+      "phase": "fills",
+      "recovered_fills": 3,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/b33dc0da-5b5d-4c68-a7b5-69d89afc7ac5",
+      "target": 3
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 7,
+      "intent_count": 5,
+      "phase": "fills",
+      "recovered_fills": 5,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/5a0b14da-4d30-45ef-969d-0b7efe202ee3",
+      "target": 4
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 8,
+      "intent_count": 5,
+      "phase": "fills",
+      "recovered_fills": 5,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/24f26b37-325b-4ee8-9fb8-55eea260273e",
+      "target": 4
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 9,
+      "intent_count": 6,
+      "phase": "fills",
+      "recovered_fills": 5,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/b10852bc-90aa-4419-bf84-21a0571f9d18",
+      "target": 5
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 10,
+      "intent_count": 6,
+      "phase": "fills",
+      "recovered_fills": 6,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/3e82d112-e7a1-4b16-8fce-3d9c49acd268",
+      "target": 6
+    },
+    {
+      "checks": [
+        "admission matches the durable-record truth exactly"
+      ],
+      "index": 11,
+      "intent_count": 6,
+      "phase": "fills",
+      "recovered_fills": 6,
+      "resume_state": "incomplete",
+      "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/d50f5170-3051-4797-9762-8fe54c061051",
+      "target": 6
+    }
+  ],
+  "seam": "real ea paper subprocess + SIGKILL at spread offsets + ea paper resume",
+  "verdict": "PASS"
+}
