@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import platform
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated, cast
+from typing import TYPE_CHECKING, Annotated, cast
 
 import typer
 
@@ -32,6 +33,9 @@ from ea.strategy.package import (
     read_regular,
     validate_package,
 )
+
+if TYPE_CHECKING:
+    from ea.product.paper_evidence import PaperSnapshot
 
 app = typer.Typer(
     help="EA quantitative trading system CLI.",
@@ -61,6 +65,10 @@ alerts_app = typer.Typer(
     invoke_without_command=True,
 )
 paper_app.add_typer(alerts_app, name="alerts")
+gate_app = typer.Typer(
+    help="Lock one gate identity and judge the current runtime against it. Starts no gate.",
+)
+paper_app.add_typer(gate_app, name="gate")
 
 
 data_app = typer.Typer(help="Inspect strict full-capture local OHLCV input.")
@@ -792,6 +800,215 @@ def paper_observer(
         typer.echo(f"Paper observer unavailable: {error}", err=True)
         raise typer.Exit(code=3) from None
     typer.echo(canonical_json(document).decode("ascii"))
+
+
+def _collect_paper_snapshot(
+    *,
+    run_dir: Path,
+    repository: Path,
+    supervisor_state: str,
+    backup_root: Path | None,
+    alert_stream: Path | None,
+) -> PaperSnapshot:
+    """Observe one real WU-2 snapshot; shared by `snapshot` and `gate evaluate`."""
+    from ea.product.market_stream import RealUtcClock
+    from ea.product.paper_evidence import SupervisorState
+    from ea.product.paper_gate_prep import PaperGatePrepError, observe_paper_snapshot
+    from ea.product.paper_session import PaperSessionError
+
+    try:
+        state = SupervisorState(supervisor_state)
+    except ValueError:
+        typer.echo(
+            f"Paper snapshot input error: supervisor-state must be one of "
+            f"{', '.join(member.value for member in SupervisorState)}",
+            err=True,
+        )
+        raise typer.Exit(code=2) from None
+    try:
+        return observe_paper_snapshot(
+            run_dir=run_dir.expanduser().absolute(),
+            repository=repository.expanduser().absolute(),
+            supervisor_state=state,
+            now=RealUtcClock().now(),
+            backup_root=None if backup_root is None else backup_root.expanduser().absolute(),
+            alert_stream_path=None
+            if alert_stream is None
+            else alert_stream.expanduser().absolute(),
+        )
+    except (PaperGatePrepError, PaperSessionError) as error:
+        typer.echo(f"Paper snapshot unavailable: {error}", err=True)
+        raise typer.Exit(code=3) from None
+
+
+@paper_app.command("snapshot")
+def paper_snapshot(
+    run_dir: Annotated[Path, typer.Option("--run-dir")],
+    repository: Annotated[
+        Path, typer.Option("--repo", help="Checkout whose HEAD is the locked repo identity.")
+    ],
+    supervisor_state: Annotated[
+        str, typer.Option("--supervisor-state", help="launchd's own report for the Paper job.")
+    ] = "unknown",
+    backup_root: Annotated[Path | None, typer.Option("--backup-root")] = None,
+    alert_stream: Annotated[Path | None, typer.Option("--alert-stream")] = None,
+) -> None:
+    """Collect one read-only M4 evidence snapshot from the real local runtime.
+
+    Every input is another owner's existing read: the `ea paper status` health
+    projection with liveness re-observed from the live writer lease, the newest
+    verified backup, the durable alert stream, the attempt's own recorded profile
+    and this checkout's HEAD. Nothing is recomputed, nothing is written, and an
+    input that cannot be observed keeps its unavailable value rather than reading
+    as healthy. Exit code 3 means the snapshot itself could not be taken.
+    """
+    snapshot = _collect_paper_snapshot(
+        run_dir=run_dir,
+        repository=repository,
+        supervisor_state=supervisor_state,
+        backup_root=backup_root,
+        alert_stream=alert_stream,
+    )
+    typer.echo(canonical_json(snapshot.document()).decode("ascii"))
+
+
+@gate_app.command("lock")
+def paper_gate_lock(
+    identity_path: Annotated[
+        Path, typer.Option("--identity", help="Where to persist the locked identity.")
+    ],
+    gate_id: Annotated[str, typer.Option("--gate-id")],
+    gate_type: Annotated[str, typer.Option("--gate-type", help="72h or 7d.")],
+    repository: Annotated[Path, typer.Option("--repo")],
+    config: Annotated[Path, typer.Option("--config", help="The operator run-config.env to pin.")],
+    launchd_dir: Annotated[
+        Path, typer.Option("--launchd-dir", help="Where the LaunchAgents were rendered.")
+    ],
+    started_at: Annotated[
+        str | None, typer.Option("--started-at", help="UTC ISO-8601 instant to record.")
+    ] = None,
+) -> None:
+    """Materialise and durably persist one M4 gate identity, exactly once.
+
+    The identity is rebuilt from the real inputs -- HEAD, the operator config
+    bytes and the rendered LaunchAgent bytes -- and is written exclusively: an
+    identity that is already locked is never replaced, because drift must become
+    an INVALID verdict, not a silent relock.
+
+    Locking an identity does not start a gate. This product owns no timer, no
+    clock and no gate state, so nothing begins when this file is written; the
+    72-hour and 7-day Gates are started by the M4 RC freeze, a separate
+    authorization, and are judged later by `ea paper gate evaluate`.
+    """
+    from ea.core.time import require_utc
+    from ea.product.market_stream import RealUtcClock
+    from ea.product.paper_evidence import GateType
+    from ea.product.paper_gate_prep import (
+        PaperGatePrepError,
+        current_gate_identity,
+        lock_gate_identity,
+    )
+
+    try:
+        requested = GateType(gate_type)
+    except ValueError:
+        typer.echo(
+            f"Paper gate lock input error: gate-type must be one of "
+            f"{', '.join(member.value for member in GateType)}",
+            err=True,
+        )
+        raise typer.Exit(code=2) from None
+    if started_at is None:
+        stamp = RealUtcClock().now()
+    else:
+        try:
+            stamp = require_utc(datetime.fromisoformat(started_at), field="started_at")
+        except ValueError as error:
+            typer.echo(f"Paper gate lock input error: {error}", err=True)
+            raise typer.Exit(code=2) from None
+    try:
+        identity = current_gate_identity(
+            gate_id=gate_id,
+            gate_type=requested,
+            repository=repository.expanduser().absolute(),
+            config_path=config.expanduser().absolute(),
+            launchd_dir=launchd_dir.expanduser().absolute(),
+            started_at=stamp,
+        )
+        lock_gate_identity(identity_path.expanduser().absolute(), identity)
+    except PaperGatePrepError as error:
+        typer.echo(f"Paper gate lock refused: {error}", err=True)
+        raise typer.Exit(code=3) from None
+    typer.echo(canonical_json(identity.document()).decode("ascii"))
+
+
+@gate_app.command("evaluate")
+def paper_gate_evaluate(
+    identity_path: Annotated[Path, typer.Option("--identity")],
+    run_dir: Annotated[Path, typer.Option("--run-dir")],
+    repository: Annotated[Path, typer.Option("--repo")],
+    config: Annotated[Path, typer.Option("--config")],
+    launchd_dir: Annotated[Path, typer.Option("--launchd-dir")],
+    supervisor_state: Annotated[str, typer.Option("--supervisor-state")] = "unknown",
+    backup_root: Annotated[Path | None, typer.Option("--backup-root")] = None,
+    alert_stream: Annotated[Path | None, typer.Option("--alert-stream")] = None,
+) -> None:
+    """Judge the current runtime against a locked identity, deterministically.
+
+    The locked identity is read back, the current one is rebuilt from the same
+    real inputs, the runtime is observed, and WU-2's own `evaluate_gate` produces
+    the verdict: drift is INVALID, a runtime violation is FAIL, and only a clean,
+    unchanged gate is PASS. This command adds no evaluator and writes nothing, so
+    it is equally usable as the pre-freeze readiness check and as the post-hoc
+    re-judgement of a gate that has already run.
+
+    Exit code 3 means the verdict is not PASS, or that the observation itself
+    could not be taken.
+    """
+    from ea.product.market_stream import RealUtcClock
+    from ea.product.paper_evidence import GateVerdict, evaluate_gate
+    from ea.product.paper_gate_prep import (
+        PaperGatePrepError,
+        current_gate_identity,
+        read_locked_gate_identity,
+    )
+
+    try:
+        locked = read_locked_gate_identity(identity_path.expanduser().absolute())
+        # The gate id, gate type and recorded start come from the lock itself, so
+        # the "current" identity differs from it only in what actually drifted.
+        current = current_gate_identity(
+            gate_id=locked.gate_id,
+            gate_type=locked.gate_type,
+            repository=repository.expanduser().absolute(),
+            config_path=config.expanduser().absolute(),
+            launchd_dir=launchd_dir.expanduser().absolute(),
+            started_at=locked.started_at,
+        )
+    except PaperGatePrepError as error:
+        typer.echo(f"Paper gate evaluate unavailable: {error}", err=True)
+        raise typer.Exit(code=3) from None
+    snapshot = _collect_paper_snapshot(
+        run_dir=run_dir,
+        repository=repository,
+        supervisor_state=supervisor_state,
+        backup_root=backup_root,
+        alert_stream=alert_stream,
+    )
+    verdict = evaluate_gate(snapshot, locked, current, evaluated_at=RealUtcClock().now())
+    typer.echo(
+        canonical_json(
+            {
+                "locked_identity": locked.document(),
+                "current_identity": current.document(),
+                "snapshot": snapshot.document(),
+                "verdict": verdict.document(),
+            }
+        ).decode("ascii")
+    )
+    if verdict.verdict is not GateVerdict.PASS:
+        typer.echo(f"Paper gate evaluate verdict: {verdict.verdict.value}", err=True)
+        raise typer.Exit(code=3)
 
 
 @strategy_app.command("pack")

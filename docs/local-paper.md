@@ -149,3 +149,16 @@ a deterministic gate verdict. A missing, timed-out or malformed Claude reports
 `observer_status: unavailable` with a reason — the Paper runtime itself is never reported as
 failed because the observer failed — and every deterministic PASS / FAIL / INVALID stays exactly
 as the gate produced it.
+
+`ea paper snapshot --run-dir DIR --repo CHECKOUT [--supervisor-state S] [--backup-root ROOT]
+[--alert-stream PATH]` collects the M4 gate's `PaperSnapshot` from the real local environment:
+the status/health projection, the live writer lease, launchd's answer, the durable alert stream,
+the newest verified backup, this checkout's HEAD and the attempt's own recorded profile. It is
+read-only and side-effect free, it recomputes no economic, risk, reconciliation or readiness
+truth, and an input it cannot observe keeps that contract's unavailable value — `unavailable`
+rather than `clean`, `absent` rather than `fresh`, `unknown` rather than `not running`. `ea paper
+gate lock --identity FILE --gate-id ID --gate-type 72h|7d ...` materialises and persists that
+gate's identity once, and `ea paper gate evaluate ...` is only a reading of the lock against the
+runtime as it is now; `evaluate_gate` remains the single verdict authority, drift is `INVALID`
+and never a relock, and writing a lock starts no gate. [Local Paper
+runtime](local-paper-runtime.md#gate-preparation) carries the real-host form of both.
