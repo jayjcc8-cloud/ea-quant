@@ -19,6 +19,7 @@
 #   ea-runtime status                    launchd state (stderr) + `ea paper status` (stdout)
 #   ea-runtime reload                    re-render both LaunchAgents from the config
 #   ea-runtime log [paper|backup]        tail the launchd-captured output
+#   ea-runtime snapshot --repo PATH      one read-only M4 gate-preparation snapshot
 #
 # launchd targets:
 #
@@ -432,6 +433,47 @@ cmd_log() {
     esac
 }
 
+# One read-only M4 gate-preparation snapshot of the supervised runtime.
+#
+# Everything this passes to the product is a reading this operator already takes
+# for `status`: launchd's own report for the Paper job, the attempt the agent
+# recorded, and the pinned backup root. `--repo` and `--alert-stream` stay
+# explicit operator arguments because neither is derivable from the pinned
+# config: WORKSPACE is the installed-Candidate workspace, not this checkout, and
+# the host alert stream has no configured location. It writes nothing, repairs
+# nothing and starts nothing.
+cmd_snapshot() {
+    repo=
+    alert_stream=
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo) repo=${2:-}; shift 2 ;;
+            --alert-stream) alert_stream=${2:-}; shift 2 ;;
+            *) die "usage: ea-runtime snapshot --repo PATH [--alert-stream PATH]" ;;
+        esac
+    done
+    [ -n "$repo" ] || die "usage: ea-runtime snapshot --repo PATH [--alert-stream PATH]"
+    load_config
+    run_dir=$(current_run_dir) ||
+        die "no supervised attempt has been launched yet; nothing to snapshot"
+    [ -d "$run_dir" ] || die "recorded attempt $run_dir does not exist"
+    # launchd's own answer, translated into the contract's closed vocabulary: a
+    # job it cannot describe is `unknown`, never assumed running or stopped.
+    case "$(job_field "$PAPER_LABEL" state || true)" in
+        running) supervisor=running ;;
+        'not running') supervisor=not_running ;;
+        *) supervisor=unknown ;;
+    esac
+    if [ -n "$alert_stream" ]; then
+        exec "$EA_BIN" paper snapshot \
+            --run-dir "$run_dir" --repo "$repo" --supervisor-state "$supervisor" \
+            --backup-root "$BACKUP_ROOT" --alert-stream "$alert_stream"
+    fi
+    exec "$EA_BIN" paper snapshot \
+        --run-dir "$run_dir" --repo "$repo" --supervisor-state "$supervisor" \
+        --backup-root "$BACKUP_ROOT"
+}
+
 # ---------------------------------------------------------------------------
 # launchd targets
 # ---------------------------------------------------------------------------
@@ -501,13 +543,34 @@ cmd_run() {
     exec "$@"
 }
 
+# The capture marker: one run id per line, appended only after `ea paper backup`
+# exits 0. It records a fact about the past -- this attempt was captured -- so
+# that retention pruning one of its backups can never make the attempt look
+# uncaptured and eligible again. It is a plain append-only text file, read only
+# by already_captured: it holds no economic, recovery, reconciliation or runtime
+# authority, nothing reconciles or replays from it, and no other command reads
+# it. The legacy `backup-*-<run_id>` directory check stays as well, so attempts
+# captured before this marker existed keep reading as captured.
+CAPTURED_RUNS=$STATE_DIR/captured-runs
+
 already_captured() {
+    if [ -f "$CAPTURED_RUNS" ] && grep -Fxq -- "$1" "$CAPTURED_RUNS" 2>/dev/null; then
+        return 0
+    fi
     for existing in "$BACKUP_ROOT"/backup-*-"$1"; do
         if [ -d "$existing" ]; then
             return 0
         fi
     done
     return 1
+}
+
+# Recorded after the capture, never before and never on refusal, so a failed or
+# refused attempt stays eligible. A capture that succeeded and then failed to be
+# recorded is reported, not hidden: it would otherwise be captured a second time.
+mark_captured() {
+    mkdir -p "$STATE_DIR" || return 1
+    printf '%s\n' "$1" >>"$CAPTURED_RUNS" || return 1
 }
 
 cmd_backup() {
@@ -538,6 +601,14 @@ cmd_backup() {
         printf 'capturing %s\n' "$entry"
         if "$EA_BIN" paper backup --run-dir "$entry" --backup-root "$BACKUP_ROOT" \
             --keep "$BACKUP_KEEP"; then
+            if ! mark_captured "$run_id"; then
+                # The backup exists but the fact was not recorded, so a later
+                # tick would capture this attempt again. Say so rather than
+                # exit 0 over it.
+                printf 'captured %s but could not record it in %s\n' \
+                    "$entry" "$CAPTURED_RUNS" >&2
+                return 2
+            fi
             return 0
         else
             # One attempt that this command refuses must not block every later
@@ -584,6 +655,7 @@ main() {
         log) cmd_log "${1:-paper}" ;;
         run) cmd_run "${1:-}" ;;
         backup) cmd_backup ;;
+        snapshot) cmd_snapshot "$@" ;;
         help | --help | -h | '') usage ;;
         *) die "unknown command '$command' (try: ea-runtime help)" ;;
     esac

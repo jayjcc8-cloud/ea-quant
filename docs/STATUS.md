@@ -15,9 +15,14 @@ integrated fault campaign (issue #254) proved the required failure classes — f
 interruption, duplicate/late facts, uncertain submit, process crash under launchd
 supervision, durable-write failure, restart recovery/reconciliation, backup/restore —
 over the existing runtime boundaries with zero product-code repairs; the campaign matrix,
-drill tooling and evidence are recorded under `.campaign/`. The remaining M4 steps are
-WU-5 Gate Prep (including #243 item 5 retention re-capture), RC freeze, and the 72-hour /
-7-day Paper soak. LIVE remains DENIED.
+drill tooling and evidence are recorded under `.campaign/`. The WU-5 Gate Prep surface is
+DELIVERED: `ea-runtime snapshot` and `ea paper snapshot` collect the frozen WU-2
+`PaperSnapshot` from the real local Paper environment, `ea paper gate lock|evaluate`
+materialise and persist one `PaperGateIdentity` and read it back through the unchanged
+`evaluate_gate`, and #243 item 5 is fixed — a captured attempt is recorded in
+`~/EA/supervisor/state/captured-runs`, so retention pruning a backup can no longer make that
+attempt eligible for automatic re-capture. The remaining M4 steps are the RC freeze and the
+72-hour / 7-day Paper soak. No gate has been started. LIVE remains DENIED.
 
 When this file is read from merged `main`, the containing `main` commit and its CI are the
 authoritative checkpoint. GitHub Issues and pull requests carry mutable coordination state; this

@@ -54,9 +54,14 @@ def _stub_ea(directory: Path) -> Path:
         '  dir=""; root=""; keep=5\n'
         '  while [ $# -gt 0 ]; do case "$1" in --run-dir) dir=$2; shift 2;; '
         "--backup-root) root=$2; shift 2;; --keep) keep=$2; shift 2;; *) shift;; esac; done\n"
-        '  rid=${dir##*/}; mkdir -p "$root/backup-20260101T000000000000Z-$rid"\n'
+        '  rid=${dir##*/}; [ -f "$dir/.refuse-backup" ] && exit 7\n'
+        '  mkdir -p "$root/backup-20260101T000000000000Z-$rid"\n'
         '  printf \'{"backup":"%s/backup-20260101T000000000000Z-%s","keep":%s}\\n\' '
         '"$root" "$rid" "$keep"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "paper" ] && [ "$2" = "snapshot" ]; then\n'
+        '  printf \'{"schema":"ea.paper-snapshot.v1","stub":true}\\n\'\n'
         "  exit 0\n"
         "fi\n"
         "exit 9\n",
@@ -588,3 +593,118 @@ def test_scheduled_backup_publishes_nothing_when_every_attempt_is_live(harness: 
         f"paper status --run-dir {harness.runtime / ATTEMPT_NEW}",
     ]
     assert harness.backups.is_dir()
+
+
+def _captured_marker(harness: Harness) -> Path:
+    return harness.supervisor / "state" / "captured-runs"
+
+
+def test_a_captured_attempt_stays_captured_after_its_backup_is_pruned(
+    harness: Harness,
+) -> None:
+    """#243 item 5: retention must not resurrect a captured attempt.
+
+    Capture is a fact about the past. While the only evidence of it was the
+    backup directory itself, pruning that directory -- exactly what retention
+    does to older captures -- made the attempt look uncaptured and eligible, so
+    the next tick published a second backup of the same attempt. The marker
+    records the fact independently of the artifact.
+    """
+    harness.install()
+    attempt = _attempt(harness, ATTEMPT_MID, settled=True, order=1)
+
+    first = harness.run("backup")
+    assert f"capturing {attempt}" in first.stdout
+    marker = _captured_marker(harness)
+    # The marker is operator state, deliberately outside BACKUP_ROOT: retention
+    # only ever prunes inside the backup root it was given.
+    assert not marker.is_relative_to(harness.backups)
+    assert marker.read_text(encoding="utf-8").splitlines() == [ATTEMPT_MID]
+
+    # Retention (or any operator cleanup) removes the capture artifact.
+    captured = harness.backups / f"backup-20260101T000000000000Z-{ATTEMPT_MID}"
+    assert captured.is_dir()
+    for entry in harness.backups.iterdir():
+        entry.rmdir()
+
+    second = harness.run("backup")
+    assert "no settled attempt needs capture" in second.stdout
+    assert [line for line in harness.argv() if line.startswith("paper backup ")] == [
+        f"paper backup --run-dir {attempt} --backup-root {harness.backups} --keep 5"
+    ]
+
+
+def test_a_refused_capture_records_nothing(harness: Harness) -> None:
+    """A refusal is not a capture: the attempt stays eligible, and unmarked.
+
+    Marking before the attempt, or marking a refusal, would make a backup that
+    never happened permanently unretryable.
+    """
+    harness.install()
+    attempt = _attempt(harness, ATTEMPT_MID, settled=True, order=1)
+    (attempt / ".refuse-backup").write_text("", encoding="utf-8")
+
+    refused = harness.run("backup", check=False)
+    assert refused.returncode == 7
+    assert "capture refused" in refused.stderr
+    assert not _captured_marker(harness).exists()
+    assert list(harness.backups.iterdir()) == []
+
+    # The refusal left the attempt untouched and still eligible, so the next
+    # tick that can capture it does -- and only that capture marks it.
+    (attempt / ".refuse-backup").unlink()
+    captured = harness.run("backup")
+    assert f"capturing {attempt}" in captured.stdout
+    assert _captured_marker(harness).read_text(encoding="utf-8").splitlines() == [ATTEMPT_MID]
+
+
+def test_a_captured_attempt_is_never_captured_twice(harness: Harness) -> None:
+    harness.install()
+    _attempt(harness, ATTEMPT_MID, settled=True, order=1)
+    harness.run("backup")
+    harness.run("backup")
+    harness.run("backup")
+    assert len([line for line in harness.argv() if line.startswith("paper backup ")]) == 1
+    assert _captured_marker(harness).read_text(encoding="utf-8").splitlines() == [ATTEMPT_MID]
+
+
+def test_snapshot_reports_launchds_own_answer_for_the_supervised_job(harness: Harness) -> None:
+    """The snapshot command reads the supervisor state; it never assumes one.
+
+    launchd is the only authority on whether the Paper job is running, so the
+    operator asks it and passes the answer through. The vocabulary is closed, and
+    a job launchd cannot describe is `unknown` -- never read as running.
+    """
+    harness.run("install", "--config", str(harness.config()), armed=True)
+    harness.run("run", "--supervised", check=False)
+    run_dir = (harness.supervisor / "state" / "current-run").read_text(encoding="utf-8").strip()
+    Path(run_dir).mkdir(parents=True, exist_ok=True)
+
+    # A loaded-but-not-running job is reported as the contract's `not_running`,
+    # which is launchd's own answer and not an assumption about the process.
+    assert harness.run("snapshot", "--repo", "/srv/ea").stdout.startswith(
+        '{"schema":"ea.paper-snapshot.v1"'
+    )
+    assert "--supervisor-state not_running" in harness.argv()[-1]
+
+    harness.mark_running()
+
+    completed = harness.run("snapshot", "--repo", "/srv/ea", "--alert-stream", "/srv/alerts.json")
+    assert completed.returncode == 0
+    assert harness.argv()[-1] == (
+        f"paper snapshot --run-dir {run_dir} --repo /srv/ea --supervisor-state running "
+        f"--backup-root {harness.backups} --alert-stream /srv/alerts.json"
+    )
+
+
+def test_snapshot_refuses_rather_than_inventing_a_runtime(harness: Harness) -> None:
+    harness.install()
+    # Nothing has been launched: there is no attempt to observe, so there is no
+    # snapshot to publish.
+    completed = harness.run("snapshot", "--repo", "/srv/ea", check=False)
+    assert completed.returncode != 0
+    assert "no supervised attempt" in completed.stderr
+    assert harness.argv() == []
+
+    harness.run("run", check=False)
+    assert harness.run("snapshot", check=False).returncode != 0

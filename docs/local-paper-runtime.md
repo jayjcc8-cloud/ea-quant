@@ -41,6 +41,7 @@ owns lives under `~/EA`, and `~/EA/supervisor` holds the operator layer itself:
     state/
       current-run              absolute path of the newest supervised attempt
       launch-history.jsonl     one line per supervised launch: run id, dir, pid, time
+      captured-runs            run ids already captured by `ea paper backup`, one per line
 ```
 
 ## Install
@@ -176,8 +177,104 @@ and `enable` it again before `ea-runtime start`.
 
 `ea paper backup` is not an online snapshot: it refuses a held writer lease and captures only a
 settled attempt. A tick therefore captures **the newest attempt whose writer has released and
-which has no backup yet**, and prints `no settled attempt needs capture` otherwise. Re-running a
-tick never captures the same attempt twice, and a refused or skipped tick publishes nothing.
+which has not been captured yet**, and prints `no settled attempt needs capture` otherwise.
+Re-running a tick never captures the same attempt twice, and a refused or skipped tick publishes
+nothing.
+
+"Has been captured" is recorded in `~/EA/supervisor/state/captured-runs`, one run id per line,
+appended only after `ea paper backup` exits 0. It has to be recorded separately from the backup
+directory itself: retention prunes older backups, and while the directory was the only evidence
+of a capture, pruning it made the attempt look uncaptured and eligible, so the next tick
+published a second backup of an attempt that had already been captured. The marker holds no
+economic, recovery, reconciliation or runtime authority — nothing reconciles, replays or decides
+from it, and no other command reads it. A refused or failed capture writes nothing, so that
+attempt stays eligible; an attempt captured before this file existed still reads as captured
+through its backup directory.
+
+### Making an attempt capture-eligible again
+
+`captured-runs` is deliberately independent of `BACKUP_ROOT`. Retention only prunes inside the
+backup root it is given, so normal retention can never remove a marker entry — that is exactly why
+the file exists, and it is also why moving or replacing the backup root does not re-capture the
+attempts already recorded in it.
+
+The one exceptional case where a run must become eligible again — the backup root was intentionally
+moved or replaced, or a capture was found corrupt and deleted — is recovered by hand:
+
+1. Confirm the run really is uncaptured in the root you now use, for example with
+   `ea paper backup inspect --backup DIR`.
+2. Delete that run's single line from `~/EA/supervisor/state/captured-runs`.
+3. Let the next `ea-runtime backup` tick capture it into the current root as usual.
+
+Deleting the line is an exceptional operator recovery action, not cleanup, and it must never be
+part of routine retention or gate preparation. It restores nothing, replays nothing, reconciles
+nothing and authorizes nothing — it only makes that one settled attempt eligible for the existing
+capture path again, and `ea paper backup` still applies every one of its own refusals.
+
+## Gate preparation
+
+The M4 release-candidate gates (72h, 7d) are judged by the frozen WU-2 contract:
+`ea.product.paper_evidence.build_paper_snapshot` produces one `PaperSnapshot`,
+`build_gate_identity` one `PaperGateIdentity`, and the pure `evaluate_gate` the verdict. This
+layer adds only the thin operational surface those need on a real host — it adds no second
+evaluator, no timer, no watchdog and no gate state.
+
+```
+ea-runtime snapshot --repo CHECKOUT [--alert-stream PATH]
+ea paper gate lock     --identity FILE --gate-id ID --gate-type 72h|7d \
+                       --repo CHECKOUT --config run-config.env --launchd-dir DIR
+ea paper gate evaluate --identity FILE --run-dir DIR --repo CHECKOUT \
+                       --config run-config.env --launchd-dir DIR \
+                       [--supervisor-state running|not_running|unknown] \
+                       [--backup-root ROOT] [--alert-stream PATH]
+```
+
+`ea-runtime snapshot` is the real-host path: it reads launchd's own answer for the Paper job and
+the attempt the agent recorded, takes the backup root from the pinned config, and passes those
+plus the operator's `--repo` and `--alert-stream` to `ea paper snapshot`. `--repo` and
+`--alert-stream` stay explicit arguments because neither is derivable from the pinned config:
+`WORKSPACE` is the installed-Candidate workspace rather than this checkout, and the host alert
+stream has no configured location.
+
+Every snapshot input is another owner's existing read, and each is written down where it comes
+from:
+
+| Snapshot field | Read from | Unobservable becomes |
+| --- | --- | --- |
+| `repo_sha` | `git -C CHECKOUT rev-parse HEAD` | the command fails, no snapshot |
+| `run_id`, `health`, `runtime_state`, `reconciliation_state`, `risk_gate_state`, `readiness` | `ea paper status` (the health projection, with liveness re-observed from the live writer lease) | an absent or unavailable projection is `health = null`, `unknown`, not ready |
+| `writer_lease_held` | the live `flock` observation of `writer-v1.lock` | the command fails, no snapshot |
+| `supervisor_state` | launchd, or the operator's explicit `--supervisor-state` | `unknown` |
+| `alert_state` | the durable alert stream | `unavailable`, never `clean` |
+| `backup_state` | `latest_verified_paper_backup` | `absent` when none verifies, `unavailable` when the root cannot be read |
+| `broker_mode`, `live_enabled` | the attempt's own recorded profile | anything that is not the local simulated Paper profile reads as live-capable |
+
+The snapshot is read-only and side-effect free, and it recomputes no economic, risk,
+reconciliation or readiness truth: an input it cannot observe keeps the contract's own
+unavailable value rather than becoming healthy evidence, so a gate prepared against a blind
+observer cannot come out `PASS`. `ea paper snapshot` exits 3 when the snapshot itself cannot be
+taken.
+
+`ea paper gate lock` rebuilds the identity from the real inputs — the checkout's HEAD, the
+operator config's bytes and the two rendered LaunchAgent definitions — and persists it once. It
+is one small JSON document at the path you give it, and its write is an exclusive create: an
+identity that is already locked is never replaced, because drift must become `INVALID`, not a
+fresh gate. Editing the pinned config or re-rendering a plist afterwards therefore fails the
+gate instead of silently relocking it.
+
+**Locking an identity does not start a gate.** This product owns no clock, no timer and no gate
+state, so nothing begins when that file is written; `evaluate_gate` is the only verdict
+authority and `ea paper gate evaluate` is only a reading of the lock against the runtime as it is
+now. The 72-hour and 7-day Gates are started by the M4 release-candidate freeze, a separate
+authorization, and exit code 3 means the verdict is not `PASS` or the observation could not be
+taken.
+
+Before that freeze, the minimum a host must show is: the checkout HEAD is observable and is the
+commit being frozen; the pinned config and both rendered LaunchAgents are observable and will not
+move; exactly one supervised writer is intact (`ea-runtime status`, one live writer lease); the
+snapshot command runs; the backup root and the alert stream are readable; and Live remains
+denied, which the snapshot reports when the attempt's own profile is anything but local
+simulated Paper.
 
 ## Boundaries
 
