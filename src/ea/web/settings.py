@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-_ALLOWED_PROVIDERS = frozenset({"anthropic", "openai-chat-completions-compatible"})
+_ALLOWED_PROVIDERS = frozenset({"anthropic", "openai-chat-completions-compatible", "deepseek"})
 _SCHEMA = "radian.settings.v1"
 _MAX_BYTES = 64 * 1024
 _DEFAULT_MAX_MODEL_CALLS = 10

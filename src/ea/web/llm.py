@@ -104,6 +104,7 @@ class ModelPort(Protocol):
 
 PROVIDER_PROTOCOLS: dict[str, tuple[str, ModelCapabilities]] = {
     "anthropic": ("anthropic-messages", ModelCapabilities(True, False, True)),
+    "deepseek": ("deepseek-chat-completions", ModelCapabilities(True, False, True)),
     "openai-chat-completions-compatible": (
         "openai-chat-completions",
         ModelCapabilities(True, False, True),
@@ -435,6 +436,7 @@ class OpenAIChatCompletionsCompatibleProvider(_Provider):
 
     provider = "openai-chat-completions-compatible"
     default_base_url = "https://api.openai.com/v1"
+    token_parameter = "max_completion_tokens"
 
     def complete(
         self,
@@ -468,9 +470,11 @@ class OpenAIChatCompletionsCompatibleProvider(_Provider):
         payload: dict[str, Any] = {
             "model": config["model"],
             "messages": wire,
-            "max_completion_tokens": max_tokens,
+            self.token_parameter: max_tokens,
             "stream": False,
         }
+        if self.provider == "deepseek":
+            payload["thinking"] = {"type": "disabled"}
         if tools:
             payload["tools"] = [
                 {
@@ -535,11 +539,27 @@ class OpenAIChatCompletionsCompatibleProvider(_Provider):
         )
 
 
+class DeepSeekProvider(OpenAIChatCompletionsCompatibleProvider):
+    """Official DeepSeek non-thinking native function-call profile."""
+
+    provider = "deepseek"
+    default_base_url = "https://api.deepseek.com/v1"
+    token_parameter = "max_tokens"
+
+    def _config(self) -> dict[str, Any]:
+        config = super()._config()
+        if config["base_url"] != self.default_base_url:
+            raise ModelNotConfigured("DeepSeek requires the official API endpoint")
+        return config
+
+
 def create_model_port(settings: RadianSettings) -> ModelPort:
     try:
         provider = (settings.load().get("model") or {}).get("provider")
     except RadianSettingsError:
         provider = None
+    if provider == "deepseek":
+        return DeepSeekProvider(settings)
     if provider == "openai-chat-completions-compatible":
         return OpenAIChatCompletionsCompatibleProvider(settings)
     # Absent/unsupported configuration fails at route/complete, never dispatches.

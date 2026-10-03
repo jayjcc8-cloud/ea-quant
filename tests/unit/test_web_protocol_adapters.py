@@ -365,3 +365,55 @@ def test_provider_failure_stays_charged_and_is_restart_readable(
         assert reopened.error == task.error and reopened.spent_calls == task.spent_calls
     finally:
         service.stop()
+
+
+def test_deepseek_native_tools_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = store(tmp_path, "deepseek")
+    config = settings.load()
+    config["model"]["base_url"] = "https://api.deepseek.com/v1"
+    config["model"]["model"] = "deepseek-flash"
+    settings.save(config)
+    call = llm.ToolCall("call-one", "lookup", {"symbol": "AAPL"})
+    recorded = transport(
+        monkeypatch,
+        [
+            document("deepseek", [call], usage={"prompt_tokens": 7, "completion_tokens": 3}),
+            document("deepseek"),
+        ],
+    )
+    port = llm.create_model_port(settings)
+    tools = [llm.ToolDefinition("lookup", "Lookup", {"type": "object"})]
+    messages = [llm.ModelMessage("user", "idea")]
+    response = port.complete(system="policy", messages=messages, tools=tools, max_tokens=321)
+    assert response.tool_calls == (call,)
+    assert response.usage_available and response.input_tokens == 7
+    messages += [
+        llm.ModelMessage("assistant", response.text, response.tool_calls),
+        llm.ModelMessage("tool", "result", call_id=call.id),
+    ]
+    port.complete(system="policy", messages=messages, tools=tools)
+    wire = recorded[0]["json"]
+    assert recorded[0]["url"] == "https://api.deepseek.com/v1/chat/completions"
+    assert wire["model"] == "deepseek-flash" and wire["max_tokens"] == 321
+    assert "max_completion_tokens" not in wire
+    assert wire["thinking"] == {"type": "disabled"} and wire["stream"] is False
+    assert wire["tools"][0]["function"]["parameters"] == tools[0].parameters
+    assert recorded[1]["json"]["messages"][-1] == {
+        "role": "tool",
+        "content": "result",
+        "tool_call_id": "call-one",
+    }
+
+
+def test_deepseek_rejects_nonofficial_endpoint_and_preserves_openai(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = transport(monkeypatch, [document("openai-chat-completions-compatible")])
+    port = llm.create_model_port(store(tmp_path, "deepseek"))
+    with pytest.raises(llm.ModelNotConfigured, match="official"):
+        port.complete(system="policy", messages=[llm.ModelMessage("user", "idea")])
+    assert recorded == []
+    port = llm.create_model_port(store(tmp_path, "openai-chat-completions-compatible"))
+    port.complete(system="policy", messages=[llm.ModelMessage("user", "idea")], max_tokens=123)
+    assert recorded[0]["json"]["max_completion_tokens"] == 123
+    assert "thinking" not in recorded[0]["json"] and "max_tokens" not in recorded[0]["json"]
