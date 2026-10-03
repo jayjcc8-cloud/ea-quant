@@ -311,7 +311,13 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   const mutate = async (kind: 'confirm' | 'cancel' | 'retry', call: () => Promise<ResearchTask>, fallback: string) => {
     if (busyRef.current) return
     busyRef.current = true; setBusy(kind); setError(null)
-    try { setTask(await call()) }
+    // A successful write is newer than every read dispatched before it completed.
+    // Invalidate those reads even when the mutation keeps the same task status.
+    try {
+      const next = await call()
+      generation.current += 1
+      setTask(next)
+    }
     catch (caught) {
       // A failed or uncertain mutation reloads the persisted state instead of
       // assuming what happened; the failure itself is reported after the reload.

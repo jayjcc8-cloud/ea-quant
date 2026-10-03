@@ -6,7 +6,7 @@
  * engine result. The scripted "proposal" only proves that the UI shows what the
  * backend persisted and never drafts, confirms, retries or submits on its own.
  */
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type ChronologicalHoldout } from './app'
@@ -108,6 +108,12 @@ type Script = {
 
 function scripted(script: Script = {}) {
   const calls = { list: 0, create: 0, get: 0, confirm: 0, retry: 0, cancel: 0 }
+  let persisted = task(script.task)
+  const persist = async (operation?: () => Promise<ResearchTask>) => {
+    const next = operation ? await operation() : persisted
+    persisted = next
+    return next
+  }
   const api: ApiAdapter = {
     holdoutScenarios: async () => [],
     createHoldout: async () => { throw new Error('unused') },
@@ -127,12 +133,12 @@ function scripted(script: Script = {}) {
       if (script.settingsError) throw script.settingsError
       return script.settings ?? configured
     },
-    listResearchTasks: async () => { calls.list += 1; return script.tasks ?? [task(script.task)] },
-    createResearchTask: async () => { calls.create += 1; return script.create ? script.create() : task(script.task) },
-    getResearchTask: async () => { calls.get += 1; return task(script.task) },
-    confirmResearchTask: async () => { calls.confirm += 1; return script.confirm ? script.confirm() : task(script.task) },
-    retryResearchTask: async () => { calls.retry += 1; return script.retry ? script.retry() : task(script.task) },
-    cancelResearchTask: async () => { calls.cancel += 1; return script.cancel ? script.cancel() : task(script.task) },
+    listResearchTasks: async () => { calls.list += 1; return script.tasks ?? [persisted] },
+    createResearchTask: async () => { calls.create += 1; return persist(script.create) },
+    getResearchTask: async () => { calls.get += 1; return persisted },
+    confirmResearchTask: async () => { calls.confirm += 1; return persist(script.confirm) },
+    retryResearchTask: async () => { calls.retry += 1; return persist(script.retry) },
+    cancelResearchTask: async () => { calls.cancel += 1; return persist(script.cancel) },
   }
   return { api, calls }
 }
@@ -235,6 +241,40 @@ describe('research workspace', () => {
     expect(screen.getByText(/Candidate acceptance records a research judgment only/)).toBeTruthy()
   })
 
+  it('ignores a delayed pre-retry read even when the mutation keeps the failed status', async () => {
+    const user = userEvent.setup()
+    const before = task({
+      status: 'failed', last_model: null,
+      error: { step: 'propose', code: 'model_not_configured', message: 'Before retry' },
+    })
+    const after = task({
+      ...before,
+      error: { step: 'propose', code: 'budget_exceeded', message: 'New persisted retry failure' },
+      operation_generation: 3, operation_completion_generation: 3,
+    })
+    const { api, calls } = scripted({ task: before, retry: async () => after })
+    const readPersisted = api.getResearchTask!
+    let delayNextRead = false
+    let releaseRead!: (value: ResearchTask) => void
+    api.getResearchTask = async id => {
+      if (!delayNextRead) return readPersisted(id)
+      delayNextRead = false
+      calls.get += 1
+      return new Promise<ResearchTask>(resolve => { releaseRead = resolve })
+    }
+    detail(api)
+    await screen.findByRole('button', { name: 'Retry failed step' })
+    delayNextRead = true
+    await user.click(screen.getByRole('button', { name: /^Refresh$/ }))
+    await waitFor(() => expect(releaseRead).toBeTypeOf('function'))
+    await user.click(screen.getByRole('button', { name: 'Retry failed step' }))
+    await screen.findByText('New persisted retry failure')
+    await act(async () => { releaseRead(before) })
+    expect(screen.getByText('New persisted retry failure')).toBeTruthy()
+    expect(screen.queryByText('Before retry')).toBeNull()
+    expect(calls.retry).toBe(1)
+  })
+
   it('restarts polling after confirmation and refreshes the completed job projection', async () => {
     const user = userEvent.setup()
     let current = task()
@@ -301,11 +341,12 @@ describe('research workspace', () => {
 
     const retry = await screen.findByRole('button', { name: 'Retry failed step' })
     expect(screen.getByText(/Retry resumes the failed step in place/)).toBeTruthy()
+    const readsBeforeRetry = calls.get
     await user.click(retry)
 
     expect(calls.retry).toBe(1)
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'an operation is already in flight')
-    expect(calls.get).toBe(2)
+    expect(calls.get).toBe(readsBeforeRetry + 1)
     expect(calls.confirm).toBe(0)
   })
 
