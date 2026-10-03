@@ -8,10 +8,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from fractions import Fraction
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ea.core.economics import CanonicalDecimal, require_positive, require_quantized
 from ea.core.market_data import Adjustment, MarketDataEnvelope
+from ea.strategy.rules import DEFAULT_RULE
 
 ParameterValue = int | str
 
@@ -19,7 +20,7 @@ ParameterValue = int | str
 @dataclass(frozen=True, slots=True)
 class ParameterV1:
     name: str
-    type: Literal["integer", "decimal"]
+    type: Literal["integer", "decimal", "price-rule-v1"]
     required: bool
     default: ParameterValue
     static_minimum: ParameterValue | None
@@ -28,7 +29,10 @@ class ParameterV1:
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-z][a-z0-9_]*", self.name):
             raise ValueError("invalid parameter name")
-        if self.type not in {"integer", "decimal"} or type(self.required) is not bool:
+        if (
+            self.type not in {"integer", "decimal", "price-rule-v1"}
+            or type(self.required) is not bool
+        ):
             raise ValueError("unsupported parameter definition")
         for value in (self.default, self.static_minimum, self.static_maximum):
             if value is not None:
@@ -42,6 +46,10 @@ class ParameterV1:
             raise ValueError("invalid parameter bounds")
 
     def _typed(self, value: object) -> ParameterValue:
+        if self.type == "price-rule-v1":
+            from ea.strategy.rules import decode_rule
+
+            return decode_rule(value).canonical
         if self.type == "integer":
             if type(value) is not int:
                 raise ValueError(f"{self.name} must be an integer")
@@ -232,6 +240,14 @@ def _optional_entry(orders: int, fills: int) -> None:
 
 
 _QUANTITY = ParameterV1("target_quantity", "decimal", True, "1", "0", None)
+
+
+def _rule_factory(parameters: Mapping[str, ParameterValue]) -> EntryLogic:
+    from ea.strategy.rules import PriceRuleLogic
+
+    return cast(EntryLogic, PriceRuleLogic(parameters))
+
+
 BUILTIN_STRATEGIES = StrategyRegistryV1(
     (
         StrategyEntryV1(
@@ -271,6 +287,22 @@ BUILTIN_STRATEGIES = StrategyRegistryV1(
             ),
             _moving_average,
             _average_factory,
+            _optional_entry,
+        ),
+        StrategyEntryV1(
+            StrategyDescriptorV1(
+                1,
+                "price-rule-entry-v1",
+                1,
+                "Closed price entry rule v1",
+                True,
+                (
+                    ParameterV1("rule", "price-rule-v1", True, DEFAULT_RULE, None, None),
+                    _QUANTITY,
+                ),
+            ),
+            _positive_quantity,
+            _rule_factory,
             _optional_entry,
         ),
     )
@@ -315,6 +347,19 @@ def resolve_parameters(
             if last_entry_index is None:
                 raise ValueError("strategy requires history and a later executable bar")
             maximum = history_bars if history_bars is not None else last_entry_index + 1
+        if parameter.type == "price-rule-v1":
+            from ea.strategy.rules import decode_rule
+
+            rule = decode_rule(normalized[parameter.name])
+            eligible_history = (
+                history_bars
+                if history_bars is not None
+                else (0 if last_entry_index is None else last_entry_index + 1)
+            )
+            if last_entry_index is None or rule.history > eligible_history:
+                raise ValueError("rule requires enough visible history and an executable later bar")
+            resolved.append(ResolvedStrategyParameterV1(parameter, minimum, maximum))
+            continue
         value = Decimal(normalized[parameter.name])
         if minimum is not None and value < Decimal(minimum):
             raise ValueError(f"{parameter.name} is below resolved minimum")

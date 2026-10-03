@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-_ALLOWED_PROVIDERS = frozenset({"anthropic"})
+_ALLOWED_PROVIDERS = frozenset({"anthropic", "openai-chat-completions-compatible"})
 _SCHEMA = "radian.settings.v1"
 _MAX_BYTES = 64 * 1024
 _DEFAULT_MAX_MODEL_CALLS = 10
@@ -84,26 +84,68 @@ class RadianSettings:
                 os.close(descriptor)
 
     def status(self) -> dict[str, Any]:
-        """Project the model configuration without exposing any secret."""
+        """Project the model configuration without exposing any secret.
+
+        The projection names the provider, the protocol that provider value
+        actually selects, the configured endpoint (never a default one), the
+        capabilities the protocol declares, the capabilities research requires
+        and the frozen research budget. A provider that is not configured, or
+        whose protocol does not declare a required capability, is reported
+        unconfigured with a reason — never as usable.
+        """
         try:
             document = self.load()
         except RadianSettingsError:
             document = {}
-        model = document.get("model") or {}
-        configured = (
-            isinstance(model, dict)
-            and model.get("provider") in _ALLOWED_PROVIDERS
-            and bool(model.get("model"))
-            and (bool(model.get("api_key")) or bool(model.get("api_key_env")))
-        )
+        raw_model = document.get("model")
+        model: dict[str, Any] = raw_model if isinstance(raw_model, dict) else {}
+        provider = model.get("provider")
+        provider = provider if isinstance(provider, str) else None
+        endpoint = model.get("base_url")
+        endpoint = endpoint if isinstance(endpoint, str) and endpoint else None
+
+        # Local import keeps this module independent of the adapter layer while
+        # the protocol and capability facts stay owned by it.
+        from ea.web.llm import model_projection
+
+        projection = model_projection(provider, model.get("model"), endpoint)
         research = document.get("research") or {}
+        configuration_present = bool(model)
+        env_name = model.get("api_key_env")
+        credential_available = bool(
+            model.get("api_key")
+            or (os.environ.get(env_name, "") if isinstance(env_name, str) and env_name else "")
+        )
+        usable = (
+            provider in _ALLOWED_PROVIDERS and bool(model.get("model")) and credential_available
+        )
+        missing = projection["missing_capabilities"]
+        configured = bool(usable and not missing)
+        if configured:
+            configuration_error = None
+        elif not usable:
+            configuration_error = "no usable model provider is configured"
+        else:
+            configuration_error = "the configured model protocol does not declare: " + ", ".join(
+                missing
+            )
         return {
             "schema": "radian.settings-status.v1",
             "settings_file": str(self.path),
+            # Local readiness is not proof of a valid key or a real request.
             "configured": configured,
-            "provider": model.get("provider") if isinstance(model, dict) else None,
+            "configuration_present": configuration_present,
+            "credential_available": credential_available,
+            "request_validation": "not_verified",
+            "provider": provider,
             "model": model.get("model") if isinstance(model, dict) else None,
-            "base_url": model.get("base_url") if isinstance(model, dict) else None,
+            "base_url": endpoint,
+            "endpoint": endpoint,
+            "protocol": projection["protocol"],
+            "capabilities": projection["capabilities"],
+            "required_capabilities": projection["required_capabilities"],
+            "missing_capabilities": missing,
+            "configuration_error": configuration_error,
             "api_key_env": model.get("api_key_env") if isinstance(model, dict) else None,
             "research_budget": {
                 "max_model_calls": _budget(research, "max_model_calls", _DEFAULT_MAX_MODEL_CALLS),

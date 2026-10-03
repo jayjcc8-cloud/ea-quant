@@ -977,6 +977,20 @@ class WebService:
             except KeyError:
                 raise JobNotFoundError("job was not found in this workspace") from None
 
+    def lookup_job_by_request_id(self, request_id: str) -> JobRecord:
+        """Read the job already bound to one idempotency key; create nothing.
+
+        This is the recovery-side view of the existing request index: a caller
+        that reserved ``request_id`` before an interrupted ``create_job`` can
+        discover whether the job and its attempt already exist instead of
+        submitting a second identity. It never starts work.
+        """
+        with self._lock:
+            job_id = self._requests.get(request_id)
+            if job_id is None:
+                raise JobNotFoundError("no job is bound to this request_id") from None
+            return self._jobs[job_id]
+
     def list_batches(self) -> list[dict[str, object]]:
         """Return one persisted summary per batch, newest first, without members."""
         with self._lock:

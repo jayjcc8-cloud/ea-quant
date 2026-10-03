@@ -19,6 +19,7 @@ def test_descriptors_are_canonical_and_research_visibility_is_explicit() -> None
     assert [d.strategy_id for d in registry.descriptors(research_only=True)] == [
         "bounded-long-v1",
         "moving-average-entry-v1",
+        "price-rule-entry-v1",
     ]
     descriptor = registry.get("moving-average-entry-v1", 1).descriptor
     assert descriptor.canonical_bytes() == descriptor.canonical_bytes()

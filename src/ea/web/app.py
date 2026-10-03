@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from ea.web.service import (
     WebService,
     roots_overlap,
 )
+from ea.web.settings import RadianSettings
 
 
 class InputIdentity(BaseModel):
@@ -187,10 +189,32 @@ def create_app(settings: WebSettings) -> Any:
         data_root=settings.data_root,
     )
 
+    from ea.web.research import (
+        InvalidSpecError,
+        ResearchOrchestrator,
+        ResearchStore,
+        ResearchTaskError,
+        TaskConflictError,
+        TaskNotFoundError,
+        TaskStateError,
+    )
+
+    research_store = ResearchStore(workspace_root)
+    research_orchestrator = ResearchOrchestrator(
+        research_store, service, RadianSettings(RadianSettings.default_path())
+    )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         service.start()
         try:
+            # Reconcile interrupted research against the real job index before the
+            # local API answers. This classifies crashed work and rebinds an
+            # already-created job; it never dispatches a provider or a backtest.
+            # A single unreadable task record must not block the local service,
+            # so a reconciliation error leaves the record for its own read path.
+            with contextlib.suppress(OSError, ResearchTaskError):
+                research_orchestrator.reconcile_all()
             yield
         finally:
             service.stop()
@@ -475,7 +499,6 @@ def create_app(settings: WebSettings) -> Any:
     from fastapi import Query
 
     from ea.web import radian
-    from ea.web.settings import RadianSettings
 
     @app.get("/api/workspace/overview")
     def workspace_overview() -> object:
@@ -519,21 +542,6 @@ def create_app(settings: WebSettings) -> Any:
             return RadianSettings(RadianSettings.default_path()).status()
         except ValueError as caught:
             return error(500, "settings_unavailable", str(caught))
-
-    from ea.web.research import (
-        InvalidSpecError,
-        ResearchOrchestrator,
-        ResearchStore,
-        ResearchTaskError,
-        TaskConflictError,
-        TaskNotFoundError,
-        TaskStateError,
-    )
-
-    research_store = ResearchStore(workspace_root)
-    research_orchestrator = ResearchOrchestrator(
-        research_store, service, RadianSettings(RadianSettings.default_path())
-    )
 
     @app.post("/api/research/tasks", status_code=201)
     def create_research_task(request: ResearchTaskRequest) -> object:
