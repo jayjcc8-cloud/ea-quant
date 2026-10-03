@@ -128,6 +128,20 @@ def _decimal_text(value: Decimal) -> str:
     return format(value.normalize(), "f") if value else "0"
 
 
+# Checked worst-case audit producers for one local Paper market callback. A
+# market callback writes at most four frames (construction, authorization,
+# result, or one non-allow safety record plus refresh); every queued or freshly
+# issued root fact closes in at most two fact callbacks of four frames each,
+# because a trade's query child is its own retained duplicate and cannot query
+# again; one submit acknowledgement is the only other ordinary producer.
+PAPER_MARKET_AUDIT_FRAMES = 4
+PAPER_FACT_CLOSURE_AUDIT_FRAMES = 8
+# Reconciliation observations and the terminal that close a capacity stop are
+# paid from the protected close allowance, never from ordinary append capacity.
+PAPER_SHUTDOWN_AUDIT_FRAMES = 3
+PAPER_CAPACITY_EXHAUSTED_REASON = "audit_capacity_exhausted"
+
+
 class PaperTradingSession:
     """One accepted configuration's incremental local simulation, never a backtest loop."""
 
@@ -165,6 +179,7 @@ class PaperTradingSession:
             if scenario.schema_version == 5
             else 1
         )
+        self.max_orders = 2 * self.max_round_trips
         self.raw_price_bound = max(prices)
         self.price_bound = _quantized_historical_close(
             max(prices),
@@ -865,6 +880,38 @@ class PaperTradingSession:
             ),
         }
 
+    def market_audit_frames(self) -> int:
+        """The complete worst-case frame budget B for one further market admission.
+
+        B = 4 + 8*(P + G) + 3 with P queued facts (<= 64) and G = max_orders + 1,
+        funding the market records themselves, the complete closure of every
+        already queued fact and of every order the broker may freshly issue, and
+        the protected shutdown allowance that closes the attempt durably. The
+        count is independent of the mid-callback stop predicate.
+        """
+        queued = self.runtime.status().pending_facts
+        return (
+            PAPER_MARKET_AUDIT_FRAMES
+            + PAPER_FACT_CLOSURE_AUDIT_FRAMES * (queued + self.max_orders + 1)
+            + PAPER_SHUTDOWN_AUDIT_FRAMES
+        )
+
+    def market_ordinary_audit_frames(self) -> int:
+        """The part of B that must still fit in ordinary append capacity.
+
+        The journal's ``remaining_frames`` already excludes its protected close
+        reserve, which funds the same shutdown allowance counted in B, so only
+        ``B - PAPER_SHUTDOWN_AUDIT_FRAMES`` may be charged against it.
+        """
+        return self.market_audit_frames() - PAPER_SHUTDOWN_AUDIT_FRAMES
+
+    def has_market_capacity(self) -> bool:
+        """Whether the audit journal can still fund one whole further market."""
+        probe = getattr(self.audit, "has_capacity_for", None)
+        if probe is None:
+            return True
+        return bool(probe(self.market_ordinary_audit_frames()))
+
     def reconcile(self) -> str:
         """Reconcile acknowledged economics against funding and retained Fills, locally."""
         replay = create_portfolio_ledger(self.run_id, self.scenario.spec_set)
@@ -988,6 +1035,7 @@ def restore_paper_trading_session(
         if scenario.schema_version == 5
         else 1
     )
+    session.max_orders = 2 * session.max_round_trips
     session.raw_price_bound = max(prices)
     session.price_bound = _quantized_historical_close(
         max(prices),

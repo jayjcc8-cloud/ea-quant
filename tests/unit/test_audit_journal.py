@@ -28,6 +28,12 @@ from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunId, Sha256Digest
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
+    MAX_AUDIT_FRAME_BYTES,
+    MAX_AUDIT_HEADER_BYTES,
+    MAX_AUDIT_INDEX_RESIDENT_BYTES,
+    MAX_AUDIT_JOURNAL_BYTES,
+    MAX_LARGE_AUDIT_PAYLOAD_BYTES,
+    AuditCapacityLimits,
     PosixAuditJournal,
     PosixAuditRecoveryRecordSource,
     _compact_index_resident_bytes,
@@ -35,6 +41,8 @@ from ea.experiments.audit import (
     _LogicalKeyIndex,
     _OsAuditOps,
     create_posix_audit_journal,
+    production_audit_capacity_limits,
+    projected_index_resident_bytes,
     reopen_posix_audit_journal,
 )
 from ea.experiments.binding import RawAuditPort
@@ -1039,3 +1047,309 @@ def test_reconciliation_append_forwards_spec_set_semantic_admission(
         spec_set=spec_set,
     )
     assert acknowledgement.record_id.owner_sequence == 2
+
+
+def _dispatch_batch(sequence: int, batch_sha256: str) -> bytes:
+    """One distinct valid MATCHER_DISPATCH_BATCH payload declaring its own digest."""
+    document = json.loads(_batch_payload())
+    document["dispatch_sequence"] = sequence
+    document["batch_sha256"] = batch_sha256
+    return json.dumps(
+        document,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _append_batch(journal: PosixAuditJournal, sequence: int, batch_sha256: str) -> Any:
+    return journal.append(
+        record_kind=AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        subject_kind=AuditSubjectKind.HISTORICAL_MATCHER_DISPATCH_BATCH,
+        subject_sha256=Sha256Digest(batch_sha256),
+        canonical_payload=_dispatch_batch(sequence, batch_sha256),
+    )
+
+
+def _reconciliation_payload(dispatch_sequence: int) -> bytes:
+    from ea.core.economics import CanonicalDecimal
+    from ea.core.reconciliation import (
+        ReconciliationRequestedAction,
+        ReconciliationWatermarkComparison,
+        canonical_reconciliation_outcome_bytes,
+        create_position_reconciliation_discrepancy,
+        create_reconciliation_outcome,
+    )
+    from unit.test_portfolio_ledger import INSTRUMENT, _spec_set
+
+    outcome = create_reconciliation_outcome(
+        run_id=RunId(str(RUN_UUID)),
+        dispatch_sequence=dispatch_sequence,
+        observation_sha256=Sha256Digest("11" * 32),
+        local_snapshot_version=4,
+        local_snapshot_sha256=Sha256Digest("22" * 32),
+        ledger_sequence=4,
+        watermark_comparison=ReconciliationWatermarkComparison.EQUAL,
+        discrepancies=(
+            create_position_reconciliation_discrepancy(
+                spec_set=_spec_set(),
+                instrument=INSTRUMENT,
+                local_amount=CanonicalDecimal("10"),
+                observed_amount=CanonicalDecimal("12"),
+            ),
+        ),
+        outcome_code=OutcomeCode.RECONCILIATION_MISMATCH,
+        requested_action=ReconciliationRequestedAction.PROPOSE_SINGLE_TARGET_ADJUSTMENT,
+        halt_requested=True,
+    )
+    return canonical_reconciliation_outcome_bytes(outcome)
+
+
+def _append_reconciliation(journal: PosixAuditJournal, dispatch_sequence: int) -> Any:
+    payload = _reconciliation_payload(dispatch_sequence)
+    return journal.append(
+        record_kind=AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        subject_kind=AuditSubjectKind.RECONCILIATION_OUTCOME,
+        subject_sha256=audit_subject_digest(
+            AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME, payload
+        ),
+        canonical_payload=payload,
+    )
+
+
+def _append_terminal(journal: PosixAuditJournal) -> Any:
+    payload = json.dumps(
+        {
+            "canonicalization": "ea-canonical-json-v1",
+            "last_dispatch_sequence": 1,
+            "last_trigger_root_sha256": "33" * 32,
+            "pre_terminal_state_sha256": "44" * 32,
+            "previous_chain_head_sha256": audit_chain_head(journal.records[-1]).value,
+            "run_id": str(RUN_UUID),
+            "schema": "ea.audit-run-terminal.v1",
+            "terminal_kind": "failed",
+        },
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return journal.append(
+        record_kind=AuditRecordKind.RUN_TERMINAL,
+        subject_kind=AuditSubjectKind.RUN_TERMINAL_STATE,
+        subject_sha256=audit_subject_digest(AuditRecordKind.RUN_TERMINAL, payload),
+        canonical_payload=payload,
+    )
+
+
+def test_ordinary_appends_cannot_spend_the_protected_close_allowance(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(
+        prepared.audit,
+        capacity_limits=production_audit_capacity_limits().tightened(max_records=6),
+        protected_close_frames=3,
+    )
+    # One RUN_PREPARED record plus the three close frames are already committed,
+    # so exactly two ordinary records remain admissible.
+    assert journal.remaining_frames() == 2
+    _append_batch(journal, 1, "33" * 32)
+    _append_batch(journal, 2, "34" * 32)
+    assert journal.remaining_frames() == 0
+    with pytest.raises(AuditContractError, match="capacity is exhausted"):
+        _append_batch(journal, 3, "35" * 32)
+    assert len(journal.records) == 3
+
+    journal.begin_protected_close()
+    assert journal.closing is True
+    assert journal.remaining_frames() == 0
+    with pytest.raises(AuditContractError, match="reserved reconciliation and terminal"):
+        _append_batch(journal, 4, "36" * 32)
+
+    # Two reconciliation outcomes are admitted, the third can only be refused:
+    # the last frame stays exclusively reserved for the terminal.
+    _append_reconciliation(journal, 7)
+    _append_reconciliation(journal, 8)
+    with pytest.raises(AuditContractError, match="reserved reconciliation and terminal"):
+        _append_reconciliation(journal, 9)
+    terminal = _append_terminal(journal)
+    assert terminal.record_id.owner_sequence == 6
+    assert journal.terminal is True
+    with pytest.raises(AuditContractError, match="terminal audit journal is closed"):
+        _append_batch(journal, 5, "37" * 32)
+    journal.close()
+
+
+def test_logical_retries_consume_no_capacity_in_any_state(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(
+        prepared.audit,
+        capacity_limits=production_audit_capacity_limits().tightened(max_records=6),
+        protected_close_frames=3,
+    )
+    _append_batch(journal, 1, "33" * 32)
+    journal.begin_protected_close()
+    _append_reconciliation(journal, 7)
+    _append_terminal(journal)
+    records = journal.records
+    assert [record.record_kind for record in records] == [
+        AuditRecordKind.RUN_PREPARED,
+        AuditRecordKind.MATCHER_DISPATCH_BATCH,
+        AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME,
+        AuditRecordKind.RUN_TERMINAL,
+    ]
+    durable_bytes = journal.verified_bytes
+    sequences = [record.record_id.owner_sequence for record in records]
+
+    def retry(record: Any) -> None:
+        replay = journal.append(
+            record_kind=record.record_kind,
+            subject_kind=record.subject_kind,
+            subject_sha256=record.subject_sha256,
+            canonical_payload=record.canonical_payload,
+        )
+        assert replay.record_id.owner_sequence == record.record_id.owner_sequence
+
+    # Preparation, ordinary, closing and post-terminal retries all return the
+    # retained acknowledgement without spending a frame, byte or index key.
+    for record in records:
+        retry(record)
+    assert journal.verified_bytes == durable_bytes
+    assert [record.record_id.owner_sequence for record in journal.records] == sequences
+    # Retries are the only appends this state admits: a new ordinary record is
+    # still refused and leaves the durable bytes, records and keys untouched.
+    with pytest.raises(AuditContractError, match="terminal audit journal is closed"):
+        _append_batch(journal, 2, "34" * 32)
+    assert journal.verified_bytes == durable_bytes
+    assert [record.record_id.owner_sequence for record in journal.records] == sequences
+    journal.close()
+
+
+def test_exact_byte_boundary_admits_one_more_worst_case_frame(tmp_path: Path) -> None:
+    assert MAX_AUDIT_FRAME_BYTES == 20528
+    assert MAX_AUDIT_FRAME_BYTES == (
+        8 + MAX_AUDIT_HEADER_BYTES + 8 + MAX_LARGE_AUDIT_PAYLOAD_BYTES + 32
+    )
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    before = journal.verified_bytes
+    _append_batch(journal, 1, "33" * 32)
+    frame_length = journal.verified_bytes - before
+    assert frame_length < MAX_AUDIT_FRAME_BYTES
+    # Count and index stay at their production bounds, so only the byte dimension
+    # can bind here.
+    journal.tighten_capacity_limits(
+        max_journal_bytes=journal.verified_bytes + MAX_AUDIT_FRAME_BYTES
+    )
+    assert journal.remaining_frames() == 1
+    assert journal.has_capacity_for(1) is True
+    assert journal.has_capacity_for(2) is False
+    _append_batch(journal, 2, "34" * 32)
+    assert journal.verified_bytes == before + 2 * frame_length
+    durable = journal.verified_bytes
+    journal.close()
+
+    reopened = reopen_posix_audit_journal(prepared.audit)
+    assert reopened.verified_bytes == durable
+    assert len(reopened.records) == 3
+    reopened.close()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_records": MAX_AUDIT_RECORDS + 1},
+        {"max_journal_bytes": MAX_AUDIT_JOURNAL_BYTES + 1},
+        {"max_index_resident_bytes": MAX_AUDIT_INDEX_RESIDENT_BYTES + 1},
+    ],
+)
+def test_capacity_limits_cannot_exceed_the_unchanged_v1_hard_bounds(
+    overrides: dict[str, int],
+) -> None:
+    # A directly constructed envelope cannot authorize more than the accepted v1
+    # format allows, whatever a caller passes.
+    with pytest.raises(ValueError, match="no larger than the v1 hard bound"):
+        AuditCapacityLimits(**overrides)
+    assert production_audit_capacity_limits() == AuditCapacityLimits()
+
+
+def test_one_byte_short_of_the_worst_case_frame_refuses_without_a_partial_frame(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    _append_batch(journal, 1, "33" * 32)
+    journal.tighten_capacity_limits(
+        max_journal_bytes=journal.verified_bytes + MAX_AUDIT_FRAME_BYTES - 1
+    )
+    assert journal.remaining_frames() == 0
+    assert journal.has_capacity_for(1) is False
+    durable = journal.verified_bytes
+    with pytest.raises(AuditContractError, match="capacity is exhausted"):
+        _append_batch(journal, 2, "34" * 32)
+    # A refused producer leaves no frame, key or byte behind and does not poison
+    # the journal: the verified prefix is unchanged and still reopens.
+    assert journal.verified_bytes == durable
+    assert len(journal.records) == 2
+    assert journal.recovery_records.record_count == 2
+    journal.close()
+    reopened = reopen_posix_audit_journal(prepared.audit)
+    assert reopened.verified_bytes == durable
+    assert len(reopened.records) == 2
+    assert reopened.closing is False
+    assert reopened.limits == production_audit_capacity_limits()
+    reopened.close()
+
+
+def test_resize_peak_index_projection_binds_the_record_dimension(tmp_path: Path) -> None:
+    # The conservative projection must cover the accepted production maximum and
+    # must never regress while a resize doubles the resident table.
+    assert projected_index_resident_bytes(MAX_AUDIT_RECORDS) <= MAX_AUDIT_INDEX_RESIDENT_BYTES
+    projected = [projected_index_resident_bytes(count) for count in range(6_000, 6_600)]
+    assert projected == sorted(projected)
+
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    journal.tighten_capacity_limits(
+        max_index_resident_bytes=projected_index_resident_bytes(1 + 3)
+    )
+    # Only the index dimension was narrowed: count and byte room stay at the
+    # accepted production bounds, so the record dimension is what binds.
+    assert journal.limits.max_records == MAX_AUDIT_RECORDS
+    assert journal.remaining_frames() == 3
+    assert journal.has_capacity_for(3) is True
+    assert journal.has_capacity_for(4) is False
+    journal.close()
+
+
+def test_durable_journal_keeps_the_v1_frame_geometry_across_reopen(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
+    journal = create_posix_audit_journal(prepared.audit)
+    _append_batch(journal, 1, "33" * 32)
+    _append_batch(journal, 2, "34" * 32)
+    journal.close()
+    raw = (root / str(RUN_UUID) / "audit" / "audit-v1.journal").read_bytes()
+    assert raw.startswith(AUDIT_JOURNAL_PREAMBLE)
+    offset = len(AUDIT_JOURNAL_PREAMBLE)
+    frames = []
+    while offset < len(raw):
+        header_length = int.from_bytes(raw[offset : offset + 8], "big")
+        payload_offset = offset + 8 + header_length
+        payload_length = int.from_bytes(raw[payload_offset : payload_offset + 8], "big")
+        end = payload_offset + 8 + payload_length + 32
+        frames.append(raw[offset:end])
+        offset = end
+    assert offset == len(raw)
+    assert len(frames) == 3
+    reopened = reopen_posix_audit_journal(prepared.audit)
+    assert reopened.verified_bytes == len(raw)
+    assert len(reopened.records) == 3
+    assert reopened.limits == production_audit_capacity_limits()
+    assert reopened.remaining_frames() > 0
+    reopened.close()

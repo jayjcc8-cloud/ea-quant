@@ -48,6 +48,16 @@ AUDIT_JOURNAL_NAME = "audit-v1.journal"
 MAX_AUDIT_JOURNAL_BYTES = 13 * 1024 * 1024 * 1024
 MIN_AUDIT_FILESYSTEM_FREE_BYTES = MAX_AUDIT_JOURNAL_BYTES
 MAX_AUDIT_INDEX_RESIDENT_BYTES = 256 * 1024 * 1024
+# One v1 frame is a length-prefixed canonical header, a length-prefixed
+# canonical payload and a 32-byte frame checksum. Every admission projection
+# funds this exact worst case per record, never the observed average.
+MAX_AUDIT_FRAME_BYTES = 8 + MAX_AUDIT_HEADER_BYTES + 8 + MAX_LARGE_AUDIT_PAYLOAD_BYTES + 32
+# Conservative compact-index projection terms: 112 nominal bytes per record
+# (8+4+4+32*3) plus allocation slack, 38 nominal bytes per logical-key slot
+# (1+1+32+4), and one fixed term covering object/array/bytearray headers.
+AUDIT_INDEX_BYTES_PER_RECORD = 128
+AUDIT_INDEX_BYTES_PER_SLOT = 38
+AUDIT_INDEX_FIXED_OVERHEAD_BYTES = 4096
 
 
 class _AuditOps(Protocol):
@@ -246,6 +256,11 @@ class _JournalEntryIndex:
 
 _AUDIT_RECORD_KIND_RANK = {kind: rank + 1 for rank, kind in enumerate(AuditRecordKind)}
 _AUDIT_SUBJECT_KIND_RANK = {kind: rank + 1 for rank, kind in enumerate(AuditSubjectKind)}
+# The only producers a closing Paper journal still admits. They are paid from
+# the reserved shutdown allowance, never from ordinary append capacity.
+_CLOSING_AUDIT_RECORD_KINDS = frozenset(
+    (AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME, AuditRecordKind.RUN_TERMINAL)
+)
 
 
 class _LogicalKeyIndex:
@@ -383,6 +398,76 @@ def _require_index_resident_budget(resident_bytes: int) -> None:
         )
 
 
+def projected_index_resident_bytes(record_count: int) -> int:
+    """Conservative resident bytes for a compact index over ``record_count`` records.
+
+    Covers the fixed-width entry arrays and digest buffers, the open-addressed
+    logical-key table at its 3/4 load factor, both tables that coexist while a
+    resize rehashes, and array/bytearray allocation overhead. It is pure
+    arithmetic: no record, entry or table is materialized, so a caller can
+    project the future peak of an unbounded replay in O(1) space.
+    """
+    if type(record_count) is not int or record_count < 0:
+        raise ValueError("audit index projection requires a nonnegative exact int")
+    required_slots = (4 * (record_count + 1) + 2) // 3
+    slots = max(8, 1 << max(0, required_slots - 1).bit_length())
+    return (
+        record_count * AUDIT_INDEX_BYTES_PER_RECORD
+        + 2 * slots * AUDIT_INDEX_BYTES_PER_SLOT
+        + AUDIT_INDEX_FIXED_OVERHEAD_BYTES
+    )
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class AuditCapacityLimits:
+    """One journal's finite count/bytes/index envelope.
+
+    Production values are the accepted v1 hard bounds; ``tightened`` exists so
+    a bounded test can only narrow the envelope and can never widen a bound.
+    Every field is rejected at construction when it is not a positive exact int
+    no larger than its unchanged v1 hard bound, so no caller can construct an
+    envelope that silently authorizes more than the accepted format allows.
+    """
+
+    max_records: int = MAX_AUDIT_RECORDS
+    max_journal_bytes: int = MAX_AUDIT_JOURNAL_BYTES
+    max_index_resident_bytes: int = MAX_AUDIT_INDEX_RESIDENT_BYTES
+
+    def __post_init__(self) -> None:
+        for name, ceiling in (
+            ("max_records", MAX_AUDIT_RECORDS),
+            ("max_journal_bytes", MAX_AUDIT_JOURNAL_BYTES),
+            ("max_index_resident_bytes", MAX_AUDIT_INDEX_RESIDENT_BYTES),
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= ceiling:
+                raise ValueError(
+                    f"audit capacity {name} must be a positive exact int no larger "
+                    f"than the v1 hard bound {ceiling}"
+                )
+
+    def tightened(self, **overrides: int) -> AuditCapacityLimits:
+        """Return a copy narrowed to ``overrides``; any increase is refused."""
+        values: dict[str, int] = {
+            "max_records": self.max_records,
+            "max_journal_bytes": self.max_journal_bytes,
+            "max_index_resident_bytes": self.max_index_resident_bytes,
+        }
+        for name, value in overrides.items():
+            if name not in values:
+                raise ValueError("audit capacity override is unknown")
+            if type(value) is not int or not 1 <= value <= values[name]:
+                raise ValueError(f"audit capacity {name} can only be tightened")
+            values[name] = value
+        return AuditCapacityLimits(**values)
+
+
+def production_audit_capacity_limits() -> AuditCapacityLimits:
+    """The unmodified v1 journal envelope used by every production writer."""
+    return AuditCapacityLimits()
+
+
 @final
 class PosixAuditRecoveryRecordSource:
     """Repeatable O(1)-materialization view over one verified journal prefix."""
@@ -476,7 +561,9 @@ class PosixAuditJournal:
         "_ack_cache",
         "_authority",
         "_binding",
+        "_capacity_limits",
         "_closed",
+        "_closing",
         "_entries",
         "_failed",
         "_index",
@@ -487,6 +574,7 @@ class PosixAuditJournal:
         "_needs_rescan",
         "_ops",
         "_recovered_sequences",
+        "_reserved_frames",
         "_terminal",
         "_verified_eof",
     )
@@ -500,6 +588,8 @@ class PosixAuditJournal:
         journal_fd: int,
         journal_identity: tuple[int, int],
         ops: _AuditOps,
+        capacity_limits: AuditCapacityLimits | None = None,
+        protected_close_frames: int = 0,
     ) -> None:
         self._authority = authority
         self._binding = binding
@@ -511,6 +601,22 @@ class PosixAuditJournal:
         self._journal_identity = journal_identity
         self._ops = ops
         self._lock = Lock()
+        limits = production_audit_capacity_limits() if capacity_limits is None else capacity_limits
+        if type(limits) is not AuditCapacityLimits:
+            raise _audit_error(
+                OutcomeCode.INVALID_TYPE, "audit capacity limits must be an exact envelope"
+            )
+        if (
+            type(protected_close_frames) is not int
+            or not 0 <= protected_close_frames < limits.max_records
+        ):
+            raise _audit_error(
+                OutcomeCode.OUT_OF_RANGE,
+                "audit protected close allowance is outside the record bound",
+            )
+        self._capacity_limits = limits
+        self._reserved_frames = protected_close_frames
+        self._closing = False
         self._entries = _JournalEntryIndex()
         self._index = _LogicalKeyIndex()
         self._recovered_sequences = bytearray()
@@ -544,6 +650,94 @@ class PosixAuditJournal:
     @property
     def terminal(self) -> bool:
         return self._terminal
+
+    @property
+    def limits(self) -> AuditCapacityLimits:
+        """The frozen count/byte/index envelope this journal was created with."""
+        return self._capacity_limits
+
+    @property
+    def verified_bytes(self) -> int:
+        """Durably verified EOF byte offset, used to derive exact test boundaries."""
+        return self._verified_eof
+
+    @property
+    def closing(self) -> bool:
+        return self._closing
+
+    def _index_record_limit(self) -> int:
+        """Largest record count whose conservative index projection still fits."""
+        limit = self._capacity_limits.max_index_resident_bytes
+        low = 0
+        high = self._capacity_limits.max_records
+        while low < high:
+            middle = (low + high + 1) // 2
+            if projected_index_resident_bytes(middle) <= limit:
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    def remaining_frames(self) -> int:
+        """Frame allowance left for NEW ordinary records across all three dimensions."""
+        if self._closed or self._failed or self._terminal or self._closing:
+            return 0
+        committed = len(self._entries) + self._reserved_frames
+        record_slack = self._capacity_limits.max_records - committed
+        byte_slack = (
+            (self._capacity_limits.max_journal_bytes - self._verified_eof)
+            // MAX_AUDIT_FRAME_BYTES
+            - self._reserved_frames
+        )
+        index_slack = self._index_record_limit() - committed
+        return max(0, min(record_slack, byte_slack, index_slack))
+
+    def has_capacity_for(self, frames: int) -> bool:
+        """Whether ``frames`` further worst-case frames fit without spending the reserve."""
+        if type(frames) is not int or frames < 0:
+            raise _audit_error(OutcomeCode.OUT_OF_RANGE, "audit capacity probe is not exact")
+        return frames <= self.remaining_frames()
+
+    def begin_protected_close(self) -> None:
+        """Reserve the closing allowance for reconciliation outcomes and the terminal."""
+        if self._closed:
+            raise _audit_error(OutcomeCode.CONFLICTING_ID, "audit journal is closed")
+        if self._failed:
+            raise _audit_error(
+                OutcomeCode.DURABILITY_AUDIT_ACK_MISMATCH,
+                "audit journal is in a monotone failed state",
+            )
+        if self._needs_rescan:
+            self._rescan(permit_torn_tail=True)
+        self._closing = True
+
+    def _closing_allowance(self, record_kind: AuditRecordKind) -> int:
+        """Frames ``record_kind`` may spend from the reserve; 0 means it is refused.
+
+        A reconciliation outcome needs its own frame plus the frame that stays
+        exclusively reserved for the terminal record, so the reserve has to hold
+        both before either one is spent; each admitted record then spends one.
+        """
+        if record_kind not in _CLOSING_AUDIT_RECORD_KINDS:
+            return 0
+        requirement = (
+            2 if record_kind is AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME else 1
+        )
+        return 1 if self._reserved_frames >= requirement else 0
+
+    def _closing_appends_fit(self, required: int) -> bool:
+        """Count and index room for one closing record; its exact bytes are checked later."""
+        if self._terminal or required == 0:
+            return False
+        if len(self._entries) + 1 > self._capacity_limits.max_records:
+            return False
+        return len(self._entries) + 1 <= self._index_record_limit()
+
+    def tighten_capacity_limits(self, **overrides: int) -> AuditCapacityLimits:
+        """Narrow this journal's envelope in place; it can only ever refuse more."""
+        tightened = self._capacity_limits.tightened(**overrides)
+        self._capacity_limits = tightened
+        return tightened
 
     def _read_entry_record(self, entry: _JournalEntry) -> AuditRecord:
         frame = _pread_exact(self._ops, self._journal_fd, entry.frame_length, entry.offset)
@@ -824,6 +1018,18 @@ class PosixAuditJournal:
                         logical_key=logical_key,
                         canonical_payload=canonical_payload,
                     )
+            closing_allowance = 0
+            if self._closing:
+                closing_allowance = self._closing_allowance(record_kind)
+                if not self._closing_appends_fit(closing_allowance):
+                    raise _audit_error(
+                        OutcomeCode.OUT_OF_RANGE,
+                        "closing audit journal admits only reserved reconciliation and terminal",
+                    )
+            elif self.remaining_frames() < 1:
+                raise _audit_error(
+                    OutcomeCode.OUT_OF_RANGE, "audit capacity is exhausted for new records"
+                )
             file_stat = self._require_file_identity()
             if file_stat.st_size != self._verified_eof:
                 self._failed = True
@@ -850,7 +1056,7 @@ class PosixAuditJournal:
                 spec_set=spec_set,
             )
             frame = _frame_bytes(record)
-            if self._verified_eof + len(frame) > MAX_AUDIT_JOURNAL_BYTES:
+            if self._verified_eof + len(frame) > self._capacity_limits.max_journal_bytes:
                 raise _audit_error(
                     OutcomeCode.OUT_OF_RANGE, "audit journal hard bound would be crossed"
                 )
@@ -916,6 +1122,8 @@ class PosixAuditJournal:
                 self._entries, self._index, self._recovered_sequences
             )
             self._verified_eof += len(frame)
+            if self._closing:
+                self._reserved_frames -= closing_allowance
             self._terminal = record_kind is AuditRecordKind.RUN_TERMINAL
             return acknowledgement
         finally:
@@ -1053,9 +1261,17 @@ class PosixAuditJournal:
 def create_posix_audit_journal(
     prepared: AuditRunBinding,
     *,
+    capacity_limits: AuditCapacityLimits | None = None,
+    protected_close_frames: int = 0,
     _ops: _AuditOps | None = None,
 ) -> PosixAuditJournal:
-    """Create, durably initialize and admit one fresh prepared audit journal."""
+    """Create, durably initialize and admit one fresh prepared audit journal.
+
+    ``capacity_limits`` may only narrow the production envelope and
+    ``protected_close_frames`` funds the Paper opt-in closing allowance; both
+    are accounted before RUN_PREPARED so a bootstrap that cannot fund its own
+    record plus the allowance is rejected before any economic runtime starts.
+    """
     if type(prepared) is not AuditRunBinding:
         raise StoreError("audit journal requires an exact AuditRunBinding")
     ops = _ops or _OsAuditOps()
@@ -1084,6 +1300,8 @@ def create_posix_audit_journal(
             journal_fd=journal_fd,
             journal_identity=(value.st_dev, value.st_ino),
             ops=ops,
+            capacity_limits=capacity_limits,
+            protected_close_frames=protected_close_frames,
         )
         journal.append(
             record_kind=AuditRecordKind.RUN_PREPARED,

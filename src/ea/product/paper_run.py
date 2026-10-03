@@ -41,7 +41,11 @@ from ea.product.market_stream import (
     RealUtcClock,
     run_local_market_stream,
 )
-from ea.product.paper import PaperTradingSession
+from ea.product.paper import (
+    PAPER_CAPACITY_EXHAUSTED_REASON,
+    PAPER_SHUTDOWN_AUDIT_FRAMES,
+    PaperTradingSession,
+)
 from ea.product.paper_health import (
     RecoveryState,
     StorageState,
@@ -67,6 +71,35 @@ def _canonical(document: object) -> bytes:
     return json.dumps(
         document, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
     ).encode("ascii")
+
+
+# A worst-case queued batch of 64 visible roots with one bounded child each needs
+# at least 2*64 successful fact polls; the generic default of 100 is not enough,
+# so only this Paper call raises the deadline.
+PAPER_MAX_DRAIN_POLLS = 512
+
+
+def _paper_terminal_counts(payload: bytes) -> tuple[str | None, int, int]:
+    """Read ``reason`` and pending counts from one v1 Paper terminal payload.
+
+    The reader is defensive on purpose: an unreadable or foreign terminal payload
+    reports no reason and zero counts, so every older terminal format keeps
+    exactly the behaviour it had before capacity terminals existed.
+    """
+    try:
+        document = json.loads(payload)
+    except (TypeError, ValueError):
+        return None, 0, 0
+    if type(document) is not dict or document.get("schema") != "ea.audit-paper-terminal.v1":
+        return None, 0, 0
+    reason = document.get("reason")
+    pending_orders = document.get("pending_orders")
+    pending_facts = document.get("pending_facts")
+    return (
+        reason if type(reason) is str else None,
+        pending_orders if type(pending_orders) is int and pending_orders >= 0 else 0,
+        pending_facts if type(pending_facts) is int and pending_facts >= 0 else 0,
+    )
 
 
 def run_local_paper(
@@ -148,6 +181,7 @@ def run_local_paper(
     engine: PaperTradingSession | None = None
     writer: PaperSessionWriter | None = None
     stopping = Event()
+    capacity_exhausted = False
     previous_handlers: dict[signal.Signals, Any] = {}
     result: dict[str, Any] = {
         "state": "starting",
@@ -174,6 +208,26 @@ def run_local_paper(
     def should_stop() -> bool:
         assert writer is not None
         return stopping.is_set() or writer.stop_requested()
+
+    def stream_stop_requested() -> bool:
+        """Independent capacity gate consulted immediately before each market.
+
+        This is separate from ``should_stop`` inside ``PaperTradingSession._guard``
+        (which may run mid-callback): an operator stop keeps its existing
+        semantics, while an exhausted audit envelope latches once and admits no
+        further market, leaving every already issued fact to drain.
+        """
+        nonlocal capacity_exhausted
+        assert writer is not None
+        if stopping.is_set() or writer.stop_requested():
+            return True
+        if capacity_exhausted:
+            return True
+        assert engine is not None
+        if engine.has_market_capacity():
+            return False
+        capacity_exhausted = True
+        return True
 
     def project_health() -> dict[str, Any]:
         """Project this running session's read-only operational health.
@@ -219,7 +273,9 @@ def run_local_paper(
         prepared = store.prepare_canonical_attempt(manifest)
         writer = PaperSessionWriter(attempt, manifest.binding)
         writer.publish(result)
-        journal = create_posix_audit_journal(prepared.audit)
+        journal = create_posix_audit_journal(
+            prepared.audit, protected_close_frames=PAPER_SHUTDOWN_AUDIT_FRAMES
+        )
         source_id = SourceId("paper.local.simulated")
         source = LocalSimulatedMarketSource(
             instrument=scenario.instrument,
@@ -274,15 +330,35 @@ def run_local_paper(
             on_market=engine.on_market,
             on_fact=engine.on_fact,
             on_heartbeat=lambda _: publish(),
-            stop_requested=should_stop,
+            stop_requested=stream_stop_requested,
+            max_drain_polls=PAPER_MAX_DRAIN_POLLS,
         )
         result.update(engine.status())
+        if capacity_exhausted:
+            # The stream completed without callback failure: every issued fact and
+            # its bounded children drained, so this is a clean capacity stop and
+            # not an incomplete dispatch.
+            result["reason"] = PAPER_CAPACITY_EXHAUSTED_REASON
+            logger.emit(
+                "paper.capacity_exhausted",
+                outcome=PAPER_CAPACITY_EXHAUSTED_REASON,
+                pending_facts=stream.pending_facts,
+                pending_orders=int(engine.pending is not None),
+                market_events=stream.market_dispatches,
+            )
+        # Every normal closure draws on the same protected close reserve: the
+        # reconciliation observations and the terminal are funded before any
+        # market runs, so a closure whose ordinary envelope is already spent
+        # still closes durably instead of failing to append its terminal.
+        journal.begin_protected_close()
         result["reconciliation"] = (
             engine.reconcile() if engine.completed_sequence else "not_required_no_dispatch"
         )
         result["state"] = (
             "stopped"
-            if stream.reason is not None and stream.reason.value == "stop_requested"
+            if not capacity_exhausted
+            and stream.reason is not None
+            and stream.reason.value == "stop_requested"
             else "failed"
         )
         engine._append(
@@ -381,13 +457,29 @@ def resume_local_paper(run_dir: Path) -> dict[str, Any]:
         verified = store.verify_recovery_attempt(manifest)
         if type(verified) is VerifiedTerminalRecoveryBinding:
             store.recover_terminal_attempt(verified)
-            return {
+            reason, pending_orders, pending_facts = _paper_terminal_counts(
+                verified.terminal_record.canonical_payload
+            )
+            # A capacity stop closes the attempt durably, but an unresolved pending
+            # order or fact is an operator attention item, never a recovered
+            # economic state: nothing here continues or rewrites the attempt.
+            document: dict[str, Any] = {
                 "state": "terminal",
                 "run_id": binding.reference.run_id.value,
-                "reconciliation_required": False,
+                "reconciliation_required": (
+                    reason == PAPER_CAPACITY_EXHAUSTED_REASON
+                    and (pending_orders > 0 or pending_facts > 0)
+                ),
                 "outbound_intents": [],
                 "incomplete_outbound_intents": [],
             }
+            if reason == PAPER_CAPACITY_EXHAUSTED_REASON:
+                document.update(
+                    reason=reason,
+                    pending_orders=pending_orders,
+                    pending_facts=pending_facts,
+                )
+            return document
         if type(verified) is VerifiedIncompleteRecoveryBinding:
             recovered = store.recover_incomplete_attempt(verified)
             journal = reopen_posix_audit_journal(recovered.audit)
