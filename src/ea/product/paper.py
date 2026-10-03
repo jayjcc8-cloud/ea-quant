@@ -967,6 +967,12 @@ def restore_paper_trading_session(
     records = tuple(records)
     if scenario.schema_version not in (4, 5):
         raise ValueError("local Paper requires an accepted Action V2 long-only configuration")
+    logic = scenario.strategy_entry.factory(scenario.strategy_parameters)
+    if (
+        isinstance(logic, LocalActionLogic)
+        and getattr(logic.logic, "requires_market_history_on_restore", False) is not False
+    ):
+        raise ValueError("Paper strategy market history cannot be restored; continuation rejected")
     session = object.__new__(PaperTradingSession)
     session.scenario, session.binding = scenario, binding
     session.audit, session.clock = audit, clock
@@ -1110,7 +1116,6 @@ def restore_paper_trading_session(
         result_count=signal_count,
         last_new_signal_dispatch_sequence=last_new_dispatch_sequence,
     )
-    logic = scenario.strategy_entry.factory(scenario.strategy_parameters)
     if not isinstance(logic, (HoldRootsLogic, LocalActionLogic)):
         raise ValueError("Paper strategy does not implement the Action V2 profile")
     session.logic = logic

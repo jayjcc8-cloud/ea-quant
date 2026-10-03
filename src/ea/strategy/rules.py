@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any
+from typing import Any, Protocol
 
 from ea.core.economics import CanonicalDecimal
 from ea.core.market_data import Adjustment, MarketDataEnvelope
@@ -93,6 +93,20 @@ def decode_rule(value: object) -> PriceRule:
     return PriceRule(document, history)
 
 
+class RulePrices(Protocol):
+    @property
+    def open(self) -> Any: ...
+
+    @property
+    def high(self) -> Any: ...
+
+    @property
+    def low(self) -> Any: ...
+
+    @property
+    def close(self) -> Any: ...
+
+
 class PriceRuleLogic:
     """One bounded window; upstream runtime admits only active, visible bars."""
 
@@ -103,21 +117,23 @@ class PriceRuleLogic:
         self.entered = False
 
     def on_event(self, event: MarketDataEnvelope) -> CanonicalDecimal | None:
-        if (
-            self.entered
-            or event.revision != 0
-            or event.payload.adjustment is not Adjustment.RAW
-        ):
+        if self.entered or event.revision != 0 or event.payload.adjustment is not Adjustment.RAW:
             return None
-        self.closes.append(Fraction(str(event.payload.close)))
+        return self.on_prices(event.payload)
+
+    def on_prices(self, prices: RulePrices) -> CanonicalDecimal | None:
+        """Shared evaluator for runtime-admitted visible bars, never future data."""
+        if self.entered:
+            return None
+        self.closes.append(Fraction(str(prices.close)))
         self.closes = self.closes[-self.rule.history :]
         if len(self.closes) < self.rule.history:
             return None  # All operands must be ready, including under NOT/ANY.
 
         def operand(node: dict[str, Any]) -> Fraction:
             if node["kind"] == "price":
-                return Fraction(str(getattr(event.payload, node["field"])))
-            window = node["window"]
+                return Fraction(str(getattr(prices, node["field"])))
+            window = int(node["window"])
             return sum(self.closes[-window:], Fraction()) / window
 
         def condition(node: dict[str, Any]) -> bool:
