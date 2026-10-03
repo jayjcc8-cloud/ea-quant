@@ -62,6 +62,19 @@ const canRetry = (task: ResearchTask) =>
   && !NON_RETRYABLE_CODES.has(task.error.code)
   && task.last_model?.outcome !== 'unknown_after_dispatch'
 
+function parameterDescription(name: string, value: string | number): string {
+  if (name !== 'rule' || typeof value !== 'string') return `${name}: ${value}`
+  try {
+    const rule = JSON.parse(value)
+    const operand = (item: { kind?: string; field?: string; window?: number }) =>
+      item.kind === 'price' && item.field === 'close' ? 'Close' : item.kind === 'sma' && Number.isInteger(item.window) ? `SMA(${item.window})` : null
+    const left = operand(rule.when.left), right = operand(rule.when.right)
+    const operator: Record<string, string> = { gt: 'is above', lt: 'is below', crosses_above: 'crosses above', crosses_below: 'crosses below' }
+    if (rule.action === 'ENTER_LONG' && left && right && operator[rule.when.op]) return `Enter long when ${left} ${operator[rule.when.op]} ${right}`
+  } catch { /* Preserve unknown contracts exactly. */ }
+  return `${name}: ${value}`
+}
+
 function SpecFacts({ spec }: { spec: ResearchSpec }) {
   return <>
     <dl className="summary-list">
@@ -70,9 +83,10 @@ function SpecFacts({ spec }: { spec: ResearchSpec }) {
       <div><dt>Registered scenario</dt><dd>{spec.scenario_id ?? 'Resolved from the registered catalog at confirmation'}</dd></div>
       <div><dt>Research data</dt><dd>{spec.dataset_id ?? 'Registered scenario data'}</dd></div>
       <div><dt>Initial cash</dt><dd>{spec.initial_cash}</dd></div>
-      <div><dt>Parameters</dt><dd>{Object.entries(spec.parameters).map(([name, value]) => `${name}: ${value}`).join(' · ') || 'Registered defaults'}</dd></div>
+      <div><dt>Parameters</dt><dd>{Object.entries(spec.parameters).map(([name, value]) => parameterDescription(name, value)).join(' · ') || 'Registered defaults'}</dd></div>
     </dl>
     <h3>Rationale</h3>
+    <p className="muted">Recorded when the proposal was drafted. Current backtest and holdout states appear in the linked evidence below.</p>
     <p>{spec.rationale}</p>
     <h3>Assumptions</h3>
     {spec.assumptions.length
@@ -142,6 +156,7 @@ function ResearchJob({ api, jobId, job, holdouts }: { api: ApiAdapter; jobId: st
     <div className="job-card-title"><Link to={`/backtests/${job.job_id}`}><strong>{job.job_id}</strong></Link><span className={`status status-${job.status}`}>{job.status}</span></div>
     <small>Engine run {job.engine_run_id ?? 'not available'} · {job.scenario_id}{job.error_code ? ` · ${job.error_code}` : ''}</small>
     {job.message && <small>{job.message}</small>}
+    {job.input_identity.record_count <= 6 && <small>Small sample · {job.input_identity.record_count} records. Workflow validation only; no robustness claim.</small>}
     <div className="job-actions">
       <Link to={`/backtests/${job.job_id}`}>Open job and report</Link>
       {job.report_ready && <a href={api.artifactUrl(job.job_id, 'report.json')}>Download report.json</a>}
@@ -195,7 +210,7 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
     <PageHeading title="Research Workspace" subtitle="Persisted ideas, registered restrictive specs, and the real installed backtests they start." />
     {error && <p role="alert" className="notice error">{error}</p>}
     {unavailable && <p className="notice error">This client cannot reach the local research API.</p>}
-    <section className="panel">
+    <div className="research-list-layout"><section className="panel idea-panel">
       <header><h2>New research idea</h2><span>One active task per idea</span></header>
       <label htmlFor="research-idea">Research idea</label>
       <textarea id="research-idea" maxLength={4000} rows={3} value={idea} disabled={busy}
@@ -203,7 +218,7 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
       <p className="muted">The idea is drafted into a spec that can only reference the registered strategy, instrument and scenario catalog. Confirmation is a separate, explicit step.</p>
       <div className="actions"><button className="primary" disabled={busy || !idea.trim() || unavailable} onClick={() => { void create() }}>{busy ? 'Creating draft…' : 'Create draft'}</button></div>
     </section>
-    <section className="panel">
+    <section className="panel research-history">
       <header><h2>Persisted research tasks</h2><span>Refresh-safe list</span></header>
       <div className="result-toolbar"><button onClick={() => { void load() }}>Refresh</button></div>
       {tasks === null && !error && !unavailable && <p className="muted">Loading persisted tasks…</p>}
@@ -218,7 +233,8 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
           <div className="job-actions"><Link to={`/research/${task.task_id}`}>Open task</Link></div>
         </li>
       })}</ul>
-    </section>
+    </section></div>
+    <div className="research-tools"><Link to="/backtests">Backtests</Link><Link to="/batches/new">Run batch</Link><Link to="/holdouts">Chronological holdouts</Link></div>
   </>
 }
 
@@ -316,23 +332,10 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   const confirmable = task.status === 'awaiting_confirmation' && task.spec_draft !== null
   const succeededJobId = Object.values(jobs).find(job => job?.status === 'succeeded')?.job_id ?? null
   return <>
-    <PageHeading title="Research Task" subtitle={task.raw_idea} status={task.status} />
+    <PageHeading title="Research Task" subtitle="Strategy specification and linked validation evidence." status={task.status} />
     <div className="result-toolbar"><Link to="/research">← Research workspace</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
     {error && <p role="alert" className="notice error">{error}</p>}
-    <section className="panel identity-panel">
-      <header><h2>Task identity</h2><span>Persisted evidence only</span></header>
-      <dl className="summary-list">
-        <div><dt>Task</dt><dd>{task.task_id}</dd></div>
-        <div><dt>State</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
-        <div><dt>Created</dt><dd>{task.created_at}</dd></div>
-        <div><dt>Updated</dt><dd>{task.updated_at}</dd></div>
-      </dl>
-      {task.status === 'cancelled' && <p className="notice">This task is cancelled and final. {task.cancel_note ?? 'Started runs keep their own terminal states; cancelling is not a rollback.'}</p>}
-      {task.status === 'unsupported' && <p className="notice">Not executable with the registered strategies and data. {task.gap ?? 'The backend recorded no gap detail.'}</p>}
-    </section>
-    <ModelConfigurationPanel status={settings} error={api.settingsStatus ? settingsError : 'Model configuration status is unavailable in this client.'} />
-    <UsagePanel task={task} />
-
+    <div className="research-detail-layout"><article className="research-artifact" aria-label="Strategy and validation evidence">
     {task.error && <section className="panel" aria-label="Failure explanation">
       <header><h2>Failure</h2><span>step {task.error.step}</span></header>
       <p>{ERROR_EXPLANATIONS[task.error.code] ?? 'The backend reported a failure for this step.'}</p>
@@ -364,6 +367,22 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
       {succeededJobId && <p><Link to={`/backtests/${succeededJobId}`}>Open the succeeded run to evaluate its holdout and create the evaluated candidate</Link></p>}
     </section>}
 
+    </article><details className="research-context" open><summary>AI context & task controls</summary>
+    <section className="panel identity-panel">
+      <header><h2>Research idea</h2></header><p className="muted">{task.raw_idea}</p>
+      <header className="context-identity-heading"><h2>Task identity</h2><span>Persisted evidence only</span></header>
+      <dl className="summary-list">
+        <div><dt>Task</dt><dd>{task.task_id}</dd></div>
+        <div><dt>State</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
+        <div><dt>Created</dt><dd>{task.created_at}</dd></div>
+        <div><dt>Updated</dt><dd>{task.updated_at}</dd></div>
+      </dl>
+      {task.status === 'cancelled' && <p className="notice">This task is cancelled and final. {task.cancel_note ?? 'Started runs keep their own terminal states; cancelling is not a rollback.'}</p>}
+      {task.status === 'unsupported' && <p className="notice">Not executable with the registered strategies and data. {task.gap ?? 'The backend recorded no gap detail.'}</p>}
+    </section>
+    <ModelConfigurationPanel status={settings} error={api.settingsStatus ? settingsError : 'Model configuration status is unavailable in this client.'} />
+    <UsagePanel task={task} />
+
     {(task.status !== 'cancelled' && task.status !== 'unsupported' && task.status !== 'succeeded') && <section className="panel" aria-label="Task actions">
       <header><h2>Task actions</h2><span>Explicit, never automatic</span></header>
       <p className="muted">Cancelling is final. It stops future steps and never claims a rollback or kills a backtest that already started; started runs keep their own terminal states. A refresh, back navigation or failed request never confirms, retries or submits anything.</p>
@@ -372,9 +391,22 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
         {api.cancelResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('cancel', () => api.cancelResearchTask!(taskId), 'Cancel was not confirmed; the persisted task was reloaded.') }}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel task'}</button>}
       </div>
     </section>}
+    </details></div>
   </>
 }
 
 function PageHeading({ title, subtitle, status }: { title: string; subtitle: string; status?: string }) {
   return <header className="page-title"><div><h1>{title}</h1><p>{subtitle}</p></div>{status && <span className={`status status-${status}`}>{STATUS_LABELS[status as ResearchTaskStatus] ?? status}</span>}</header>
+}
+
+export function ResearchSettings({ api }: { api: ApiAdapter }) {
+  const [status, setStatus] = useState<ModelConfigurationStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    let current = true
+    if (!api.settingsStatus) return
+    void api.settingsStatus().then(value => { if (current) setStatus(value) }).catch(caught => { if (current) setError(messageOf(caught, 'Configuration status unavailable')) })
+    return () => { current = false }
+  }, [api])
+  return <><PageHeading title="Settings" subtitle="Current model configuration and local research limits." /><ModelConfigurationPanel status={status} error={api.settingsStatus ? error : 'Model configuration status is unavailable in this client.'} /></>
 }

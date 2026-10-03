@@ -1,7 +1,7 @@
 import { EventValidation } from './events'
 import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
-import { ResearchTaskDetailRoute, ResearchTasks } from './research'
+import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings } from './research'
 import { radianApi } from './radian-api'
 import { researchApi, type ModelConfigurationStatus, type ResearchTask } from './research-api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -302,16 +302,17 @@ function PageTitle({ title, subtitle, status }: { title: string; subtitle: strin
 function Shell({ api }: { api: ApiAdapter }) {
   return <div className="app-shell">
     <aside className="sidebar">
-      <Link className="brand" to="/backtests"><span>EA</span><strong>QUANT</strong></Link>
-      <p className="workspace">LOCAL OFFLINE CONSOLE</p>
-      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/research">Research</NavLink><NavLink to="/events">Event Validation</NavLink><NavLink to="/batches/new">Run Batch</NavLink><NavLink to="/holdouts">Chronological Holdout</NavLink><NavLink to="/candidates">Candidates</NavLink></nav>
+      <Link className="brand" to="/research"><i className="brand-mark" aria-hidden="true" /><span>EA</span><strong>QUANT</strong></Link>
+      <p className="workspace">RESEARCH WORKSPACE</p>
+      <nav aria-label="Primary navigation"><NavLink to="/research">Research</NavLink><NavLink to="/candidates">Candidates</NavLink><NavLink to="/events">Event Validation</NavLink><NavLink to="/settings">Settings</NavLink></nav>
       <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
     </aside>
-    <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
+    <main><header className="topbar"><span>Strategy research</span><span>Offline simulation</span></header><div className="content">
       <Routes>
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
+        <Route path="/settings" element={<ResearchSettings api={api} />} />
         <Route path="/research" element={<ResearchTasks api={api} />} />
         <Route path="/events" element={<EventValidation />} />
         <Route path="/research/:taskId" element={<ResearchTaskDetailRoute api={api} />} />
@@ -322,7 +323,7 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/holdouts/:validationId" element={<HoldoutDetailRoute api={api} />} />
         <Route path="/batches/new" element={<BatchCreator api={api} />} />
         <Route path="/batches/:batchId" element={<BatchDetailRoute api={api} />} />
-        <Route path="*" element={<Navigate replace to="/backtests" />} />
+        <Route path="*" element={<Navigate replace to="/research" />} />
       </Routes>
     </div></main>
   </div>
