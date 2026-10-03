@@ -4,6 +4,24 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type InputSnapshot } from './app'
 import type { Candidate } from './candidates'
 
+it('shows local simulation preparation blockers without authorizing a start', async () => {
+  window.history.pushState({}, '', '/candidates/candidate-1')
+  render(<App api={adapter({
+    getCandidate: async () => evaluatedCandidate(),
+    prepareSimulation: async () => ({
+      eligible: false, blockers: ['explicit_research_acceptance_required', 'unsupported_paper_profile_requires_action_v2_v4_v5'],
+      fingerprint: 'bound-fixture', scenario_version: 2, binding: null,
+      execution_authorized: false, start_available: false, runtime_state: 'not_started',
+      required_action: 'Separate explicit bounded local Paper start; acceptance is not authorization.',
+      stop_semantics: 'Stop does not liquidate.', small_sample_warning: true,
+    }),
+  })} />)
+  expect((await screen.findByText('Blocked for local Paper startup.')).textContent).toContain('Blocked')
+  expect(screen.getByText('unsupported paper profile requires action v2 v4 v5')).toBeTruthy()
+  expect(screen.getByText(/workflow validation only/)).toBeTruthy()
+  expect((screen.getByRole('button', { name: 'Start local simulation unavailable in this entry' }) as HTMLButtonElement).disabled).toBe(true)
+})
+
 const identity = { scenario_sha256: 'a'.repeat(64), data_sha256: 'b'.repeat(64), record_count: 4 }
 const scenarios = [
   {

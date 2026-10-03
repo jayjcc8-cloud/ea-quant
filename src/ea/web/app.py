@@ -332,6 +332,19 @@ def create_app(settings: WebSettings) -> Any:
         except (OSError, ValueError, KeyError, TypeError):
             return error(409, "candidate_unavailable", "Candidate evidence is unavailable")
 
+    @app.get("/api/candidates/{candidate_id}/simulation-preparation")
+    def simulation_preparation(candidate_id: str) -> object:
+        from ea.web.simulation import prepare_simulation
+
+        try:
+            return prepare_simulation(service.workspace, candidate_id)
+        except (ValueError, OSError):
+            return error(
+                409,
+                "simulation_evidence_unavailable",
+                "Simulation preparation failed: evidence unavailable",
+            )
+
     @app.post("/api/candidates/{candidate_id}/decision")
     def decide_candidate(candidate_id: str, request: CandidateDecisionRequest) -> object:
         try:

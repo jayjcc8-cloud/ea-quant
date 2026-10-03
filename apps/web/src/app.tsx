@@ -153,6 +153,7 @@ function RoundTripExecution({ economics }: { economics: RoundTripEconomics }) {
 export type ApiAdapter = {
   listCandidates?(): Promise<Candidate[]>
   getCandidate?(id: string): Promise<Candidate>
+  prepareSimulation?(id: string): Promise<import('./candidates').SimulationPreparation>
   createCandidate?(validationId: string): Promise<Candidate>
   decideCandidate?(id: string, outcome: string, reason: string): Promise<Candidate>
   holdoutScenarios(sourceJobId: string): Promise<ScenarioSummary[]>
@@ -206,6 +207,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 const browserApi: ApiAdapter = {
   async listCandidates() { return (await apiRequest<{ candidates: Candidate[] }>('/api/candidates')).candidates },
   getCandidate: id => apiRequest(`/api/candidates/${id}`),
+  prepareSimulation: id => apiRequest(`/api/candidates/${id}/simulation-preparation`),
   createCandidate: validationId => apiRequest('/api/candidates', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ validation_id: validationId }) }),
   decideCandidate: (id, outcome, reason) => apiRequest(`/api/candidates/${id}/decision`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ outcome, reason }) }),
   async listDatasets() { return (await apiRequest<{ datasets: Dataset[] }>('/api/datasets')).datasets },
