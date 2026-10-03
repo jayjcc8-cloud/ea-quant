@@ -43,7 +43,7 @@ from ea.product.paper_evidence import (
     decode_gate_identity,
     decode_gate_verdict,
     decode_paper_snapshot,
-    evaluate_gate,
+    evaluate_snapshot_health,
     launchd_identity_digest,
     summarize_alert_state,
     summarize_backup_state,
@@ -267,7 +267,7 @@ def test_gate_identity_rejects_drift_prone_fields() -> None:
 
 
 def _evaluate(snapshot: PaperSnapshot, locked: PaperGateIdentity) -> PaperGateVerdict:
-    return evaluate_gate(
+    return evaluate_snapshot_health(
         snapshot,
         locked,
         current_identity=build_gate_identity(
@@ -347,7 +347,7 @@ def test_repo_sha_drift_invalidates() -> None:
 def test_config_drift_invalidates() -> None:
     snapshot = _healthy_snapshot()
     locked = _locked_identity()
-    verdict = evaluate_gate(
+    verdict = evaluate_snapshot_health(
         snapshot,
         locked,
         current_identity=build_gate_identity(
@@ -367,7 +367,7 @@ def test_config_drift_invalidates() -> None:
 def test_launchd_drift_invalidates() -> None:
     snapshot = _healthy_snapshot()
     locked = _locked_identity()
-    verdict = evaluate_gate(
+    verdict = evaluate_snapshot_health(
         snapshot,
         locked,
         current_identity=build_gate_identity(

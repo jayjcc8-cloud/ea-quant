@@ -1,8 +1,8 @@
 """Deterministic M4 evidence contract for the local Paper runtime (WU-2).
 
-This module is the single evidence standard the 72-hour and 7-day gates judge
-against. It does not add a second runtime, scheduler, or control plane: it
-*collects* the state the existing owners already publish and reduces it to a
+This module is the evidence standard the 72-hour and 7-day gates judge against.
+It does not add a second runtime, scheduler, or control plane: it *collects* the
+state the existing owners already publish and reduces a single observation to a
 deterministic ``PASS`` / ``FAIL`` / ``INVALID`` verdict that plain code -- never
 an LLM, never a human reading logs -- can reproduce.
 
@@ -15,14 +15,20 @@ Three closed objects form the contract:
 * ``PaperGateIdentity`` -- the small set of facts whose drift would invalidate a
   gate: the repo SHA, the runtime profile, the operator config and the launchd
   definitions. This is the only place a digest is taken.
-* ``PaperGateVerdict`` -- the outcome of applying the hard rules. Drift produces
-  ``INVALID`` (restart the gate), a runtime violation produces ``FAIL`` (the
-  runtime is not in a passing state), and only a fully clean, unchanged gate
-  produces ``PASS``.
+* ``PaperGateVerdict`` -- the outcome of applying the hard rules to one
+  observation. Drift produces ``INVALID`` (the evidence basis has moved), a
+  runtime violation produces ``FAIL`` (the runtime is not in a passing state),
+  and only a fully clean, unchanged observation produces ``PASS``.
 
-The evaluator is a pure function of its inputs: the same snapshot and identity
-always produce the same verdict, so a gate can be re-judged offline from durable
-evidence without any observer in the loop.
+The snapshot evaluator is a pure function of its inputs: the same snapshot and
+identity always produce the same verdict, so one observation can be re-judged
+offline from durable evidence without any observer in the loop. That verdict
+describes an instant and nothing more: it can never certify a gate interval.
+Every one of these objects is per-attempt evidence; none of them carries the
+durable, caller-supplied interval inventory a gate needs. The whole-interval
+aggregate that does -- and that treats a missing interval input as a gap rather
+than as a pass -- lives in :mod:`ea.product.paper_gate_history`; this module
+exposes it as the fail-closed ``evaluate_gate`` wrapper.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ea.core import RunId, Sha256Digest
 from ea.core.outcomes import OutcomeCode
@@ -47,6 +53,11 @@ from ea.product.paper_health import (
     RuntimeState,
     decode_paper_health,
 )
+
+if TYPE_CHECKING:
+    # The interval contract imports this module, so the dependency is one-way at
+    # run time; this import exists only for the annotation below.
+    from ea.product.paper_gate_history import PaperIntervalHistory
 
 SNAPSHOT_SCHEMA = "ea.paper-snapshot.v1"
 GATE_IDENTITY_SCHEMA = "ea.paper-gate-identity.v1"
@@ -681,19 +692,25 @@ def _hard_rule_reasons(snapshot: PaperSnapshot) -> list[str]:
     return reasons
 
 
-def evaluate_gate(
+def evaluate_snapshot_health(
     snapshot: PaperSnapshot,
     locked_identity: PaperGateIdentity,
     current_identity: PaperGateIdentity,
     *,
     evaluated_at: datetime,
 ) -> PaperGateVerdict:
-    """Judge one snapshot against a locked gate identity, deterministically.
+    """Judge one snapshot of instant health against a locked identity.
 
-    Drift is evaluated first and produces ``INVALID``: once the gate's
-    evidentiary basis has moved, no runtime state can rescue it and the gate
-    must be restarted from a fresh identity. Only then are the hard rules
-    applied; any violation produces ``FAIL``. A clean, unchanged gate produces
+    This is the instant-health rule set, not a gate verdict: it answers "is the
+    runtime healthy, unchanged and consistent with the locked identity right
+    now?", and it has no interval input and no durable attempt history, so it can
+    never establish that a 72-hour or 7-day gate was clean. Use
+    :func:`evaluate_gate` for a whole-interval verdict.
+
+    Drift is evaluated first and produces ``INVALID``: once the evidence basis
+    has moved, no runtime state can rescue the instant, and the gate must be
+    restarted from a fresh identity. Only then are the hard rules applied; any
+    violation produces ``FAIL``. A clean, unchanged observation produces
     ``PASS``.
 
     This function is pure: it performs no I/O and reads no clock, so the same
@@ -760,3 +777,35 @@ def decode_gate_verdict(document: object) -> PaperGateVerdict:
         raise
     except ValueError as error:
         raise _fail(OutcomeCode.CONFLICTING_ID, "verdict document conflicts") from error
+
+
+def evaluate_gate(
+    snapshot: PaperSnapshot,
+    locked_identity: PaperGateIdentity,
+    current_identity: PaperGateIdentity,
+    history: PaperIntervalHistory | None = None,
+    *,
+    evaluated_at: datetime,
+) -> PaperGateVerdict:
+    """Judge the whole gate interval; see :mod:`ea.product.paper_gate_history`.
+
+    This is the fail-closed interval entry point, kept importable here for the
+    gate's own callers. It is not the instant-health evaluator: the snapshot only
+    supplies the boundary observation, and ``history`` is the explicit durable
+    interval evidence the verdict is actually aggregated from. ``history``
+    defaults to ``None``, so a caller that omits it -- or passes any object that
+    is not exact interval evidence -- gets the explicit "no interval evidence was
+    supplied" gap, never a snapshot-only pass and never an argument error.
+
+    The interval contract imports this module, so the delegation is a lazy import
+    inside the body rather than a module-level cycle.
+    """
+    from ea.product.paper_gate_history import evaluate_gate as _evaluate_interval
+
+    return _evaluate_interval(
+        snapshot,
+        locked_identity,
+        current_identity,
+        history,
+        evaluated_at=evaluated_at,
+    )
