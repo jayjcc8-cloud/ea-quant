@@ -1,5 +1,8 @@
 import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
+import { ResearchTaskDetailRoute, ResearchTasks } from './research'
+import { radianApi } from './radian-api'
+import { researchApi, type ModelConfigurationStatus, type ResearchTask } from './research-api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
@@ -14,7 +17,7 @@ const parameterText = (parameters: ParameterMap) => Object.entries(parameters).m
 function ParameterControls({ contracts, values, update, prefix = '' }: { contracts: StrategyParameterContract[]; values: ParameterMap; update: (name: string, value: string | number) => void; prefix?: string }) {
   return <div className="parameter-grid">{contracts.map(p => <div key={p.name}>
     <label htmlFor={`${prefix}${p.name}`}>{prefix}{p.name}</label>
-    <input id={`${prefix}${p.name}`} type={p.type === 'integer' ? 'number' : 'text'} inputMode={p.type === 'integer' ? 'numeric' : 'decimal'}
+    <input id={`${prefix}${p.name}`} type={p.type === 'integer' ? 'number' : 'text'} inputMode={p.type === 'integer' ? 'numeric' : p.type === 'price-rule-v1' ? 'text' : 'decimal'}
       min={p.minimum === null ? undefined : String(p.minimum)} max={p.maximum === null ? undefined : String(p.maximum)} step={p.type === 'integer' ? '1' : undefined}
       value={Number.isNaN(values[p.name]) ? '' : values[p.name] ?? ''}
       onChange={event => update(p.name, p.type === 'integer' && /^-?\d+$/.test(event.target.value) && Number.isSafeInteger(event.target.valueAsNumber) ? event.target.valueAsNumber : event.target.value)} />
@@ -32,7 +35,7 @@ type Dataset = {
 type DatasetReference = { dataset_id?: string; source_sha256?: string }
 export type InputIdentity = DatasetReference & { scenario_sha256: string; data_sha256: string; record_count: number }
 export type StrategyParameterContract = {
-  name: string; type: 'decimal' | 'integer'
+  name: string; type: 'decimal' | 'integer' | 'price-rule-v1' | 'price-rule-v1' | 'price-rule-v1' | 'price-rule-v1'
   default: string | number | null; current_value: string | number | null
   minimum: string | number; maximum: string | number | null
 }
@@ -167,6 +170,13 @@ export type ApiAdapter = {
   getReport(jobId: string): Promise<BacktestReport>
   getEquityPath(jobId: string): Promise<EquityPath>
   artifactUrl(jobId: string, name: 'report.json' | 'summary.txt' | 'equity-path.json'): string
+  settingsStatus?(): Promise<ModelConfigurationStatus>
+  listResearchTasks?(): Promise<ResearchTask[]>
+  createResearchTask?(idea: string): Promise<ResearchTask>
+  getResearchTask?(taskId: string): Promise<ResearchTask>
+  confirmResearchTask?(taskId: string): Promise<ResearchTask>
+  retryResearchTask?(taskId: string): Promise<ResearchTask>
+  cancelResearchTask?(taskId: string): Promise<ResearchTask>
 }
 
 async function loadTradeAnalytics(api: ApiAdapter, job: BacktestJob): Promise<TradeAnalytics | null> {
@@ -225,6 +235,13 @@ const browserApi: ApiAdapter = {
   getReport(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/report`) },
   getEquityPath(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/artifacts/equity-path.json`) },
   artifactUrl(jobId, name) { return `/api/backtests/${encodeURIComponent(jobId)}/artifacts/${name}` },
+  settingsStatus: () => radianApi.settingsStatus(),
+  listResearchTasks: () => researchApi.listTasks(),
+  createResearchTask: idea => researchApi.createTask(idea),
+  getResearchTask: taskId => researchApi.getTask(taskId),
+  confirmResearchTask: taskId => researchApi.confirmTask(taskId),
+  retryResearchTask: taskId => researchApi.retryTask(taskId),
+  cancelResearchTask: taskId => researchApi.cancelTask(taskId),
 }
 
 async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath | null> {
@@ -286,7 +303,7 @@ function Shell({ api }: { api: ApiAdapter }) {
     <aside className="sidebar">
       <Link className="brand" to="/backtests"><span>EA</span><strong>QUANT</strong></Link>
       <p className="workspace">LOCAL OFFLINE CONSOLE</p>
-      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/batches/new">Run Batch</NavLink><NavLink to="/holdouts">Chronological Holdout</NavLink><NavLink to="/candidates">Candidates</NavLink></nav>
+      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/research">Research</NavLink><NavLink to="/batches/new">Run Batch</NavLink><NavLink to="/holdouts">Chronological Holdout</NavLink><NavLink to="/candidates">Candidates</NavLink></nav>
       <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
     </aside>
     <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
@@ -294,6 +311,8 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
+        <Route path="/research" element={<ResearchTasks api={api} />} />
+        <Route path="/research/:taskId" element={<ResearchTaskDetailRoute api={api} />} />
         <Route path="/candidates" element={<CandidateHistory api={api} />} />
         <Route path="/candidates/:candidateId" element={<CandidateDetail api={api} />} />
         <Route path="/holdouts" element={<HoldoutHistory api={api} />} />
