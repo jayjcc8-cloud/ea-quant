@@ -1,3 +1,4 @@
+import { EventValidation } from './events'
 import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import { ResearchTaskDetailRoute, ResearchTasks } from './research'
@@ -303,7 +304,7 @@ function Shell({ api }: { api: ApiAdapter }) {
     <aside className="sidebar">
       <Link className="brand" to="/backtests"><span>EA</span><strong>QUANT</strong></Link>
       <p className="workspace">LOCAL OFFLINE CONSOLE</p>
-      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/research">Research</NavLink><NavLink to="/batches/new">Run Batch</NavLink><NavLink to="/holdouts">Chronological Holdout</NavLink><NavLink to="/candidates">Candidates</NavLink></nav>
+      <nav aria-label="Primary navigation"><NavLink to="/backtests">Backtests</NavLink><NavLink to="/research">Research</NavLink><NavLink to="/events">Event Validation</NavLink><NavLink to="/batches/new">Run Batch</NavLink><NavLink to="/holdouts">Chronological Holdout</NavLink><NavLink to="/candidates">Candidates</NavLink></nav>
       <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
     </aside>
     <main><header className="topbar"><span>Installed Python engine</span><span>Offline simulation</span></header><div className="content">
@@ -312,6 +313,7 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
         <Route path="/research" element={<ResearchTasks api={api} />} />
+        <Route path="/events" element={<EventValidation />} />
         <Route path="/research/:taskId" element={<ResearchTaskDetailRoute api={api} />} />
         <Route path="/candidates" element={<CandidateHistory api={api} />} />
         <Route path="/candidates/:candidateId" element={<CandidateDetail api={api} />} />

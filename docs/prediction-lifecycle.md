@@ -78,3 +78,28 @@ Whole-file malicious rewrites are outside the local trust model; validation is
 semantic, not tamper-proof chain certification. Installed wheel/central CLI/Web
 integration, real model product E2E, real-money accounting, multi-contract portfolios,
 correction/reversal mechanics and external settlement remain unverified/unavailable.
+
+
+## Local Web event entry
+
+The existing local Web console now offers **Event Validation** in its sidebar
+(`/events`). Select the curated historical resolved sample or the explicitly
+synthetic void sample, choose an explicit UTC as-of, and invoke local simulation.
+`GET /api/events` lists the fixed inputs; `GET /api/events/{sample_id}` refreshes
+saved evidence; `POST /api/events/{sample_id}/simulate` accepts only `as_of`.
+The existing loopback, origin and write-header boundaries apply. Journals live
+under the Web workspace's `events/`, using C2's existing journal and replay.
+No arbitrary observation, path, market or revision submission is exposed.
+
+The URL preserves sample selection on refresh. Duplicate requests are no-ops;
+time regression or unreadable evidence fails closed and asks the user to refresh.
+An advanced sample journal cannot demonstrate an earlier historical as-of; use
+a fresh isolated Web workspace for that demonstration. The view never resets or
+rewrites evidence. It displays pending/resolved/void and explains unknown/disputed
+as nonfinal, rather than adding new sample observations.
+
+This is separate from price Research/backtests. It does not generate prediction
+strategies, discover markets, verify authority signatures, submit trades, redeem
+wallet claims, accept a Candidate or promote Paper. No model credential is needed.
+Historical availability is still the 2026-10-03 capture time, not proven historical
+publication time; synthetic void is never presented as an official historical void.

@@ -125,6 +125,11 @@ class ResearchConfirmRequest(BaseModel):
     auto_run: bool = True
 
 
+class EventSimulationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    as_of: str = Field(min_length=1, max_length=64)
+
+
 @dataclass(frozen=True, slots=True)
 class WebSettings:
     """Explicit filesystem and loopback boundaries for one local service."""
@@ -252,6 +257,45 @@ def create_app(settings: WebSettings) -> Any:
             if content_type != "application/json":
                 return error(415, "json_required", "write requests require application/json")
         return await call_next(request)
+
+    from ea.web.events import SAMPLES, EventView, sample_document
+
+    events = EventView(workspace_root)
+
+    @app.get("/api/events")
+    def event_catalog() -> object:
+        try:
+            return {"samples": [{"sample_id": name, **sample_document(name)} for name in SAMPLES]}
+        except (OSError, ValueError):
+            return error(409, "event_unavailable", "Offline event samples are unavailable")
+
+    @app.get("/api/events/{sample_id}")
+    def event_result(sample_id: str) -> object:
+        try:
+            return events.view(sample_id)
+        except KeyError:
+            return error(404, "event_not_found", "Unknown offline event sample")
+        except (OSError, ValueError):
+            return error(409, "event_unavailable", "Saved event evidence is unavailable")
+
+    @app.post("/api/events/{sample_id}/simulate")
+    def event_simulate(sample_id: str, request: EventSimulationRequest) -> object:
+        from ea.product.prediction import instant
+
+        try:
+            instant(request.as_of)
+        except (ValueError, TypeError):
+            return error(422, "event_time_invalid", "as_of must be an explicit UTC timestamp")
+        try:
+            return events.view(sample_id, request.as_of)
+        except KeyError:
+            return error(404, "event_not_found", "Unknown offline event sample")
+        except (OSError, ValueError) as caught:
+            return error(
+                409,
+                "event_simulation_rejected",
+                f"Simulation not confirmed: {caught}. Refresh saved evidence before retrying.",
+            )
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
