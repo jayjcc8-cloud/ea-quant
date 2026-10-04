@@ -78,6 +78,30 @@ NORMALIZER_VERSION = "1.0.0"
 ENVELOPE_SCHEMA = "ea.historical-bars-response-envelope.v1"
 PROVIDER_EVIDENCE_SCHEMA = "ea.historical-bars-provider-evidence.v1"
 
+# The two provenances an offline read records. Neither is a network read and
+# neither is a claim about the provider: one is one user's own pasted response,
+# the other is the host's built-in fixture. They are recorded verbatim on the
+# envelope's transport declaration, so a reader can tell them apart and so a
+# store can refuse a marking that does not match the bytes.
+OFFLINE_RESPONSE_KIND_USER = "user-pasted-offline-response"
+OFFLINE_RESPONSE_KIND_SYNTHETIC = "builtin-synthetic-example"
+OFFLINE_RESPONSE_KINDS = (OFFLINE_RESPONSE_KIND_USER, OFFLINE_RESPONSE_KIND_SYNTHETIC)
+OFFLINE_RESPONSE_MEDIA_TYPE = "application/json"
+
+# One built-in synthetic example: a fixed UTC day of hourly bars in the exact
+# documented shape. It exists so that preview, publication and catalog selection
+# can be exercised end to end without a provider, a network or any real captured
+# bytes. It is a fixture, never an observation, and a store accepts the synthetic
+# marking for exactly these bytes and this declaration and for nothing else.
+SYNTHETIC_EXAMPLE_SCHEMA = "ea.offline-history-example.v1"
+SYNTHETIC_EXAMPLE_ID = "ea.offline-history.synthetic-klines-1h.v1"
+SYNTHETIC_EXAMPLE_VENUE = "BINANCE"
+SYNTHETIC_EXAMPLE_SYMBOL = "BTCUSDT"
+SYNTHETIC_EXAMPLE_INTERVAL = "1h"
+SYNTHETIC_EXAMPLE_START_MS = 1_704_067_200_000  # 2024-01-01T00:00:00Z
+SYNTHETIC_EXAMPLE_RECORD_COUNT = 24
+SYNTHETIC_EXAMPLE_LATENCY_SECONDS = 0
+
 # The documented response shape this adapter reads, field by field. It is a
 # declaration of what was read, never a claim that a live request established it.
 DOCUMENTED_KLINES_FIELDS: tuple[str, ...] = (
@@ -167,6 +191,42 @@ _LIMITATIONS: tuple[str, ...] = (
     "catalog identity and not a statement about the retained bytes.",
 )
 
+# True of one user's own pasted response read offline. It deliberately does not
+# inherit the transport statements above: no caller-supplied transport object was
+# involved, the pasted bytes are the user's own, and the user — not a provider
+# protocol — is the one asserting where they came from.
+USER_OFFLINE_LIMITATIONS: tuple[str, ...] = (
+    "Offline import only. The response bytes were pasted by the user and read in this process; "
+    "this build contains no network transport, makes no request, holds no provider credential "
+    "and resolves none.",
+    "The source, the rights/licence and the intended use are the user's own assertion. They are "
+    "recorded verbatim and are not a legal verification, and no permission or grant is "
+    "established by recording them.",
+    "available_at is simulated as interval_end plus the explicitly declared latency. It is not "
+    "verified point-in-time availability and no vintage, as-of or publication-time claim is "
+    "made; ingested_at is recorded separately.",
+    "Only the documented twelve-field klines shape is read. Fields 7..11 are retained in the "
+    "pasted bytes exactly as they arrived and are not interpreted.",
+    "The retained raw source is one canonical JSON response envelope holding the exact pasted "
+    "bytes base64-encoded beside the exact query, adapter version and assumptions. This store's "
+    "dataset identifier carries a fixed '.csv' suffix that is a catalog identity and not a "
+    "statement about the retained bytes.",
+)
+
+# True of the host's built-in synthetic example. It is a fixture, and none of it
+# is an uploader assertion or an observation of any market.
+SYNTHETIC_OFFLINE_LIMITATIONS: tuple[str, ...] = (
+    "Built-in synthetic example. These bytes are a fixture the host ships, not user-supplied "
+    "data and not an observation of any market. They exercise preview, publication and catalog "
+    "selection and support no research claim.",
+    "Offline only: no network request was made, this build contains no network transport, and "
+    "no provider permission, licence or point-in-time verification is established or claimed.",
+    "available_at is simulated as interval_end plus the declared latency; it is not verified "
+    "point-in-time availability.",
+    "Only the documented twelve-field klines shape is read; fields 7..11 are retained "
+    "uninterpreted.",
+)
+
 
 class HistoricalBarFailureCode(StrEnum):
     """Closed failure vocabulary for the historical Bar adapter."""
@@ -196,6 +256,8 @@ class HistoricalBarFailureCode(StrEnum):
     OUT_OF_ORDER_BAR = "out_of_order_bar"
     EMPTY_SELECTION = "empty_selection"
     ENVELOPE_INVALID = "envelope_invalid"
+    OFFLINE_RESPONSE_INVALID = "offline_response_invalid"
+    OFFLINE_RESPONSE_INCOMPLETE = "offline_response_incomplete"
 
 
 class HistoricalBarError(ValueError):
@@ -1063,18 +1125,9 @@ def fetch_historical_bars(
     return _capture(query, pages, normalized, now, ingested)
 
 
-def _capture(
-    query: HistoricalBarQueryV1,
-    pages: list[_Page],
-    normalized: _Normalized,
-    observed_now: datetime,
-    ingested_at: datetime,
-) -> HistoricalBarCaptureV1:
-    """One capture: the strict bytes plus the exact envelope that produced them."""
-    instrument = Instrument(venue=VenueId(query.venue), symbol=query.symbol)
-    provider = _provider_document()
-    normalizer = _normalizer_document()
-    policy = {
+def _fetch_policy() -> dict[str, Any]:
+    """The policy one caller-supplied-transport read records."""
+    return {
         "network_transport": "not-implemented-in-this-build",
         "transport": "caller-supplied",
         "real_network": False,
@@ -1090,7 +1143,11 @@ def _capture(
         "pit_verified": False,
         "vintage": None,
     }
-    transport_provenance = {
+
+
+def _fetch_transport_provenance() -> dict[str, Any]:
+    """What is true of bytes a caller-supplied transport returned."""
+    return {
         "kind": "synthetic-or-caller-supplied",
         "real_network": False,
         "provider_terms": "blocked",
@@ -1101,6 +1158,82 @@ def _capture(
             "host pending a separate explicit data-use grant."
         ),
     }
+
+
+def _offline_policy() -> dict[str, Any]:
+    """The policy one offline paste read records: one page, no transport."""
+    return {
+        "network_transport": "not-implemented-in-this-build",
+        "transport": "pasted-offline-response",
+        "real_network": False,
+        "provider_terms": "unresolved",
+        "page_limit": PAGE_LIMIT,
+        "max_pages": 1,
+        "max_records": PAGE_LIMIT,
+        "max_page_bytes": MAX_PAGE_BYTES,
+        "max_total_response_bytes": MAX_PAGE_BYTES,
+        "max_retry_after_seconds": MAX_RETRY_AFTER_SECONDS,
+        "max_429_attempts": 0,
+        "availability": "simulated: interval_end + latency_seconds",
+        "pit_verified": False,
+        "vintage": None,
+    }
+
+
+def _offline_transport_provenance(kind: str) -> dict[str, Any]:
+    """What is true of one offline read, stated for exactly its own provenance."""
+    if kind == OFFLINE_RESPONSE_KIND_SYNTHETIC:
+        note = (
+            "Every byte below is the host's own built-in synthetic example, read offline. It is "
+            "a fixture and not user data; no network request was made and no provider, "
+            "permission, licence or point-in-time verification is involved."
+        )
+    else:
+        note = (
+            "Every byte below was pasted by the user and read offline in this process. This host "
+            "made no network request, holds no provider credential and resolves none. The "
+            "source, rights/licence and intended use are the user's own assertion and are "
+            "recorded without legal verification."
+        )
+    return {
+        "kind": kind,
+        "real_network": False,
+        "provider_terms": "unresolved",
+        "media_type": OFFLINE_RESPONSE_MEDIA_TYPE,
+        "record_field_count": DOCUMENTED_KLINES_FIELD_COUNT,
+        "adapter": _normalizer_document(),
+        "note": note,
+    }
+
+
+def adapter_identity_document() -> dict[str, Any]:
+    """The exact provider and adapter identity a capture records.
+
+    A caller that seals its own evidence over a capture's bytes names this
+    document rather than restating a version string of its own, so one adapter
+    version is stated in exactly one place.
+    """
+    return {"provider": _provider_document(), "normalizer": _normalizer_document()}
+
+
+def _capture(
+    query: HistoricalBarQueryV1,
+    pages: list[_Page],
+    normalized: _Normalized,
+    observed_now: datetime,
+    ingested_at: datetime,
+    *,
+    policy: dict[str, Any] | None = None,
+    transport: dict[str, Any] | None = None,
+    limitations: tuple[str, ...] | None = None,
+) -> HistoricalBarCaptureV1:
+    """One capture: the strict bytes plus the exact envelope that produced them."""
+    instrument = Instrument(venue=VenueId(query.venue), symbol=query.symbol)
+    provider = _provider_document()
+    normalizer = _normalizer_document()
+    declared_policy = _fetch_policy() if policy is None else policy
+    transport_provenance = _fetch_transport_provenance() if transport is None else transport
+    declared_limitations = _LIMITATIONS if limitations is None else limitations
     observed_stamp = observed_now.strftime(_STAMP_FORMAT)
     ingested_stamp = ingested_at.strftime(_STAMP_FORMAT)
     page_documents = [
@@ -1136,7 +1269,7 @@ def _capture(
         "normalizer": normalizer,
         "declaration": {
             "query": query.document(),
-            "policy": policy,
+            "policy": declared_policy,
             "transport": transport_provenance,
             "observed_now_utc": observed_stamp,
             "ingested_at_utc": ingested_stamp,
@@ -1154,7 +1287,7 @@ def _capture(
             "records": records,
             "capture": capture_digests,
             "instrument": {"venue": instrument.venue.code, "symbol": instrument.symbol},
-            "limitations": list(_LIMITATIONS),
+            "limitations": list(declared_limitations),
         },
     }
     envelope = {
@@ -1162,14 +1295,14 @@ def _capture(
         "provider": provider,
         "normalizer": normalizer,
         "query": query.document(),
-        "policy": policy,
+        "policy": declared_policy,
         "transport": transport_provenance,
         "observed_now_utc": observed_stamp,
         "ingested_at_utc": ingested_stamp,
         "pages": page_documents,
         "records": records,
         "capture": capture_digests,
-        "limitations": list(_LIMITATIONS),
+        "limitations": list(declared_limitations),
     }
     envelope_json = _canonical_json(envelope)
     if len(envelope_json.encode("utf-8")) > MAX_ENVELOPE_BYTES:
@@ -1188,6 +1321,183 @@ def _capture(
         record_count=normalized.record_count,
         venue=instrument.venue.code,
         symbol=instrument.symbol,
+    )
+
+
+# --- offline paste -----------------------------------------------------------
+
+
+def _synthetic_example_records() -> list[list[Any]]:
+    """A fixed UTC day of synthetic hourly bars in the documented shape."""
+    step = INTERVALS[SYNTHETIC_EXAMPLE_INTERVAL]
+    records: list[list[Any]] = []
+    for index in range(SYNTHETIC_EXAMPLE_RECORD_COUNT):
+        open_ms = SYNTHETIC_EXAMPLE_START_MS + index * step
+        base = 100 + index
+        records.append(
+            [
+                open_ms,
+                f"{base}.0",
+                f"{base + 1}.0",
+                f"{base - 1}.0",
+                f"{base}.5",
+                "10.0",
+                open_ms + step - 1,
+                "1000.0",
+                index + 1,
+                "5.0",
+                "500.0",
+                "0",
+            ]
+        )
+    return records
+
+
+SYNTHETIC_EXAMPLE_END_MS = (
+    SYNTHETIC_EXAMPLE_START_MS
+    + SYNTHETIC_EXAMPLE_RECORD_COUNT * INTERVALS[SYNTHETIC_EXAMPLE_INTERVAL]
+)
+SYNTHETIC_EXAMPLE_BODY: bytes = _canonical_json(_synthetic_example_records()).encode("utf-8")
+SYNTHETIC_EXAMPLE_BODY_SHA256 = _digest(SYNTHETIC_EXAMPLE_BODY)
+
+
+def synthetic_example_query() -> HistoricalBarQueryV1:
+    """The one declaration the built-in example's bytes correspond to."""
+    return HistoricalBarQueryV1(
+        venue=SYNTHETIC_EXAMPLE_VENUE,
+        symbol=SYNTHETIC_EXAMPLE_SYMBOL,
+        interval=SYNTHETIC_EXAMPLE_INTERVAL,
+        start_ms=SYNTHETIC_EXAMPLE_START_MS,
+        end_ms=SYNTHETIC_EXAMPLE_END_MS,
+        latency_seconds=SYNTHETIC_EXAMPLE_LATENCY_SECONDS,
+    )
+
+
+def is_synthetic_example(body: object) -> bool:
+    """Whether these bytes are exactly the host's own built-in example."""
+    return type(body) is bytes and body == SYNTHETIC_EXAMPLE_BODY
+
+
+def synthetic_example_document() -> dict[str, Any]:
+    """The built-in example whole: its bytes, its declaration and its marking."""
+    return {
+        "schema": SYNTHETIC_EXAMPLE_SCHEMA,
+        "example_id": SYNTHETIC_EXAMPLE_ID,
+        "synthetic": True,
+        "label": "Built-in synthetic example — not market data",
+        "note": (
+            "These bytes are a fixture this host ships so that offline preview, publication and "
+            "catalog selection can be exercised without a provider or a network. They are not "
+            "user-supplied data and not an observation of any market, and loading them is what "
+            "marks an import synthetic."
+        ),
+        "adapter": adapter_identity_document(),
+        "media_type": OFFLINE_RESPONSE_MEDIA_TYPE,
+        "record_field_count": DOCUMENTED_KLINES_FIELD_COUNT,
+        "documented_fields": list(DOCUMENTED_KLINES_FIELDS),
+        "venue": SYNTHETIC_EXAMPLE_VENUE,
+        "symbol": SYNTHETIC_EXAMPLE_SYMBOL,
+        "interval": SYNTHETIC_EXAMPLE_INTERVAL,
+        "start_ms": SYNTHETIC_EXAMPLE_START_MS,
+        "end_ms": SYNTHETIC_EXAMPLE_END_MS,
+        "latency_seconds": SYNTHETIC_EXAMPLE_LATENCY_SECONDS,
+        "record_count": SYNTHETIC_EXAMPLE_RECORD_COUNT,
+        "response_body": SYNTHETIC_EXAMPLE_BODY.decode("utf-8"),
+        "response_sha256": SYNTHETIC_EXAMPLE_BODY_SHA256,
+        "limitations": list(SYNTHETIC_OFFLINE_LIMITATIONS),
+    }
+
+
+def capture_offline_response(
+    body: object,
+    *,
+    query: HistoricalBarQueryV1,
+    observed_now: datetime,
+    ingested_at: datetime,
+    synthetic: bool = False,
+) -> HistoricalBarCaptureV1:
+    """Read one pasted documented response offline: one page and no transport at all.
+
+    The pasted bytes become the single retained page, so the envelope keeps them
+    exactly and a read re-derives the capture from them. ``synthetic`` selects
+    which provenance the envelope records, and it is accepted for exactly the
+    host's own built-in example bytes and declaration — never for whatever bytes
+    a caller chose to label synthetic.
+    """
+    if type(body) is not bytes or not body:
+        _fail(
+            HistoricalBarFailureCode.OFFLINE_RESPONSE_INVALID,
+            "the pasted response must be the response body's own non-empty bytes",
+        )
+    if len(body) > MAX_PAGE_BYTES:
+        _fail(
+            HistoricalBarFailureCode.RESPONSE_TOO_LARGE,
+            f"the pasted response is larger than the {MAX_PAGE_BYTES}-byte single-response bound",
+        )
+    if type(synthetic) is not bool:
+        _fail(
+            HistoricalBarFailureCode.OFFLINE_RESPONSE_INVALID,
+            "the synthetic marking must be one boolean",
+        )
+    validated = _validated_query(query)
+    if synthetic and (body != SYNTHETIC_EXAMPLE_BODY or validated != synthetic_example_query()):
+        _fail(
+            HistoricalBarFailureCode.OFFLINE_RESPONSE_INVALID,
+            "the synthetic marking is accepted only for the host's own built-in example bytes "
+            "and declaration; pasted input is never recorded as synthetic on request",
+        )
+    now = _utc_instant(observed_now, field_name="observed_now")
+    ingested = _utc_instant(ingested_at, field_name="ingested_at")
+    observed_now_ms = _instant_ms(now)
+    if validated.end_ms > observed_now_ms:
+        _fail(
+            HistoricalBarFailureCode.INVALID_QUERY,
+            "the declared range is not closed as of the host's observed UTC now",
+            field_name="end_ms",
+        )
+    params = (
+        ("symbol", validated.symbol),
+        ("interval", validated.interval),
+        ("startTime", str(validated.start_ms)),
+        ("endTime", str(validated.end_ms - 1)),
+        ("limit", str(PAGE_LIMIT)),
+    )
+    records = _page_records(body, 1)
+    accumulator = _Accumulator(validated, observed_now_ms)
+    accumulator.accept(records, 1)
+    if len(accumulator.bars) == PAGE_LIMIT and accumulator.cursor_ms < validated.end_ms:
+        _fail(
+            HistoricalBarFailureCode.OFFLINE_RESPONSE_INCOMPLETE,
+            "the pasted response is one full page whose last bar does not reach the declared "
+            "range end; a single pasted response must be the whole answer",
+        )
+    normalized = _normalize(
+        validated,
+        [body],
+        observed_now_ms,
+        # One entry per page, each the closed five-parameter request that page
+        # answers: the same shape a fetched multi-page capture seals.
+        [[[name, value] for name, value in params]],
+    )
+    page = _Page(
+        index=1,
+        url=PROVIDER_ENDPOINT,
+        params=params,
+        timeout_seconds=0.0,
+        status=200,
+        headers=(),
+        body=body,
+    )
+    kind = OFFLINE_RESPONSE_KIND_SYNTHETIC if synthetic else OFFLINE_RESPONSE_KIND_USER
+    return _capture(
+        validated,
+        [page],
+        normalized,
+        now,
+        ingested,
+        policy=_offline_policy(),
+        transport=_offline_transport_provenance(kind),
+        limitations=SYNTHETIC_OFFLINE_LIMITATIONS if synthetic else USER_OFFLINE_LIMITATIONS,
     )
 
 

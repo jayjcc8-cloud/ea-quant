@@ -335,6 +335,102 @@ export type MappedPreview = {
 export type UploadPreviewResponse = UploadPreview | MappedPreview
 
 /**
+ * The host's own built-in fixture, served so that offline preview, publication
+ * and catalog selection can be exercised with no provider and no network.
+ *
+ * It is the only body the host will ever mark synthetic, and loading it is the
+ * only thing that marks an import synthetic: a pasted response is always the
+ * user's own, never re-labelled by a request.
+ */
+export type OfflineHistoryExample = {
+  schema: 'ea.offline-history-example.v1'
+  example_id: string
+  synthetic: true
+  label: string
+  note: string
+  adapter: { provider: Record<string, unknown>; normalizer: Record<string, unknown> }
+  media_type: string
+  record_field_count: number
+  documented_fields: string[]
+  venue: string
+  symbol: string
+  interval: string
+  start_ms: number
+  end_ms: number
+  latency_seconds: number
+  record_count: number
+  response_body: string
+  response_sha256: string
+  limitations: string[]
+}
+
+/**
+ * Exactly the fixed assumptions and assertions one offline import binds.
+ *
+ * The bytes on screen plus these fields are the whole preview identity, so a
+ * publication that changes either is publishing something nobody previewed. A
+ * user paste states its source, rights and intended use; the built-in example
+ * states none of them and refuses one.
+ */
+export type OfflineHistoryDeclaration = {
+  venue: string
+  symbol: string
+  interval: string
+  start_ms: number
+  end_ms: number
+  latency_seconds: number
+  synthetic: boolean
+  declared_source?: string
+  declared_rights?: string
+  intended_use?: string
+}
+
+/**
+ * What the host read offline from one pasted response.
+ *
+ * ``valid`` is the adapter's own verdict over the whole response, and
+ * ``preview_sha256`` names the exact identity a publication must return. The
+ * host clock stamps are informational: they are outside that identity.
+ */
+export type OfflineHistoryPreview = {
+  schema: 'ea.offline-history-preview.v1'
+  mode: 'offline-history'
+  valid: boolean
+  first_error: { code: string; message: string; record_number?: number | null; field_name?: string | null } | null
+  synthetic: boolean | null
+  provenance?: string
+  provider?: Record<string, unknown>
+  normalizer?: Record<string, unknown>
+  byte_count: number
+  response_sha256?: string
+  envelope_sha256?: string
+  capture?: { sha256: string; byte_count: number; data_sha256: string; record_count: number }
+  instrument?: { venue: string; symbol: string }
+  query?: Record<string, unknown>
+  observed_now_utc?: string
+  ingested_at_utc?: string
+  availability_policy?: AvailabilityPolicy
+  quality?: DatasetQuality
+  preview?: {
+    rows: Record<string, string | number>[]
+    row_count_sampled: number
+    truncated: boolean
+    valid: boolean
+  }
+  declarations?: { source: string | null; rights: string | null; intended_use: string | null }
+  preview_sha256: string | null
+  limitations: string[]
+}
+
+/** One published offline version: the pasted response, sealed and re-derivable. */
+export type OfflineHistoryVersion = Omit<UploadVersion, 'schema' | 'source'> & {
+  schema: 'ea.local-dataset-version.v4'
+  source: UploadVersion['source'] & { intended_use?: string | null; provenance?: string }
+  provider_evidence?: Record<string, unknown>
+  provider_evidence_sha256?: string
+}
+
+/**
  * One statically inspected local strategy package. Inspection establishes no
  * trust and runs nothing: it reports the identity a captured container actually
  * is, so an operator can decide about exactly that identity.
@@ -436,6 +532,8 @@ export type DatasetEntry = {
   version_evidence_digest?: string
   /** Present only for a version an explicit mapping produced. */
   mapping?: MappingSummary
+  /** Present only for a version a provider transport or an offline paste produced. */
+  provider?: Record<string, unknown>
   error_code?: string
   message?: string
 }
@@ -564,6 +662,32 @@ export const researchApi = {
     }),
   publishUpload: (request: UploadPublishRequest) =>
     write<UploadVersion & { datasets: DatasetEntry[] }>('/api/datasets/upload', request),
+  /**
+   * The host's labelled synthetic example. Loading it is what marks an import
+   * synthetic; nothing a caller sends can mark a pasted response synthetic.
+   */
+  offlineHistoryExample: () =>
+    apiRequest<OfflineHistoryExample>('/api/datasets/offline-history/example'),
+  previewOfflineHistory: (content: string, declaration: OfflineHistoryDeclaration) =>
+    write<OfflineHistoryPreview>('/api/datasets/offline-history/preview', {
+      content,
+      ...declaration,
+    }),
+  /**
+   * Publish exactly the preview this host verified. ``previewSha256`` is the
+   * identity the preview named; the host recomputes it from these bytes and
+   * declarations and refuses a publication that names anything else.
+   */
+  publishOfflineHistory: (
+    content: string,
+    declaration: OfflineHistoryDeclaration,
+    previewSha256: string,
+  ) =>
+    write<OfflineHistoryVersion & { datasets: DatasetEntry[] }>('/api/datasets/offline-history', {
+      content,
+      ...declaration,
+      preview_sha256: previewSha256,
+    }),
   localStrategySlot: () => apiRequest<LocalStrategySlot>('/api/plugins/local-strategy'),
   inspectLocalStrategy: (contentBase64: string, manifest: Record<string, unknown>) =>
     write<LocalStrategyCapability>('/api/plugins/local-strategy/inspect', {

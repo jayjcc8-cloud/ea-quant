@@ -34,6 +34,17 @@ evidence names the exact query, provider, normalizer and policy, and a read runs
 the normalizer again over the retained page bytes and requires the capture to be
 reproduced exactly. No live provider request, permission, licence or
 point-in-time verification is claimed for such a version.
+
+A fifth case is an *offline paste*: the user supplies the response bytes
+themselves and declares the instrument, the fixed UTC interval, the query range,
+a simulated availability latency, and their own source, rights/licence and
+intended-use assertions. It reuses the same adapter, the same store and the same
+catalog; what differs is the provenance, which is the user's own assertion rather
+than a caller's protocol, and the marking, which is either the user's paste or the
+host's built-in synthetic example — and the example marking is accepted only for
+the host's own example bytes and declaration. A publication binds the exact
+preview identity (bytes plus declarations) that this store recomputed, so no
+staged draft and no edited declaration can be published behind an old preview.
 """
 
 from __future__ import annotations
@@ -80,6 +91,14 @@ MAPPED_VERSION_SCHEMA = "ea.local-dataset-version.v2"
 # normalized from a caller-supplied transport. It is one more version schema in
 # this store, not a second store, a second decoder or a second catalog.
 PROVIDER_VERSION_SCHEMA = "ea.local-dataset-version.v3"
+# A fifth entrance: one user's own pasted historical response read offline by the
+# same read-only Bar adapter. It is one more schema in this same store and the
+# same catalog — never a second store, decoder or catalog — and it records the
+# user's own source, rights and intended-use assertions rather than a caller's
+# protocol provenance.
+OFFLINE_HISTORY_PREVIEW_SCHEMA = "ea.offline-history-preview.v1"
+OFFLINE_HISTORY_VERSION_SCHEMA = "ea.local-dataset-version.v4"
+OFFLINE_PREVIEW_IDENTITY_SCHEMA = "ea.offline-history-preview-identity.v1"
 PROVIDER_EVIDENCE_SCHEMA = historical_bars.PROVIDER_EVIDENCE_SCHEMA
 MAP_EVIDENCE_SCHEMA = "ea.local-csv-mapping-evidence.v1"
 DATASET_CATALOG_SCHEMA = "ea.local-dataset-catalog.v1"
@@ -170,6 +189,32 @@ _PROVIDER_LIMITATIONS = (
     "verification is claimed; the provider's terms are unresolved and real use is blocked.",
     "available_at was simulated as interval_end plus the caller's declared latency. It is not an "
     "assertion by any uploader and not verified point-in-time availability.",
+)
+
+# What is additionally true of a version one user's own pasted response produced.
+# This entrance states the user's own assertions, so it must not inherit the
+# provider-transport statements above: no caller-supplied transport was involved
+# and the user — not a provider protocol — asserted where the bytes came from.
+_OFFLINE_USER_LIMITATIONS = (
+    "Offline import only. The response bytes were pasted by the user and read in this process; "
+    "this build contains no network transport and makes no request, and the host resolves no "
+    "provider credential.",
+    "The declared source, rights/licence and intended use are the user's own assertion, recorded "
+    "verbatim. They are not a legal verification and establish no permission or grant.",
+    "available_at was simulated as interval_end plus the user's declared latency. It is not "
+    "verified point-in-time availability and is not an assertion by any provider.",
+)
+
+# What is additionally true of a version the host's built-in synthetic example
+# produced. Nothing here is an uploader assertion.
+_SYNTHETIC_VERSION_LIMITATIONS = (
+    "Published from the host's built-in synthetic example, not from user-supplied data. It is a "
+    "fixture for exercising preview, publication and catalog selection and supports no research "
+    "claim.",
+    "Availability is not verified point-in-time evidence; simulated values are never presented "
+    "as PIT verified.",
+    "The raw response is provenance only; the canonical capture is the identity research binds.",
+    "The host made no network request and holds no provider permission or licence.",
 )
 
 
@@ -683,6 +728,125 @@ def _provider_summary(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# The declared-by/asserted pair each offline provenance records. A user's own
+# paste is an uploader assertion; the host's fixture asserts nothing.
+OFFLINE_DECLARED_BY = {
+    historical_bars.OFFLINE_RESPONSE_KIND_USER: ("user", True),
+    historical_bars.OFFLINE_RESPONSE_KIND_SYNTHETIC: ("host-example", False),
+}
+
+
+def _offline_failure(error: historical_bars.HistoricalBarError) -> UploadError:
+    """One adapter refusal, reported in this store's own vocabulary."""
+    return UploadError(
+        error.code.value,
+        error.message,
+        record_number=error.record_index,
+        field_name=error.field_name,
+    )
+
+
+def _offline_query(
+    *,
+    venue: object,
+    symbol: object,
+    interval: object,
+    start_ms: object,
+    end_ms: object,
+    latency_seconds: object,
+) -> historical_bars.HistoricalBarQueryV1:
+    """Re-read one declared offline query under the adapter's closed contract."""
+    return historical_bars.HistoricalBarQueryV1(
+        venue=cast("str", venue),
+        symbol=cast("str", symbol),
+        interval=cast("str", interval),
+        start_ms=cast("int", start_ms),
+        end_ms=cast("int", end_ms),
+        latency_seconds=cast("int", latency_seconds),
+    )
+
+
+def _offline_declaration(
+    *,
+    synthetic: object,
+    declared_source: object,
+    declared_rights: object,
+    intended_use: object,
+) -> dict[str, Any]:
+    """Re-read the user's own offline declarations under one closed contract.
+
+    A user's own paste must state its source, its rights/licence and its intended
+    use, because this host records no assertion nobody made and fabricates no
+    licence. The built-in synthetic example is the opposite case: it is the host's
+    fixture, so it takes no user assertion at all and one is refused rather than
+    attached to it.
+    """
+    if type(synthetic) is not bool:
+        raise UploadError("offline_declaration", "synthetic must be stated as true or false")
+    source = _bounded_reference(declared_source, field="declared_source")
+    rights = _bounded_reference(declared_rights, field="declared_rights")
+    use = _bounded_reference(intended_use, field="intended_use")
+    if synthetic:
+        if source is not None or rights is not None or use is not None:
+            raise UploadError(
+                "offline_declaration",
+                "the built-in synthetic example takes no source, rights or intended-use assertion",
+            )
+    elif not source or not rights or not use:
+        raise UploadError(
+            "offline_declaration",
+            "declare the source, the rights/licence and the intended use of your own pasted "
+            "response; the host records no assertion nobody made",
+        )
+    return {
+        "synthetic": synthetic,
+        "declared_source": source,
+        "declared_rights": rights,
+        "intended_use": use,
+    }
+
+
+def _offline_identity(
+    payload: bytes,
+    query: historical_bars.HistoricalBarQueryV1,
+    *,
+    synthetic: bool,
+    declared_source: str | None,
+    declared_rights: str | None,
+    intended_use: str | None,
+) -> str:
+    """The exact identity a publication must bind: bytes plus declarations.
+
+    Host-read instants are deliberately outside it, so a preview read a moment
+    before a publication still names the same identity; the publication seals its
+    own host read of the clock regardless.
+    """
+    return evidence_digest(
+        {
+            "schema": OFFLINE_PREVIEW_IDENTITY_SCHEMA,
+            "adapter": historical_bars.adapter_identity_document(),
+            "provenance": (
+                historical_bars.OFFLINE_RESPONSE_KIND_SYNTHETIC
+                if synthetic
+                else historical_bars.OFFLINE_RESPONSE_KIND_USER
+            ),
+            "synthetic": synthetic,
+            "response_byte_count": len(payload),
+            "response_sha256": sha256(payload).hexdigest(),
+            "query": query.document(),
+            "declared_source": declared_source,
+            "declared_rights": declared_rights,
+            "intended_use": intended_use,
+        }
+    )
+
+
+def _offline_limitations(synthetic: bool) -> list[str]:
+    if synthetic:
+        return [*_SYNTHETIC_VERSION_LIMITATIONS, *historical_bars.SYNTHETIC_OFFLINE_LIMITATIONS]
+    return [*_VERSION_LIMITATIONS, *_OFFLINE_USER_LIMITATIONS]
+
+
 def seal_version_manifest(document: dict[str, Any]) -> dict[str, Any]:
     """One published version's own body, with its integrity digest filled in.
 
@@ -706,6 +870,7 @@ def _version_evidence(
     instrument = dataset.selection.events[0].payload.instrument
     source = cast("dict[str, Any]", manifest.get("source"))
     provider_version = manifest.get("schema") == PROVIDER_VERSION_SCHEMA
+    offline_version = manifest.get("schema") == OFFLINE_HISTORY_VERSION_SCHEMA
     evidence: dict[str, Any] = {
         "schema": VERSION_EVIDENCE_SCHEMA,
         "dataset_id": dataset_id,
@@ -722,8 +887,8 @@ def _version_evidence(
         "source_bytes_sha256": manifest.get("source_bytes_sha256"),
         "source_byte_count": manifest.get("source_byte_count"),
         "source": {
-            "declared_by": "caller" if provider_version else "user",
-            "asserted": not provider_version,
+            "declared_by": "caller" if provider_version else source.get("declared_by"),
+            "asserted": False if provider_version else source.get("asserted"),
             "reference": source.get("reference"),
             "file_name": source.get("file_name"),
             "license_reference": source.get("license_reference"),
@@ -732,12 +897,17 @@ def _version_evidence(
         "availability_policy": _validated_policy(manifest.get("availability_policy")),
         "time_semantics": dict(_TIME_SEMANTICS),
     }
+    if offline_version:
+        # The user's own rights and intended-use assertions, and which provenance
+        # the sealed response was read under, are part of what the evidence names.
+        evidence["source"]["intended_use"] = source.get("intended_use")
+        evidence["source"]["provenance"] = source.get("provenance")
     if manifest.get("schema") == MAPPED_VERSION_SCHEMA:
         # The declaration that produced this capture is part of what the evidence
         # names, so the digest a bound job freezes covers the mapping too.
         evidence["mapping"] = _mapping_summary(manifest)
-    if provider_version:
-        # Likewise for a provider capture: the query, provider, normalizer, policy
+    if provider_version or offline_version:
+        # Likewise for a response capture: the query, provider, normalizer, policy
         # and page digests are part of what the bound version identity covers.
         evidence["provider"] = _provider_summary(manifest)
     return evidence
@@ -1341,7 +1511,325 @@ class ControlledUploadStoreV1:
                 ) from None
             return manifest
 
+    # -- offline pasted response --------------------------------------------
+
+    def preview_offline_history(
+        self,
+        content: object,
+        *,
+        venue: object = None,
+        symbol: object = None,
+        interval: object = None,
+        start_ms: object = None,
+        end_ms: object = None,
+        latency_seconds: object = None,
+        synthetic: object = None,
+        declared_source: object = None,
+        declared_rights: object = None,
+        intended_use: object = None,
+    ) -> dict[str, Any]:
+        """Read one pasted response offline and report what a publication would seal.
+
+        The adapter's own normalizer is the only authority: the whole pasted
+        response is normalized and the strict decoder re-reads the whole capture,
+        so ``valid`` means the entire response is usable. Nothing is written, and
+        the identity a publication must bind is handed out with the verdict.
+        """
+        try:
+            payload = self._check_request(content)
+            query = _offline_query(
+                venue=venue,
+                symbol=symbol,
+                interval=interval,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                latency_seconds=latency_seconds,
+            )
+            declaration = _offline_declaration(
+                synthetic=synthetic,
+                declared_source=declared_source,
+                declared_rights=declared_rights,
+                intended_use=intended_use,
+            )
+            observed = datetime.now(UTC)
+            capture = historical_bars.capture_offline_response(
+                payload,
+                query=query,
+                observed_now=observed,
+                ingested_at=datetime.now(UTC),
+                synthetic=declaration["synthetic"],
+            )
+            decoded = self._decode_staged(capture.strict_csv)
+            self._single_instrument(decoded)
+            self._check_record_count(decoded)
+            # The same policy a publication would seal, resolved here so that a
+            # preview names exactly the availability the version would record.
+            policy = _policy_document(AVAILABILITY_SIMULATED, query.latency_seconds)
+        except UploadError as error:
+            return self._offline_preview_error(error, content)
+        except historical_bars.HistoricalBarError as error:
+            return self._offline_preview_error(_offline_failure(error), content)
+        declaration_document = cast("dict[str, Any]", capture.provider_evidence["declaration"])
+        _, rows, truncated_bytes, sample_error = _sample_rows(capture.strict_csv)
+        return {
+            "schema": OFFLINE_HISTORY_PREVIEW_SCHEMA,
+            "mode": "offline-history",
+            "valid": True,
+            "first_error": None,
+            "synthetic": declaration["synthetic"],
+            "provenance": cast("dict[str, Any]", declaration_document["transport"])["kind"],
+            "provider": capture.provider_evidence["provider"],
+            "normalizer": capture.provider_evidence["normalizer"],
+            "byte_count": len(payload),
+            "response_sha256": sha256(payload).hexdigest(),
+            "envelope_sha256": sha256(capture.envelope_json.encode("utf-8")).hexdigest(),
+            "capture": {
+                "sha256": capture.capture_sha256,
+                "byte_count": capture.capture_byte_count,
+                "data_sha256": capture.data_sha256,
+                "record_count": capture.record_count,
+            },
+            "instrument": {"venue": capture.venue, "symbol": capture.symbol},
+            "query": declaration_document["query"],
+            "observed_now_utc": declaration_document["observed_now_utc"],
+            "ingested_at_utc": declaration_document["ingested_at_utc"],
+            "availability_policy": policy,
+            "quality": _coverage(decoded),
+            "preview": {
+                "rows": list(rows),
+                "row_count_sampled": len(rows),
+                "truncated": bool(truncated_bytes) or capture.record_count > len(rows),
+                "valid": sample_error is None,
+            },
+            "declarations": {
+                "source": declaration["declared_source"],
+                "rights": declaration["declared_rights"],
+                "intended_use": declaration["intended_use"],
+            },
+            "preview_sha256": _offline_identity(payload, query, **declaration),
+            "limitations": _offline_limitations(declaration["synthetic"]),
+        }
+
+    def _offline_preview_error(self, error: UploadError, content: object) -> dict[str, Any]:
+        """One refused offline preview: the refusal itself, and nothing else."""
+        return {
+            "schema": OFFLINE_HISTORY_PREVIEW_SCHEMA,
+            "mode": "offline-history",
+            "valid": False,
+            "first_error": error.document(),
+            "synthetic": None,
+            "byte_count": len(content) if type(content) is bytes else 0,
+            "preview_sha256": None,
+            "limitations": _offline_limitations(False),
+        }
+
+    def publish_offline_history(
+        self,
+        content: object,
+        *,
+        venue: object = None,
+        symbol: object = None,
+        interval: object = None,
+        start_ms: object = None,
+        end_ms: object = None,
+        latency_seconds: object = None,
+        synthetic: object = None,
+        declared_source: object = None,
+        declared_rights: object = None,
+        intended_use: object = None,
+        preview_sha256: object = None,
+    ) -> dict[str, Any]:
+        """Publish one pasted response as one immutable, re-derivable version.
+
+        The published request must name the exact preview identity this host
+        already verified: the identity is recomputed here from the request's own
+        bytes and declarations and a mismatch is refused, so no mutable staging
+        record is trusted and no edited declaration can ride on an old preview.
+        The retained raw source is the adapter's response envelope, which keeps the
+        pasted bytes exactly, and a read normalizes them again under the sealed
+        query, provenance and policy.
+        """
+        with self._lock:
+            payload = self._check_request(content)
+            try:
+                query = _offline_query(
+                    venue=venue,
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    latency_seconds=latency_seconds,
+                )
+            except historical_bars.HistoricalBarError as error:
+                raise _offline_failure(error) from None
+            declaration = _offline_declaration(
+                synthetic=synthetic,
+                declared_source=declared_source,
+                declared_rights=declared_rights,
+                intended_use=intended_use,
+            )
+            identity = _offline_identity(payload, query, **declaration)
+            if preview_sha256 != identity:
+                raise UploadError(
+                    "preview_mismatch",
+                    "this is not the exact preview this host verified; preview these bytes and "
+                    "declarations again and publish from that preview",
+                )
+            # One preview identity is one immutable version. A repeated
+            # publication of the same identity — a retried request, a panel
+            # reopened while an earlier publication was still settling — returns
+            # the version already sealed for it instead of minting a second one.
+            replay = self._published_offline_identity(identity)
+            if replay is not None:
+                return replay
+            try:
+                capture = historical_bars.capture_offline_response(
+                    payload,
+                    query=query,
+                    observed_now=datetime.now(UTC),
+                    ingested_at=datetime.now(UTC),
+                    synthetic=declaration["synthetic"],
+                )
+            except historical_bars.HistoricalBarError as error:
+                raise _offline_failure(error) from None
+            raw = capture.envelope_json.encode("utf-8")
+            try:
+                rederived = historical_bars.rederive_strict_capture(raw, capture.provider_evidence)
+            except historical_bars.HistoricalBarError as error:
+                raise UploadError(
+                    "provider_capture",
+                    "the capture is not what its own retained response reproduces "
+                    f"({error.code.value})",
+                ) from None
+            if rederived != capture.strict_csv:
+                raise UploadError(
+                    "provider_capture",
+                    "the capture is not what its own retained response reproduces",
+                )
+            try:
+                decoded = self._decode_staged(capture.strict_csv)
+            except HistoricalMarketDataError as error:
+                raise _strict_failure(error) from None
+            self._single_instrument(decoded)
+            self._check_record_count(decoded)
+            policy = _policy_document(AVAILABILITY_SIMULATED, query.latency_seconds)
+            if len(self._versions()) >= MAX_PUBLISHED_VERSIONS:
+                raise UploadError(
+                    "upload_quota", f"the store holds the {MAX_PUBLISHED_VERSIONS}-version limit"
+                )
+            if self._stored_bytes() + len(raw) + capture.capture_byte_count > MAX_STORED_BYTES:
+                raise UploadError("upload_quota", "the upload store has reached its size limit")
+            kind = cast(
+                "dict[str, Any]",
+                cast("dict[str, Any]", capture.provider_evidence["declaration"])["transport"],
+            )["kind"]
+            declared_by, asserted = OFFLINE_DECLARED_BY[cast("str", kind)]
+            dataset_id = f"{uuid4().hex}.csv"
+            raw_directory = self._fds["raw"]
+            capture_directory = self._fds["captures"]
+            versions_directory = self._fds["versions"]
+            manifest: dict[str, Any] = {
+                "schema": OFFLINE_HISTORY_VERSION_SCHEMA,
+                "dataset_id": dataset_id,
+                "kind": "ohlcv",
+                "profile": PHASE1_OHLCV_PROFILE,
+                "version": 1,
+                "published_at": datetime.now(UTC).strftime(_DATETIME_FORMAT),
+                "source": {
+                    "declared_by": declared_by,
+                    "asserted": asserted,
+                    "reference": declaration["declared_source"],
+                    "file_name": None,
+                    "license_reference": declaration["declared_rights"],
+                    "intended_use": declaration["intended_use"],
+                    "provenance": kind,
+                },
+                "availability_policy": policy,
+                "source_bytes_sha256": sha256(raw).hexdigest(),
+                "source_byte_count": len(raw),
+                "raw_retained": True,
+                "capture_sha256": capture.capture_sha256,
+                "capture_byte_count": capture.capture_byte_count,
+                "data_sha256": decoded.selection.fingerprint.sha256.value,
+                "record_count": decoded.selection.fingerprint.record_count,
+                "instrument": {"venue": capture.venue, "symbol": capture.symbol},
+                "time_semantics": dict(_TIME_SEMANTICS),
+                "quality": _coverage(decoded),
+                "limitations": _offline_limitations(declaration["synthetic"]),
+            }
+            # The exact preview identity this version seals, persisted with it so
+            # that a repeat of the same publication is recognised as the same
+            # version rather than as a new one.
+            manifest["preview_sha256"] = identity
+            manifest["provider_evidence"] = capture.provider_evidence
+            manifest["provider_evidence_sha256"] = evidence_digest(capture.provider_evidence)
+            manifest = seal_version_manifest(manifest)
+            if len(_canonical_json(manifest)) > MAX_PROVIDER_MANIFEST_BYTES:
+                raise UploadError(
+                    "provider_evidence",
+                    "the response evidence is larger than one version manifest can carry",
+                )
+            try:
+                _write_new(raw_directory, dataset_id, raw)
+                _write_new(capture_directory, dataset_id, capture.strict_csv)
+                pending = f".version-{uuid4().hex}"
+                descriptor = os.open(
+                    pending,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=versions_directory,
+                )
+                try:
+                    with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                        handle.write(_canonical_json(manifest))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(
+                        pending,
+                        f"{dataset_id}.json",
+                        src_dir_fd=versions_directory,
+                        dst_dir_fd=versions_directory,
+                    )
+                    os.fsync(versions_directory)
+                finally:
+                    with suppress(OSError):
+                        os.unlink(pending, dir_fd=versions_directory)
+            except OSError:
+                for directory, entry in (
+                    (versions_directory, f"{dataset_id}.json"),
+                    (capture_directory, dataset_id),
+                    (raw_directory, dataset_id),
+                ):
+                    with suppress(OSError):
+                        os.unlink(entry, dir_fd=directory)
+                raise UploadError(
+                    "upload_unavailable", "the version could not be published"
+                ) from None
+            return manifest
+
     # -- reading ------------------------------------------------------------
+
+    def _published_offline_identity(self, identity: str) -> dict[str, Any] | None:
+        """The version already sealed for one offline preview identity, if any.
+
+        A version is only returned when it still loads: an entry that no longer
+        reproduces its own retained response is not a version this identity can
+        be answered with, and the caller then publishes afresh.
+        """
+        for dataset_id in self._versions():
+            manifest = self.manifest(dataset_id)
+            if (
+                manifest is None
+                or manifest.get("schema") != OFFLINE_HISTORY_VERSION_SCHEMA
+                or manifest.get("preview_sha256") != identity
+            ):
+                continue
+            try:
+                self.load(dataset_id)
+            except (HistoricalMarketDataError, OSError, ValueError):
+                continue
+            return manifest
+        return None
 
     def _versions(self) -> list[str]:
         directory = self._fds["versions"]
@@ -1374,7 +1862,12 @@ class ControlledUploadStoreV1:
         if (
             type(document) is not dict
             or document.get("schema")
-            not in {UPLOAD_VERSION_SCHEMA, MAPPED_VERSION_SCHEMA, PROVIDER_VERSION_SCHEMA}
+            not in {
+                UPLOAD_VERSION_SCHEMA,
+                MAPPED_VERSION_SCHEMA,
+                PROVIDER_VERSION_SCHEMA,
+                OFFLINE_HISTORY_VERSION_SCHEMA,
+            }
             or document.get("dataset_id") != dataset_id
             or document.get("kind") != "ohlcv"
             or document.get("profile") != PHASE1_OHLCV_PROFILE
@@ -1388,7 +1881,7 @@ class ControlledUploadStoreV1:
             or type(document.get("mapping_evidence_sha256")) is not str
         ):
             return None
-        if document["schema"] == PROVIDER_VERSION_SCHEMA and (
+        if document["schema"] in {PROVIDER_VERSION_SCHEMA, OFFLINE_HISTORY_VERSION_SCHEMA} and (
             type(document.get("provider_evidence")) is not dict
             or type(document.get("provider_evidence_sha256")) is not str
         ):
@@ -1426,21 +1919,46 @@ class ControlledUploadStoreV1:
         _validated_policy(manifest.get("availability_policy"))
         if manifest["schema"] == MAPPED_VERSION_SCHEMA:
             self._validated_mapping(raw, manifest)
-        if manifest["schema"] == PROVIDER_VERSION_SCHEMA:
+        if manifest["schema"] in {PROVIDER_VERSION_SCHEMA, OFFLINE_HISTORY_VERSION_SCHEMA}:
             self._validated_provider(raw, manifest)
         if manifest.get("time_semantics") != _TIME_SEMANTICS:
             raise ValueError("uploaded dataset version declares unsupported time semantics")
         source = manifest.get("source")
-        expected_provenance: tuple[object, object] = (
-            ("caller", False) if manifest["schema"] == PROVIDER_VERSION_SCHEMA else ("user", True)
-        )
-        if (
-            type(source) is not dict
-            or (source.get("declared_by"), source.get("asserted")) != expected_provenance
-        ):
-            raise ValueError(
-                "uploaded dataset version is not recorded as uploader-asserted provenance"
+        if manifest["schema"] == OFFLINE_HISTORY_VERSION_SCHEMA:
+            # The provenance the version records must be the provenance its own
+            # sealed response evidence declares, and the declared-by/asserted pair
+            # must be the one that provenance implies. An out-of-band edit that
+            # relabels a user's paste as the host's fixture (or the reverse) is a
+            # different statement from the sealed one and is refused here.
+            declaration, _ = _provider_declaration(manifest)
+            kind = cast("dict[str, Any]", declaration.get("transport")).get("kind")
+            if kind not in OFFLINE_DECLARED_BY:
+                raise ValueError(
+                    "uploaded dataset version does not declare a known offline provenance"
+                )
+            expected_provenance = OFFLINE_DECLARED_BY[cast("str", kind)]
+            if (
+                type(source) is not dict
+                or source.get("provenance") != kind
+                or (source.get("declared_by"), source.get("asserted")) != expected_provenance
+            ):
+                raise ValueError(
+                    "uploaded dataset version is not recorded under the provenance its response "
+                    "evidence declares"
+                )
+        else:
+            expected_provenance = (
+                ("caller", False)
+                if manifest["schema"] == PROVIDER_VERSION_SCHEMA
+                else ("user", True)
             )
+            if (
+                type(source) is not dict
+                or (source.get("declared_by"), source.get("asserted")) != expected_provenance
+            ):
+                raise ValueError(
+                    "uploaded dataset version is not recorded as uploader-asserted provenance"
+                )
         if len({event.payload.instrument for event in dataset.selection.events}) != 1:
             raise ValueError("uploaded input requires exactly one instrument")
         return path, dataset
@@ -1576,7 +2094,7 @@ class ControlledUploadStoreV1:
         }
         if manifest["schema"] == MAPPED_VERSION_SCHEMA:
             entry["mapping"] = _mapping_summary(manifest)
-        if manifest["schema"] == PROVIDER_VERSION_SCHEMA:
+        if manifest["schema"] in {PROVIDER_VERSION_SCHEMA, OFFLINE_HISTORY_VERSION_SCHEMA}:
             entry["provider"] = _provider_summary(manifest)
         return entry
 

@@ -9,6 +9,7 @@ import {
   ResearchRequestError,
   TIME_FORMAT_IDS,
   isMappedPreview,
+  researchApi,
   type DeclarationBody,
   type DeclarationCatalog,
   type DeclarationVerdict,
@@ -16,6 +17,10 @@ import {
   type LocalStrategyCapability,
   type LocalStrategySlot,
   type ModelConfigurationStatus,
+  type OfflineHistoryDeclaration,
+  type OfflineHistoryExample,
+  type OfflineHistoryPreview,
+  type OfflineHistoryVersion,
   type PluginCatalog,
   type PluginCatalogEntry,
   type PluginSelection,
@@ -945,6 +950,267 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
   </div>
 }
 
+/**
+ * The offline import methods this workspace calls.
+ *
+ * The shipped browser adapter is built from ``research-api`` in another module,
+ * so a caller may carry these three methods itself; when it does not, the module
+ * this file already reads every other host verdict from is the same one.
+ */
+type OfflineHistoryMethods = {
+  offlineHistoryExample?: () => Promise<OfflineHistoryExample>
+  previewOfflineHistory?: (
+    content: string,
+    declaration: OfflineHistoryDeclaration,
+  ) => Promise<OfflineHistoryPreview>
+  publishOfflineHistory?: (
+    content: string,
+    declaration: OfflineHistoryDeclaration,
+    previewSha256: string,
+  ) => Promise<OfflineHistoryVersion>
+}
+
+function offlineHistoryApi(api: ApiAdapter): OfflineHistoryMethods {
+  const injected = api as unknown as OfflineHistoryMethods
+  if (injected.previewOfflineHistory || injected.publishOfflineHistory) return injected
+  return researchApi as unknown as OfflineHistoryMethods
+}
+
+/** The adapter's own single-response bound; a longer paste is refused unread. */
+const MAX_OFFLINE_RESPONSE_CHARACTERS = 512 * 1024
+
+const offlineInteger = (value: string): number | null =>
+  /^-?\d+$/.test(value.trim()) ? Number(value.trim()) : null
+
+/**
+ * Offline import of a historical response the user already holds.
+ *
+ * No transport is involved anywhere in this path: the pasted text is the whole
+ * input, the host normalizes it with the one documented 12-field adapter and
+ * seals the exact bytes as the version's provenance. The panel marks the
+ * built-in example synthetic and refuses to carry that mark onto a paste, and a
+ * publication is only ever the exact bytes and declarations a preview verified.
+ */
+function OfflineHistoryPanel({ api }: { api: ApiAdapter }) {
+  const offline = offlineHistoryApi(api)
+  const [open, setOpen] = useState(false)
+  const [content, setContent] = useState('')
+  const [venue, setVenue] = useState('')
+  const [symbol, setSymbol] = useState('')
+  const [interval, setIntervalValue] = useState('')
+  const [startMs, setStartMs] = useState('')
+  const [endMs, setEndMs] = useState('')
+  const [latency, setLatency] = useState('')
+  const [source, setSource] = useState('')
+  const [rights, setRights] = useState('')
+  const [intendedUse, setIntendedUse] = useState('')
+  const [synthetic, setSynthetic] = useState(false)
+  const [preview, setPreview] = useState<OfflineHistoryPreview | null>(null)
+  const [previewedFor, setPreviewedFor] = useState<string | null>(null)
+  const [published, setPublished] = useState<OfflineHistoryVersion | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<'example' | 'preview' | 'publish' | null>(null)
+  // Every reply is tagged with the generation it started in, so a reply that
+  // arrives after an edit, a close or a newer request is dropped unread. The
+  // busy ref is synchronous: a second click in the same tick, before React has
+  // disabled the button, is refused rather than sent again.
+  const generation = useRef(0)
+  const busyRef = useRef(false)
+
+  const clearPreview = () => { setPreview(null); setPreviewedFor(null); setPublished(null) }
+  // The exact paste and declarations a preview verified. Any change to either is
+  // a different import, so the preview stops authorizing a publication.
+  const signature = JSON.stringify([content, venue, symbol, interval, startMs, endMs, latency, source, rights, intendedUse, synthetic])
+  const previewFresh = preview !== null && previewedFor === signature
+  const verified = previewFresh && preview !== null && preview.valid && preview.preview_sha256 !== null
+  const tooLarge = content.length > MAX_OFFLINE_RESPONSE_CHARACTERS
+
+  // Editing the response is what the user does with their own bytes, so the
+  // synthetic designation can never survive an edit: only loading the host's own
+  // example sets it, and the host refuses the marking for anything else.
+  const edit = (apply: () => void) => { apply(); setSynthetic(false); clearPreview(); setError(null) }
+
+  const declarationOf = (): OfflineHistoryDeclaration | null => {
+    const start = offlineInteger(startMs)
+    const end = offlineInteger(endMs)
+    const latencyValue = offlineInteger(latency)
+    if (!venue.trim() || !symbol.trim() || !interval.trim()) {
+      setError('State the venue, the symbol and the fixed interval your own response answers, so the host normalizes it under exactly that query.')
+      return null
+    }
+    if (start === null || end === null || latencyValue === null) {
+      setError('State the query start, the query end and the simulated availability latency as whole numbers.')
+      return null
+    }
+    if (!synthetic && (!source.trim() || !rights.trim() || !intendedUse.trim())) {
+      setError('Declare the source, the rights/licence and the intended use of your own pasted response; the host records no assertion nobody made and verifies no licence.')
+      return null
+    }
+    return {
+      venue: venue.trim(),
+      symbol: symbol.trim(),
+      interval: interval.trim(),
+      start_ms: start,
+      end_ms: end,
+      latency_seconds: latencyValue,
+      synthetic,
+      ...(synthetic
+        ? {}
+        : { declared_source: source.trim(), declared_rights: rights.trim(), intended_use: intendedUse.trim() }),
+    }
+  }
+
+  const run = async (kind: 'example' | 'preview' | 'publish') => {
+    if (busyRef.current) return
+    if (kind === 'example') {
+      if (!offline.offlineHistoryExample) return
+      busyRef.current = true
+      const current = ++generation.current
+      setBusy('example'); setError(null)
+      try {
+        const example = await offline.offlineHistoryExample()
+        if (current !== generation.current) return
+        setContent(example.response_body)
+        setVenue(example.venue); setSymbol(example.symbol); setIntervalValue(example.interval)
+        setStartMs(String(example.start_ms)); setEndMs(String(example.end_ms))
+        setLatency(String(example.latency_seconds))
+        setSource(''); setRights(''); setIntendedUse('')
+        setSynthetic(true)
+        clearPreview()
+      } catch (caught) {
+        if (current === generation.current) setError(messageOf(caught, 'The built-in example could not be read.'))
+      } finally {
+        // One request is in flight at a time, so its own reply is what releases
+        // the synchronous guard, even when that reply is dropped unread.
+        busyRef.current = false
+        setBusy(null)
+      }
+      return
+    }
+    if (!content) return
+    if (tooLarge) { setError(`This response is above the ${MAX_OFFLINE_RESPONSE_CHARACTERS}-character ceiling the host reads; it would be refused before it is parsed.`); return }
+    const declaration = declarationOf()
+    if (declaration === null) return
+    busyRef.current = true
+    const current = ++generation.current
+    setBusy(kind); setError(null)
+    try {
+      if (kind === 'preview') {
+        if (!offline.previewOfflineHistory) return
+        const verdict = await offline.previewOfflineHistory(content, declaration)
+        if (current !== generation.current) return
+        setPreview(verdict); setPreviewedFor(signature); setPublished(null)
+        return
+      }
+      if (!offline.publishOfflineHistory) return
+      // A publication is only ever the exact preview this host handed out: a
+      // changed response, a changed declaration or a refused preview is not one.
+      if (!verified || preview === null || preview.preview_sha256 === null) {
+        setError('An offline version is published only from a preview of these exact bytes and declarations: preview them and publish while that preview is still current.')
+        return
+      }
+      const version = await offline.publishOfflineHistory(content, declaration, preview.preview_sha256)
+      if (current !== generation.current) return
+      setPreview(null); setPreviewedFor(null); setPublished(version)
+    } catch (caught) {
+      if (current === generation.current) setError(messageOf(caught, 'The host refused this offline import.'))
+    } finally {
+      busyRef.current = false
+      setBusy(null)
+    }
+  }
+
+  if (!offline.previewOfflineHistory && !offline.publishOfflineHistory && !offline.offlineHistoryExample) return null
+
+  const columns = preview && preview.preview ? Object.keys(preview.preview.rows[0] ?? {}).filter(name => name !== 'record_number') : []
+  return <div className="upload-panel">
+    <p className="muted"><strong>Offline import.</strong> API NOT connected: paste a historical response you already hold and the host normalizes it with the one documented 12-field klines adapter, with no network request and no provider credential. The response is read in this process only. Point-in-time availability is unverified; the declared availability is simulated interval end plus the latency you state.</p>
+    <div className="actions">
+      <button type="button" onClick={() => {
+        // Closing invalidates the preview on screen; it cannot recall a
+        // publication that was already sent, which the host settles under its
+        // own lock and answers with the one version that identity seals.
+        if (open) { generation.current += 1; setError(null); clearPreview() }
+        setOpen(!open)
+      }}>{open ? 'Close offline history import' : 'Open offline history import'}</button>
+      {!open && <span className="muted">Nothing is sent until you preview; nothing is published until you confirm that preview.</span>}
+    </div>
+    {open && <>
+      <div className="actions">
+        <button type="button" disabled={busy !== null || !offline.offlineHistoryExample} onClick={() => { void run('example') }}>{busy === 'example' ? 'Loading example…' : 'Load built-in synthetic example'}</button>
+        <span className="muted">{synthetic
+          ? 'Synthetic: these are the host\'s own fixture bytes, marked synthetic end to end, not market data and not your data. Editing the response clears this designation.'
+          : 'Your own response. It is never recorded as synthetic: that mark is reserved for the host\'s built-in example and cannot be requested for a paste.'}</span>
+      </div>
+      <label htmlFor="offline-response">Offline response (JSON, exactly as received)</label>
+      <textarea id="offline-response" rows={8} spellCheck={false} value={content} disabled={busy !== null}
+        onChange={event => edit(() => setContent(event.target.value))} />
+      {tooLarge && <p className="notice error">This response is above the {MAX_OFFLINE_RESPONSE_CHARACTERS}-character ceiling the host reads; it would be refused before it is parsed.</p>}
+      <div className="parameter-grid">
+        <div><label htmlFor="offline-venue">Offline venue</label><input id="offline-venue" value={venue} disabled={busy !== null} onChange={event => edit(() => setVenue(event.target.value))} /></div>
+        <div><label htmlFor="offline-symbol">Offline symbol</label><input id="offline-symbol" value={symbol} disabled={busy !== null} onChange={event => edit(() => setSymbol(event.target.value))} /></div>
+        <div><label htmlFor="offline-interval">Offline interval</label><input id="offline-interval" placeholder="1h" value={interval} disabled={busy !== null} onChange={event => edit(() => setIntervalValue(event.target.value))} /></div>
+        <div><label htmlFor="offline-start">Offline query start (epoch ms)</label><input id="offline-start" inputMode="numeric" value={startMs} disabled={busy !== null} onChange={event => edit(() => setStartMs(event.target.value))} /></div>
+        <div><label htmlFor="offline-end">Offline query end (epoch ms, exclusive)</label><input id="offline-end" inputMode="numeric" value={endMs} disabled={busy !== null} onChange={event => edit(() => setEndMs(event.target.value))} /></div>
+        <div><label htmlFor="offline-latency">Simulated availability latency (seconds)</label><input id="offline-latency" inputMode="numeric" value={latency} disabled={busy !== null} onChange={event => edit(() => setLatency(event.target.value))} /></div>
+      </div>
+      <p className="muted">The query is fixed here and never inferred from the bytes: the whole pasted response must answer exactly this venue, symbol, interval and range, and a response that is one full page short of the declared range end is refused rather than truncated silently.</p>
+      <div className="parameter-grid">
+        <div><label htmlFor="offline-source">Declared source (your assertion)</label><input id="offline-source" maxLength={300} value={source} disabled={busy !== null || synthetic} onChange={event => edit(() => setSource(event.target.value))} /></div>
+        <div><label htmlFor="offline-rights">Declared rights/licence (your assertion)</label><input id="offline-rights" maxLength={300} value={rights} disabled={busy !== null || synthetic} onChange={event => edit(() => setRights(event.target.value))} /></div>
+        <div><label htmlFor="offline-use">Declared intended use (your assertion)</label><input id="offline-use" maxLength={300} value={intendedUse} disabled={busy !== null || synthetic} onChange={event => edit(() => setIntendedUse(event.target.value))} /></div>
+      </div>
+      <p className="muted">These three strings are your own assertion, recorded with the version and not legally verified. The built-in example asserts nothing and takes no such declaration.</p>
+      <div className="actions">
+        <button type="button" disabled={busy !== null || !content || tooLarge || !offline.previewOfflineHistory} onClick={() => { void run('preview') }}>{busy === 'preview' ? 'Previewing…' : 'Preview offline import'}</button>
+        <button type="button" className="primary" disabled={busy !== null || !verified || !offline.publishOfflineHistory} onClick={() => { void run('publish') }}>{busy === 'publish' ? 'Publishing…' : 'Publish offline version'}</button>
+      </div>
+      <p className="muted">Closing this panel invalidates the preview on screen, but it does not revoke a publication already submitted: that version still seals. Publishing the same preview identity again is answered with the one version it already sealed, not with a second one.</p>
+      {previewFresh && preview && !verified && <p className="muted">The host refused this response: a refused preview is never published. Correct the response or the declarations and preview again.</p>}
+      {error && <p className="notice error">{error}</p>}
+      {preview && !previewFresh && <p className="muted">These bytes or declarations changed since the last preview, so that preview no longer authorizes a publication.</p>}
+      {previewFresh && preview?.valid && <section className="upload-preview" aria-label="Offline history import preview">
+        <dl className="summary-list">
+          <div><dt>Response bytes / SHA-256</dt><dd>{preview.byte_count} · {preview.response_sha256 ?? 'Unavailable'}</dd></div>
+          <div><dt>Provenance</dt><dd>{preview.provenance ?? 'Unavailable'}{preview.synthetic ? ' · synthetic, host fixture' : ' · user paste, not supplier-verified'}</dd></div>
+          <div><dt>Instrument / records</dt><dd>{preview.instrument?.venue ?? 'Unavailable'}:{preview.instrument?.symbol ?? ''} · {preview.capture?.record_count ?? 0}</dd></div>
+          <div><dt>Normalized capture SHA-256</dt><dd>{preview.capture?.sha256 ?? 'Unavailable'}</dd></div>
+          <div><dt>Availability policy</dt><dd>{preview.availability_policy?.id ?? 'Unavailable'} · point-in-time verified: {String(preview.availability_policy?.pit_verified ?? false)}</dd></div>
+          <div><dt>Declarations (your assertion, not verified)</dt><dd>{preview.synthetic
+            ? 'None: the built-in example asserts no source, rights or intended use'
+            : `${preview.declarations?.source ?? 'None'} · ${preview.declarations?.rights ?? 'None'} · ${preview.declarations?.intended_use ?? 'None'}`}</dd></div>
+          {preview.synthetic && <div><dt>Synthetic example SHA-256</dt><dd>{preview.response_sha256 ?? 'Unavailable'} · the host's own fixture, re-checked on every read</dd></div>}
+          <div><dt>Preview identity SHA-256</dt><dd>{preview.preview_sha256 ?? 'Unavailable'} · the exact identity a publication must name</dd></div>
+        </dl>
+        {preview.quality && <dl className="summary-list">
+          <div><dt>Bars / revisions</dt><dd>{preview.quality.bar_count} / {preview.quality.revision_count}</dd></div>
+          <div><dt>Observed gaps</dt><dd>{preview.quality.observed_gap_count}{preview.quality.largest_gap_seconds ? ` · largest ${preview.quality.largest_gap_seconds}s` : ''}</dd></div>
+          <div><dt>Bar coverage (UTC)</dt><dd>{preview.quality.bar_start_utc} — {preview.quality.bar_end_utc}</dd></div>
+        </dl>}
+        <p className="muted">Sampled rows {preview.preview?.row_count_sampled ?? 0}{preview.preview?.truncated ? ' · sample truncated' : ''}: the whole response was normalized to reach this verdict, and the sample below is a bounded view of it.</p>
+        {columns.length > 0 && (preview.preview?.rows.length ?? 0) > 0 && <table><thead><tr><th>Record</th>{columns.map(name => <th key={name}>{name}</th>)}</tr></thead>
+          <tbody>{preview.preview?.rows.map(row => <tr key={String(row.record_number)}><th scope="row">{String(row.record_number)}</th>{columns.map(name => <td key={name}>{String(row[name] ?? '')}</td>)}</tr>)}</tbody></table>}
+        {preview.limitations.length > 0 && <details><summary>What this import cannot show</summary>
+          <ul className="assumption-list">{preview.limitations.map(item => <li key={item}>{item}</li>)}</ul>
+        </details>}
+      </section>}
+      {published && <section className="upload-version" aria-label="Published offline version">
+        <dl className="summary-list">
+          <div><dt>Dataset version</dt><dd>{published.dataset_id} · v{published.version} · {published.published_at}</dd></div>
+          <div><dt>Instrument / records</dt><dd>{published.instrument.venue}:{published.instrument.symbol} · {published.record_count}</dd></div>
+          <div><dt>Provenance</dt><dd>{published.source.provenance ?? 'Unavailable'} · declared by {published.source.declared_by}, asserted: {String(published.source.asserted)}</dd></div>
+          <div><dt>Availability policy</dt><dd>{published.availability_policy.id} · point-in-time verified: {String(published.availability_policy.pit_verified)}</dd></div>
+          <div><dt>Raw response SHA-256</dt><dd>{published.source_bytes_sha256} · {published.source_byte_count} bytes of the response envelope retained as provenance</dd></div>
+          <div><dt>Normalized capture SHA-256</dt><dd>{published.capture_sha256}</dd></div>
+          <div><dt>Version manifest SHA-256</dt><dd>{published.manifest_sha256}</dd></div>
+        </dl>
+        <p className="muted">The retained envelope keeps your exact pasted bytes, the adapter version and the whole source, time and declaration record, so every read normalizes them again under the sealed query. This version is now one entry in the dataset catalog; it becomes research data only when you explicitly select its Data capability.</p>
+        {published.limitations.length > 0 && <ul className="assumption-list">{published.limitations.map(item => <li key={item}>{item}</li>)}</ul>}
+      </section>}
+    </>}
+  </div>
+}
+
 function ResearchJob({ api, jobId, job, holdouts }: { api: ApiAdapter; jobId: string; job: BacktestJob | null; holdouts: ChronologicalHoldout[] }) {
   if (!job) return <li className="job-card"><small>{jobId} · persisted job record unavailable</small></li>
   const holdoutForJob = holdouts.filter(item => item.source_job_id === job.job_id)
@@ -972,6 +1238,12 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
   const [error, setError] = useState<string | null>(null)
   const unavailable = !api.listResearchTasks
   const busyRef = useRef(false)
+  // The offline panel is offered wherever this client can already upload: the
+  // shipped adapter is the same host boundary, and an injected adapter may carry
+  // the offline methods itself.
+  const offlineOffered = Boolean(
+    (api as unknown as OfflineHistoryMethods).previewOfflineHistory ?? api.previewUpload ?? api.publishUpload,
+  )
 
   const load = useCallback(async () => {
     if (!api.listResearchTasks) return
@@ -1038,10 +1310,14 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
         </li>
       })}</ul>
     </section></div>
-    {(api.previewUpload || api.publishUpload || api.listDeclarations) && <div className="research-workspace-tools">
+    {(api.previewUpload || api.publishUpload || api.listDeclarations || offlineOffered) && <div className="research-workspace-tools">
       {(api.previewUpload || api.publishUpload) && <section className="panel" aria-label="Controlled dataset upload">
         <header><h2>Controlled data upload</h2><span>Preview, then publish one version</span></header>
         <DataUploadPanel api={api} />
+      </section>}
+      {offlineOffered && <section className="panel" aria-label="Offline history import">
+        <header><h2>Offline historical import</h2><span>Pasted historical response; no network is used</span></header>
+        <OfflineHistoryPanel api={api} />
       </section>}
       {api.listDeclarations && <section className="panel" aria-label="Registered declarations">
         <header><h2>Declarations</h2><span>Verified data, installed only by you</span></header>

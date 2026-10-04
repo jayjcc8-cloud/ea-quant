@@ -15,6 +15,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 import ea
+from ea.plugin import historical_bars
+from ea.plugin.historical_bars import MAX_PAGE_BYTES as MAX_OFFLINE_RESPONSE_BYTES
 from ea.strategy.package import MAX_ARTIFACT_BYTES
 from ea.web.service import (
     BatchNotFoundError,
@@ -41,6 +43,9 @@ from ea.web.uploads import MAX_UPLOAD_BYTES, UploadError
 MAX_UPLOAD_REQUEST_BYTES = 4 * MAX_UPLOAD_BYTES
 MAX_DECLARATION_REQUEST_BYTES = 64 * 1024
 MAX_UPLOAD_BASE64_CHARS = 4 * ((MAX_UPLOAD_BYTES + 2) // 3)
+# One pasted documented response, bounded to the adapter's own single-response
+# bound, plus the small JSON envelope the response text is carried inside.
+MAX_OFFLINE_REQUEST_BYTES = 2 * MAX_OFFLINE_RESPONSE_BYTES + 64 * 1024
 MAX_LOCAL_PACKAGE_BYTES = MAX_ARTIFACT_BYTES
 MAX_LOCAL_PACKAGE_BASE64_CHARS = 4 * ((MAX_LOCAL_PACKAGE_BYTES + 2) // 3)
 # One captured container plus its sealed manifest, carried as base64 in JSON.
@@ -221,6 +226,37 @@ class UploadPublishRequest(BaseModel):
     # refuses the upload instead of recording an assertion nobody made.
     availability_policy: str | None = None
     latency_seconds: int | None = None
+
+
+class OfflineHistoryRequest(BaseModel):
+    """One pasted historical response plus the user's own explicit declarations.
+
+    ``content`` is the response body's exact UTF-8 text, bounded to the adapter's
+    single-response bound; it is encoded once to the bytes it names. ``synthetic``
+    has no default: the host never decides by itself that input is the built-in
+    example, and a synthetic marking is accepted only for the example's own bytes
+    and declaration. Source, rights and intended use are the uploader's own
+    assertions for a user paste and are refused for the example.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    content: str | None = Field(default=None, max_length=MAX_OFFLINE_RESPONSE_BYTES)
+    venue: str | None = None
+    symbol: str | None = None
+    interval: str | None = None
+    start_ms: int | None = None
+    end_ms: int | None = None
+    latency_seconds: int | None = None
+    synthetic: bool | None = None
+    declared_source: str | None = None
+    declared_rights: str | None = None
+    intended_use: str | None = None
+
+
+class OfflineHistoryPublishRequest(OfflineHistoryRequest):
+    """One publication, bound to the exact preview identity it was previewed as."""
+
+    preview_sha256: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class DeclarationRequest(BaseModel):
@@ -465,6 +501,37 @@ def create_app(settings: WebSettings) -> Any:
             )
         return {"mapping": parsed.mapping, "time_declaration": parsed.time_declaration}
 
+    def _offline_fields(parsed: OfflineHistoryRequest) -> dict[str, Any]:
+        """The declarations one offline request carries, and nothing else.
+
+        Absent values stay absent: the store, not this boundary, is what decides
+        that a missing latency, a missing synthetic marking or a missing rights
+        assertion is a refusal rather than a default.
+        """
+        return {
+            "venue": parsed.venue,
+            "symbol": parsed.symbol,
+            "interval": parsed.interval,
+            "start_ms": parsed.start_ms,
+            "end_ms": parsed.end_ms,
+            "latency_seconds": parsed.latency_seconds,
+            "synthetic": parsed.synthetic,
+            "declared_source": parsed.declared_source,
+            "declared_rights": parsed.declared_rights,
+            "intended_use": parsed.intended_use,
+        }
+
+    def _offline_content(parsed: OfflineHistoryRequest) -> bytes:
+        """The exact bytes one pasted response carries.
+
+        The text is encoded once to UTF-8, so what the adapter hashes is the bytes
+        the paste itself denotes, and the adapter's own bound is the only size
+        limit applied to them.
+        """
+        if parsed.content is None:
+            raise UploadError("offline_response_invalid", "send the pasted response as content")
+        return parsed.content.encode("utf-8")
+
     def _declaration_bytes(document: dict[str, Any]) -> str:
         """One declaration body as this host reads it.
 
@@ -671,6 +738,63 @@ def create_app(settings: WebSettings) -> Any:
             return error(422, caught.code, caught.message)
         except OSError:
             return error(409, "upload_unavailable", "the upload could not be published")
+        return {**manifest, "datasets": service.dataset_catalog.list()}
+
+    @app.get("/api/datasets/offline-history/example")
+    def offline_history_example() -> object:
+        """This host's own labelled synthetic example, for a full local proof.
+
+        The example is generated here rather than accepted from a caller, and its
+        bytes are the only bytes the adapter will mark synthetic. Nothing about it
+        claims a venue, a supplier or a right.
+        """
+        return historical_bars.synthetic_example_document()
+
+    @app.post("/api/datasets/offline-history/preview")
+    async def preview_offline_history(request: Request) -> object:
+        """Normalize one pasted offline response; a preview publishes nothing."""
+        try:
+            parsed = OfflineHistoryRequest.model_validate(
+                await _bounded_document(request, MAX_OFFLINE_REQUEST_BYTES)
+            )
+        except _RequestTooLarge:
+            return too_large("offline history")
+        except (TypeError, ValueError):
+            return malformed()
+        try:
+            content = _offline_content(parsed)
+        except UploadError as caught:
+            return error(422, caught.code, caught.message)
+        return service.uploads.preview_offline_history(content, **_offline_fields(parsed))
+
+    @app.post("/api/datasets/offline-history", status_code=201)
+    async def publish_offline_history(request: Request) -> object:
+        """Publish one pasted response as one immutable, re-derivable version.
+
+        The request must name the preview identity this host handed out for its
+        own bytes and declarations; the store recomputes that identity and refuses
+        anything else, so a changed response or a changed assertion is a refusal
+        rather than a publication.
+        """
+        try:
+            parsed = OfflineHistoryPublishRequest.model_validate(
+                await _bounded_document(request, MAX_OFFLINE_REQUEST_BYTES)
+            )
+        except _RequestTooLarge:
+            return too_large("offline history")
+        except (TypeError, ValueError):
+            return malformed()
+        try:
+            content = _offline_content(parsed)
+            manifest = service.uploads.publish_offline_history(
+                content,
+                preview_sha256=parsed.preview_sha256,
+                **_offline_fields(parsed),
+            )
+        except UploadError as caught:
+            return error(422, caught.code, caught.message)
+        except OSError:
+            return error(409, "offline_history_unavailable", "the response could not be published")
         return {**manifest, "datasets": service.dataset_catalog.list()}
 
     @app.get("/api/plugins/declarations")
