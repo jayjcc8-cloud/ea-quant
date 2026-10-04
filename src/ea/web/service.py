@@ -18,6 +18,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from ea.core import RunId
+from ea.plugin.selection import BINDING_SCHEMA
 from ea.product import (
     BacktestRunFailure,
     BacktestScenarioError,
@@ -58,6 +59,14 @@ _PATH_SCHEMAS = {
     "ea.local-web-job.v4": "ea.backtest-equity-path.v2",
     "ea.local-web-job.v5": "ea.backtest-equity-path.v3",
 }
+
+# Every input snapshot schema this validator accepts, oldest first. The last
+# entry is the version the validator currently produces, so a capability bound to
+# it drifts when a new schema is added here.
+VALIDATOR_INPUT_SCHEMAS: tuple[str, ...] = (
+    "ea.local-web-input.v1",
+    "ea.local-web-input.v2",
+)
 
 
 def _job_schema(scenario: LoadedBacktestScenario) -> str:
@@ -258,14 +267,14 @@ def _input_snapshot(
 ) -> tuple[bytes, str]:
     _validate_web_integer_parameters(scenario)
     snapshot = {
-        "schema": "ea.local-web-input.v1",
+        "schema": VALIDATOR_INPUT_SCHEMAS[0],
         "scenario_id": scenario_id,
         "source_identity": source_identity,
         "identity": _scenario_identity(scenario),
         "scenario": json.loads(scenario.canonical_bytes),
     }
     if scenario.research_input_bytes is not None:
-        snapshot["schema"] = "ea.local-web-input.v2"
+        snapshot["schema"] = VALIDATOR_INPUT_SCHEMAS[-1]
         snapshot["research_input"] = json.loads(scenario.research_input_bytes)
     payload = _canonical_json(snapshot)
     return payload, sha256(_INPUT_DIGEST_DOMAIN + payload).hexdigest()
@@ -368,6 +377,10 @@ class JobRecord:
     error_code: str | None = None
     message: str | None = None
     strategy_package: StrategyPackage | None = None
+    # Exact capability identity this run was accepted with. Additive and absent
+    # on records written before capability binding existed, so those stay
+    # readable and byte-identical.
+    plugin_binding: dict[str, object] | None = None
 
     def document(self, *, presentation: bool = False) -> dict[str, object]:
         document: dict[str, object] = {
@@ -415,6 +428,8 @@ class JobRecord:
                     "attempt_id": self.attempt_id,
                 }
             )
+        if self.plugin_binding is not None:
+            document["plugin_binding"] = self.plugin_binding
         if presentation and self.input_snapshot_bytes is not None:
             strategy = json.loads(self.input_snapshot_bytes)["scenario"]["strategy"]
             entry = ResearchStrategyCatalogV1(
@@ -521,11 +536,11 @@ def _decode_job(payload: bytes) -> JobRecord:
                     {"schema", "scenario_id", "source_identity", "identity", "scenario"}
                     | (
                         {"research_input"}
-                        if snapshot.get("schema") == "ea.local-web-input.v2"
+                        if snapshot.get("schema") == VALIDATOR_INPUT_SCHEMAS[-1]
                         else set()
                     )
                 )
-                or snapshot.get("schema") not in {"ea.local-web-input.v1", "ea.local-web-input.v2"}
+                or snapshot.get("schema") not in set(VALIDATOR_INPUT_SCHEMAS)
                 or snapshot.get("scenario_id") != document["scenario_id"]
                 or snapshot.get("source_identity") != identity
                 or type(snapshot.get("identity")) is not dict
@@ -557,6 +572,17 @@ def _decode_job(payload: bytes) -> JobRecord:
                 raise ValueError
             if status_value == "succeeded" and digest is None:
                 raise ValueError
+        # Optional and additive: a job accepted before capability binding is
+        # still a valid record, and a bound one must carry a readable binding.
+        plugin_binding = document.get("plugin_binding")
+        if plugin_binding is not None and (
+            type(plugin_binding) is not dict
+            or set(plugin_binding) != {"schema", "binding_sha256", "components"}
+            or plugin_binding.get("schema") != BINDING_SCHEMA
+            or type(plugin_binding.get("binding_sha256")) is not str
+            or type(plugin_binding.get("components")) is not list
+        ):
+            raise ValueError
         return JobRecord(
             job_id=document["job_id"],
             request_id=document["request_id"],
@@ -576,6 +602,7 @@ def _decode_job(payload: bytes) -> JobRecord:
             else None,
             error_code=document.get("error_code"),
             message=document.get("message"),
+            plugin_binding=plugin_binding,
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         raise WebBoundaryError("workspace job index is invalid") from None
@@ -1075,6 +1102,7 @@ class WebService:
         input_identity: dict[str, object],
         parameters: dict[str, object] | None = None,
         request_id: str,
+        plugin_binding: dict[str, object] | None = None,
     ) -> tuple[JobRecord, bool]:
         with self._lock:
             prepared = self._prepare_job(
@@ -1089,6 +1117,7 @@ class WebService:
                     existing.scenario_id != scenario_id
                     or existing.input_identity != input_identity
                     or existing.input_snapshot_bytes != prepared.input_snapshot_bytes
+                    or existing.plugin_binding != plugin_binding
                 ):
                     raise RequestConflictError("request_id is already bound to different input")
                 return existing, False
@@ -1109,6 +1138,7 @@ class WebService:
                 input_snapshot_bytes=prepared.input_snapshot_bytes,
                 input_sha256=prepared.input_sha256,
                 attempt_id=attempt_id.value,
+                plugin_binding=plugin_binding,
             )
             self._store(record)
             self._active = record.job_id

@@ -27,6 +27,15 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from ea.plugin.builtins import builtin_catalog
+from ea.plugin.catalog import PluginCatalogV1, VerifiedPluginV1
+from ea.plugin.manifest import ManifestError
+from ea.plugin.selection import (
+    PluginBindingV1,
+    PluginSelectionV1,
+    resolve_selection,
+    verify_binding,
+)
 from ea.web.llm import (
     ModelMessage,
     ModelNotConfigured,
@@ -39,6 +48,7 @@ from ea.web.service import JobNotFoundError, WebService
 from ea.web.settings import RadianSettings, RadianSettingsError
 
 _SCHEMA = "radian.research-task.v1"
+_RECIPE_SCHEMA = "ea.plugin-recipe.v1"
 _ACTIVE_STATES = frozenset({"drafting", "awaiting_confirmation", "confirmed", "running"})
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled", "unsupported"})
 # A task with a durable in-flight reservation is reconciled, not left pending.
@@ -87,6 +97,15 @@ class TaskStateError(ResearchTaskError):
     """The action is not valid in the task's current state."""
 
 
+class SelectionRejectedError(ResearchTaskError):
+    """A selected capability is unknown, incompatible, or not authorized here."""
+
+    def __init__(self, error: ManifestError) -> None:
+        super().__init__(f"{error.code}: {error.message}")
+        self.code = error.code
+        self.message = error.message
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchSpec:
     """One structured spec: exactly the fields the product can execute."""
@@ -101,9 +120,13 @@ class ResearchSpec:
     source_sha256: str | None = None
     parameters: dict[str, Any] = field(default_factory=dict)
     assumptions: tuple[str, ...] = ()
+    # The user's explicit capability selection, per layer. Absent means the host
+    # default route, which is what every task written before this field used.
+    # The model never sets this: it is not a propose_spec argument.
+    selection: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "strategy_id": self.strategy_id,
             "instrument": {"venue": self.instrument_venue, "symbol": self.instrument_symbol},
             "initial_cash": self.initial_cash,
@@ -114,6 +137,10 @@ class ResearchSpec:
             "parameters": self.parameters,
             "assumptions": list(self.assumptions),
         }
+        # Additive: a spec with no explicit selection keeps its original shape.
+        if self.selection is not None:
+            document["selection"] = self.selection
+        return document
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,9 +203,13 @@ class ResearchTask:
     operation_completion_generation: int = 0
     operation_kind: str | None = None
     runtime_diagnostic: str | None = None
+    # The user's explicit selection for this task, and the exact binding frozen
+    # at confirmation. Both are additive: an unselected task keeps its shape.
+    selection: dict[str, Any] | None = None
+    pinned_binding: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "schema": _SCHEMA,
             "task_id": self.task_id,
             "created_at": self.created_at,
@@ -208,6 +239,11 @@ class ResearchTask:
             "operation_kind": self.operation_kind,
             "runtime_diagnostic": self.runtime_diagnostic,
         }
+        if self.selection is not None:
+            document["selection"] = self.selection
+        if self.pinned_binding is not None:
+            document["pinned_binding"] = self.pinned_binding
+        return document
 
 
 def _now() -> str:
@@ -281,6 +317,12 @@ class ResearchStore:
         completed = int(document.get("operation_completion_generation", 0))
         if generation < 0 or completed < 0 or completed > generation:
             raise ResearchTaskError("invalid operation generation markers")
+        selection = document.get("selection")
+        pinned_binding = document.get("pinned_binding")
+        if (selection is not None and type(selection) is not dict) or (
+            pinned_binding is not None and type(pinned_binding) is not dict
+        ):
+            raise ResearchTaskError("research task capability record is unreadable")
         return ResearchTask(
             task_id=str(document["task_id"]),
             created_at=str(document["created_at"]),
@@ -312,6 +354,8 @@ class ResearchStore:
             operation_generation=generation,
             operation_completion_generation=completed,
             operation_kind=document.get("operation_kind"),
+            selection=selection,
+            pinned_binding=pinned_binding,
         )
 
     def _publish(self, task: ResearchTask, payload: bytes) -> None:
@@ -396,6 +440,10 @@ class ResearchStore:
 
 def _decode_spec(document: dict[str, Any]) -> ResearchSpec:
     instrument = document.get("instrument") or {}
+    selection = document.get("selection")
+    if selection is not None and type(selection) is not dict:
+        # A record this product cannot read must not become a half-read spec.
+        raise ResearchTaskError("research spec selection is unreadable")
     return ResearchSpec(
         strategy_id=str(document["strategy_id"]),
         instrument_venue=str(instrument.get("venue") or ""),
@@ -407,6 +455,7 @@ def _decode_spec(document: dict[str, Any]) -> ResearchSpec:
         source_sha256=document.get("source_sha256"),
         parameters=dict(document.get("parameters") or {}),
         assumptions=tuple(str(item) for item in document.get("assumptions") or []),
+        selection=None if selection is None else dict(selection),
     )
 
 
@@ -475,6 +524,175 @@ class ResearchOrchestrator:
             )
         return entries[:_MAX_CATALOG_ENTRIES]
 
+    # -- capability catalog and recipe --------------------------------------
+
+    def _model_route(self) -> dict[str, Any]:
+        """The non-secret facts of the route this host is configured for.
+
+        Only what the settings status already projects: provider, model and
+        endpoint. No credential, key reference or resolution value is read, and
+        nothing here creates a provider, a client or a request.
+        """
+        try:
+            status = self._settings.status()
+        except (RadianSettingsError, ValueError):
+            return {}
+        return {
+            "provider": status.get("provider"),
+            "model": status.get("model"),
+            "endpoint": status.get("endpoint"),
+        }
+
+    def _plugin_catalog(self) -> PluginCatalogV1:
+        """Built from live host facts on every use, so no stale claim survives."""
+        return builtin_catalog(self._service, self._model_route())
+
+    def plugin_catalog(self) -> dict[str, Any]:
+        """The declared catalog with the host's verified view of each entry."""
+        return self._plugin_catalog().document()
+
+    def _authorize_plugin(self, plugin: VerifiedPluginV1) -> None:
+        """Current host policy for one selected capability, before any dispatch.
+
+        This can only refuse. A model capability must be the route this host is
+        actually configured for and must declare the capability research needs;
+        nothing here reads or forwards a credential, and no new provider or
+        endpoint is created.
+        """
+        if plugin.manifest.kind != "model":
+            return
+        try:
+            status = self._settings.status()
+        except (RadianSettingsError, ValueError) as error:
+            raise ManifestError("model_settings_unavailable", str(error)) from None
+        provider = plugin.adapter.identity.get("provider")
+        configured = status.get("provider")
+        if provider != configured:
+            raise ManifestError(
+                "model_route_not_configured",
+                f"the configured model route is {configured or 'not configured'}; "
+                f"this run selected {provider}",
+            )
+        missing = tuple(status.get("missing_capabilities") or ())
+        if missing:
+            raise ManifestError(
+                "model_capability_missing",
+                "the configured model protocol does not declare: " + ", ".join(missing),
+            )
+        if not status.get("configured"):
+            raise ManifestError(
+                "model_route_not_configured",
+                str(status.get("configuration_error") or "no usable model provider is configured"),
+            )
+
+    def _resolve_binding(self, selection: dict[str, Any]) -> PluginBindingV1:
+        """Resolve one explicit selection to exact versions, or refuse it."""
+        try:
+            return resolve_selection(
+                self._plugin_catalog(),
+                PluginSelectionV1.decode(selection),
+                authorize=self._authorize_plugin,
+            )
+        except ManifestError as error:
+            raise SelectionRejectedError(error) from None
+
+    @staticmethod
+    def _selection_payload(selection: Any) -> dict[str, Any] | None:
+        """Normalize one requested selection; empty means the host default."""
+        if selection is None:
+            return None
+        if type(selection) is not dict:
+            raise SelectionRejectedError(
+                ManifestError("selection_invalid", "selection must be one object keyed by layer")
+            )
+        try:
+            decoded = PluginSelectionV1.decode(selection)
+        except ManifestError as error:
+            raise SelectionRejectedError(error) from None
+        return None if not decoded else dict(decoded.document()["layers"])
+
+    def resolve_recipe(self, selection: Any) -> dict[str, Any]:
+        """Inspect one recipe: resolve and verify it, dispatch nothing."""
+        try:
+            payload = self._selection_payload(selection)
+            binding = None if payload is None else self._resolve_binding(payload)
+        except SelectionRejectedError as error:
+            return {
+                "schema": _RECIPE_SCHEMA,
+                "usable": False,
+                "code": error.code,
+                "message": error.message,
+                "selection": selection,
+                "binding": None,
+            }
+        return {
+            "schema": _RECIPE_SCHEMA,
+            "usable": True,
+            "code": None,
+            "message": None,
+            "selection": payload,
+            "binding": None if binding is None else binding.document(),
+        }
+
+    def _check_selection(self, spec: ResearchSpec) -> None:
+        """The user's selection must be the one the spec actually executes."""
+        if spec.selection is None:
+            return
+        binding = self._resolve_binding(spec.selection)
+        strategy = binding.identity("strategy")
+        if strategy and strategy.get("strategy_id") != spec.strategy_id:
+            raise InvalidSpecError(
+                f"the selected strategy capability is {strategy.get('strategy_id')}; "
+                "the spec must use that strategy"
+            )
+        data = binding.identity("data")
+        if data and spec.dataset_id != data.get("dataset_id"):
+            raise InvalidSpecError(
+                f"the selected data capability is {data.get('dataset_id')}; "
+                "the spec must name that dataset_id"
+            )
+
+    def _frozen_binding(
+        self, task: ResearchTask, confirmed: ResearchSpec
+    ) -> PluginBindingV1 | None:
+        """Re-verify the binding frozen at confirmation; never substitute one."""
+        if confirmed.selection is None:
+            return None
+        if task.pinned_binding is None:
+            raise SelectionRejectedError(
+                ManifestError(
+                    "plugin_binding_missing",
+                    "the confirmed spec names capabilities but no binding was frozen for it",
+                )
+            )
+        try:
+            binding = PluginBindingV1.decode(task.pinned_binding)
+            verify_binding(self._plugin_catalog(), binding, authorize=self._authorize_plugin)
+        except ManifestError as error:
+            raise SelectionRejectedError(error) from None
+        return binding
+
+    def _recheck_selection(self, task: ResearchTask) -> None:
+        """Re-verify this run's capabilities before every model dispatch.
+
+        A catalog, plugin or configuration change after the task was created must
+        stop the run before it can call a provider again, so a capability that is
+        no longer verified — or no longer the route this host is configured for —
+        is refused here instead of being discovered inside the provider call.
+        """
+        if task.pinned_binding is not None:
+            try:
+                verify_binding(
+                    self._plugin_catalog(),
+                    PluginBindingV1.decode(task.pinned_binding),
+                    authorize=self._authorize_plugin,
+                )
+            except ManifestError as error:
+                raise SelectionRejectedError(error) from None
+            return
+        if task.selection is not None:
+            self._resolve_binding(task.selection)
+
     def _with_defaults(self, spec: ResearchSpec) -> ResearchSpec:
         """Fill unset parameters from the registered contract defaults."""
         matching = [
@@ -495,6 +713,10 @@ class ResearchOrchestrator:
         return replace(spec, parameters={**defaults, **spec.parameters})
 
     def _validate_spec(self, spec: ResearchSpec) -> None:
+        if spec.selection is not None:
+            # A selected capability is verified before the spec surface, so an
+            # unusable selection is reported as itself and never dispatched.
+            self._check_selection(spec)
         catalog = self._catalog()
         strategies = {entry["strategy_id"] for entry in catalog if entry["strategy_id"]}
         if spec.strategy_id not in strategies:
@@ -604,7 +826,26 @@ class ResearchOrchestrator:
 
         return [ToolDefinition(**definition) for definition in definitions]
 
-    def _system_prompt(self) -> str:
+    def _selected_capabilities(self, task: ResearchTask | None) -> str:
+        """The user's fixed selection, described to the model as a constraint."""
+        if task is None or not task.selection:
+            return ""
+        wanted = {
+            item.get("plugin_id") for item in task.selection.values() if isinstance(item, dict)
+        }
+        entries = [
+            entry for entry in self._plugin_catalog().entries() if entry["plugin_id"] in wanted
+        ]
+        listing = json.dumps(entries, ensure_ascii=True, separators=(",", ":"))
+        return (
+            "\n\nThe user has already selected the capabilities below. The selection is "
+            "theirs, is fixed, and cannot be changed, replaced or extended by you: the "
+            "proposed spec must use exactly the selected strategy and dataset identity. "
+            "There is no tool argument that alters a selection.\nSelected capabilities "
+            f"(JSON):\n{listing}"
+        )
+
+    def _system_prompt(self, task: ResearchTask | None = None) -> str:
         catalog = self._catalog()
         listing = json.dumps(catalog, ensure_ascii=True, separators=(",", ":"))
         return (
@@ -617,7 +858,7 @@ class ResearchOrchestrator:
             "the registered contracts; use the registered defaults when the idea does not "
             "specify them. State assumptions explicitly, and keep the rationale honest "
             "about what this run can and cannot show.\n\nRegistered catalog (JSON):\n"
-            f"{listing}"
+            f"{listing}{self._selected_capabilities(task)}"
         )
 
     # -- orchestration steps -------------------------------------------------
@@ -893,6 +1134,7 @@ class ResearchOrchestrator:
                 "spec_draft": None,
                 "status": "confirmed",
                 "error": None,
+                "pinned_binding": data.get("binding"),
             }
         else:
             raise TaskStateError(f"unknown task transition: {event}")
@@ -925,8 +1167,13 @@ class ResearchOrchestrator:
             task_id, generation, "failure", finish=True, error=self._error(code, message, step)
         )
 
-    def create(self, raw_idea: str) -> ResearchTask:
+    def create(self, raw_idea: str, selection: Any = None) -> ResearchTask:
         idea = _bounded_text(raw_idea, field="idea", maximum=_MAX_IDEA_BYTES)
+        # The user's explicit selection is verified, and if unusable refused,
+        # before a task record exists and before any provider call.
+        requested = self._selection_payload(selection)
+        if requested is not None:
+            self._resolve_binding(requested)
         now = _now()
         task = ResearchTask(
             task_id=str(uuid4()),
@@ -936,8 +1183,13 @@ class ResearchOrchestrator:
             raw_idea=idea,
             gap=None,
             budget=self._budget(),
-            usage={"model_calls": 0, "input_tokens": 0, "output_tokens": 0, "backtests": 0,
-                   "unavailable_model_calls": 0},
+            usage={
+                "model_calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "backtests": 0,
+                "unavailable_model_calls": 0,
+            },
             spec_draft=None,
             spec_confirmed=(),
             jobs=(),
@@ -945,6 +1197,7 @@ class ResearchOrchestrator:
             error=None,
             cancel_note=None,
             last_model=None,
+            selection=requested,
         )
         with self._creation_lock:
             if self._store.find_active_by_idea(idea) is not None:
@@ -968,6 +1221,19 @@ class ResearchOrchestrator:
                 return self._transition(task_id, generation, "noop", finish=True)
             assert task.reservation is not None
             seq = task.reservation.seq
+            # Re-checked before the dispatch, so a refused round never reaches the
+            # provider and its reserved slot is released rather than charged.
+            try:
+                self._recheck_selection(task)
+            except SelectionRejectedError as error:
+                return self._transition(
+                    task_id,
+                    generation,
+                    "model_pending_release",
+                    finish=True,
+                    seq=seq,
+                    error=self._error(error.code, error.message),
+                )
             task = self._transition(task_id, generation, "model_dispatch")
             if task.status == "cancelled":
                 return self._transition(
@@ -975,7 +1241,7 @@ class ResearchOrchestrator:
                 )
             try:
                 response = self._provider.complete(
-                    system=self._system_prompt(), messages=messages, tools=self._tools()
+                    system=self._system_prompt(task), messages=messages, tools=self._tools()
                 )
             except ModelNotConfigured as error:
                 return self._transition(
@@ -1037,11 +1303,15 @@ class ResearchOrchestrator:
                 if name == "propose_spec":
                     try:
                         spec = self._spec_from_input(call.arguments)
+                        # The user's selection, never the model's, is attached.
+                        spec = replace(spec, selection=task.selection)
                         self._validate_spec(spec)
                         spec = self._with_defaults(spec)
                     except InvalidSpecError as error:
                         results.append(ModelMessage("tool", f"rejected: {error}", call_id=call.id))
                         continue
+                    except SelectionRejectedError as error:
+                        return self._failure(task_id, generation, error.code, error.message)
                     return self._transition(
                         task_id,
                         generation,
@@ -1050,9 +1320,11 @@ class ResearchOrchestrator:
                         status="awaiting_confirmation",
                         spec=spec,
                     )
-                results.append(ModelMessage(
-                    "tool", f"tool {name!r} is not available to research", call_id=call.id
-                ))
+                results.append(
+                    ModelMessage(
+                        "tool", f"tool {name!r} is not available to research", call_id=call.id
+                    )
+                )
             messages.extend(results)
         return self._failure(
             task_id,
@@ -1113,6 +1385,13 @@ class ResearchOrchestrator:
             )
         scenario_id = confirmed.scenario_id or self._resolve_scenario_id(confirmed)
         try:
+            # The frozen binding is re-verified here, before the engine boundary,
+            # and a missing or changed exact version fails the task instead of
+            # falling back to another version.
+            binding = self._frozen_binding(task, confirmed)
+        except SelectionRejectedError as error:
+            return self._failure(task_id, generation, error.code, error.message, "start_backtest")
+        try:
             validated = self._service.validate_scenario(
                 scenario_id,
                 dataset_id=confirmed.dataset_id,
@@ -1128,6 +1407,20 @@ class ResearchOrchestrator:
             return self._failure(
                 task_id, generation, "scenario_invalid", str(error), "start_backtest"
             )
+        if binding is not None:
+            selected = binding.identity("strategy")
+            summary = cast(dict[str, Any], validated.get("summary") or {})
+            if selected and (
+                summary.get("strategy_id") != selected.get("strategy_id")
+                or summary.get("strategy_version") != selected.get("strategy_version")
+            ):
+                return self._failure(
+                    task_id,
+                    generation,
+                    "selection_conflict",
+                    "the registered scenario does not run the selected strategy version",
+                    "start_backtest",
+                )
         try:
             task = self._transition(task_id, generation, "backtest_reserve", spec=confirmed)
         except BudgetExceededError as error:
@@ -1164,6 +1457,7 @@ class ResearchOrchestrator:
                         "strategy_source": None,
                     },
                     request_id=cast(str, task.request_id),
+                    plugin_binding=None if binding is None else binding.document(),
                 )
             except Exception as error:  # noqa: BLE001 — may have published before raising
                 try:
@@ -1379,6 +1673,11 @@ class ResearchOrchestrator:
             assumptions=tuple(
                 str(item) for item in fields.get("assumptions", list(draft.assumptions))
             ),
+            selection=(
+                draft.selection
+                if "selection" not in fields
+                else self._selection_payload(fields.get("selection"))
+            ),
         )
         self._validate_spec(merged)
         merged = self._with_defaults(merged)
@@ -1406,10 +1705,20 @@ class ResearchOrchestrator:
             spec = task.spec_draft
             self._validate_spec(spec)
             spec = self._with_defaults(spec)
+            # Confirmation freezes the exact capability identity. A later
+            # catalog, settings or plugin change cannot alter this binding.
+            binding = None if spec.selection is None else self._resolve_binding(spec.selection)
         except ResearchTaskError:
             self._transition(task_id, generation, "noop", finish=True)
             raise
-        task = self._transition(task_id, generation, "confirm", finish=True, spec=spec)
+        task = self._transition(
+            task_id,
+            generation,
+            "confirm",
+            finish=True,
+            spec=spec,
+            binding=None if binding is None else binding.document(),
+        )
         return self._start_backtest(task_id) if auto_run and task.status != "cancelled" else task
 
     def _resolve_scenario_id(self, spec: ResearchSpec) -> str:

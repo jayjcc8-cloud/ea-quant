@@ -102,6 +102,10 @@ class ScenarioValidationRequest(BaseModel):
 class ResearchTaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     idea: str = Field(min_length=1, max_length=4000)
+    # Explicit capability selection per layer, e.g. {"strategy": {"plugin_id":
+    # "ea.builtin.strategy.bounded-long-v1", "package_version": "1.0.0"}}.
+    # Absent keeps the host default route.
+    selection: dict[str, Any] | None = None
 
 
 class ResearchSpecEdit(BaseModel):
@@ -118,6 +122,15 @@ class ResearchSpecEdit(BaseModel):
     dataset_id: str | None = None
     parameters: dict[str, Any] | None = None
     assumptions: list[str] | None = None
+    # Send {} to clear an explicit selection back to the host default.
+    selection: dict[str, Any] | None = None
+
+
+class PluginRecipeRequest(BaseModel):
+    """One capability selection to resolve without dispatching anything."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    selection: dict[str, Any] | None = None
 
 
 class ResearchConfirmRequest(BaseModel):
@@ -194,11 +207,13 @@ def create_app(settings: WebSettings) -> Any:
         data_root=settings.data_root,
     )
 
+    from ea.plugin.manifest import ManifestError
     from ea.web.research import (
         InvalidSpecError,
         ResearchOrchestrator,
         ResearchStore,
         ResearchTaskError,
+        SelectionRejectedError,
         TaskConflictError,
         TaskNotFoundError,
         TaskStateError,
@@ -603,14 +618,29 @@ def create_app(settings: WebSettings) -> Any:
     @app.post("/api/research/tasks", status_code=201)
     def create_research_task(request: ResearchTaskRequest) -> object:
         try:
-            task = research_orchestrator.create(request.idea)
+            task = research_orchestrator.create(request.idea, request.selection)
             return task.document()
         except TaskConflictError as caught:
             return error(409, "research_task_exists", str(caught))
+        except SelectionRejectedError as caught:
+            return error(422, "selection_rejected", str(caught))
         except InvalidSpecError as caught:
             return error(422, "spec_invalid", str(caught))
         except ResearchTaskError as caught:
             return error(422, "research_task_invalid", str(caught))
+
+    @app.get("/api/plugins/catalog")
+    def plugin_catalog_route() -> object:
+        """Declared built-in capabilities plus the host's verified view."""
+        try:
+            return research_orchestrator.plugin_catalog()
+        except ManifestError as caught:
+            return error(500, "plugin_catalog_unavailable", str(caught))
+
+    @app.post("/api/plugins/recipe/resolve")
+    def resolve_recipe_route(request: PluginRecipeRequest) -> object:
+        """Resolve and verify one selection; dispatch nothing, grant nothing."""
+        return research_orchestrator.resolve_recipe(request.selection)
 
     @app.get("/api/research/tasks")
     def list_research_tasks() -> object:
@@ -636,6 +666,8 @@ def create_app(settings: WebSettings) -> Any:
             return task.document()
         except TaskNotFoundError as caught:
             return error(404, "research_task_not_found", str(caught))
+        except SelectionRejectedError as caught:
+            return error(409, "selection_rejected", str(caught))
         except (InvalidSpecError, TaskStateError) as caught:
             return error(409, "spec_edit_rejected", str(caught))
         except ResearchTaskError as caught:
@@ -652,6 +684,8 @@ def create_app(settings: WebSettings) -> Any:
             return task.document()
         except TaskNotFoundError as caught:
             return error(404, "research_task_not_found", str(caught))
+        except SelectionRejectedError as caught:
+            return error(409, "selection_rejected", str(caught))
         except (InvalidSpecError, TaskStateError) as caught:
             return error(409, "confirm_rejected", str(caught))
         except ResearchTaskError as caught:
