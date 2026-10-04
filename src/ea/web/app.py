@@ -26,6 +26,15 @@ from ea.web.service import (
     roots_overlap,
 )
 from ea.web.settings import RadianSettings
+from ea.web.uploads import MAX_UPLOAD_BYTES
+
+# The bound applied to the bytes that actually arrive on a write request, before
+# any JSON parser sees them. A CSV carried inside a JSON string can be escaped to
+# several times its own size, so the upload envelope is larger than the file cap
+# the decoded content is still held to; a declaration request carries at most one
+# 16 KiB declaration plus its envelope.
+MAX_UPLOAD_REQUEST_BYTES = 4 * MAX_UPLOAD_BYTES
+MAX_DECLARATION_REQUEST_BYTES = 64 * 1024
 
 
 class InputIdentity(BaseModel):
@@ -133,6 +142,33 @@ class PluginRecipeRequest(BaseModel):
     selection: dict[str, Any] | None = None
 
 
+class UploadPreviewRequest(BaseModel):
+    """Bounded strict-UTF-8 CSV text; the host never reads a client path."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    content: str = Field(min_length=1, max_length=MAX_UPLOAD_BYTES)
+    file_name: str | None = None
+
+
+class UploadPublishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    content: str = Field(min_length=1, max_length=MAX_UPLOAD_BYTES)
+    file_name: str | None = None
+    source_reference: str | None = None
+    license_reference: str | None = None
+    # No default: a caller states how the capture became available, or the store
+    # refuses the upload instead of recording an assertion nobody made.
+    availability_policy: str | None = None
+    latency_seconds: int | None = None
+
+
+class DeclarationRequest(BaseModel):
+    """One declaration body; it is verified before anything is registered."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    declaration: dict[str, Any]
+
+
 class ResearchConfirmRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     auto_run: bool = True
@@ -166,6 +202,12 @@ def create_app(settings: WebSettings) -> Any:
     from fastapi import FastAPI, Request
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import FileResponse, JSONResponse, Response
+
+    # FastAPI resolves an endpoint's annotations against this module's globals, so the
+    # lazily imported Request class has to be nameable there for the endpoints that
+    # read their own bounded body. Importing it at module scope would make importing
+    # this module require the optional web extra.
+    globals()["Request"] = Request
 
     try:
         scenario_root = settings.scenario_root.resolve(strict=True)
@@ -251,6 +293,55 @@ def create_app(settings: WebSettings) -> Any:
         return JSONResponse(
             status_code=status_code, content={"error": {"code": code, "message": message}}
         )
+
+    class _RequestTooLarge(Exception):
+        """One write body arrived with more bytes than this host reads."""
+
+    def too_large(scope: str) -> JSONResponse:
+        return error(413, "request_too_large", f"the {scope} request exceeds the host limit")
+
+    def malformed() -> JSONResponse:
+        return error(422, "invalid_request", "request does not match the local Web API contract")
+
+    async def _bounded_document(request: Request, limit: int) -> object:
+        """Read one JSON write body, bounding the stream before any parser sees it.
+
+        ``Content-Length`` is only a hint: it may be absent, and a client may send
+        more or fewer bytes than it declares. The limit is therefore applied to the
+        bytes that actually arrive, so no parser — and no model validation — ever
+        runs over an unbounded body.
+        """
+        import json
+
+        received = 0
+        chunks: list[bytes] = []
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > limit:
+                raise _RequestTooLarge
+            chunks.append(chunk)
+        return json.loads(b"".join(chunks))
+
+    def _declaration_bytes(document: dict[str, Any]) -> str:
+        """One declaration body as this host reads it.
+
+        A body authored without an integrity digest is sealed here, because the
+        host is what computes a declaration's integrity and the user may type the
+        body by hand. A body that already carries one is passed through
+        unchanged, so a wrong digest is refused rather than silently repaired.
+        """
+        import json
+
+        from ea.plugin.declarative import DECLARATION_SCHEMA, seal_declaration
+
+        body = dict(document)
+        if "artifact_digest" not in body:
+            try:
+                body = seal_declaration({**body, "schema": DECLARATION_SCHEMA})
+            except (TypeError, ValueError):
+                # Unsealable input is left for the declaration decoder to refuse.
+                body = {**body, "schema": DECLARATION_SCHEMA}
+        return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_request: Request, _error: RequestValidationError) -> JSONResponse:
@@ -374,16 +465,91 @@ def create_app(settings: WebSettings) -> Any:
 
     @app.get("/api/datasets")
     def list_datasets() -> object:
-        return {"datasets": [] if service.datasets is None else service.datasets.list()}
+        return {"datasets": service.dataset_catalog.list()}
 
     @app.get("/api/datasets/{dataset_id}")
     def inspect_dataset(dataset_id: str) -> object:
         try:
-            if service.datasets is None:
-                raise ValueError("no data root is configured")
-            return service.datasets.inspect(dataset_id)
+            return service.dataset_catalog.inspect(dataset_id)
         except (OSError, ValueError):
             return error(422, "dataset_invalid", "dataset is invalid or unavailable")
+
+    @app.post("/api/datasets/upload/preview")
+    async def preview_upload(request: Request) -> object:
+        """A bounded sample and quality view; nothing is published by a preview."""
+        try:
+            parsed = UploadPreviewRequest.model_validate(
+                await _bounded_document(request, MAX_UPLOAD_REQUEST_BYTES)
+            )
+        except _RequestTooLarge:
+            return too_large("upload")
+        except (TypeError, ValueError):
+            return malformed()
+        return service.uploads.preview(parsed.content.encode("utf-8"))
+
+    @app.post("/api/datasets/upload", status_code=201)
+    async def publish_upload(request: Request) -> object:
+        """Publish one verified upload as one immutable, explicitly-policied version."""
+        from ea.web.uploads import UploadError
+
+        try:
+            parsed = UploadPublishRequest.model_validate(
+                await _bounded_document(request, MAX_UPLOAD_REQUEST_BYTES)
+            )
+        except _RequestTooLarge:
+            return too_large("upload")
+        except (TypeError, ValueError):
+            return malformed()
+        try:
+            manifest = service.uploads.publish(
+                parsed.content.encode("utf-8"),
+                file_name=parsed.file_name,
+                source_reference=parsed.source_reference,
+                license_reference=parsed.license_reference,
+                availability_policy=parsed.availability_policy,
+                latency_seconds=parsed.latency_seconds,
+            )
+        except UploadError as caught:
+            return error(422, caught.code, caught.message)
+        except OSError:
+            return error(409, "upload_unavailable", "the upload could not be published")
+        return {**manifest, "datasets": service.dataset_catalog.list()}
+
+    @app.get("/api/plugins/declarations")
+    def list_declarations() -> object:
+        try:
+            return research_orchestrator.declaration_catalog()
+        except SelectionRejectedError as caught:
+            return error(409, "declaration_unavailable", str(caught))
+
+    @app.post("/api/plugins/declarations/validate")
+    async def validate_declaration(request: Request) -> object:
+        """Verify one declaration against this host; register and dispatch nothing."""
+        try:
+            parsed = DeclarationRequest.model_validate(
+                await _bounded_document(request, MAX_DECLARATION_REQUEST_BYTES)
+            )
+        except _RequestTooLarge:
+            return too_large("declaration")
+        except (TypeError, ValueError):
+            return malformed()
+        return research_orchestrator.inspect_declaration(_declaration_bytes(parsed.declaration))
+
+    @app.post("/api/plugins/declarations", status_code=201)
+    async def register_declaration(request: Request) -> object:
+        """Explicit user registration of one verified declaration."""
+        try:
+            parsed = DeclarationRequest.model_validate(
+                await _bounded_document(request, MAX_DECLARATION_REQUEST_BYTES)
+            )
+        except _RequestTooLarge:
+            return too_large("declaration")
+        except (TypeError, ValueError):
+            return malformed()
+        outcome = research_orchestrator.register_declaration(_declaration_bytes(parsed.declaration))
+        if not outcome["usable"]:
+            return JSONResponse(status_code=422, content=outcome)
+        return outcome
 
     @app.get("/api/scenarios")
     def list_scenarios() -> object:

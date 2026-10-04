@@ -16,13 +16,17 @@ fingerprint of the host module that implements it — lives in the adapter's
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from hashlib import sha256
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
 from ea.plugin.catalog import AdapterV1, PluginCatalogV1
+from ea.plugin.declarative import (
+    DeclarationV1,
+    declarative_capabilities,
+)
 from ea.plugin.manifest import (
     EFFECT_LOCAL_COMPUTE,
     EFFECT_READ_NETWORK,
@@ -52,12 +56,14 @@ BACKTEST_METHOD_ID = "ea.product.run_backtest_scenario"
 
 # The host artifact each adapter kind actually executes. A manifest describes a
 # capability; these modules are what runs, so their bytes are part of the
-# identity a run is bound to.
+# identity a run is bound to. The declarative layer is named for the kinds it
+# enforces, because that module is what decides whether a declared rule and a
+# declared constraint set are actually satisfied before dispatch.
 IMPLEMENTATION_MODULES: dict[str, tuple[str, ...]] = {
     "model": ("ea.web.llm",),
-    "data": ("ea.web.datasets",),
-    "strategy": ("ea.strategy.registry", "ea.strategy.rules"),
-    "validator": ("ea.web.service",),
+    "data": ("ea.web.datasets", "ea.web.uploads"),
+    "strategy": ("ea.strategy.registry", "ea.strategy.rules", "ea.plugin.declarative"),
+    "validator": ("ea.web.service", "ea.plugin.declarative"),
     "backtest-method": ("ea.product.backtest",),
 }
 
@@ -181,7 +187,19 @@ def builtin_model_capabilities(
 
 
 def builtin_data_capabilities(datasets: Any) -> list[tuple[AdapterV1, PluginManifestV1]]:
-    """One capability per registered local dataset that passes strict inspection."""
+    """One capability per local dataset that passes strict inspection.
+
+    ``datasets`` is the host dataset catalog: the registered read-only root and
+    the controlled upload store are two entrances to the same strict decoder, so
+    they are listed through one catalog. The availability policy a published
+    upload declares is part of the capability identity, because it is the only
+    record of where those ``available_at`` values came from, and so is the digest
+    of the whole re-validated version evidence: source reference, retained raw
+    bytes, capture digest, economic fingerprint, record count and time semantics.
+    A registered input carries no policy at all, which is materially different
+    from an asserted one. A published upload whose evidence cannot be re-derived
+    is left out rather than bound as if it had no provenance.
+    """
     if datasets is None:
         return []
     built: list[tuple[AdapterV1, PluginManifestV1]] = []
@@ -190,19 +208,33 @@ def builtin_data_capabilities(datasets: Any) -> list[tuple[AdapterV1, PluginMani
             continue
         dataset_id = str(entry["dataset_id"])
         entrypoint = f"{DATA_ENTRYPOINT}.{dataset_id}"
+        origin = str(entry.get("origin") or "registered")
+        policy = entry.get("availability_policy")
+        policy_id = policy.get("id") if isinstance(policy, dict) else None
+        evidence_digest = entry.get("version_evidence_digest")
+        if origin == "upload" and not isinstance(evidence_digest, str):
+            continue
         identity = {
             "dataset_id": dataset_id,
             "data_sha256": entry.get("data_sha256"),
             "source_sha256": entry.get("source_sha256"),
+            "capture_sha256": entry.get("capture_sha256"),
+            "version_evidence_sha256": evidence_digest,
+            "origin": origin,
+            "availability_policy_id": policy_id,
             "implementation_sha256": implementation_identity("data"),
         }
         config: dict[str, Any] = {
             "dataset_id": dataset_id,
+            "origin": origin,
             "venue": entry.get("venue"),
             "symbol": entry.get("symbol"),
             "record_count": entry.get("record_count"),
             "replay_start_utc": entry.get("replay_start_utc"),
             "replay_end_utc": entry.get("replay_end_utc"),
+            "observed_gap_count": entry.get("observed_gap_count"),
+            "availability_policy": policy,
+            "version_evidence_sha256": evidence_digest,
         }
         built.append(
             (
@@ -334,21 +366,62 @@ def builtin_backtest_capabilities() -> list[tuple[AdapterV1, PluginManifestV1]]:
     ]
 
 
-def builtin_capabilities(
-    service: Any, model_route: Mapping[str, Any] | None = None
+def dataset_catalog(service: Any) -> Any:
+    """The host dataset catalog: both data entrances behind one strict decoder."""
+    catalog = getattr(service, "dataset_catalog", None)
+    return catalog if catalog is not None else getattr(service, "datasets", None)
+
+
+def declarative_capability_pairs(
+    declarations: Iterable[DeclarationV1],
 ) -> list[tuple[AdapterV1, PluginManifestV1]]:
-    """Every built-in capability this host currently declares."""
+    """Turn user declarations into host-generated adapters and sealed manifests.
+
+    Everything a declaration is checked against here is a host fact computed from
+    the built-ins in this same build: the exact wrapped plugin version and
+    artifact digest, and the implementation fingerprints of the host modules that
+    actually run. A declaration that cannot be bound to them stays unusable
+    instead of falling back to a newer or substituted capability.
+    """
+    strategy_capabilities = builtin_strategy_capabilities()
+    validator_capabilities = builtin_validator_capabilities()
+    dependency_digests = {
+        manifest.plugin_id: manifest.artifact_digest
+        for _adapter, manifest in (*strategy_capabilities, *validator_capabilities)
+    }
+    return declarative_capabilities(
+        declarations,
+        dependency_digests=dependency_digests,
+        implementation_digests={
+            "strategy": implementation_identity("strategy"),
+            "validator": implementation_identity("validator"),
+        },
+        validator_version=validator_version(),
+    )
+
+
+def builtin_capabilities(
+    service: Any,
+    model_route: Mapping[str, Any] | None = None,
+    declarations: Iterable[DeclarationV1] = (),
+) -> list[tuple[AdapterV1, PluginManifestV1]]:
+    """Every capability this host currently declares, and every declared one."""
     return [
         *builtin_model_capabilities(model_route),
-        *builtin_data_capabilities(getattr(service, "datasets", None)),
+        *builtin_data_capabilities(dataset_catalog(service)),
         *builtin_strategy_capabilities(),
         *builtin_validator_capabilities(),
         *builtin_backtest_capabilities(),
+        *declarative_capability_pairs(declarations),
     ]
 
 
-def builtin_catalog(service: Any, model_route: Mapping[str, Any] | None = None) -> PluginCatalogV1:
-    capabilities = builtin_capabilities(service, model_route)
+def builtin_catalog(
+    service: Any,
+    model_route: Mapping[str, Any] | None = None,
+    declarations: Iterable[DeclarationV1] = (),
+) -> PluginCatalogV1:
+    capabilities = builtin_capabilities(service, model_route, declarations)
     return PluginCatalogV1(
         [manifest for _adapter, manifest in capabilities],
         [adapter for adapter, _manifest_item in capabilities],

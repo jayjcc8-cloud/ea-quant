@@ -3,7 +3,7 @@ import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } fr
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings } from './research'
 import { radianApi } from './radian-api'
-import { researchApi, type ModelConfigurationStatus, type ResearchTask } from './research-api'
+import { researchApi, type DeclarationBody, type DeclarationCatalog, type DeclarationVerdict, type DatasetEntry, type ModelConfigurationStatus, type PluginCatalog, type PluginSelection, type RecipeResolution, type ResearchTask, type UploadPreview, type UploadPublishRequest, type UploadVersion } from './research-api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
@@ -174,11 +174,19 @@ export type ApiAdapter = {
   artifactUrl(jobId: string, name: 'report.json' | 'summary.txt' | 'equity-path.json'): string
   settingsStatus?(): Promise<ModelConfigurationStatus>
   listResearchTasks?(): Promise<ResearchTask[]>
-  createResearchTask?(idea: string): Promise<ResearchTask>
+  createResearchTask?(idea: string, selection?: PluginSelection): Promise<ResearchTask>
   getResearchTask?(taskId: string): Promise<ResearchTask>
+  editResearchSpec?(taskId: string, fields: Record<string, unknown>): Promise<ResearchTask>
   confirmResearchTask?(taskId: string): Promise<ResearchTask>
   retryResearchTask?(taskId: string): Promise<ResearchTask>
   cancelResearchTask?(taskId: string): Promise<ResearchTask>
+  pluginCatalog?(): Promise<PluginCatalog>
+  resolveRecipe?(selection: PluginSelection): Promise<RecipeResolution>
+  listDeclarations?(): Promise<DeclarationCatalog>
+  validateDeclaration?(declaration: DeclarationBody): Promise<DeclarationVerdict>
+  registerDeclaration?(declaration: DeclarationBody): Promise<DeclarationVerdict>
+  previewUpload?(content: string, fileName?: string): Promise<UploadPreview>
+  publishUpload?(request: UploadPublishRequest): Promise<UploadVersion & { datasets: DatasetEntry[] }>
 }
 
 async function loadTradeAnalytics(api: ApiAdapter, job: BacktestJob): Promise<TradeAnalytics | null> {
@@ -240,11 +248,19 @@ const browserApi: ApiAdapter = {
   artifactUrl(jobId, name) { return `/api/backtests/${encodeURIComponent(jobId)}/artifacts/${name}` },
   settingsStatus: () => radianApi.settingsStatus(),
   listResearchTasks: () => researchApi.listTasks(),
-  createResearchTask: idea => researchApi.createTask(idea),
+  createResearchTask: (idea, selection) => researchApi.createTask(idea, selection),
   getResearchTask: taskId => researchApi.getTask(taskId),
+  editResearchSpec: (taskId, fields) => researchApi.editSpec(taskId, fields),
   confirmResearchTask: taskId => researchApi.confirmTask(taskId),
   retryResearchTask: taskId => researchApi.retryTask(taskId),
   cancelResearchTask: taskId => researchApi.cancelTask(taskId),
+  pluginCatalog: () => researchApi.pluginCatalog(),
+  resolveRecipe: selection => researchApi.resolveRecipe(selection),
+  listDeclarations: () => researchApi.listDeclarations(),
+  validateDeclaration: declaration => researchApi.validateDeclaration(declaration),
+  registerDeclaration: declaration => researchApi.registerDeclaration(declaration),
+  previewUpload: (content, fileName) => researchApi.previewUpload(content, fileName),
+  publishUpload: request => researchApi.publishUpload(request),
 }
 
 async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath | null> {

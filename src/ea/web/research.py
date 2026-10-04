@@ -29,6 +29,19 @@ from uuid import uuid4
 
 from ea.plugin.builtins import builtin_catalog
 from ea.plugin.catalog import PluginCatalogV1, VerifiedPluginV1
+from ea.plugin.declarative import (
+    DECLARATION_KINDS,
+    DECLARATION_SCHEMA,
+    STRATEGY_TARGET_PLUGIN_ID,
+    VALIDATOR_CONSTRAINTS,
+    VALIDATOR_TARGET_PLUGIN_ID,
+    DeclarationError,
+    DeclarationV1,
+    declared_strategy_rejection,
+    declared_validator_rejection,
+    decode_declaration,
+    seal_declaration,
+)
 from ea.plugin.manifest import ManifestError
 from ea.plugin.selection import (
     PluginBindingV1,
@@ -49,6 +62,7 @@ from ea.web.settings import RadianSettings, RadianSettingsError
 
 _SCHEMA = "radian.research-task.v1"
 _RECIPE_SCHEMA = "ea.plugin-recipe.v1"
+_DECLARATION_CATALOG_SCHEMA = "ea.plugin-declaration-catalog.v1"
 _ACTIVE_STATES = frozenset({"drafting", "awaiting_confirmation", "confirmed", "running"})
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled", "unsupported"})
 # A task with a durable in-flight reservation is reconciled, not left pending.
@@ -207,6 +221,10 @@ class ResearchTask:
     # at confirmation. Both are additive: an unselected task keeps its shape.
     selection: dict[str, Any] | None = None
     pinned_binding: dict[str, Any] | None = None
+    # One host-verified declaration proposal the model drafted for this task. It is
+    # evidence for the user to read and install themselves: never a selection,
+    # never a registration and never a run.
+    declaration_draft: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         document: dict[str, Any] = {
@@ -243,6 +261,8 @@ class ResearchTask:
             document["selection"] = self.selection
         if self.pinned_binding is not None:
             document["pinned_binding"] = self.pinned_binding
+        if self.declaration_draft is not None:
+            document["declaration_draft"] = self.declaration_draft
         return document
 
 
@@ -290,6 +310,45 @@ def _initial_cash(value: object) -> str:
     return text
 
 
+def _declaration_body(arguments: dict[str, Any]) -> dict[str, Any]:
+    """The closed declaration body a model-authored proposal may fill in.
+
+    Everything outside these fields is host-fixed — the schema, the package
+    version and the declared-by value — so a model cannot propose a different
+    artifact kind, a floating version, or a claim that the host itself declared
+    it. The body is data: it is sealed, verified against the host primitives and
+    never imported, evaluated or installed by this path.
+    """
+    return {
+        "schema": DECLARATION_SCHEMA,
+        "declaration_id": arguments.get("declaration_id"),
+        "kind": arguments.get("kind"),
+        "package_version": "1.0.0",
+        "title": arguments.get("title"),
+        "declared_by": "user",
+        "rule": arguments.get("rule"),
+        "rule_history": arguments.get("rule_history"),
+        "constraints": arguments.get("constraints"),
+    }
+
+
+def _declaration_result_text(proposal: dict[str, Any]) -> str:
+    """What the model is told about its own declaration proposal.
+
+    A proposal is host-verified evidence for the user to look at. It is never an
+    installation, never a selection and never a run, and the model is told
+    exactly that so it cannot report otherwise to the user.
+    """
+    if proposal.get("usable") is not True:
+        return f"rejected: {proposal.get('message') or proposal.get('code')}"
+    document = proposal.get("declaration")
+    declaration_id = document.get("declaration_id") if isinstance(document, dict) else None
+    return (
+        f"verified by the host and NOT installed: {declaration_id} exists only if the user "
+        "registers it explicitly. Nothing was selected, replaced, registered or run."
+    )
+
+
 class ResearchStore:
     """Durable task store under one workspace research directory."""
 
@@ -319,10 +378,13 @@ class ResearchStore:
             raise ResearchTaskError("invalid operation generation markers")
         selection = document.get("selection")
         pinned_binding = document.get("pinned_binding")
+        declaration_draft = document.get("declaration_draft")
         if (selection is not None and type(selection) is not dict) or (
             pinned_binding is not None and type(pinned_binding) is not dict
         ):
             raise ResearchTaskError("research task capability record is unreadable")
+        if declaration_draft is not None and type(declaration_draft) is not dict:
+            raise ResearchTaskError("research task declaration proposal is unreadable")
         return ResearchTask(
             task_id=str(document["task_id"]),
             created_at=str(document["created_at"]),
@@ -356,6 +418,7 @@ class ResearchStore:
             operation_kind=document.get("operation_kind"),
             selection=selection,
             pinned_binding=pinned_binding,
+            declaration_draft=declaration_draft,
         )
 
     def _publish(self, task: ResearchTask, payload: bytes) -> None:
@@ -543,13 +606,200 @@ class ResearchOrchestrator:
             "endpoint": status.get("endpoint"),
         }
 
+    def _declaration_store(self) -> Any:
+        store = getattr(self._service, "declarations", None)
+        if store is None:
+            raise SelectionRejectedError(
+                ManifestError(
+                    "declaration_unavailable",
+                    "this service has no workspace declaration store",
+                )
+            )
+        return store
+
+    def _registered_declarations(self) -> tuple[DeclarationV1, ...]:
+        try:
+            return cast(tuple[DeclarationV1, ...], self._declaration_store().load())
+        except DeclarationError as error:
+            raise SelectionRejectedError(ManifestError(error.code, error.message)) from None
+
     def _plugin_catalog(self) -> PluginCatalogV1:
         """Built from live host facts on every use, so no stale claim survives."""
-        return builtin_catalog(self._service, self._model_route())
+        store = getattr(self._service, "declarations", None)
+        try:
+            declarations = () if store is None else tuple(store.load())
+            return builtin_catalog(self._service, self._model_route(), declarations)
+        except DeclarationError as error:
+            raise SelectionRejectedError(ManifestError(error.code, error.message)) from None
 
     def plugin_catalog(self) -> dict[str, Any]:
         """The declared catalog with the host's verified view of each entry."""
         return self._plugin_catalog().document()
+
+    def declaration_catalog(self) -> dict[str, Any]:
+        """Every declaration this workspace registered, with the host's view."""
+        store = self._declaration_store()
+        declarations = self._registered_declarations()
+        catalog = self._plugin_catalog()
+        entries: list[dict[str, Any]] = []
+        for declaration in declarations:
+            document = declaration.document()
+            try:
+                verified = catalog.get(declaration.plugin_id, declaration.package_version)
+            except ManifestError as error:
+                entries.append(
+                    {
+                        **document,
+                        "usable": False,
+                        "reason": {"code": error.code, "message": error.message},
+                    }
+                )
+            else:
+                entries.append({**document, "usable": True, "capability": verified.document()})
+        return {
+            "schema": _DECLARATION_CATALOG_SCHEMA,
+            "supported_kinds": list(DECLARATION_KINDS),
+            "validator_constraints": list(VALIDATOR_CONSTRAINTS),
+            "declaration_root_configured": store is not None,
+            "declarations": entries,
+        }
+
+    def inspect_declaration(self, payload: object) -> dict[str, Any]:
+        """Read and verify one declaration against the host; register nothing."""
+        return self._declaration_outcome(payload, register=False)
+
+    def register_declaration(self, payload: object) -> dict[str, Any]:
+        """Explicit user registration: verify first, then persist add-only."""
+        return self._declaration_outcome(payload, register=True)
+
+    def _declaration_outcome(self, payload: object, *, register: bool) -> dict[str, Any]:
+        """One declaration's verdict, with nothing stored when it cannot run.
+
+        A declaration is a proposal: the AI may author its body, but only this
+        explicit user action installs it, and an installed one is still only a
+        preset over a host primitive that the host itself verifies.
+        """
+        try:
+            declaration = decode_declaration(payload)
+        except DeclarationError as error:
+            return {
+                "usable": False,
+                "code": error.code,
+                "message": error.message,
+                "declaration": None,
+                "capability": None,
+                "registered": False,
+            }
+        store = self._declaration_store()
+        if register and store.has(declaration.declaration_id):
+            return {
+                "usable": False,
+                "code": "declaration_exists",
+                "message": (
+                    f"declaration {declaration.declaration_id} is already registered and is "
+                    "never overwritten"
+                ),
+                "declaration": declaration.document(),
+                "capability": None,
+                "registered": False,
+            }
+        try:
+            catalog = builtin_catalog(
+                self._service,
+                self._model_route(),
+                (*self._registered_declarations(), declaration),
+            )
+            verified = catalog.get(declaration.plugin_id, declaration.package_version)
+        except (DeclarationError, ManifestError) as error:
+            return {
+                "usable": False,
+                "code": getattr(error, "code", "declaration_rejected"),
+                "message": getattr(error, "message", str(error)),
+                "declaration": declaration.document(),
+                "capability": None,
+                "registered": False,
+            }
+        if not register:
+            return {
+                "usable": True,
+                "code": None,
+                "message": None,
+                "declaration": declaration.document(),
+                "capability": verified.document(),
+                "registered": store.has(declaration.declaration_id),
+            }
+        try:
+            document = store.store(declaration)
+        except DeclarationError as error:
+            return {
+                "usable": False,
+                "code": error.code,
+                "message": error.message,
+                "declaration": declaration.document(),
+                "capability": None,
+                "registered": False,
+            }
+        return {
+            "usable": True,
+            "code": None,
+            "message": None,
+            "declaration": document,
+            "capability": verified.document(),
+            "registered": True,
+        }
+
+    def _declaration_proposal(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """One model-drafted declaration, verified by this host and never installed.
+
+        The model only fills in the closed body fields; the host seals the body,
+        validates the rule against the closed engine and the constraints against the
+        closed vocabulary, and checks the result can be bound to a host primitive.
+        What comes back is evidence for the user to read and install, or to ignore.
+        Registration is the separate explicit action above, and the model has no
+        path to it.
+        """
+        try:
+            payload = json.dumps(
+                seal_declaration(_declaration_body(arguments)),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        except (DeclarationError, TypeError, ValueError) as error:
+            return {
+                "usable": False,
+                "code": getattr(error, "code", "declaration_field"),
+                "message": getattr(error, "message", str(error)),
+                "declaration": None,
+                "capability": None,
+                "registered": False,
+            }
+        return self.inspect_declaration(payload)
+
+    def _dataset_entry(self, dataset_id: object) -> dict[str, Any] | None:
+        """The host's own evidence for one bound input, or None when unreadable."""
+        if type(dataset_id) is not str:
+            return None
+        catalog = getattr(self._service, "dataset_catalog", None)
+        if catalog is None:
+            return None
+        try:
+            return cast(dict[str, Any], catalog.inspect(dataset_id))
+        except (OSError, ValueError):
+            return None
+
+    def _check_declared(
+        self, binding: PluginBindingV1, parameters: dict[str, Any], dataset_id: str | None
+    ) -> None:
+        """A declared preset must match what will actually run."""
+        reason = declared_strategy_rejection(binding.identity("strategy"), parameters)
+        if reason is not None:
+            raise InvalidSpecError(reason)
+        reason = declared_validator_rejection(
+            binding.identity("validator"), self._dataset_entry(dataset_id)
+        )
+        if reason is not None:
+            raise InvalidSpecError(reason)
 
     def _authorize_plugin(self, plugin: VerifiedPluginV1) -> None:
         """Current host policy for one selected capability, before any dispatch.
@@ -651,12 +901,25 @@ class ResearchOrchestrator:
                 f"the selected data capability is {data.get('dataset_id')}; "
                 "the spec must name that dataset_id"
             )
+        # A declared preset must match the spec that will actually be dispatched.
+        self._check_declared(binding, spec.parameters, spec.dataset_id)
 
     def _frozen_binding(
         self, task: ResearchTask, confirmed: ResearchSpec
     ) -> PluginBindingV1 | None:
         """Re-verify the binding frozen at confirmation; never substitute one."""
         if confirmed.selection is None:
+            # Defensive: a spec that names an uploaded version without a data
+            # capability cannot freeze its provenance, so it must fail here rather
+            # than reach the engine or be reported as an unobserved dispatch.
+            if self._uploaded_input(confirmed.dataset_id):
+                raise SelectionRejectedError(
+                    ManifestError(
+                        "upload_data_capability_required",
+                        f"{confirmed.dataset_id} is an uploaded version; it is usable only "
+                        "through a research recipe that selects its data capability",
+                    )
+                )
             return None
         if task.pinned_binding is None:
             raise SelectionRejectedError(
@@ -712,7 +975,32 @@ class ResearchOrchestrator:
                     defaults[name] = value
         return replace(spec, parameters={**defaults, **spec.parameters})
 
+    def _uploaded_input(self, dataset_id: str | None) -> bool:
+        """True when this dataset id is a published upload, not registered data."""
+        if dataset_id is None:
+            return False
+        uploads = getattr(self._service, "uploads", None)
+        return uploads is not None and bool(uploads.has(dataset_id))
+
     def _validate_spec(self, spec: ResearchSpec) -> None:
+        if self._uploaded_input(spec.dataset_id):
+            # An uploaded version has provenance only through the data capability
+            # bound to it: that component is what freezes the version evidence
+            # digest alongside the accepted input. A spec that names an upload
+            # while the user selected no data capability — or a different one —
+            # would run with nothing pinning where its bars came from, so it is
+            # refused here, before confirmation and before any engine dispatch.
+            selected = (spec.selection or {}).get("data")
+            expected = f"ea.builtin.data.{spec.dataset_id}"
+            if not isinstance(selected, dict) or selected.get("plugin_id") != expected:
+                raise SelectionRejectedError(
+                    ManifestError(
+                        "upload_data_capability_required",
+                        f"{spec.dataset_id} is an uploaded version; it is usable only through a "
+                        f"research recipe that selects its data capability {expected}, because "
+                        "that binding is what freezes the version evidence",
+                    )
+                )
         if spec.selection is not None:
             # A selected capability is verified before the spec surface, so an
             # unusable selection is reported as itself and never dispatched.
@@ -822,6 +1110,36 @@ class ResearchOrchestrator:
                     "required": ["gap"],
                 },
             },
+            {
+                "name": "propose_declaration",
+                "description": (
+                    "Draft one declarative capability for the user to read and install "
+                    "themselves. This never installs, selects, replaces or runs anything: the "
+                    "host verifies the body, the user registers it explicitly, and until then "
+                    "it does not exist. Kinds: "
+                    f"{', '.join(DECLARATION_KINDS)}. A strategy declaration wraps the host "
+                    f"rule strategy {STRATEGY_TARGET_PLUGIN_ID} and needs exactly one bounded "
+                    "price rule (the same rule grammar as propose_spec) plus its rule_history. "
+                    "A validator declaration wraps the host scenario validator "
+                    f"{VALIDATOR_TARGET_PLUGIN_ID} and may only make a run stricter, using "
+                    f"these constraints: {', '.join(VALIDATOR_CONSTRAINTS)}. A strategy "
+                    "declaration takes no constraints, a validator declaration takes no rule. "
+                    "declaration_id must be a lowercase namespaced identifier such as "
+                    "user.rule.close-above-open; the host namespace ea.* is refused."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": list(DECLARATION_KINDS)},
+                        "declaration_id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "rule": {"type": "string"},
+                        "rule_history": {"type": "integer"},
+                        "constraints": {"type": "object"},
+                    },
+                    "required": ["kind", "declaration_id", "title"],
+                },
+            },
         ]
 
         return [ToolDefinition(**definition) for definition in definitions]
@@ -857,7 +1175,10 @@ class ResearchOrchestrator:
             "orders, broker access, or live trading. Parameters are optional overrides of "
             "the registered contracts; use the registered defaults when the idea does not "
             "specify them. State assumptions explicitly, and keep the rationale honest "
-            "about what this run can and cannot show.\n\nRegistered catalog (JSON):\n"
+            "about what this run can and cannot show. propose_declaration only drafts a "
+            "bounded capability preset for the user to install themselves: you cannot "
+            "install, select, replace or run one, and you must never claim you did."
+            "\n\nRegistered catalog (JSON):\n"
             f"{listing}{self._selected_capabilities(task)}"
         )
 
@@ -1136,6 +1457,13 @@ class ResearchOrchestrator:
                 "error": None,
                 "pinned_binding": data.get("binding"),
             }
+        elif event == "declaration_proposal":
+            proposal = data["proposal"]
+            if type(proposal) is not dict:
+                raise TaskStateError("a declaration proposal must be one document")
+            # Additive evidence only: the latest host-verified proposal replaces an
+            # earlier one. Nothing is installed, selected, replaced or run here.
+            changes = {"declaration_draft": proposal}
         else:
             raise TaskStateError(f"unknown task transition: {event}")
         if task.status == "cancelled":
@@ -1320,6 +1648,18 @@ class ResearchOrchestrator:
                         status="awaiting_confirmation",
                         spec=spec,
                     )
+                if name == "propose_declaration":
+                    # Recorded as evidence for the user, and the round continues: a
+                    # declaration proposal is never an installation, a selection or a
+                    # run, and it cannot replace the user's own selection.
+                    proposal = self._declaration_proposal(call.arguments)
+                    task = self._transition(
+                        task_id, generation, "declaration_proposal", proposal=proposal
+                    )
+                    results.append(
+                        ModelMessage("tool", _declaration_result_text(proposal), call_id=call.id)
+                    )
+                    continue
                 results.append(
                     ModelMessage(
                         "tool", f"tool {name!r} is not available to research", call_id=call.id
@@ -1420,6 +1760,19 @@ class ResearchOrchestrator:
                     "selection_conflict",
                     "the registered scenario does not run the selected strategy version",
                     "start_backtest",
+                )
+            # A declared preset is enforced against the normalized parameters and
+            # the host's own input evidence, before any backtest is reserved.
+            reason = declared_strategy_rejection(
+                selected, cast(dict[str, Any], summary.get("parameters") or {})
+            )
+            if reason is None:
+                reason = declared_validator_rejection(
+                    binding.identity("validator"), self._dataset_entry(confirmed.dataset_id)
+                )
+            if reason is not None:
+                return self._failure(
+                    task_id, generation, "selection_conflict", reason, "start_backtest"
                 )
         try:
             task = self._transition(task_id, generation, "backtest_reserve", spec=confirmed)

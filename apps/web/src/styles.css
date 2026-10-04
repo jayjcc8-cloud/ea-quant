@@ -164,3 +164,28 @@ td:nth-child(3) { color: inherit; font-weight: inherit; }
 
 .context-identity-heading { margin-top: 24px; }
 .research-history .job-card-title strong { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Optional host-verified surfaces: capability selection, upload, declarations. */
+.disclosure { border: 1px solid #e2e3e0; border-radius: 8px; background: #f7f8f6; margin-top: 16px; }
+.disclosure > summary { cursor: pointer; padding: 13px 16px; font-size: 12px; color: #26282c; }
+.disclosure > summary span { margin-left: 9px; color: #74777d; font-size: 11px; font-weight: 400; }
+.disclosure-body { padding: 0 16px 16px; }
+.disclosure-body > .muted:first-child { margin-top: 0; }
+.capability-selector .parameter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.capability-selector .validated small { overflow-wrap: anywhere; }
+.research-workspace-tools { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.research-workspace-tools > .panel { min-width: 0; }
+.upload-panel textarea, .declaration-workbench textarea { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; font-size: 11px; line-height: 1.5; }
+.upload-panel input[type="file"] { padding: 8px 10px; background: #f7f8f6; }
+.upload-preview, .upload-version { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e2e3e0; }
+.upload-preview table { font-size: 10px; }
+.upload-preview table th, .upload-preview table td { padding: 5px 6px; white-space: nowrap; }
+.upload-preview details { margin-top: 14px; }
+.upload-preview summary { cursor: pointer; color: #6d7177; font-size: 11px; }
+.declaration-catalog .job-card small { overflow-wrap: anywhere; }
+.declaration-workbench { margin-top: 22px; padding-top: 16px; border-top: 1px solid #e2e3e0; }
+.declaration-workbench h3 { margin: 0 0 6px; color: #26282c; font-size: 13px; }
+.declaration-workbench .validated { margin-top: 14px; }
+.declaration-workbench .validated span { line-height: 1.6; }
+.declaration-workbench .summary-list { margin-top: 14px; }
+@media(max-width:900px) { .research-workspace-tools { grid-template-columns: 1fr; } }

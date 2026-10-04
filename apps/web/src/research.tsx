@@ -1,12 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, ChronologicalHoldout } from './app'
 import {
+  AVAILABILITY_PROVIDED,
+  AVAILABILITY_SIMULATED,
+  LAYER_ORDER,
+  MAX_UPLOAD_CHARACTERS,
   ResearchRequestError,
+  type DeclarationBody,
+  type DeclarationCatalog,
+  type DeclarationVerdict,
+  type LayerName,
   type ModelConfigurationStatus,
+  type PluginCatalog,
+  type PluginCatalogEntry,
+  type PluginSelection,
+  type RecipeResolution,
   type ResearchSpec,
   type ResearchTask,
   type ResearchTaskStatus,
+  type UploadPreview,
+  type UploadVersion,
 } from './research-api'
 
 /**
@@ -17,6 +31,13 @@ import {
  * Every value on these pages is read from the persisted task record; this
  * client never derives a spec, a result or an outcome, never starts a provider
  * call or a backtest on its own, and never falls back to a default provider.
+ *
+ * Three optional surfaces sit beside a task, each of them a host verdict this
+ * client only reads: the capability selection over the five layers, the
+ * controlled upload preview/publish pair, and declaration verification with
+ * explicit registration. Publishing a version and registering a declaration are
+ * separate user writes; nothing on these pages installs, selects or runs
+ * anything by itself.
  */
 
 const POLL_STATUSES: ResearchTaskStatus[] = ['drafting', 'confirmed', 'running']
@@ -49,6 +70,64 @@ const ERROR_EXPLANATIONS: Record<string, string> = {
 
 const messageOf = (caught: unknown, fallback: string) =>
   caught instanceof Error && caught.message ? caught.message : fallback
+
+// The host's own layer → kind mapping and layer order (src/ea/plugin/selection.py).
+const LAYER_KINDS: Record<LayerName, string> = {
+  model: 'model',
+  data: 'data',
+  strategy: 'strategy',
+  validator: 'validator',
+  backtest: 'backtest-method',
+}
+
+const LAYER_LABELS: Record<LayerName, string> = {
+  model: 'Model',
+  data: 'Data',
+  strategy: 'Strategy',
+  validator: 'Validator',
+  backtest: 'Backtest method',
+}
+
+// One selectable option is one exact plugin id and one exact package version.
+// Neither an identifier nor a version can contain '@', so the value round-trips.
+const optionValue = (entry: PluginCatalogEntry) => `${entry.plugin_id}@${entry.package_version}`
+
+function componentOf(value: string | undefined): { plugin_id: string; package_version: string } | null {
+  if (!value) return null
+  const index = value.lastIndexOf('@')
+  if (index < 1 || index === value.length - 1) return null
+  return { plugin_id: value.slice(0, index), package_version: value.slice(index + 1) }
+}
+
+const valueLabel = (value: string) => {
+  const component = componentOf(value)
+  return component ? `${component.plugin_id} · ${component.package_version}` : value
+}
+
+function selectionOf(values: Partial<Record<LayerName, string>>): PluginSelection {
+  const selection: PluginSelection = {}
+  for (const layer of LAYER_ORDER) {
+    const component = componentOf(values[layer])
+    if (component) selection[layer] = component
+  }
+  return selection
+}
+
+function valuesOf(selection: PluginSelection | null | undefined): Partial<Record<LayerName, string>> {
+  const values: Partial<Record<LayerName, string>> = {}
+  for (const layer of LAYER_ORDER) {
+    const component = selection?.[layer]
+    if (component) values[layer] = `${component.plugin_id}@${component.package_version}`
+  }
+  return values
+}
+
+function Disclosure({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
+  return <details className="disclosure">
+    <summary><strong>{title}</strong>{subtitle && <span>{subtitle}</span>}</summary>
+    <div className="disclosure-body">{children}</div>
+  </details>
+}
 
 const latestSpec = (task: ResearchTask): ResearchSpec | null =>
   task.spec_confirmed.at(-1)?.spec ?? task.spec_draft
@@ -84,6 +163,10 @@ function SpecFacts({ spec }: { spec: ResearchSpec }) {
       <div><dt>Research data</dt><dd>{spec.dataset_id ?? 'Registered scenario data'}</dd></div>
       <div><dt>Initial cash</dt><dd>{spec.initial_cash}</dd></div>
       <div><dt>Parameters</dt><dd>{Object.entries(spec.parameters).map(([name, value]) => parameterDescription(name, value)).join(' · ') || 'Registered defaults'}</dd></div>
+      {spec.selection && <div><dt>Selected capabilities</dt><dd>{LAYER_ORDER.flatMap(layer => {
+        const component = spec.selection?.[layer]
+        return component ? [`${LAYER_LABELS[layer]}: ${component.plugin_id} ${component.package_version}`] : []
+      }).join(' · ') || 'Host default route'}</dd></div>}
     </dl>
     <h3>Rationale</h3>
     <p className="muted">Recorded when the proposal was drafted. Current backtest and holdout states appear in the linked evidence below.</p>
@@ -149,6 +232,381 @@ function UsagePanel({ task }: { task: ResearchTask }) {
   </section>
 }
 
+/** One explicit capability selection across the five layers, verified by the host. */
+function CapabilitySelector({ api, values, change, disabled = false }: {
+  api: ApiAdapter
+  values: Partial<Record<LayerName, string>>
+  change: (values: Partial<Record<LayerName, string>>) => void
+  disabled?: boolean
+}) {
+  const request = api.pluginCatalog
+  const [catalog, setCatalog] = useState<PluginCatalog | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [verdict, setVerdict] = useState<RecipeResolution | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+
+  useEffect(() => {
+    if (!request) return
+    let active = true
+    request().then(next => { if (active) { setCatalog(next); setError(null) } })
+      .catch(caught => { if (active) setError(messageOf(caught, 'The host capability catalog is unavailable.')) })
+    return () => { active = false }
+  }, [request])
+
+  if (!request) return null
+
+  // A version published, or a declaration registered, after this list was read is
+  // offered only after this explicit refresh. It replaces the catalog and nothing
+  // else: a value already chosen for a layer is kept exactly as it is, including
+  // when the refreshed catalog no longer offers it.
+  const refresh = async () => {
+    if (!request || refreshing) return
+    setRefreshing(true)
+    try { setCatalog(await request()); setError(null) }
+    catch (caught) { setError(messageOf(caught, 'The host capability catalog is unavailable.')) }
+    finally { setRefreshing(false) }
+  }
+
+  const selection = selectionOf(values)
+  const selected = Object.keys(selection).length
+  const usable = (kind: string) => (catalog?.plugins ?? []).filter(entry => entry.kind === kind && entry.usable)
+  const verify = async () => {
+    if (!api.resolveRecipe || busy) return
+    setBusy(true); setError(null); setVerdict(null)
+    try { setVerdict(await api.resolveRecipe(selection)) }
+    catch (caught) { setError(messageOf(caught, 'The selection could not be verified by this host.')) }
+    finally { setBusy(false) }
+  }
+
+  return <div className="capability-selector">
+    <p className="muted">Every layer is optional and names one exact version; a range or a tag is not selectable. The host verifies and freezes the selection before anything runs, and an unselected layer keeps the host default route. A version that no longer matches the frozen identity fails the run instead of being replaced by a newer one. An uploaded dataset version is research data only when you explicitly select its Data capability here: with no data layer selected there is no binding to freeze the version's evidence, and a run over that upload is refused.</p>
+    <div className="parameter-grid">{LAYER_ORDER.map(layer => {
+      const entries = usable(LAYER_KINDS[layer])
+      const value = values[layer] ?? ''
+      return <div key={layer}>
+        <label htmlFor={`capability-${layer}`}>{LAYER_LABELS[layer]} capability</label>
+        <select id={`capability-${layer}`} value={value} disabled={disabled}
+          onChange={event => {
+            const next = { ...values }
+            next[layer] = event.target.value
+            change(next); setVerdict(null); setError(null)
+          }}>
+          <option value="">Host default (unselected)</option>
+          {entries.map(entry => <option key={optionValue(entry)} value={optionValue(entry)}>{valueLabel(optionValue(entry))}</option>)}
+          {value && !entries.some(entry => optionValue(entry) === value) && <option value={value}>{valueLabel(value)} · not usable now</option>}
+        </select>
+      </div>
+    })}</div>
+    <div className="actions">
+      <button type="button" disabled={disabled || busy || selected === 0 || !api.resolveRecipe} onClick={() => { void verify() }}>{busy ? 'Verifying…' : 'Verify selection'}</button>
+      <button type="button" disabled={refreshing} onClick={() => { void refresh() }}>{refreshing ? 'Refreshing…' : 'Refresh capabilities'}</button>
+      <span className="muted">{selected === 0 ? 'No layer is selected.' : `${selected} of ${LAYER_ORDER.length} layers selected.`}</span>
+    </div>
+    <p className="muted">A version you published, or a declaration you registered, is offered here only after you refresh this list. Refreshing changes no selected value and selects nothing for you.</p>
+    {verdict && (verdict.usable
+      ? <div className="validated" aria-label="Verified selection"><strong>Selection verified by the host</strong>
+        <span>{verdict.binding ? `binding ${verdict.binding.binding_sha256.slice(0, 16)}…` : 'Host default route'}</span>
+        <small>{verdict.binding ? verdict.binding.components.map(item => `${item.layer}: ${item.plugin_id} ${item.package_version}`).join(' · ') : 'No capability is selected; the host default route is used.'}</small>
+      </div>
+      : <p className="notice error">{verdict.code ?? 'selection_rejected'}: {verdict.message ?? 'the host refused this selection'}</p>)}
+    {error && <p className="notice error">{error}</p>}
+  </div>
+}
+
+/** The user's selection, and the exact identity frozen for it, as persisted. */
+function SelectionEvidence({ task }: { task: ResearchTask }) {
+  const selection = latestSpec(task)?.selection ?? task.selection ?? null
+  const binding = task.pinned_binding ?? null
+  if (!selection && !binding) return null
+  const frozen = new Map((binding?.components ?? []).map(item => [item.layer as LayerName, item] as const))
+  return <section className="panel" aria-label="Selected capabilities">
+    <header><h2>Selected capabilities</h2><span>{binding ? 'Frozen at confirmation' : 'Recorded when the task was created'}</span></header>
+    <dl className="summary-list">{LAYER_ORDER.map(layer => {
+      const component = frozen.get(layer)
+      const chosen = component ? { plugin_id: component.plugin_id, package_version: component.package_version } : selection?.[layer]
+      return <div key={layer}><dt>{LAYER_LABELS[layer]}</dt><dd>{chosen ? `${chosen.plugin_id} · ${chosen.package_version}` : 'Host default route'}</dd></div>
+    })}</dl>
+    {binding && <p className="muted">binding {binding.binding_sha256.slice(0, 24)}… This exact identity is re-verified before every dispatch: a changed catalog, plugin, configuration or declaration fails the run instead of silently substituting another capability.</p>}
+    <p className="muted">The model cannot change this selection: it is not a tool argument, and a proposed spec must use exactly the selected strategy and dataset identity.</p>
+  </section>
+}
+
+/** Edit the selection of one unconfirmed draft; the host re-verifies it. */
+function SelectionEditor({ api, task }: { api: ApiAdapter; task: ResearchTask }) {
+  const [values, setValues] = useState<Partial<Record<LayerName, string>>>(() => valuesOf(latestSpec(task)?.selection ?? task.selection))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [applied, setApplied] = useState(false)
+  const edit = api.editResearchSpec
+  if (!edit) return null
+  const apply = async () => {
+    if (busy) return
+    setBusy(true); setError(null); setApplied(false)
+    try {
+      // An empty selection is sent as {} so the host clears back to its default.
+      await edit(task.task_id, { selection: selectionOf(values) })
+      setApplied(true)
+    } catch (caught) { setError(messageOf(caught, 'The selection was not applied; the persisted draft is unchanged.')) }
+    finally { setBusy(false) }
+  }
+  return <section className="panel" aria-label="Draft capabilities">
+    <header><h2>Draft capabilities</h2><span>Editable while the draft is unconfirmed</span></header>
+    <CapabilitySelector api={api} values={values} change={value => { setValues(value); setApplied(false); setError(null) }} disabled={busy} />
+    <div className="actions"><button type="button" disabled={busy} onClick={() => { void apply() }}>{busy ? 'Applying…' : 'Apply selection to draft'}</button></div>
+    {applied && <p className="muted">The persisted draft now names this selection. It is verified again, and frozen into the binding above, at confirmation.</p>}
+    {error && <p className="notice error">{error}</p>}
+  </section>
+}
+
+function DeclarationWorkbench({ api, initial, initialVerdict = null, heading, note, prefix, registerLabel, onRegistered }: {
+  api: ApiAdapter
+  initial?: DeclarationBody | null
+  /** A verdict the host already returned for `initial`; never a client-side judgment. */
+  initialVerdict?: DeclarationVerdict | null
+  heading: string
+  note: string
+  prefix: string
+  registerLabel: string
+  onRegistered?: () => void
+}) {
+  const text = (body: DeclarationBody | null | undefined) => (body ? JSON.stringify(body, null, 2) : '')
+  // The initial body and the host's verdict for it are read once, as this
+  // component's starting state. A caller that has a different draft or verdict
+  // gives this workbench a different key, so it is mounted against the new one
+  // rather than resynchronized afterwards: an edit in progress is never silently
+  // overwritten by a later read of the task.
+  const [draft, setDraft] = useState(() => text(initial))
+  const [verdict, setVerdict] = useState<DeclarationVerdict | null>(initialVerdict)
+  const [registered, setRegistered] = useState<DeclarationVerdict | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<'validate' | 'register' | null>(null)
+
+  const submit = async (register: boolean) => {
+    if (busy) return
+    const call = register ? api.registerDeclaration : api.validateDeclaration
+    if (!call) return
+    let body: DeclarationBody
+    try {
+      const parsed: unknown = JSON.parse(draft)
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('one JSON object')
+      body = parsed as DeclarationBody
+    } catch (caught) {
+      setError(`A declaration body must be one JSON object: ${messageOf(caught, 'unreadable JSON')}`)
+      return
+    }
+    setBusy(register ? 'register' : 'validate'); setError(null); setRegistered(null)
+    try {
+      const next = await call(body)
+      if (register && next.registered) { setRegistered(next); onRegistered?.() } else setVerdict(next)
+    } catch (caught) {
+      // A refused registration answers with its own verdict document, not only a code.
+      if (caught instanceof ResearchRequestError) setVerdict({ usable: false, code: caught.code, message: caught.message, declaration: null, capability: null, registered: false })
+      else setError(messageOf(caught, 'The host could not read this declaration request.'))
+    } finally { setBusy(null) }
+  }
+
+  const shown = registered ?? verdict
+  // Read the identity once, outside the JSX, so a nested field is a named string.
+  const capability = shown?.usable ? shown.capability : null
+  const identity: Record<string, unknown> = capability?.identity ?? {}
+  const declaredRule = typeof identity.declared_rule === 'string' ? identity.declared_rule : null
+  const declaredConstraints = identity.validator_constraints
+  const declaration = shown?.usable ? shown.declaration : null
+  return <div className="declaration-workbench">
+    <h3>{heading}</h3>
+    <p className="muted">{note}</p>
+    <label htmlFor={`${prefix}-declaration-body`}>Declaration body (JSON)</label>
+    <textarea id={`${prefix}-declaration-body`} rows={10} spellCheck={false} value={draft} disabled={busy !== null}
+      onChange={event => { setDraft(event.target.value); setVerdict(null); setRegistered(null); setError(null) }} />
+    <div className="actions">
+      <button type="button" disabled={busy !== null || !draft.trim() || !api.validateDeclaration} onClick={() => { void submit(false) }}>{busy === 'validate' ? 'Verifying…' : 'Verify declaration'}</button>
+      {verdict?.usable && !registered && api.registerDeclaration && <button type="button" className="primary" disabled={busy !== null} onClick={() => { void submit(true) }}>{busy === 'register' ? 'Registering…' : registerLabel}</button>}
+    </div>
+    {shown && <section className={shown.usable ? 'validated' : 'notice error'} aria-label="Declaration verdict">
+      <strong>{shown.usable ? (shown.registered ? 'Registered by the host' : 'Verified by the host · not installed') : 'Refused by the host'}</strong>
+      <span>{shown.usable
+        ? 'Nothing is installed, selected or run until you register it explicitly. Registration is add-only and never overwrites an existing identity.'
+        : `${shown.code ?? 'declaration_rejected'}: ${shown.message ?? 'the host refused this declaration'}`}</span>
+      {declaration && <small>{declaration.declaration_id} · {declaration.kind} · {declaration.package_version} · {declaration.artifact_digest?.slice(0, 24) ?? ''}…</small>}
+    </section>}
+    {capability && <dl className="summary-list">
+      <div><dt>Wraps</dt><dd>{String(identity.wraps ?? 'A host primitive')}</dd></div>
+      <div><dt>Grants</dt><dd>{capability.effects.granted.join(', ') || 'No effect beyond local compute'}</dd></div>
+      {declaredRule !== null && <div><dt>Declared rule</dt><dd>{declaredRule}</dd></div>}
+      {declaredConstraints !== undefined && <div><dt>Declared constraints</dt><dd>{JSON.stringify(declaredConstraints)}</dd></div>}
+    </dl>}
+    {error && <p className="notice error">{error}</p>}
+  </div>
+}
+
+function DeclarationCatalogPanel({ api }: { api: ApiAdapter }) {
+  const [catalog, setCatalog] = useState<DeclarationCatalog | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const request = api.listDeclarations
+  const load = useCallback(async () => {
+    if (!request) return
+    try { setCatalog(await request()); setError(null) }
+    catch (caught) { setError(messageOf(caught, 'Registered declarations are unavailable.')) }
+  }, [request])
+  // The first read is dispatched here and settles asynchronously; this effect
+  // installs no state of its own. Every later read is an explicit action: the
+  // refresh after a registration below.
+  useEffect(() => {
+    if (!request) return
+    let active = true
+    request()
+      .then(items => { if (active) { setCatalog(items); setError(null) } })
+      .catch(caught => { if (active) setError(messageOf(caught, 'Registered declarations are unavailable.')) })
+    return () => { active = false }
+  }, [request])
+  if (!request || !api.validateDeclaration) return null
+  return <div className="declaration-catalog">
+    <p className="muted">A declaration is bounded data: it names one already-authorized host primitive and fixes a preset for it. It is never imported or evaluated, it can only make a run stricter, and only your explicit registration installs one.</p>
+    {catalog && <dl className="summary-list">
+      <div><dt>Supported kinds</dt><dd>{catalog.supported_kinds.join(', ')}</dd></div>
+      <div><dt>Validator constraints</dt><dd>{catalog.validator_constraints.join(', ')}</dd></div>
+      <div><dt>Registered here</dt><dd>{catalog.declarations.length}{catalog.declaration_root_configured ? '' : ' · this service has no declaration store'}</dd></div>
+    </dl>}
+    {catalog?.declarations.length === 0 && <p className="muted">No declaration is registered in this workspace yet.</p>}
+    <ul className="job-list">{catalog?.declarations.map(item => <li className="job-card" key={item.declaration_id}>
+      <div className="job-card-title"><strong>{item.declaration_id}</strong><span className={`status status-${item.usable ? 'succeeded' : 'failed'}`}>{item.usable ? 'usable' : 'refused'}</span></div>
+      <small>{item.kind} · {item.package_version} · {item.title}</small>
+      <small>{item.usable
+        ? `${item.capability ? String(item.capability.identity.wraps ?? '') : ''} · ${item.capability ? item.capability.effects.granted.join(', ') : ''}`
+        : (item.reason ? `${item.reason.code}: ${item.reason.message}` : 'not usable in this catalog')}</small>
+      <small>{item.artifact_digest}</small>
+    </li>)}</ul>
+    {error && <p className="notice error">{error}</p>}
+    <DeclarationWorkbench api={api} prefix="register" heading="Register one declaration" registerLabel="Register this declaration"
+      note="Paste a body you wrote or one a model proposed to you. The host verifies it first; only the click below stores it, and a body the host refuses is never installed."
+      onRegistered={() => { void load() }} />
+  </div>
+}
+
+/** One declaration the model drafted: verified evidence, never an installation. */
+function DeclarationDraftPanel({ api, draft }: { api: ApiAdapter; draft: DeclarationVerdict }) {
+  if (draft.usable !== true) return <section className="panel" aria-label="Declaration proposal">
+    <header><h2>Declaration proposal</h2><span>Refused by the host</span></header>
+    <p className="muted">The model proposed a declaration this host refused, so there is nothing here to install. {draft.code ?? 'declaration_rejected'}: {draft.message ?? 'the host refused it'}</p>
+  </section>
+  return <section className="panel" aria-label="Declaration proposal">
+    <header><h2>Declaration proposal</h2><span>Host-verified draft</span></header>
+    <p className="muted">The model drafted this declaration and the host verified it against its own primitives. It is evidence for you to read: nothing was installed, selected, replaced or run, and the model has no path to registering it. Registration is the explicit click below, it is add-only, and it never overwrites an existing identity.</p>
+    <DeclarationWorkbench key={draft.declaration?.artifact_digest ?? 'draft'} api={api} initial={draft.declaration} initialVerdict={draft} prefix="draft" heading="Proposed declaration body" registerLabel="Register this declaration"
+      note="Registering stores this exact verified body in the workspace declaration store; it then appears in the catalog as one more selectable capability." />
+  </section>
+}
+
+/** Controlled upload: bounded preview first, then one explicitly policied version. */
+function DataUploadPanel({ api }: { api: ApiAdapter }) {
+  const [content, setContent] = useState('')
+  const [fileName, setFileName] = useState('')
+  const [policy, setPolicy] = useState('')
+  const [latency, setLatency] = useState('0')
+  const [sourceReference, setSourceReference] = useState('')
+  const [licenseReference, setLicenseReference] = useState('')
+  const [preview, setPreview] = useState<UploadPreview | null>(null)
+  const [published, setPublished] = useState<UploadVersion | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<'preview' | 'publish' | null>(null)
+  const previewUpload = api.previewUpload
+
+  const reset = () => { setPreview(null); setPublished(null); setError(null) }
+  const tooLarge = content.length > MAX_UPLOAD_CHARACTERS
+
+  const run = async (kind: 'preview' | 'publish') => {
+    if (busy || !content || tooLarge) return
+    setBusy(kind); setError(null)
+    try {
+      if (kind === 'preview') {
+        if (!previewUpload) return
+        setPublished(null); setPreview(await previewUpload(content, fileName || undefined))
+        return
+      }
+      if (!api.publishUpload) return
+      const version = await api.publishUpload({
+        content,
+        ...(fileName ? { file_name: fileName } : {}),
+        ...(sourceReference ? { source_reference: sourceReference } : {}),
+        ...(licenseReference ? { license_reference: licenseReference } : {}),
+        availability_policy: policy,
+        ...(policy === AVAILABILITY_SIMULATED ? { latency_seconds: Number(latency) } : {}),
+      })
+      setPreview(null); setPublished(version)
+    } catch (caught) { setError(messageOf(caught, 'The host refused this upload.')) }
+    finally { setBusy(null) }
+  }
+
+  if (!previewUpload && !api.publishUpload) return null
+  const columns = preview ? (preview.header.length ? preview.header : Object.keys(preview.rows[0] ?? {}).filter(name => name !== 'record_number')) : []
+  return <div className="upload-panel">
+    <p className="muted">An uploaded file is decoded by the same strict Phase 1 OHLCV decoder the read-only registered root uses, and published as one immutable version. There is no general column mapper: only that fixed 15-column UTC interval profile is accepted, and its own raw units are read as they are rather than converted.</p>
+    <label htmlFor="upload-file">CSV file</label>
+    <input id="upload-file" type="file" accept=".csv,text/csv" disabled={busy !== null} onChange={event => {
+      const file = event.target.files?.[0]
+      if (!file) return
+      setFileName(file.name); reset()
+      void file.text().then(value => setContent(value)).catch(() => setError('The selected file could not be read in this browser.'))
+    }} />
+    <label htmlFor="upload-content">CSV content</label>
+    <textarea id="upload-content" rows={6} spellCheck={false} value={content} disabled={busy !== null}
+      onChange={event => { setContent(event.target.value); reset() }} />
+    {tooLarge && <p className="notice error">This content is above the {MAX_UPLOAD_CHARACTERS}-character ceiling this host accepts; it would be refused before anything is parsed.</p>}
+    <div className="parameter-grid">
+      <div><label htmlFor="upload-source">Source reference (your assertion)</label><input id="upload-source" maxLength={300} value={sourceReference} disabled={busy !== null} onChange={event => { setSourceReference(event.target.value); setPublished(null) }} /></div>
+      <div><label htmlFor="upload-license">Licence reference</label><input id="upload-license" maxLength={300} value={licenseReference} disabled={busy !== null} onChange={event => { setLicenseReference(event.target.value); setPublished(null) }} /></div>
+      <div><label htmlFor="upload-policy">Availability policy</label>
+        <select id="upload-policy" value={policy} disabled={busy !== null} onChange={event => { setPolicy(event.target.value); setPublished(null); setError(null) }}>
+          <option value="">Choose explicitly…</option>
+          <option value={AVAILABILITY_PROVIDED}>Provided in the capture (uploader assertion)</option>
+          <option value={AVAILABILITY_SIMULATED}>Simulated: interval end + latency</option>
+        </select></div>
+      {policy === AVAILABILITY_SIMULATED && <div><label htmlFor="upload-latency">Simulated latency (seconds)</label><input id="upload-latency" inputMode="numeric" value={latency} disabled={busy !== null} onChange={event => { setLatency(event.target.value); setPublished(null) }} /></div>}
+    </div>
+    <p className="muted">There is no default policy: an upload that does not state how the capture became available is refused rather than recorded as if you had asserted it. Neither policy is ever reported as verified point-in-time availability, and the source and licence strings are your assertion, not a legal verification.</p>
+    <div className="actions">
+      <button type="button" disabled={busy !== null || !content || tooLarge || !previewUpload} onClick={() => { void run('preview') }}>{busy === 'preview' ? 'Previewing…' : 'Preview sample'}</button>
+      <button type="button" className="primary" disabled={busy !== null || !content || tooLarge || !policy || !api.publishUpload} onClick={() => { void run('publish') }}>{busy === 'publish' ? 'Publishing…' : 'Publish version'}</button>
+    </div>
+    {error && <p className="notice error">{error}</p>}
+    {preview && <section className="upload-preview" aria-label="Upload preview">
+      <dl className="summary-list">
+        <div><dt>Bytes / profile</dt><dd>{preview.byte_count} · {preview.profile}</dd></div>
+        <div><dt>Sampled rows</dt><dd>{preview.row_count_sampled}{preview.truncated ? ' · sample truncated' : ''}</dd></div>
+        <div><dt>Header</dt><dd>{preview.header_ok ? 'Matches the strict profile' : `Expected: ${preview.expected_header.join(', ')}`}</dd></div>
+        <div><dt>Full validation</dt><dd>{preview.full_validation}{preview.valid ? ' · verified' : ''}</dd></div>
+      </dl>
+      {preview.first_error && <p className="notice error">{preview.first_error.code}: {preview.first_error.message}{preview.first_error.record_number ? ` · CSV record ${preview.first_error.record_number}` : ''}{preview.first_error.field_name ? ` · field ${preview.first_error.field_name}` : ''}</p>}
+      {preview.quality && <dl className="summary-list">
+        <div><dt>Bars / revisions</dt><dd>{preview.quality.bar_count} / {preview.quality.revision_count}</dd></div>
+        <div><dt>Observed gaps</dt><dd>{preview.quality.observed_gap_count}{preview.quality.largest_gap_seconds ? ` · largest ${preview.quality.largest_gap_seconds}s` : ''}</dd></div>
+        <div><dt>Bar coverage (UTC)</dt><dd>{preview.quality.bar_start_utc} — {preview.quality.bar_end_utc}</dd></div>
+        <div><dt>Bar durations</dt><dd>{preview.quality.bar_durations_seconds.map(value => `${value}s`).join(', ') || 'Unavailable'}</dd></div>
+      </dl>}
+      {columns.length > 0 && preview.rows.length > 0 && <table><thead><tr><th>Record</th>{columns.map(name => <th key={name}>{name}</th>)}</tr></thead>
+        <tbody>{preview.rows.map(row => <tr key={String(row.record_number)}><th scope="row">{String(row.record_number)}</th>{columns.map(name => <td key={name}>{String(row[name] ?? '')}</td>)}</tr>)}</tbody></table>}
+      {preview.limitations.length > 0 && <details><summary>What a preview cannot show</summary>
+        <ul className="assumption-list">{preview.limitations.map(item => <li key={item}>{item}</li>)}</ul>
+      </details>}
+    </section>}
+    {published && <section className="upload-version" aria-label="Published dataset version">
+      <dl className="summary-list">
+        <div><dt>Dataset version</dt><dd>{published.dataset_id} · v{published.version} · {published.published_at}</dd></div>
+        <div><dt>Instrument / records</dt><dd>{published.instrument.venue}:{published.instrument.symbol} · {published.record_count}</dd></div>
+        <div><dt>Availability policy</dt><dd>{published.availability_policy.id} · {published.availability_policy.evidence} · point-in-time verified: {String(published.availability_policy.pit_verified)}</dd></div>
+        <div><dt>Source assertion</dt><dd>{published.source.reference ?? 'No reference given'} · asserted by {published.source.declared_by}, not legally verified</dd></div>
+        <div><dt>Capture SHA-256</dt><dd>{published.capture_sha256}</dd></div>
+        <div><dt>Canonical data SHA-256</dt><dd>{published.data_sha256}</dd></div>
+        <div><dt>Raw source SHA-256</dt><dd>{published.source_bytes_sha256} · {published.source_byte_count} bytes retained as provenance only</dd></div>
+        <div><dt>Version manifest SHA-256</dt><dd>{published.manifest_sha256}</dd></div>
+      </dl>
+      <p className="muted">This version is now one entry in the dataset catalog. It is usable as research data only when you explicitly select its Data capability: that selection is what freezes the version's evidence for a run, and a direct backtest or batch over an uploaded version carries no such binding and is refused before anything is prepared. Research binds the canonical capture digest; an edited manifest fails that binding before any run is dispatched, and the retained raw bytes only ever identify where the version came from.</p>
+      {published.limitations.length > 0 && <ul className="assumption-list">{published.limitations.map(item => <li key={item}>{item}</li>)}</ul>}
+    </section>}
+  </div>
+}
+
 function ResearchJob({ api, jobId, job, holdouts }: { api: ApiAdapter; jobId: string; job: BacktestJob | null; holdouts: ChronologicalHoldout[] }) {
   if (!job) return <li className="job-card"><small>{jobId} · persisted job record unavailable</small></li>
   const holdoutForJob = holdouts.filter(item => item.source_job_id === job.job_id)
@@ -171,6 +629,7 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
   const navigate = useNavigate()
   const [tasks, setTasks] = useState<ResearchTask[] | null>(null)
   const [idea, setIdea] = useState('')
+  const [selection, setSelection] = useState<Partial<Record<LayerName, string>>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const unavailable = !api.listResearchTasks
@@ -195,7 +654,10 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
     const value = idea.trim()
     if (!value || busyRef.current || !api.createResearchTask) return
     busyRef.current = true; setBusy(true); setError(null)
-    try { navigate(`/research/${(await api.createResearchTask(value)).task_id}`) }
+    // Only the layers the user actually selected are sent; an empty selection
+    // leaves the request exactly as it was and keeps the host default route.
+    const chosen = selectionOf(selection)
+    try { navigate(`/research/${(await api.createResearchTask(value, Object.keys(chosen).length ? chosen : undefined)).task_id}`) }
     catch (caught) {
       const message = caught instanceof ResearchRequestError && caught.code === 'research_task_exists'
         ? 'An active research task already exists for this idea. Open it below instead of submitting it again.'
@@ -216,7 +678,11 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
       <textarea id="research-idea" maxLength={4000} rows={3} value={idea} disabled={busy}
         onChange={event => setIdea(event.target.value)} />
       <p className="muted">The idea is drafted into a spec that can only reference the registered strategy, instrument and scenario catalog. Confirmation is a separate, explicit step.</p>
+      {api.pluginCatalog && <Disclosure title="Capability selection" subtitle="Optional · one exact version per layer">
+        <CapabilitySelector api={api} values={selection} change={setSelection} disabled={busy} />
+      </Disclosure>}
       <div className="actions"><button className="primary" disabled={busy || !idea.trim() || unavailable} onClick={() => { void create() }}>{busy ? 'Creating draft…' : 'Create draft'}</button></div>
+      <p className="muted">Creating the draft records the selected capabilities on it; the host verifies that exact identity again and freezes it when you confirm. No selection means the host default route, and the model can never change it.</p>
     </section>
     <section className="panel research-history">
       <header><h2>Persisted research tasks</h2><span>Refresh-safe list</span></header>
@@ -234,6 +700,16 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
         </li>
       })}</ul>
     </section></div>
+    {(api.previewUpload || api.publishUpload || api.listDeclarations) && <div className="research-workspace-tools">
+      {(api.previewUpload || api.publishUpload) && <section className="panel" aria-label="Controlled dataset upload">
+        <header><h2>Controlled data upload</h2><span>Preview, then publish one version</span></header>
+        <DataUploadPanel api={api} />
+      </section>}
+      {api.listDeclarations && <section className="panel" aria-label="Registered declarations">
+        <header><h2>Declarations</h2><span>Verified data, installed only by you</span></header>
+        <DeclarationCatalogPanel api={api} />
+      </section>}
+    </div>}
     <div className="research-tools"><Link to="/backtests">Backtests</Link><Link to="/batches/new">Run batch</Link><Link to="/holdouts">Chronological holdouts</Link></div>
   </>
 }
@@ -365,6 +841,12 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
         ? <p className="muted">Confirming registers this exact spec and starts one real installed-engine backtest with the frozen parameters. It creates no orders and no Paper session.</p>
         : <p className="muted">This draft can no longer be confirmed: the task is {STATUS_LABELS[task.status]}.</p>)}
     </section>}
+
+    {confirmable && api.pluginCatalog && api.editResearchSpec && <SelectionEditor api={api} task={task} />}
+
+    {task.declaration_draft && <DeclarationDraftPanel api={api} draft={task.declaration_draft} />}
+
+    <SelectionEvidence task={task} />
 
     {task.jobs.length > 0 && <section className="panel" aria-label="Research backtests">
       <header><h2>Backtests started by this task</h2><span>Next: existing chronological holdout, then evaluated candidate</span></header>

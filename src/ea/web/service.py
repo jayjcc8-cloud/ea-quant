@@ -18,7 +18,9 @@ from typing import Any, cast
 from uuid import uuid4
 
 from ea.core import RunId
-from ea.plugin.selection import BINDING_SCHEMA
+from ea.plugin.declarative import DeclarationStoreV1
+from ea.plugin.manifest import ManifestError
+from ea.plugin.selection import BINDING_SCHEMA, PluginBindingV1
 from ea.product import (
     BacktestRunFailure,
     BacktestScenarioError,
@@ -43,6 +45,11 @@ from ea.strategy.registry import project_parameters
 from ea.web import candidates
 from ea.web.datasets import LocalResearchDatasetRegistryV1
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
+from ea.web.uploads import (
+    UPLOAD_VERSION_SCHEMA,
+    ControlledUploadStoreV1,
+    LocalResearchDatasetCatalogV1,
+)
 
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 _JOB_STATES = frozenset({"accepted", "running", "succeeded", "failed", "interrupted"})
@@ -381,6 +388,10 @@ class JobRecord:
     # on records written before capability binding existed, so those stay
     # readable and byte-identical.
     plugin_binding: dict[str, object] | None = None
+    # The published version of an uploaded input this run read, including its
+    # declared availability policy and source assertion. Additive and absent for
+    # a registered input, which has no published version to name.
+    dataset_version: dict[str, object] | None = None
 
     def document(self, *, presentation: bool = False) -> dict[str, object]:
         document: dict[str, object] = {
@@ -430,6 +441,8 @@ class JobRecord:
             )
         if self.plugin_binding is not None:
             document["plugin_binding"] = self.plugin_binding
+        if self.dataset_version is not None:
+            document["dataset_version"] = self.dataset_version
         if presentation and self.input_snapshot_bytes is not None:
             strategy = json.loads(self.input_snapshot_bytes)["scenario"]["strategy"]
             entry = ResearchStrategyCatalogV1(
@@ -583,6 +596,16 @@ def _decode_job(payload: bytes) -> JobRecord:
             or type(plugin_binding.get("components")) is not list
         ):
             raise ValueError
+        # Optional and additive, same rule: a run over a registered input has no
+        # published version, and one over an uploaded version must carry it.
+        dataset_version = document.get("dataset_version")
+        if dataset_version is not None and (
+            type(dataset_version) is not dict
+            or dataset_version.get("schema") != UPLOAD_VERSION_SCHEMA
+            or type(dataset_version.get("dataset_id")) is not str
+            or type(dataset_version.get("availability_policy")) is not dict
+        ):
+            raise ValueError
         return JobRecord(
             job_id=document["job_id"],
             request_id=document["request_id"],
@@ -603,6 +626,7 @@ def _decode_job(payload: bytes) -> JobRecord:
             error_code=document.get("error_code"),
             message=document.get("message"),
             plugin_binding=plugin_binding,
+            dataset_version=dataset_version,
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         raise WebBoundaryError("workspace job index is invalid") from None
@@ -736,6 +760,19 @@ class WebService:
         ):
             if not _contained(directory, self.workspace):
                 raise WebBoundaryError(f"{label} resolves outside workspace")
+        # The second data entrance and the user declaration store are both
+        # workspace-local, so a restart finds exactly what was published and
+        # registered before it.
+        try:
+            self.uploads = ControlledUploadStoreV1(self.workspace)
+            self.declarations = DeclarationStoreV1(self.workspace)
+        except (OSError, ValueError):
+            raise WebBoundaryError("workspace upload store is unavailable") from None
+        if not _contained(self.uploads.root, self.workspace) or not _contained(
+            self.declarations.root, self.workspace
+        ):
+            raise WebBoundaryError("workspace upload store resolves outside workspace")
+        self.dataset_catalog = LocalResearchDatasetCatalogV1(self.datasets, self.uploads)
         self._lease = WorkspaceLease(self.workspace)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ea-local-web")
         self._lock = threading.RLock()
@@ -950,10 +987,10 @@ class WebService:
     ) -> LoadedBacktestScenario:
         if dataset_id is None:
             return scenario
-        if self.datasets is None:
+        if self.datasets is None and not self.uploads.has(dataset_id):
             raise WebBoundaryError("no data root is configured")
         try:
-            path, dataset = self.datasets.load(dataset_id)
+            path, dataset = self.dataset_catalog.load(dataset_id)
             return rebind_research_dataset(
                 scenario, data_path=path, dataset=dataset, dataset_id=dataset_id
             )
@@ -964,14 +1001,56 @@ class WebService:
         if scenario.research_input_bytes is None:
             return
         evidence = json.loads(scenario.research_input_bytes)
-        if self.datasets is None:
+        if self.datasets is None and not self.uploads.has(evidence["dataset_id"]):
             raise InputChangedError("dataset is unavailable")
         try:
-            _, current = self.datasets.load(evidence["dataset_id"])
+            _, current = self.dataset_catalog.load(evidence["dataset_id"])
             if current.source_bytes_sha256 != scenario.dataset.source_bytes_sha256:
                 raise ValueError
         except (OSError, ValueError):
             raise InputChangedError("dataset changed; validate it again") from None
+
+    def _dataset_version(self, dataset_id: object) -> dict[str, object] | None:
+        """The published version of one uploaded input, if it is one."""
+        if type(dataset_id) is not str:
+            return None
+        return self.uploads.manifest(dataset_id)
+
+    def _require_upload_binding(
+        self, input_identity: dict[str, object], plugin_binding: dict[str, object] | None
+    ) -> None:
+        """An uploaded input is usable only through the data capability bound to it.
+
+        A registered input keeps the existing default path: it carries no version
+        evidence to pin, so no binding is required. An uploaded version does, and
+        the data component of the plugin binding is the only record that freezes
+        that evidence alongside the accepted input. A caller that names an upload
+        without that binding — the direct backtest and batch paths — is refused
+        here, before any materialization, reservation or engine effect.
+        """
+        dataset_id = input_identity.get("dataset_id")
+        if type(dataset_id) is not str or not self.uploads.has(dataset_id):
+            return
+        if plugin_binding is None:
+            raise InputChangedError(
+                "an uploaded dataset is usable only through a bound research recipe; "
+                "this request carries no capability binding"
+            )
+        try:
+            binding = PluginBindingV1.decode(plugin_binding)
+        except ManifestError:
+            raise InputChangedError(
+                "the capability binding on this request is not readable"
+            ) from None
+        data = binding.component("data")
+        if data is None or data.plugin_id != f"ea.builtin.data.{dataset_id}":
+            raise InputChangedError("the bound data capability does not name this uploaded dataset")
+        evidence = data.identity.get("version_evidence_sha256")
+        if evidence != self.uploads.version_evidence_digest(dataset_id):
+            raise InputChangedError(
+                "the bound data capability does not match this version's evidence; "
+                "re-select the dataset and confirm again"
+            )
 
     def validate_scenario(
         self,
@@ -1105,6 +1184,7 @@ class WebService:
         plugin_binding: dict[str, object] | None = None,
     ) -> tuple[JobRecord, bool]:
         with self._lock:
+            self._require_upload_binding(input_identity, plugin_binding)
             prepared = self._prepare_job(
                 scenario_id=scenario_id,
                 input_identity=input_identity,
@@ -1139,6 +1219,7 @@ class WebService:
                 input_sha256=prepared.input_sha256,
                 attempt_id=attempt_id.value,
                 plugin_binding=plugin_binding,
+                dataset_version=self._dataset_version(input_identity.get("dataset_id")),
             )
             self._store(record)
             self._active = record.job_id
@@ -1158,6 +1239,10 @@ class WebService:
                 raise BacktestScenarioError("batch run count must be between 2 and 10")
             if self._active is not None:
                 raise ServiceBusyError("one local backtest or batch is already active")
+            # A batch carries no capability binding at all, so an uploaded input
+            # has nothing to freeze its provenance: this path is refused before any
+            # batch member is prepared, materialized or reserved.
+            self._require_upload_binding(input_identity, None)
             prepared: list[PreparedJob] = []
             combinations: set[bytes] = set()
             captured = self._bind_dataset(
@@ -1201,6 +1286,7 @@ class WebService:
                         input_snapshot_bytes=item.input_snapshot_bytes,
                         input_sha256=item.input_sha256,
                         attempt_id=RunId(str(uuid4())).value,
+                        dataset_version=self._dataset_version(input_identity.get("dataset_id")),
                     )
                     self._store(record)
                     records.append(record)

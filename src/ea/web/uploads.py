@@ -1,0 +1,1068 @@
+"""Controlled UTF-8 CSV upload staging and immutable dataset version publication.
+
+This is the second data entrance; the registered read-only ``--data-root`` stays
+the first. It adds no second decoder, engine or catalog: an uploaded file passes
+the same strict Phase 1 OHLCV decoder, and a published upload becomes one more
+entry in the same dataset catalog the registered root is listed through.
+
+Two things are kept deliberately separate and both are recorded on the version:
+
+* the raw bytes the user supplied, whose digest is provenance only, and
+* the canonical capture the engine actually reads, whose semantic fingerprint is
+  the economic identity.
+
+The availability policy is part of the published version, never a hidden default.
+``provided`` keeps the capture's own ``available_at`` column and records it as an
+uploader assertion; ``simulated`` replaces that column with ``interval_end +
+latency`` and says so. Neither is ever reported as verified point-in-time
+availability.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import os
+import re
+import stat
+import threading
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from pathlib import Path
+from typing import Any, cast
+from uuid import uuid4
+
+from ea.data.historical import (
+    _HEADER as STRICT_HEADER,
+)
+from ea.data.historical import (
+    PHASE1_OHLCV_PROFILE,
+    HistoricalMarketDataError,
+    Phase1HistoricalDataset,
+    read_full_capture_phase1_ohlcv_csv,
+)
+from ea.web.datasets import (
+    DATASET_ID_PATTERN,
+    LocalResearchDatasetRegistryV1,
+    _coverage,
+)
+
+UPLOAD_PREVIEW_SCHEMA = "ea.local-upload-preview.v1"
+UPLOAD_VERSION_SCHEMA = "ea.local-dataset-version.v1"
+DATASET_CATALOG_SCHEMA = "ea.local-dataset-catalog.v1"
+VERSION_EVIDENCE_SCHEMA = "ea.local-dataset-version-evidence.v1"
+
+AVAILABILITY_PROVIDED = "ea.availability.provided-in-capture.v1"
+AVAILABILITY_SIMULATED = "ea.availability.simulated-bar-end-plus-latency.v1"
+
+# The strict decoder itself accepts up to PHASE1_OHLCV_MAX_BYTES (64 MiB) and
+# 1_000_001 records. This store keeps its own, deliberately smaller ceiling: one
+# HTTP request must not be able to materialize a million decoded records, and the
+# limit is enforced before the decoder allocates anything.
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024
+MAX_UPLOAD_RECORDS = 100_000
+PREVIEW_SAMPLE_ROWS = 20
+PREVIEW_SAMPLE_BYTES = 64 * 1024
+PREVIEW_FULL_DECODE_BYTES = 4 * 1024 * 1024
+MAX_PUBLISHED_VERSIONS = 32
+MAX_STORED_BYTES = 384 * 1024 * 1024
+MAX_NAME_BYTES = 128
+MAX_REFERENCE_BYTES = 300
+MAX_LATENCY_SECONDS = 366 * 24 * 3600
+MAX_MANIFEST_BYTES = 64 * 1024
+MAX_SWEEP_ENTRIES = 4096
+
+_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+_REFERENCE_PATTERN = re.compile(r"[\x20-\x7e]{0,300}\Z")
+_HOST_FILE_PATTERN = re.compile(r"[0-9a-f]{32}\.csv\Z")
+_DIRECTORY_NAMES = ("staging", "raw", "captures", "versions")
+_TIME_SEMANTICS = {
+    "timestamp_role": "interval",
+    "timezone": "UTC",
+    "bar_boundary": "explicit-interval-start-end",
+}
+
+_POLICY_LIMITATIONS = (
+    "Availability is not verified point-in-time evidence; asserted and simulated values are "
+    "never presented as PIT verified.",
+    "The raw upload is provenance only; the canonical capture is the identity research binds.",
+    "No row is dropped, filled, interpolated, resampled or corrected by the host.",
+    "The declared source and licence are the uploader's assertion, not a legal verification.",
+    "A successful preview of a bounded sample is not evidence that the whole file is valid.",
+    "Only the fixed strict UTC 15-column OHLCV profile is accepted. The host has no general "
+    "column mapper, and it reads the profile's own raw units rather than converting them.",
+)
+
+
+class UploadError(ValueError):
+    """One controlled-upload failure with a stable code and bounded location."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        record_number: int | None = None,
+        field_name: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.record_number = record_number
+        self.field_name = field_name
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "record_number": self.record_number,
+            "field_name": self.field_name,
+        }
+
+
+def _strict_failure(error: HistoricalMarketDataError) -> UploadError:
+    """Reuse the strict decoder's own vocabulary instead of inventing a second one."""
+    return UploadError(
+        error.code.value,
+        "strict OHLCV validation failed",
+        record_number=error.record_number,
+        field_name=error.field_name,
+    )
+
+
+def _bounded_reference(value: object, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or _REFERENCE_PATTERN.fullmatch(value) is None:
+        raise UploadError(
+            "upload_metadata",
+            f"{field} must be at most {MAX_REFERENCE_BYTES} printable characters",
+        )
+    return value
+
+
+def _bounded_file_name(value: object) -> str | None:
+    """One client-supplied name kept as a display hint only; never used as a path."""
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or not 1 <= len(value.encode("utf-8")) <= MAX_NAME_BYTES
+        or "/" in value
+        or "\\" in value
+        or value in {".", ".."}
+        or any(ord(character) < 32 or ord(character) > 126 for character in value)
+    ):
+        raise UploadError("upload_metadata", "file_name must be one bounded plain file name")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class UploadPreviewV1:
+    """One bounded sample plus whatever the host could honestly conclude from it."""
+
+    byte_count: int
+    header: tuple[str, ...]
+    header_ok: bool
+    rows: tuple[dict[str, Any], ...]
+    truncated: bool
+    full_validation: str
+    valid: bool
+    quality: dict[str, Any] | None
+    first_error: dict[str, Any] | None
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "schema": UPLOAD_PREVIEW_SCHEMA,
+            "profile": PHASE1_OHLCV_PROFILE,
+            "byte_count": self.byte_count,
+            "expected_header": list(STRICT_HEADER),
+            "header": list(self.header),
+            "header_ok": self.header_ok,
+            "rows": list(self.rows),
+            "row_count_sampled": len(self.rows),
+            "truncated": self.truncated,
+            "full_validation": self.full_validation,
+            "valid": self.valid,
+            "quality": self.quality,
+            "first_error": self.first_error,
+            "limitations": list(_POLICY_LIMITATIONS),
+        }
+
+
+def _sample_rows(
+    content: bytes,
+) -> tuple[tuple[str, ...], tuple[dict[str, Any], ...], bool, dict[str, Any] | None]:
+    """Bounded structural sample; never claims the whole file is valid."""
+    sample = content[:PREVIEW_SAMPLE_BYTES]
+    truncated = len(content) > PREVIEW_SAMPLE_BYTES
+    try:
+        text = sample.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return (
+            (),
+            (),
+            truncated,
+            UploadError("invalid_encoding", "the upload is not strict UTF-8").document(),
+        )
+    if "\x00" in text:
+        return (
+            (),
+            (),
+            truncated,
+            UploadError("invalid_file_character", "the upload contains a NUL character").document(),
+        )
+    rows: list[list[str]] = []
+    try:
+        for row in csv.reader(io.StringIO(text, newline=""), dialect="excel", strict=True):
+            rows.append(row)
+            if len(rows) > PREVIEW_SAMPLE_ROWS + 1:
+                break
+    except csv.Error:
+        return (
+            (),
+            (),
+            truncated,
+            UploadError(
+                "malformed_csv",
+                "the sampled rows are not well-formed CSV",
+                record_number=len(rows) + 1,
+            ).document(),
+        )
+    if not rows:
+        return (), (), truncated, UploadError("empty_source", "the upload is empty").document()
+    header = tuple(rows[0])
+    data_rows = rows[1:]
+    if truncated and data_rows:
+        # The sample was cut mid-file, so its final row may itself be cut short;
+        # reporting that as a data defect would be a fabricated error.
+        data_rows = data_rows[:-1]
+    sampled: list[dict[str, Any]] = []
+    for number, row in enumerate(data_rows[:PREVIEW_SAMPLE_ROWS], start=2):
+        if len(row) != len(STRICT_HEADER):
+            return (
+                header,
+                tuple(sampled),
+                truncated,
+                UploadError(
+                    "invalid_record_shape",
+                    "the sampled row does not have the strict column count",
+                    record_number=number,
+                ).document(),
+            )
+        sampled.append(
+            {
+                "record_number": number,
+                **{name: row[index] for index, name in enumerate(STRICT_HEADER)},
+            }
+        )
+    return header, tuple(sampled), truncated, None
+
+
+def _rewrite_available_at(content: bytes, latency_seconds: int) -> bytes:
+    """Materialize the declared simulated policy as a strict-profile capture."""
+    reader = csv.reader(
+        io.StringIO(content.decode("utf-8"), newline=""), dialect="excel", strict=True
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, dialect="excel", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
+    latency = timedelta(seconds=latency_seconds)
+    for index, row in enumerate(reader):
+        if index == 0:
+            writer.writerow(row)
+            continue
+        interval_end = datetime.strptime(row[4], _DATETIME_FORMAT).replace(tzinfo=UTC)
+        rewritten = list(row)
+        rewritten[14] = (interval_end + latency).strftime(_DATETIME_FORMAT)
+        writer.writerow(rewritten)
+    return output.getvalue().encode("utf-8")
+
+
+def _open_workspace(workspace: Path) -> int:
+    """One nofollow descriptor for the workspace, before anything is written into it."""
+    if workspace.is_symlink():
+        raise UploadError("store_untrusted", "the upload workspace is not a real directory")
+    try:
+        workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        raise UploadError("store_untrusted", "the upload workspace could not be created") from None
+    if workspace.is_symlink() or not workspace.is_dir():
+        raise UploadError("store_untrusted", "the upload workspace is not a real directory")
+    try:
+        return os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise UploadError("store_untrusted", "the upload workspace could not be secured") from None
+
+
+def _open_child_directory(parent: int, name: str) -> int:
+    """Create and open one host-owned directory relative to an already-verified parent.
+
+    The parent descriptor, not a path, is what the child is created and opened
+    against, and the child itself is opened with ``O_NOFOLLOW`` after a stat that
+    does not follow links. A symlinked or replaced child is refused here, before
+    any file in it is written, read or removed.
+    """
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    except OSError:
+        raise UploadError("store_untrusted", f"{name} could not be created") from None
+    try:
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode):
+            raise UploadError(
+                "store_untrusted",
+                f"{name} must be a real directory inside the upload workspace",
+            )
+        return os.open(
+            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent
+        )
+    except UploadError:
+        raise
+    except OSError:
+        raise UploadError("store_untrusted", f"{name} could not be secured") from None
+
+
+def _write_new(directory: int, name: str, payload: bytes) -> None:
+    """Create one immutable file inside a verified directory; an existing name is never
+    overwritten, and a symlinked name is never followed."""
+    descriptor = os.open(
+        name,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(name, dir_fd=directory)
+        raise
+
+
+def _read_bounded(directory: int, name: str, limit: int) -> bytes | None:
+    """Read one host-named regular file through a nofollow descriptor, or nothing."""
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        remaining = info.st_size
+        chunks: list[bytes] = []
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 1 << 20))
+            if not chunk:
+                return None
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _entry_size(directory: int, name: str) -> int | None:
+    try:
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except OSError:
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
+
+
+def _canonical_json(document: object) -> bytes:
+    return json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode("utf-8")
+
+
+def _validated_policy(value: object) -> dict[str, Any]:
+    """Re-read one availability policy under the closed schema that writes it.
+
+    The policy is metadata, so it is re-validated on every read: an edited manifest
+    cannot smuggle in a third policy, a latency that does not match its own
+    evidence string, or a claim of verified point-in-time availability.
+    """
+    keys = {"id", "version", "latency_seconds", "pit_verified", "evidence"}
+    if type(value) is not dict or set(value) != keys:
+        raise UploadError("upload_policy", "the availability policy is not the closed schema")
+    policy = cast("dict[str, Any]", value)
+    if policy["version"] != 1:
+        raise UploadError("upload_policy", "the availability policy version is not supported")
+    if policy["pit_verified"] is not False:
+        raise UploadError(
+            "upload_policy",
+            "this host never records an upload as verified point-in-time availability",
+        )
+    if policy["id"] == AVAILABILITY_PROVIDED:
+        if policy["latency_seconds"] is not None:
+            raise UploadError(
+                "upload_policy", "the provided availability policy does not take a latency"
+            )
+        if policy["evidence"] != "asserted-by-uploader":
+            raise UploadError(
+                "upload_policy", "the provided availability policy is an uploader assertion"
+            )
+        return policy
+    if policy["id"] == AVAILABILITY_SIMULATED:
+        latency = policy["latency_seconds"]
+        if (
+            type(latency) is not int
+            or isinstance(latency, bool)
+            or not 0 <= latency <= MAX_LATENCY_SECONDS
+        ):
+            raise UploadError(
+                "upload_policy",
+                "simulated availability requires an explicit latency in whole seconds",
+            )
+        if policy["evidence"] != f"host-simulated: interval_end + {latency}s":
+            raise UploadError(
+                "upload_policy", "the simulated availability evidence does not match its latency"
+            )
+        return policy
+    raise UploadError("upload_policy", "availability_policy must be one of the supported policies")
+
+
+def _policy_document(availability_policy: object, latency_seconds: object) -> dict[str, Any]:
+    """Resolve the one explicitly chosen availability policy.
+
+    There is no default policy and no default latency: a caller that does not say
+    how the capture became available is refused rather than recorded as if the
+    uploader had asserted it.
+    """
+    if availability_policy is None:
+        raise UploadError(
+            "upload_policy",
+            "availability_policy must be chosen explicitly; the host never assumes how an "
+            "uploaded capture became available",
+        )
+    if availability_policy == AVAILABILITY_PROVIDED:
+        if latency_seconds is not None:
+            # The provided-in-capture policy says the capture already carried its
+            # availability; a latency alongside it is a contradiction, not a hint.
+            raise UploadError(
+                "upload_policy",
+                "the provided-in-capture policy carries no latency; do not send one",
+            )
+        return _validated_policy(
+            {
+                "id": AVAILABILITY_PROVIDED,
+                "version": 1,
+                "latency_seconds": None,
+                "pit_verified": False,
+                "evidence": "asserted-by-uploader",
+            }
+        )
+    if availability_policy == AVAILABILITY_SIMULATED:
+        return _validated_policy(
+            {
+                "id": AVAILABILITY_SIMULATED,
+                "version": 1,
+                "latency_seconds": latency_seconds,
+                "pit_verified": False,
+                "evidence": f"host-simulated: interval_end + {latency_seconds}s",
+            }
+        )
+    raise UploadError("upload_policy", "availability_policy must be one of the supported policies")
+
+
+def evidence_digest(document: object) -> str:
+    """One canonical digest over one bounded data-version evidence document."""
+    return "sha256:" + sha256(_canonical_json(document)).hexdigest()
+
+
+def seal_version_manifest(document: dict[str, Any]) -> dict[str, Any]:
+    """One published version's own body, with its integrity digest filled in.
+
+    Like a plugin manifest, this proves the record is intact; it proves nothing
+    about the bytes it names, which the capture and raw digests do separately. An
+    out-of-band edit is detected rather than silently re-read as this version.
+    """
+    body = {key: value for key, value in document.items() if key != "manifest_sha256"}
+    return {**body, "manifest_sha256": evidence_digest(body)}
+
+
+def _manifest_is_intact(document: dict[str, Any]) -> bool:
+    digest = document.get("manifest_sha256")
+    return isinstance(digest, str) and digest == seal_version_manifest(document)["manifest_sha256"]
+
+
+def _version_evidence(
+    manifest: dict[str, Any], dataset_id: str, dataset: Phase1HistoricalDataset
+) -> dict[str, Any]:
+    """The bounded, canonical evidence one published upload version can prove."""
+    instrument = dataset.selection.events[0].payload.instrument
+    source = cast("dict[str, Any]", manifest.get("source"))
+    return {
+        "schema": VERSION_EVIDENCE_SCHEMA,
+        "dataset_id": dataset_id,
+        "origin": "upload",
+        "kind": "ohlcv",
+        "profile": dataset.profile,
+        "version": manifest["version"],
+        "published_at": manifest.get("published_at"),
+        "manifest_sha256": manifest.get("manifest_sha256"),
+        "capture_sha256": dataset.source_bytes_sha256.value,
+        "capture_byte_count": manifest.get("capture_byte_count"),
+        "data_sha256": dataset.selection.fingerprint.sha256.value,
+        "record_count": dataset.selection.fingerprint.record_count,
+        "source_bytes_sha256": manifest.get("source_bytes_sha256"),
+        "source_byte_count": manifest.get("source_byte_count"),
+        "source": {
+            "declared_by": "user",
+            "asserted": True,
+            "reference": source.get("reference"),
+            "file_name": source.get("file_name"),
+            "license_reference": source.get("license_reference"),
+        },
+        "instrument": {"venue": instrument.venue.code, "symbol": instrument.symbol},
+        "availability_policy": _validated_policy(manifest.get("availability_policy")),
+        "time_semantics": dict(_TIME_SEMANTICS),
+    }
+
+
+class ControlledUploadStoreV1:
+    """One workspace-local store of immutable, explicitly published dataset versions.
+
+    Every directory this store touches is opened once with ``O_NOFOLLOW`` relative
+    to its already-verified parent, and every later write, read and clean-up goes
+    through those descriptors rather than through a re-resolved path. A symlinked
+    or replaced workspace, store root or child directory is therefore refused
+    before anything is created, swept or written, and the store only ever removes
+    files whose names it generated itself. This is path anchoring, not an
+    operating-system sandbox: a hostile process with write access to the same
+    directories is outside what this store can defend.
+    """
+
+    def __init__(self, workspace: Path) -> None:
+        self.root = workspace / "uploads"
+        self._workspace_fd: int | None = None
+        self._root_fd: int | None = None
+        self._fds: dict[str, int] = {}
+        try:
+            self._workspace_fd = _open_workspace(workspace)
+            self._root_fd = _open_child_directory(self._workspace_fd, "uploads")
+            for name in _DIRECTORY_NAMES:
+                self._fds[name] = _open_child_directory(self._root_fd, name)
+        except BaseException:
+            self.close()
+            raise
+        self._lock = threading.RLock()
+        self._sweep_orphans()
+
+    def close(self) -> None:
+        """Release the anchored directory descriptors; no file is touched."""
+        descriptors = [*self._fds.values(), self._root_fd, self._workspace_fd]
+        self._fds = {}
+        self._root_fd = None
+        self._workspace_fd = None
+        for descriptor in descriptors:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+
+    def __del__(self) -> None:
+        with suppress(BaseException):
+            self.close()
+
+    @staticmethod
+    def _names(directory: int) -> list[str]:
+        try:
+            return os.listdir(directory)
+        except OSError:
+            return []
+
+    # -- staging helpers ----------------------------------------------------
+
+    def _decode_staged(self, payload: bytes) -> Phase1HistoricalDataset:
+        """Write one bounded staging file and run the strict decoder over it."""
+        directory = self._fds["staging"]
+        name = f"{uuid4().hex}.csv"
+        path = self.root / "staging" / name
+        try:
+            _write_new(directory, name, payload)
+            return read_full_capture_phase1_ohlcv_csv(path, directory_descriptor=directory)
+        finally:
+            with suppress(OSError):
+                os.unlink(name, dir_fd=directory)
+
+    def _sweep_orphans(self) -> None:
+        """Remove only this store's own unpublished files, and nothing else.
+
+        A file belongs to this store only when its name is one the store generates.
+        Anything else in these directories was put there by somebody else and is
+        left exactly where it is, as are every published version and its capture.
+        The number of entries examined per sweep is bounded.
+        """
+        versions = set(self._versions())
+        for name in ("staging", "raw", "captures"):
+            directory = self._fds[name]
+            for entry in sorted(self._names(directory))[:MAX_SWEEP_ENTRIES]:
+                if _HOST_FILE_PATTERN.fullmatch(entry) is None:
+                    continue
+                if name != "staging" and entry in versions:
+                    continue
+                with suppress(OSError):
+                    os.unlink(entry, dir_fd=directory)
+
+    def _check_request(self, content: object) -> bytes:
+        if type(content) is not bytes:
+            raise UploadError("upload_invalid", "an upload must be raw bytes")
+        if not content:
+            raise UploadError("empty_source", "the upload is empty")
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise UploadError(
+                "source_too_large", f"the upload exceeds the {MAX_UPLOAD_BYTES}-byte limit"
+            )
+        return content
+
+    def _single_instrument(self, dataset: Phase1HistoricalDataset) -> Any:
+        instruments = {event.payload.instrument for event in dataset.selection.events}
+        if len(instruments) != 1:
+            raise UploadError(
+                "invalid_identity", "an uploaded input requires exactly one instrument"
+            )
+        return next(iter(instruments))
+
+    def _check_record_count(self, dataset: Phase1HistoricalDataset) -> None:
+        count = dataset.selection.fingerprint.record_count
+        if count > MAX_UPLOAD_RECORDS:
+            raise UploadError(
+                "too_many_records",
+                f"the upload holds {count} records, above this store's {MAX_UPLOAD_RECORDS} limit",
+            )
+
+    # -- preview ------------------------------------------------------------
+
+    def preview(self, content: object) -> dict[str, Any]:
+        """A bounded sample and, for a small file, its verified quality summary."""
+        try:
+            payload = self._check_request(content)
+        except UploadError as error:
+            return UploadPreviewV1(
+                byte_count=0,
+                header=(),
+                header_ok=False,
+                rows=(),
+                truncated=False,
+                full_validation="not_attempted",
+                valid=False,
+                quality=None,
+                first_error=error.document(),
+            ).document()
+        header, rows, truncated, first_error = _sample_rows(payload)
+        header_ok = header == tuple(STRICT_HEADER)
+        if not header_ok and first_error is None:
+            first_error = UploadError(
+                "invalid_header",
+                "the header does not match the strict OHLCV profile",
+                record_number=1,
+            ).document()
+        quality: dict[str, Any] | None = None
+        valid = False
+        full_validation = "not_attempted"
+        if len(payload) <= PREVIEW_FULL_DECODE_BYTES:
+            try:
+                dataset = self._decode_staged(payload)
+            except HistoricalMarketDataError as error:
+                full_validation = "failed"
+                if first_error is None:
+                    first_error = _strict_failure(error).document()
+            except OSError:
+                full_validation = "not_attempted"
+            else:
+                full_validation = "passed"
+                try:
+                    self._check_record_count(dataset)
+                except UploadError as error:
+                    full_validation = "failed"
+                    first_error = error.document()
+                else:
+                    valid = True
+                    quality = _coverage(dataset)
+        return UploadPreviewV1(
+            byte_count=len(payload),
+            header=header,
+            header_ok=header_ok,
+            rows=rows,
+            truncated=truncated,
+            full_validation=full_validation,
+            valid=valid,
+            quality=quality,
+            first_error=first_error,
+        ).document()
+
+    # -- publication --------------------------------------------------------
+
+    def _stored_bytes(self) -> int:
+        total = 0
+        for name in ("raw", "captures"):
+            directory = self._fds[name]
+            for entry in self._names(directory):
+                size = _entry_size(directory, entry)
+                if size is not None:
+                    total += size
+        return total
+
+    def publish(
+        self,
+        content: object,
+        *,
+        file_name: object = None,
+        source_reference: object = None,
+        license_reference: object = None,
+        availability_policy: object = None,
+        latency_seconds: object = None,
+    ) -> dict[str, Any]:
+        """Verify one upload end to end and publish it as one immutable version.
+
+        ``availability_policy`` has no default: the caller states how the capture
+        became available, or the upload is refused.
+        """
+        with self._lock:
+            payload = self._check_request(content)
+            name = _bounded_file_name(file_name)
+            source = _bounded_reference(source_reference, field="source_reference")
+            licence = _bounded_reference(license_reference, field="license_reference")
+            policy = _policy_document(availability_policy, latency_seconds)
+            if len(self._versions()) >= MAX_PUBLISHED_VERSIONS:
+                raise UploadError(
+                    "upload_quota", f"the store holds the {MAX_PUBLISHED_VERSIONS}-version limit"
+                )
+            try:
+                decoded = self._decode_staged(payload)
+            except HistoricalMarketDataError as error:
+                raise _strict_failure(error) from None
+            self._single_instrument(decoded)
+            self._check_record_count(decoded)
+            if policy["latency_seconds"] is None:
+                capture, redecoded = payload, decoded
+            else:
+                capture = _rewrite_available_at(payload, policy["latency_seconds"])
+                if len(capture) > MAX_UPLOAD_BYTES:
+                    raise UploadError(
+                        "source_too_large",
+                        "the simulated capture is larger than this store accepts",
+                    )
+                try:
+                    redecoded = self._decode_staged(capture)
+                except HistoricalMarketDataError as error:
+                    raise _strict_failure(error) from None
+                self._check_record_count(redecoded)
+            instrument = self._single_instrument(redecoded)
+            # The quota counts the converted capture, not only the raw bytes that
+            # arrived: the simulated policy materializes a second, larger file.
+            if self._stored_bytes() + len(payload) + len(capture) > MAX_STORED_BYTES:
+                raise UploadError("upload_quota", "the upload store has reached its size limit")
+            dataset_id = f"{uuid4().hex}.csv"
+            raw_directory = self._fds["raw"]
+            capture_directory = self._fds["captures"]
+            versions_directory = self._fds["versions"]
+            manifest: dict[str, Any] = {
+                "schema": UPLOAD_VERSION_SCHEMA,
+                "dataset_id": dataset_id,
+                "kind": "ohlcv",
+                "profile": PHASE1_OHLCV_PROFILE,
+                "version": 1,
+                "published_at": datetime.now(UTC).strftime(_DATETIME_FORMAT),
+                "source": {
+                    "declared_by": "user",
+                    "asserted": True,
+                    "reference": source,
+                    "file_name": name,
+                    "license_reference": licence,
+                },
+                "availability_policy": policy,
+                "source_bytes_sha256": sha256(payload).hexdigest(),
+                "source_byte_count": len(payload),
+                "raw_retained": True,
+                "capture_sha256": sha256(capture).hexdigest(),
+                "capture_byte_count": len(capture),
+                "data_sha256": redecoded.selection.fingerprint.sha256.value,
+                "record_count": redecoded.selection.fingerprint.record_count,
+                "instrument": {"venue": instrument.venue.code, "symbol": instrument.symbol},
+                "time_semantics": dict(_TIME_SEMANTICS),
+                "quality": _coverage(redecoded),
+                "limitations": list(_POLICY_LIMITATIONS),
+            }
+            manifest = seal_version_manifest(manifest)
+            try:
+                _write_new(raw_directory, dataset_id, payload)
+                if capture is payload:
+                    os.link(
+                        dataset_id,
+                        dataset_id,
+                        src_dir_fd=raw_directory,
+                        dst_dir_fd=capture_directory,
+                    )
+                else:
+                    _write_new(capture_directory, dataset_id, capture)
+                pending = f".version-{uuid4().hex}"
+                descriptor = os.open(
+                    pending,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=versions_directory,
+                )
+                try:
+                    with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                        handle.write(_canonical_json(manifest))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(
+                        pending,
+                        f"{dataset_id}.json",
+                        src_dir_fd=versions_directory,
+                        dst_dir_fd=versions_directory,
+                    )
+                    os.fsync(versions_directory)
+                finally:
+                    with suppress(OSError):
+                        os.unlink(pending, dir_fd=versions_directory)
+            except OSError:
+                for directory, entry in (
+                    (versions_directory, f"{dataset_id}.json"),
+                    (capture_directory, dataset_id),
+                    (raw_directory, dataset_id),
+                ):
+                    with suppress(OSError):
+                        os.unlink(entry, dir_fd=directory)
+                raise UploadError(
+                    "upload_unavailable", "the version could not be published"
+                ) from None
+            return manifest
+
+    # -- reading ------------------------------------------------------------
+
+    def _versions(self) -> list[str]:
+        directory = self._fds["versions"]
+        names: list[str] = []
+        for entry in self._names(directory):
+            if not entry.endswith(".json"):
+                continue
+            dataset_id = entry[: -len(".json")]
+            if re.fullmatch(DATASET_ID_PATTERN, dataset_id) is None:
+                continue
+            if _entry_size(directory, entry) is not None:
+                names.append(dataset_id)
+        return sorted(names)
+
+    def has(self, dataset_id: object) -> bool:
+        if type(dataset_id) is not str or re.fullmatch(DATASET_ID_PATTERN, dataset_id) is None:
+            return False
+        return _entry_size(self._fds["versions"], f"{dataset_id}.json") is not None
+
+    def manifest(self, dataset_id: object) -> dict[str, Any] | None:
+        if type(dataset_id) is not str or re.fullmatch(DATASET_ID_PATTERN, dataset_id) is None:
+            return None
+        payload = _read_bounded(self._fds["versions"], f"{dataset_id}.json", MAX_MANIFEST_BYTES)
+        if payload is None:
+            return None
+        try:
+            document = json.loads(payload)
+        except ValueError:
+            return None
+        if (
+            type(document) is not dict
+            or document.get("schema") != UPLOAD_VERSION_SCHEMA
+            or document.get("dataset_id") != dataset_id
+            or document.get("kind") != "ohlcv"
+            or document.get("profile") != PHASE1_OHLCV_PROFILE
+            or type(document.get("version")) is not int
+            or document.get("raw_retained") is not True
+            or not _manifest_is_intact(document)
+        ):
+            return None
+        return cast("dict[str, Any]", document)
+
+    def load(self, dataset_id: str) -> tuple[Path, Phase1HistoricalDataset]:
+        """Re-read one published version and prove it still matches its own manifest.
+
+        Every claim the manifest makes about the bytes is checked here — the capture
+        digest, its size, the economic fingerprint, the record count, the retained
+        raw source, the closed availability policy and the uploader-asserted
+        provenance. A manifest edited after publication fails here, before any job
+        could be dispatched against it.
+        """
+        manifest = self.manifest(dataset_id)
+        if manifest is None:
+            raise ValueError("uploaded dataset version is unavailable")
+        directory = self._fds["captures"]
+        path = self.root / "captures" / dataset_id
+        dataset = read_full_capture_phase1_ohlcv_csv(path, directory_descriptor=directory)
+        if dataset.profile != manifest["profile"]:
+            raise ValueError("uploaded dataset capture no longer matches its published version")
+        if dataset.source_bytes_sha256.value != manifest.get("capture_sha256"):
+            raise ValueError("uploaded dataset capture no longer matches its published version")
+        if _entry_size(directory, dataset_id) != manifest.get("capture_byte_count"):
+            raise ValueError("uploaded dataset capture no longer matches its published version")
+        fingerprint = dataset.selection.fingerprint
+        if fingerprint.sha256.value != manifest.get("data_sha256"):
+            raise ValueError("uploaded dataset capture no longer matches its published version")
+        if fingerprint.record_count != manifest.get("record_count"):
+            raise ValueError("uploaded dataset capture no longer matches its published version")
+        self._validated_raw(dataset_id, manifest)
+        _validated_policy(manifest.get("availability_policy"))
+        if manifest.get("time_semantics") != _TIME_SEMANTICS:
+            raise ValueError("uploaded dataset version declares unsupported time semantics")
+        source = manifest.get("source")
+        if (
+            type(source) is not dict
+            or source.get("declared_by") != "user"
+            or source.get("asserted") is not True
+        ):
+            raise ValueError(
+                "uploaded dataset version is not recorded as uploader-asserted provenance"
+            )
+        if len({event.payload.instrument for event in dataset.selection.events}) != 1:
+            raise ValueError("uploaded input requires exactly one instrument")
+        return path, dataset
+
+    def _validated_raw(self, dataset_id: str, manifest: dict[str, Any]) -> None:
+        """The retained raw source must still be the bytes that were published."""
+        raw = _read_bounded(self._fds["raw"], dataset_id, MAX_UPLOAD_BYTES)
+        if raw is None or len(raw) != manifest.get("source_byte_count"):
+            raise ValueError("uploaded dataset version no longer matches its retained raw source")
+        if sha256(raw).hexdigest() != manifest.get("source_bytes_sha256"):
+            raise ValueError("uploaded dataset version no longer matches its retained raw source")
+
+    def version_evidence(self, dataset_id: str) -> dict[str, Any]:
+        """One bounded, re-validated evidence document for a published upload.
+
+        It is derived from the manifest *and* from the capture re-read through this
+        store's own descriptors, so it is only ever produced for a version that
+        still matches every claim its manifest makes. It carries no point-in-time
+        claim: ``pit_verified`` stays false in the policy it records.
+        """
+        manifest = self.manifest(dataset_id)
+        if manifest is None:
+            raise ValueError("uploaded dataset version is unavailable")
+        _, dataset = self.load(dataset_id)
+        return _version_evidence(manifest, dataset_id, dataset)
+
+    def version_evidence_digest(self, dataset_id: str) -> str:
+        """The one host-validated digest an accepted job freezes for this version."""
+        return evidence_digest(self.version_evidence(dataset_id))
+
+    def inspect(self, dataset_id: str) -> dict[str, Any]:
+        manifest = self.manifest(dataset_id)
+        if manifest is None:
+            raise ValueError("uploaded dataset version is unavailable")
+        _, dataset = self.load(dataset_id)
+        instrument = dataset.selection.events[0].payload.instrument
+        return {
+            "dataset_id": dataset_id,
+            "valid": True,
+            "origin": "upload",
+            "profile": dataset.profile,
+            "source_sha256": dataset.source_bytes_sha256.value,
+            "capture_sha256": manifest.get("capture_sha256"),
+            "data_sha256": dataset.selection.fingerprint.sha256.value,
+            "record_count": dataset.selection.fingerprint.record_count,
+            "venue": instrument.venue.code,
+            "symbol": instrument.symbol,
+            "replay_start_utc": dataset.replay_window.start_inclusive.strftime(_DATETIME_FORMAT),
+            "replay_end_utc": dataset.replay_window.end_exclusive.strftime(_DATETIME_FORMAT),
+            "availability_policy": _validated_policy(manifest.get("availability_policy")),
+            "version_evidence_digest": evidence_digest(
+                _version_evidence(manifest, dataset_id, dataset)
+            ),
+            "version_manifest": manifest,
+            **_coverage(dataset),
+        }
+
+    def list(self) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for dataset_id in self._versions():
+            try:
+                entries.append(self.inspect(dataset_id))
+            except (HistoricalMarketDataError, OSError, ValueError):
+                entries.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "valid": False,
+                        "origin": "upload",
+                        "message": (
+                            "published upload is unreadable or no longer matches its version"
+                        ),
+                        "error_code": "invalid_or_unavailable_input",
+                    }
+                )
+        return entries
+
+
+class LocalResearchDatasetCatalogV1:
+    """One catalog over the trusted registered root and the controlled upload store."""
+
+    def __init__(
+        self,
+        registered: LocalResearchDatasetRegistryV1 | None,
+        uploads: ControlledUploadStoreV1,
+    ) -> None:
+        self._registered = registered
+        self._uploads = uploads
+
+    @property
+    def uploads(self) -> ControlledUploadStoreV1:
+        return self._uploads
+
+    def has(self, dataset_id: object) -> bool:
+        return self._uploads.has(dataset_id)
+
+    def load(self, dataset_id: str) -> tuple[Path, Phase1HistoricalDataset]:
+        if self._registered is not None:
+            try:
+                return self._registered.load(dataset_id)
+            except ValueError:
+                # An identifier unknown to the registered root may still be a
+                # published upload. A strict validation failure of a *registered*
+                # file is not retried, and no uploaded raw name can collide with
+                # a registered identifier because uploads are host-named.
+                if not self._uploads.has(dataset_id):
+                    raise
+        return self._uploads.load(dataset_id)
+
+    def inspect(self, dataset_id: str) -> dict[str, Any]:
+        if self._registered is not None:
+            try:
+                entry = self._registered.inspect(dataset_id)
+            except (HistoricalMarketDataError, OSError, ValueError):
+                if not self._uploads.has(dataset_id):
+                    raise
+            else:
+                return {"origin": "registered", **entry}
+        return self._uploads.inspect(dataset_id)
+
+    def version_evidence(self, dataset_id: object) -> dict[str, Any] | None:
+        """One version's re-validated evidence, or None for the read-only registered root."""
+        if type(dataset_id) is not str or not self._uploads.has(dataset_id):
+            return None
+        try:
+            return self._uploads.version_evidence(dataset_id)
+        except (HistoricalMarketDataError, OSError, ValueError):
+            return None
+
+    def version_evidence_digest(self, dataset_id: object) -> str | None:
+        """The digest an accepted job freezes; None when this version has no such evidence."""
+        evidence = self.version_evidence(dataset_id)
+        return None if evidence is None else evidence_digest(evidence)
+
+    def list(self) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        if self._registered is not None:
+            entries.extend({"origin": "registered", **entry} for entry in self._registered.list())
+        entries.extend(self._uploads.list())
+        return entries
+
+    def document(self) -> dict[str, Any]:
+        return {"schema": DATASET_CATALOG_SCHEMA, "datasets": self.list()}
