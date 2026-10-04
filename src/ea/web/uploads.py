@@ -25,6 +25,15 @@ the canonical identity, and the whole declaration is sealed onto the version as
 mapping evidence. Reading such a version runs the mapper again over the retained
 raw source and the sealed declaration and requires it to reproduce the capture
 exactly, so an edited declaration cannot be re-read as this version.
+
+A fourth case is a capture a read-only historical Bar adapter normalized from
+bytes a caller-supplied transport returned (``ea.plugin.historical_bars``). It is
+one more version schema in this store, never a second store or a second catalog.
+The retained raw source is that adapter's response envelope, the sealed provider
+evidence names the exact query, provider, normalizer and policy, and a read runs
+the normalizer again over the retained page bytes and requires the capture to be
+reproduced exactly. No live provider request, permission, licence or
+point-in-time verification is claimed for such a version.
 """
 
 from __future__ import annotations
@@ -53,6 +62,7 @@ from ea.data.historical import (
     Phase1HistoricalDataset,
     read_full_capture_phase1_ohlcv_csv,
 )
+from ea.plugin import historical_bars
 from ea.web.datasets import (
     DATASET_ID_PATTERN,
     LocalResearchDatasetRegistryV1,
@@ -66,6 +76,11 @@ UPLOAD_PREVIEW_SCHEMA = "ea.local-upload-preview.v1"
 UPLOAD_VERSION_SCHEMA = "ea.local-dataset-version.v1"
 MAPPED_PREVIEW_SCHEMA = "ea.local-csv-mapping-preview.v1"
 MAPPED_VERSION_SCHEMA = "ea.local-dataset-version.v2"
+# A fourth entrance: a capture a replaceable read-only historical Bar adapter
+# normalized from a caller-supplied transport. It is one more version schema in
+# this store, not a second store, a second decoder or a second catalog.
+PROVIDER_VERSION_SCHEMA = "ea.local-dataset-version.v3"
+PROVIDER_EVIDENCE_SCHEMA = historical_bars.PROVIDER_EVIDENCE_SCHEMA
 MAP_EVIDENCE_SCHEMA = "ea.local-csv-mapping-evidence.v1"
 DATASET_CATALOG_SCHEMA = "ea.local-dataset-catalog.v1"
 VERSION_EVIDENCE_SCHEMA = "ea.local-dataset-version-evidence.v1"
@@ -92,6 +107,10 @@ MAX_MANIFEST_BYTES = 64 * 1024
 # reads back under its own 64 KiB bound, so it is kept comfortably below it.
 MAX_MAPPED_MANIFEST_BYTES = 48 * 1024
 MAX_MAPPING_DECLARATION_BYTES = 16 * 1024
+# A provider version manifest also travels inside a job record, so it is bounded
+# like a mapped one. Only digests and summaries are sealed there: the page bytes
+# stay in the retained raw envelope and never enter the manifest.
+MAX_PROVIDER_MANIFEST_BYTES = 48 * 1024
 MAX_SWEEP_ENTRIES = 4096
 
 _DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -136,6 +155,21 @@ _MAPPED_LIMITATIONS = (
     "capture; the original source is retained whole.",
     "The declaration is the uploader's own statement. It is sealed with the version and re-derived "
     "on every read, which proves it is intact rather than that it is correct.",
+)
+
+# What is additionally true of a version a provider adapter produced. The raw source
+# is the adapter's response envelope rather than the provider's bytes alone, and the
+# availability column was simulated rather than asserted by anyone.
+_PROVIDER_LIMITATIONS = (
+    "The retained raw source is one canonical JSON response envelope, not the provider's own "
+    "bytes alone: it holds the exact page bytes base64-encoded beside the exact query, provider, "
+    "normalizer, policy and digests. The '.csv' suffix of this dataset identifier is a catalog "
+    "identity and not a statement about the retained bytes.",
+    "The capture was produced by a replaceable read-only adapter from bytes a caller-supplied "
+    "transport returned. No live provider request, no permission, no licence and no point-in-time "
+    "verification is claimed; the provider's terms are unresolved and real use is blocked.",
+    "available_at was simulated as interval_end plus the caller's declared latency. It is not an "
+    "assertion by any uploader and not verified point-in-time availability.",
 )
 
 
@@ -607,6 +641,48 @@ def _mapping_declaration(manifest: dict[str, Any]) -> dict[str, Any]:
     return cast("dict[str, Any]", declaration)
 
 
+def _provider_declaration(manifest: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Re-read one version's sealed provider evidence under its closed schema.
+
+    It returns the sealed declaration (what the adapter stated it did) and the
+    sealed result (what it derived), having first proved the evidence is still the
+    evidence this version published.
+    """
+    evidence = manifest.get("provider_evidence")
+    if (
+        type(evidence) is not dict
+        or evidence.get("schema") != PROVIDER_EVIDENCE_SCHEMA
+        or evidence.get("version") != 1
+        or manifest.get("provider_evidence_sha256") != evidence_digest(evidence)
+    ):
+        raise ValueError("uploaded dataset version provider evidence is not the closed schema")
+    declaration = evidence.get("declaration")
+    result = evidence.get("result")
+    if type(declaration) is not dict or type(result) is not dict:
+        raise ValueError("uploaded dataset version provider evidence is not the closed schema")
+    return cast("dict[str, Any]", declaration), cast("dict[str, Any]", result)
+
+
+def _provider_summary(manifest: dict[str, Any]) -> dict[str, Any]:
+    """The bounded part of one provider version's evidence that evidence carries."""
+    declaration, result = _provider_declaration(manifest)
+    evidence = cast("dict[str, Any]", manifest["provider_evidence"])
+    return {
+        "schema": PROVIDER_EVIDENCE_SCHEMA,
+        "evidence_sha256": manifest["provider_evidence_sha256"],
+        "provider": evidence["provider"],
+        "normalizer": evidence["normalizer"],
+        "query": declaration.get("query"),
+        "policy": declaration.get("policy"),
+        "transport": declaration.get("transport"),
+        "observed_now_utc": declaration.get("observed_now_utc"),
+        "ingested_at_utc": declaration.get("ingested_at_utc"),
+        "pages": result.get("pages"),
+        "records": result.get("records"),
+        "capture": result.get("capture"),
+    }
+
+
 def seal_version_manifest(document: dict[str, Any]) -> dict[str, Any]:
     """One published version's own body, with its integrity digest filled in.
 
@@ -629,6 +705,7 @@ def _version_evidence(
     """The bounded, canonical evidence one published upload version can prove."""
     instrument = dataset.selection.events[0].payload.instrument
     source = cast("dict[str, Any]", manifest.get("source"))
+    provider_version = manifest.get("schema") == PROVIDER_VERSION_SCHEMA
     evidence: dict[str, Any] = {
         "schema": VERSION_EVIDENCE_SCHEMA,
         "dataset_id": dataset_id,
@@ -645,8 +722,8 @@ def _version_evidence(
         "source_bytes_sha256": manifest.get("source_bytes_sha256"),
         "source_byte_count": manifest.get("source_byte_count"),
         "source": {
-            "declared_by": "user",
-            "asserted": True,
+            "declared_by": "caller" if provider_version else "user",
+            "asserted": not provider_version,
             "reference": source.get("reference"),
             "file_name": source.get("file_name"),
             "license_reference": source.get("license_reference"),
@@ -659,6 +736,10 @@ def _version_evidence(
         # The declaration that produced this capture is part of what the evidence
         # names, so the digest a bound job freezes covers the mapping too.
         evidence["mapping"] = _mapping_summary(manifest)
+    if provider_version:
+        # Likewise for a provider capture: the query, provider, normalizer, policy
+        # and page digests are part of what the bound version identity covers.
+        evidence["provider"] = _provider_summary(manifest)
     return evidence
 
 
@@ -1114,6 +1195,152 @@ class ControlledUploadStoreV1:
                 ) from None
             return manifest
 
+    def publish_historical_bars(
+        self,
+        capture: object,
+        *,
+        file_name: object = None,
+        source_reference: object = None,
+    ) -> dict[str, Any]:
+        """Publish one provider-normalized capture as one immutable version.
+
+        The raw source retained for such a version is the adapter's own response
+        envelope — the exact page bytes beside the exact query, provider,
+        normalizer, policy and digests — and the capture is the strict CSV those
+        bytes normalize to. Both are re-derived here before anything is written, so
+        a capture that its own envelope does not reproduce is refused rather than
+        published, and a read re-derives it again. No licence is recorded: this host
+        holds no grant for the provider and fabricates none.
+        """
+        with self._lock:
+            if type(capture) is not historical_bars.HistoricalBarCaptureV1:
+                raise UploadError(
+                    "provider_capture",
+                    "a provider version is published from one HistoricalBarCaptureV1",
+                )
+            record = capture
+            payload = record.envelope_json.encode("utf-8")
+            capture_bytes = record.strict_csv
+            if len(payload) > MAX_UPLOAD_BYTES:
+                raise UploadError(
+                    "source_too_large",
+                    "the response envelope is larger than this store accepts",
+                )
+            if len(capture_bytes) > MAX_UPLOAD_BYTES:
+                raise UploadError(
+                    "source_too_large",
+                    "the normalized capture is larger than this store accepts",
+                )
+            try:
+                rederived = historical_bars.rederive_strict_capture(
+                    payload, record.provider_evidence
+                )
+            except historical_bars.HistoricalBarError as error:
+                raise UploadError(
+                    "provider_capture",
+                    f"the capture is not what its own response envelope reproduces "
+                    f"({error.code.value})",
+                ) from None
+            if rederived != capture_bytes or sha256(rederived).hexdigest() != record.capture_sha256:
+                raise UploadError(
+                    "provider_capture",
+                    "the capture is not what its own response envelope reproduces",
+                )
+            try:
+                decoded = self._decode_staged(capture_bytes)
+            except HistoricalMarketDataError as error:
+                raise _strict_failure(error) from None
+            self._single_instrument(decoded)
+            self._check_record_count(decoded)
+            latency = cast("dict[str, Any]", record.provider_evidence["declaration"])["query"][
+                "latency_seconds"
+            ]
+            policy = _policy_document(AVAILABILITY_SIMULATED, latency)
+            if len(self._versions()) >= MAX_PUBLISHED_VERSIONS:
+                raise UploadError(
+                    "upload_quota", f"the store holds the {MAX_PUBLISHED_VERSIONS}-version limit"
+                )
+            if self._stored_bytes() + len(payload) + len(capture_bytes) > MAX_STORED_BYTES:
+                raise UploadError("upload_quota", "the upload store has reached its size limit")
+            dataset_id = f"{uuid4().hex}.csv"
+            raw_directory = self._fds["raw"]
+            capture_directory = self._fds["captures"]
+            versions_directory = self._fds["versions"]
+            manifest: dict[str, Any] = {
+                "schema": PROVIDER_VERSION_SCHEMA,
+                "dataset_id": dataset_id,
+                "kind": "ohlcv",
+                "profile": PHASE1_OHLCV_PROFILE,
+                "version": 1,
+                "published_at": datetime.now(UTC).strftime(_DATETIME_FORMAT),
+                "source": {
+                    "declared_by": "caller",
+                    "asserted": False,
+                    "reference": _bounded_reference(source_reference, field="source_reference"),
+                    "file_name": _bounded_file_name(file_name),
+                    # Never fabricated: this host was granted nothing for the provider.
+                    "license_reference": None,
+                },
+                "availability_policy": policy,
+                "source_bytes_sha256": sha256(payload).hexdigest(),
+                "source_byte_count": len(payload),
+                "raw_retained": True,
+                "capture_sha256": sha256(capture_bytes).hexdigest(),
+                "capture_byte_count": len(capture_bytes),
+                "data_sha256": decoded.selection.fingerprint.sha256.value,
+                "record_count": decoded.selection.fingerprint.record_count,
+                "instrument": {"venue": record.venue, "symbol": record.symbol},
+                "time_semantics": dict(_TIME_SEMANTICS),
+                "quality": _coverage(decoded),
+                "limitations": [*_VERSION_LIMITATIONS, *_PROVIDER_LIMITATIONS],
+            }
+            evidence = record.provider_evidence
+            manifest["provider_evidence"] = evidence
+            manifest["provider_evidence_sha256"] = evidence_digest(evidence)
+            manifest = seal_version_manifest(manifest)
+            if len(_canonical_json(manifest)) > MAX_PROVIDER_MANIFEST_BYTES:
+                raise UploadError(
+                    "provider_evidence",
+                    "the provider evidence is larger than one version manifest can carry",
+                )
+            try:
+                _write_new(raw_directory, dataset_id, payload)
+                _write_new(capture_directory, dataset_id, capture_bytes)
+                pending = f".version-{uuid4().hex}"
+                descriptor = os.open(
+                    pending,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=versions_directory,
+                )
+                try:
+                    with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                        handle.write(_canonical_json(manifest))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(
+                        pending,
+                        f"{dataset_id}.json",
+                        src_dir_fd=versions_directory,
+                        dst_dir_fd=versions_directory,
+                    )
+                    os.fsync(versions_directory)
+                finally:
+                    with suppress(OSError):
+                        os.unlink(pending, dir_fd=versions_directory)
+            except OSError:
+                for directory, entry in (
+                    (versions_directory, f"{dataset_id}.json"),
+                    (capture_directory, dataset_id),
+                    (raw_directory, dataset_id),
+                ):
+                    with suppress(OSError):
+                        os.unlink(entry, dir_fd=directory)
+                raise UploadError(
+                    "upload_unavailable", "the version could not be published"
+                ) from None
+            return manifest
+
     # -- reading ------------------------------------------------------------
 
     def _versions(self) -> list[str]:
@@ -1146,7 +1373,8 @@ class ControlledUploadStoreV1:
             return None
         if (
             type(document) is not dict
-            or document.get("schema") not in {UPLOAD_VERSION_SCHEMA, MAPPED_VERSION_SCHEMA}
+            or document.get("schema")
+            not in {UPLOAD_VERSION_SCHEMA, MAPPED_VERSION_SCHEMA, PROVIDER_VERSION_SCHEMA}
             or document.get("dataset_id") != dataset_id
             or document.get("kind") != "ohlcv"
             or document.get("profile") != PHASE1_OHLCV_PROFILE
@@ -1158,6 +1386,11 @@ class ControlledUploadStoreV1:
         if document["schema"] == MAPPED_VERSION_SCHEMA and (
             type(document.get("mapping_evidence")) is not dict
             or type(document.get("mapping_evidence_sha256")) is not str
+        ):
+            return None
+        if document["schema"] == PROVIDER_VERSION_SCHEMA and (
+            type(document.get("provider_evidence")) is not dict
+            or type(document.get("provider_evidence_sha256")) is not str
         ):
             return None
         return cast("dict[str, Any]", document)
@@ -1193,13 +1426,17 @@ class ControlledUploadStoreV1:
         _validated_policy(manifest.get("availability_policy"))
         if manifest["schema"] == MAPPED_VERSION_SCHEMA:
             self._validated_mapping(raw, manifest)
+        if manifest["schema"] == PROVIDER_VERSION_SCHEMA:
+            self._validated_provider(raw, manifest)
         if manifest.get("time_semantics") != _TIME_SEMANTICS:
             raise ValueError("uploaded dataset version declares unsupported time semantics")
         source = manifest.get("source")
+        expected_provenance: tuple[object, object] = (
+            ("caller", False) if manifest["schema"] == PROVIDER_VERSION_SCHEMA else ("user", True)
+        )
         if (
             type(source) is not dict
-            or source.get("declared_by") != "user"
-            or source.get("asserted") is not True
+            or (source.get("declared_by"), source.get("asserted")) != expected_provenance
         ):
             raise ValueError(
                 "uploaded dataset version is not recorded as uploader-asserted provenance"
@@ -1260,6 +1497,39 @@ class ControlledUploadStoreV1:
         ):
             raise ValueError("uploaded dataset version no longer reproduces its declared mapping")
 
+    def _validated_provider(self, raw: bytes, manifest: dict[str, Any]) -> None:
+        """Re-derive the capture from the retained envelope and the sealed evidence.
+
+        The adapter's normalizer is the only authority on what a response envelope
+        means, so a read runs it again over the retained page bytes under the sealed
+        query, provider, normalizer and policy. An edited envelope, an edited
+        declaration or a capture that is not what those page bytes normalize to
+        cannot agree with the published digests, and the version is refused rather
+        than re-read as if it were intact.
+        """
+        declaration, result = _provider_declaration(manifest)
+        try:
+            rederived = historical_bars.rederive_strict_capture(
+                raw, cast("dict[str, Any]", manifest["provider_evidence"])
+            )
+        except historical_bars.HistoricalBarError as error:
+            raise ValueError(
+                "uploaded dataset version no longer reproduces its retained provider response "
+                f"({error.code.value})"
+            ) from None
+        if (
+            sha256(rederived).hexdigest() != manifest.get("capture_sha256")
+            or len(rederived) != manifest.get("capture_byte_count")
+            or result.get("capture", {}).get("data_sha256") != manifest.get("data_sha256")
+            or result.get("capture", {}).get("record_count") != manifest.get("record_count")
+            or result.get("instrument") != manifest.get("instrument")
+            or declaration.get("query", {}).get("latency_seconds")
+            != _validated_policy(manifest.get("availability_policy"))["latency_seconds"]
+        ):
+            raise ValueError(
+                "uploaded dataset version no longer reproduces its retained provider response"
+            )
+
     def version_evidence(self, dataset_id: str) -> dict[str, Any]:
         """One bounded, re-validated evidence document for a published upload.
 
@@ -1306,6 +1576,8 @@ class ControlledUploadStoreV1:
         }
         if manifest["schema"] == MAPPED_VERSION_SCHEMA:
             entry["mapping"] = _mapping_summary(manifest)
+        if manifest["schema"] == PROVIDER_VERSION_SCHEMA:
+            entry["provider"] = _provider_summary(manifest)
         return entry
 
     def list(self) -> list[dict[str, Any]]:

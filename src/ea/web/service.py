@@ -58,6 +58,7 @@ from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_ch
 from ea.web.local_packages import LOCAL_SCENARIO_ID, LocalStrategyStoreV1
 from ea.web.uploads import (
     MAPPED_VERSION_SCHEMA,
+    PROVIDER_VERSION_SCHEMA,
     UPLOAD_VERSION_SCHEMA,
     ControlledUploadStoreV1,
     LocalResearchDatasetCatalogV1,
@@ -692,7 +693,8 @@ def _decode_job(payload: bytes) -> JobRecord:
         dataset_version = document.get("dataset_version")
         if dataset_version is not None and (
             type(dataset_version) is not dict
-            or dataset_version.get("schema") not in {UPLOAD_VERSION_SCHEMA, MAPPED_VERSION_SCHEMA}
+            or dataset_version.get("schema")
+            not in {UPLOAD_VERSION_SCHEMA, MAPPED_VERSION_SCHEMA, PROVIDER_VERSION_SCHEMA}
             or type(dataset_version.get("dataset_id")) is not str
             or type(dataset_version.get("availability_policy")) is not dict
         ):
