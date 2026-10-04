@@ -1,16 +1,20 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import type { ApiAdapter, BacktestJob, ChronologicalHoldout } from './app'
+import type { ApiAdapter, BacktestJob, ChronologicalHoldout, ScenarioSummary } from './app'
 import {
   AVAILABILITY_PROVIDED,
   AVAILABILITY_SIMULATED,
   LAYER_ORDER,
   MAX_UPLOAD_CHARACTERS,
   ResearchRequestError,
+  TIME_FORMAT_IDS,
+  isMappedPreview,
   type DeclarationBody,
   type DeclarationCatalog,
   type DeclarationVerdict,
   type LayerName,
+  type LocalStrategyCapability,
+  type LocalStrategySlot,
   type ModelConfigurationStatus,
   type PluginCatalog,
   type PluginCatalogEntry,
@@ -19,7 +23,8 @@ import {
   type ResearchSpec,
   type ResearchTask,
   type ResearchTaskStatus,
-  type UploadPreview,
+  type UploadDeclaration,
+  type UploadPreviewResponse,
   type UploadVersion,
 } from './research-api'
 
@@ -498,96 +503,428 @@ function DeclarationDraftPanel({ api, draft }: { api: ApiAdapter; draft: Declara
   </section>
 }
 
-/** Controlled upload: bounded preview first, then one explicitly policied version. */
+/**
+ * One workspace-local strategy package: inspect it statically, then trust it
+ * explicitly, or withdraw that trust.
+ *
+ * Nothing here runs, generates or installs a package: a captured container and the
+ * manifest it claims are read by the host, which reports the identity it measured.
+ * Trust is a separate, explicit act over exactly that identity — every expected
+ * value below is the operator's own reading of the preview — and revocation is
+ * immediate. The package, once trusted, runs with this process's own privileges and
+ * no sandbox, which the panel states rather than hides.
+ */
+function LocalStrategyPanel({ api }: { api: ApiAdapter }) {
+  // Destructured so the load effect depends on the two calls it makes rather than
+  // on the whole adapter object, which a caller may rebuild on every render.
+  const { localStrategySlot, listScenarios } = api
+  const [slot, setSlot] = useState<LocalStrategySlot | null>(null)
+  const [fileName, setFileName] = useState('')
+  const [packageBase64, setPackageBase64] = useState<string | null>(null)
+  const [manifestText, setManifestText] = useState('')
+  const [inspected, setInspected] = useState<LocalStrategyCapability | null>(null)
+  const [inspectedFor, setInspectedFor] = useState<string | null>(null)
+  const [trusted, setTrusted] = useState(false)
+  const [localCompute, setLocalCompute] = useState(false)
+  const [baseScenario, setBaseScenario] = useState('')
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([])
+  const [busy, setBusy] = useState<'inspect' | 'trust' | 'revoke' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      try {
+        if (localStrategySlot) { const current = await localStrategySlot(); if (active) setSlot(current) }
+        if (listScenarios) { const list = await listScenarios(); if (active) setScenarios(list.filter(item => item.valid)) }
+      } catch (caught) { if (active) setError(messageOf(caught, 'This workspace has no readable local package slot.')) }
+    })()
+    return () => { active = false }
+  }, [localStrategySlot, listScenarios])
+
+  const signature = JSON.stringify([packageBase64, manifestText])
+  // Every expected value the trust decision names comes from the preview the
+  // operator is looking at, and only while it is still the same preview.
+  const fresh = inspected !== null && inspectedFor === signature
+
+  const inspect = async () => {
+    if (busy || !api.inspectLocalStrategy || packageBase64 === null) return
+    setBusy('inspect'); setError(null); setNotice(null)
+    try {
+      const manifest = parseDeclaration(manifestText, 'The manifest')
+      if ('error' in manifest) { setError(manifest.error); return }
+      const capability = await api.inspectLocalStrategy(packageBase64, manifest.value as Record<string, unknown>)
+      setInspected(capability); setInspectedFor(signature)
+      setTrusted(false); setLocalCompute(false)
+    } catch (caught) { setError(messageOf(caught, 'The host refused this package.')) }
+    finally { setBusy(null) }
+  }
+
+  const trust = async () => {
+    if (busy || !api.registerLocalStrategy || !inspected || packageBase64 === null || !trusted) return
+    setBusy('trust'); setError(null); setNotice(null)
+    try {
+      const manifest = parseDeclaration(manifestText, 'The manifest')
+      if ('error' in manifest) { setError(manifest.error); return }
+      const current = await api.registerLocalStrategy({
+        content_base64: packageBase64,
+        manifest: manifest.value as Record<string, unknown>,
+        trusted: true,
+        effects: localCompute ? ['local_compute'] : [],
+        base_scenario_id: baseScenario,
+        expected_plugin_id: inspected.plugin_id,
+        expected_package_version: inspected.package_version,
+        expected_manifest_digest: inspected.manifest_digest,
+        expected_implementation_digest: `sha256:${inspected.package.artifact_sha256}`,
+      })
+      setSlot(current)
+      setNotice(`Trusted ${current.capability?.plugin_id ?? inspected.plugin_id}: research now offers the scenario ${current.scenario_id}.`)
+    } catch (caught) { setError(messageOf(caught, 'The host refused this trust decision.')) }
+    finally { setBusy(null) }
+  }
+
+  const revoke = async () => {
+    if (busy || !api.revokeLocalStrategy) return
+    setBusy('revoke'); setError(null); setNotice(null)
+    try { setSlot(await api.revokeLocalStrategy()); setNotice('Trust withdrawn. This package is no longer selectable, and no later run can start it.') }
+    catch (caught) { setError(messageOf(caught, 'The trust could not be withdrawn.')) }
+    finally { setBusy(null) }
+  }
+
+  if (!api.localStrategySlot && !api.inspectLocalStrategy) return null
+  return <div className="local-package-panel">
+    <p className="muted">A local strategy package is a captured <code>.eastrategy</code> container. Inspection reads its identity statically and executes nothing; trusting it is your decision, and from then on it runs with this process's own privileges, in this process, with no sandbox. Revoking stops every later selection and dispatch, and cannot interrupt code that is already running.</p>
+    <label htmlFor="local-strategy-file">Package file (.eastrategy)</label>
+    <p className="muted">{fileName ? `Captured in this browser as ${fileName}; its bytes are sent unchanged.` : 'No file selected: only the bytes this browser read are ever sent, never a path or a name.'}</p>
+    <input id="local-strategy-file" type="file" accept=".eastrategy" disabled={busy !== null} onChange={event => {
+      const file = event.target.files?.[0]
+      if (!file) return
+      setFileName(file.name); setInspected(null); setInspectedFor(null); setError(null); setNotice(null)
+      void file.arrayBuffer().then(bytes => setPackageBase64(base64Of(bytes)))
+        .catch(() => setError('The selected file could not be read in this browser.'))
+    }} />
+    <label htmlFor="local-strategy-manifest">Capability manifest (JSON, sealed by the host on inspection)</label>
+    <textarea id="local-strategy-manifest" rows={5} spellCheck={false} placeholder={LOCAL_MANIFEST_EXAMPLE} value={manifestText} disabled={busy !== null}
+      onChange={event => { setManifestText(event.target.value); setInspected(null); setInspectedFor(null); setNotice(null) }} />
+    <div className="actions">
+      <button type="button" disabled={busy !== null || packageBase64 === null || !api.inspectLocalStrategy} onClick={() => { void inspect() }}>{busy === 'inspect' ? 'Inspecting…' : 'Inspect package'}</button>
+      {slot?.registered && api.revokeLocalStrategy && <button type="button" disabled={busy !== null} onClick={() => { void revoke() }}>{busy === 'revoke' ? 'Revoking…' : 'Revoke trust'}</button>}
+    </div>
+    {error && <p className="notice error">{error}</p>}
+    {notice && <p className="muted">{notice}</p>}
+
+    {slot && <dl className="summary-list" aria-label="Local package slot">
+      <div><dt>Slot</dt><dd>{slot.registered ? `${slot.capability?.plugin_id ?? 'unreadable'} · ${slot.capability?.package_version ?? ''}` : 'No package registered'}{slot.revoked ? ' · trust revoked' : ''}</dd></div>
+      <div><dt>Trusted now</dt><dd>{String(slot.trusted)} · effects {slot.grant?.effects.join(', ') || 'none'}</dd></div>
+      <div><dt>Virtual scenario</dt><dd>{slot.scenario_id} · one slot per workspace; registering again replaces it</dd></div>
+      {slot.capability && <div><dt>Strategy / digest</dt><dd>{slot.capability.descriptor.strategy_id} · v{slot.capability.descriptor.strategy_version} · {slot.capability.package.artifact_sha256}</dd></div>}
+    </dl>}
+
+    {fresh && inspected && <section className="upload-preview" aria-label="Package inspection">
+      <dl className="summary-list">
+        <div><dt>Package / version</dt><dd>{inspected.package.package_id} · {inspected.package_version} · package schema {inspected.package.schema_version}</dd></div>
+        <div><dt>Strategy</dt><dd>{inspected.descriptor.strategy_id} · v{inspected.descriptor.strategy_version} · {inspected.descriptor.display_name}</dd></div>
+        <div><dt>Mandatory local compute</dt><dd>This package runs in this process, with ordinary privileges and no sandbox. {inspected.warning}</dd></div>
+        <div><dt>Manifest digest (this host sealed)</dt><dd>{inspected.manifest_digest}</dd></div>
+        <div><dt>Implementation digest</dt><dd>sha256:{inspected.package.artifact_sha256}</dd></div>
+        <div><dt>Declared parameters</dt><dd>{(inspected.descriptor.parameters ?? []).map(parameter => `${parameter.name} = ${String(parameter.default)}`).join(' · ') || 'None'}</dd></div>
+      </dl>
+      <div className="parameter-grid">
+        <div><label htmlFor="local-strategy-base">Base scenario (data, funding, risk, execution)</label>
+          <select id="local-strategy-base" value={baseScenario} disabled={busy !== null} onChange={event => { setBaseScenario(event.target.value); setNotice(null) }}>
+            <option value="">Choose a registered scenario…</option>
+            {scenarios.map(scenario => <option key={scenario.scenario_id} value={scenario.scenario_id}>{scenario.scenario_id}</option>)}
+          </select></div>
+      </div>
+      <label htmlFor="local-strategy-trusted"><input id="local-strategy-trusted" type="checkbox" checked={trusted} disabled={busy !== null} onChange={event => setTrusted(event.target.checked)} /> I have read these digests and trust this exact identity</label>
+      <label htmlFor="local-strategy-compute"><input id="local-strategy-compute" type="checkbox" checked={localCompute} disabled={busy !== null} onChange={event => setLocalCompute(event.target.checked)} /> Grant local_compute (required: reading these bytes is local computation)</label>
+      <div className="actions">
+        <button type="button" className="primary" disabled={busy !== null || !trusted || !localCompute || !baseScenario || !api.registerLocalStrategy} onClick={() => { void trust() }}>{busy === 'trust' ? 'Registering…' : 'Trust and register'}</button>
+      </div>
+      <p className="muted">The four expected values are taken from this inspection, so a manifest edited after it, a different file, or a bumped version is refused rather than trusted by approximation. Nothing installs or runs the package here.</p>
+    </section>}
+  </div>
+}
+
+/** One harmless but complete example of a local capability manifest: real field
+ * names, real entrypoint, real interface, and a blank artifact_digest, which is the
+ * one field this host fills in. No package is behind it; nothing is sent unless the
+ * user sends it. The package_id in the plugin_id is the one the package itself must
+ * declare: the host derives the capability id and never takes it from the package. */
+const LOCAL_MANIFEST_EXAMPLE = JSON.stringify({
+  schema_version: 1,
+  plugin_id: 'ea.local.strategy.example.package',
+  kind: 'strategy',
+  package_version: '1.0.0',
+  // Blank is the only value this host fills in: it is the digest of this whole body.
+  artifact_digest: '',
+  interface: { name: 'ea.strategy-contract', major: 1, minor: 0 },
+  entrypoint: 'ea.host.adapter.local-strategy',
+  provides: ['strategy.research'],
+  requires: [],
+  dependencies: [],
+  effects: ['local_compute'],
+  runtime_profile: 'ea.runtime-profile.default-offline-research.v1',
+  config_schema: {},
+  author: 'whoever wrote the package you captured',
+  license: 'the licence you distribute it under',
+}, null, 2)
+
+// One harmless, exact example of each declaration: the strict field names the
+// mapper accepts, and the ids of the timestamp forms it allows. Nothing here is
+// applied unless the user sends it.
+const MAPPING_EXAMPLE = JSON.stringify({
+  columns: {
+    schema_version: 'v',
+    venue: 'mic',
+    symbol: 'ticker',
+    interval_start: 'bar_start',
+    interval_end: 'bar_end',
+    adjustment: 'adj',
+    open: 'o',
+    high: 'h',
+    low: 'lo',
+    close: 'c',
+    volume: 'vlm',
+    source: 'feed',
+    source_sequence: 'seq',
+    revision: 'rev',
+    available_at: 'seen',
+  },
+  constants: {},
+})
+const TIME_EXAMPLE = JSON.stringify({
+  timezone: 'UTC',
+  formats: {
+    interval_start: 'utc-microseconds',
+    interval_end: 'utc-microseconds',
+    available_at: 'utc-microseconds',
+  },
+})
+
+/** One pasted declaration, or the reason it is not one. */
+function parseDeclaration(text: string, label: string): { value: unknown } | { error: string } {
+  try {
+    return { value: JSON.parse(text) }
+  } catch {
+    return { error: `${label} is not JSON. Type the declaration you mean; the host never guesses one.` }
+  }
+}
+
+/** One file's bytes as standard base64, exactly as the browser read them. */
+function base64Of(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes)
+  let binary = ''
+  for (const byte of view) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+/**
+ * Controlled upload: bounded preview first, then one explicitly policied version.
+ *
+ * Either the file already has the strict profile, or the user declares how its own
+ * columns and timestamps become it. A mapped version is published only from a
+ * preview of the exact declaration on screen, so the digest the preview reports is
+ * the digest the sealed version carries.
+ */
 function DataUploadPanel({ api }: { api: ApiAdapter }) {
   const [content, setContent] = useState('')
+  const [fileBase64, setFileBase64] = useState<string | null>(null)
   const [fileName, setFileName] = useState('')
+  const [mode, setMode] = useState<'strict' | 'explicit-mapping'>('strict')
+  const [mappingText, setMappingText] = useState('')
+  const [timeText, setTimeText] = useState('')
   const [policy, setPolicy] = useState('')
   const [latency, setLatency] = useState('0')
   const [sourceReference, setSourceReference] = useState('')
   const [licenseReference, setLicenseReference] = useState('')
-  const [preview, setPreview] = useState<UploadPreview | null>(null)
+  const [preview, setPreview] = useState<UploadPreviewResponse | null>(null)
+  const [previewedFor, setPreviewedFor] = useState<string | null>(null)
   const [published, setPublished] = useState<UploadVersion | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<'preview' | 'publish' | null>(null)
   const previewUpload = api.previewUpload
 
-  const reset = () => { setPreview(null); setPublished(null); setError(null) }
-  const tooLarge = content.length > MAX_UPLOAD_CHARACTERS
+  const mapped = mode === 'explicit-mapping'
+  // The exact inputs a mapped preview verified. Any change to the payload, the
+  // declaration or the policy makes the previewed declaration a different one,
+  // so the preview no longer authorizes a publication.
+  const signature = JSON.stringify([fileBase64 ?? content, mode, mappingText, timeText, policy, latency])
+  const previewFresh = preview !== null && previewedFor === signature
+  // A mapped version needs a preview of this exact declaration that also
+  // accepted the whole source: a refused preview is never publishable, and the
+  // host remains the authority that rejects an invalid declaration anyway.
+  const mappedVerified = mapped && preview !== null && previewFresh && preview.valid
+  const mappedBlocked = mapped && !mappedVerified
+    ? previewFresh
+      ? 'This declaration does not verify the whole source: a refused preview is never published. Correct the declaration and preview it again.'
+      : 'A mapped version is published only from a preview of this exact declaration: preview it, and publish while that preview is still current. Changing the file, the mapping, the time declaration or the policy clears it.'
+    : null
+
+  const reset = () => { setPreview(null); setPreviewedFor(null); setPublished(null); setError(null) }
+  // A file's own bytes are the payload; editing the text makes the text the payload.
+  const tooLarge = fileBase64 === null && content.length > MAX_UPLOAD_CHARACTERS
+
+  const declarationOf = (): UploadDeclaration | null => {
+    if (!policy) { setError('A mapped source states how it became available; no policy is assumed.'); return null }
+    const mapping = parseDeclaration(mappingText, 'The mapping declaration')
+    if ('error' in mapping) { setError(mapping.error); return null }
+    const time = parseDeclaration(timeText, 'The time declaration')
+    if ('error' in time) { setError(time.error); return null }
+    return {
+      mode: 'explicit-mapping',
+      mapping: mapping.value as UploadDeclaration['mapping'],
+      time_declaration: time.value as UploadDeclaration['time_declaration'],
+      availability_policy: policy,
+      ...(policy === AVAILABILITY_SIMULATED ? { latency_seconds: Number(latency) } : {}),
+    }
+  }
 
   const run = async (kind: 'preview' | 'publish') => {
-    if (busy || !content || tooLarge) return
+    if (busy || tooLarge) return
+    if (!fileBase64 && !content) return
     setBusy(kind); setError(null)
     try {
+      const declaration = mapped ? declarationOf() : undefined
+      if (mapped && declaration === null) return
       if (kind === 'preview') {
+        setPublished(null)
         if (!previewUpload) return
-        setPublished(null); setPreview(await previewUpload(content, fileName || undefined))
+        // A selected file is previewed as its own bytes or not at all: decoding
+        // it into text and sending that back would preview a different payload.
+        if (fileBase64 !== null && !api.previewUploadFile) {
+          setError('This workspace cannot preview a selected file as its own bytes; clear the file and paste the content instead.')
+          return
+        }
+        const verified = fileBase64 !== null && api.previewUploadFile
+          ? await api.previewUploadFile(fileBase64, declaration as UploadDeclaration, fileName || undefined)
+          : await previewUpload(content, fileName || undefined, declaration ?? undefined)
+        setPreview(verified); setPreviewedFor(signature)
         return
       }
       if (!api.publishUpload) return
+      // A mapped publication is only ever the declaration a preview verified.
+      if (mapped && !mappedVerified) {
+        setError(mappedBlocked ?? 'Preview this declaration and correct it before publishing.')
+        return
+      }
       const version = await api.publishUpload({
-        content,
+        ...(fileBase64 !== null ? { content_base64: fileBase64 } : { content }),
         ...(fileName ? { file_name: fileName } : {}),
         ...(sourceReference ? { source_reference: sourceReference } : {}),
         ...(licenseReference ? { license_reference: licenseReference } : {}),
+        ...(declaration ?? {}),
         availability_policy: policy,
         ...(policy === AVAILABILITY_SIMULATED ? { latency_seconds: Number(latency) } : {}),
       })
-      setPreview(null); setPublished(version)
+      setPreview(null); setPreviewedFor(null); setPublished(version)
     } catch (caught) { setError(messageOf(caught, 'The host refused this upload.')) }
     finally { setBusy(null) }
   }
 
   if (!previewUpload && !api.publishUpload) return null
-  const columns = preview ? (preview.header.length ? preview.header : Object.keys(preview.rows[0] ?? {}).filter(name => name !== 'record_number')) : []
+  const strictPreview = preview && preview.schema === 'ea.local-upload-preview.v1' ? preview : null
+  const mappedPreview = preview && isMappedPreview(preview) ? preview : null
+  const columns = strictPreview ? (strictPreview.header.length ? strictPreview.header : Object.keys(strictPreview.rows[0] ?? {}).filter(name => name !== 'record_number')) : []
+  const mappedColumns = mappedPreview?.preview ? Object.keys(mappedPreview.preview.rows[0] ?? {}).filter(name => name !== 'record_number') : []
   return <div className="upload-panel">
-    <p className="muted">An uploaded file is decoded by the same strict Phase 1 OHLCV decoder the read-only registered root uses, and published as one immutable version. There is no general column mapper: only that fixed 15-column UTC interval profile is accepted, and its own raw units are read as they are rather than converted.</p>
+    <p className="muted">An uploaded file is decoded by the same strict Phase 1 OHLCV decoder the read-only registered root uses, and published as one immutable version. Either the file already has that fixed 15-column UTC interval profile, or you declare, field by field, how your own columns and timestamps become it. Nothing is inferred from the data in either case.</p>
+    <label htmlFor="upload-mode">Upload mode</label>
+    <select id="upload-mode" value={mode} disabled={busy !== null} onChange={event => { setMode(event.target.value === 'explicit-mapping' ? 'explicit-mapping' : 'strict'); reset() }}>
+      <option value="strict">Strict profile, unchanged</option>
+      <option value="explicit-mapping">Explicit mapping of my own file</option>
+    </select>
     <label htmlFor="upload-file">CSV file</label>
     <input id="upload-file" type="file" accept=".csv,text/csv" disabled={busy !== null} onChange={event => {
       const file = event.target.files?.[0]
       if (!file) return
       setFileName(file.name); reset()
-      void file.text().then(value => setContent(value)).catch(() => setError('The selected file could not be read in this browser.'))
+      void file.arrayBuffer().then(bytes => {
+        // The file's own bytes are what a publication sends; the text below is
+        // only a readable view of them, and editing it replaces that payload.
+        setFileBase64(base64Of(bytes))
+        setContent(new TextDecoder().decode(bytes))
+      }).catch(() => setError('The selected file could not be read in this browser.'))
     }} />
-    <label htmlFor="upload-content">CSV content</label>
+    {fileBase64 !== null && <p className="muted">This file is sent as its own bytes (base64), not as re-encoded text: a byte-order mark, a CRLF ending or a non-ASCII column stays exactly as the file has it.</p>}
+    <label htmlFor="upload-content">{fileBase64 !== null ? 'CSV content (a readable view; editing it sends this text instead)' : 'CSV content'}</label>
     <textarea id="upload-content" rows={6} spellCheck={false} value={content} disabled={busy !== null}
-      onChange={event => { setContent(event.target.value); reset() }} />
+      onChange={event => { setContent(event.target.value); setFileBase64(null); reset() }} />
     {tooLarge && <p className="notice error">This content is above the {MAX_UPLOAD_CHARACTERS}-character ceiling this host accepts; it would be refused before anything is parsed.</p>}
+    {mapped && <>
+      <label htmlFor="upload-mapping">Mapping declaration (JSON, every strict field declared)</label>
+      <textarea id="upload-mapping" rows={5} spellCheck={false} placeholder={MAPPING_EXAMPLE} value={mappingText} disabled={busy !== null}
+        onChange={event => { setMappingText(event.target.value); reset() }} />
+      <label htmlFor="upload-time">Time declaration (JSON, exact formats and timezone)</label>
+      <textarea id="upload-time" rows={3} spellCheck={false} placeholder={TIME_EXAMPLE} value={timeText} disabled={busy !== null}
+        onChange={event => { setTimeText(event.target.value); reset() }} />
+      <p className="muted">Each destination is one of the strict profile's own field names, and each timestamp names one exact form from {TIME_FORMAT_IDS.join(', ')}. A field you do not declare, a column this file does not have, and a format the values do not match are all refusals rather than guesses.</p>
+    </>}
     <div className="parameter-grid">
       <div><label htmlFor="upload-source">Source reference (your assertion)</label><input id="upload-source" maxLength={300} value={sourceReference} disabled={busy !== null} onChange={event => { setSourceReference(event.target.value); setPublished(null) }} /></div>
       <div><label htmlFor="upload-license">Licence reference</label><input id="upload-license" maxLength={300} value={licenseReference} disabled={busy !== null} onChange={event => { setLicenseReference(event.target.value); setPublished(null) }} /></div>
       <div><label htmlFor="upload-policy">Availability policy</label>
-        <select id="upload-policy" value={policy} disabled={busy !== null} onChange={event => { setPolicy(event.target.value); setPublished(null); setError(null) }}>
+        <select id="upload-policy" value={policy} disabled={busy !== null} onChange={event => { setPolicy(event.target.value); setPreview(null); setPreviewedFor(null); setPublished(null); setError(null) }}>
           <option value="">Choose explicitly…</option>
           <option value={AVAILABILITY_PROVIDED}>Provided in the capture (uploader assertion)</option>
           <option value={AVAILABILITY_SIMULATED}>Simulated: interval end + latency</option>
         </select></div>
-      {policy === AVAILABILITY_SIMULATED && <div><label htmlFor="upload-latency">Simulated latency (seconds)</label><input id="upload-latency" inputMode="numeric" value={latency} disabled={busy !== null} onChange={event => { setLatency(event.target.value); setPublished(null) }} /></div>}
+      {policy === AVAILABILITY_SIMULATED && <div><label htmlFor="upload-latency">Simulated latency (seconds)</label><input id="upload-latency" inputMode="numeric" value={latency} disabled={busy !== null} onChange={event => { setLatency(event.target.value); setPreview(null); setPreviewedFor(null); setPublished(null) }} /></div>}
     </div>
     <p className="muted">There is no default policy: an upload that does not state how the capture became available is refused rather than recorded as if you had asserted it. Neither policy is ever reported as verified point-in-time availability, and the source and licence strings are your assertion, not a legal verification.</p>
     <div className="actions">
-      <button type="button" disabled={busy !== null || !content || tooLarge || !previewUpload} onClick={() => { void run('preview') }}>{busy === 'preview' ? 'Previewing…' : 'Preview sample'}</button>
-      <button type="button" className="primary" disabled={busy !== null || !content || tooLarge || !policy || !api.publishUpload} onClick={() => { void run('publish') }}>{busy === 'publish' ? 'Publishing…' : 'Publish version'}</button>
+      <button type="button" disabled={busy !== null || (!content && fileBase64 === null) || tooLarge || !previewUpload} onClick={() => { void run('preview') }}>{busy === 'preview' ? 'Previewing…' : 'Preview sample'}</button>
+      <button type="button" className="primary" disabled={busy !== null || (!content && fileBase64 === null) || tooLarge || !policy || !api.publishUpload || (mapped && !mappedVerified)} onClick={() => { void run('publish') }}>{busy === 'publish' ? 'Publishing…' : 'Publish version'}</button>
     </div>
+    {mappedBlocked && <p className="muted">{mappedBlocked}</p>}
     {error && <p className="notice error">{error}</p>}
-    {preview && <section className="upload-preview" aria-label="Upload preview">
+    {strictPreview && <section className="upload-preview" aria-label="Upload preview">
       <dl className="summary-list">
-        <div><dt>Bytes / profile</dt><dd>{preview.byte_count} · {preview.profile}</dd></div>
-        <div><dt>Sampled rows</dt><dd>{preview.row_count_sampled}{preview.truncated ? ' · sample truncated' : ''}</dd></div>
-        <div><dt>Header</dt><dd>{preview.header_ok ? 'Matches the strict profile' : `Expected: ${preview.expected_header.join(', ')}`}</dd></div>
-        <div><dt>Full validation</dt><dd>{preview.full_validation}{preview.valid ? ' · verified' : ''}</dd></div>
+        <div><dt>Bytes / profile</dt><dd>{strictPreview.byte_count} · {strictPreview.profile}</dd></div>
+        <div><dt>Sampled rows</dt><dd>{strictPreview.row_count_sampled}{strictPreview.truncated ? ' · sample truncated' : ''}</dd></div>
+        <div><dt>Header</dt><dd>{strictPreview.header_ok ? 'Matches the strict profile' : `Expected: ${strictPreview.expected_header.join(', ')}`}</dd></div>
+        <div><dt>Full validation</dt><dd>{strictPreview.full_validation}{strictPreview.valid ? ' · verified' : ''}</dd></div>
       </dl>
-      {preview.first_error && <p className="notice error">{preview.first_error.code}: {preview.first_error.message}{preview.first_error.record_number ? ` · CSV record ${preview.first_error.record_number}` : ''}{preview.first_error.field_name ? ` · field ${preview.first_error.field_name}` : ''}</p>}
-      {preview.quality && <dl className="summary-list">
-        <div><dt>Bars / revisions</dt><dd>{preview.quality.bar_count} / {preview.quality.revision_count}</dd></div>
-        <div><dt>Observed gaps</dt><dd>{preview.quality.observed_gap_count}{preview.quality.largest_gap_seconds ? ` · largest ${preview.quality.largest_gap_seconds}s` : ''}</dd></div>
-        <div><dt>Bar coverage (UTC)</dt><dd>{preview.quality.bar_start_utc} — {preview.quality.bar_end_utc}</dd></div>
-        <div><dt>Bar durations</dt><dd>{preview.quality.bar_durations_seconds.map(value => `${value}s`).join(', ') || 'Unavailable'}</dd></div>
+      {strictPreview.first_error && <p className="notice error">{strictPreview.first_error.code}: {strictPreview.first_error.message}{strictPreview.first_error.record_number ? ` · CSV record ${strictPreview.first_error.record_number}` : ''}{strictPreview.first_error.field_name ? ` · field ${strictPreview.first_error.field_name}` : ''}</p>}
+      {strictPreview.quality && <dl className="summary-list">
+        <div><dt>Bars / revisions</dt><dd>{strictPreview.quality.bar_count} / {strictPreview.quality.revision_count}</dd></div>
+        <div><dt>Observed gaps</dt><dd>{strictPreview.quality.observed_gap_count}{strictPreview.quality.largest_gap_seconds ? ` · largest ${strictPreview.quality.largest_gap_seconds}s` : ''}</dd></div>
+        <div><dt>Bar coverage (UTC)</dt><dd>{strictPreview.quality.bar_start_utc} — {strictPreview.quality.bar_end_utc}</dd></div>
+        <div><dt>Bar durations</dt><dd>{strictPreview.quality.bar_durations_seconds.map(value => `${value}s`).join(', ') || 'Unavailable'}</dd></div>
       </dl>}
-      {columns.length > 0 && preview.rows.length > 0 && <table><thead><tr><th>Record</th>{columns.map(name => <th key={name}>{name}</th>)}</tr></thead>
-        <tbody>{preview.rows.map(row => <tr key={String(row.record_number)}><th scope="row">{String(row.record_number)}</th>{columns.map(name => <td key={name}>{String(row[name] ?? '')}</td>)}</tr>)}</tbody></table>}
-      {preview.limitations.length > 0 && <details><summary>What a preview cannot show</summary>
-        <ul className="assumption-list">{preview.limitations.map(item => <li key={item}>{item}</li>)}</ul>
+      {columns.length > 0 && strictPreview.rows.length > 0 && <table><thead><tr><th>Record</th>{columns.map(name => <th key={name}>{name}</th>)}</tr></thead>
+        <tbody>{strictPreview.rows.map(row => <tr key={String(row.record_number)}><th scope="row">{String(row.record_number)}</th>{columns.map(name => <td key={name}>{String(row[name] ?? '')}</td>)}</tr>)}</tbody></table>}
+      {strictPreview.limitations.length > 0 && <details><summary>What a preview cannot show</summary>
+        <ul className="assumption-list">{strictPreview.limitations.map(item => <li key={item}>{item}</li>)}</ul>
+      </details>}
+    </section>}
+    {mappedPreview && <section className="upload-preview" aria-label="Mapped upload preview">
+      <dl className="summary-list">
+        <div><dt>Mapped bytes / profile</dt><dd>{mappedPreview.capture?.byte_count ?? mappedPreview.byte_count} · {mappedPreview.profile ?? 'strict Phase 1 OHLCV'}</dd></div>
+        <div><dt>Sampled rows</dt><dd>{mappedPreview.preview?.row_count_sampled ?? 0}{mappedPreview.preview?.truncated ? ' · sample truncated' : ''}</dd></div>
+        <div><dt>Whole file mapped</dt><dd>{mappedPreview.valid ? 'verified — the whole source normalizes and re-decodes' : 'refused'}</dd></div>
+        <div><dt>Raw source SHA-256 (not the capture)</dt><dd>{mappedPreview.source?.sha256 ?? 'Unavailable'} · {mappedPreview.source?.byte_count ?? 0} source bytes; retained only after publication</dd></div>
+        <div><dt>Mapped capture SHA-256</dt><dd>{mappedPreview.capture?.sha256 ?? 'Unavailable'} · {mappedPreview.capture?.record_count ?? 0} records</dd></div>
+        <div><dt>Mapping evidence SHA-256</dt><dd>{mappedPreview.mapping_evidence_sha256 ?? 'Unavailable'}</dd></div>
+        <div><dt>Declared timezone / formats</dt><dd>{mappedPreview.time?.timezone ?? 'Unavailable'} · {Object.entries(mappedPreview.time?.formats ?? {}).map(([field, format]) => `${field}: ${format}`).join(' · ') || 'Unavailable'}</dd></div>
+      </dl>
+      {mappedPreview.first_error && <p className="notice error">{mappedPreview.first_error.code}: {mappedPreview.first_error.message}{mappedPreview.first_error.record_number ? ` · CSV record ${mappedPreview.first_error.record_number}` : ''}{mappedPreview.first_error.field_name ? ` · field ${mappedPreview.first_error.field_name}` : ''}</p>}
+      {mappedPreview.quality && <dl className="summary-list">
+        <div><dt>Bars / revisions</dt><dd>{mappedPreview.quality.bar_count} / {mappedPreview.quality.revision_count}</dd></div>
+        <div><dt>Observed gaps</dt><dd>{mappedPreview.quality.observed_gap_count}{mappedPreview.quality.largest_gap_seconds ? ` · largest ${mappedPreview.quality.largest_gap_seconds}s` : ''}</dd></div>
+        <div><dt>Bar coverage (UTC)</dt><dd>{mappedPreview.quality.bar_start_utc} — {mappedPreview.quality.bar_end_utc}</dd></div>
+      </dl>}
+      {mappedPreview.mapping && <details><summary>Declared mapping, as the host resolved it</summary>
+        <ul className="assumption-list">
+          {Object.entries(mappedPreview.mapping.columns).map(([field, column]) => <li key={field}>{field} ← column {column}</li>)}
+          {Object.entries(mappedPreview.mapping.constants).map(([field, value]) => <li key={field}>{field} = {value}</li>)}
+        </ul>
+      </details>}
+      {mappedColumns.length > 0 && (mappedPreview.preview?.rows.length ?? 0) > 0 && <table><thead><tr><th>Record</th>{mappedColumns.map(name => <th key={name}>{name}</th>)}</tr></thead>
+        <tbody>{mappedPreview.preview?.rows.map(row => <tr key={String(row.record_number)}><th scope="row">{String(row.record_number)}</th>{mappedColumns.map(name => <td key={name}>{String(row[name] ?? '')}</td>)}</tr>)}</tbody></table>}
+      {mappedPreview.limitations.length > 0 && <details><summary>What a preview cannot show</summary>
+        <ul className="assumption-list">{mappedPreview.limitations.map(item => <li key={item}>{item}</li>)}</ul>
       </details>}
     </section>}
     {published && <section className="upload-version" aria-label="Published dataset version">
@@ -599,6 +936,7 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
         <div><dt>Capture SHA-256</dt><dd>{published.capture_sha256}</dd></div>
         <div><dt>Canonical data SHA-256</dt><dd>{published.data_sha256}</dd></div>
         <div><dt>Raw source SHA-256</dt><dd>{published.source_bytes_sha256} · {published.source_byte_count} bytes retained as provenance only</dd></div>
+        {published.mapping_evidence_sha256 && <div><dt>Mapping evidence SHA-256</dt><dd>{published.mapping_evidence_sha256} · the declaration is sealed with the version and re-derived on every read</dd></div>}
         <div><dt>Version manifest SHA-256</dt><dd>{published.manifest_sha256}</dd></div>
       </dl>
       <p className="muted">This version is now one entry in the dataset catalog. It is usable as research data only when you explicitly select its Data capability: that selection is what freezes the version's evidence for a run, and a direct backtest or batch over an uploaded version carries no such binding and is refused before anything is prepared. Research binds the canonical capture digest; an edited manifest fails that binding before any run is dispatched, and the retained raw bytes only ever identify where the version came from.</p>
@@ -708,6 +1046,10 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
       {api.listDeclarations && <section className="panel" aria-label="Registered declarations">
         <header><h2>Declarations</h2><span>Verified data, installed only by you</span></header>
         <DeclarationCatalogPanel api={api} />
+      </section>}
+      {(api.localStrategySlot || api.inspectLocalStrategy) && <section className="panel" aria-label="Local strategy package">
+        <header><h2>Local strategy package</h2><span>Inspected statically, trusted explicitly</span></header>
+        <LocalStrategyPanel api={api} />
       </section>}
     </div>}
     <div className="research-tools"><Link to="/backtests">Backtests</Link><Link to="/batches/new">Run batch</Link><Link to="/holdouts">Chronological holdouts</Link></div>

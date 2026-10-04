@@ -3,7 +3,7 @@ import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } fr
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings } from './research'
 import { radianApi } from './radian-api'
-import { researchApi, type DeclarationBody, type DeclarationCatalog, type DeclarationVerdict, type DatasetEntry, type ModelConfigurationStatus, type PluginCatalog, type PluginSelection, type RecipeResolution, type ResearchTask, type UploadPreview, type UploadPublishRequest, type UploadVersion } from './research-api'
+import { researchApi, type DeclarationBody, type DeclarationCatalog, type DeclarationVerdict, type DatasetEntry, type LocalStrategyCapability, type LocalStrategyRegisterRequest, type LocalStrategySlot, type ModelConfigurationStatus, type PluginCatalog, type PluginSelection, type RecipeResolution, type ResearchTask, type UploadDeclaration, type UploadPreviewResponse, type UploadPublishRequest, type UploadVersion } from './research-api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
@@ -185,8 +185,15 @@ export type ApiAdapter = {
   listDeclarations?(): Promise<DeclarationCatalog>
   validateDeclaration?(declaration: DeclarationBody): Promise<DeclarationVerdict>
   registerDeclaration?(declaration: DeclarationBody): Promise<DeclarationVerdict>
-  previewUpload?(content: string, fileName?: string): Promise<UploadPreview>
+  previewUpload?(content: string, fileName?: string, declaration?: UploadDeclaration): Promise<UploadPreviewResponse>
+  previewUploadFile?(contentBase64: string, declaration: UploadDeclaration, fileName?: string): Promise<UploadPreviewResponse>
   publishUpload?(request: UploadPublishRequest): Promise<UploadVersion & { datasets: DatasetEntry[] }>
+  /** The workspace's one local strategy package slot, and the explicit decisions
+   * that change it. Absent means this workspace offers no local packages. */
+  localStrategySlot?(): Promise<LocalStrategySlot>
+  inspectLocalStrategy?(contentBase64: string, manifest: Record<string, unknown>): Promise<LocalStrategyCapability>
+  registerLocalStrategy?(request: LocalStrategyRegisterRequest): Promise<LocalStrategySlot>
+  revokeLocalStrategy?(): Promise<LocalStrategySlot>
 }
 
 async function loadTradeAnalytics(api: ApiAdapter, job: BacktestJob): Promise<TradeAnalytics | null> {
@@ -259,8 +266,13 @@ const browserApi: ApiAdapter = {
   listDeclarations: () => researchApi.listDeclarations(),
   validateDeclaration: declaration => researchApi.validateDeclaration(declaration),
   registerDeclaration: declaration => researchApi.registerDeclaration(declaration),
-  previewUpload: (content, fileName) => researchApi.previewUpload(content, fileName),
+  previewUpload: (content, fileName, declaration) => researchApi.previewUpload(content, fileName, declaration),
+  previewUploadFile: (contentBase64, declaration, fileName) => researchApi.previewUploadFile(contentBase64, declaration, fileName),
   publishUpload: request => researchApi.publishUpload(request),
+  localStrategySlot: () => researchApi.localStrategySlot(),
+  inspectLocalStrategy: (contentBase64, manifest) => researchApi.inspectLocalStrategy(contentBase64, manifest),
+  registerLocalStrategy: request => researchApi.registerLocalStrategy(request),
+  revokeLocalStrategy: () => researchApi.revokeLocalStrategy(),
 }
 
 async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath | null> {

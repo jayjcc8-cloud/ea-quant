@@ -16,6 +16,15 @@ The availability policy is part of the published version, never a hidden default
 uploader assertion; ``simulated`` replaces that column with ``interval_end +
 latency`` and says so. Neither is ever reported as verified point-in-time
 availability.
+
+A third case is an *explicitly mapped* upload: the arriving bytes are some
+vendor's own CSV, and ``ea.web.csv_mapping`` normalizes them under a declaration
+the uploader states field by field. The arriving bytes are still what is
+retained as the raw source, the normalized capture is still what is published as
+the canonical identity, and the whole declaration is sealed onto the version as
+mapping evidence. Reading such a version runs the mapper again over the retained
+raw source and the sealed declaration and requires it to reproduce the capture
+exactly, so an edited declaration cannot be re-read as this version.
 """
 
 from __future__ import annotations
@@ -32,7 +41,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from ea.data.historical import (
@@ -50,8 +59,14 @@ from ea.web.datasets import (
     _coverage,
 )
 
+if TYPE_CHECKING:  # the mapper imports this module, so it is imported lazily here
+    from ea.web.csv_mapping import MappedCsvCaptureV1
+
 UPLOAD_PREVIEW_SCHEMA = "ea.local-upload-preview.v1"
 UPLOAD_VERSION_SCHEMA = "ea.local-dataset-version.v1"
+MAPPED_PREVIEW_SCHEMA = "ea.local-csv-mapping-preview.v1"
+MAPPED_VERSION_SCHEMA = "ea.local-dataset-version.v2"
+MAP_EVIDENCE_SCHEMA = "ea.local-csv-mapping-evidence.v1"
 DATASET_CATALOG_SCHEMA = "ea.local-dataset-catalog.v1"
 VERSION_EVIDENCE_SCHEMA = "ea.local-dataset-version-evidence.v1"
 
@@ -73,6 +88,10 @@ MAX_NAME_BYTES = 128
 MAX_REFERENCE_BYTES = 300
 MAX_LATENCY_SECONDS = 366 * 24 * 3600
 MAX_MANIFEST_BYTES = 64 * 1024
+# A mapped version manifest also travels inside a job record, which this service
+# reads back under its own 64 KiB bound, so it is kept comfortably below it.
+MAX_MAPPED_MANIFEST_BYTES = 48 * 1024
+MAX_MAPPING_DECLARATION_BYTES = 16 * 1024
 MAX_SWEEP_ENTRIES = 4096
 
 _DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -85,15 +104,38 @@ _TIME_SEMANTICS = {
     "bar_boundary": "explicit-interval-start-end",
 }
 
-_POLICY_LIMITATIONS = (
+# True of every version this store publishes, whichever entrance produced it.
+_VERSION_LIMITATIONS = (
     "Availability is not verified point-in-time evidence; asserted and simulated values are "
     "never presented as PIT verified.",
     "The raw upload is provenance only; the canonical capture is the identity research binds.",
     "No row is dropped, filled, interpolated, resampled or corrected by the host.",
     "The declared source and licence are the uploader's assertion, not a legal verification.",
+)
+
+# True of the fixed strict profile's own decoder, and of it alone: it accepts one
+# column layout, and its preview reads a bounded sample even though a publication
+# then verifies the whole file.
+_STRICT_LIMITATIONS = (
     "A successful preview of a bounded sample is not evidence that the whole file is valid.",
     "Only the fixed strict UTC 15-column OHLCV profile is accepted. The host has no general "
     "column mapper, and it reads the profile's own raw units rather than converting them.",
+)
+
+_POLICY_LIMITATIONS = (*_VERSION_LIMITATIONS, *_STRICT_LIMITATIONS)
+
+# What is additionally true of a version an explicit mapping produced. The declaration
+# replaces both strict-only statements: the mapper reads every row of the arriving file
+# rather than a bounded sample, and it is the general column mapping the strict profile
+# does not have.
+_MAPPED_LIMITATIONS = (
+    "The normalized capture is not the raw source: the arriving bytes are retained unchanged as "
+    "the raw upload, and the declared mapping is the only thing that turned them into a capture.",
+    "Only the declared columns, constants, timestamp formats and timezone are applied. Nothing is "
+    "inferred from the data, and no undeclared source column is projected into the normalized "
+    "capture; the original source is retained whole.",
+    "The declaration is the uploader's own statement. It is sealed with the version and re-derived "
+    "on every read, which proves it is intact rather than that it is correct.",
 )
 
 
@@ -481,6 +523,90 @@ def evidence_digest(document: object) -> str:
     return "sha256:" + sha256(_canonical_json(document)).hexdigest()
 
 
+def _mapper_schema() -> str:
+    """The mapping schema id this build ships, without importing the mapper eagerly."""
+    from ea.web.csv_mapping import CSV_MAPPING_SCHEMA
+
+    return CSV_MAPPING_SCHEMA
+
+
+def _bounded_declaration(value: object, *, field: str) -> Any:
+    """One caller-supplied mapping declaration, kept only as bounded canonical JSON.
+
+    The declaration is both the mapper's input and part of the sealed evidence, so
+    it is copied into plain JSON data and bounded here rather than being stored as
+    whatever object a caller happened to hold.
+    """
+    try:
+        payload = _canonical_json(value)
+    except (TypeError, ValueError):
+        raise UploadError(
+            "mapping_declaration", f"{field} must be JSON data this host can record"
+        ) from None
+    if len(payload) > MAX_MAPPING_DECLARATION_BYTES:
+        raise UploadError(
+            "mapping_declaration",
+            f"{field} is larger than the {MAX_MAPPING_DECLARATION_BYTES}-byte declaration limit",
+        )
+    return json.loads(payload)
+
+
+def _mapping_evidence(result: MappedCsvCaptureV1, declaration: dict[str, Any]) -> dict[str, Any]:
+    """The whole explicit declaration beside the mapper's own complete result.
+
+    ``declaration`` is what the uploader stated; ``result`` is what the mapper
+    derived from that declaration and from the arriving bytes, including the
+    normalized capture's digests, the resolved mapping and time plan, the
+    availability policy, the coverage evidence and the bounded preview. A read
+    re-derives one from the other and requires the capture to be reproduced
+    exactly, which is what ``_validated_mapping`` checks.
+    """
+    document = result.document()
+    return {
+        "schema": MAP_EVIDENCE_SCHEMA,
+        "version": 1,
+        "mapper": document["schema"],
+        "profile": document["profile"],
+        "declaration": declaration,
+        "result": document,
+    }
+
+
+def _mapping_summary(manifest: dict[str, Any]) -> dict[str, Any]:
+    """The bounded part of one version's mapping evidence that evidence carries."""
+    evidence = cast("dict[str, Any]", manifest["mapping_evidence"])
+    result = cast("dict[str, Any]", evidence["result"])
+    return {
+        "schema": MAP_EVIDENCE_SCHEMA,
+        "mapper": evidence["mapper"],
+        "evidence_sha256": manifest["mapping_evidence_sha256"],
+        "mapping": result["mapping"],
+        "time": result["time"],
+        "capture": result["capture"],
+        "source": result["source"],
+    }
+
+
+def _mapping_declaration(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Re-read one version's sealed mapping evidence under its closed schema."""
+    evidence = manifest.get("mapping_evidence")
+    declaration = evidence.get("declaration") if type(evidence) is dict else None
+    result = evidence.get("result") if type(evidence) is dict else None
+    if (
+        type(evidence) is not dict
+        or evidence.get("schema") != MAP_EVIDENCE_SCHEMA
+        or evidence.get("version") != 1
+        or evidence.get("mapper") != _mapper_schema()
+        or manifest.get("mapping_evidence_sha256") != evidence_digest(evidence)
+        or type(declaration) is not dict
+        or set(declaration) != {"mapping", "time_declaration"}
+        or type(result) is not dict
+        or result.get("schema") != _mapper_schema()
+    ):
+        raise ValueError("uploaded dataset version mapping evidence is not the closed schema")
+    return cast("dict[str, Any]", declaration)
+
+
 def seal_version_manifest(document: dict[str, Any]) -> dict[str, Any]:
     """One published version's own body, with its integrity digest filled in.
 
@@ -503,7 +629,7 @@ def _version_evidence(
     """The bounded, canonical evidence one published upload version can prove."""
     instrument = dataset.selection.events[0].payload.instrument
     source = cast("dict[str, Any]", manifest.get("source"))
-    return {
+    evidence: dict[str, Any] = {
         "schema": VERSION_EVIDENCE_SCHEMA,
         "dataset_id": dataset_id,
         "origin": "upload",
@@ -529,6 +655,11 @@ def _version_evidence(
         "availability_policy": _validated_policy(manifest.get("availability_policy")),
         "time_semantics": dict(_TIME_SEMANTICS),
     }
+    if manifest.get("schema") == MAPPED_VERSION_SCHEMA:
+        # The declaration that produced this capture is part of what the evidence
+        # names, so the digest a bound job freezes covers the mapping too.
+        evidence["mapping"] = _mapping_summary(manifest)
+    return evidence
 
 
 class ControlledUploadStoreV1:
@@ -704,6 +835,59 @@ class ControlledUploadStoreV1:
 
     # -- publication --------------------------------------------------------
 
+    def preview_mapped(
+        self,
+        content: object,
+        *,
+        mapping: object = None,
+        time_declaration: object = None,
+        availability_policy: object = None,
+        latency_seconds: object = None,
+    ) -> dict[str, Any]:
+        """A bounded preview of one explicitly mapped source; never a publication.
+
+        The verdict is the mapper's own: it normalizes the whole source and the
+        strict decoder re-reads the whole capture, so ``valid`` means the entire
+        file maps. The bounded sample, the coverage evidence and the digest of the
+        mapping evidence are handed out so a caller can confirm exactly what it
+        would publish, and nothing is written: a preview creates no version.
+        """
+        try:
+            payload = self._check_request(content)
+            declaration = {
+                "mapping": _bounded_declaration(mapping, field="mapping"),
+                "time_declaration": _bounded_declaration(
+                    time_declaration, field="time_declaration"
+                ),
+            }
+            policy = _policy_document(availability_policy, latency_seconds)
+            result = self._mapped_capture(
+                payload, declaration["mapping"], declaration["time_declaration"], policy
+            )
+        except UploadError as error:
+            return {
+                "schema": MAPPED_PREVIEW_SCHEMA,
+                "mode": "explicit-mapping",
+                "valid": False,
+                "first_error": error.document(),
+                "byte_count": len(content) if type(content) is bytes else 0,
+                "mapping_evidence": None,
+                "mapping_evidence_sha256": None,
+                "limitations": [*_VERSION_LIMITATIONS, *_MAPPED_LIMITATIONS],
+            }
+        document = result.document()
+        evidence = _mapping_evidence(result, declaration)
+        return {
+            **document,
+            "schema": MAPPED_PREVIEW_SCHEMA,
+            "mode": "explicit-mapping",
+            "valid": True,
+            "first_error": None,
+            "mapping_evidence": evidence,
+            "mapping_evidence_sha256": evidence_digest(evidence),
+            "limitations": [*document["limitations"], *_MAPPED_LIMITATIONS],
+        }
+
     def _stored_bytes(self) -> int:
         total = 0
         for name in ("raw", "captures"):
@@ -714,6 +898,42 @@ class ControlledUploadStoreV1:
                     total += size
         return total
 
+    def _mapped_capture(
+        self,
+        payload: bytes,
+        mapping: Any,
+        time_declaration: Any,
+        policy: dict[str, Any],
+    ) -> MappedCsvCaptureV1:
+        """Run the one explicit mapping over the arriving bytes.
+
+        ``ea.web.csv_mapping`` imports this module, so the mapper is imported here
+        rather than at module scope and the dependency keeps one direction. The
+        policy the store already validated is what the mapper is given, so the
+        capture's own ``available_at`` is derived under the same closed policy the
+        version records.
+        """
+        from ea.web.csv_mapping import map_csv_capture
+
+        result = map_csv_capture(
+            payload,
+            mapping=mapping,
+            time_declaration=time_declaration,
+            availability_policy=policy["id"],
+            latency_seconds=policy["latency_seconds"],
+        )
+        if result.record_count > MAX_UPLOAD_RECORDS:
+            raise UploadError(
+                "too_many_records",
+                f"the mapped capture holds {result.record_count} records, above this store's "
+                f"{MAX_UPLOAD_RECORDS} limit",
+            )
+        if len(result.strict_csv) > MAX_UPLOAD_BYTES:
+            raise UploadError(
+                "source_too_large", "the mapped capture is larger than this store accepts"
+            )
+        return result
+
     def publish(
         self,
         content: object,
@@ -723,11 +943,16 @@ class ControlledUploadStoreV1:
         license_reference: object = None,
         availability_policy: object = None,
         latency_seconds: object = None,
+        mapping: object = None,
+        time_declaration: object = None,
     ) -> dict[str, Any]:
         """Verify one upload end to end and publish it as one immutable version.
 
         ``availability_policy`` has no default: the caller states how the capture
-        became available, or the upload is refused.
+        became available, or the upload is refused. ``mapping`` and
+        ``time_declaration`` are both absent for a strict-profile upload and both
+        present for an explicitly mapped one; one without the other is refused
+        rather than guessed at.
         """
         with self._lock:
             payload = self._check_request(content)
@@ -735,33 +960,64 @@ class ControlledUploadStoreV1:
             source = _bounded_reference(source_reference, field="source_reference")
             licence = _bounded_reference(license_reference, field="license_reference")
             policy = _policy_document(availability_policy, latency_seconds)
+            if (mapping is None) != (time_declaration is None):
+                raise UploadError(
+                    "mapping_declaration",
+                    "an explicit mapping needs both 'mapping' and 'time_declaration'",
+                )
+            declaration = {
+                "mapping": _bounded_declaration(mapping, field="mapping"),
+                "time_declaration": _bounded_declaration(
+                    time_declaration, field="time_declaration"
+                ),
+            }
             if len(self._versions()) >= MAX_PUBLISHED_VERSIONS:
                 raise UploadError(
                     "upload_quota", f"the store holds the {MAX_PUBLISHED_VERSIONS}-version limit"
                 )
-            try:
-                decoded = self._decode_staged(payload)
-            except HistoricalMarketDataError as error:
-                raise _strict_failure(error) from None
-            self._single_instrument(decoded)
-            self._check_record_count(decoded)
-            if policy["latency_seconds"] is None:
-                capture, redecoded = payload, decoded
+            result: MappedCsvCaptureV1 | None = None
+            if mapping is not None:
+                result = self._mapped_capture(
+                    payload, declaration["mapping"], declaration["time_declaration"], policy
+                )
+                capture = result.strict_csv
+                capture_sha256 = result.capture_sha256
+                capture_byte_count = result.capture_byte_count
+                data_sha256 = result.data_sha256
+                record_count = result.record_count
+                venue, symbol = result.venue, result.symbol
+                quality = result.quality
             else:
-                capture = _rewrite_available_at(payload, policy["latency_seconds"])
-                if len(capture) > MAX_UPLOAD_BYTES:
-                    raise UploadError(
-                        "source_too_large",
-                        "the simulated capture is larger than this store accepts",
-                    )
                 try:
-                    redecoded = self._decode_staged(capture)
+                    decoded = self._decode_staged(payload)
                 except HistoricalMarketDataError as error:
                     raise _strict_failure(error) from None
-                self._check_record_count(redecoded)
-            instrument = self._single_instrument(redecoded)
+                self._single_instrument(decoded)
+                self._check_record_count(decoded)
+                if policy["latency_seconds"] is None:
+                    capture, redecoded = payload, decoded
+                else:
+                    capture = _rewrite_available_at(payload, policy["latency_seconds"])
+                    if len(capture) > MAX_UPLOAD_BYTES:
+                        raise UploadError(
+                            "source_too_large",
+                            "the simulated capture is larger than this store accepts",
+                        )
+                    try:
+                        redecoded = self._decode_staged(capture)
+                    except HistoricalMarketDataError as error:
+                        raise _strict_failure(error) from None
+                    self._check_record_count(redecoded)
+                instrument = self._single_instrument(redecoded)
+                venue, symbol = instrument.venue.code, instrument.symbol
+                capture_sha256 = sha256(capture).hexdigest()
+                capture_byte_count = len(capture)
+                data_sha256 = redecoded.selection.fingerprint.sha256.value
+                record_count = redecoded.selection.fingerprint.record_count
+                quality = _coverage(redecoded)
             # The quota counts the converted capture, not only the raw bytes that
-            # arrived: the simulated policy materializes a second, larger file.
+            # arrived: the simulated policy materializes a second, larger file, and
+            # so does an explicit mapping.
             if self._stored_bytes() + len(payload) + len(capture) > MAX_STORED_BYTES:
                 raise UploadError("upload_quota", "the upload store has reached its size limit")
             dataset_id = f"{uuid4().hex}.csv"
@@ -769,7 +1025,7 @@ class ControlledUploadStoreV1:
             capture_directory = self._fds["captures"]
             versions_directory = self._fds["versions"]
             manifest: dict[str, Any] = {
-                "schema": UPLOAD_VERSION_SCHEMA,
+                "schema": MAPPED_VERSION_SCHEMA if result is not None else UPLOAD_VERSION_SCHEMA,
                 "dataset_id": dataset_id,
                 "kind": "ohlcv",
                 "profile": PHASE1_OHLCV_PROFILE,
@@ -786,16 +1042,32 @@ class ControlledUploadStoreV1:
                 "source_bytes_sha256": sha256(payload).hexdigest(),
                 "source_byte_count": len(payload),
                 "raw_retained": True,
-                "capture_sha256": sha256(capture).hexdigest(),
-                "capture_byte_count": len(capture),
-                "data_sha256": redecoded.selection.fingerprint.sha256.value,
-                "record_count": redecoded.selection.fingerprint.record_count,
-                "instrument": {"venue": instrument.venue.code, "symbol": instrument.symbol},
+                "capture_sha256": capture_sha256,
+                "capture_byte_count": capture_byte_count,
+                "data_sha256": data_sha256,
+                "record_count": record_count,
+                "instrument": {"venue": venue, "symbol": symbol},
                 "time_semantics": dict(_TIME_SEMANTICS),
-                "quality": _coverage(redecoded),
+                "quality": quality,
                 "limitations": list(_POLICY_LIMITATIONS),
             }
+            if result is not None:
+                evidence = _mapping_evidence(result, declaration)
+                manifest["mapping_evidence"] = evidence
+                manifest["mapping_evidence_sha256"] = evidence_digest(evidence)
+                manifest["limitations"] = [*_VERSION_LIMITATIONS, *_MAPPED_LIMITATIONS]
             manifest = seal_version_manifest(manifest)
+            if len(_canonical_json(manifest)) > (
+                MAX_MAPPED_MANIFEST_BYTES if result is not None else MAX_MANIFEST_BYTES
+            ):
+                # A version whose own manifest cannot be read back is not
+                # publishable at all, so the bound is enforced before any write. A
+                # mapped manifest is bounded more tightly because the same document
+                # also travels inside a job record, which has its own read bound.
+                raise UploadError(
+                    "mapping_evidence",
+                    "the mapping evidence is larger than one version manifest can carry",
+                )
             try:
                 _write_new(raw_directory, dataset_id, payload)
                 if capture is payload:
@@ -874,13 +1146,18 @@ class ControlledUploadStoreV1:
             return None
         if (
             type(document) is not dict
-            or document.get("schema") != UPLOAD_VERSION_SCHEMA
+            or document.get("schema") not in {UPLOAD_VERSION_SCHEMA, MAPPED_VERSION_SCHEMA}
             or document.get("dataset_id") != dataset_id
             or document.get("kind") != "ohlcv"
             or document.get("profile") != PHASE1_OHLCV_PROFILE
             or type(document.get("version")) is not int
             or document.get("raw_retained") is not True
             or not _manifest_is_intact(document)
+        ):
+            return None
+        if document["schema"] == MAPPED_VERSION_SCHEMA and (
+            type(document.get("mapping_evidence")) is not dict
+            or type(document.get("mapping_evidence_sha256")) is not str
         ):
             return None
         return cast("dict[str, Any]", document)
@@ -891,8 +1168,9 @@ class ControlledUploadStoreV1:
         Every claim the manifest makes about the bytes is checked here — the capture
         digest, its size, the economic fingerprint, the record count, the retained
         raw source, the closed availability policy and the uploader-asserted
-        provenance. A manifest edited after publication fails here, before any job
-        could be dispatched against it.
+        provenance — and, for a mapped version, the mapper is run again over the
+        retained raw source and the sealed declaration. A manifest edited after
+        publication fails here, before any job could be dispatched against it.
         """
         manifest = self.manifest(dataset_id)
         if manifest is None:
@@ -911,8 +1189,10 @@ class ControlledUploadStoreV1:
             raise ValueError("uploaded dataset capture no longer matches its published version")
         if fingerprint.record_count != manifest.get("record_count"):
             raise ValueError("uploaded dataset capture no longer matches its published version")
-        self._validated_raw(dataset_id, manifest)
+        raw = self._validated_raw(dataset_id, manifest)
         _validated_policy(manifest.get("availability_policy"))
+        if manifest["schema"] == MAPPED_VERSION_SCHEMA:
+            self._validated_mapping(raw, manifest)
         if manifest.get("time_semantics") != _TIME_SEMANTICS:
             raise ValueError("uploaded dataset version declares unsupported time semantics")
         source = manifest.get("source")
@@ -928,13 +1208,57 @@ class ControlledUploadStoreV1:
             raise ValueError("uploaded input requires exactly one instrument")
         return path, dataset
 
-    def _validated_raw(self, dataset_id: str, manifest: dict[str, Any]) -> None:
+    def _validated_raw(self, dataset_id: str, manifest: dict[str, Any]) -> bytes:
         """The retained raw source must still be the bytes that were published."""
         raw = _read_bounded(self._fds["raw"], dataset_id, MAX_UPLOAD_BYTES)
         if raw is None or len(raw) != manifest.get("source_byte_count"):
             raise ValueError("uploaded dataset version no longer matches its retained raw source")
         if sha256(raw).hexdigest() != manifest.get("source_bytes_sha256"):
             raise ValueError("uploaded dataset version no longer matches its retained raw source")
+        return raw
+
+    def _validated_mapping(self, raw: bytes, manifest: dict[str, Any]) -> None:
+        """Re-derive the capture from the retained raw source and the sealed declaration.
+
+        The mapper is the only authority on what a declaration means, so a read runs
+        it again instead of trusting the capture that is on disk. An edited
+        declaration, an edited raw source or a capture that is not what the
+        declaration produces cannot agree with the published digests, and the
+        version is refused rather than re-read as if it were intact.
+        """
+        from ea.web.csv_mapping import map_csv_capture
+
+        declaration = _mapping_declaration(manifest)
+        policy = _validated_policy(manifest.get("availability_policy"))
+        try:
+            rederived = map_csv_capture(
+                raw,
+                mapping=declaration["mapping"],
+                time_declaration=declaration["time_declaration"],
+                availability_policy=policy["id"],
+                latency_seconds=policy["latency_seconds"],
+            )
+        except UploadError as error:
+            raise ValueError(
+                f"uploaded dataset version no longer reproduces its declared mapping ({error.code})"
+            ) from None
+        recorded = cast(
+            "dict[str, Any]", cast("dict[str, Any]", manifest["mapping_evidence"])["result"]
+        )
+        document = rederived.document()
+        for key in ("source", "capture", "mapping", "time", "availability_policy"):
+            if document[key] != recorded.get(key):
+                raise ValueError(
+                    "uploaded dataset version mapping evidence no longer reproduces its capture"
+                )
+        if (
+            rederived.capture_sha256 != manifest.get("capture_sha256")
+            or rederived.capture_byte_count != manifest.get("capture_byte_count")
+            or rederived.data_sha256 != manifest.get("data_sha256")
+            or rederived.record_count != manifest.get("record_count")
+            or rederived.source_bytes_sha256 != manifest.get("source_bytes_sha256")
+        ):
+            raise ValueError("uploaded dataset version no longer reproduces its declared mapping")
 
     def version_evidence(self, dataset_id: str) -> dict[str, Any]:
         """One bounded, re-validated evidence document for a published upload.
@@ -960,7 +1284,7 @@ class ControlledUploadStoreV1:
             raise ValueError("uploaded dataset version is unavailable")
         _, dataset = self.load(dataset_id)
         instrument = dataset.selection.events[0].payload.instrument
-        return {
+        entry: dict[str, Any] = {
             "dataset_id": dataset_id,
             "valid": True,
             "origin": "upload",
@@ -980,6 +1304,9 @@ class ControlledUploadStoreV1:
             "version_manifest": manifest,
             **_coverage(dataset),
         }
+        if manifest["schema"] == MAPPED_VERSION_SCHEMA:
+            entry["mapping"] = _mapping_summary(manifest)
+        return entry
 
     def list(self) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from ea.plugin.builtins import builtin_catalog
+from ea.plugin.builtins import builtin_capabilities, builtin_catalog
 from ea.plugin.catalog import PluginCatalogV1, VerifiedPluginV1
 from ea.plugin.declarative import (
     DECLARATION_KINDS,
@@ -41,6 +41,11 @@ from ea.plugin.declarative import (
     declared_validator_rejection,
     decode_declaration,
     seal_declaration,
+)
+from ea.plugin.local_strategy import (
+    LOCAL_STRATEGY_ENTRYPOINT,
+    LocalStrategyCapabilityV1,
+    select_local_strategy,
 )
 from ea.plugin.manifest import ManifestError
 from ea.plugin.selection import (
@@ -553,6 +558,7 @@ class ResearchOrchestrator:
     # -- catalog and validation --------------------------------------------
 
     def _catalog(self) -> list[dict[str, Any]]:
+        local = self._local_scenario_facts()
         entries: list[dict[str, Any]] = []
         for scenario in (cast(dict[str, Any], item) for item in self._service.registry.list()):
             descriptor = scenario.get("strategy_descriptor") or {}
@@ -585,7 +591,22 @@ class ResearchOrchestrator:
                     "parameters": contracts,
                 }
             )
+        if local is not None:
+            # The workspace-local slot, described from static facts only: no package
+            # is loaded, compiled or executed to offer it, and it is offered only
+            # while its trust is current.
+            entries.append(local)
         return entries[:_MAX_CATALOG_ENTRIES]
+
+    def _local_scenario_facts(self) -> dict[str, Any] | None:
+        """Static facts of the trusted local slot, or None. Imports nothing."""
+        facts = getattr(self._service, "local_strategy_facts", None)
+        if facts is None:
+            return None
+        try:
+            return cast(dict[str, Any] | None, facts())
+        except ManifestError as error:
+            raise SelectionRejectedError(error) from None
 
     # -- capability catalog and recipe --------------------------------------
 
@@ -624,13 +645,35 @@ class ResearchOrchestrator:
             raise SelectionRejectedError(ManifestError(error.code, error.message)) from None
 
     def _plugin_catalog(self) -> PluginCatalogV1:
-        """Built from live host facts on every use, so no stale claim survives."""
+        """Built from live host facts on every use, so no stale claim survives.
+
+        The trusted workspace-local slot is composed in through the catalog's own
+        public records, and only while its trust is current: an untrusted, revoked
+        or replaced package is simply not offered here.
+        """
         store = getattr(self._service, "declarations", None)
         try:
             declarations = () if store is None else tuple(store.load())
-            return builtin_catalog(self._service, self._model_route(), declarations)
+            capabilities = builtin_capabilities(self._service, self._model_route(), declarations)
         except DeclarationError as error:
             raise SelectionRejectedError(ManifestError(error.code, error.message)) from None
+        local = self._local_strategy_capability()
+        if local is not None:
+            capabilities = [*capabilities, local.pair()]
+        return PluginCatalogV1(
+            [manifest for _adapter, manifest in capabilities],
+            [adapter for adapter, _manifest in capabilities],
+        )
+
+    def _local_strategy_capability(self) -> LocalStrategyCapabilityV1 | None:
+        """The current trusted local capability, re-derived on every read."""
+        current = getattr(self._service, "local_strategy_capability", None)
+        if current is None:
+            return None
+        try:
+            return cast(LocalStrategyCapabilityV1 | None, current())
+        except ManifestError as error:
+            raise SelectionRejectedError(error) from None
 
     def plugin_catalog(self) -> dict[str, Any]:
         """The declared catalog with the host's verified view of each entry."""
@@ -809,6 +852,29 @@ class ResearchOrchestrator:
         nothing here reads or forwards a credential, and no new provider or
         endpoint is created.
         """
+        if plugin.adapter.entrypoint == LOCAL_STRATEGY_ENTRYPOINT:
+            # Current host policy for a local strategy is exactly the current grant:
+            # the identity this run selects must still be the identity this workspace
+            # trusts and is permitted to compute with.
+            capability = self._local_strategy_capability()
+            if capability is None:
+                raise ManifestError(
+                    "grant_required",
+                    "this run selects a local strategy package, and this workspace has "
+                    "no currently trusted one",
+                )
+            if (plugin.manifest.plugin_id, plugin.manifest.package_version) != (
+                capability.plugin_id,
+                capability.package_version,
+            ) or plugin.manifest.artifact_digest != capability.manifest.artifact_digest:
+                raise ManifestError(
+                    "local_strategy_unbound",
+                    "the selected local capability is not the package this workspace "
+                    "currently trusts; inspect and trust it again",
+                )
+            slot = self._service.local_strategy
+            select_local_strategy(capability, grant=slot.grant())
+            return
         if plugin.manifest.kind != "model":
             return
         try:

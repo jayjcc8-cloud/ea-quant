@@ -9,6 +9,7 @@ import shutil
 import stat
 import tempfile
 import threading
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -17,8 +18,17 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+import yaml
+
 from ea.core import RunId
+from ea.data.historical import HistoricalMarketDataError
 from ea.plugin.declarative import DeclarationStoreV1
+from ea.plugin.local_strategy import (
+    LOCAL_STRATEGY_ENTRYPOINT,
+    LocalStrategyCapabilityV1,
+    activate_local_strategy,
+    select_local_strategy,
+)
 from ea.plugin.manifest import ManifestError
 from ea.plugin.selection import BINDING_SCHEMA, PluginBindingV1
 from ea.product import (
@@ -40,12 +50,14 @@ from ea.product.scenario import (
 )
 from ea.product.trade_analytics import trade_analytics
 from ea.strategy.catalog import ResearchStrategyCatalogV1
-from ea.strategy.package import StrategyPackage, read_regular, validate_package
+from ea.strategy.package import StrategyPackage, inspect_package, read_regular, validate_package
 from ea.strategy.registry import project_parameters
 from ea.web import candidates
 from ea.web.datasets import LocalResearchDatasetRegistryV1
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
+from ea.web.local_packages import LOCAL_SCENARIO_ID, LocalStrategyStoreV1
 from ea.web.uploads import (
+    MAPPED_VERSION_SCHEMA,
     UPLOAD_VERSION_SCHEMA,
     ControlledUploadStoreV1,
     LocalResearchDatasetCatalogV1,
@@ -80,6 +92,56 @@ def _job_schema(scenario: LoadedBacktestScenario) -> str:
     return {4: "ea.local-web-job.v4", 5: "ea.local-web-job.v5"}.get(
         scenario.schema_version, "ea.local-web-job.v3"
     )
+
+
+def _binds_local_strategy(plugin_binding: object) -> bool:
+    """Whether one frozen binding selects a workspace-local strategy package.
+
+    This is the only marker that separates the new explicitly trusted slot path
+    from the legacy strategy-root path: both carry a ``local-package`` source, but
+    only the new one freezes the capability in the job's binding.
+    """
+    if type(plugin_binding) is not dict:
+        return False
+    try:
+        binding = PluginBindingV1.decode(plugin_binding)
+    except ManifestError:
+        return False
+    component = binding.component("strategy")
+    return component is not None and component.entrypoint == LOCAL_STRATEGY_ENTRYPOINT
+
+
+def _scenario_document(payload: bytes) -> dict[str, Any]:
+    """One scenario document, YAML or canonical JSON, exactly as it is written."""
+    try:
+        document = yaml.safe_load(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ManifestError(
+            "scenario_invalid", "the scenario is not one readable document"
+        ) from None
+    if type(document) is not dict:
+        raise ManifestError("scenario_invalid", "the scenario is not one mapping")
+    return document
+
+
+def _default_parameters(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    """The declared defaults of one package descriptor, or a refusal.
+
+    A virtual scenario has to name every parameter of the package it selects, so a
+    descriptor whose parameters carry no default cannot be registered rather than
+    being guessed at.
+    """
+    parameters: dict[str, Any] = {}
+    for parameter in descriptor.get("parameters") or []:
+        name = parameter.get("name") if isinstance(parameter, Mapping) else None
+        if type(name) is not str or "default" not in parameter:
+            raise ManifestError(
+                "package_invalid",
+                "every declared parameter of a local strategy needs a default the "
+                "virtual scenario can state",
+            )
+        parameters[name] = parameter["default"]
+    return parameters
 
 
 class WebBoundaryError(ValueError):
@@ -331,6 +393,27 @@ class ScenarioRegistry:
             raise BacktestScenarioError("scenario input resolves outside the authorized root")
         return scenario
 
+    def source_document(self, scenario_id: str) -> dict[str, Any]:
+        """One registered scenario's own declaration, read statically and bounded.
+
+        Path validation and YAML only: no strategy loader, no package import, no
+        catalog. It exists so a caller that must decide something *about* a scenario
+        before loading it can do so without giving the loader the chance to pull a
+        strategy source in first.
+        """
+        path = self._path(scenario_id)
+        try:
+            payload = read_regular(path, self.root, limit=_MAX_SCENARIO_BYTES)
+        except (OSError, ValueError):
+            raise ScenarioNotFoundError("scenario is not registered") from None
+        try:
+            document = yaml.safe_load(payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise BacktestScenarioError("the scenario is not one readable document") from None
+        if type(document) is not dict:
+            raise BacktestScenarioError("the scenario is not one mapping")
+        return document
+
     def validate(self, scenario_id: str) -> dict[str, object]:
         return _scenario_summary(scenario_id, self.load(scenario_id))
 
@@ -448,10 +531,18 @@ class JobRecord:
             entry = ResearchStrategyCatalogV1(
                 () if self.strategy_package is None else (self.strategy_package,)
             ).resolve(strategy)
+            # A frozen local package is presented from its own descriptor's
+            # projection, never from BUILTIN_STRATEGIES: the local entry's parameter
+            # validation callback is a no-op, so rendering history reads the
+            # persisted canonical snapshot and the descriptor alone. Nothing here
+            # imports or runs the package's Python, not even after a revocation.
+            callback_normalized = "source" in strategy or self.schema in {
+                "ea.local-web-job.v4",
+                "ea.local-web-job.v5",
+            }
             document["parameters"] = (
                 entry.normalize(strategy["parameters"])
-                if "source" in strategy
-                or self.schema in {"ea.local-web-job.v4", "ea.local-web-job.v5"}
+                if callback_normalized or _binds_local_strategy(self.plugin_binding)
                 else project_parameters(strategy)
             )
             document["strategy_descriptor"] = entry.descriptor.document()
@@ -601,7 +692,7 @@ def _decode_job(payload: bytes) -> JobRecord:
         dataset_version = document.get("dataset_version")
         if dataset_version is not None and (
             type(dataset_version) is not dict
-            or dataset_version.get("schema") != UPLOAD_VERSION_SCHEMA
+            or dataset_version.get("schema") not in {UPLOAD_VERSION_SCHEMA, MAPPED_VERSION_SCHEMA}
             or type(dataset_version.get("dataset_id")) is not str
             or type(dataset_version.get("availability_policy")) is not dict
         ):
@@ -766,10 +857,13 @@ class WebService:
         try:
             self.uploads = ControlledUploadStoreV1(self.workspace)
             self.declarations = DeclarationStoreV1(self.workspace)
+            self.local_strategy = LocalStrategyStoreV1(self.workspace)
         except (OSError, ValueError):
             raise WebBoundaryError("workspace upload store is unavailable") from None
-        if not _contained(self.uploads.root, self.workspace) or not _contained(
-            self.declarations.root, self.workspace
+        if (
+            not _contained(self.uploads.root, self.workspace)
+            or not _contained(self.declarations.root, self.workspace)
+            or not _contained(self.local_strategy.root.parent, self.workspace)
         ):
             raise WebBoundaryError("workspace upload store resolves outside workspace")
         self.dataset_catalog = LocalResearchDatasetCatalogV1(self.datasets, self.uploads)
@@ -795,6 +889,7 @@ class WebService:
     def stop(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=False)
         self._lease.release()
+        self.local_strategy.close()
 
     def _job_path(self, job_id: str) -> Path:
         bundle = self.jobs_dir / job_id
@@ -933,13 +1028,21 @@ class WebService:
             if record.input_snapshot_bytes is not None:
                 strategy = json.loads(record.input_snapshot_bytes)["scenario"]["strategy"]
                 if "source" in strategy:
-                    package = validate_package(
-                        read_regular(
-                            self.inputs_dir / f"{record.job_id}.eastrategy", self.inputs_dir
-                        ),
-                        expected_sha256=strategy["source"]["artifact_sha256"],
+                    payload = read_regular(
+                        self.inputs_dir / f"{record.job_id}.eastrategy", self.inputs_dir
                     )
-                    ResearchStrategyCatalogV1((package,)).resolve(strategy)
+                    if _binds_local_strategy(record.plugin_binding):
+                        # A job whose binding froze a workspace-local package is read
+                        # statically on every restart: trust may have been revoked
+                        # since it ran, and history must never re-execute the Python.
+                        package = inspect_package(
+                            payload, expected_sha256=strategy["source"]["artifact_sha256"]
+                        )
+                    else:
+                        package = validate_package(
+                            payload, expected_sha256=strategy["source"]["artifact_sha256"]
+                        )
+                        ResearchStrategyCatalogV1((package,)).resolve(strategy)
                     record = replace(record, strategy_package=package)
             self._jobs[record.job_id] = record
             self._requests[record.request_id] = record.job_id
@@ -994,7 +1097,7 @@ class WebService:
             return rebind_research_dataset(
                 scenario, data_path=path, dataset=dataset, dataset_id=dataset_id
             )
-        except (OSError, ValueError):
+        except (HistoricalMarketDataError, OSError, ValueError):
             raise WebBoundaryError("dataset is invalid, incompatible, or unavailable") from None
 
     def _check_dataset(self, scenario: LoadedBacktestScenario) -> None:
@@ -1007,7 +1110,7 @@ class WebService:
             _, current = self.dataset_catalog.load(evidence["dataset_id"])
             if current.source_bytes_sha256 != scenario.dataset.source_bytes_sha256:
                 raise ValueError
-        except (OSError, ValueError):
+        except (HistoricalMarketDataError, OSError, ValueError):
             raise InputChangedError("dataset changed; validate it again") from None
 
     def _dataset_version(self, dataset_id: object) -> dict[str, object] | None:
@@ -1046,10 +1149,312 @@ class WebService:
         if data is None or data.plugin_id != f"ea.builtin.data.{dataset_id}":
             raise InputChangedError("the bound data capability does not name this uploaded dataset")
         evidence = data.identity.get("version_evidence_sha256")
-        if evidence != self.uploads.version_evidence_digest(dataset_id):
+        try:
+            current = self.uploads.version_evidence_digest(dataset_id)
+        except (HistoricalMarketDataError, OSError, ValueError):
+            # A version whose evidence can no longer be re-derived — an edited
+            # declaration, an edited raw source or an edited capture — is a changed
+            # input, not an unreadable one, and it fails before any job exists.
+            raise InputChangedError(
+                "the published version of this dataset can no longer be re-derived; "
+                "re-select the dataset and confirm again"
+            ) from None
+        if evidence != current:
             raise InputChangedError(
                 "the bound data capability does not match this version's evidence; "
                 "re-select the dataset and confirm again"
+            )
+
+    def _is_local_scenario(self, scenario_id: object) -> bool:
+        return scenario_id == LOCAL_SCENARIO_ID
+
+    def local_strategy_status(self) -> dict[str, object]:
+        """What the workspace-local package slot currently is; read-only."""
+        return self.local_strategy.status()
+
+    def local_strategy_capability(self) -> LocalStrategyCapabilityV1 | None:
+        """The current trusted capability, or None. Never establishes trust."""
+        return self.local_strategy.capability()
+
+    def local_strategy_binding(self) -> dict[str, object] | None:
+        """The exact frozen binding the current slot selects, or None."""
+        return self.local_strategy.binding()
+
+    def local_strategy_facts(self) -> dict[str, object] | None:
+        """The static facts the research catalog needs, without importing anything.
+
+        These are what the virtual scenario is: strategy identity, instrument and
+        default parameters read from the retained scenario and the package
+        descriptor. Nothing here loads, compiles or executes the package.
+        """
+        try:
+            capability = self.local_strategy.capability()
+            scenario_path = self.local_strategy.scenario_path()
+        except (OSError, ManifestError):
+            return None
+        if capability is None or scenario_path is None:
+            return None
+        try:
+            document = _scenario_document(scenario_path.read_bytes())
+        except (OSError, ValueError, ManifestError):
+            return None
+        instrument = document.get("instrument")
+        data = document.get("data")
+        funding = document.get("funding")
+        if type(instrument) is not dict or type(data) is not dict or type(funding) is not dict:
+            return None
+        descriptor = capability.descriptor
+        return {
+            "scenario_id": LOCAL_SCENARIO_ID,
+            "name": "Local strategy package",
+            "valid": True,
+            "strategy_id": descriptor.get("strategy_id"),
+            "display_name": descriptor.get("display_name"),
+            "instrument": {
+                "venue": instrument.get("venue"),
+                "symbol": instrument.get("symbol"),
+            },
+            "initial_cash": funding.get("initial_cash"),
+            "parameters": [
+                {
+                    "name": parameter.get("name"),
+                    "type": parameter.get("type"),
+                    "minimum": parameter.get("static_minimum"),
+                    "maximum": parameter.get("static_maximum"),
+                    "default": parameter.get("default"),
+                }
+                for parameter in descriptor.get("parameters") or []
+            ],
+        }
+
+    def inspect_local_strategy(self, *, manifest: object, payload: object) -> dict[str, object]:
+        """Read one captured package statically: no trust, no write, no execution."""
+        return self.local_strategy.inspect(manifest, payload).document()
+
+    def register_local_strategy(
+        self,
+        *,
+        manifest: object,
+        payload: object,
+        trusted: object,
+        effects: object,
+        base_scenario_id: object,
+        expected_plugin_id: object,
+        expected_package_version: object,
+        expected_manifest_digest: object,
+        expected_implementation_digest: object,
+    ) -> dict[str, object]:
+        """Trust one exact captured identity, on explicit operator decisions only.
+
+        The base scenario this borrows data, funding, risk and execution from is a
+        registered one and must not itself be local, so no second package is ever
+        pulled in by a registration. The virtual scenario is built from the base
+        document and retains only the strategy replacement.
+        """
+        if type(base_scenario_id) is not str:
+            raise ManifestError("base_scenario_required", "a base scenario id is required")
+        self._require_ordinary_base(base_scenario_id)
+        base = self.registry.load(base_scenario_id)
+        scenario = self._local_scenario_bytes(
+            base, manifest, payload, expected_implementation_digest
+        )
+        return self.local_strategy.register(
+            manifest=manifest,
+            payload=payload,
+            trusted=trusted,
+            effects=effects,
+            base_scenario_id=base_scenario_id,
+            expected_plugin_id=expected_plugin_id,
+            expected_package_version=expected_package_version,
+            expected_manifest_digest=expected_manifest_digest,
+            expected_implementation_digest=expected_implementation_digest,
+            scenario=scenario,
+            scenario_id=LOCAL_SCENARIO_ID,
+            registered_at=_created_at(),
+        )
+
+    def revoke_local_strategy(self) -> dict[str, object]:
+        """Withdraw trust in the workspace-local slot, durably."""
+        return self.local_strategy.revoke()
+
+    def _require_ordinary_base(self, scenario_id: str) -> None:
+        """Refuse a local-sourced base scenario before any loader could import it.
+
+        The base is read as one bounded YAML document first, through the registry's
+        own path validation and no-follow read, so a base that names a local package
+        is refused here rather than by a loader that would have had to load — and so
+        import — that package to find out. Registering this slot borrows data,
+        funding, risk and execution from an ordinary registered scenario, and never
+        pulls a second package's Python in to do it.
+        """
+        document = self.registry.source_document(scenario_id)
+        strategy = document.get("strategy")
+        declared = strategy.get("source") if type(strategy) is dict else None
+        if type(declared) is dict and declared.get("kind") == "local-package":
+            raise ManifestError(
+                "base_scenario_local",
+                "a local strategy scenario cannot borrow from another local package; "
+                "choose a registered scenario whose strategy this host already owns",
+            )
+
+    def _local_scenario_bytes(
+        self,
+        base: LoadedBacktestScenario,
+        manifest: object,
+        payload: object,
+        expected_implementation_digest: object,
+    ) -> bytes:
+        """The retained virtual scenario: the base document, strategy replaced.
+
+        Only ``strategy`` and ``schema_version`` differ from the registered base
+        scenario, whose data, funding, risk and execution are kept as they are. The
+        data path is pinned absolutely, because the retained YAML lives in the
+        workspace slot rather than beside its base.
+        """
+        capability = self.local_strategy.inspect(manifest, payload)
+        if expected_implementation_digest is not None and (
+            "sha256:" + capability.artifact_sha256 != expected_implementation_digest
+        ):
+            raise ManifestError(
+                "grant_identity_mismatch", "the captured bytes are not the granted implementation"
+            )
+        document = _scenario_document(base.canonical_bytes)
+        # The canonical capture carries the loader-owned canonicalization record, the
+        # same way _materialize_scenario drops it before writing a job document.
+        document.pop("canonicalization", None)
+        base_strategy = document.get("strategy")
+        if type(base_strategy) is not dict or "source" in base_strategy:
+            raise ManifestError(
+                "base_scenario_invalid",
+                "a local strategy scenario needs one registered built-in base scenario; "
+                "a base scenario that already names a local package is refused",
+            )
+        descriptor = capability.descriptor
+        schema_version = {1: 3, 2: 4, 3: 5}.get(capability.package_schema_version)
+        if schema_version is None:
+            raise ManifestError("package_invalid", "unsupported local strategy package schema")
+        strategy: dict[str, object] = {
+            "id": descriptor.get("strategy_id"),
+            "version": descriptor.get("strategy_version"),
+            "source": capability.source(),
+            "parameters": _default_parameters(descriptor),
+        }
+        if schema_version in {4, 5}:
+            strategy["action_contract"] = "V2"
+            lifecycle = descriptor.get("position_lifecycle")
+            if lifecycle not in {"single-long-round-trip-v1", "bounded-long-round-trips-v1"}:
+                raise ManifestError(
+                    "package_invalid",
+                    "an action-contract local package must declare its position lifecycle",
+                )
+            strategy["position_lifecycle"] = lifecycle
+        if schema_version == 5:
+            limit = descriptor.get("max_round_trips")
+            if type(limit) is not int:
+                raise ManifestError(
+                    "package_invalid",
+                    "a bounded-round-trip local package must declare max_round_trips",
+                )
+            strategy["max_round_trips"] = limit
+        document["schema_version"] = schema_version
+        document["strategy"] = strategy
+        document["data"] = {**document["data"], "path": str(base.data_path)}
+        return yaml.safe_dump(document, sort_keys=False).encode("utf-8")
+
+    def _local_catalog(
+        self, plugin_binding: dict[str, object] | None = None
+    ) -> ResearchStrategyCatalogV1:
+        """The engine catalog for the current slot, re-checked against trust now.
+
+        A revoked, replaced or drifted slot is a refusal here, at the moment of this
+        read, rather than a fallback to whatever was once registered. Given a frozen
+        binding, its strategy component must be exactly the capability this slot's
+        current grant selects, so a slot replaced since a job was accepted refuses
+        that job instead of running the new package.
+        """
+        capability = self.local_strategy.capability()
+        if capability is None:
+            raise ManifestError(
+                "grant_required",
+                "this workspace has no currently trusted local strategy package",
+            )
+        grant = self.local_strategy.grant()
+        current = select_local_strategy(capability, grant=grant)
+        if plugin_binding is not None:
+            # A caller's binding carries every layer its recipe selected; only the
+            # strategy component names this slot. That component must be exactly the
+            # one this slot's current grant selects, and activation then runs over
+            # the strategy-only binding: this host's one-entry catalog is the only
+            # thing that can vouch for this capability, and the other layers keep
+            # the verification their own catalogs and the frozen binding give them.
+            frozen = PluginBindingV1.decode(plugin_binding)
+            selected = frozen.component("strategy")
+            expected = current.component("strategy")
+            if selected is None or expected is None or selected.document() != expected.document():
+                raise ManifestError(
+                    "binding_drift",
+                    "the frozen binding does not select the local strategy this slot "
+                    "currently grants",
+                )
+        retained = self.local_strategy.retained()
+        if retained is None:
+            raise ManifestError("slot_invalid", "the local strategy slot is unreadable")
+        return activate_local_strategy(
+            current, retained[0], catalog=capability.catalog(), grant=grant
+        )
+
+    def _load_scenario(self, scenario_id: str) -> LoadedBacktestScenario:
+        """Load one registered scenario, or the current workspace-local slot."""
+        if not self._is_local_scenario(scenario_id):
+            return self.registry.load(scenario_id)
+        path = self.local_strategy.scenario_path()
+        if path is None:
+            raise ScenarioNotFoundError("no trusted local strategy package is registered")
+        try:
+            return load_backtest_scenario(path, catalog=self._local_catalog())
+        except ManifestError:
+            raise
+        except (BacktestScenarioError, OSError, ValueError):
+            raise ScenarioNotFoundError("the local strategy scenario is unreadable") from None
+
+    def _require_local_binding(
+        self, scenario_id: str, plugin_binding: dict[str, object] | None
+    ) -> None:
+        """The local slot is reachable only through its own exact bound capability.
+
+        The direct scenario, batch and holdout paths carry no research recipe, so
+        they name no capability that could freeze this identity. They are refused
+        here, before any materialization, reservation or engine effect, and the
+        binding must match the slot as it is *now*.
+        """
+        if not self._is_local_scenario(scenario_id):
+            return
+        current = self.local_strategy.binding()
+        if current is None:
+            raise ManifestError(
+                "grant_required",
+                "this workspace has no currently trusted local strategy package; "
+                "register one explicitly before running it",
+            )
+        if plugin_binding is None:
+            raise ManifestError(
+                "local_strategy_unbound",
+                "a local strategy scenario runs only through its bound capability; "
+                "this request carries no capability binding",
+            )
+        try:
+            binding = PluginBindingV1.decode(plugin_binding)
+        except ManifestError:
+            raise ManifestError(
+                "local_strategy_unbound", "the capability binding on this request is not readable"
+            ) from None
+        strategy = binding.component("strategy")
+        expected = PluginBindingV1.decode(current).component("strategy")
+        if strategy is None or expected is None or strategy.document() != expected.document():
+            raise ManifestError(
+                "local_strategy_unbound",
+                "the bound strategy capability is not the local package this workspace "
+                "currently trusts; inspect and trust it again",
             )
 
     def validate_scenario(
@@ -1060,7 +1465,7 @@ class WebService:
         dataset_id: str | None = None,
         source_sha256: str | None = None,
     ) -> dict[str, object]:
-        scenario = self._bind_dataset(self.registry.load(scenario_id), dataset_id)
+        scenario = self._bind_dataset(self._load_scenario(scenario_id), dataset_id)
         if (
             source_sha256 is not None
             and scenario.dataset.source_bytes_sha256.value != source_sha256
@@ -1156,7 +1561,8 @@ class WebService:
             captured
             if captured is not None
             else self._bind_dataset(
-                self.registry.load(scenario_id), cast(str | None, input_identity.get("dataset_id"))
+                self._load_scenario(scenario_id),
+                cast(str | None, input_identity.get("dataset_id")),
             )
         )
         if _scenario_identity(scenario) != input_identity:
@@ -1185,6 +1591,7 @@ class WebService:
     ) -> tuple[JobRecord, bool]:
         with self._lock:
             self._require_upload_binding(input_identity, plugin_binding)
+            self._require_local_binding(scenario_id, plugin_binding)
             prepared = self._prepare_job(
                 scenario_id=scenario_id,
                 input_identity=input_identity,
@@ -1243,10 +1650,12 @@ class WebService:
             # has nothing to freeze its provenance: this path is refused before any
             # batch member is prepared, materialized or reserved.
             self._require_upload_binding(input_identity, None)
+            self._require_local_binding(scenario_id, None)
             prepared: list[PreparedJob] = []
             combinations: set[bytes] = set()
             captured = self._bind_dataset(
-                self.registry.load(scenario_id), cast(str | None, input_identity.get("dataset_id"))
+                self._load_scenario(scenario_id),
+                cast(str | None, input_identity.get("dataset_id")),
             )
             for strategy_parameters in runs:
                 item = self._prepare_job(
@@ -1392,6 +1801,13 @@ class WebService:
         source_sha256: str | None = None,
     ) -> PreparedJob:
         source = self._holdout_source(source_job_id)
+        if _binds_local_strategy(self.get_job(source_job_id).plugin_binding):
+            # A holdout carries no capability binding of its own, so there is nothing
+            # here that could freeze or re-check a local package identity: this path
+            # is refused rather than run against a trust that was never named again.
+            raise WebBoundaryError(
+                "a holdout over a workspace-local strategy package is not supported"
+            )
         source_package = self.get_job(source_job_id).strategy_package
         frozen_catalog = (
             None if source_package is None else ResearchStrategyCatalogV1((source_package,))
@@ -1548,6 +1964,12 @@ class WebService:
             if record.attempt_id is None:
                 raise RuntimeError("accepted Web job has no reserved attempt identity")
             self._check_dataset(scenario)
+            if _binds_local_strategy(record.plugin_binding):
+                # Immediately before the engine is reached, the frozen binding and
+                # the current trust are re-checked: a revocation between admission
+                # and this moment refuses the run instead of starting it. It cannot
+                # interrupt Python that has already begun.
+                self._local_catalog(record.plugin_binding)
             result = run_backtest_scenario(
                 scenario,
                 self.runs_dir,

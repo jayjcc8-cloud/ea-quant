@@ -216,7 +216,7 @@ export type UploadPreview = {
 
 /** One published, immutable dataset version, exactly as it was sealed. */
 export type UploadVersion = {
-  schema: 'ea.local-dataset-version.v1'
+  schema: 'ea.local-dataset-version.v1' | 'ea.local-dataset-version.v2'
   dataset_id: string
   kind: string
   profile: string
@@ -241,11 +241,178 @@ export type UploadVersion = {
   quality: DatasetQuality
   limitations: string[]
   manifest_sha256: string
+  /** Present only on a version an explicit mapping produced. */
+  mapping_evidence?: MappingEvidence
+  mapping_evidence_sha256?: string
+}
+
+/**
+ * One explicit mapping declaration, in the mapper's own vocabulary: every strict
+ * destination field is either a source column name or, for the metadata fields
+ * only, the constant to write, and every timestamp field in use names one exact
+ * allowlisted form. Nothing here is inferred from the data.
+ */
+export type MappingDeclaration = {
+  columns: Record<string, string>
+  constants: Record<string, string>
+}
+
+export type TimeDeclaration = {
+  timezone: string
+  formats: Record<string, string>
+}
+
+/** The three exact timestamp forms this host accepts for a mapped source. */
+export const TIME_FORMAT_IDS = [
+  'utc-microseconds',
+  'utc-seconds',
+  'offset-microseconds',
+  'offset-seconds',
+  'naive-microseconds',
+  'naive-seconds',
+] as const
+
+/**
+ * The whole explicit mapped-mode decision: the declaration, and how the mapped
+ * capture became available. It is one object so that the exact thing a preview
+ * verified is the exact thing a publication sends.
+ */
+export type UploadDeclaration = {
+  mode: 'explicit-mapping'
+  mapping: MappingDeclaration
+  time_declaration: TimeDeclaration
+  availability_policy: string
+  latency_seconds?: number
+}
+
+/** The mapper's own sealed evidence for one mapped version. */
+export type MappingEvidence = {
+  schema: 'ea.local-csv-mapping-evidence.v1'
+  version: number
+  mapper: string
+  profile: string
+  declaration: { mapping: MappingDeclaration; time_declaration: TimeDeclaration }
+  result: Record<string, unknown>
+}
+
+/** The bounded part of one mapped version's evidence that a catalog entry names. */
+export type MappingSummary = {
+  schema: 'ea.local-csv-mapping-evidence.v1'
+  mapper: string
+  evidence_sha256: string
+  mapping: MappingDeclaration
+  time: { timezone: string; formats: Record<string, string>; target_format: string }
+  capture: { byte_count: number; sha256: string; data_sha256: string; record_count: number }
+  source: { byte_count: number; sha256: string; record_count: number }
+}
+
+/**
+ * What the host verified about one mapped source before anything was published.
+ *
+ * The verdict is the mapper's own: it normalizes the whole source and the strict
+ * decoder re-reads the whole capture, so ``valid`` says the entire file maps.
+ * The sample is bounded exactly as the strict preview's is, and the evidence
+ * digest names the exact declaration a publication would seal.
+ */
+export type MappedPreview = {
+  schema: 'ea.local-csv-mapping-preview.v1'
+  mode: 'explicit-mapping'
+  valid: boolean
+  first_error: { code: string; message: string; record_number?: number | null; field_name?: string | null } | null
+  byte_count: number
+  profile?: string
+  source?: { byte_count: number; sha256: string; record_count: number; stored_here: boolean }
+  capture?: { byte_count: number; sha256: string; data_sha256: string; record_count: number }
+  mapping?: MappingDeclaration
+  time?: { timezone: string; formats: Record<string, string>; target_format: string }
+  quality?: DatasetQuality
+  preview?: { rows: Record<string, string | number>[]; row_count_sampled: number; truncated: boolean; valid: boolean }
+  mapping_evidence?: MappingEvidence | null
+  mapping_evidence_sha256?: string | null
+  limitations: string[]
+}
+
+export type UploadPreviewResponse = UploadPreview | MappedPreview
+
+/**
+ * One statically inspected local strategy package. Inspection establishes no
+ * trust and runs nothing: it reports the identity a captured container actually
+ * is, so an operator can decide about exactly that identity.
+ */
+export type LocalStrategyCapability = {
+  schema: 'ea.plugin-local-strategy.v1'
+  warning: string
+  static_only: true
+  trust_established: false
+  plugin_id: string
+  package_version: string
+  manifest_digest: string
+  entrypoint: string
+  effects: string[]
+  identity: Record<string, unknown>
+  package: {
+    package_id: string
+    schema_version: number
+    artifact_sha256: string
+    source: { kind: 'local-package'; package_id: string; artifact_sha256: string }
+  }
+  descriptor: {
+    strategy_id?: string
+    strategy_version?: number
+    display_name?: string
+    parameters?: { name: string; type?: string; default?: unknown }[]
+  }
+  manifest: Record<string, unknown>
+}
+
+/** What one workspace's single local package slot currently is. */
+export type LocalStrategySlot = {
+  schema: 'ea.local-strategy-slot.v1'
+  registered: boolean
+  trusted: boolean
+  revoked: boolean
+  scenario_id: string
+  base_scenario_id?: string | null
+  registered_at?: string | null
+  capability: LocalStrategyCapability | null
+  grant: {
+    schema: 'ea.plugin-local-strategy-grant.v1'
+    trusted: boolean
+    plugin_id: string
+    package_version: string
+    manifest_digest: string
+    implementation_digest: string
+    effects: string[]
+  } | null
+  warning: string
+  limitations: string[]
+}
+
+/** One explicit trust decision over exactly the identity that was inspected. */
+export type LocalStrategyRegisterRequest = {
+  content_base64: string
+  manifest: Record<string, unknown>
+  trusted: true
+  effects: string[]
+  base_scenario_id: string
+  expected_plugin_id: string
+  expected_package_version: string
+  expected_manifest_digest: string
+  expected_implementation_digest: string
+}
+/** The one discriminator between the two preview documents the host returns. */
+export function isMappedPreview(preview: UploadPreviewResponse): preview is MappedPreview {
+  return preview.schema === 'ea.local-csv-mapping-preview.v1'
 }
 
 export type UploadPublishRequest = {
-  content: string
+  /** Exactly one payload field: strict UTF-8 text, or a file's own bytes in base64. */
+  content?: string
+  content_base64?: string
   file_name?: string
+  mode?: 'strict' | 'explicit-mapping'
+  mapping?: MappingDeclaration
+  time_declaration?: TimeDeclaration
   source_reference?: string
   license_reference?: string
   availability_policy: string
@@ -267,6 +434,8 @@ export type DatasetEntry = {
   replay_end_utc?: string
   availability_policy?: AvailabilityPolicy
   version_evidence_digest?: string
+  /** Present only for a version an explicit mapping produced. */
+  mapping?: MappingSummary
   error_code?: string
   message?: string
 }
@@ -372,11 +541,37 @@ export const researchApi = {
   async listDatasets(): Promise<DatasetEntry[]> {
     return (await apiRequest<{ datasets: DatasetEntry[] }>('/api/datasets')).datasets
   },
-  previewUpload: (content: string, fileName?: string) =>
-    write<UploadPreview>(
-      '/api/datasets/upload/preview',
-      fileName ? { content, file_name: fileName } : { content },
-    ),
+  previewUpload: (content: string, fileName?: string, declaration?: UploadDeclaration) =>
+    write<UploadPreviewResponse>('/api/datasets/upload/preview', {
+      content,
+      ...(fileName ? { file_name: fileName } : {}),
+      ...(declaration ?? {}),
+    }),
+  /**
+   * A preview of a file's own bytes, carried as base64 so nothing is re-encoded
+   * on the way to the host: a BOM, a CRLF ending or a non-ASCII column arrives
+   * exactly as the browser read it.
+   */
+  previewUploadFile: (
+    contentBase64: string,
+    declaration: UploadDeclaration,
+    fileName?: string,
+  ) =>
+    write<UploadPreviewResponse>('/api/datasets/upload/preview', {
+      content_base64: contentBase64,
+      file_name: fileName,
+      ...declaration,
+    }),
   publishUpload: (request: UploadPublishRequest) =>
     write<UploadVersion & { datasets: DatasetEntry[] }>('/api/datasets/upload', request),
+  localStrategySlot: () => apiRequest<LocalStrategySlot>('/api/plugins/local-strategy'),
+  inspectLocalStrategy: (contentBase64: string, manifest: Record<string, unknown>) =>
+    write<LocalStrategyCapability>('/api/plugins/local-strategy/inspect', {
+      content_base64: contentBase64,
+      manifest,
+    }),
+  registerLocalStrategy: (request: LocalStrategyRegisterRequest) =>
+    write<LocalStrategySlot>('/api/plugins/local-strategy/register', request),
+  revokeLocalStrategy: () =>
+    write<LocalStrategySlot>('/api/plugins/local-strategy/revoke', {}),
 }

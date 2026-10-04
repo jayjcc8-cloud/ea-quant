@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 import ea
+from ea.strategy.package import MAX_ARTIFACT_BYTES
 from ea.web.service import (
     BatchNotFoundError,
     DuplicateBatchRunError,
@@ -26,15 +30,22 @@ from ea.web.service import (
     roots_overlap,
 )
 from ea.web.settings import RadianSettings
-from ea.web.uploads import MAX_UPLOAD_BYTES
+from ea.web.uploads import MAX_UPLOAD_BYTES, UploadError
 
 # The bound applied to the bytes that actually arrive on a write request, before
 # any JSON parser sees them. A CSV carried inside a JSON string can be escaped to
 # several times its own size, so the upload envelope is larger than the file cap
 # the decoded content is still held to; a declaration request carries at most one
-# 16 KiB declaration plus its envelope.
+# 16 KiB declaration plus its envelope. A file payload is carried as base64 in one
+# JSON string, which is the same envelope over four thirds of the bytes.
 MAX_UPLOAD_REQUEST_BYTES = 4 * MAX_UPLOAD_BYTES
 MAX_DECLARATION_REQUEST_BYTES = 64 * 1024
+MAX_UPLOAD_BASE64_CHARS = 4 * ((MAX_UPLOAD_BYTES + 2) // 3)
+MAX_LOCAL_PACKAGE_BYTES = MAX_ARTIFACT_BYTES
+MAX_LOCAL_PACKAGE_BASE64_CHARS = 4 * ((MAX_LOCAL_PACKAGE_BYTES + 2) // 3)
+# One captured container plus its sealed manifest, carried as base64 in JSON.
+MAX_LOCAL_PACKAGE_REQUEST_BYTES = 2 * MAX_LOCAL_PACKAGE_BASE64_CHARS + MAX_DECLARATION_REQUEST_BYTES
+_BASE64_PATTERN = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
 
 
 class InputIdentity(BaseModel):
@@ -142,18 +153,68 @@ class PluginRecipeRequest(BaseModel):
     selection: dict[str, Any] | None = None
 
 
-class UploadPreviewRequest(BaseModel):
-    """Bounded strict-UTF-8 CSV text; the host never reads a client path."""
+class LocalStrategyInspectRequest(BaseModel):
+    """One captured package plus the capability it claims: read, never trusted.
+
+    ``content_base64`` carries the file's own bytes, exactly as the browser read
+    them, and ``manifest`` is the sealed declarative body the package claims. No
+    path, URL or module is ever read from the request: the captured bytes and one
+    small JSON document are the whole input.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
-    content: str = Field(min_length=1, max_length=MAX_UPLOAD_BYTES)
+    content_base64: str | None = Field(default=None, max_length=MAX_LOCAL_PACKAGE_BASE64_CHARS)
+    manifest: dict[str, Any] | None = None
+
+
+class LocalStrategyRegisterRequest(BaseModel):
+    """One explicit trust decision over exactly the identity that was inspected.
+
+    ``trusted`` must be true — this host never records a default — and every
+    expected value is the operator's own reading of the preview, compared against
+    what the static inspection actually measured.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    content_base64: str | None = Field(default=None, max_length=MAX_LOCAL_PACKAGE_BASE64_CHARS)
+    manifest: dict[str, Any] | None = None
+    trusted: bool | None = None
+    effects: list[str] | None = None
+    base_scenario_id: str | None = None
+    expected_plugin_id: str | None = None
+    expected_package_version: str | None = None
+    expected_manifest_digest: str | None = None
+    expected_implementation_digest: str | None = None
+
+
+class UploadPreviewRequest(BaseModel):
+    """Bounded upload bytes and, in mapped mode, the uploader's own declaration.
+
+    Exactly one payload field carries the upload: ``content`` is strict UTF-8 text
+    and is encoded once to the bytes it names, ``content_base64`` carries a file's
+    own bytes unchanged. ``mode`` selects the strict profile or the explicit
+    mapping, and in mapped mode both declaration fields are required.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    content: str | None = Field(default=None, max_length=MAX_UPLOAD_BYTES)
+    content_base64: str | None = Field(default=None, max_length=MAX_UPLOAD_BASE64_CHARS)
     file_name: str | None = None
+    mode: Literal["strict", "explicit-mapping"] | None = None
+    mapping: dict[str, Any] | None = None
+    time_declaration: dict[str, Any] | None = None
+    availability_policy: str | None = None
+    latency_seconds: int | None = None
 
 
 class UploadPublishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    content: str = Field(min_length=1, max_length=MAX_UPLOAD_BYTES)
+    content: str | None = Field(default=None, max_length=MAX_UPLOAD_BYTES)
+    content_base64: str | None = Field(default=None, max_length=MAX_UPLOAD_BASE64_CHARS)
     file_name: str | None = None
+    mode: Literal["strict", "explicit-mapping"] | None = None
+    mapping: dict[str, Any] | None = None
+    time_declaration: dict[str, Any] | None = None
     source_reference: str | None = None
     license_reference: str | None = None
     # No default: a caller states how the capture became available, or the store
@@ -294,6 +355,14 @@ def create_app(settings: WebSettings) -> Any:
             status_code=status_code, content={"error": {"code": code, "message": message}}
         )
 
+    # The codes that describe the state of this workspace's slot rather than the
+    # request: an unusable, replaced or unwritable slot is a conflict, and every
+    # other local-package refusal is a refusal of what the request claimed.
+    slot_store_codes = frozenset({"store_untrusted", "slot_write_failed", "slot_unreadable"})
+
+    def slot_refusal(caught: ManifestError) -> JSONResponse:
+        return error(409 if caught.code in slot_store_codes else 422, caught.code, caught.message)
+
     class _RequestTooLarge(Exception):
         """One write body arrived with more bytes than this host reads."""
 
@@ -321,6 +390,80 @@ def create_app(settings: WebSettings) -> Any:
                 raise _RequestTooLarge
             chunks.append(chunk)
         return json.loads(b"".join(chunks))
+
+    def _upload_bytes(parsed: UploadPreviewRequest | UploadPublishRequest) -> bytes:
+        """The exact bytes one upload request carries, and nothing else.
+
+        One of the two payload fields is required and both together are refused,
+        so there is never a question of which one the host read. Text is encoded
+        once to the bytes it names; base64 is decoded once and the file's own bytes
+        are then the upload, which is what keeps a BOM, a CRLF ending or a non-ASCII
+        byte exactly as it arrived.
+        """
+        if (parsed.content is None) == (parsed.content_base64 is None):
+            raise UploadError("upload_invalid", "send exactly one of content or content_base64")
+        if parsed.content is not None:
+            return parsed.content.encode("utf-8")
+        encoded = parsed.content_base64
+        assert encoded is not None
+        if len(encoded) % 4 != 0 or _BASE64_PATTERN.fullmatch(encoded) is None:
+            raise UploadError("upload_invalid", "content_base64 is not one bounded base64 payload")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise UploadError("upload_invalid", "content_base64 is not valid base64") from None
+        if not payload or len(payload) > MAX_UPLOAD_BYTES:
+            raise UploadError(
+                "upload_invalid", "the decoded upload is empty or above the size limit"
+            )
+        return payload
+
+    def _local_package_bytes(encoded: str | None) -> bytes:
+        """One captured .eastrategy container, decoded once and bounded first.
+
+        The bytes are the file's own; the manifest travels beside them as JSON. No
+        path, URL or module name is ever read from a request, so the host opens
+        nothing a caller named.
+        """
+        if encoded is None:
+            raise ManifestError("package_invalid", "send the captured package as content_base64")
+        if len(encoded) % 4 != 0 or _BASE64_PATTERN.fullmatch(encoded) is None:
+            raise ManifestError(
+                "package_invalid", "content_base64 is not one bounded base64 payload"
+            )
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise ManifestError("package_invalid", "content_base64 is not valid base64") from None
+        if not payload or len(payload) > MAX_LOCAL_PACKAGE_BYTES:
+            raise ManifestError(
+                "package_invalid", "the decoded package is empty or above the size limit"
+            )
+        return payload
+
+    def _mapping_declaration(
+        parsed: UploadPreviewRequest | UploadPublishRequest,
+    ) -> dict[str, Any] | None:
+        """The explicit mapping declaration, or None for the strict profile.
+
+        Mapped mode is selected only by the request's own ``mode`` field, and it
+        requires both declaration fields. A mapping sent in strict mode is refused
+        rather than quietly applied to an upload that declared itself strict.
+        """
+        mapped = parsed.mode == "explicit-mapping"
+        if not mapped and (parsed.mapping is not None or parsed.time_declaration is not None):
+            raise UploadError(
+                "upload_invalid",
+                "mapping and time_declaration are read only in explicit-mapping mode",
+            )
+        if not mapped:
+            return None
+        if parsed.mapping is None or parsed.time_declaration is None:
+            raise UploadError(
+                "mapping_declaration",
+                "an explicit mapping needs both 'mapping' and 'time_declaration'",
+            )
+        return {"mapping": parsed.mapping, "time_declaration": parsed.time_declaration}
 
     def _declaration_bytes(document: dict[str, Any]) -> str:
         """One declaration body as this host reads it.
@@ -485,13 +628,24 @@ def create_app(settings: WebSettings) -> Any:
             return too_large("upload")
         except (TypeError, ValueError):
             return malformed()
-        return service.uploads.preview(parsed.content.encode("utf-8"))
+        try:
+            payload = _upload_bytes(parsed)
+            declaration = _mapping_declaration(parsed)
+        except UploadError as caught:
+            return error(422, caught.code, caught.message)
+        if declaration is None:
+            return service.uploads.preview(payload)
+        return service.uploads.preview_mapped(
+            payload,
+            mapping=declaration["mapping"],
+            time_declaration=declaration["time_declaration"],
+            availability_policy=parsed.availability_policy,
+            latency_seconds=parsed.latency_seconds,
+        )
 
     @app.post("/api/datasets/upload", status_code=201)
     async def publish_upload(request: Request) -> object:
         """Publish one verified upload as one immutable, explicitly-policied version."""
-        from ea.web.uploads import UploadError
-
         try:
             parsed = UploadPublishRequest.model_validate(
                 await _bounded_document(request, MAX_UPLOAD_REQUEST_BYTES)
@@ -501,13 +655,17 @@ def create_app(settings: WebSettings) -> Any:
         except (TypeError, ValueError):
             return malformed()
         try:
+            payload = _upload_bytes(parsed)
+            declaration = _mapping_declaration(parsed)
             manifest = service.uploads.publish(
-                parsed.content.encode("utf-8"),
+                payload,
                 file_name=parsed.file_name,
                 source_reference=parsed.source_reference,
                 license_reference=parsed.license_reference,
                 availability_policy=parsed.availability_policy,
                 latency_seconds=parsed.latency_seconds,
+                mapping=None if declaration is None else declaration["mapping"],
+                time_declaration=(None if declaration is None else declaration["time_declaration"]),
             )
         except UploadError as caught:
             return error(422, caught.code, caught.message)
@@ -550,6 +708,88 @@ def create_app(settings: WebSettings) -> Any:
         if not outcome["usable"]:
             return JSONResponse(status_code=422, content=outcome)
         return outcome
+
+    @app.get("/api/plugins/local-strategy")
+    def local_strategy_slot() -> object:
+        """What this workspace's one local package slot currently is.
+
+        An unreadable, replaced or symlinked slot is a readable refusal here rather
+        than an unhandled failure: the caller learns the slot is not trusted.
+        """
+        try:
+            return service.local_strategy_status()
+        except ManifestError as caught:
+            return slot_refusal(caught)
+        except (OSError, WebBoundaryError, ValueError) as caught:
+            return error(409, "slot_unreadable", str(caught))
+
+    @app.post("/api/plugins/local-strategy/inspect")
+    async def inspect_local_strategy(request: Request) -> object:
+        """Read one captured package statically: no trust, no write, no execution."""
+        try:
+            parsed = LocalStrategyInspectRequest.model_validate(
+                await _bounded_document(request, MAX_LOCAL_PACKAGE_REQUEST_BYTES)
+            )
+        except _RequestTooLarge:
+            return too_large("local strategy")
+        except (TypeError, ValueError):
+            return malformed()
+        if parsed.manifest is None:
+            return malformed()
+        try:
+            payload = _local_package_bytes(parsed.content_base64)
+            outcome = service.inspect_local_strategy(manifest=parsed.manifest, payload=payload)
+        except ManifestError as caught:
+            return slot_refusal(caught)
+        except OSError as caught:
+            return error(409, "slot_unreadable", str(caught))
+        except (WebBoundaryError, ValueError) as caught:
+            return error(422, "package_invalid", str(caught))
+        return outcome
+
+    @app.post("/api/plugins/local-strategy/register", status_code=201)
+    async def register_local_strategy(request: Request) -> object:
+        """One explicit trusted decision: capture, verify, and seal this identity."""
+        try:
+            parsed = LocalStrategyRegisterRequest.model_validate(
+                await _bounded_document(request, MAX_LOCAL_PACKAGE_REQUEST_BYTES)
+            )
+        except _RequestTooLarge:
+            return too_large("local strategy")
+        except (TypeError, ValueError):
+            return malformed()
+        if parsed.manifest is None or parsed.base_scenario_id is None:
+            return malformed()
+        try:
+            payload = _local_package_bytes(parsed.content_base64)
+            outcome = service.register_local_strategy(
+                manifest=parsed.manifest,
+                payload=payload,
+                trusted=parsed.trusted,
+                effects=tuple(parsed.effects or ()),
+                base_scenario_id=parsed.base_scenario_id,
+                expected_plugin_id=parsed.expected_plugin_id,
+                expected_package_version=parsed.expected_package_version,
+                expected_manifest_digest=parsed.expected_manifest_digest,
+                expected_implementation_digest=parsed.expected_implementation_digest,
+            )
+        except ManifestError as caught:
+            return slot_refusal(caught)
+        except OSError as caught:
+            return error(409, "slot_unreadable", str(caught))
+        except (WebBoundaryError, ValueError) as caught:
+            return error(422, "registration_refused", str(caught))
+        return outcome
+
+    @app.post("/api/plugins/local-strategy/revoke")
+    def revoke_local_strategy() -> object:
+        """Withdraw trust in the workspace-local slot, durably."""
+        try:
+            return service.revoke_local_strategy()
+        except ManifestError as caught:
+            return slot_refusal(caught)
+        except (OSError, WebBoundaryError, ValueError) as caught:
+            return error(409, "revocation_failed", str(caught))
 
     @app.get("/api/scenarios")
     def list_scenarios() -> object:
