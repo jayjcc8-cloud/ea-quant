@@ -358,6 +358,9 @@ def test_snapshot_keeps_unobserved_inputs_unobserved(tmp_path: Path) -> None:
         started_at=OBSERVED_AT,
     )
     verdict = evaluate_gate(snapshot, identity, identity, evaluated_at=OBSERVED_AT)
+    # An unhealthy snapshot is still a FAIL, and its health violations are joined
+    # by the explicit absence of interval evidence: this call supplies no history,
+    # and a missing history is a gap, never a clean interval.
     assert verdict.verdict is GateVerdict.FAIL
     assert set(verdict.reasons) == {
         "reconciliation_not_clean",
@@ -366,6 +369,7 @@ def test_snapshot_keeps_unobserved_inputs_unobserved(tmp_path: Path) -> None:
         "runtime_not_ready",
         "backup_not_fresh",
         "critical_alert_active",
+        "evidence_gap",
     }
 
 
@@ -691,9 +695,12 @@ def test_cli_gate_lock_reports_an_invalid_gate_id_as_input(tmp_path: Path) -> No
 def test_cli_gate_lock_then_evaluate_is_the_only_path_to_a_verdict(tmp_path: Path) -> None:
     """Locking starts nothing; evaluating is a reading of the lock.
 
-    The same real inputs are judged twice: unchanged, the gate is PASS, so the
-    command is usable as the pre-freeze readiness check; after the operator
-    config moves it is INVALID, and the lock has not moved with it.
+    Neither reading is a ``PASS``. The runtime here is healthy and the lock is
+    untouched, but this command connects no trusted durable interval history, so
+    the interval verdict is ``INVALID``/``evidence_gap``: one healthy instant can
+    never certify a 72h window, and no invocation of this command can produce a
+    72h ``PASS``. After the operator config moves it is ``INVALID``/
+    ``config_drift``, and the lock has not moved with it.
     """
     live = Live(tmp_path, at=datetime.now(UTC))
     alerts = _clean_alert_stream(tmp_path, at=datetime.now(UTC))
@@ -747,13 +754,19 @@ def test_cli_gate_lock_then_evaluate_is_the_only_path_to_a_verdict(tmp_path: Pat
         "--alert-stream",
         str(alerts),
     ]
-    passing = runner.invoke(app, evaluate)
-    assert passing.exit_code == 0, passing.output
-    document = json.loads(passing.stdout)
-    # The verdict is exactly WU-2's; this surface only supplies the inputs.
+    # A healthy, unchanged runtime is still not an interval verdict: with no
+    # history supplied the gate fails closed on the evidence it does not have,
+    # and the command publishes the reading and exits 3 rather than reporting a
+    # readiness it cannot prove.
+    uncovered = runner.invoke(app, evaluate)
+    assert uncovered.exit_code == 3
+    document = json.loads(uncovered.stdout)
+    # The verdict is the interval contract's; this surface only supplies the
+    # boundary observation and the two identities.
     assert document["verdict"]["schema"] == "ea.paper-gate-verdict.v1"
-    assert document["verdict"]["verdict"] == "pass"
-    assert document["verdict"]["reasons"] == []
+    assert document["verdict"]["verdict"] == "invalid"
+    assert document["verdict"]["reasons"] == ["evidence_gap"]
+    assert "Paper gate evaluate verdict: invalid" in uncovered.stderr
     assert document["locked_identity"] == json.loads(locked_bytes)
     assert document["snapshot"]["writer_lease_held"] is True
 
@@ -764,3 +777,10 @@ def test_cli_gate_lock_then_evaluate_is_the_only_path_to_a_verdict(tmp_path: Pat
     assert drift_document["verdict"]["verdict"] == "invalid"
     assert drift_document["verdict"]["reasons"] == ["config_drift"]
     assert identity.read_bytes() == locked_bytes
+
+    # The command's own help must not read as a readiness, soak or post-hoc
+    # certification claim: it names the interval history it does not connect.
+    help_text = " ".join(
+        runner.invoke(app, ["paper", "gate", "evaluate", "--help"]).stdout.split()
+    )
+    assert "no interval history" in help_text

@@ -1001,11 +1001,17 @@ def paper_gate_evaluate(
     """Judge the current runtime against a locked identity, deterministically.
 
     The locked identity is read back, the current one is rebuilt from the same
-    real inputs, the runtime is observed, and WU-2's own `evaluate_gate` produces
-    the verdict: drift is INVALID, a runtime violation is FAIL, and only a clean,
-    unchanged gate is PASS. This command adds no evaluator and writes nothing, so
-    it is equally usable as the pre-freeze readiness check and as the post-hoc
-    re-judgement of a gate that has already run.
+    real inputs, the runtime is observed, and the interval gate's own
+    `evaluate_gate` produces the verdict: drift is INVALID, a runtime violation is
+    FAIL, and PASS requires the whole requested interval to be covered by explicit
+    durable interval evidence.
+
+    This command supplies no interval history, so a healthy, unchanged runtime
+    evaluates INVALID/evidence_gap: one healthy instant can never certify a 72h or
+    7d window, and no invocation of this command can produce a 72h or 7d PASS
+    until trusted durable interval history is connected to it. It adds no
+    evaluator and writes nothing, so it starts no gate, certifies no gate after
+    the fact, and reports no soak result.
 
     Exit code 3 means the verdict is not PASS, or that the observation itself
     could not be taken.
