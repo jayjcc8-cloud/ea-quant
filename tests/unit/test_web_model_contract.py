@@ -116,7 +116,10 @@ def test_protocol_without_tool_use_is_unconfigured_and_never_dispatches(
     provider = llm.AnthropicProvider(store)
     assert provider.route() is None
     with pytest.raises(llm.ModelNotConfigured, match="tool_use"):
-        provider.complete(system="system", messages=[{"role": "user", "content": "idea"}])
+        provider.complete(
+            system="system",
+            messages=[{"role": "user", "content": "idea"}],  # type: ignore[list-item]
+        )
 
 
 def test_messages_adapter_keeps_its_own_protocol_for_any_endpoint(tmp_path: Path) -> None:

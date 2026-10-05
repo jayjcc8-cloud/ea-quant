@@ -69,7 +69,9 @@ def _body(bars: int, *, start_ms: int = START_MS) -> bytes:
     return json.dumps(records).encode("utf-8")
 
 
-def _query(*, start_ms: int = START_MS, end_ms: int = START_MS + 3 * ONE_HOUR_MS, latency: int = 0):
+def _query(
+    *, start_ms: int = START_MS, end_ms: int = START_MS + 3 * ONE_HOUR_MS, latency: int = 0
+) -> historical_bars.HistoricalBarQueryV1:
     return historical_bars.HistoricalBarQueryV1(
         venue="BINANCE",
         symbol="BTCUSDT",
@@ -80,7 +82,9 @@ def _query(*, start_ms: int = START_MS, end_ms: int = START_MS + 3 * ONE_HOUR_MS
     )
 
 
-def _capture(body: bytes, *, synthetic: bool = False, **query: Any):
+def _capture(
+    body: bytes, *, synthetic: bool = False, **query: Any
+) -> historical_bars.HistoricalBarCaptureV1:
     return historical_bars.capture_offline_response(
         body,
         query=_query(**query),

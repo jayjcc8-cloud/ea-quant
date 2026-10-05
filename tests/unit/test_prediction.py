@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pytest
 
 from ea.product.prediction import Contract, Observation, PredictionJournal
@@ -6,7 +9,7 @@ AT = "2026-10-03T11:10:08+00:00"
 BEFORE = "2024-11-05T00:00:00+00:00"
 
 
-def contract(**changes):
+def contract(**changes: object) -> Contract:
     return Contract.model_validate(
         {
             "version": 1,
@@ -26,7 +29,7 @@ def contract(**changes):
     )
 
 
-def observation(**changes):
+def observation(**changes: object) -> Observation:
     return Observation.model_validate(
         {
             "contract_id": "historic-binary",
@@ -43,11 +46,11 @@ def observation(**changes):
     )
 
 
-def open_journal(tmp_path, **changes):
+def open_journal(tmp_path: Path, **changes: object) -> PredictionJournal:
     return PredictionJournal(tmp_path / "journal.json", contract(**changes), "YES", 10)
 
 
-def test_visibility_then_exactly_once_and_restart(tmp_path):
+def test_visibility_then_exactly_once_and_restart(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     assert journal.apply(observation(), BEFORE)["action"] == "not_visible"
     assert journal.report()["status"] == "pending"
@@ -69,7 +72,7 @@ def test_visibility_then_exactly_once_and_restart(tmp_path):
 
 
 @pytest.mark.parametrize("status", ["pending", "disputed", "unknown"])
-def test_nonfinal_never_success_or_payout(tmp_path, status):
+def test_nonfinal_never_success_or_payout(tmp_path: Path, status: str) -> None:
     journal = open_journal(tmp_path)
     report = journal.apply(
         observation(status=status, outcome=None, payout_yes=None, payout_no=None), AT
@@ -82,7 +85,7 @@ def test_nonfinal_never_success_or_payout(tmp_path, status):
     assert open_journal(tmp_path).report() == journal.report()
 
 
-def test_missing_input_remains_pending(tmp_path):
+def test_missing_input_remains_pending(tmp_path: Path) -> None:
     assert open_journal(tmp_path).report()["success"] is False
 
 
@@ -101,7 +104,7 @@ def test_missing_input_remains_pending(tmp_path):
         {"status": "void", "outcome": None},
     ],
 )
-def test_invalid_results_do_not_mutate(tmp_path, changes):
+def test_invalid_results_do_not_mutate(tmp_path: Path, changes: dict[str, object]) -> None:
     journal = open_journal(tmp_path)
     original = (tmp_path / "journal.json").read_bytes()
     with pytest.raises(ValueError):
@@ -110,7 +113,7 @@ def test_invalid_results_do_not_mutate(tmp_path, changes):
     assert journal.report()["success"] is False
 
 
-def test_conflicting_revision_blocked_even_after_restart(tmp_path):
+def test_conflicting_revision_blocked_even_after_restart(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     journal.apply(observation(), AT)
     original = (tmp_path / "journal.json").read_bytes()
@@ -119,7 +122,7 @@ def test_conflicting_revision_blocked_even_after_restart(tmp_path):
     assert (tmp_path / "journal.json").read_bytes() == original
 
 
-def test_losing_claim_retired_at_zero(tmp_path):
+def test_losing_claim_retired_at_zero(tmp_path: Path) -> None:
     journal = PredictionJournal(tmp_path / "journal.json", contract(), "NO", 7)
     report = journal.apply(observation(), AT)
     assert report["cash"] == "0"
@@ -128,7 +131,7 @@ def test_losing_claim_retired_at_zero(tmp_path):
     assert report["success"] is True
 
 
-def test_synthetic_void_is_explicit_refund_not_win(tmp_path):
+def test_synthetic_void_is_explicit_refund_not_win(tmp_path: Path) -> None:
     journal = open_journal(tmp_path, source_kind="synthetic", void_payout="0.4")
     report = journal.apply(
         observation(status="void", outcome=None, payout_yes="0.4", payout_no="0.4"), AT
@@ -145,17 +148,17 @@ def test_synthetic_void_is_explicit_refund_not_win(tmp_path):
 
 
 @pytest.mark.parametrize("kwargs", [{"quantity": True}, {"quantity": 0}, {"side": "MAYBE"}])
-def test_invalid_claim(tmp_path, kwargs):
+def test_invalid_claim(tmp_path: Path, kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         PredictionJournal(
             tmp_path / "journal.json",
             contract(),
-            kwargs.get("side", "YES"),
-            kwargs.get("quantity", 10),
+            kwargs.get("side", "YES"),  # type: ignore[arg-type]
+            kwargs.get("quantity", 10),  # type: ignore[arg-type]
         )
 
 
-def test_bootstrap_conflict_and_corrupt_replay(tmp_path):
+def test_bootstrap_conflict_and_corrupt_replay(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     journal.apply(observation(), AT)
     with pytest.raises(ValueError):
@@ -166,14 +169,14 @@ def test_bootstrap_conflict_and_corrupt_replay(tmp_path):
         open_journal(tmp_path).report()
 
 
-def test_duplicate_json_key_rejected(tmp_path):
+def test_duplicate_json_key_rejected(tmp_path: Path) -> None:
     path = tmp_path / "journal.json"
     path.write_text('{"version":1,"version":2}')
     with pytest.raises(ValueError):
         open_journal(tmp_path)
 
 
-def test_persisted_future_cannot_leak_into_earlier_view(tmp_path):
+def test_persisted_future_cannot_leak_into_earlier_view(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     journal.apply(observation(), AT)
     with pytest.raises(ValueError, match="regressed"):
@@ -182,14 +185,14 @@ def test_persisted_future_cannot_leak_into_earlier_view(tmp_path):
         journal.report(BEFORE)
 
 
-def test_backdated_capture_rejected(tmp_path):
+def test_backdated_capture_rejected(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     with pytest.raises(ValueError, match="availability precedes"):
         journal.apply(observation(available_at=BEFORE), AT)
     assert journal.report()["settlement_count"] == 0
 
 
-def test_stale_instance_reloads_before_payout(tmp_path):
+def test_stale_instance_reloads_before_payout(tmp_path: Path) -> None:
     first = open_journal(tmp_path)
     stale = open_journal(tmp_path)
     first.apply(observation(), AT)
@@ -198,19 +201,19 @@ def test_stale_instance_reloads_before_payout(tmp_path):
 
 
 @pytest.mark.parametrize("after_replace", [False, True])
-def test_unconfirmed_publish_reopens_without_double_payout(tmp_path, monkeypatch, after_replace):
-    import ea.product.prediction as module
-
+def test_unconfirmed_publish_reopens_without_double_payout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_replace: bool
+) -> None:
     journal = open_journal(tmp_path)
-    original = module.os.replace
+    original = os.replace
 
-    def fail(source, target):
+    def fail(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
         if after_replace:
             original(source, target)
         raise OSError("injected interrupted publication")
 
     with monkeypatch.context() as patch:
-        patch.setattr(module.os, "replace", fail)
+        patch.setattr(os, "replace", fail)
         with pytest.raises(OSError):
             journal.apply(observation(), AT)
     reopened = open_journal(tmp_path)
@@ -221,7 +224,7 @@ def test_unconfirmed_publish_reopens_without_double_payout(tmp_path, monkeypatch
     assert result["settlement_count"] == 1
 
 
-def test_dispute_then_authoritative_final(tmp_path):
+def test_dispute_then_authoritative_final(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     journal.apply(
         observation(status="disputed", outcome=None, payout_yes=None, payout_no=None),
@@ -230,19 +233,20 @@ def test_dispute_then_authoritative_final(tmp_path):
     assert journal.apply(observation(), AT)["success"] is True
 
 
-def test_lock_contention_fails_closed(tmp_path):
+def test_lock_contention_fails_closed(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     with journal._lock(), pytest.raises(BlockingIOError):
         open_journal(tmp_path)
 
 
-def test_currency_quantum_and_void_rules_closed():
-    for change in [
+def test_currency_quantum_and_void_rules_closed() -> None:
+    changes: list[dict[str, object]] = [
         {"version": True},
         {"currency": "USDC"},
         {"quantum": "0.001"},
         {"void_payout": "0.4"},
         {"source_kind": "synthetic", "void_payout": "0.401"},
-    ]:
+    ]
+    for change in changes:
         with pytest.raises(ValueError):
             contract(**change)

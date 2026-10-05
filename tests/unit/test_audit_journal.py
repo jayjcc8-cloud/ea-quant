@@ -14,7 +14,9 @@ import pytest
 import ea.experiments.audit as audit_module
 from ea.composition.run import RunCompositionError, admit_recovered_run
 from ea.core.audit import (
+    MAX_AUDIT_HEADER_BYTES,
     MAX_AUDIT_RECORDS,
+    MAX_LARGE_AUDIT_PAYLOAD_BYTES,
     AuditContractError,
     AuditLogicalKey,
     AuditRecordKind,
@@ -29,10 +31,8 @@ from ea.core.run import RunId, Sha256Digest
 from ea.experiments.audit import (
     AUDIT_JOURNAL_PREAMBLE,
     MAX_AUDIT_FRAME_BYTES,
-    MAX_AUDIT_HEADER_BYTES,
     MAX_AUDIT_INDEX_RESIDENT_BYTES,
     MAX_AUDIT_JOURNAL_BYTES,
-    MAX_LARGE_AUDIT_PAYLOAD_BYTES,
     AuditCapacityLimits,
     PosixAuditJournal,
     PosixAuditRecoveryRecordSource,

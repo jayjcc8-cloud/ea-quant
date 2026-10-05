@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -193,10 +193,11 @@ def test_every_dispatch_stays_inside_the_checked_four_frame_market_bound(tmp_pat
     on_market = engine.on_market
 
     def counting_append(**kwargs: Any) -> Any:
-        before = len(engine.audit.records)
+        audit = cast(_DemoAudit, engine.audit)
+        before = len(audit.records)
         result = append(**kwargs)
         sequence = engine.runtime.status().dispatch_sequence
-        durable[sequence] = durable.get(sequence, 0) + len(engine.audit.records) - before
+        durable[sequence] = durable.get(sequence, 0) + len(audit.records) - before
         return result
 
     def recording_market(root: Any, sequence: int) -> None:
@@ -263,10 +264,11 @@ def test_non_allow_safety_markets_stay_inside_the_four_frame_bound(
     on_market = engine.on_market
 
     def counting_append(**kwargs: Any) -> Any:
-        before = len(engine.audit.records)
+        audit = cast(_DemoAudit, engine.audit)
+        before = len(audit.records)
         result = append(**kwargs)
         sequence = engine.runtime.status().dispatch_sequence
-        durable[sequence] = durable.get(sequence, 0) + len(engine.audit.records) - before
+        durable[sequence] = durable.get(sequence, 0) + len(audit.records) - before
         return result
 
     def recording_market(root: Any, sequence: int) -> None:
@@ -279,7 +281,7 @@ def test_non_allow_safety_markets_stay_inside_the_four_frame_bound(
     status = engine.status()
     safety = [
         json.loads(record.canonical_payload)
-        for record in engine.audit.records
+        for record in cast(_DemoAudit, engine.audit).records
         if record.record_kind is AuditRecordKind.PAPER_OPERATIONAL_SAFETY
     ]
     # The non-ALLOW branch really ran, and no market or fact dispatch ever
@@ -300,7 +302,7 @@ def test_trade_query_duplicate_reuses_the_trade_fact_without_new_effects(tmp_pat
     engine, clock = session(tmp_path)
     drive(engine, clock)
     dispatches: dict[str, list[dict[str, Any]]] = {}
-    for record in engine.audit.records:
+    for record in cast(_DemoAudit, engine.audit).records:
         if record.record_kind is not AuditRecordKind.PAPER_FACT_DISPATCH:
             continue
         document = json.loads(record.canonical_payload)

@@ -1115,8 +1115,8 @@ def test_history_validation_is_exact(tmp_path: Path) -> None:
     with pytest.raises(PaperEvidenceError) as unbounded_begin:
         PaperAttemptAssociation(
             binding=clean.binding,
-            begin=None,
-            end=WINDOW_END,  # type: ignore[arg-type]
+            begin=None,  # type: ignore[arg-type]
+            end=WINDOW_END,
         )
     assert unbounded_begin.value.code is OutcomeCode.OUT_OF_RANGE
 

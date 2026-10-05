@@ -160,8 +160,8 @@ def test_fresh_research_candidate_runs_bounded_paper_and_stops(tmp_path: Path) -
     worker_errors = []
     workers = []
 
-    def ready(attempt):
-        def stop_after_fill():
+    def ready(attempt: Path) -> None:
+        def stop_after_fill() -> None:
             try:
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
@@ -221,12 +221,12 @@ def test_fresh_research_candidate_runs_bounded_paper_and_stops(tmp_path: Path) -
     with pytest.raises(ValueError, match="market history cannot be restored"):
         restore_paper_trading_session(
             scenario,
-            binding=None,
-            audit=None,
+            binding=None,  # type: ignore[arg-type]
+            audit=None,  # type: ignore[arg-type]
             records=(),
-            clock=None,
-            monotonic=None,
-            source_id=None,
+            clock=None,  # type: ignore[arg-type]
+            monotonic=None,  # type: ignore[arg-type]
+            source_id=None,  # type: ignore[arg-type]
             prices=(100.0,),
             stop_requested=lambda: False,
         )

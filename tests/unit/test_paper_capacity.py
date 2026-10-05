@@ -43,6 +43,7 @@ from ea.experiments.audit import (
 from ea.experiments.store import CanonicalAttemptManifest, LocalResultStore
 from ea.product import load_backtest_scenario
 from ea.product.candidate import _configuration
+from ea.product.market_stream import run_local_market_stream
 from ea.product.offline_demo import _DemoAudit
 from ea.product.paper import (
     PAPER_CAPACITY_EXHAUSTED_REASON,
@@ -185,7 +186,7 @@ def faulting(
     """Inject one bounded append failure into the production journal factory."""
     from ea.product import paper_run as paper_run_module
 
-    create = paper_run_module.create_posix_audit_journal
+    create = create_posix_audit_journal
     journals: list[_FaultingJournal] = []
 
     def apply(
@@ -207,7 +208,7 @@ def tighten(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     """Patch the Paper journal factory to a tightened, still-production envelope."""
     from ea.product import paper_run as paper_run_module
 
-    create = paper_run_module.create_posix_audit_journal
+    create = create_posix_audit_journal
 
     def apply(*, byte_frames: int | None = None, **overrides: int) -> None:
         def factory(prepared: Any, **kwargs: Any) -> Any:
@@ -466,7 +467,7 @@ def test_full_run_under_a_small_envelope_keeps_default_behavior_and_drain_deadli
     polls: list[int] = []
     from ea.product import paper_run as paper_run_module
 
-    stream = paper_run_module.run_local_market_stream
+    stream = run_local_market_stream
 
     def recording_stream(**kwargs: Any) -> Any:
         polls.append(kwargs["max_drain_polls"])

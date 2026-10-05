@@ -157,11 +157,12 @@
            alt="Historical single example of the research view: one idea, a frozen spec, a real backtest, its verified report, and one bounded conclusion. The model completed this conclusion on commit 088d4ab. This is an illustration of one past run, not a current capability or performance claim.">
       <figcaption>
         Historical single example. The model completed that conclusion on commit
-        <code>088d4ab</code>. An isolated verification of the current UI was completed against a
-        copied, safe historical report — no new provider calls, no new backtests, no overflow at
-        desktop or mobile widths, and a stable state across GET refresh. Full exact-head release
-        verification is not yet passed: it was attempted and the formatter gate blocked it. This
-        image is an illustration of one past run — not a profit, robustness, or all-market claim.
+        <code>088d4ab</code>. The current UI was verified by reading that same copied, safe
+        historical report — no extra provider calls, no new backtests, no overflow at desktop or
+        mobile widths, and a stable GET refresh. The formal installed Web E2E passed 8 checks with
+        no real provider key; full exact-head release verification is required before publication.
+        This image is an illustration of one past run — not a profit, robustness, or all-market
+        claim.
       </figcaption>
     </figure>
   </section>
@@ -176,7 +177,7 @@
       <li>Continuous research means repeated independent, explicitly confirmed experiments — not autonomous optimization and not autonomous trading.</li>
       <li>The Web app is a single-user loopback service. It is not a hosted browser app and cannot be reached from another device.</li>
       <li>A strategy artifact is trusted local executable Python, not a sandbox. AI output is not runtime trading authority.</li>
-      <li>The public package version remains <code>0.2.0</code> until the owner decides otherwise. No tag, registry upload, or deployment has been made.</li>
+      <li>The public package version remains <code>0.2.0</code> until the owner decides otherwise. The next version is proposed as <code>0.3.0rc1</code> with tag <code>v0.3.0-rc.1</code> — a proposal only. No tag, registry upload, or deployment has been made.</li>
     </ul>
   </section>
 

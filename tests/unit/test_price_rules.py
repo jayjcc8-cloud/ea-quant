@@ -176,7 +176,9 @@ def test_two_rules_real_research_holdout_candidate(tmp_path: Path, condition: An
         assert candidate["status"] == "EVALUATED"
         # Frozen source and holdout preserve the same canonical rule and implementation ID.
         for job_id in (source.job_id, relation["holdout_job_id"]):
-            snapshot = json.loads(service.get_job(job_id).input_snapshot_bytes)
+            snapshot_bytes = service.get_job(job_id).input_snapshot_bytes
+            assert snapshot_bytes is not None
+            snapshot = json.loads(snapshot_bytes)
             assert (
                 decode_rule(snapshot["scenario"]["strategy"]["parameters"]["rule"]).canonical
                 == decode_rule(expression).canonical
