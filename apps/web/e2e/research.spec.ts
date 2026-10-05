@@ -35,6 +35,38 @@ const PROPOSAL = {
   assumptions: ['The registered scenario bars are the only evidence considered.'],
   // Registered decimal parameters are canonical decimal strings, as in the catalog.
   parameters: { target_quantity: '2', entry_delay_bars: 0 },
+  // One comparison frozen before the run, so the conclusion step has something
+  // it is allowed to conclude for or against.
+  criterion: { field: 'economics.net_pnl.amount', expectation: 'positive' },
+}
+
+/**
+ * The scripted conclusion: it reads the sign the host projected for the frozen
+ * criterion and answers with the one code that matches it, naming the frozen
+ * field as its evidence and staying inside the frozen single-run scope. It
+ * writes no number and no sentence, exactly as the real contract requires. A
+ * packet it cannot read yields an honest non-answer rather than a guess.
+ */
+type ConclusionInput = { inference: string; evidence_ref?: { field: string }; conclusion_scope?: string }
+
+function conclusionInput(packetText: string): ConclusionInput {
+  try {
+    const packet = JSON.parse(packetText) as {
+      criterion?: { field?: string; expectation?: string } | null
+      criterion_observed?: { reading?: { sign?: string } }
+    }
+    const field = packet.criterion?.field
+    const expectation = packet.criterion?.expectation
+    const sign = packet.criterion_observed?.reading?.sign
+    if (field === undefined || expectation === undefined || sign === undefined) throw new Error('no frozen criterion')
+    return {
+      inference: sign === expectation ? 'criterion_direction_matched' : 'criterion_direction_not_matched',
+      evidence_ref: { field },
+      conclusion_scope: 'frozen_single_run',
+    }
+  } catch {
+    return { inference: 'criterion_not_stated' }
+  }
 }
 
 async function waitForHealth(): Promise<void> {
@@ -79,15 +111,24 @@ async function startScriptedProvider(): Promise<ScriptedProvider> {
     let raw = ''
     request.on('data', (chunk) => { raw += chunk })
     request.on('end', () => {
-      const body = JSON.parse(raw) as { model?: string; tools?: { name?: string }[] }
+      const body = JSON.parse(raw) as {
+        model?: string
+        tools?: { name?: string }[]
+        messages?: { content?: unknown }[]
+      }
       requests.push({ model: String(body.model ?? ''), tool_names: (body.tools ?? []).map((tool) => String(tool.name)) })
+      // One fixture, two steps: the proposal, then the one conclusion call the
+      // explicit interpret action makes.
+      const concluding = (body.tools ?? []).some((tool) => tool.name === 'conclude')
+      const name = concluding ? 'conclude' : 'propose_spec'
+      const input = concluding ? conclusionInput(String(body.messages?.at(-1)?.content ?? '')) : PROPOSAL
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(JSON.stringify({
         id: 'msg-scripted-fixture',
         type: 'message',
         role: 'assistant',
         model: body.model,
-        content: [{ type: 'tool_use', id: 'toolu-scripted-fixture', name: 'propose_spec', input: PROPOSAL }],
+        content: [{ type: 'tool_use', id: 'toolu-scripted-fixture', name, input }],
         stop_reason: 'tool_use',
         usage: { input_tokens: 1234, output_tokens: 321 },
       }))
@@ -165,6 +206,8 @@ test('research workspace reaches an evaluated candidate from a scripted proposal
     await expect(draft.getByText('Enter once with a two-unit target on the registered scenario window.')).toBeVisible()
     await expect(draft.getByText('The registered scenario bars are the only evidence considered.')).toBeVisible()
     await expect(draft.getByText('Unconfirmed draft')).toBeVisible()
+    // The comparison is shown before the run, while it can still be changed.
+    await expect(draft.getByText('Net P&L expected positive · frozen before the run')).toBeVisible()
 
     // Model configuration comes from the backend projection: protocol, endpoint and capabilities.
     const model = page.locator('section[aria-label="Model provider configuration"]')
@@ -252,6 +295,68 @@ test('research workspace reaches an evaluated candidate from a scripted proposal
       contentType: 'application/json',
     })
     await page.screenshot({ path: testInfo.outputPath('research-workspace.png'), fullPage: true })
+  } finally {
+    await stopServer(server)
+    await provider.close()
+  }
+})
+
+test('one explicit conclusion is published, then re-verified and served across a restart', async ({ page }, testInfo) => {
+  test.setTimeout(180_000)
+  const provider = await startScriptedProvider()
+  let server = await startServerWithProvider(provider.settingsPath)
+  try {
+    const taskURL = await draftIdea(page, 'Test a concluded two-unit entry on the registered AAPL scenario')
+    await page.getByRole('button', { name: 'Confirm spec and start real backtest' }).click()
+    await expect(page.locator('.page-title .status')).toHaveText('backtest succeeded', { timeout: 30_000 })
+    expect(provider.requests).toHaveLength(1)
+
+    // Reading the page never draws a conclusion, and there is none to show yet.
+    const conclusion = page.locator('section[aria-label="Conclusion"]')
+    const action = page.locator('section[aria-label="Conclusion action"]')
+    await expect(action.getByText(/never changes the result above/)).toBeVisible()
+    await page.reload()
+    await expect(conclusion).toHaveCount(0)
+    expect(provider.requests).toHaveLength(1)
+
+    // The one explicit action spends exactly one call and publishes the host's reading.
+    await action.getByRole('button', { name: 'Interpret this run' }).click()
+    await expect(conclusion.locator('header span')).toHaveText(
+      /Consistent with the frozen criterion|Opposite to the frozen criterion/,
+      { timeout: 30_000 },
+    )
+    await expect(conclusion.getByText('Net P&L expected positive')).toBeVisible()
+    // The host's own three-valued reading of the frozen criterion, and the
+    // scope sentence for the claim, are both rendered from host constants.
+    await expect(
+      conclusion.locator('dt', { hasText: 'Criterion met' }).locator('..').locator('dd'),
+    ).toHaveText(/^(Met|Not met|Not determined)$/)
+    await expect(conclusion.getByText(/claims nothing wider/)).toBeVisible()
+    await expect(conclusion.getByText('Data scope')).toBeVisible()
+    await expect(conclusion.getByText(/Facts this run does not carry: point_in_time, quality_verified/)).toBeVisible()
+    await expect(conclusion.getByText(/no figure or sentence here was written by the model/)).toBeVisible()
+    expect(provider.requests).toHaveLength(2)
+    expect(provider.requests[1].tool_names).toEqual(['conclude'])
+
+    // A refresh re-reads and re-verifies the report; it never calls again.
+    await page.reload()
+    await expect(conclusion.getByText('Data scope')).toBeVisible()
+    expect(provider.requests).toHaveLength(2)
+
+    // The same conclusion is still served after a real restart of the installed service.
+    await stopServer(server)
+    server = await startServerWithProvider(provider.settingsPath)
+    await page.goto(taskURL)
+    await expect(conclusion.locator('header span')).toHaveText(
+      /Consistent with the frozen criterion|Opposite to the frozen criterion/,
+    )
+    await expect(conclusion.getByText('Net P&L expected positive')).toBeVisible()
+    expect(provider.requests).toHaveLength(2)
+    await testInfo.attach('research-conclusion-evidence', {
+      body: JSON.stringify({ task_id: taskURL.split('/').pop(), conclusion: 'host-rendered from the verified report', provider_calls: provider.requests }, null, 2),
+      contentType: 'application/json',
+    })
+    await page.screenshot({ path: testInfo.outputPath('research-conclusion.png'), fullPage: true })
   } finally {
     await stopServer(server)
     await provider.close()

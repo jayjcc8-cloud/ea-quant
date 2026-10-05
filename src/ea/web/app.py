@@ -1174,7 +1174,18 @@ def create_app(settings: WebSettings) -> Any:
 
     @app.get("/api/research/tasks")
     def list_research_tasks() -> object:
-        return {"tasks": [task.document() for task in research_store.list()]}
+        """Every listing re-verifies the conclusions it serves.
+
+        A task whose reconciliation fails is still listed from its durable
+        record, so a read never drops a task; a conclusion that can no longer
+        be proven from its verified report is withdrawn rather than displayed.
+        """
+        reconciled = {task.task_id: task for task in research_orchestrator.reconcile_all()}
+        return {
+            "tasks": [
+                reconciled.get(task.task_id, task).document() for task in research_store.list()
+            ]
+        }
 
     @app.get("/api/research/tasks/{task_id}")
     def get_research_task(task_id: str) -> object:
@@ -1240,6 +1251,19 @@ def create_app(settings: WebSettings) -> Any:
             return task.document()
         except TaskNotFoundError as caught:
             return error(404, "research_task_not_found", str(caught))
+        except ResearchTaskError as caught:
+            return error(422, "research_task_invalid", str(caught))
+
+    @app.post("/api/research/tasks/{task_id}/interpret")
+    def interpret_research_task(task_id: str) -> object:
+        """The explicit one-shot conclusion step for a succeeded, verified run."""
+        try:
+            task = research_orchestrator.interpret(task_id)
+            return task.document()
+        except TaskNotFoundError as caught:
+            return error(404, "research_task_not_found", str(caught))
+        except TaskStateError as caught:
+            return error(409, "interpret_rejected", str(caught))
         except ResearchTaskError as caught:
             return error(422, "research_task_invalid", str(caught))
 

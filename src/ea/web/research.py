@@ -13,6 +13,7 @@ funds, or order authority.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -54,6 +55,7 @@ from ea.plugin.selection import (
     resolve_selection,
     verify_binding,
 )
+from ea.web import report_claims
 from ea.web.llm import (
     ModelMessage,
     ModelNotConfigured,
@@ -89,6 +91,23 @@ _MAX_RATIONALE_BYTES = 2000
 _MAX_GAP_BYTES = 2000
 _MAX_TOOL_ROUNDS = 4
 _MAX_CATALOG_ENTRIES = 40
+_INTERPRETATION_EVIDENCE_SCHEMA = "radian.research-interpretation-evidence.v1"
+_INTERPRETATION_EVIDENCE_RECEIPT_SCHEMA = "radian.research-interpretation-evidence-receipt.v1"
+_INTERPRETATION_OPERATION = "radian.research-interpretation.v1"
+_INTERPRETATION_PROMPT_VERSION = "radian.research-interpretation-prompt.v2"
+_INTERPRETATION_TOOL_VERSION = "radian.research-interpretation-tools.v2"
+# The raw conclusion arguments are kept for audit only, never displayed, so a
+# model that sends an oversized blob cannot grow the durable record. An
+# over-limit call is refused with its size and digest recorded, never truncated
+# into something that could re-parse as a valid conclusion.
+_MAX_EVIDENCE_ARGUMENT_BYTES = 4000
+# The same reasoning bounds the recorded call set as a whole, on both axes. The
+# legal contract is exactly one conclusion call, so 8 is eight times what the
+# contract needs and 16384 bytes is four times the largest single argument payload
+# the bound above admits. Both are counted over the complete id/name/arguments
+# set, so the total binds before a per-call-only scheme could grow to 8 x 4000.
+_MAX_EVIDENCE_CALLS = 8
+_MAX_EVIDENCE_CALL_BYTES = 16384
 _DECIMAL_PATTERN = re.compile(r"^-?\d{1,20}(\.\d{1,20})?$")
 
 
@@ -143,6 +162,10 @@ class ResearchSpec:
     # default route, which is what every task written before this field used.
     # The model never sets this: it is not a propose_spec argument.
     selection: dict[str, Any] | None = None
+    # One comparison frozen before the run: an allowlisted report path plus the
+    # sign the idea expects. Absent on every task written before this field, and
+    # such a task concludes honestly that nothing was stated to compare against.
+    criterion: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         document: dict[str, Any] = {
@@ -159,6 +182,8 @@ class ResearchSpec:
         # Additive: a spec with no explicit selection keeps its original shape.
         if self.selection is not None:
             document["selection"] = self.selection
+        if self.criterion is not None:
+            document["criterion"] = self.criterion
         return document
 
 
@@ -230,6 +255,14 @@ class ResearchTask:
     # evidence for the user to read and install themselves: never a selection,
     # never a registration and never a run.
     declaration_draft: dict[str, Any] | None = None
+    # The conclusion axis, kept separate from computation. `interpretation_evidence`
+    # is the observed model response persisted before anything is published;
+    # `interpretation` is the host-rendered conclusion the user reads; and
+    # `interpretation_error` is a technical failure of the interpretation step,
+    # which never rewrites the job's own succeeded computation.
+    interpretation: dict[str, Any] | None = None
+    interpretation_evidence: dict[str, Any] | None = None
+    interpretation_error: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         document: dict[str, Any] = {
@@ -268,6 +301,12 @@ class ResearchTask:
             document["pinned_binding"] = self.pinned_binding
         if self.declaration_draft is not None:
             document["declaration_draft"] = self.declaration_draft
+        if self.interpretation is not None:
+            document["interpretation"] = self.interpretation
+        if self.interpretation_evidence is not None:
+            document["interpretation_evidence"] = self.interpretation_evidence
+        if self.interpretation_error is not None:
+            document["interpretation_error"] = self.interpretation_error
         return document
 
 
@@ -277,6 +316,18 @@ def _now() -> str:
 
 def _idea_key(raw_idea: str) -> str:
     return " ".join(raw_idea.split())
+
+
+def _conclusion_closed(task: ResearchTask) -> bool:
+    """Whether the conclusion axis of this task already holds its durable answer.
+
+    The axis is separate from the run: a task may be ``succeeded`` with a
+    published conclusion, with a recorded interpretation failure, or with the
+    conclusion closed by the user's cancellation. Once closed it is never
+    reopened, so no new slot may be reserved for it and no late result or
+    failure may overwrite it.
+    """
+    return task.interpretation is not None or task.interpretation_error is not None
 
 
 def _unproven_submission_message(detail: str) -> str:
@@ -390,6 +441,16 @@ class ResearchStore:
             raise ResearchTaskError("research task capability record is unreadable")
         if declaration_draft is not None and type(declaration_draft) is not dict:
             raise ResearchTaskError("research task declaration proposal is unreadable")
+        interpretation = document.get("interpretation")
+        interpretation_evidence = document.get("interpretation_evidence")
+        interpretation_error = document.get("interpretation_error")
+        for name, value in (
+            ("interpretation", interpretation),
+            ("interpretation evidence", interpretation_evidence),
+            ("interpretation error", interpretation_error),
+        ):
+            if value is not None and type(value) is not dict:
+                raise ResearchTaskError(f"research task {name} is unreadable")
         return ResearchTask(
             task_id=str(document["task_id"]),
             created_at=str(document["created_at"]),
@@ -424,6 +485,9 @@ class ResearchStore:
             selection=selection,
             pinned_binding=pinned_binding,
             declaration_draft=declaration_draft,
+            interpretation=interpretation,
+            interpretation_evidence=interpretation_evidence,
+            interpretation_error=interpretation_error,
         )
 
     def _publish(self, task: ResearchTask, payload: bytes) -> None:
@@ -512,6 +576,14 @@ def _decode_spec(document: dict[str, Any]) -> ResearchSpec:
     if selection is not None and type(selection) is not dict:
         # A record this product cannot read must not become a half-read spec.
         raise ResearchTaskError("research spec selection is unreadable")
+    try:
+        criterion = (
+            None
+            if document.get("criterion") is None
+            else report_claims.decode_criterion(document.get("criterion"))
+        )
+    except report_claims.CriterionRejectedError as error:
+        raise ResearchTaskError(f"research spec criterion is unreadable: {error}") from None
     return ResearchSpec(
         strategy_id=str(document["strategy_id"]),
         instrument_venue=str(instrument.get("venue") or ""),
@@ -524,6 +596,7 @@ def _decode_spec(document: dict[str, Any]) -> ResearchSpec:
         parameters=dict(document.get("parameters") or {}),
         assumptions=tuple(str(item) for item in document.get("assumptions") or []),
         selection=None if selection is None else dict(selection),
+        criterion=criterion,
     )
 
 
@@ -1160,6 +1233,28 @@ class ResearchOrchestrator:
                         "parameters": {"type": "object"},
                         "assumptions": {"type": "array", "items": {"type": "string"}},
                         "rationale": {"type": "string"},
+                        "criterion": {
+                            "type": "object",
+                            "description": (
+                                "One comparison frozen before the run, so the result can be "
+                                "interpreted afterwards. field must be one of "
+                                f"{', '.join(sorted(report_claims.FIELD_SPECS_BY_PATH))}; "
+                                "expectation is the sign the idea predicts: "
+                                f"{', '.join(report_claims.EXPECTATIONS)}. Omit it only "
+                                "when the idea states no testable expectation."
+                            ),
+                            "properties": {
+                                "field": {
+                                    "type": "string",
+                                    "enum": sorted(report_claims.FIELD_SPECS_BY_PATH),
+                                },
+                                "expectation": {
+                                    "type": "string",
+                                    "enum": list(report_claims.EXPECTATIONS),
+                                },
+                            },
+                            "required": ["field", "expectation"],
+                        },
                     },
                     "required": ["strategy_id", "instrument", "initial_cash", "rationale"],
                 },
@@ -1241,7 +1336,14 @@ class ResearchOrchestrator:
             "orders, broker access, or live trading. Parameters are optional overrides of "
             "the registered contracts; use the registered defaults when the idea does not "
             "specify them. State assumptions explicitly, and keep the rationale honest "
-            "about what this run can and cannot show. propose_declaration only drafts a "
+            "about what this run can and cannot show. Freeze exactly one criterion "
+            "before the run whenever the idea states a testable expectation: one "
+            "allowlisted report field plus the sign the idea predicts. The result is "
+            "interpreted against that frozen criterion and nothing else, so a criterion "
+            "that only partly represents the question will be reported as insufficient "
+            "evidence rather than as support for the idea. Never state or imply a "
+            "profit, and never claim a run proves an idea. propose_declaration only "
+            "drafts a "
             "bounded capability preset for the user to install themselves: you cannot "
             "install, select, replace or run one, and you must never claim you did."
             "\n\nRegistered catalog (JSON):\n"
@@ -1371,7 +1473,40 @@ class ResearchOrchestrator:
         if event == "noop":
             return task
         if event == "cancel":
-            if task.status in {"succeeded", "unsupported", "cancelled"}:
+            if task.status == "succeeded":
+                # The computation is already durable and terminal, so cancelling
+                # closes the conclusion axis instead of rewriting the run. The
+                # job, its report and the succeeded status are untouched.
+                if _conclusion_closed(task):
+                    return task
+                # Closing the axis and settling its outstanding reservation are one
+                # durable write. A charge that never reached the provider is not
+                # spent, so it is returned with the cancellation; a dispatched call
+                # cannot be proven either way and stays charged and unknown.
+                reservation = task.reservation
+                released = reservation is not None and reservation.status == "pending"
+                return replace(
+                    task,
+                    reservation=None if released else reservation,
+                    usage=(
+                        {
+                            **task.usage,
+                            "model_calls": max(0, task.usage["model_calls"] - 1),
+                        }
+                        if released
+                        else task.usage
+                    ),
+                    cancel_note=(
+                        "The completed run and its verified report are unchanged; "
+                        "no conclusion will be published for it."
+                    ),
+                    interpretation_error={
+                        "step": "interpret",
+                        "code": "cancelled_by_user",
+                        "message": "the user cancelled before a conclusion was published",
+                    },
+                )
+            if task.status in {"unsupported", "cancelled"}:
                 return task
             note = None
             if task.jobs:
@@ -1391,10 +1526,24 @@ class ResearchOrchestrator:
         ):
             return task
         if event == "model_reserve":
+            if data.get("step") == "interpret" and _conclusion_closed(task):
+                # The conclusion axis already has its durable answer, so no new
+                # slot may be reserved for it. This is the same write gate the
+                # cancellation used, so a call in flight cannot slip a dispatch
+                # past a cancel that landed first.
+                raise TaskStateError("the conclusion axis is already closed")
             if task.reservation is not None:
                 raise TaskStateError("a model call is already reserved")
             if task.usage["model_calls"] >= task.budget["max_model_calls"]:
                 raise BudgetExceededError("research model-call budget is exhausted")
+            if data.get("hold_back_last_call") and (
+                task.usage["model_calls"] + 1 >= task.budget["max_model_calls"]
+            ):
+                # One call is kept for the conclusion. A run whose own result could
+                # never be interpreted is refused before it is proposed, not after.
+                raise BudgetExceededError(
+                    "research model-call budget cannot pay for a conclusion after this call"
+                )
             seq = max(task.spent_calls, default=0) + 1
             changes = {
                 "reservation": TaskReservation("model_call", seq, "pending", _now()),
@@ -1408,6 +1557,7 @@ class ResearchOrchestrator:
             changes[key] = replace(reservation, status="dispatched")
         elif event in {
             "model_observed",
+            "model_concluded",
             "model_unknown",
             "model_unconfigured",
             "model_pending_release",
@@ -1427,7 +1577,7 @@ class ResearchOrchestrator:
             elif seq not in task.spent_calls:
                 changes["spent_calls"] = (*task.spent_calls, seq)
                 changes["last_model"] = data["model"]
-                if event == "model_observed":
+                if event in {"model_observed", "model_concluded"}:
                     response = data["response"]
                     changes["usage"] = {
                         **task.usage,
@@ -1438,7 +1588,15 @@ class ResearchOrchestrator:
                         "unavailable_model_calls": task.usage.get("unavailable_model_calls", 0)
                         + int(not response.usage_available),
                     }
-            if data.get("error"):
+                if event == "model_concluded":
+                    # The charge, the observed outcome and the exact response it
+                    # produced land in one durable write: there is no image in
+                    # which a slot is spent and its evidence is gone.
+                    changes["interpretation_evidence"] = data["evidence"]
+            if data.get("error") and not _conclusion_closed(task):
+                # A failure observed after the axis already has its durable
+                # answer is a late arrival: it may settle its own reservation
+                # above, but it never rewrites the run's outcome.
                 changes.update(status="failed", error=data["error"])
         elif event == "backtest_reserve":
             if task.backtest_reservation is not None or task.jobs:
@@ -1530,11 +1688,46 @@ class ResearchOrchestrator:
             # Additive evidence only: the latest host-verified proposal replaces an
             # earlier one. Nothing is installed, selected, replaced or run here.
             changes = {"declaration_draft": proposal}
+        elif event == "interpretation_evidence":
+            # Durable before anything is published: the observed response and the
+            # exact identities it was produced under. This is evidence, never a
+            # conclusion, so a cancelled task may keep it.
+            changes = {"interpretation_evidence": data["evidence"]}
+        elif event == "interpretation":
+            if _conclusion_closed(task):
+                # The axis already has its durable answer. A conclusion that
+                # arrives after it closed is never revived.
+                raise TaskStateError("the conclusion axis is already closed")
+            if data["evidence"] != task.interpretation_evidence:
+                raise TaskStateError("no matching interpretation evidence is persisted")
+            changes = {
+                "interpretation": data["interpretation"],
+                "interpretation_error": None,
+            }
+        elif event == "interpretation_failure":
+            if _conclusion_closed(task):
+                # Cancellation, or an earlier failure, is already the durable
+                # answer: a late failure never overwrites it.
+                return task
+            changes = {"interpretation_error": data["error"]}
+        elif event == "interpretation_refresh":
+            # Re-verified against the same report the served conclusion was
+            # derived from, so the served reading is replaced in place.
+            changes = {
+                "interpretation": data["interpretation"],
+                "interpretation_error": None,
+            }
+        elif event == "interpretation_stale":
+            # The report this conclusion was derived from is no longer
+            # available or no longer the same document. Withdrawing it is the
+            # only honest answer; the run itself is untouched.
+            changes = {"interpretation": None, "interpretation_error": data["error"]}
         else:
             raise TaskStateError(f"unknown task transition: {event}")
         if task.status == "cancelled":
             # A late result may add evidence and settle its own reservation.
-            # It never changes cancellation, installs a spec or starts work.
+            # It never changes cancellation, installs a spec, publishes a
+            # conclusion or starts work.
             changes = {
                 key: value
                 for key, value in changes.items()
@@ -1546,6 +1739,7 @@ class ResearchOrchestrator:
                     "jobs",
                     "reservation",
                     "backtest_reservation",
+                    "interpretation_evidence",
                 }
             }
         return replace(task, **changes)
@@ -1608,7 +1802,9 @@ class ResearchOrchestrator:
         messages = [ModelMessage("user", task.raw_idea)]
         for _round in range(_MAX_TOOL_ROUNDS + 1):
             try:
-                task = self._transition(task_id, generation, "model_reserve")
+                task = self._transition(
+                    task_id, generation, "model_reserve", hold_back_last_call=True
+                )
             except BudgetExceededError as error:
                 return self._failure(task_id, generation, "budget_exceeded", str(error))
             if task.status == "cancelled":
@@ -1789,6 +1985,16 @@ class ResearchOrchestrator:
                 "no confirmed spec exists",
                 "start_backtest",
             )
+        if task.usage["model_calls"] >= task.budget["max_model_calls"]:
+            # The conclusion slot is gone: this run's own result could never be
+            # interpreted, so it is refused before the engine sees it.
+            return self._failure(
+                task_id,
+                generation,
+                "budget_exceeded",
+                "research model-call budget leaves no call for a conclusion",
+                "start_backtest",
+            )
         scenario_id = confirmed.scenario_id or self._resolve_scenario_id(confirmed)
         try:
             # The frozen binding is re-verified here, before the engine boundary,
@@ -1891,6 +2097,717 @@ class ResearchOrchestrator:
                     )
         return self._bind(task_id, generation, record)
 
+    # -- the conclusion axis -------------------------------------------------
+    #
+    # Interpretation is a separate step with its own lifecycle. It reads one
+    # verified report, spends at most one model call, publishes a host-rendered
+    # conclusion, and never rewrites the job's own succeeded computation.
+
+    def _verified_report(self, task_id: str) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+        """The one verified report this task may conclude about."""
+        task = self._store.get(task_id)
+        if len(task.jobs) != 1:
+            raise TaskStateError("exactly one bound backtest is required to interpret")
+        record = self._service.get_job(task.jobs[0])
+        if record.status != "succeeded":
+            raise TaskStateError("the bound backtest has not succeeded")
+        # The service re-verifies payload hash, report schema and run id on every
+        # read, so nothing here is read from an unverified file.
+        payload = self._service.report(record.job_id)
+        document = json.loads(payload)
+        if type(document) is not dict:
+            raise TaskStateError("the verified report is not one document")
+        report = cast(dict[str, Any], document)
+        return record, report, report_claims.identity_of(report, record)
+
+    @staticmethod
+    def _interpretation_tools() -> list[ToolDefinition]:
+        return [ToolDefinition(**report_claims.interpretation_tool())]
+
+    @staticmethod
+    def _interpretation_prompt(packet: dict[str, Any]) -> str:
+        return (
+            "You record one bounded conclusion about a single completed backtest. "
+            "You cannot change, recompute or extend the run, and you cannot start "
+            "another one. Call conclude exactly once with codes only: you never write "
+            "a number, a unit or a sentence, because the host reads every value from "
+            "the verified report and writes every sentence it shows the user. "
+            "The question below is the user's own input, not a verified finding. "
+            "The host has already read the frozen criterion deterministically and its "
+            "own reading is in the packet: choose the one inference code that restates "
+            "it, and point evidence_ref at the frozen criterion field. You cannot "
+            "narrow that reading: a satisfied criterion stays satisfied, and counts of "
+            "orders or fills are never on their own a reason to call the evidence "
+            "insufficient. The conclusion is about this single frozen run: the "
+            "confirmed experiment fixed one scope, nothing in the accepted input "
+            "declares a wider one, and a conclusion claiming more than this run is "
+            "refused rather than published. Never claim the run proves the idea, and "
+            "never state or imply a profit.\n\n"
+            "Verified packet (JSON, read-only projection):\n"
+            + json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        )
+
+    def _interpretation_versions(self, task: ResearchTask) -> dict[str, Any]:
+        confirmed = task.spec_confirmed[-1][2] if task.spec_confirmed else None
+        return {
+            "operation": _INTERPRETATION_OPERATION,
+            "prompt": _INTERPRETATION_PROMPT_VERSION,
+            "tools": _INTERPRETATION_TOOL_VERSION,
+            "renderer": report_claims.INTERPRETATION_SCHEMA,
+            "criterion_schema": (
+                report_claims.CRITERION_SCHEMA
+                if confirmed is not None and confirmed.criterion is not None
+                else None
+            ),
+            "spec_version": len(task.spec_confirmed),
+            "strategy_id": None if confirmed is None else confirmed.strategy_id,
+            "dataset_id": None if confirmed is None else confirmed.dataset_id,
+            "source_sha256": None if confirmed is None else confirmed.source_sha256,
+            "pinned_binding": task.pinned_binding,
+        }
+
+    @staticmethod
+    def _observation(response: Any) -> dict[str, Any]:
+        """The durable identity of one observed model call.
+
+        It is written in the same transition that settles the call's charge and
+        records its response, so no durable image can carry a spent slot whose
+        outcome is unrecorded.
+        """
+        return {
+            "model": str(response.model or "unknown"),
+            "at": _now(),
+            "outcome": "observed",
+            "usage_available": response.usage_available,
+            "stop_reason": response.stop_reason,
+        }
+
+    @staticmethod
+    def _recorded_call(call: Any) -> dict[str, Any]:
+        """One tool call exactly as the response carried it, bounded, never rewritten.
+
+        The model's own identity for the call is kept beside its arguments: the id
+        it sent, the tool name, and the argument object as compact JSON. When the
+        arguments are larger than the bound the payload is withheld and its byte
+        length and digest are kept instead: a truncated argument set can re-parse
+        as a different, apparently valid conclusion, which is precisely what must
+        not happen. Nothing is dropped silently either way, and nothing is
+        re-asked.
+        """
+        try:
+            payload: str | None = json.dumps(
+                call.arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            )
+        except (TypeError, ValueError):
+            payload = None
+        name = str(call.name or "")
+        identity = str(call.id or "")
+        if payload is None:
+            return {
+                "id": identity,
+                "tool": name,
+                "arguments": None,
+                "arguments_bytes": None,
+                "arguments_sha256": None,
+                "over_limit": True,
+            }
+        encoded = payload.encode("utf-8")
+        over_limit = len(encoded) > _MAX_EVIDENCE_ARGUMENT_BYTES
+        return {
+            "id": identity,
+            "tool": name,
+            "arguments": None if over_limit else payload,
+            "arguments_bytes": len(encoded),
+            "arguments_sha256": hashlib.sha256(encoded).hexdigest(),
+            "over_limit": over_limit,
+        }
+
+    @staticmethod
+    def _bounded_calls(
+        tool_calls: Any,
+    ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+        """The complete call set, or one fixed-size record of why it was refused.
+
+        Both bounds are measured over the whole set the response carried: the
+        number of calls, and the UTF-8 bytes of every id, tool name and argument
+        payload together. No prefix of a larger response is ever stored as if it
+        were the whole answer, because a shortened set can re-parse as a
+        different, apparently valid conclusion. A refusal keeps the real count,
+        the real size and the digest of what was sent, and nothing else.
+        """
+        calls = list(tool_calls or [])
+        try:
+            encoded = json.dumps(
+                [
+                    {
+                        "id": str(call.id or ""),
+                        "name": str(call.name or ""),
+                        "arguments": call.arguments,
+                    }
+                    for call in calls
+                ],
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            return None, ResearchOrchestrator._calls_rejection(
+                "unserializable", len(calls), None, None
+            )
+        reason = None
+        if len(calls) > _MAX_EVIDENCE_CALLS:
+            reason = "too_many_calls"
+        elif len(encoded) > _MAX_EVIDENCE_CALL_BYTES:
+            reason = "too_many_bytes"
+        if reason is None:
+            return [ResearchOrchestrator._recorded_call(call) for call in calls], None
+        return None, ResearchOrchestrator._calls_rejection(
+            reason, len(calls), len(encoded), hashlib.sha256(encoded).hexdigest()
+        )
+
+    @staticmethod
+    def _calls_rejection(
+        reason: str, count: int, size: int | None, digest: str | None
+    ) -> dict[str, Any]:
+        """The fixed-size record of a call set this product will not store."""
+        return {
+            "reason": reason,
+            "call_count": count,
+            "calls_bytes": size,
+            "calls_sha256": digest,
+            "limit_calls": _MAX_EVIDENCE_CALLS,
+            "limit_bytes": _MAX_EVIDENCE_CALL_BYTES,
+        }
+
+    @staticmethod
+    def _evidence_receipt(evidence: dict[str, Any], *, seq: int | None) -> dict[str, Any]:
+        """A digest over the stored claim facts, plus the identity they belong to.
+
+        It is computed over the document exactly as persisted and is recomputed
+        the same way on read, so a changed or partially written document is
+        detectable. It is a persistence check only: the authority over what the
+        claim means stays with the verified report identity recorded alongside.
+        """
+        bound = {
+            "origin": evidence.get("origin"),
+            "report": evidence.get("report"),
+            "criterion": evidence.get("criterion"),
+            "data_scope": evidence.get("data_scope"),
+            "call_seq": seq,
+            "calls": evidence.get("calls"),
+            "calls_rejection": evidence.get("calls_rejection"),
+            "response_text_sha256": (evidence.get("response") or {}).get("text_sha256"),
+        }
+        encoded = json.dumps(bound, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return {
+            "schema": _INTERPRETATION_EVIDENCE_RECEIPT_SCHEMA,
+            "call_seq": seq,
+            "evidence_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+            "at": evidence.get("at"),
+        }
+
+    @staticmethod
+    def _evidence_document(
+        identity: dict[str, Any],
+        criterion: dict[str, Any] | None,
+        response: Any,
+        versions: dict[str, Any],
+        model: dict[str, Any],
+        *,
+        seq: int | None = None,
+        confirmed_spec: dict[str, Any] | None = None,
+        data_scope: dict[str, Any] | None = None,
+        origin: str = "model",
+    ) -> dict[str, Any]:
+        """Everything observed, persisted before anything is claimed about it.
+
+        This document is the audit record of one model call: the exact verified
+        report it was produced against, the frozen criterion, the call identity
+        and sequence, the usage it reported, its own accounting, and the complete
+        bounded set of tool calls the response carried — or, when that set is past
+        its bound, the fixed-size record of the refusal instead. It is written
+        *before* any local claim parsing, and the local reader re-reads these same
+        stored bytes, so a first publication and a restart after recovery cannot
+        disagree about what the model said. Model prose is never stored for
+        display; its hash is kept so the exact response stays identifiable.
+        """
+        text = str(response.text or "")
+        calls, calls_rejection = ResearchOrchestrator._bounded_calls(response.tool_calls)
+        evidence: dict[str, Any] = {
+            "schema": _INTERPRETATION_EVIDENCE_SCHEMA,
+            "origin": origin,
+            "report": identity,
+            "criterion": criterion,
+            "confirmed_spec": confirmed_spec,
+            "data_scope": data_scope,
+            "calls": calls,
+            "calls_rejection": calls_rejection,
+            "response": {
+                "model": str(response.model or "unknown"),
+                "stop_reason": response.stop_reason,
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "input_tokens": int(response.input_tokens or 0),
+                "output_tokens": int(response.output_tokens or 0),
+                "usage_available": bool(response.usage_available),
+            },
+            "model": model,
+            "versions": versions,
+            "at": _now(),
+        }
+        evidence["receipt"] = ResearchOrchestrator._evidence_receipt(evidence, seq=seq)
+        evidence["call"] = {"seq": seq, "tool": report_claims.CONCLUDE_TOOL_NAME}
+        return evidence
+
+    @staticmethod
+    def _host_evidence(
+        identity: dict[str, Any],
+        versions: dict[str, Any],
+        inference: str,
+        note: str,
+        *,
+        data_scope: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Evidence for a conclusion the host reaches without any model call.
+
+        It carries the same shape as a model response document so the one local
+        reader handles both, and it is marked as the host's own so it is never
+        mistaken for something a model said.
+        """
+        evidence: dict[str, Any] = {
+            "schema": _INTERPRETATION_EVIDENCE_SCHEMA,
+            "origin": "host",
+            "report": identity,
+            "criterion": None,
+            "confirmed_spec": None,
+            "data_scope": data_scope,
+            "calls": [],
+            "calls_rejection": None,
+            "selection": {
+                "inference": inference,
+                "evidence_ref": None,
+                "conclusion_scope": report_claims.FROZEN_SCOPE,
+            },
+            "rejection": note,
+            "response": None,
+            "model": None,
+            "versions": versions,
+            "at": _now(),
+        }
+        evidence["receipt"] = ResearchOrchestrator._evidence_receipt(evidence, seq=None)
+        evidence["call"] = None
+        return evidence
+
+    @staticmethod
+    def _selection_from_evidence(
+        evidence: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str | None, str | None]:
+        """The one local reader of a stored claim, shared by both paths.
+
+        It returns ``(selection, code, message)``. The first publication and a
+        restart after recovery both come through here, so a claim that was
+        accepted once cannot be refused later from the same bytes, and one that
+        was refused is never re-asked. Only persisted facts are parsed: the
+        model response is never re-derived, repaired or re-requested.
+        """
+        if evidence.get("origin") == "host":
+            selection = evidence.get("selection")
+            if type(selection) is not dict:
+                return None, "no_conclusion_call", "the host recorded no conclusion"
+            return cast(dict[str, Any], selection), None, None
+        calls = evidence.get("calls")
+        refusal = evidence.get("calls_rejection")
+        if type(refusal) is dict:
+            # The response carried more call data than the record keeps, so no
+            # part of it is stored as a collection. The refusal is technical: it
+            # says nothing about the run, and the call that produced it stays
+            # charged and is never re-asked.
+            return (
+                None,
+                "claim_rejected",
+                "the recorded call set was refused as "
+                f"{refusal.get('reason')} ({refusal.get('call_count')} calls, "
+                f"{refusal.get('calls_bytes')} bytes, sha256 {refusal.get('calls_sha256')}); "
+                "it is retained for audit and is not re-asked",
+            )
+        if type(calls) is not list:
+            return None, "no_conclusion_call", "the model did not record a conclusion"
+        concludes = [
+            call
+            for call in calls
+            if type(call) is dict and call.get("tool") == report_claims.CONCLUDE_TOOL_NAME
+        ]
+        if not concludes:
+            return None, "no_conclusion_call", "the model did not record a conclusion"
+        if len(concludes) > 1:
+            # The contract is exactly one conclusion call. Two of them are not a
+            # conclusion, they are a broken claim shape.
+            return None, "no_conclusion_call", "the model recorded more than one conclusion"
+        call = concludes[0]
+        if call.get("over_limit"):
+            return (
+                None,
+                "claim_rejected",
+                "the recorded conclusion arguments exceed the "
+                f"{_MAX_EVIDENCE_ARGUMENT_BYTES}-byte bound "
+                f"({call.get('arguments_bytes')} bytes, sha256 {call.get('arguments_sha256')}); "
+                "the call is retained for audit and is not re-asked",
+            )
+        payload = call.get("arguments")
+        if not isinstance(payload, str):
+            return None, "claim_rejected", "the recorded conclusion call carries no arguments"
+        try:
+            selection = report_claims.claim_selection(json.loads(payload))
+        except (ValueError, TypeError) as error:
+            return None, "claim_rejected", str(error)
+        return selection, None, None
+
+    def _interpretation_failure(
+        self, task_id: str, generation: int, code: str, message: str
+    ) -> ResearchTask:
+        """A technical failure of the conclusion step, on its own axis."""
+        return self._transition(
+            task_id,
+            generation,
+            "interpretation_failure",
+            finish=True,
+            error=self._error(code, message, "interpret"),
+        )
+
+    def _publish_interpretation(
+        self, task_id: str, generation: int, task: ResearchTask
+    ) -> ResearchTask:
+        """Re-verify the report, then render and publish. Never dispatches."""
+        evidence = task.interpretation_evidence
+        if evidence is None:
+            return self._transition(task_id, generation, "noop", finish=True)
+        try:
+            _record, report, identity = self._verified_report(task_id)
+        except (ResearchTaskError, JobNotFoundError, OSError, ValueError) as error:
+            return self._interpretation_failure(
+                task_id, generation, "report_unavailable", str(error)
+            )
+        if identity != evidence.get("report"):
+            # The exact verified report this response was produced against is not
+            # the one on disk. Nothing is published from a stale conclusion.
+            return self._interpretation_failure(
+                task_id,
+                generation,
+                "report_identity_changed",
+                "the verified report no longer matches the interpreted one",
+            )
+        selection, code, message = self._selection_from_evidence(evidence)
+        if selection is None:
+            return self._interpretation_failure(task_id, generation, str(code), str(message))
+        try:
+            interpretation = report_claims.build_interpretation(
+                question=task.raw_idea,
+                criterion=evidence.get("criterion"),
+                report=report,
+                report_identity=identity,
+                inference=str(selection["inference"]),
+                evidence_ref=selection.get("evidence_ref"),
+                conclusion_scope=selection.get("conclusion_scope"),
+                model=evidence.get("model"),
+                versions=cast(dict[str, Any], evidence.get("versions") or {}),
+                data_scope=cast(dict[str, Any] | None, evidence.get("data_scope")),
+            )
+        except (report_claims.CriterionRejectedError, KeyError, TypeError) as error:
+            return self._interpretation_failure(task_id, generation, "claim_rejected", str(error))
+        try:
+            return self._transition(
+                task_id,
+                generation,
+                "interpretation",
+                finish=True,
+                evidence=evidence,
+                interpretation=interpretation,
+            )
+        except TaskStateError:
+            # The axis closed while this call was in flight. The response stays
+            # evidence and nothing is published or revived.
+            return self._transition(task_id, generation, "noop", finish=True)
+
+    def _reverify_interpretation(
+        self, task_id: str, generation: int, task: ResearchTask
+    ) -> ResearchTask:
+        """Re-derive a served conclusion from the report before it is shown.
+
+        A conclusion is only ever a reading of one exact verified report. If that
+        report is gone, or is no longer the document the conclusion was derived
+        from, the conclusion is withdrawn rather than displayed. Nothing here
+        dispatches a model call.
+        """
+        published = task.interpretation
+        if published is None:
+            return self._transition(task_id, generation, "noop", finish=True)
+        try:
+            _record, report, identity = self._verified_report(task_id)
+        except (ResearchTaskError, JobNotFoundError, OSError, ValueError) as error:
+            return self._transition(
+                task_id,
+                generation,
+                "interpretation_stale",
+                finish=True,
+                error=self._error("report_unavailable", str(error), "interpret"),
+            )
+        if identity != published.get("report"):
+            return self._transition(
+                task_id,
+                generation,
+                "interpretation_stale",
+                finish=True,
+                error=self._error(
+                    "report_identity_changed",
+                    "the verified report no longer matches the interpreted one",
+                    "interpret",
+                ),
+            )
+        try:
+            rerendered = report_claims.rerender_interpretation(
+                published, report=report, report_identity=identity
+            )
+        except report_claims.InterpretationUnsupportedError as error:
+            # The stored conclusion was rendered under semantics this build does
+            # not implement. That is a technical unavailability on the conclusion
+            # axis, not a withdrawn claim, and it never touches the run.
+            return self._transition(
+                task_id,
+                generation,
+                "interpretation_stale",
+                finish=True,
+                error=self._error("interpretation_schema_unsupported", str(error), "interpret"),
+            )
+        if rerendered is None:
+            return self._transition(
+                task_id,
+                generation,
+                "interpretation_stale",
+                finish=True,
+                error=self._error(
+                    "claim_rejected",
+                    "the served conclusion can no longer be derived from this report",
+                    "interpret",
+                ),
+            )
+        if rerendered == published:
+            return self._transition(task_id, generation, "noop", finish=True)
+        return self._transition(
+            task_id,
+            generation,
+            "interpretation_refresh",
+            finish=True,
+            interpretation=rerendered,
+        )
+
+    def _confirmed_projection(self, task: ResearchTask) -> dict[str, Any] | None:
+        """The confirmed spec the model is allowed to reason about.
+
+        This is the exact document the user confirmed, so the model sees what
+        was frozen before the run rather than a summary of it.
+        """
+        if not task.spec_confirmed:
+            return None
+        version, at, spec = task.spec_confirmed[-1]
+        return {**spec.document(), "version": version, "confirmed_at": at}
+
+    @staticmethod
+    def _job_projection(record: Any) -> dict[str, Any]:
+        """The bounded identity of the one job this conclusion is about."""
+        return {
+            "job_id": record.job_id,
+            "status": record.status,
+            "schema": record.schema,
+            "engine_run_id": record.engine_run_id,
+            "input_sha256": record.input_sha256,
+        }
+
+    @staticmethod
+    def _data_scope(record: Any, report: dict[str, Any] | None = None) -> dict[str, Any]:
+        """The bounded data provenance a conclusion may lean on.
+
+        Anything this product cannot prove about the data is named as
+        unavailable rather than left out, so a conclusion can never silently
+        assume point-in-time correctness or independent verification. The time
+        and input policy the run actually recorded is projected alongside it: the
+        replay window the report carries, and nothing inferred from it. A window
+        is a selection policy, not proof that it covers the time a question is
+        about, so its presence never removes the unknown-coverage limitation.
+        """
+        identity = record.input_identity if isinstance(record.input_identity, dict) else {}
+        document = report if isinstance(report, dict) else {}
+        replay = report_claims.read_field(document, "source.replay_window")
+        window = replay if isinstance(replay, dict) else None
+        return {
+            "record_count": identity.get("record_count"),
+            "dataset_id": identity.get("dataset_id"),
+            "source_sha256": identity.get("source_sha256"),
+            "scenario_sha256": identity.get("scenario_sha256"),
+            "input_sha256": record.input_sha256,
+            "time_range": (
+                None
+                if window is None
+                else {
+                    "start_inclusive": window.get("start_inclusive"),
+                    "end_exclusive": window.get("end_exclusive"),
+                    "timezone": window.get("timezone"),
+                    "selection_field": window.get("selection_field"),
+                }
+            ),
+            "point_in_time": None,
+            "quality_verified": False,
+            "unavailable": ["point_in_time", "quality_verified"],
+        }
+
+    def _stop_conclusion(self, task_id: str, generation: int, task: ResearchTask) -> ResearchTask:
+        """Stop a conclusion attempt closed before anything left this process.
+
+        A reservation that never reached the provider is not spent, so it is
+        returned in the same write that stops the attempt.
+        """
+        reservation = task.reservation
+        if reservation is None:
+            return self._transition(task_id, generation, "noop", finish=True)
+        try:
+            return self._transition(
+                task_id, generation, "model_pending_release", finish=True, seq=reservation.seq
+            )
+        except TaskStateError:
+            # Whoever closed the axis already settled this reservation.
+            return self._transition(task_id, generation, "noop", finish=True)
+
+    def interpret(self, task_id: str) -> ResearchTask:
+        """The explicit one-shot conclusion step for a succeeded run."""
+        generation = self._begin(task_id, "interpret")
+        if generation is None:
+            return self._view(task_id)
+        task = self._store.get(task_id)
+        if task.status == "cancelled":
+            return self._transition(task_id, generation, "noop", finish=True)
+        if _conclusion_closed(task):
+            # Already concluded or already settled as failed/unknown: an explicit
+            # repeat never re-dispatches a model call.
+            return self._transition(task_id, generation, "noop", finish=True)
+        if task.status != "succeeded":
+            self._transition(task_id, generation, "noop", finish=True)
+            raise TaskStateError("only a run whose computation succeeded can be interpreted")
+        if task.interpretation_evidence is not None:
+            # An observed response survived a restart: local validate and publish.
+            return self._publish_interpretation(task_id, generation, task)
+        try:
+            record, report, identity = self._verified_report(task_id)
+        except (ResearchTaskError, JobNotFoundError, OSError, ValueError) as error:
+            return self._interpretation_failure(
+                task_id, generation, "report_unavailable", str(error)
+            )
+        confirmed = task.spec_confirmed[-1][2] if task.spec_confirmed else None
+        criterion = None if confirmed is None else confirmed.criterion
+        versions = self._interpretation_versions(task)
+        data_scope = self._data_scope(record, report)
+        if criterion is None:
+            # Nothing was frozen before the run, so there is nothing to compare
+            # against. The honest answer needs no model call and no budget.
+            evidence = self._host_evidence(
+                identity,
+                versions,
+                "criterion_not_stated",
+                "no criterion was frozen",
+                data_scope=data_scope,
+            )
+            task = self._transition(
+                task_id, generation, "interpretation_evidence", evidence=evidence
+            )
+            return self._publish_interpretation(task_id, generation, task)
+        packet = report_claims.packet(
+            question=task.raw_idea,
+            criterion=criterion,
+            report=report,
+            report_identity=identity,
+            confirmed_spec=self._confirmed_projection(task),
+            job=self._job_projection(record),
+            data_scope=data_scope,
+        )
+        try:
+            task = self._transition(task_id, generation, "model_reserve", step="interpret")
+        except TaskStateError:
+            # The axis closed between the reads above and this write.
+            return self._transition(task_id, generation, "noop", finish=True)
+        except BudgetExceededError as error:
+            return self._interpretation_failure(task_id, generation, "budget_exceeded", str(error))
+        if _conclusion_closed(task):
+            # Cancelled while the slot was reserved and before anything left
+            # this process: the slot is returned and no call is made.
+            return self._stop_conclusion(task_id, generation, task)
+        assert task.reservation is not None
+        seq = task.reservation.seq
+        try:
+            task = self._transition(task_id, generation, "model_dispatch")
+        except TaskStateError:
+            return self._stop_conclusion(task_id, generation, task)
+        if _conclusion_closed(task):
+            return self._stop_conclusion(task_id, generation, task)
+        route = self._model_route()
+        try:
+            response = self._provider.complete(
+                system=self._interpretation_prompt(packet),
+                messages=[
+                    ModelMessage(
+                        "user",
+                        json.dumps(
+                            packet, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                        ),
+                    )
+                ],
+                tools=self._interpretation_tools(),
+            )
+        except ModelNotConfigured as error:
+            # No error payload here: the run's own succeeded computation is not
+            # rewritten by a failure of the conclusion step.
+            self._transition(task_id, generation, "model_unconfigured", seq=seq)
+            return self._interpretation_failure(
+                task_id, generation, "model_not_configured", str(error)
+            )
+        except ModelProviderError as error:
+            self._transition(
+                task_id,
+                generation,
+                "model_unknown",
+                seq=seq,
+                model={"model": "unknown", "at": _now(), "outcome": "unknown_after_dispatch"},
+            )
+            return self._interpretation_failure(
+                task_id,
+                generation,
+                _UNKNOWN_MODEL,
+                f"{error}; outcome unknown; the call stays charged and is not "
+                "re-dispatched automatically",
+            )
+        # One durable write: the charge, the observed outcome and the exact
+        # response it produced. There is no image in which a slot is spent and
+        # its evidence is gone, and nothing is published before this lands.
+        # A task cancelled while this call was in flight keeps the evidence and
+        # settles its own reservation, but never publishes.
+        task = self._transition(
+            task_id,
+            generation,
+            "model_concluded",
+            seq=seq,
+            response=response,
+            evidence=self._evidence_document(
+                identity,
+                criterion,
+                response,
+                versions,
+                route,
+                seq=seq,
+                confirmed_spec=self._confirmed_projection(task),
+                data_scope=data_scope,
+            ),
+            model=self._observation(response),
+        )
+        if task.status == "cancelled":
+            return self._transition(task_id, generation, "noop", finish=True)
+        return self._publish_interpretation(task_id, generation, task)
+
     def _recover_backtest(
         self, task_id: str, generation: int, reservation: TaskReservation
     ) -> ResearchTask:
@@ -1925,6 +2842,43 @@ class ResearchOrchestrator:
             return self._view(task_id)
         task = self._store.get(task_id)
         reservation = task.reservation
+        if reservation is not None and task.status == "succeeded":
+            # A leftover charge on an already-succeeded task can only belong to the
+            # conclusion step. It is settled on that axis and never rewrites the
+            # run's own succeeded computation.
+            if reservation.status == "pending":
+                self._transition(task_id, generation, "model_pending_release", seq=reservation.seq)
+                return self._interpretation_failure(
+                    task_id,
+                    generation,
+                    _INTERRUPTED,
+                    "interrupted before dispatch; the model-call charge was released once",
+                )
+            self._transition(
+                task_id,
+                generation,
+                "model_unknown",
+                seq=reservation.seq,
+                model={"model": "unknown", "at": _now(), "outcome": "unknown_after_dispatch"},
+            )
+            return self._interpretation_failure(
+                task_id,
+                generation,
+                _UNKNOWN_MODEL,
+                "model outcome unknown after dispatch; the call stays charged and is not "
+                "re-dispatched automatically",
+            )
+        if task.status == "succeeded" and task.interpretation is not None:
+            # Every read re-derives a served conclusion from the verified report.
+            # One that can no longer be proven from it is withdrawn, not shown.
+            return self._reverify_interpretation(task_id, generation, task)
+        if (
+            task.status == "succeeded"
+            and task.interpretation is None
+            and task.interpretation_evidence is not None
+        ):
+            # An observed response survived a restart: local validate and publish.
+            return self._publish_interpretation(task_id, generation, task)
         if reservation is not None:
             if reservation.status == "pending":
                 self._transition(task_id, generation, "model_pending_release", seq=reservation.seq)
@@ -2031,6 +2985,10 @@ class ResearchOrchestrator:
         assumptions = input_.get("assumptions") or []
         if not isinstance(assumptions, list):
             raise InvalidSpecError("assumptions must be a list")
+        try:
+            criterion = report_claims.validate_criterion(input_.get("criterion"))
+        except report_claims.CriterionRejectedError as error:
+            raise InvalidSpecError(str(error)) from None
         return ResearchSpec(
             strategy_id=_bounded_text(input_.get("strategy_id"), field="strategy_id", maximum=128),
             instrument_venue=_bounded_text(
@@ -2055,7 +3013,15 @@ class ResearchOrchestrator:
             ),
             parameters=parameters,
             assumptions=tuple(str(item) for item in assumptions),
+            criterion=criterion,
         )
+
+    @staticmethod
+    def _edited_criterion(value: Any) -> dict[str, Any] | None:
+        try:
+            return report_claims.validate_criterion(value)
+        except report_claims.CriterionRejectedError as error:
+            raise InvalidSpecError(str(error)) from None
 
     def _edited_spec(self, task: ResearchTask, fields: dict[str, Any]) -> ResearchSpec:
         if task.status not in {"awaiting_confirmation", "drafting"} or task.spec_draft is None:
@@ -2096,6 +3062,11 @@ class ResearchOrchestrator:
                 draft.selection
                 if "selection" not in fields
                 else self._selection_payload(fields.get("selection"))
+            ),
+            criterion=(
+                draft.criterion
+                if "criterion" not in fields
+                else self._edited_criterion(fields.get("criterion"))
             ),
         )
         self._validate_spec(merged)

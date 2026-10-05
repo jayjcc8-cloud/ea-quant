@@ -980,11 +980,13 @@ def test_concurrent_retries_cannot_double_spend_the_last_model_call_slot(
     store = orchestrator._store  # noqa: SLF001
     provider = BlockingProvider([_model_evidence_response(orchestrator, "call-1")])
     cast(Any, orchestrator)._provider = provider
+    # Of two calls, one is held back for the conclusion, so exactly one call is
+    # available to propose with and both retries race for that same final slot.
     seeded = _task(
         request_id=str(uuid4()),
         status="failed",
         error={"step": "propose", "code": "no_tool_call", "message": "seed"},
-        budget={"max_model_calls": 1, "max_backtests": 5},
+        budget={"max_model_calls": 2, "max_backtests": 5},
     )
     store.save(seeded)
     outcomes: list[BaseException | ResearchTask] = []
