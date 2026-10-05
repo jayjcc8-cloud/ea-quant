@@ -1,0 +1,28 @@
+/* The preview's own chrome only. The app under it is styled by src/styles.css.
+   The chrome is one default-closed summary: on a 390px-wide phone the whole bar
+   costs under 60px, and the product below keeps the rest of the first screen.
+   Neither the bar nor the summary is sticky: the product must never be covered
+   by this page's own toolbar. */
+.preview-bar { padding: 8px 24px; border-bottom: 2px solid #4263db; background: #eef1fa; color: #26282c; font-size: 12px; }
+.preview-controls { margin: 0; background: #fff; }
+.preview-controls > summary { min-height: 44px; padding: 10px 14px; cursor: pointer; }
+.preview-controls > summary span { color: #6d7177; }
+.preview-controls .disclosure-body { display: grid; gap: 8px; }
+.preview-attribution { max-width: 900px; margin: 0; color: #4a4f57; line-height: 1.6; }
+.preview-bar label { margin: 0; }
+.preview-bar select { max-width: 460px; }
+.preview-staging { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+.preview-staging label { display: flex; gap: 6px; align-items: center; }
+.preview-staging button { min-height: 44px; }
+.preview-counters { display: flex; flex-wrap: wrap; gap: 6px 14px; color: #4a4f57; }
+.preview-counters span { font-variant-numeric: tabular-nums; }
+.preview-counters code, .preview-note code { color: #26282c; font-size: 11px; }
+.preview-note { max-width: 900px; color: #6d7177; line-height: 1.6; }
+@media (max-width: 640px) {
+  /* 2px bar border + 5px + the 44px summary + its 2px border + 5px = 58px. */
+  .preview-bar { padding: 5px 12px; }
+  .preview-controls > summary { padding: 10px 12px; }
+  /* The state is already named by the control inside, and the summary has to stay
+     one line on a phone's first screen. */
+  .preview-controls > summary span { display: none; }
+}

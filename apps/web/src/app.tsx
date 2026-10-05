@@ -578,6 +578,14 @@ function Backtests({ api }: { api: ApiAdapter }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [disconnected, setDisconnected] = useState(false)
+  // A refused validation or a refused dispatch is announced where the user just
+  // acted, and focus moves to it: the failure was previously rendered above the
+  // whole form, off screen on a narrow viewport.
+  const errorRef = useRef<HTMLParagraphElement | null>(null)
+
+  useEffect(() => {
+    if (error) errorRef.current?.focus()
+  }, [error])
 
   useEffect(() => {
     let current = true
@@ -638,7 +646,6 @@ function Backtests({ api }: { api: ApiAdapter }) {
   return <>
     <PageTitle title="Offline Backtests" subtitle="Run, replay, and compare real installed-engine attempts." />
     {disconnected && <section className="notice error">Local service is unreachable</section>}
-    {error && <section className="notice error">{error}</section>}
     <div className="backtest-grid">
       <section className="panel control-panel">
         <header><h2>New backtest</h2><span>One active job</span></header>
@@ -664,6 +671,7 @@ function Backtests({ api }: { api: ApiAdapter }) {
           <ParameterControls contracts={validated?.strategy_parameters ?? candidate?.strategy_parameters ?? []} values={values} update={(name, value) => { setValues(current => ({ ...current, [name]: value })); setValidated(null); setError(null) }} />
         </section>
         <div className="actions"><button disabled={!selected || busy} onClick={validate}>Validate input</button><button className="primary" disabled={!validated || busy} onClick={run}>Run new backtest</button></div>
+        {error && <p className="notice error" role="alert" tabIndex={-1} ref={errorRef}>{error}</p>}
         {validated?.summary && <div className="validated"><strong>Validated input</strong><span>{parameterText(validated.summary.parameters ?? {})}</span><small>{validated.normalized_input_identity?.scenario_sha256.slice(0, 12) ?? validated.input_identity?.scenario_sha256.slice(0, 12)}…</small></div>}
       </section>
       <section className="panel jobs-panel"><header><h2>Recent Runs</h2><span>Refresh-safe history</span></header>
@@ -756,7 +764,7 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
       leftCurrency: left.report?.economics.net_pnl.currency ?? left.report?.economics.currency,
       rightCurrency: right.report?.economics.net_pnl.currency ?? right.report?.economics.currency,
     },
-    { label: 'Fees', before: left.report?.economics.fees?.amount, after: right.report?.economics.fees?.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.report?.economics.fees?.currency, rightCurrency: right.report?.economics.fees?.currency },
+    { label: 'Fees', before: left.report?.economics.fees?.amount, after: right.report?.economics.fees?.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.report?.economics.fees?.currency ?? left.report?.economics.currency, rightCurrency: right.report?.economics.fees?.currency ?? right.report?.economics.currency },
     { label: 'Maximum Drawdown Amount', before: left.path?.max_drawdown.amount, after: right.path?.max_drawdown.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.path?.currency, rightCurrency: right.path?.currency },
     { label: 'Maximum Drawdown Ratio', before: left.path?.max_drawdown.ratio, after: right.path?.max_drawdown.ratio, shift: 0, suffix: '', monetary: false },
     { label: 'Return', before: left.report?.economics.total_return.value, after: right.report?.economics.total_return.value, shift: 2, suffix: ' pp', monetary: false },
@@ -846,7 +854,16 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
 
   if (!job) return <><PageTitle title="Backtest Result" subtitle="Loading the workspace job and formal report." />{disconnected && <section className="notice error">Local service is unreachable</section>}{error && <section className="notice error">{error}</section>}</>
   const economics = report?.economics
-  const currency = economics?.currency ?? economics?.ending_cash[0]?.currency ?? economics?.initial_funding?.currency ?? 'USD'
+  // Each amount is shown with the unit the report recorded for that amount; the
+  // run-level currency is the fallback for an amount that recorded none, and a
+  // unit no part of the report recorded is named as missing rather than assumed
+  // to be USD. A v1 report carries the run's currency once, a v2/v3 report
+  // carries it on each amount.
+  const amount = (value: Money | null | undefined) => {
+    if (!value) return 'not available'
+    const currency = value.currency ?? economics?.currency ?? null
+    return currency ? `${value.amount} ${currency}` : `${value.amount} · currency not recorded by the report`
+  }
   const strategy = report?.source?.strategy.id ?? report?.scenario?.strategy_id
   const instrument = report?.source?.instrument ?? report?.scenario?.instrument
   return <>
@@ -855,24 +872,29 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     {error && <section className="notice error">{error}</section>}
     {job.message && <section className="notice error"><strong>{job.error_code}</strong> · {job.message}</section>}
     <div className="result-toolbar"><Link to="/backtests">← New or saved backtest</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
-    <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
-      <div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
-      {job.input_snapshot?.research_input && <><div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div><div><dt>Source SHA-256</dt><dd>{job.input_snapshot.research_input.source_sha256}</dd></div></>}
-    </dl></section>
-    {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
-    {job.input_snapshot && <p><span>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</span> · <span>{slippageLabel(job.input_snapshot.scenario.execution?.slippage)}</span> · <span>{latencyLabel(job.input_snapshot.scenario.execution?.latency)}</span></p>}
-    {job.schema === 'ea.local-web-job.v5' && <p>Round trip limit: {String(job.input_snapshot?.scenario.strategy.max_round_trips)}</p>}
     {economics ? <>
-      {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
       <section className="metrics">
-        <Metric label="Initial cash" value={economics.initial_funding ? `${economics.initial_funding.amount} ${currency}` : 'not available'} />
-        <Metric label="Ending cash" value={`${economics.ending_cash[0]?.amount ?? '0'} ${currency}`} />
-        <Metric label="Equity" value={`${economics.equity.amount} ${currency}`} />
-        <Metric label="Net P&L" value={`${economics.net_pnl.amount} ${currency}`} />
+        <Metric label="Initial cash" value={amount(economics.initial_funding)} />
+        <Metric label="Ending cash" value={amount(economics.ending_cash[0] ?? { amount: '0' })} />
+        <Metric label="Equity" value={amount(economics.equity)} />
+        <Metric label="Net P&L" value={amount(economics.net_pnl)} />
         <Metric label="Total return" value={economics.total_return.value} />
-        <Metric label="Fees" value={economics.fees ? `${economics.fees.amount} ${economics.fees.currency}` : 'not available'} />
+        <Metric label="Fees" value={amount(economics.fees)} />
         <Metric label="Position quantity" value={economics.ending_positions[0]?.quantity ?? '0'} />
       </section>
+      <section className="panel result-limits" aria-label="What this result does not show">
+        <header><h2>What this result does not show</h2><span>One deterministic run</span></header>
+        <p className="muted">These are the limits the reporter itself records. The formal report is the authority for every figure above; nothing here is extrapolated from it.</p>
+        <dl className="summary-list">
+          <div><dt>Records in this run</dt><dd>{job.input_identity.record_count} records{job.input_identity.record_count <= 6 ? ' · small sample: workflow validation only, no robustness claim' : ''}</dd></div>
+          <div><dt>Net P&amp;L</dt><dd>Includes the valuation of any position still open at the end of the window; it is not realized profit.</dd></div>
+          <div><dt>Position quantity</dt><dd>A number of units in one ending position, not a count of trades.</dd></div>
+          <div><dt>Fees</dt><dd>Charged by the recorded commission policy, not observed from a venue.</dd></div>
+          <div><dt>Robustness</dt><dd>One window, no benchmark comparison, no out-of-sample period. A chronological holdout is a separate evaluation with its own explicit action.</dd></div>
+          <div><dt>Statistical claims</dt><dd>None are made here: no Sharpe ratio, no confidence interval and no significance test exists for this run.</dd></div>
+        </dl>
+      </section>
+      {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
       <div className="backtest-grid">
         <section className="panel"><header><h2>Execution</h2><span>Canonical strings</span></header><dl className="summary-list">
           {report?.schema === 'ea.backtest-report.v3' ? <MultiRoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v2' ? <RoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v1' ? <>
@@ -891,6 +913,13 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
           ? error ? 'No current verified report is available.' : 'Loading the formal report.'
           : 'The installed engine is running. This page will refresh automatically.'
     }</p></section>}
+    <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
+      <div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
+      {job.input_snapshot?.research_input && <><div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div><div><dt>Source SHA-256</dt><dd>{job.input_snapshot.research_input.source_sha256}</dd></div></>}
+    </dl></section>
+    {job.input_snapshot && <p><span>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</span> · <span>{slippageLabel(job.input_snapshot.scenario.execution?.slippage)}</span> · <span>{latencyLabel(job.input_snapshot.scenario.execution?.latency)}</span></p>}
+    {job.schema === 'ea.local-web-job.v5' && <p>Round trip limit: {String(job.input_snapshot?.scenario.strategy.max_round_trips)}</p>}
+    {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
     {report && <TradeAnalyticsPanel analytics={analytics} />}
     {report && api.createCandidate && <CandidateCreate api={api} jobId={jobId} />}
   </>
@@ -914,7 +943,14 @@ function FrozenParameters({ job }: { job: BacktestJob }) {
 function HoldoutEvidence({ role, job, report, path }: { role: string } & ComparedRun) {
   const data = job.input_snapshot?.scenario.data
   const economics = report?.economics
-  const currency = economics?.currency ?? job.input_snapshot?.scenario.funding.currency
+  // Each amount carries the unit the report recorded for that amount; the run's
+  // currency and then the frozen scenario funding are the fallbacks for an amount
+  // that recorded none, and a missing unit is named rather than assumed to be USD.
+  const unit = (value: Money | null | undefined) => {
+    if (!value) return 'not available'
+    const currency = value.currency ?? economics?.currency ?? job.input_snapshot?.scenario.funding.currency ?? null
+    return currency ? `${value.amount} ${currency}` : `${value.amount} · currency not recorded by the report`
+  }
   return <section className="panel"><header><h2>{role}</h2><span>{job.status}</span></header><dl className="summary-list">
     <div><dt>Scenario</dt><dd>{job.scenario_id}</dd></div>
     {job.input_snapshot?.research_input && <div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div>}
@@ -924,9 +960,9 @@ function HoldoutEvidence({ role, job, report, path }: { role: string } & Compare
     <div><dt>Commission assumption</dt><dd>{commissionLabel(job.input_snapshot?.scenario.execution?.commission)}</dd></div>
     <div><dt>Slippage assumption</dt><dd>{slippageLabel(job.input_snapshot?.scenario.execution?.slippage)}</dd></div>
     <div><dt>Execution latency</dt><dd>{latencyLabel(job.input_snapshot?.scenario.execution?.latency)}</dd></div>
-    <div><dt>Fees</dt><dd>{economics?.fees ? `${economics.fees.amount} ${economics.fees.currency}` : 'No report'}</dd></div>
-    <div><dt>Final equity</dt><dd>{economics ? `${economics.equity.amount} ${currency}` : 'No report'}</dd></div>
-    <div><dt>Net P&amp;L</dt><dd>{economics ? `${economics.net_pnl.amount} ${currency}` : 'No report'}</dd></div>
+    <div><dt>Fees</dt><dd>{economics ? unit(economics.fees) : 'No report'}</dd></div>
+    <div><dt>Final equity</dt><dd>{economics ? unit(economics.equity) : 'No report'}</dd></div>
+    <div><dt>Net P&amp;L</dt><dd>{economics ? unit(economics.net_pnl) : 'No report'}</dd></div>
     <div><dt>Total return</dt><dd>{economics ? percent(economics.total_return.value) : 'No report'}</dd></div>
     <div><dt>Maximum Drawdown</dt><dd>{path ? `${path.max_drawdown.amount} ${path.currency} / ${pathPercent(path.max_drawdown.ratio)}` : pathUnavailable(job)}</dd></div>
   </dl><Link to={`/backtests/${job.job_id}`}>Open {role} formal run</Link></section>

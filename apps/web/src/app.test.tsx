@@ -581,6 +581,49 @@ describe('EA Quant local Web backtests', () => {
     expect(screen.getByRole('button', { name: 'Run new backtest' }).hasAttribute('disabled')).toBe(true)
   })
 
+it('announces a refused validation where the action was and moves focus to it', async () => {
+  const user = userEvent.setup()
+  window.history.pushState({}, '', '/backtests')
+  render(<App api={adapter({
+    validateScenario: async () => { throw new Error('scenario parameters are outside the registered contract') },
+  })} />)
+
+  await user.selectOptions(await screen.findByLabelText('Scenario'), 'bounded-long.yaml')
+  await user.click(screen.getByRole('button', { name: 'Validate input' }))
+
+  // The refusal is announced as an alert in the panel the user acted in, and
+  // focus moves to it rather than staying on a control that cannot proceed.
+  const alert = await screen.findByRole('alert')
+  expect(alert.textContent).toBe('scenario parameters are outside the registered contract')
+  await waitFor(() => expect(document.activeElement).toBe(alert))
+  expect(screen.getByRole('button', { name: 'Run new backtest' }).hasAttribute('disabled')).toBe(true)
+})
+
+it('states what one result does not show before the curve, execution detail and downloads', async () => {
+  window.history.pushState({}, '', '/backtests/job-1')
+  render(<App api={adapter({
+    getBacktest: async () => ({ ...job, schema: 'ea.local-web-job.v3', equity_path_sha256: '7'.repeat(64) }),
+    getEquityPath: async () => ({
+      schema: 'ea.backtest-equity-path.v1', run_id: 'run-1', report_sha256: job.report_sha256!, currency: 'USD',
+      point_count: 4, display_sampling: 'uniform-index-extrema-v1',
+      display_points: [{ index: 0, time: '2026-01-01T09:31:00.000000Z', equity: '10000' }, { index: 3, time: '2026-01-02T09:31:00.000000Z', equity: '10017' }],
+      max_drawdown: { amount: '30', ratio: '0.003', peak_index: 0, peak_time: '2026-01-01T09:31:00.000000Z', peak_equity: '10000', trough_index: 1, trough_time: '2026-01-02T09:30:00.000000Z', trough_equity: '9970' },
+    }),
+  })} />)
+
+  const limits = await screen.findByRole('region', { name: 'What this result does not show' })
+  const precedes = (first: Element | null, second: Element) =>
+    Boolean(first && first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING)
+  expect(precedes(document.querySelector('.metrics'), limits)).toBe(true)
+  expect(precedes(limits, screen.getByRole('heading', { name: 'Equity Curve' }))).toBe(true)
+  expect(precedes(limits, screen.getByRole('heading', { name: 'Execution' }))).toBe(true)
+  expect(precedes(limits, screen.getByRole('link', { name: 'Download report.json' }))).toBe(true)
+  // A run this small says so, and no statistic is claimed from it.
+  expect(limits.textContent).toContain('4 records')
+  expect(limits.textContent).toContain('small sample: workflow validation only, no robustness claim')
+  expect(limits.textContent).toContain('no Sharpe ratio')
+})
+
   it('clears a previously loaded report and surfaces a failed refresh', async () => {
     const user = userEvent.setup()
     let reportRequests = 0
@@ -711,11 +754,45 @@ it('shows backend path evidence and sampled equity curve without replacing termi
     }),
   })} />)
   await screen.findByRole('heading', { name: 'Equity Curve' })
-  expect(screen.getByRole('img', { name: 'Equity curve' })).toBeTruthy()
+  const curve = screen.getByRole('img', { name: 'Equity curve' })
+  // The extrema and the window are HTML at the reading size, not SVG text the
+  // 750x260 viewBox would scale down, and the drawing points at that description.
+  const axes = [...document.querySelectorAll('.curve-axis')]
+  expect(axes.map(axis => axis.tagName)).toEqual(['DIV', 'DIV'])
+  expect(axes[0].textContent).toBe('High 10017 USDLow 10000 USD')
+  expect(axes[1].textContent).toBe('First 2026-01-01Last 2026-01-02')
+  expect(curve.querySelector('text')).toBeNull()
+  expect(document.getElementById(curve.getAttribute('aria-describedby')!)?.textContent)
+    .toContain('Equity in USD over the displayed observations')
   expect(screen.getByText('30 USD')).toBeTruthy()
   expect(screen.getByText(/0.3%/)).toBeTruthy()
   expect(screen.getByText(/sampled display/)).toBeTruthy()
   expect(screen.getByText('10017 USD')).toBeTruthy()
+})
+
+it('names a report currency that was not recorded instead of assuming USD', async () => {
+  const v1 = report as Extract<BacktestReport, { schema: 'ea.backtest-report.v1' }>
+  const unrecorded: BacktestReport = {
+    ...v1,
+    economics: {
+      ...v1.economics,
+      // A report read from disk may predate the currency field: the amounts are
+      // still published, so the unit is named as missing rather than invented.
+      currency: undefined,
+      initial_funding: { amount: '10000' },
+      ending_cash: [{ amount: '9797' }],
+      equity: { amount: '10017' },
+      net_pnl: { amount: '17' },
+    },
+  }
+  window.history.pushState({}, '', '/backtests/job-1')
+  render(<App api={adapter({ getReport: async () => unrecorded })} />)
+  await screen.findByText('10017 · currency not recorded by the report')
+  const metrics = document.querySelector('.metrics')!.textContent ?? ''
+  expect(metrics).toContain('10000 · currency not recorded by the report')
+  expect(metrics).toContain('9797 · currency not recorded by the report')
+  expect(metrics).toContain('17 · currency not recorded by the report')
+  expect(metrics).not.toContain('USD')
 })
 
 it('sorts drawdown ratios exactly with stable missing-last legacy rows in both directions', async () => {

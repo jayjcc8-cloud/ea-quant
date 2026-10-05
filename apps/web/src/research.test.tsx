@@ -9,7 +9,7 @@
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
-import { App, type ApiAdapter, type BacktestJob, type ChronologicalHoldout } from './app'
+import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type ChronologicalHoldout } from './app'
 import { ResearchRequestError, type ModelConfigurationStatus, type ResearchTask } from './research-api'
 
 const spec = {
@@ -77,6 +77,24 @@ const holdout: ChronologicalHoldout = {
   holdout_job_id: 'job-2',
 }
 
+/** A verified report handwritten to the published v1 schema for run-1. */
+const report: BacktestReport = {
+  schema: 'ea.backtest-report.v1',
+  run_id: 'run-1',
+  economics: {
+    currency: 'USD',
+    initial_funding: { amount: '10000', currency: 'USD' },
+    ending_cash: [{ amount: '9797', currency: 'USD' }],
+    ending_positions: [{ quantity: '2', venue: 'XNAS', symbol: 'AAPL' }],
+    valuation: { price: '110', position_value: '220' },
+    equity: { amount: '10017', currency: 'USD' },
+    net_pnl: { amount: '17', currency: 'USD' },
+    total_return: { value: '0.0017' },
+    counts: { orders: 1, fills: 1 },
+    execution: { order: { quantity: '2', side: 'buy' }, fill: { quantity: '2', price: '101.5', side: 'buy' } },
+  },
+}
+
 const configured: ModelConfigurationStatus = {
   schema: 'radian.settings-status.v1',
   settings_file: '/tmp/radian/settings.json',
@@ -104,6 +122,7 @@ type Script = {
   confirm?: () => Promise<ResearchTask>
   retry?: () => Promise<ResearchTask>
   cancel?: () => Promise<ResearchTask>
+  report?: () => Promise<BacktestReport>
 }
 
 function scripted(script: Script = {}) {
@@ -126,7 +145,10 @@ function scripted(script: Script = {}) {
     getBatch: async () => { throw new Error('unused') },
     listBacktests: async () => [],
     getBacktest: async () => (script.getBacktest ? script.getBacktest() : job),
-    getReport: async () => { throw new Error('unused') },
+    getReport: async () => {
+      if (!script.report) throw new Error('unused')
+      return script.report()
+    },
     getEquityPath: async () => { throw new Error('unused') },
     artifactUrl: (jobId, name) => `/api/backtests/${jobId}/artifacts/${name}`,
     settingsStatus: async () => {
@@ -460,4 +482,160 @@ it('shows unknown or partial token usage without refunding model calls', async (
   expect(within(panel).getByText('812 reported (partial)')).toBeTruthy()
   expect(within(panel).getByText('143 reported (partial)')).toBeTruthy()
   expect(within(panel).getByText('3 of 10')).toBeTruthy()
+})
+
+/**
+ * The detail page leads with the state the task is in.
+ *
+ * Whatever a task has already settled is what a reader meets first, and only the
+ * actions that state can actually accept are offered. Every fixture here is a
+ * persisted document; the report is a handwritten v1 document for run-1.
+ */
+it('leads with the state the task is in and offers only the actions it allows', async () => {
+  const confirmed = [{ version: 1, confirmed_at: '2026-10-03T10:02:00.000000Z', spec }]
+  const runningJob: BacktestJob = { ...job, status: 'running', report_ready: false }
+  const cases = [
+    { status: 'drafting', overrides: { status: 'drafting' as const, spec_draft: null, spec_confirmed: [] }, job,
+      first: 'Task state', stateHeading: 'Drafting a specification',
+      allows: ['Cancel task'], denies: ['Confirm spec and start real backtest', 'Retry failed step'] },
+    { status: 'awaiting_confirmation', overrides: {}, job,
+      first: 'Task state', stateHeading: 'Waiting for your confirmation',
+      allows: ['Confirm spec and start real backtest', 'Cancel task'], denies: ['Retry failed step'] },
+    { status: 'running', overrides: { status: 'running' as const, spec_draft: null, spec_confirmed: confirmed, jobs: ['job-1'] }, job: runningJob,
+      first: 'Task state', stateHeading: 'One backtest running',
+      allows: ['Cancel task'], denies: ['Confirm spec and start real backtest'] },
+    { status: 'failed', overrides: { status: 'failed' as const, error: { step: 'propose', code: 'model_not_configured', message: 'no provider' } }, job,
+      first: 'Failure explanation', stateHeading: 'This task failed',
+      allows: ['Retry failed step', 'Cancel task'], denies: [] },
+    // A succeeded run settles its own state, so it carries no state panel: the
+    // block a reader meets first is the report summary itself.
+    { status: 'succeeded', overrides: { status: 'succeeded' as const, spec_draft: null, spec_confirmed: confirmed, jobs: ['job-1'] }, job,
+      first: 'Verified report summary', stateHeading: null,
+      allows: [], denies: ['Confirm spec and start real backtest', 'Cancel task'] },
+  ]
+  for (const item of cases) {
+    cleanup()
+    const { api } = scripted({ task: task(item.overrides), report: async () => report, getBacktest: async () => item.job })
+    detail(api)
+
+    // The block a reader meets first is awaited first: for a succeeded run that
+    // is the report summary, which exists only once this run's job has loaded.
+    const leading = await screen.findByRole('region', { name: item.first })
+    expect(document.querySelector('.research-artifact > section')?.getAttribute('aria-label')).toBe(item.first)
+    if (item.stateHeading) {
+      const state = await screen.findByRole('region', { name: 'Task state' })
+      await within(state).findByRole('heading', { name: item.stateHeading })
+      expect(state.textContent).toContain('Model calls 1/10 · backtests 0/5')
+    } else {
+      expect(screen.queryByRole('region', { name: 'Task state' })).toBeNull()
+      await within(leading).findByRole('heading', { name: 'What this run measured' })
+      // The report this block was read from is reachable from the block itself,
+      // not only from the evidence list further down the page.
+      expect(within(leading).getByRole('link', { name: 'Open the run and its verified report' })).toBeTruthy()
+    }
+    for (const name of item.allows) expect(screen.getByRole('button', { name })).toBeTruthy()
+    for (const name of item.denies) expect(screen.queryByRole('button', { name })).toBeNull()
+  }
+})
+
+it('shows a succeeded run from its own verified report and never guesses its unit', async () => {
+  const succeeded = { status: 'succeeded' as const, spec_draft: null, spec_confirmed: [{ version: 1, confirmed_at: '2026-10-03T10:02:00.000000Z', spec }], jobs: ['job-1'] }
+  const { api } = scripted({ task: task(succeeded), report: async () => report })
+  detail(api)
+
+  const summary = () => screen.getByRole('region', { name: 'Verified report summary' }).textContent ?? ''
+  await waitFor(() => expect(summary()).toContain('10017 USD'))
+  expect(summary()).toContain('17 USD')
+  expect(summary()).toContain('0.17%')
+  expect(summary()).toContain('2 units')
+  expect(summary()).toContain('4 records')
+  // report v1 records no realized/unrealized split: none is invented for it, and
+  // the net figure is not presented as realized profit.
+  expect(summary()).toContain('records no realized/unrealized split')
+  expect(summary()).not.toContain('Realized P&L')
+  // Nothing on this page draws a conclusion or submits anything by itself.
+  expect(screen.queryByRole('button', { name: 'Interpret this run' })).toBeNull()
+})
+
+it('shows no figure at all when the report is not this run\'s own', async () => {
+  const { api } = scripted({
+    task: task({ status: 'succeeded', spec_draft: null, spec_confirmed: [{ version: 1, confirmed_at: '2026-10-03T10:02:00.000000Z', spec }], jobs: ['job-1'] }),
+    report: async () => ({ ...report, run_id: 'run-somewhere-else' }),
+  })
+  detail(api)
+
+  await waitFor(() => expect(
+    screen.getByRole('region', { name: 'Verified report summary' }).textContent,
+  ).toContain('does not match this run'))
+  const summary = () => screen.getByRole('region', { name: 'Verified report summary' }).textContent ?? ''
+  expect(summary()).not.toContain('10017')
+  expect(summary()).not.toContain('USD')
+  // The run itself stays reachable; only the inferred figures are withheld.
+  expect(screen.getByRole('link', { name: 'Open the run and its verified report' })).toBeTruthy()
+})
+
+it('names a currency the report did not record instead of assuming USD', async () => {
+  const bare: BacktestReport = {
+    schema: 'ea.backtest-report.v1', run_id: 'run-1',
+    economics: {
+      ending_cash: [{ amount: '9797' }],
+      ending_positions: [{ quantity: '2', venue: 'XNAS', symbol: 'AAPL' }],
+      valuation: { price: '110', position_value: '220' },
+      equity: { amount: '10017' }, net_pnl: { amount: '17' },
+      total_return: { value: '0.0017' }, counts: { orders: 1, fills: 1 },
+      execution: { order: { quantity: '2', side: 'buy' }, fill: { quantity: '2', price: '101.5', side: 'buy' } },
+    },
+  }
+  const { api } = scripted({
+    task: task({ status: 'succeeded', spec_draft: null, spec_confirmed: [{ version: 1, confirmed_at: '2026-10-03T10:02:00.000000Z', spec }], jobs: ['job-1'] }),
+    report: async () => bare,
+  })
+  detail(api)
+
+  const summary = () => screen.getByRole('region', { name: 'Verified report summary' }).textContent ?? ''
+  await waitFor(() => expect(summary()).toContain('17 · currency not recorded by the report'))
+  expect(summary()).not.toContain('USD')
+  expect(summary()).toContain('records no currency')
+})
+
+/**
+ * An explicit refresh revalidates the run this task is bound to, not only the task.
+ *
+ * A run can lose or replace its report while the task keeps the same status and
+ * the same job ids, and the poll below the page only re-reads the task itself, so
+ * a refresh that stopped there would leave the last-read figures on screen as if
+ * they still described the run. The refresh stays a read: it confirms, retries,
+ * cancels, interprets and dispatches nothing.
+ */
+it('withdraws a verified summary when an explicit refresh finds the run without its report', async () => {
+  const user = userEvent.setup()
+  let ready = true
+  const { api, calls } = scripted({
+    task: task({
+      status: 'succeeded', spec_draft: null,
+      spec_confirmed: [{ version: 1, confirmed_at: '2026-10-03T10:02:00.000000Z', spec }],
+      jobs: ['job-1'],
+    }),
+    // The same run, re-read after its report was withdrawn: same job, same run
+    // id, same status, no ready report and no digest.
+    getBacktest: async () => ready ? job : { ...job, report_ready: false, report_sha256: null },
+    report: async () => report,
+  })
+  detail(api)
+
+  const summary = () => screen.getByRole('region', { name: 'Verified report summary' }).textContent ?? ''
+  await waitFor(() => expect(summary()).toContain('10017 USD'))
+
+  ready = false
+  await user.click(screen.getByRole('button', { name: 'Refresh' }))
+
+  await waitFor(() => expect(summary()).toContain('has not recorded a ready verified report'))
+  expect(summary()).not.toContain('10017')
+  expect(summary()).not.toContain('USD')
+  // A refresh re-reads; every write stays where it was.
+  expect(calls.confirm).toBe(0)
+  expect(calls.retry).toBe(0)
+  expect(calls.cancel).toBe(0)
+  expect(calls.create).toBe(0)
+  expect(screen.queryByRole('button', { name: 'Interpret this run' })).toBeNull()
 })

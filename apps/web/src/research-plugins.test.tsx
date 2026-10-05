@@ -263,8 +263,10 @@ describe('capability selection', () => {
     expect(await screen.findByRole('heading', { name: 'New research idea' })).toBeTruthy()
     // The selector lives inside a collapsed disclosure, so these controls are
     // driven directly: the assertions below are about what the host offers, not
-    // about how a test DOM hides a closed disclosure.
-    const model = screen.getByLabelText('Model capability') as HTMLSelectElement
+    // about how a test DOM hides a closed disclosure. The host's catalog is read
+    // asynchronously, and until it answers there is no select and no option at
+    // all, so this waits for the control the host's answer creates.
+    const model = await screen.findByLabelText('Model capability') as HTMLSelectElement
     expect(model.value).toBe('')
     const offered = Array.from(model.options, option => option.value)
     expect(offered).toContain('ea.model.scripted.v1@1.0.0')
@@ -272,6 +274,10 @@ describe('capability selection', () => {
     expect(offered).not.toContain('ea.model.legacy.v0@1.0.0')
 
     fireEvent.change(model, { target: { value: 'ea.model.scripted.v1@1.0.0' } })
+    // If the host had not offered this version, the change would have selected
+    // nothing; asserting the control took the value keeps that failure local
+    // instead of letting it surface as an empty selection below.
+    expect(model.value).toBe('ea.model.scripted.v1@1.0.0')
     fireEvent.click(screen.getByText('Verify selection'))
 
     expect(await screen.findByText('Selection verified by the host')).toBeTruthy()
@@ -292,7 +298,14 @@ describe('capability selection', () => {
     detail(api)
 
     expect(await screen.findByRole('heading', { name: 'Draft specification' })).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('Validator capability'), { target: { value: 'ea.validator.chronological-holdout.v1@1.0.0' } })
+    // The draft's own selector reads the host catalog on mount, so the option has
+    // to be offered before it can be chosen: an empty selection here would mean
+    // the host offered no such version, not that the user picked nothing.
+    const validator = await screen.findByLabelText('Validator capability') as HTMLSelectElement
+    await waitFor(() => expect(Array.from(validator.options, option => option.value))
+      .toContain('ea.validator.chronological-holdout.v1@1.0.0'))
+    fireEvent.change(validator, { target: { value: 'ea.validator.chronological-holdout.v1@1.0.0' } })
+    expect(validator.value).toBe('ea.validator.chronological-holdout.v1@1.0.0')
     await user.click(screen.getByRole('button', { name: 'Apply selection to draft' }))
 
     await waitFor(() => expect(calls.edit).toBe(1))

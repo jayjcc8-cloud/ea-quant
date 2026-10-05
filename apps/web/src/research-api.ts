@@ -123,9 +123,20 @@ export type ResearchInterpretation = {
   observed: {
     state: string
     field?: string
+    /** The host's unit word, e.g. 'currency' or 'ratio'. Never a currency itself. */
     unit?: string
     value?: string
     sign?: string
+    /**
+     * The host's own rendering of the value, currency included, and the exact
+     * currency it recorded. Both are published by the host's claim vocabulary;
+     * an older record may carry neither, and a missing currency is then shown
+     * as missing rather than assumed.
+     */
+    value_text?: string
+    currency?: string | null
+    report_schema?: string
+    json_type?: string
   }
   /** The scope the claim was declared to hold over, and the host's sentence for it. */
   conclusion_scope: 'frozen_single_run' | 'beyond_frozen_run'

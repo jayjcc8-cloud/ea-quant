@@ -1,6 +1,7 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import type { ApiAdapter, BacktestJob, ChronologicalHoldout, ScenarioSummary } from './app'
+import type { ApiAdapter, BacktestJob, BacktestReport, ChronologicalHoldout, ScenarioSummary } from './app'
+import { pathPercent } from './equity-path'
 import {
   AVAILABILITY_PROVIDED,
   AVAILABILITY_SIMULATED,
@@ -71,13 +72,6 @@ const CRITERION_FIELD_LABELS: Record<string, string> = {
   'economics.completed_round_trips': 'Completed round trips',
 }
 
-const OUTCOME_LABELS: Record<ResearchInterpretation['outcome'], string> = {
-  supported_in_scope: 'Consistent with the frozen criterion, within this one run',
-  not_supported: 'Opposite to the frozen criterion, within this one run',
-  insufficient_evidence: 'Not settled by this run',
-  capability_unsupported: 'Cannot be evaluated from this report',
-}
-
 /** Why the conclusion step did not publish; the run's own result is unaffected. */
 const INTERPRETATION_ERROR_EXPLANATIONS: Record<string, string> = {
   model_not_configured: 'No model is configured, so no conclusion call was made. The completed run and its report are unchanged.',
@@ -101,6 +95,37 @@ const STATUS_LABELS: Record<ResearchTaskStatus, string> = {
   cancelled: 'cancelled',
   unsupported: 'unsupported by the registered surface',
 }
+
+/**
+ * Short headings for the state a task is actually in. They describe the state
+ * and nothing more: each one is paired with a sentence that only repeats what
+ * the persisted record already settled.
+ */
+const STATE_HEADINGS: Record<ResearchTaskStatus, string> = {
+  drafting: 'Drafting a specification',
+  awaiting_confirmation: 'Waiting for your confirmation',
+  confirmed: 'Confirmed, not yet dispatched',
+  running: 'One backtest running',
+  succeeded: 'Backtest succeeded',
+  failed: 'This task failed',
+  cancelled: 'This task is cancelled',
+  unsupported: 'Not executable as stated',
+}
+
+const STATE_STATEMENTS: Record<ResearchTaskStatus, string> = {
+  drafting: 'The host is drafting one restrictive specification from your idea. Nothing is confirmable yet, and submitting the same idea again is refused as an existing task rather than starting a second one.',
+  awaiting_confirmation: 'One draft specification is waiting for your decision. Nothing runs until you confirm it explicitly; the criterion and the frozen budget you are confirming against are beside it.',
+  confirmed: 'The specification is confirmed and handed to the installed engine as one backtest. Nothing else is dispatched for this task.',
+  running: 'One backtest is running in the installed engine. Refreshing re-reads what the backend persisted; it never re-submits or re-dispatches anything.',
+  succeeded: 'The backtest succeeded. Its verified report is the authority for every figure.',
+  failed: 'This task stopped with the recorded failure. Whether any step can be retried in place is decided by the backend, not by this page.',
+  cancelled: 'No further step is dispatched for this task, and runs that already started keep their own terminal states; a cancel is never a rollback.',
+  unsupported: 'The host recorded that this idea cannot be run with the registered strategies and data, so nothing was dispatched and no backtest was started for it.',
+}
+
+const criterionText = (criterion: ResearchSpec['criterion']) => criterion
+  ? `${CRITERION_FIELD_LABELS[criterion.field] ?? criterion.field} expected ${criterion.expectation}`
+  : 'None was stated before the run'
 
 const ERROR_EXPLANATIONS: Record<string, string> = {
   model_not_configured: 'No usable model provider configuration exists, so no proposal could be requested.',
@@ -170,8 +195,8 @@ function valuesOf(selection: PluginSelection | null | undefined): Partial<Record
   return values
 }
 
-function Disclosure({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
-  return <details className="disclosure">
+function Disclosure({ title, subtitle, className, children }: { title: string; subtitle?: string; className?: string; children: ReactNode }) {
+  return <details className={className ? `disclosure ${className}` : 'disclosure'}>
     <summary><strong>{title}</strong>{subtitle && <span>{subtitle}</span>}</summary>
     <div className="disclosure-body">{children}</div>
   </details>
@@ -218,6 +243,12 @@ function SpecFacts({ spec }: { spec: ResearchSpec }) {
         return component ? [`${LAYER_LABELS[layer]}: ${component.plugin_id} ${component.package_version}`] : []
       }).join(' · ') || 'Host default route'}</dd></div>}
     </dl>
+  </>
+}
+
+/** The drafted reasoning behind a spec: detail, not a decision a reader acts on. */
+function SpecRationale({ spec }: { spec: ResearchSpec }) {
+  return <>
     <h3>Rationale</h3>
     <p className="muted">Recorded when the proposal was drafted. Current backtest and holdout states appear in the linked evidence below.</p>
     <p>{spec.rationale}</p>
@@ -328,6 +359,18 @@ function CapabilitySelector({ api, values, change, disabled = false }: {
     catch (caught) { setError(messageOf(caught, 'The selection could not be verified by this host.')) }
     finally { setBusy(false) }
   }
+
+  // The host's catalog is what decides which versions exist. Until it has
+  // answered, no option exists to select, so this offers no select at all rather
+  // than an empty one a user could read as "this host offers nothing".
+  if (catalog === null) return <div className="capability-selector">
+    {error
+      ? <>
+        <p className="notice error">{error}</p>
+        <div className="actions"><button type="button" disabled={refreshing} onClick={() => { void refresh() }}>{refreshing ? 'Refreshing…' : 'Refresh capabilities'}</button></div>
+      </>
+      : <p className="muted">Reading the host capability catalog…</p>}
+  </div>
 
   return <div className="capability-selector">
     <p className="muted">Every layer is optional and names one exact version; a range or a tag is not selectable. The host verifies and freezes the selection before anything runs, and an unselected layer keeps the host default route. A version that no longer matches the frozen identity fails the run instead of being replaced by a newer one. An uploaded dataset version is research data only when you explicitly select its Data capability here: with no data layer selected there is no binding to freeze the version's evidence, and a run over that upload is refused.</p>
@@ -1318,10 +1361,18 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
     } finally { busyRef.current = false; setBusy(false) }
   }
 
+  const advancedOffered = Boolean(api.previewUpload || api.publishUpload || api.listDeclarations || offlineOffered || api.localStrategySlot || api.inspectLocalStrategy)
   return <>
     <PageHeading title="Research Workspace" subtitle="Persisted ideas, registered restrictive specs, and the real installed backtests they start." />
     {error && <p role="alert" className="notice error">{error}</p>}
     {unavailable && <p className="notice error">This client cannot reach the local research API.</p>}
+    {/* Reachable without scrolling past the workspace: the evidence pages this
+        task leads to are one click from the top of the page. */}
+    <nav className="research-tools" aria-label="Research destinations">
+      <Link to="/backtests">Backtests</Link>
+      <Link to="/batches/new">Run batch</Link>
+      <Link to="/holdouts">Chronological holdouts</Link>
+    </nav>
     <div className="research-list-layout"><section className="panel idea-panel">
       <header><h2>New research idea</h2><span>One active task per idea</span></header>
       <label htmlFor="research-idea">Research idea</label>
@@ -1341,34 +1392,36 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
       {tasks?.length === 0 && <p className="muted">No research tasks yet. Create a draft from an idea above.</p>}
       <ul className="job-list">{tasks?.map(task => {
         const spec = latestSpec(task)
+        // The registered identity a reader recognizes leads the card; the idea it
+        // came from stays on the card as the record it was drafted from.
         return <li className="job-card" key={task.task_id}>
-          <div className="job-card-title"><Link to={`/research/${task.task_id}`}><strong>{task.raw_idea}</strong></Link><span className={`status status-${task.status}`}>{STATUS_LABELS[task.status]}</span></div>
-          <small>{spec ? `${spec.strategy_id} · ${spec.instrument.venue}:${spec.instrument.symbol} · ${spec.initial_cash}` : 'No spec drafted yet'}</small>
+          <div className="job-card-title"><Link to={`/research/${task.task_id}`}><strong>{spec ? `${spec.strategy_id} · ${spec.instrument.venue}:${spec.instrument.symbol}` : 'No spec drafted yet'}</strong></Link><span className={`status status-${task.status}`}>{STATUS_LABELS[task.status]}</span></div>
+          <small className="job-idea">{task.raw_idea}</small>
+          <small>{spec ? `${spec.initial_cash} initial cash · ${spec.scenario_id ?? 'scenario resolved at confirmation'}` : 'No registry-verified spec exists for this task yet'}</small>
           <small>Updated {task.updated_at} · model calls {task.usage.model_calls}/{task.budget.max_model_calls} · backtests {task.usage.backtests}/{task.budget.max_backtests} · jobs {task.jobs.length}</small>
           {task.error && <small>{task.error.step}: {task.error.code}</small>}
           <div className="job-actions"><Link to={`/research/${task.task_id}`}>Open task</Link></div>
         </li>
       })}</ul>
     </section></div>
-    {(api.previewUpload || api.publishUpload || api.listDeclarations || offlineOffered) && <div className="research-workspace-tools">
-      {(api.previewUpload || api.publishUpload) && <section className="panel" aria-label="Controlled dataset upload">
-        <header><h2>Controlled data upload</h2><span>Preview, then publish one version</span></header>
+    {/* Everything that changes what this workspace can research with. Nothing
+        here is applied by opening it: each panel keeps its own explicit action. */}
+    {advancedOffered && <section className="panel advanced-panel" aria-label="Data, declarations and local packages">
+      <header><h2>Data, declarations and local packages</h2><span>Advanced · nothing is selected or run from here</span></header>
+      <p className="muted">These controls change what this workspace can research with. Opening one applies nothing: every version published, declaration registered and package trusted below is a separate explicit decision, and each panel states its own effect before its action.</p>
+      {(api.previewUpload || api.publishUpload) && <Disclosure title="Controlled data upload" subtitle="Preview, then publish one version">
         <DataUploadPanel api={api} />
-      </section>}
-      {offlineOffered && <section className="panel" aria-label="Offline history import">
-        <header><h2>Offline historical import</h2><span>Pasted historical response; no network is used</span></header>
+      </Disclosure>}
+      {offlineOffered && <Disclosure title="Offline historical import" subtitle="Pasted historical response; no network is used">
         <OfflineHistoryPanel api={api} />
-      </section>}
-      {api.listDeclarations && <section className="panel" aria-label="Registered declarations">
-        <header><h2>Declarations</h2><span>Verified data, installed only by you</span></header>
+      </Disclosure>}
+      {api.listDeclarations && <Disclosure title="Declarations" subtitle="Verified data, installed only by you">
         <DeclarationCatalogPanel api={api} />
-      </section>}
-      {(api.localStrategySlot || api.inspectLocalStrategy) && <section className="panel" aria-label="Local strategy package">
-        <header><h2>Local strategy package</h2><span>Inspected statically, trusted explicitly</span></header>
+      </Disclosure>}
+      {(api.localStrategySlot || api.inspectLocalStrategy) && <Disclosure title="Local strategy package" subtitle="Inspected statically, trusted explicitly">
         <LocalStrategyPanel api={api} />
-      </section>}
-    </div>}
-    <div className="research-tools"><Link to="/backtests">Backtests</Link><Link to="/batches/new">Run batch</Link><Link to="/holdouts">Chronological holdouts</Link></div>
+      </Disclosure>}
+    </section>}
   </>
 }
 
@@ -1384,7 +1437,7 @@ export function ResearchTaskDetailRoute({ api }: { api: ApiAdapter }) {
  * so a reader can never take this one run for more data than it actually had.
  */
 function ConclusionScope({ scope }: { scope: ResearchDataScope | null | undefined }) {
-  if (!scope) return <p className="muted">The host recorded no data scope for this conclusion, so no scope is claimed here.</p>
+  if (!scope) return null
   const text = (value: string | number | boolean | null) => value === null ? 'Not available' : String(value)
   // The replay window is the time and input policy the run recorded. It is shown
   // as recorded and never read as coverage: an absent window stays unavailable.
@@ -1392,19 +1445,68 @@ function ConclusionScope({ scope }: { scope: ResearchDataScope | null | undefine
   const windowText = window === null
     ? 'Not available'
     : `${text(window.start_inclusive)} → ${text(window.end_exclusive)}${window.timezone === null ? '' : ` (${window.timezone}${window.selection_field === null ? '' : `, selected by ${window.selection_field}`})`}`
-  return <>
-    <h3>Data scope</h3>
+  return <dl className="summary-list">
+    <div><dt>Records</dt><dd>{text(scope.record_count)}</dd></div>
+    <div><dt>Dataset</dt><dd>{text(scope.dataset_id)}</dd></div>
+    <div><dt>Input SHA-256</dt><dd>{text(scope.input_sha256)}</dd></div>
+    <div><dt>Scenario SHA-256</dt><dd>{text(scope.scenario_sha256)}</dd></div>
+    <div><dt>Recorded replay window</dt><dd>{windowText}</dd></div>
+    <div><dt>Point in time</dt><dd>{text(scope.point_in_time)}</dd></div>
+    <div><dt>Independently verified</dt><dd>{scope.quality_verified ? 'Verified' : 'Not available'}</dd></div>
+  </dl>
+}
+
+/**
+ * The one line of data scope that belongs beside the conclusion itself.
+ *
+ * The full provenance stays in the disclosure below it; this line carries the
+ * two facts a reader needs to judge the claim — how much data, and which facts
+ * the run does not carry at all.
+ */
+function scopeLine(scope: ResearchDataScope | null | undefined): string {
+  if (!scope) return 'The host recorded no data scope for this conclusion, so no scope is claimed here.'
+  const window = scope.time_range
+  const windowText = window === null
+    ? 'no recorded replay window'
+    : `${window.start_inclusive} → ${window.end_exclusive}${window.timezone === null ? '' : ` (${window.timezone}${window.selection_field === null ? '' : `, selected by ${window.selection_field}`})`}`
+  return `${scope.record_count} records, recorded replay window ${windowText}. Facts this run does not carry: ${scope.unavailable.length > 0 ? scope.unavailable.join(', ') : 'none'}.`
+}
+
+/**
+ * The host's own rendering of the value it read from the verified report.
+ *
+ * `value_text` is what the host published and is shown as written; a record
+ * published before that field existed falls back to the value with the exact
+ * currency the host recorded. A unit word is never presented as a currency, and
+ * a currency the host did not record is named as missing rather than filled in.
+ */
+function observedReading(reading: ResearchInterpretation['observed']): string {
+  if (reading.state !== 'value' || reading.value === undefined) return 'No value could be read for this criterion'
+  const text = reading.value_text
+    ?? (reading.unit === 'currency'
+      ? `${reading.value}${reading.currency ? ` ${reading.currency}` : ' (currency not recorded by the host)'}`
+      : `${reading.value}${reading.unit ? ` (${reading.unit})` : ''}`)
+  return reading.sign ? `${text} · ${reading.sign}` : text
+}
+
+/**
+ * The phase this task is in, and what it has spent, in three lines.
+ *
+ * Every sentence is derived from persisted fields this client already holds: the
+ * status, the frozen budget and the measured usage. It says what the state allows
+ * and nothing more, and it never offers a step the backend cannot accept from it.
+ */
+function TaskStatePanel({ task }: { task: ResearchTask }) {
+  return <section className="panel task-state" aria-label="Task state">
+    <header><h2>{STATE_HEADINGS[task.status]}</h2><span className={`status status-${task.status}`}>{STATUS_LABELS[task.status]}</span></header>
+    <p>{STATE_STATEMENTS[task.status]}</p>
+    {task.status === 'cancelled' && <p className="notice">This task is cancelled and final. {task.cancel_note ?? 'Started runs keep their own terminal states; cancelling is not a rollback.'}</p>}
+    {task.status === 'unsupported' && <p className="notice">Not executable with the registered strategies and data. {task.gap ?? 'The backend recorded no gap detail.'}</p>}
     <dl className="summary-list">
-      <div><dt>Records</dt><dd>{text(scope.record_count)}</dd></div>
-      <div><dt>Dataset</dt><dd>{text(scope.dataset_id)}</dd></div>
-      <div><dt>Input SHA-256</dt><dd>{text(scope.input_sha256)}</dd></div>
-      <div><dt>Scenario SHA-256</dt><dd>{text(scope.scenario_sha256)}</dd></div>
-      <div><dt>Recorded replay window</dt><dd>{windowText}</dd></div>
-      <div><dt>Point in time</dt><dd>{text(scope.point_in_time)}</dd></div>
-      <div><dt>Independently verified</dt><dd>{scope.quality_verified ? 'Verified' : 'Not available'}</dd></div>
+      <div><dt>Recorded usage</dt><dd>Model calls {task.usage.model_calls}/{task.budget.max_model_calls} · backtests {task.usage.backtests}/{task.budget.max_backtests}</dd></div>
+      <div><dt>Last recorded change</dt><dd>{task.updated_at}</dd></div>
     </dl>
-    <p className="muted">Facts this run does not carry: {scope.unavailable.length > 0 ? scope.unavailable.join(', ') : 'none'}. Nothing here is claimed beyond the recorded facts.</p>
-  </>
+  </section>
 }
 
 /**
@@ -1415,41 +1517,143 @@ function ConclusionScope({ scope }: { scope: ResearchDataScope | null | undefine
  * the verified report. The question is shown as the user's own input, never as
  * a finding, and the model's own wording is never displayed at all.
  */
-function ResearchConclusion({ interpretation, error }: { interpretation: ResearchInterpretation | null; error: ResearchError | null }) {
+function ConclusionHero({ job, interpretation, error }: {
+  job: BacktestJob | null
+  interpretation: ResearchInterpretation | null
+  error: ResearchError | null
+}) {
+  // The report entry belongs with the outcome, not only in the machinery below
+  // it: the verified report is the authority every sentence here is read from.
+  const reportEntry = job
+    ? <div className="actions hero-actions"><Link className="primary-link" to={`/backtests/${job.job_id}`}>Open the run and its verified report</Link></div>
+    : <p className="muted">The backend bound no run to this task, so there is no report to open for it.</p>
+
+  if (!interpretation && !error) return null
+
   if (!interpretation) {
-    if (!error) return null
-    return <section className="panel" aria-label="Conclusion">
-      <header><h2>Conclusion</h2><span>Not published</span></header>
-      <p className="notice">{INTERPRETATION_ERROR_EXPLANATIONS[error.code] ?? 'The conclusion step did not publish a result.'}</p>
-      <dl className="summary-list"><div><dt>Code</dt><dd>{error.code}</dd></div><div><dt>Detail</dt><dd>{error.message}</dd></div></dl>
-      <p className="muted">This is a failure of the conclusion step alone. The backtest computation, its status and its verified report are unchanged.</p>
+    return <section className="panel outcome-hero" aria-label="Conclusion">
+      <header><h2>Backtest succeeded</h2><span>conclusion not published</span></header>
+      {reportEntry}
+      <p className="notice">{error ? INTERPRETATION_ERROR_EXPLANATIONS[error.code] ?? 'The conclusion step did not publish a result.' : 'No conclusion was published for this run.'}</p>
+      <p className="muted">This is the conclusion axis alone. The host closed it for this run when it recorded the failure, so this page never asks again and no retry exists for it here. The run, its status and its verified report are unchanged.</p>
+      {error && <Disclosure className="progressive" title="Recorded conclusion failure" subtitle="The code the host stored">
+        <dl className="summary-list"><div><dt>Code</dt><dd>{error.code}</dd></div><div><dt>Detail</dt><dd>{error.message}</dd></div></dl>
+      </Disclosure>}
     </section>
   }
-  const reading = interpretation.observed
-  return <section className="panel" aria-label="Conclusion">
-    <header><h2>Conclusion</h2><span>{OUTCOME_LABELS[interpretation.outcome]}</span></header>
-    <dl className="summary-list">
-      <div><dt>Question (your input)</dt><dd>{interpretation.question}</dd></div>
-      <div><dt>Frozen criterion</dt><dd>{interpretation.criterion
-        ? `${CRITERION_FIELD_LABELS[interpretation.criterion.field] ?? interpretation.criterion.field} expected ${interpretation.criterion.expectation}`
-        : 'None was stated before the run'}</dd></div>
-      <div><dt>Read from the verified report</dt><dd>{reading.state === 'value' && reading.value !== undefined
-        ? `${reading.value}${reading.unit ? ` (${reading.unit})` : ''} · ${reading.sign}`
-        : 'No value could be read for this criterion'}</dd></div>
+
+  const limitations = interpretation.limitations ?? []
+  // The result itself is the host's own outcome sentence, rendered verbatim; the
+  // host's outcome code rides along as a machine-readable attribute instead of a
+  // second, longer line of status chrome above it. Nothing here composes either.
+  return <section className="panel outcome-hero" aria-label="Conclusion" data-outcome={interpretation.outcome}>
+    <header><h2>Conclusion</h2></header>
+    <p className="outcome-text">{interpretation.outcome_text}</p>
+    <dl className="summary-list hero-facts">
+      <div><dt>Frozen criterion</dt><dd>{criterionText(interpretation.criterion)}</dd></div>
       <div><dt>Criterion met</dt><dd>{interpretation.criterion_met === true
         ? 'Met'
         : interpretation.criterion_met === false ? 'Not met' : 'Not determined'}</dd></div>
+      <div><dt>Read from the verified report</dt><dd>{observedReading(interpretation.observed)}</dd></div>
     </dl>
-    <p>{interpretation.outcome_text}</p>
-    <p className="muted">{interpretation.inference_text}</p>
     <p className="muted">{interpretation.conclusion_scope_text}</p>
-    {interpretation.limitations.length > 0 && <>
-      <h3>What this run does not show</h3>
-      <ul className="assumption-list">{interpretation.limitations.map(item => <li key={item.code}>{item.text}</li>)}</ul>
-    </>}
-    <ConclusionScope scope={interpretation.data_scope} />
-    <p className="muted">Backtest only. This is one frozen criterion in one deterministic run, not a forecast, a promise of profit or a statement about the idea in general. The numbers above are read by the host from the verified report; no figure or sentence here was written by the model.</p>
+    {limitations.length > 0 && <p className="muted">Key limitation: {limitations[0].text}</p>}
+    {reportEntry}
+    <h3>Data scope</h3>
+    <p className="muted">{scopeLine(interpretation.data_scope)}</p>
+    <Disclosure className="progressive" title="Inference, every limitation, provenance and the question" subtitle="Host strings, unedited">
+      <p className="muted">{interpretation.inference_text}</p>
+      <dl className="summary-list"><div><dt>Question (your input)</dt><dd>{interpretation.question}</dd></div></dl>
+      {limitations.length > 0 && <>
+        <h3>What this run does not show</h3>
+        <ul className="assumption-list">{limitations.map(item => <li key={item.code}>{item.text}</li>)}</ul>
+      </>}
+      <ConclusionScope scope={interpretation.data_scope} />
+    </Disclosure>
+    <p className="muted">Backtest only. This is one frozen criterion in one deterministic run, not a forecast, a promise of profit or a statement about the idea in general; no figure or sentence here was written by the model.</p>
   </section>
+}
+
+/**
+ * The key figures of a succeeded run, read from its verified report.
+ *
+ * The report is loaded through the same read-only adapter and checked against
+ * the same run identity the backtest page checks. A report that cannot be read,
+ * or that is not this job's own run, leaves this summary out with an explicit
+ * sentence instead of showing a stale or invented figure. A currency the report
+ * does not record is named as missing and never assumed to be USD.
+ */
+function RunReportSummary({ api, job, reportLink = false }: { api: ApiAdapter; job: BacktestJob; reportLink?: boolean }) {
+  const jobId = job.job_id
+  const runId = job.engine_run_id
+  // Every settled read is bound to the exact identity it was read for: the run,
+  // and the report digest the record claims for it where the record carries one.
+  // A refresh of this same job that changes any part of that identity — a
+  // withdrawn readiness, a replaced report, a different run — therefore withdraws
+  // the stored result instead of leaving it on screen as if it described the newer
+  // record; the read below is keyed by the same identity, so it is requested once
+  // per identity rather than once per render.
+  const identity = `${jobId}@${runId ?? 'no-run'}@${job.report_sha256 ?? 'no-report'}@${job.report_ready ? 'ready' : 'not-ready'}`
+  const [loaded, setLoaded] = useState<{ identity: string; report: BacktestReport | null } | null>(null)
+
+  useEffect(() => {
+    // A run whose record does not claim a ready report is never read as if it had
+    // one: the verified report is claimed only for a run that persisted it.
+    if (!job.report_ready) return
+    let active = true
+    api.getReport(jobId).then(value => {
+      if (!active) return
+      setLoaded({ identity, report: !runId || value.run_id !== runId ? null : value })
+    }).catch(() => { if (active) setLoaded({ identity, report: null }) })
+    return () => { active = false }
+  }, [api, identity, jobId, runId, job.report_ready])
+
+  const header = <header><h2>What this run measured</h2><span>Read from the verified report</span></header>
+  // When this summary is the block a reader meets first, the report it was read
+  // from is one click away from here rather than only from the evidence list
+  // below. With a conclusion on screen that link belongs to the conclusion, and
+  // this panel is supporting detail, so it is not repeated inside it.
+  const entry = reportLink
+    ? <div className="actions hero-actions"><Link className="primary-link" to={`/backtests/${job.job_id}`}>Open the run and its verified report</Link></div>
+    : null
+  const panel = (body: ReactNode) => <section className="panel report-summary" aria-label="Verified report summary">{header}{body}{entry}</section>
+  if (!job.report_ready) return panel(
+    <p className="notice">This run has not recorded a ready verified report, so no figure is read from one here. Open the run for its own persisted state.</p>,
+  )
+  if (!loaded || loaded.identity !== identity) return panel(<p className="muted">Reading the verified report for this run…</p>)
+  if (!loaded.report) return panel(
+    <p className="notice">The verified report for this run could not be read, or it does not match this run's identity, so no figure from it is shown here. Open the run for the report itself; nothing is inferred from the job record instead.</p>,
+  )
+  const report = loaded.report
+
+  const economics = report.economics
+  // The unit of an amount is the one the report records for it. A currency this
+  // report never recorded stays missing; it is never filled in with a guess.
+  const currency = economics.currency ?? economics.ending_cash[0]?.currency ?? economics.initial_funding?.currency ?? null
+  const money = (value: { amount: string; currency?: string } | null | undefined) => {
+    if (!value) return 'Not recorded'
+    const unit = value.currency ?? currency
+    return unit ? `${value.amount} ${unit}` : `${value.amount} · currency not recorded by the report`
+  }
+  // report v1 records no realized/unrealized split at all; the two later schemas do.
+  const roundTrip = report.schema === 'ea.backtest-report.v2' || report.schema === 'ea.backtest-report.v3' ? report.economics : null
+  const records = job.input_identity.record_count
+  return panel(<>
+    <dl className="summary-list">
+      <div><dt>Net P&amp;L</dt><dd>{money(economics.net_pnl)}</dd></div>
+      <div><dt>Fees</dt><dd>{money(economics.fees)}</dd></div>
+      <div><dt>Equity at the end of the window</dt><dd>{money(economics.equity)}</dd></div>
+      <div><dt>Total return</dt><dd>{pathPercent(economics.total_return.value)} <span className="muted">({economics.total_return.value})</span></dd></div>
+      {roundTrip && <div><dt>Realized P&amp;L</dt><dd>{money(roundTrip.realized_pnl)}</dd></div>}
+      {roundTrip && <div><dt>Gross unrealized P&amp;L</dt><dd>{money(roundTrip.gross_unrealized_pnl)}</dd></div>}
+      <div><dt>Ending position quantity</dt><dd>{economics.ending_positions[0]?.quantity ?? '0'} units{economics.ending_positions.length > 1 ? ` · ${economics.ending_positions.length} ending positions` : ''} — a quantity, not a count of trades</dd></div>
+      <div><dt>Records in this run</dt><dd>{records} records</dd></div>
+      <div><dt>Report schema</dt><dd>{report.schema} · run {report.run_id}</dd></div>
+    </dl>
+    {!currency && <p className="muted">This report records no currency, so no unit is stated for its amounts; none is assumed.</p>}
+    {!roundTrip && <p className="muted">This report schema records no realized/unrealized split, so none is shown — the net figure above is not presented as realized profit.</p>}
+    <p className="muted">Net P&amp;L includes the valuation of any position still open at the end of the window; it is not realized profit. One deterministic run of {records} records carries no robustness claim, and these figures are read from the report rather than recomputed here.</p>
+  </>)
 }
 
 export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: string }) {
@@ -1459,8 +1663,10 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   const [settings, setSettings] = useState<ModelConfigurationStatus | null>(null)
   const [settingsError, setSettingsError] = useState<string | null>(null)
   const [jobs, setJobs] = useState<Record<string, BacktestJob | null>>({})
+  const [jobEpoch, setJobEpoch] = useState(0)
   const [holdouts, setHoldouts] = useState<ChronologicalHoldout[]>([])
   const generation = useRef(0)
+  const jobRead = useRef(0)
   const busyRef = useRef(false)
 
   const refresh = useCallback(async () => {
@@ -1488,6 +1694,20 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
     return () => { active = false; generation.current += 1; if (timer !== undefined) window.clearTimeout(timer) }
   }, [refresh, task?.status])
 
+  /**
+   * One explicit refresh: the task, and the runs it is bound to.
+   *
+   * The poll above re-reads the task alone, so a run whose report was withdrawn or
+   * replaced while the task kept the same status and the same job ids would keep
+   * its last-read figures on screen. This re-reads each bound run once, for the
+   * reader who asked for it, and never on a timer of its own.
+   */
+  const refreshAll = useCallback(async () => {
+    const status = await refresh()
+    setJobEpoch(value => value + 1)
+    return status
+  }, [refresh])
+
   useEffect(() => {
     let active = true
     const request = api.settingsStatus
@@ -1498,14 +1718,19 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   }, [api])
 
   const jobKey = task?.jobs.join(',') ?? ''
+  // Each read of the bound runs is bound to the read it started in, so an answer
+  // that lands after a newer one was dispatched is discarded rather than allowed
+  // to overwrite it. `jobEpoch` moves only on one explicit refresh, so this stays
+  // one read per identity and one more per explicit ask instead of per render.
   useEffect(() => {
     if (!jobKey) return
+    const at = ++jobRead.current
     let active = true
     Promise.all(jobKey.split(',').map(async jobId => {
       try { return [jobId, await api.getBacktest(jobId)] as const } catch { return [jobId, null] as const }
-    })).then(entries => { if (active) setJobs(Object.fromEntries(entries)) })
+    })).then(entries => { if (active && at === jobRead.current) setJobs(Object.fromEntries(entries)) })
     return () => { active = false }
-  }, [api, jobKey, task?.status])
+  }, [api, jobKey, task?.status, jobEpoch])
 
   useEffect(() => {
     if (!jobKey || !api.listHoldouts) return
@@ -1545,96 +1770,155 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   const retryable = canRetry(task)
   // Confirmation is offered only while the backend can still accept it.
   const confirmable = task.status === 'awaiting_confirmation' && task.spec_draft !== null
-  const succeededJobId = Object.values(jobs).find(job => job?.status === 'succeeded')?.job_id ?? null
-  return <>
-    <PageHeading title="Research Task" subtitle="Strategy specification and linked validation evidence." status={task.status} />
-    <div className="result-toolbar"><Link to="/research">← Research workspace</Link><button onClick={() => { void refresh() }}>Refresh</button></div>
-    {error && <p role="alert" className="notice error">{error}</p>}
-    <div className="research-detail-layout"><article className="research-artifact" aria-label="Strategy and validation evidence">
-    {task.error && <section className="panel" aria-label="Failure explanation">
-      <header><h2>Failure</h2><span>step {task.error.step}</span></header>
-      <p>{ERROR_EXPLANATIONS[task.error.code] ?? 'The backend reported a failure for this step.'}</p>
-      <dl className="summary-list"><div><dt>Code</dt><dd>{task.error.code}</dd></div><div><dt>Message</dt><dd>{task.error.message}</dd></div></dl>
-      <p className="muted">{retryable
-        ? 'Retry resumes the failed step in place from the persisted record; it does not restart the research.'
-        : NON_RETRYABLE_CODES.has(task.error.code)
-          ? 'This failure is not retryable in place: an attempt left this process and its outcome is unproven. Cancel this task and create a new one for another attempt.'
-          : 'This failure is not retryable in place.'}</p>
-    </section>}
+  const succeededJob = Object.values(jobs).find(job => job?.status === 'succeeded') ?? null
+  const succeededJobId = succeededJob?.job_id ?? null
 
-    {spec && <section className="panel research-spec" aria-label="Specification">
-      <header><h2>{task.spec_draft ? 'Draft specification' : 'Confirmed specification'}</h2><span>{task.spec_draft ? 'Unconfirmed draft' : `Version ${task.spec_confirmed.at(-1)?.version ?? 1} · confirmed ${task.spec_confirmed.at(-1)?.confirmed_at ?? ''}`}</span></header>
-      <SpecFacts spec={spec} />
-      {confirmable && api.confirmResearchTask && <div className="actions">
+  // Each block is written once, and the order below is the order a reader meets
+  // them in: the outcome and the state this task is actually in lead, the legal
+  // actions sit beside the state they belong to, and the machinery that produced
+  // them stays collapsed under a summary that names it.
+  const failure = task.error ? <section className="panel" aria-label="Failure explanation">
+    <header><h2>Failure</h2><span>step {task.error.step}</span></header>
+    <p>{ERROR_EXPLANATIONS[task.error.code] ?? 'The backend reported a failure for this step.'}</p>
+    <dl className="summary-list"><div><dt>Code</dt><dd>{task.error.code}</dd></div><div><dt>Message</dt><dd>{task.error.message}</dd></div></dl>
+    <p className="muted">{retryable
+      ? 'Retry resumes the failed step in place from the persisted record; it does not restart the research.'
+      : NON_RETRYABLE_CODES.has(task.error.code)
+        ? 'This failure is not retryable in place: an attempt left this process and its outcome is unproven. Cancel this task and create a new one for another attempt.'
+        : 'This failure is not retryable in place.'}</p>
+  </section> : null
+
+  // A succeeded task leads with its conclusion, or with the report figures when
+  // no conclusion was drawn; its own state needs no separate panel there.
+  const state = task.status === 'succeeded' ? null : <TaskStatePanel task={task} />
+
+  const concluded = task.interpretation != null || task.interpretation_error != null
+  const reportSummary = task.status === 'succeeded' && succeededJob
+    ? <RunReportSummary key={succeededJob.job_id} api={api} job={succeededJob} reportLink={!concluded} />
+    : null
+  // With a conclusion on screen the figures it was read from are supporting
+  // detail; without one they are the first thing a reader needs.
+  const reportBlock = reportSummary && concluded
+    ? <Disclosure className="progressive" title="Report figures for this run" subtitle={succeededJobId ?? ''}>{reportSummary}</Disclosure>
+    : reportSummary
+
+  // A draft that can still be confirmed leads with the facts being confirmed —
+  // the registered surface, the frozen parameters and the frozen criterion — and
+  // with the confirm itself, because that is the decision. Its rationale and
+  // assumptions are the drafted reasoning behind it, so they sit under a summary
+  // that names them rather than pushing the decision off the first screen.
+  const specFacts = spec ? <SpecFacts spec={spec} /> : null
+
+  const specification = spec ? (confirmable
+    ? <section className="panel research-spec" aria-label="Specification">
+      <header><h2>Draft specification</h2><span>Unconfirmed draft</span></header>
+      {specFacts}
+      {api.confirmResearchTask && <div className="actions">
         <button className="primary" disabled={busy !== null} onClick={() => { void mutate('confirm', () => api.confirmResearchTask!(taskId), 'Confirmation was not accepted; the persisted task was reloaded.') }}>
           {busy === 'confirm' ? 'Confirming…' : 'Confirm spec and start real backtest'}
         </button>
       </div>}
-      {task.spec_draft && (confirmable
-        ? <p className="muted">Confirming registers this exact spec and starts one real installed-engine backtest with the frozen parameters. It creates no orders and no Paper session.</p>
-        : <p className="muted">This draft can no longer be confirmed: the task is {STATUS_LABELS[task.status]}.</p>)}
-    </section>}
+      <p className="muted">Confirming registers this exact spec and starts one real installed-engine backtest with the frozen parameters. It creates no orders and no Paper session.</p>
+      <Disclosure className="progressive" title="Rationale and assumptions" subtitle="Recorded when this draft was proposed">
+        <SpecRationale spec={spec} />
+      </Disclosure>
+    </section>
+    : <details className="disclosure progressive">
+      <summary><h2>{task.spec_draft ? 'Draft specification' : 'Confirmed specification'}</h2><span>{task.spec_draft ? 'Unconfirmed draft' : `Version ${task.spec_confirmed.at(-1)?.version ?? 1} · confirmed ${task.spec_confirmed.at(-1)?.confirmed_at ?? ''}`}</span></summary>
+      <div className="disclosure-body">
+        <section className="panel research-spec" aria-label="Specification">
+          {specFacts}
+          <SpecRationale spec={spec} />
+          {task.spec_draft && <p className="muted">This draft can no longer be confirmed: the task is {STATUS_LABELS[task.status]}.</p>}
+        </section>
+      </div>
+    </details>) : null
 
-    {confirmable && api.pluginCatalog && api.editResearchSpec && <SelectionEditor api={api} task={task} />}
+  const selectionEditor = confirmable && api.pluginCatalog && api.editResearchSpec ? <SelectionEditor api={api} task={task} /> : null
 
-    {task.declaration_draft && <DeclarationDraftPanel api={api} draft={task.declaration_draft} />}
+  const declarationDraft = task.declaration_draft
+    ? <Disclosure title="Declaration verification" subtitle="Verified against the registered surface">{<DeclarationDraftPanel api={api} draft={task.declaration_draft} />}</Disclosure>
+    : null
 
-    <SelectionEvidence task={task} />
+  const selectionEvidence = <SelectionEvidence task={task} />
 
-    {task.jobs.length > 0 && <section className="panel" aria-label="Research backtests">
-      <header><h2>Backtests started by this task</h2><span>Next: existing chronological holdout, then evaluated candidate</span></header>
+  // The runs a task started are machinery below the decision, so they take one
+  // summary that names them and counts them; the run cards, their download links
+  // and their holdout and candidate evidence stay inside it, unchanged.
+  const backtests = task.jobs.length > 0 ? <Disclosure className="progressive" title="Backtests started by this task"
+    subtitle={task.jobs.length === 1 ? 'One run · its holdout and candidate evidence' : `${task.jobs.length} runs · their holdout and candidate evidence`}>
+    <section className="panel" aria-label="Research backtests">
       <ul className="job-list">{task.jobs.map(jobId => <ResearchJob key={jobId} api={api} jobId={jobId} job={jobs[jobId] ?? null} holdouts={holdouts} />)}</ul>
       <p className="muted">Holdout evaluation and candidate creation stay on the existing evidence pages with their own explicit actions. Candidate acceptance records a research judgment only and grants no execution permission.</p>
       {succeededJobId && <p><Link to={`/backtests/${succeededJobId}`}>Open the succeeded run to evaluate its holdout and create the evaluated candidate</Link></p>}
-    </section>}
+    </section>
+  </Disclosure> : null
 
-    <ResearchConclusion
-      interpretation={task.interpretation ?? null}
-      error={task.interpretation_error ?? null}
-    />
+  const conclusion = <ConclusionHero
+    job={succeededJob}
+    interpretation={task.interpretation ?? null}
+    error={task.interpretation_error ?? null}
+  />
 
-    {task.status === 'succeeded' && task.interpretation == null && task.interpretation_error == null && (api.interpretResearchTask || api.cancelResearchTask) && <section className="panel" aria-label="Conclusion action">
-      <header><h2>Draw one conclusion</h2><span>Explicit, never automatic</span></header>
-      <p className="muted">This asks the host to read the verified report for this run and publish one bounded conclusion against the criterion frozen before it. It spends at most one model call, starts no new backtest, and never changes the result above. Reading or refreshing this page never does this by itself.</p>
+  const conclusionAction = task.status === 'succeeded' && !concluded && (api.interpretResearchTask || api.cancelResearchTask) ? <section className="panel" aria-label="Conclusion action">
+    <header><h2>Draw one conclusion</h2><span>Explicit, never automatic</span></header>
+    <p className="muted">This asks the host to read the verified report for this run and publish one bounded conclusion against the criterion frozen before it. It spends at most one model call, starts no new backtest, and never changes the result above.</p>
+    <div className="actions">
+      {api.interpretResearchTask && <button className="primary" disabled={busy !== null} onClick={() => { void mutate('interpret', () => api.interpretResearchTask!(taskId), 'The conclusion request was not accepted; the persisted task was reloaded.') }}>
+        {busy === 'interpret' ? 'Interpreting…' : 'Interpret this run'}
+      </button>}
+      {api.cancelResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('cancel', () => api.cancelResearchTask!(taskId), 'Cancel was not confirmed; the persisted task was reloaded.') }}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel without a conclusion'}</button>}
+    </div>
+    <p className="muted">Cancelling here closes the conclusion only. It is final, and the completed run and its verified report are left exactly as they are.</p>
+  </section> : null
+
+  // Cancellation and retry are legal only while the backend can still accept
+  // them, and they belong beside the state they act on, never behind a summary.
+  const taskActions = (task.status === 'drafting' || task.status === 'awaiting_confirmation' || task.status === 'confirmed' || task.status === 'running' || task.status === 'failed') && (retryable || api.cancelResearchTask)
+    ? <section className="panel" aria-label="Task actions">
+      <header><h2>Task actions</h2><span>Explicit, never automatic</span></header>
+      <p className="muted">Cancelling is final: it stops future steps and never claims a rollback or kills a backtest that already started. Started runs keep their own terminal states, and a refresh, a back navigation or a failed request never confirms, retries or submits anything.</p>
       <div className="actions">
-        {api.interpretResearchTask && <button className="primary" disabled={busy !== null} onClick={() => { void mutate('interpret', () => api.interpretResearchTask!(taskId), 'The conclusion request was not accepted; the persisted task was reloaded.') }}>
-          {busy === 'interpret' ? 'Interpreting…' : 'Interpret this run'}
-        </button>}
-        {api.cancelResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('cancel', () => api.cancelResearchTask!(taskId), 'Cancel was not confirmed; the persisted task was reloaded.') }}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel without a conclusion'}</button>}
+        {retryable && api.retryResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('retry', () => api.retryResearchTask!(taskId), 'Retry was not accepted; the persisted task was reloaded.') }}>{busy === 'retry' ? 'Retrying…' : 'Retry failed step'}</button>}
+        {api.cancelResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('cancel', () => api.cancelResearchTask!(taskId), 'Cancel was not confirmed; the persisted task was reloaded.') }}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel task'}</button>}
       </div>
-      <p className="muted">Cancelling here closes the conclusion only. It is final, and the completed run and its verified report are left exactly as they are.</p>
-    </section>}
+    </section> : null
 
-    </article><details className="research-context" open><summary>AI context & task controls</summary>
-    <section className="panel identity-panel">
-      <header><h2>Research idea</h2></header><p className="muted">{task.raw_idea}</p>
-      <header className="context-identity-heading"><h2>Task identity</h2><span>Persisted evidence only</span></header>
+  // Waiting for a decision is the one state where the specification itself is the
+  // decision, so the facts and the confirmation lead and the drafted reasoning
+  // follows them; every other state keeps the specification as progressive detail.
+  const blocks: ReactNode[] = confirmable
+    ? [conclusion, failure, state, specification, taskActions, selectionEditor, selectionEvidence, declarationDraft, backtests]
+    : [conclusion, failure, state, reportBlock, conclusionAction, taskActions, specification, selectionEditor, selectionEvidence, backtests, declarationDraft]
+
+  return <>
+    {/* The page's own scope is stated where the result is, so the heading carries
+        no standing subtitle and the chrome above stays a compact bar. */}
+    <PageHeading title="Research Task" status={task.status} />
+    <div className="result-toolbar"><Link to="/research">← Research workspace</Link><button onClick={() => { void refreshAll() }}>Refresh</button></div>
+    {error && <p role="alert" className="notice error">{error}</p>}
+    <div className="research-detail-layout"><article className="research-artifact" aria-label="Strategy and validation evidence">
+    {blocks.map((node, index) => <Fragment key={index}>{node}</Fragment>)}
+    </article><aside className="research-context">
+    <UsagePanel task={task} />
+    <Disclosure title="Provider, protocol and capabilities" subtitle="Read from the backend configuration">
+      <ModelConfigurationPanel status={settings} error={api.settingsStatus ? settingsError : 'Model configuration status is unavailable in this client.'} />
+    </Disclosure>
+    <Disclosure title="Research idea and task identity" subtitle="Persisted evidence only">
+      <p className="muted">{task.raw_idea}</p>
       <dl className="summary-list">
         <div><dt>Task</dt><dd>{task.task_id}</dd></div>
         <div><dt>State</dt><dd>{STATUS_LABELS[task.status]}</dd></div>
         <div><dt>Created</dt><dd>{task.created_at}</dd></div>
         <div><dt>Updated</dt><dd>{task.updated_at}</dd></div>
       </dl>
-      {task.status === 'cancelled' && <p className="notice">This task is cancelled and final. {task.cancel_note ?? 'Started runs keep their own terminal states; cancelling is not a rollback.'}</p>}
-      {task.status === 'unsupported' && <p className="notice">Not executable with the registered strategies and data. {task.gap ?? 'The backend recorded no gap detail.'}</p>}
-    </section>
-    <ModelConfigurationPanel status={settings} error={api.settingsStatus ? settingsError : 'Model configuration status is unavailable in this client.'} />
-    <UsagePanel task={task} />
-
-    {(task.status !== 'cancelled' && task.status !== 'unsupported' && task.status !== 'succeeded') && <section className="panel" aria-label="Task actions">
-      <header><h2>Task actions</h2><span>Explicit, never automatic</span></header>
-      <p className="muted">Cancelling is final. It stops future steps and never claims a rollback or kills a backtest that already started; started runs keep their own terminal states. A refresh, back navigation or failed request never confirms, retries or submits anything.</p>
-      <div className="actions">
-        {retryable && api.retryResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('retry', () => api.retryResearchTask!(taskId), 'Retry was not accepted; the persisted task was reloaded.') }}>{busy === 'retry' ? 'Retrying…' : 'Retry failed step'}</button>}
-        {api.cancelResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('cancel', () => api.cancelResearchTask!(taskId), 'Cancel was not confirmed; the persisted task was reloaded.') }}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel task'}</button>}
-      </div>
-    </section>}
-    </details></div>
+    </Disclosure>
+    </aside></div>
   </>
 }
 
-function PageHeading({ title, subtitle, status }: { title: string; subtitle: string; status?: string }) {
-  return <header className="page-title"><div><h1>{title}</h1><p>{subtitle}</p></div>{status && <span className={`status status-${status}`}>{STATUS_LABELS[status as ResearchTaskStatus] ?? status}</span>}</header>
+function PageHeading({ title, subtitle, status }: { title: string; subtitle?: string; status?: string }) {
+  return <header className="page-title"><div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>{status && <span className={`status status-${status}`}>{STATUS_LABELS[status as ResearchTaskStatus] ?? status}</span>}</header>
 }
 
 export function ResearchSettings({ api }: { api: ApiAdapter }) {

@@ -189,6 +189,20 @@ async function draftIdea(page: Page, idea: string): Promise<string> {
   return page.url()
 }
 
+/**
+ * Opens one named disclosure that the product ships closed.
+ *
+ * The runs a task started, the provider configuration and the drafted rationale
+ * are progressive detail in the shipped product, so a test that reads them opens
+ * them first. Opening is the only thing this does: every assertion below is about
+ * the contents, and none of them is weakened by where the panel starts.
+ */
+async function openDisclosure(page: Page, title: string): Promise<void> {
+  const panel = page.locator('details.disclosure').filter({ has: page.locator('summary', { hasText: title }) }).first()
+  if (await panel.getAttribute('open') === null) await panel.locator('summary').first().click()
+  await expect(panel).toHaveAttribute('open', '')
+}
+
 test('research workspace reaches an evaluated candidate from a scripted proposal', async ({ page }, testInfo) => {
   test.setTimeout(120_000)
   const provider = await startScriptedProvider()
@@ -201,6 +215,9 @@ test('research workspace reaches an evaluated candidate from a scripted proposal
     expect(provider.requests[0].tool_names).toContain('propose_spec')
 
     const draft = page.locator('section[aria-label="Specification"]')
+    // The facts being confirmed and the confirm itself lead; the drafted
+    // rationale and assumptions are progressive detail behind this summary.
+    await openDisclosure(page, 'Rationale and assumptions')
     await expect(draft.getByText('bounded-long-v1')).toBeVisible()
     await expect(draft.getByText('XNAS:AAPL')).toBeVisible()
     await expect(draft.getByText('Enter once with a two-unit target on the registered scenario window.')).toBeVisible()
@@ -211,6 +228,7 @@ test('research workspace reaches an evaluated candidate from a scripted proposal
 
     // Model configuration comes from the backend projection: protocol, endpoint and capabilities.
     const model = page.locator('section[aria-label="Model provider configuration"]')
+    await openDisclosure(page, 'Provider, protocol and capabilities')
     await expect(model.getByText('Configured', { exact: true })).toBeVisible()
     await expect(model.getByText('anthropic-messages')).toBeVisible()
     await expect(model.getByText(SCRIPTED_MODEL)).toBeVisible()
@@ -245,6 +263,9 @@ test('research workspace reaches an evaluated candidate from a scripted proposal
     await expect(page.locator('.page-title .status')).toHaveText('backtest succeeded', { timeout: 30_000 })
     await expect(page.getByRole('heading', { name: 'Confirmed specification' })).toBeVisible()
 
+    // The runs this task started are progressive detail under one summary that
+    // names and counts them; their cards and links are inside it.
+    await openDisclosure(page, 'Backtests started by this task')
     const jobCard = page.locator('section[aria-label="Research backtests"] .job-card')
     await expect(jobCard.locator('.status')).toHaveText('succeeded')
     const jobId = (await jobCard.getByRole('link', { name: 'Open job and report' }).getAttribute('href'))!.split('/').pop()!
@@ -264,6 +285,7 @@ test('research workspace reaches an evaluated candidate from a scripted proposal
 
     // The research task now points at that holdout from persisted state only.
     await page.goto(taskURL)
+    await openDisclosure(page, 'Backtests started by this task')
     await expect(jobCard.getByRole('link', { name: `Open holdout ${validationId}` })).toBeVisible()
     await expect(jobCard.getByRole('link', { name: 'Create evaluated candidate' })).toHaveAttribute('href', `/backtests/${jobId}`)
     await expect(page.getByText(/Candidate acceptance records a research judgment only/)).toBeVisible()
@@ -286,6 +308,7 @@ test('research workspace reaches an evaluated candidate from a scripted proposal
     await expect(page.getByText('EVALUATED', { exact: true })).toBeVisible()
     await page.goto(taskURL)
     await expect(page.locator('.page-title .status')).toHaveText('backtest succeeded')
+    await openDisclosure(page, 'Backtests started by this task')
     await expect(jobCard.locator('.status')).toHaveText('succeeded')
     await expect(usage.getByText('1 of 6')).toBeVisible()
     await expect(usage.getByText('1 of 3')).toBeVisible()
@@ -321,10 +344,13 @@ test('one explicit conclusion is published, then re-verified and served across a
 
     // The one explicit action spends exactly one call and publishes the host's reading.
     await action.getByRole('button', { name: 'Interpret this run' }).click()
-    await expect(conclusion.locator('header span')).toHaveText(
-      /Consistent with the frozen criterion|Opposite to the frozen criterion/,
-      { timeout: 30_000 },
+    // The result is the host's own outcome sentence, rendered verbatim, and the
+    // host's outcome code rides on the section as a machine-readable attribute
+    // rather than as a second, longer line of status chrome above it.
+    await expect(conclusion).toHaveAttribute(
+      'data-outcome', /^(supported_in_scope|not_supported)$/, { timeout: 30_000 },
     )
+    await expect(conclusion.locator('.outcome-text')).not.toBeEmpty()
     await expect(conclusion.getByText('Net P&L expected positive')).toBeVisible()
     // The host's own three-valued reading of the frozen criterion, and the
     // scope sentence for the claim, are both rendered from host constants.
@@ -347,9 +373,7 @@ test('one explicit conclusion is published, then re-verified and served across a
     await stopServer(server)
     server = await startServerWithProvider(provider.settingsPath)
     await page.goto(taskURL)
-    await expect(conclusion.locator('header span')).toHaveText(
-      /Consistent with the frozen criterion|Opposite to the frozen criterion/,
-    )
+    await expect(conclusion).toHaveAttribute('data-outcome', /^(supported_in_scope|not_supported)$/)
     await expect(conclusion.getByText('Net P&L expected positive')).toBeVisible()
     expect(provider.requests).toHaveLength(2)
     await testInfo.attach('research-conclusion-evidence', {

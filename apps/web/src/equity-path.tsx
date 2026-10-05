@@ -1,3 +1,4 @@
+import { useId } from 'react'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
 
 export type EquityPath = {
@@ -8,6 +9,18 @@ export type EquityPath = {
 }
 export const pathPercent = (ratio: string) => `${exactDelta('0', ratio, 2).replace(/^\+/, '')}%`
 
+/**
+ * An ISO instant as a short UTC label, or the recorded string unchanged.
+ *
+ * The label is a bounded view of the same recorded value; the full instant stays
+ * in the accessible description and in the drawdown facts below.
+ */
+function shortTime(value: string | undefined): string {
+  if (!value) return 'Not recorded'
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(value)
+  return match ? `${match[1]} ${match[2]}Z` : value
+}
+
 export function EquityCurve({ analysis }: { analysis: EquityPath }) {
   const points = analysis.display_points
   const low = points.reduce((a, b) => compareCanonicalDecimal(a.equity, b.equity) < 0 ? a : b).equity
@@ -16,17 +29,22 @@ export function EquityCurve({ analysis }: { analysis: EquityPath }) {
   const span = Number(exactDelta(low, high))
   const coordinates = points.map(p => `${70 + 650 * p.index / Math.max(1, analysis.point_count - 1)},${span === 0 ? 120 : 210 - 180 * Number(exactDelta(low, p.equity)) / span}`).join(' ')
   const dd = analysis.max_drawdown
+  const first = points[0]
+  const last = points.at(-1)
+  // The axis labels are HTML at the reading size rather than SVG text scaled by
+  // the 750x260 viewBox, which is unreadable in a narrow column. The path, its
+  // points and every extrema/drawdown fact are unchanged; the description below
+  // carries the same context the axis labels did.
+  const descriptionId = useId()
   return <section className="panel equity-path"><header><h2>Equity Curve</h2><span>{analysis.currency}</span></header>
-    <svg viewBox="0 0 750 260" role="img" aria-label="Equity curve">
+    <div className="curve-axis"><span>High {high} {analysis.currency}</span><span>Low {low} {analysis.currency}</span></div>
+    <svg viewBox="0 0 750 260" role="img" aria-label="Equity curve" aria-describedby={descriptionId}>
       <title>Equity through admitted market observations</title>
       <path d="M70 25V215H725" fill="none" stroke="currentColor" opacity="0.3" />
       <polyline points={coordinates} fill="none" stroke="#4f8cff" strokeWidth="2" />
-      <text x="5" y="30" fontSize="11" fill="currentColor">{high}</text>
-      <text x="5" y="215" fontSize="11" fill="currentColor">{low}</text>
-      <text x="70" y="245" fontSize="11" fill="currentColor">{points[0]?.time}</text>
-      <text x="720" y="245" textAnchor="end" fontSize="11" fill="currentColor">{points.at(-1)?.time}</text>
     </svg>
-    <p className="muted">{points.length < analysis.point_count ? `${points.length} sampled display points from ${analysis.point_count} observations.` : `${analysis.point_count} equity observations.`} Maximum drawdown uses every observation, including initial funding.</p>
+    <div className="curve-axis"><span>First {shortTime(first?.time)}</span><span>Last {shortTime(last?.time)}</span></div>
+    <p className="muted" id={descriptionId}>Equity in {analysis.currency} over the displayed observations: first {first?.time ?? 'not recorded'} at {first?.equity ?? 'not recorded'}, last {last?.time ?? 'not recorded'} at {last?.equity ?? 'not recorded'}, lowest {low}, highest {high}. {points.length < analysis.point_count ? `${points.length} sampled display points from ${analysis.point_count} observations.` : `${analysis.point_count} equity observations.`} Maximum drawdown uses every observation, including initial funding.</p>
     <h3>Maximum Drawdown</h3><dl className="summary-list">
       <div><dt>Amount</dt><dd>{dd.amount} {analysis.currency}</dd></div>
       <div><dt>Percentage / ratio</dt><dd>{pathPercent(dd.ratio)} / {dd.ratio}</dd></div>

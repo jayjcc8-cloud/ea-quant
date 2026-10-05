@@ -141,7 +141,7 @@ const configured: ModelConfigurationStatus = {
 }
 
 function scripted(script: { task?: ResearchTask; interpret?: () => Promise<ResearchTask> } = {}) {
-  const calls = { interpret: 0, get: 0 }
+  const calls = { interpret: 0, get: 0, backtest: 0 }
   let persisted = task(script.task)
   const api: ApiAdapter = {
     holdoutScenarios: async () => [],
@@ -150,7 +150,7 @@ function scripted(script: { task?: ResearchTask; interpret?: () => Promise<Resea
     listHoldouts: async () => [],
     listScenarios: async () => [],
     validateScenario: async () => { throw new Error('unused') },
-    createBacktest: async () => job,
+    createBacktest: async () => { calls.backtest += 1; return job },
     createBatch: async () => { throw new Error('unused') },
     getBatch: async () => { throw new Error('unused') },
     listBacktests: async () => [],
@@ -187,8 +187,11 @@ describe('the conclusion for one verified run', () => {
     expect(panel.textContent).toContain('HOST OUTCOME SENTENCE')
     expect(panel.textContent).toContain('HOST INFERENCE SENTENCE')
     expect(panel.textContent).toContain('HOST LIMITATION SENTENCE')
+    // The host wrote the value with the exact currency it read; this client adds
+    // no unit of its own and never turns the unit word into a currency.
     expect(panel.textContent).toContain('12.5')
-    expect(panel.textContent).toContain('currency')
+    expect(panel.textContent).toContain('currency not recorded by the host')
+    expect(panel.textContent).not.toContain('USD')
     expect(panel.textContent).toContain('Question (your input)')
     expect(panel.textContent).toContain('HOST SCOPE SENTENCE')
     // The host's own three-valued fact about the frozen criterion is shown as
@@ -258,6 +261,44 @@ describe('the conclusion for one verified run', () => {
     expect(panel.textContent).toContain('HOST OUTCOME SENTENCE')
     // The action is gone once a conclusion exists.
     expect(screen.queryByRole('button', { name: 'Interpret this run' })).toBeNull()
+    // Exactly one provider call: drawing a conclusion starts no backtest.
+    expect(calls.backtest).toBe(0)
+  })
+
+  it('shows the value the host published, with the unit word kept as a unit', async () => {
+    const { api } = scripted({
+      task: task({ interpretation: { ...interpretation, observed: { ...interpretation.observed, value_text: '12.5 USD', currency: 'USD' } } }),
+    })
+    await openTask(api)
+
+    const panel = await screen.findByRole('region', { name: 'Conclusion' })
+    expect(panel.textContent).toContain('12.5 USD · positive')
+    // The unit word is never rendered as if it were a currency of its own.
+    expect(panel.textContent).not.toContain('(currency)')
+    expect(panel.textContent).not.toContain('currency not recorded')
+  })
+
+  it('retries a failed conclusion step and starts no backtest for it', async () => {
+    let attempts = 0
+    const { api, calls } = scripted({
+      interpret: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('an operation is already in flight')
+        return task({ interpretation })
+      },
+    })
+    await openTask(api)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Interpret this run' }))
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'an operation is already in flight')
+    expect(calls.interpret).toBe(1)
+    // Only the conclusion step is re-asked: the run it reads is untouched and
+    // nothing dispatches a second backtest.
+    await userEvent.click(screen.getByRole('button', { name: 'Interpret this run' }))
+    await waitFor(() => expect(calls.interpret).toBe(2))
+    const panel = await screen.findByRole('region', { name: 'Conclusion' })
+    expect(panel.textContent).toContain('HOST OUTCOME SENTENCE')
+    expect(calls.backtest).toBe(0)
   })
 
   it('reports a conclusion-step failure on its own axis without touching the run', async () => {
