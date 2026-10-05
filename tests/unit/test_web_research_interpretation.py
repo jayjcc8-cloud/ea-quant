@@ -1241,6 +1241,54 @@ def test_an_unchanged_report_keeps_serving_the_same_conclusion(
     service.stop()
 
 
+def test_repeated_reads_of_an_unchanged_task_do_not_restate_it_as_updated(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orchestrator, service, _provider, concluded = _published_run(tmp_path, monkeypatch)
+    before = concluded.updated_at
+
+    first = orchestrator.refresh(concluded.task_id)
+    second = orchestrator.refresh(concluded.task_id)
+    listed = {task.task_id: task for task in orchestrator.reconcile_all()}[concluded.task_id]
+
+    # Re-verifying the same report is a no-op for the reader. The record is
+    # still re-saved — that save is the durability barrier for the operation
+    # generation — but the revision timestamp does not move on every poll, so a
+    # finished task keeps reading as finished rather than as freshly changed.
+    assert first.interpretation == concluded.interpretation
+    assert first.updated_at == before
+    assert second.updated_at == before
+    assert listed.updated_at == before
+    # The bookkeeping really did advance underneath the unchanged revision.
+    assert first.operation_generation > concluded.operation_generation
+    assert second.operation_generation > first.operation_generation
+    stored = json.loads(
+        (tmp_path / "workspace" / "research" / f"{concluded.task_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert stored["operation_generation"] == listed.operation_generation
+    assert stored["updated_at"] == before
+    service.stop()
+
+
+def test_a_real_change_still_advances_the_revision_timestamp(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orchestrator, service, _provider, concluded = _published_run(tmp_path, monkeypatch)
+    unchanged = orchestrator.refresh(concluded.task_id)
+    (service.reports_dir / concluded.jobs[0] / "report.json").unlink()
+
+    withdrawn = orchestrator.refresh(concluded.task_id)
+
+    # Withdrawing a conclusion the verified report no longer supports is a real
+    # change, and it is recorded as one.
+    assert withdrawn.interpretation is None
+    assert withdrawn.interpretation_error is not None
+    assert withdrawn.updated_at != unchanged.updated_at
+    service.stop()
+
+
 def test_a_conclusion_stored_under_older_semantics_is_a_technical_unavailability(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

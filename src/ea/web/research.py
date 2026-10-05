@@ -314,6 +314,24 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _revision(task: ResearchTask) -> ResearchTask:
+    """The reader-visible revision of a task: everything but writer bookkeeping.
+
+    ``updated_at`` and the operation generation/kind exist to coordinate writers,
+    not to carry research state. A transition that leaves this projection
+    unchanged is a no-op for the reader, so it must not read as a new revision —
+    a refresh that re-verifies the same report would otherwise move the
+    timestamp on every poll while showing the same conclusion.
+    """
+    return replace(
+        task,
+        updated_at="",
+        operation_generation=0,
+        operation_completion_generation=0,
+        operation_kind=None,
+    )
+
+
 def _idea_key(raw_idea: str) -> str:
     return " ".join(raw_idea.split())
 
@@ -1437,7 +1455,11 @@ class ResearchOrchestrator:
                             next_task = replace(
                                 next_task, operation_completion_generation=generation
                             )
-            next_task = replace(next_task, updated_at=_now())
+            # Bookkeeping (generation, kind, durability barrier) is still saved
+            # below in every case; only a change the reader can see is a new
+            # revision and only that advances `updated_at`.
+            if event == "create" or _revision(next_task) != _revision(current):
+                next_task = replace(next_task, updated_at=_now())
             try:
                 self._store.save(next_task)
             except Exception as error:  # noqa: BLE001 — any unconfirmed save keeps ownership
