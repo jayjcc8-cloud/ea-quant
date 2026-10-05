@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EA Quant — Local Offline Research Loop</title>
+<meta name="description" content="EA is an AI-native quantitative R&amp;D and strategy-promotion system in development. This candidate delivers one local research loop: idea, frozen strict spec, real backtest, formal report, one bounded evidence conclusion, and durable refresh. The deterministic engine runs offline; the two model-backed steps call the provider you configure.">
+<style>
+  :root {
+    --bg: #0a0d12;
+    --panel: #111620;
+    --panel-2: #161d2a;
+    --line: #232c3d;
+    --text: #e7ecf3;
+    --muted: #98a4b8;
+    --accent: #6ea8fe;
+    --accent-2: #7ee0c0;
+    --warn: #f0b46b;
+    --deny: #f08a8a;
+    --radius: 14px;
+    --maxw: 1060px;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 50% -200px, #16203a 0%, var(--bg) 60%) no-repeat, var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover, a:focus { text-decoration: underline; }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 20px; }
+  header.site { border-bottom: 1px solid var(--line); background: rgba(10,13,18,.7); }
+  .site-inner { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 16px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .2px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 0 4px rgba(126,224,192,.14); }
+  nav.top { display: flex; flex-wrap: wrap; gap: 14px; font-size: 14px; }
+  main { padding: 44px 0 8px; }
+  .hero { padding: 26px 0 8px; }
+  h1 { font-size: clamp(1.7rem, 4.2vw, 2.6rem); line-height: 1.15; margin: 0 0 14px; letter-spacing: -.4px; }
+  h2 { font-size: clamp(1.2rem, 2.6vw, 1.5rem); margin: 0 0 6px; letter-spacing: -.2px; }
+  h3 { font-size: 1rem; margin: 0 0 6px; }
+  p { margin: 0 0 12px; }
+  .lede { font-size: clamp(1rem, 2.2vw, 1.14rem); color: #c7d2e3; max-width: 62ch; }
+  .muted { color: var(--muted); }
+  section { margin: 34px 0; }
+  .kicker { font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: var(--accent-2); margin: 0 0 10px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .card { background: linear-gradient(180deg, var(--panel-2), var(--panel)); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 16px 14px; }
+  .card p:last-child { margin-bottom: 0; }
+  .status-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .status-list li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; border-bottom: 1px dashed var(--line); padding: 8px 0; }
+  .status-list li:last-child { border-bottom: 0; }
+  .tag { font-size: 12px; font-weight: 700; letter-spacing: .03em; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+  .tag.ok { color: #0b1a14; background: var(--accent-2); border-color: var(--accent-2); }
+  .tag.cond { color: #241704; background: var(--warn); border-color: var(--warn); }
+  .tag.no { color: #2a0d0d; background: var(--deny); border-color: var(--deny); }
+  ol.flow { counter-reset: step; list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+  ol.flow li { counter-increment: step; position: relative; padding: 12px 14px 12px 54px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+  ol.flow li::before {
+    content: counter(step);
+    position: absolute; left: 14px; top: 12px;
+    width: 26px; height: 26px; border-radius: 50%;
+    display: grid; place-items: center;
+    font-size: 13px; font-weight: 700; color: #08111f; background: var(--accent);
+  }
+  ol.flow strong { display: block; }
+  .caveats { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .caveats li { padding-left: 20px; position: relative; color: #cdd7e6; }
+  .caveats li::before { content: "—"; position: absolute; left: 0; color: var(--warn); }
+  .shot { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot figcaption { padding: 12px 14px; font-size: 13.5px; color: var(--muted); border-top: 1px solid var(--line); }
+  .links { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .links a.card { display: block; color: var(--text); }
+  .links a.card:hover { border-color: var(--accent); text-decoration: none; }
+  .links .card small { display: block; color: var(--muted); margin-top: 4px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; background: #0d1420; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; color: #d8e2f2; }
+  footer.site { border-top: 1px solid var(--line); margin-top: 40px; padding: 22px 0 34px; color: var(--muted); font-size: 13.5px; }
+  footer.site p { margin: 0 0 6px; }
+  @media (max-width: 640px) {
+    main { padding-top: 28px; }
+    .site-inner { padding: 12px 0; }
+    nav.top { font-size: 13px; gap: 10px; }
+    ol.flow li { padding-left: 48px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap site-inner">
+    <div class="brand"><span class="dot" aria-hidden="true"></span> EA Quant</div>
+    <nav class="top" aria-label="Primary">
+      <a href="#workflow">Workflow</a>
+      <a href="#status">Status</a>
+      <a href="#boundaries">Boundaries</a>
+      <a href="#links">Docs &amp; source</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="hero">
+    <p class="kicker">Local engine · Loopback UI</p>
+    <h1>One honest research loop, from idea to a single bounded conclusion.</h1>
+    <p class="lede">
+      EA is an AI-native quantitative R&amp;D and strategy-promotion system in development.
+      This candidate delivers one <strong>local research loop</strong>: an idea, a
+      registered and frozen strict spec, one explicit real backtest, its formal report, one
+      bounded evidence conclusion, and a durable refresh.
+    </p>
+    <p class="muted">
+      The deterministic engine runs entirely offline on <code>127.0.0.1</code> against local files.
+      The two model-backed steps (spec proposal and the single conclusion) call the external
+      provider you configure. External Paper providers and Live trading remain unavailable.
+    </p>
+  </div>
+
+  <section id="workflow" aria-labelledby="workflow-h">
+    <h2 id="workflow-h">The workflow</h2>
+    <p class="muted">Every step is explicit. Nothing is created, confirmed, run, or concluded without a user action.</p>
+    <ol class="flow">
+      <li><strong>Idea</strong> One bounded research idea is recorded durably before any work starts.</li>
+      <li><strong>Registered strict spec</strong> The host proposes a spec through two tools only, validated in code against the registered scenario and strategy catalog — not by prompt. An idea the product cannot run keeps its text and a declared gap.</li>
+      <li><strong>Frozen spec</strong> You edit and confirm the draft. Confirming versions and freezes it, then starts one real backtest. A retry reuses the same request identity, so it never duplicates a job.</li>
+      <li><strong>Explicit real backtest</strong> The run executes through the existing deterministic offline engine: funding, risk limits, orders, fills, ledger, reconciliation, audit, and report authorities.</li>
+      <li><strong>Formal report</strong> A verified report is published for the completed run. The numbers you read come from that report, not from a model.</li>
+      <li><strong>One bounded evidence conclusion</strong> On a succeeded run you may ask for exactly one conclusion. It spends at most one model call, reads only the verified report, and never changes the result.</li>
+      <li><strong>Refresh</strong> Task status is re-derived from the real started jobs on every read. A refresh never re-confirms, re-runs, or submits anything.</li>
+    </ol>
+  </section>
+
+  <section id="status" aria-labelledby="status-h">
+    <h2 id="status-h">Status</h2>
+    <ul class="status-list">
+      <li><span>Local offline research / backtest</span> <span class="tag ok">AVAILABLE</span></li>
+      <li><span>Loopback Web research loop</span> <span class="tag ok">AVAILABLE</span></li>
+      <li><span>Model-backed spec proposal and conclusion</span> <span class="tag cond">AVAILABLE WHEN CONFIGURED</span></li>
+      <li><span>Mac-local simulated Paper (separate runtime)</span> <span class="tag ok">AVAILABLE</span></li>
+      <li><span>72-hour / 7-day Paper soak</span> <span class="tag no">NO PASS RECORDED</span></li>
+      <li><span>External Paper provider</span> <span class="tag no">NOT AVAILABLE</span></li>
+      <li><span>Live trading</span> <span class="tag no">DENIED</span></li>
+    </ul>
+    <p class="muted" style="margin-top:12px">
+      Model-backed steps are off until a provider is configured. Unconfigured is shown honestly, and
+      deterministic backtests, reports, and simulated Paper stay available without a key.
+    </p>
+  </section>
+
+  <section aria-labelledby="shot-h">
+    <h2 id="shot-h">One honest example</h2>
+    <figure class="shot">
+      <img src="assets/research-conclusion.png"
+           alt="Historical single example of the research view: one idea, a frozen spec, a real backtest, its verified report, and one bounded conclusion. The model completed this conclusion on commit 088d4ab. This is an illustration of one past run, not a current capability or performance claim.">
+      <figcaption>
+        Historical single example. The model completed that conclusion on commit
+        <code>088d4ab</code>. An isolated verification of the current UI was completed against a
+        copied, safe historical report — no new provider calls, no new backtests, no overflow at
+        desktop or mobile widths, and a stable state across GET refresh. Full exact-head release
+        verification remains unrun. This image is an illustration of one past run — not a profit,
+        robustness, or all-market claim.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section id="boundaries" aria-labelledby="boundaries-h">
+    <h2 id="boundaries-h">Boundaries the product keeps</h2>
+    <ul class="caveats">
+      <li>The result comes first: a conclusion is shown with the verified run behind it, never instead of it.</li>
+      <li>Backtest status and conclusion status are separate. A succeeded run without a conclusion reads “conclusion not published” — an empty slot, never an invented conclusion.</li>
+      <li>A submission whose outcome cannot be proven stays charged and is never silently retried. Retry exists only for failures that provably spent nothing. There is no fake retry.</li>
+      <li>Cancellation stops future steps; it is not a rollback and never kills or undoes a backtest that already started.</li>
+      <li>Continuous research means repeated independent, explicitly confirmed experiments — not autonomous optimization and not autonomous trading.</li>
+      <li>The Web app is a single-user loopback service. It is not a hosted browser app and cannot be reached from another device.</li>
+      <li>A strategy artifact is trusted local executable Python, not a sandbox. AI output is not runtime trading authority.</li>
+      <li>The public package version remains <code>0.2.0</code> until the owner decides otherwise. No tag, registry upload, or deployment has been made.</li>
+    </ul>
+  </section>
+
+  <section id="links" aria-labelledby="links-h">
+    <h2 id="links-h">Source and documentation</h2>
+    <div class="links">
+      <a class="card" href="https://github.com/jayjcc8-cloud/ea-quant">
+        <h3>Source on GitHub</h3>
+        <small>The repository is the project record: merged code, tests, and CI.</small>
+      </a>
+      <a class="card" href="https://github.com/jayjcc8-cloud/ea-quant/blob/main/README.md">
+        <h3>README</h3>
+        <small>Quick Start, the research workflow, and the product boundary.</small>
+      </a>
+      <a class="card" href="https://github.com/jayjcc8-cloud/ea-quant/blob/main/docs/research-first-release.md">
+        <h3>Research first release</h3>
+        <small>Inherited evidence vs. pending publish gates, and future paths.</small>
+      </a>
+      <a class="card" href="https://github.com/jayjcc8-cloud/ea-quant/blob/main/docs/STATUS.md">
+        <h3>Current status</h3>
+        <small>The durable, human-readable state of the product.</small>
+      </a>
+      <a class="card" href="https://github.com/jayjcc8-cloud/ea-quant/blob/main/docs/radian-local-product.md">
+        <h3>Local AI product surface</h3>
+        <small>Research tasks, model provider configuration, and the local run mode.</small>
+      </a>
+      <a class="card" href="https://github.com/jayjcc8-cloud/ea-quant/blob/main/docs/local-paper.md">
+        <h3>Simulated Paper</h3>
+        <small>A separate, explicitly installed macOS runtime — not part of the Quick Start.</small>
+      </a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <p>EA Quant — local, loopback research over an offline deterministic engine. No real-time, all-market, robustness, or profit claim.</p>
+    <p>Live trading is denied. External Paper providers are unavailable. No 72-hour / 7-day Paper pass is recorded, and no release, tag, or deployment is claimed here.</p>
+  </div>
+</footer>
+
+</body>
+</html>
