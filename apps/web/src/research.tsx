@@ -1501,6 +1501,9 @@ function TaskStatePanel({ task }: { task: ResearchTask }) {
     <header><h2>{STATE_HEADINGS[task.status]}</h2><span className={`status status-${task.status}`}>{STATUS_LABELS[task.status]}</span></header>
     <p>{STATE_STATEMENTS[task.status]}</p>
     {task.status === 'cancelled' && <p className="notice">This task is cancelled and final. {task.cancel_note ?? 'Started runs keep their own terminal states; cancelling is not a rollback.'}</p>}
+    {/* A cancelled task is never resumed here, so the only path forward is a new
+        one: a separate experiment, with its own budget and its own confirmation. */}
+    {task.status === 'cancelled' && <p className="muted">Nothing further is dispatched for this task and no step of it is resumed here. To run the question again, draft a separate experiment in the <Link to="/research">Research workspace</Link>: a new task has its own budget and requires explicit confirmation before a backtest starts.</p>}
     {task.status === 'unsupported' && <p className="notice">Not executable with the registered strategies and data. {task.gap ?? 'The backend recorded no gap detail.'}</p>}
     <dl className="summary-list">
       <div><dt>Recorded usage</dt><dd>Model calls {task.usage.model_calls}/{task.budget.max_model_calls} · backtests {task.usage.backtests}/{task.budget.max_backtests}</dd></div>
@@ -1536,6 +1539,14 @@ function ConclusionHero({ job, interpretation, error }: {
       {reportEntry}
       <p className="notice">{error ? INTERPRETATION_ERROR_EXPLANATIONS[error.code] ?? 'The conclusion step did not publish a result.' : 'No conclusion was published for this run.'}</p>
       <p className="muted">This is the conclusion axis alone. The host closed it for this run when it recorded the failure, so this page never asks again and no retry exists for it here. The run, its status and its verified report are unchanged.</p>
+      {/* The boundary is final, so the reader is given the two things that are
+          still open to them instead of a control that would have to pretend
+          otherwise: the report that exists, and a new experiment that carries its
+          own budget and its own confirmation. */}
+      <p className="muted">{job
+        ? 'Use the report link above to inspect the run and its current report availability. '
+        : 'No run is bound to this task, so there is no report to open for it. '}
+        Asking the same question again means a separate experiment, drafted in the <Link to="/research">Research workspace</Link>: it is budgeted and confirmed on its own, and nothing on this page starts one.</p>
       {error && <Disclosure className="progressive" title="Recorded conclusion failure" subtitle="The code the host stored">
         <dl className="summary-list"><div><dt>Code</dt><dd>{error.code}</dd></div><div><dt>Detail</dt><dd>{error.message}</dd></div></dl>
       </Disclosure>}
@@ -1656,10 +1667,42 @@ function RunReportSummary({ api, job, reportLink = false }: { api: ApiAdapter; j
   </>)
 }
 
+/** The explicit actions whose refusal is reported beside the control that made it. */
+type ActionKind = 'confirm' | 'cancel' | 'retry' | 'interpret'
+
+const ACTION_KIND_LABELS: Record<ActionKind, string> = {
+  confirm: 'Confirming the specification',
+  cancel: 'Cancelling',
+  retry: 'Retrying the failed step',
+  interpret: 'Drawing the conclusion',
+}
+
+/** A request the backend refused, together with the action that made it. */
+type ActionFailureState = { kind: ActionKind; message: string }
+
+/**
+ * One refused action, announced where that action was taken.
+ *
+ * The page-level alert sits under the toolbar, which on a phone is a screen away
+ * from the button that failed, so a refused write is reported by the panel that
+ * holds that button instead. It takes focus because the reader's own click is the
+ * only reason it exists, and it is rendered by exactly one place at a time: the
+ * detail page hands it to the panel that owns the action, or summarises it itself
+ * when the reload that followed the refusal took that panel away.
+ */
+function ActionFailure({ failure }: { failure: ActionFailureState }) {
+  const ref = useRef<HTMLParagraphElement | null>(null)
+  useEffect(() => { ref.current?.focus() }, [failure])
+  return <p className="notice error" role="alert" tabIndex={-1} ref={ref}>{failure.message}</p>
+}
+
 export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: string }) {
   const [task, setTask] = useState<ResearchTask | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState<'confirm' | 'cancel' | 'retry' | 'interpret' | null>(null)
+  const [busy, setBusy] = useState<ActionKind | null>(null)
+  // A refused write is kept apart from the read errors above: the read error is
+  // about the page, this one is about one button the reader pressed.
+  const [actionFailure, setActionFailure] = useState<ActionFailureState | null>(null)
   const [settings, setSettings] = useState<ModelConfigurationStatus | null>(null)
   const [settingsError, setSettingsError] = useState<string | null>(null)
   const [jobs, setJobs] = useState<Record<string, BacktestJob | null>>({})
@@ -1742,9 +1785,12 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
     return () => { active = false }
   }, [api, jobKey])
 
-  const mutate = async (kind: 'confirm' | 'cancel' | 'retry' | 'interpret', call: () => Promise<ResearchTask>, fallback: string) => {
+  const mutate = async (kind: ActionKind, call: () => Promise<ResearchTask>, fallback: string) => {
     if (busyRef.current) return
-    busyRef.current = true; setBusy(kind); setError(null)
+    // A new attempt clears the last refusal: the reader asked again, and a stale
+    // message beside a button that is being pressed now would be a claim about
+    // the wrong request.
+    busyRef.current = true; setBusy(kind); setError(null); setActionFailure(null)
     // A successful write is newer than every read dispatched before it completed.
     // Invalidate those reads even when the mutation keeps the same task status.
     try {
@@ -1754,9 +1800,10 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
     }
     catch (caught) {
       // A failed or uncertain mutation reloads the persisted state instead of
-      // assuming what happened; the failure itself is reported after the reload.
+      // assuming what happened; the failure itself is reported beside the action
+      // that made it, once, after the reload.
       await refresh()
-      setError(messageOf(caught, fallback))
+      setActionFailure({ kind, message: messageOf(caught, fallback) })
     } finally { busyRef.current = false; setBusy(null) }
   }
 
@@ -1818,6 +1865,7 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
           {busy === 'confirm' ? 'Confirming…' : 'Confirm spec and start real backtest'}
         </button>
       </div>}
+      {actionFailure !== null && actionFailure.kind === 'confirm' && <ActionFailure failure={actionFailure} />}
       <p className="muted">Confirming registers this exact spec and starts one real installed-engine backtest with the frozen parameters. It creates no orders and no Paper session.</p>
       <Disclosure className="progressive" title="Rationale and assumptions" subtitle="Recorded when this draft was proposed">
         <SpecRationale spec={spec} />
@@ -1869,6 +1917,7 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
       </button>}
       {api.cancelResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('cancel', () => api.cancelResearchTask!(taskId), 'Cancel was not confirmed; the persisted task was reloaded.') }}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel without a conclusion'}</button>}
     </div>
+    {actionFailure !== null && (actionFailure.kind === 'interpret' || actionFailure.kind === 'cancel') && <ActionFailure failure={actionFailure} />}
     <p className="muted">Cancelling here closes the conclusion only. It is final, and the completed run and its verified report are left exactly as they are.</p>
   </section> : null
 
@@ -1882,14 +1931,30 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
         {retryable && api.retryResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('retry', () => api.retryResearchTask!(taskId), 'Retry was not accepted; the persisted task was reloaded.') }}>{busy === 'retry' ? 'Retrying…' : 'Retry failed step'}</button>}
         {api.cancelResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('cancel', () => api.cancelResearchTask!(taskId), 'Cancel was not confirmed; the persisted task was reloaded.') }}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel task'}</button>}
       </div>
+      {actionFailure !== null && (actionFailure.kind === 'retry' || actionFailure.kind === 'cancel') && <ActionFailure failure={actionFailure} />}
     </section> : null
+
+  // A refusal belongs to the panel that holds the action that made it. The reload
+  // that follows it can take that panel away — a refused confirm whose task was
+  // confirmed elsewhere, a conclusion the host published anyway — so what no panel
+  // shows is summarised on its own below rather than dropped.
+  const raisedAnywhere = actionFailure !== null && (
+    (actionFailure.kind === 'confirm' && confirmable && api.confirmResearchTask != null)
+    || (taskActions !== null && (actionFailure.kind === 'cancel' || actionFailure.kind === 'retry'))
+    || (conclusionAction !== null && (actionFailure.kind === 'cancel' || actionFailure.kind === 'interpret')))
+
+  const unclaimedFailure = actionFailure !== null && !raisedAnywhere ? <section className="panel" aria-label="Action failure">
+    <header><h2>Review the action outcome</h2><span>{ACTION_KIND_LABELS[actionFailure.kind]}</span></header>
+    <ActionFailure failure={actionFailure} />
+    <p className="muted">The persisted task was reloaded and no longer offers that action. Review its recorded state below before taking another action; this message alone cannot establish whether the request took effect.</p>
+  </section> : null
 
   // Waiting for a decision is the one state where the specification itself is the
   // decision, so the facts and the confirmation lead and the drafted reasoning
   // follows them; every other state keeps the specification as progressive detail.
   const blocks: ReactNode[] = confirmable
-    ? [conclusion, failure, state, specification, taskActions, selectionEditor, selectionEvidence, declarationDraft, backtests]
-    : [conclusion, failure, state, reportBlock, conclusionAction, taskActions, specification, selectionEditor, selectionEvidence, backtests, declarationDraft]
+    ? [conclusion, failure, unclaimedFailure, state, specification, taskActions, selectionEditor, selectionEvidence, declarationDraft, backtests]
+    : [conclusion, failure, unclaimedFailure, state, reportBlock, conclusionAction, taskActions, specification, selectionEditor, selectionEvidence, backtests, declarationDraft]
 
   return <>
     {/* The page's own scope is stated where the result is, so the heading carries

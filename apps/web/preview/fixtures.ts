@@ -450,11 +450,15 @@ export const STATES: PreviewState[] = [
   },
   {
     id: 'home-recent', label: 'Homepage · recent tasks', path: '/research',
-    task: awaiting,
+    // One stable id per card, and the live document is the awaiting one: the list
+    // keys on the task id and each card opens the task it names, so two cards
+    // carrying the observed id would collide as React keys and both links would
+    // land on the same document. Job, run and report ids are left as observed.
+    task: withId(awaiting, 'scripted-task-recent-awaiting'),
     recent: [
-      withId({ ...drafting, raw_idea: 'Draft a delayed entry on the registered window' }, 'scripted-task-recent'),
-      awaiting,
-      concluded,
+      withId({ ...drafting, raw_idea: 'Draft a delayed entry on the registered window' }, 'scripted-task-recent-drafting'),
+      withId(awaiting, 'scripted-task-recent-awaiting'),
+      withId(concluded, 'scripted-task-recent-concluded'),
     ],
     created: withId(drafting, 'scripted-task-created'),
   },

@@ -359,7 +359,11 @@ describe('research workspace', () => {
         return task({ status: 'awaiting_confirmation' })
       },
     })
-    detail(api)
+    // The mount reads the task, and the poll effect is registered again once that
+    // first read reports a status, so the initial render schedules a second read.
+    // Settling it here keeps the baseline below from mixing that mount read with
+    // the mutation's own reload: the delta stays exactly the reload.
+    await act(async () => { detail(api) })
 
     const retry = await screen.findByRole('button', { name: 'Retry failed step' })
     expect(screen.getByText(/Retry resumes the failed step in place/)).toBeTruthy()
@@ -638,4 +642,96 @@ it('withdraws a verified summary when an explicit refresh finds the run without 
   expect(calls.cancel).toBe(0)
   expect(calls.create).toBe(0)
   expect(screen.queryByRole('button', { name: 'Interpret this run' })).toBeNull()
+})
+
+/**
+ * A refused write is announced beside the control that made it.
+ *
+ * The page's own alert sits under the toolbar, which on a phone can be a screen
+ * away from the button that failed, so the refusal of a cancel or a retry is
+ * reported by the panel that holds that button, focused as an alert, and only
+ * once: the reload that follows the refusal is a read, and the next attempt
+ * replaces the message instead of leaving it beside a request it never described.
+ */
+it('announces a refused cancel beside the actions and clears it on the next attempt', async () => {
+  const user = userEvent.setup()
+  const { api, calls } = scripted({
+    task: task({
+      status: 'failed',
+      spec_draft: null,
+      spec_confirmed: [{ version: 1, confirmed_at: '2026-10-03T10:02:00.000000Z', spec }],
+      error: { step: 'propose', code: 'model_not_configured', message: 'model provider is not configured' },
+      last_model: null,
+    }),
+    cancel: async () => { throw new ResearchRequestError('research_task_state', 'the task is already in flight') },
+    retry: async () => task({ status: 'awaiting_confirmation' }),
+  })
+  detail(api)
+
+  const actions = await screen.findByRole('region', { name: 'Task actions' })
+  const retry = within(actions).getByRole('button', { name: 'Retry failed step' })
+  await user.click(within(actions).getByRole('button', { name: 'Cancel task' }))
+
+  // Exactly one alert, inside the panel that holds the actions and after them.
+  const alert = await screen.findByRole('alert')
+  expect(actions.contains(alert)).toBe(true)
+  expect(alert.closest('section')?.getAttribute('aria-label')).toBe('Task actions')
+  expect(retry.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  await waitFor(() => expect(document.activeElement).toBe(alert))
+  expect(alert.textContent).toBe('the task is already in flight')
+  // One refused cancel: no second attempt, no other write, nothing dispatched.
+  expect(calls.cancel).toBe(1)
+  expect(calls.confirm).toBe(0)
+  expect(calls.retry).toBe(0)
+  expect(calls.create).toBe(0)
+
+  await user.click(retry)
+  await waitFor(() => expect(calls.retry).toBe(1))
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+})
+
+/**
+ * A refusal is never dropped when the reload takes its control away.
+ *
+ * A failed confirmation still reloads the persisted task, and that reload can
+ * show a task that was confirmed somewhere else. The button the reader pressed is
+ * then gone, so no panel owns the message any more: the page reports it once, in
+ * a focused summary of its own, rather than losing it with the control.
+ */
+it('reports a refusal whose action the reloaded task no longer offers', async () => {
+  const user = userEvent.setup()
+  let confirmedElsewhere = false
+  const confirmed = task({
+    status: 'confirmed',
+    spec_draft: null,
+    spec_confirmed: [{ version: 1, confirmed_at: '2026-10-03T10:02:00.000000Z', spec }],
+    jobs: ['job-1'],
+  })
+  const backing = scripted({
+    task: task({ status: 'awaiting_confirmation' }),
+    confirm: async () => {
+      confirmedElsewhere = true
+      throw new ResearchRequestError('research_task_state', 'the task was confirmed elsewhere')
+    },
+  })
+  const api: ApiAdapter = {
+    ...backing.api,
+    getResearchTask: async () => {
+      backing.calls.get += 1
+      return confirmedElsewhere ? confirmed : task({ status: 'awaiting_confirmation' })
+    },
+  }
+  detail(api)
+
+  await user.click(await screen.findByRole('button', { name: 'Confirm spec and start real backtest' }))
+
+  const alert = await screen.findByRole('alert')
+  expect(alert.closest('section')?.getAttribute('aria-label')).toBe('Action failure')
+  await waitFor(() => expect(document.activeElement).toBe(alert))
+  expect(alert.textContent).toBe('the task was confirmed elsewhere')
+  // The action is genuinely gone from the reloaded task, and it was asked once.
+  expect(screen.queryByRole('button', { name: 'Confirm spec and start real backtest' })).toBeNull()
+  expect(backing.calls.confirm).toBe(1)
+  expect(backing.calls.retry).toBe(0)
+  expect(backing.calls.cancel).toBe(0)
 })
