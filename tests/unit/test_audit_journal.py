@@ -387,7 +387,16 @@ def test_reopen_rejects_index_that_exceeds_resident_memory_budget(
     prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
     journal = create_posix_audit_journal(prepared.audit)
     journal.close()
-    monkeypatch.setattr(audit_module, "MAX_AUDIT_INDEX_RESIDENT_BYTES", 1)
+
+    def measured_over_budget(
+        entries: _JournalEntryIndex,
+        index: _LogicalKeyIndex,
+        recovered_sequences: bytearray,
+    ) -> int:
+        # One byte past the real hard bound; the production limits stay untouched.
+        return MAX_AUDIT_INDEX_RESIDENT_BYTES + 1
+
+    monkeypatch.setattr(audit_module, "_compact_index_resident_bytes", measured_over_budget)
 
     with pytest.raises(AuditContractError, match="256 MiB") as captured:
         reopen_posix_audit_journal(prepared.audit)

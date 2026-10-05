@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ea.plugin.catalog import AdapterV1, PluginCatalogV1
+from ea.plugin.catalog import AdapterV1
+from ea.plugin.declarative import DeclarationV1
 from ea.plugin.manifest import (
     KIND_INTERFACES,
     MANIFEST_SCHEMA_VERSION,
@@ -289,19 +290,27 @@ def test_unknown_interface_major_and_missing_version_are_rejected_in_a_recipe(
 ) -> None:
     orchestrator, _service_instance, _provider = _fake_orchestrator(tmp_path, monkeypatch, [])
 
-    def newer_major(_service: Any, _model_route: Any = None) -> PluginCatalogV1:
+    def newer_major(
+        _service: Any,
+        _model_route: Any = None,
+        _declarations: Iterable[DeclarationV1] = (),
+    ) -> list[tuple[AdapterV1, PluginManifestV1]]:
         manifest = _strategy_manifest(interface=InterfaceRangeV1(KIND_INTERFACES["strategy"], 2, 0))
-        return PluginCatalogV1([manifest], [TEST_ADAPTER])
+        return [(TEST_ADAPTER, manifest)]
 
-    monkeypatch.setattr("ea.web.research.builtin_catalog", newer_major)
+    monkeypatch.setattr("ea.web.research.builtin_capabilities", newer_major)
     rejected = orchestrator.resolve_recipe(TEST_SELECTION)
     assert rejected["usable"] is False
     assert rejected["code"] == "unknown_interface_major"
 
-    def only_this_version(_service: Any, _model_route: Any = None) -> PluginCatalogV1:
-        return PluginCatalogV1([_strategy_manifest()], [TEST_ADAPTER])
+    def only_this_version(
+        _service: Any,
+        _model_route: Any = None,
+        _declarations: Iterable[DeclarationV1] = (),
+    ) -> list[tuple[AdapterV1, PluginManifestV1]]:
+        return [(TEST_ADAPTER, _strategy_manifest())]
 
-    monkeypatch.setattr("ea.web.research.builtin_catalog", only_this_version)
+    monkeypatch.setattr("ea.web.research.builtin_capabilities", only_this_version)
     missing = orchestrator.resolve_recipe(
         {"strategy": {"plugin_id": "test.capability.strategy", "package_version": "9.9.9"}}
     )
@@ -446,10 +455,15 @@ def test_a_changed_catalog_cannot_alter_the_accepted_binding(
 ) -> None:
     orchestrator, service, confirmed = _confirmed_with_selection(tmp_path, monkeypatch)
     frozen = confirmed.pinned_binding
-    monkeypatch.setattr(
-        "ea.web.research.builtin_catalog",
-        lambda _service, _model_route=None: PluginCatalogV1([], []),
-    )
+
+    def no_capabilities(
+        _service: Any,
+        _model_route: Any = None,
+        _declarations: Iterable[DeclarationV1] = (),
+    ) -> list[tuple[AdapterV1, PluginManifestV1]]:
+        return []
+
+    monkeypatch.setattr("ea.web.research.builtin_capabilities", no_capabilities)
     failed = orchestrator._start_backtest(confirmed.task_id)  # noqa: SLF001 — the product path
     assert failed.status == "failed"
     assert failed.error is not None and failed.error["code"] == "plugin_unavailable"
@@ -463,14 +477,18 @@ def test_a_redeclared_version_under_the_same_number_is_detected(
 ) -> None:
     orchestrator, service, confirmed = _confirmed_with_selection(tmp_path, monkeypatch)
 
-    def redeclared(_service: Any, _model_route: Any = None) -> PluginCatalogV1:
+    def redeclared(
+        _service: Any,
+        _model_route: Any = None,
+        _declarations: Iterable[DeclarationV1] = (),
+    ) -> list[tuple[AdapterV1, PluginManifestV1]]:
         manifest = _strategy_manifest(
             plugin_id="ea.builtin.strategy.bounded-long-v1",
             config_schema={"strategy_id": "bounded-long-v1", "revision": 2},
         )
-        return PluginCatalogV1([manifest], [TEST_ADAPTER])
+        return [(TEST_ADAPTER, manifest)]
 
-    monkeypatch.setattr("ea.web.research.builtin_catalog", redeclared)
+    monkeypatch.setattr("ea.web.research.builtin_capabilities", redeclared)
     failed = orchestrator._start_backtest(confirmed.task_id)  # noqa: SLF001
     assert failed.status == "failed"
     assert failed.error is not None and failed.error["code"] == "binding_drift"
@@ -508,10 +526,15 @@ def test_confirmation_refuses_a_selection_that_no_longer_resolves(
         )
     )
     task = orchestrator.create("Confirm under a changed catalog", SELECTED)
-    monkeypatch.setattr(
-        "ea.web.research.builtin_catalog",
-        lambda _service, _model_route=None: PluginCatalogV1([], []),
-    )
+
+    def no_capabilities(
+        _service: Any,
+        _model_route: Any = None,
+        _declarations: Iterable[DeclarationV1] = (),
+    ) -> list[tuple[AdapterV1, PluginManifestV1]]:
+        return []
+
+    monkeypatch.setattr("ea.web.research.builtin_capabilities", no_capabilities)
     with pytest.raises(SelectionRejectedError):
         orchestrator.confirm(task.task_id)
     reloaded = orchestrator._store.get(task.task_id)  # noqa: SLF001
