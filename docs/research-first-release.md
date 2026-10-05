@@ -90,8 +90,9 @@ None of the following gates is satisfied. Each is a prerequisite, not a formalit
 - **Full exact-head release verification.** An isolated verification of the current UI was completed
   against a copied, safe historical report: no new provider calls, no new backtests, no overflow at
   desktop or mobile widths, and a stable state across GET refresh. Full exact-head release
-  verification (the complete candidate checks on the exact release commit) remains **unrun**, and
-  the candidate has not been re-verified capability-by-capability.
+  verification (the complete candidate checks on the exact release commit) is **not yet passed**: it
+  was attempted and the formatter gate blocked it. The candidate has not been re-verified
+  capability-by-capability.
 - **Version and tag decision.** The public package version remains `0.2.0` because the owner has not
   decided otherwise (see §3).
 - **Release announcement.** The final, version-specific release announcement is pending the owner's
@@ -139,7 +140,8 @@ note, and each would need its own bounded Issue and acceptance criteria.
 - **Candidate-specific verification (§2).** The only verification run for this candidate is the
   isolated UI verification: a copied, safe historical report, no new provider calls, no new
   backtests, no overflow at desktop or mobile widths, and a stable state across GET refresh. Full
-  exact-head release verification is unrun.
+  exact-head release verification is not yet passed: it was attempted and the formatter gate blocked
+  it.
 - This note adds no runtime, gate, schema, version, or architecture change; it is documentation
   only.
 - A claim is absent from this note unless the supplied facts support it. Where a capability is

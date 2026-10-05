@@ -529,8 +529,7 @@ def _destination_field(name: object, section: str) -> str:
     if type(name) is not str or name not in STRICT_HEADER:
         _fail(
             "mapping_declaration",
-            f"{name!r} in '{section}' is not one of the strict fields "
-            f"{', '.join(STRICT_HEADER)}",
+            f"{name!r} in '{section}' is not one of the strict fields {', '.join(STRICT_HEADER)}",
         )
     return name
 

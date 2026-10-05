@@ -780,7 +780,5 @@ def test_cli_gate_lock_then_evaluate_is_the_only_path_to_a_verdict(tmp_path: Pat
 
     # The command's own help must not read as a readiness, soak or post-hoc
     # certification claim: it names the interval history it does not connect.
-    help_text = " ".join(
-        runner.invoke(app, ["paper", "gate", "evaluate", "--help"]).stdout.split()
-    )
+    help_text = " ".join(runner.invoke(app, ["paper", "gate", "evaluate", "--help"]).stdout.split())
     assert "no interval history" in help_text

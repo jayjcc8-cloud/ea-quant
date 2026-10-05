@@ -452,9 +452,7 @@ def test_durable_capacity_stop_without_pending_work_is_still_a_certain_failure(
 
 
 @pytest.mark.parametrize("reason", FAILED_RUNTIME_REASONS)
-def test_recorded_runtime_failure_reasons_are_certain_failures(
-    tmp_path: Path, reason: str
-) -> None:
+def test_recorded_runtime_failure_reasons_are_certain_failures(tmp_path: Path, reason: str) -> None:
     """Every reason the runtime records as failed stays an incident with nothing pending."""
     locked = _locked()
     stopped = _attempt(
@@ -1116,13 +1114,17 @@ def test_history_validation_is_exact(tmp_path: Path) -> None:
 
     with pytest.raises(PaperEvidenceError) as unbounded_begin:
         PaperAttemptAssociation(
-            binding=clean.binding, begin=None, end=WINDOW_END  # type: ignore[arg-type]
+            binding=clean.binding,
+            begin=None,
+            end=WINDOW_END,  # type: ignore[arg-type]
         )
     assert unbounded_begin.value.code is OutcomeCode.OUT_OF_RANGE
 
     with pytest.raises(PaperEvidenceError) as unbounded_end:
         PaperAttemptAssociation(
-            binding=clean.binding, begin=STARTED_AT, end=None  # type: ignore[arg-type]
+            binding=clean.binding,
+            begin=STARTED_AT,
+            end=None,  # type: ignore[arg-type]
         )
     assert unbounded_end.value.code is OutcomeCode.OUT_OF_RANGE
 

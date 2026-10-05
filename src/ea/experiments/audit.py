@@ -685,10 +685,8 @@ class PosixAuditJournal:
         committed = len(self._entries) + self._reserved_frames
         record_slack = self._capacity_limits.max_records - committed
         byte_slack = (
-            (self._capacity_limits.max_journal_bytes - self._verified_eof)
-            // MAX_AUDIT_FRAME_BYTES
-            - self._reserved_frames
-        )
+            self._capacity_limits.max_journal_bytes - self._verified_eof
+        ) // MAX_AUDIT_FRAME_BYTES - self._reserved_frames
         index_slack = self._index_record_limit() - committed
         return max(0, min(record_slack, byte_slack, index_slack))
 
@@ -720,9 +718,7 @@ class PosixAuditJournal:
         """
         if record_kind not in _CLOSING_AUDIT_RECORD_KINDS:
             return 0
-        requirement = (
-            2 if record_kind is AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME else 1
-        )
+        requirement = 2 if record_kind is AuditRecordKind.RECONCILIATION_OBSERVATION_OUTCOME else 1
         return 1 if self._reserved_frames >= requirement else 0
 
     def _closing_appends_fit(self, required: int) -> bool:

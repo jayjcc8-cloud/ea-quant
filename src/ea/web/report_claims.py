@@ -114,8 +114,7 @@ CONCLUSION_SCOPES = (FROZEN_SCOPE,)
 
 SCOPE_TEXT: dict[str, str] = {
     FROZEN_SCOPE: (
-        "This conclusion is about the single frozen experiment above and claims "
-        "nothing wider."
+        "This conclusion is about the single frozen experiment above and claims nothing wider."
     ),
     BEYOND_SCOPE: (
         "The conclusion was declared to reach beyond the single frozen experiment, and "

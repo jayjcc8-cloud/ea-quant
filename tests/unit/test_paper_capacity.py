@@ -416,9 +416,7 @@ def test_index_resize_projection_binds_first_while_count_and_bytes_allow(
     workspace, candidate_id, scenario, round_trips = accepted
     # The projection must cover the prepared record, the reserve and the whole
     # ordinary budget (B - 3); one record less already refuses before a market.
-    tighten(
-        max_index_resident_bytes=projected_index_resident_bytes(1 + _budget(round_trips) - 1)
-    )
+    tighten(max_index_resident_bytes=projected_index_resident_bytes(1 + _budget(round_trips) - 1))
     refused = run_local_paper(
         workspace, candidate_id, scenario, tmp_path / "refused", event_limit=3
     )

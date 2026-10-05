@@ -644,17 +644,13 @@ def test_a_stored_conclusion_of_this_semantics_re_renders_from_the_report_alone(
         versions={"renderer": rc.INTERPRETATION_SCHEMA},
     )
     assert (
-        rc.rerender_interpretation(
-            published, report=_report(), report_identity={"job_id": "j-1"}
-        )
+        rc.rerender_interpretation(published, report=_report(), report_identity={"job_id": "j-1"})
         == published
     )
     # A report that no longer shows what the conclusion claimed re-renders to
     # nothing rather than to the stored text.
     tampered = _report(net_pnl={"amount": "-4.25", "rule": "equity-minus-initial-funding-v1"})
-    assert (
-        rc.rerender_interpretation(published, report=tampered, report_identity={}) is None
-    )
+    assert rc.rerender_interpretation(published, report=tampered, report_identity={}) is None
 
 
 def test_the_packet_carries_codes_and_host_read_values_only() -> None:

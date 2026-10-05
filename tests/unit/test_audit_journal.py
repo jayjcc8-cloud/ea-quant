@@ -1315,9 +1315,7 @@ def test_resize_peak_index_projection_binds_the_record_dimension(tmp_path: Path)
     root = _root(tmp_path)
     prepared = LocalResultStore(root).prepare(_spec(), lambda: RUN_UUID)
     journal = create_posix_audit_journal(prepared.audit)
-    journal.tighten_capacity_limits(
-        max_index_resident_bytes=projected_index_resident_bytes(1 + 3)
-    )
+    journal.tighten_capacity_limits(max_index_resident_bytes=projected_index_resident_bytes(1 + 3))
     # Only the index dimension was narrowed: count and byte room stay at the
     # accepted production bounds, so the record dimension is what binds.
     assert journal.limits.max_records == MAX_AUDIT_RECORDS

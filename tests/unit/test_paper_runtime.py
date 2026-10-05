@@ -211,9 +211,10 @@ def test_every_dispatch_stays_inside_the_checked_four_frame_market_bound(tmp_pat
     assert len(markets) == status["market_events"]
     assert max(durable.values()) == PAPER_MARKET_AUDIT_FRAMES
     orders = 2 * engine.max_round_trips
-    assert sorted(durable[sequence] for sequence in markets) == [
-        1
-    ] * (len(markets) - orders) + [PAPER_MARKET_AUDIT_FRAMES] * orders
+    assert (
+        sorted(durable[sequence] for sequence in markets)
+        == [1] * (len(markets) - orders) + [PAPER_MARKET_AUDIT_FRAMES] * orders
+    )
     fact_sequences = [sequence for sequence in durable if sequence not in set(markets)]
     # Every fact dispatch closes in exactly one budgeted four-frame cascade: the
     # acknowledgement, the trade itself and the broker query child of that trade.

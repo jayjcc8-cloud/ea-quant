@@ -453,13 +453,16 @@ def test_the_time_declaration_admits_no_guessing_and_no_contradiction() -> None:
     claimed_zone = {"timezone": NEW_YORK, "formats": offsets}
     assert _reject(content, time_declaration=claimed_zone).code == "invalid_timezone"
     # A declared format for a field this policy does not use is a contradiction.
-    assert _reject(
-        content,
-        mapping=_without("available_at"),
-        time_declaration=TIME,
-        availability_policy=AVAILABILITY_SIMULATED,
-        latency_seconds=60,
-    ).code == "mapping_declaration"
+    assert (
+        _reject(
+            content,
+            mapping=_without("available_at"),
+            time_declaration=TIME,
+            availability_policy=AVAILABILITY_SIMULATED,
+            latency_seconds=60,
+        ).code
+        == "mapping_declaration"
+    )
 
 
 # -- value refusals ---------------------------------------------------------

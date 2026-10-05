@@ -153,7 +153,8 @@ The screenshot is a historical single example: the model completed that conclusi
 `088d4ab`. An isolated verification of the current UI was completed against a copied, safe
 historical report, with no new provider calls and no new backtests; it showed no overflow at
 desktop or mobile widths and a stable state across GET refresh. Full exact-head release
-verification remains unrun.
+verification is not yet passed: it was attempted and the formatter gate blocked it, so the release
+remains pending.
 
 ## Simulated Paper (separate runtime)
 
