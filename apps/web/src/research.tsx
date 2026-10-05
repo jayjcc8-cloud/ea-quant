@@ -25,7 +25,10 @@ import {
   type PluginCatalogEntry,
   type PluginSelection,
   type RecipeResolution,
+  type ResearchError,
   type ResearchSpec,
+  type ResearchDataScope,
+  type ResearchInterpretation,
   type ResearchTask,
   type ResearchTaskStatus,
   type UploadDeclaration,
@@ -52,6 +55,41 @@ import {
 
 const POLL_STATUSES: ResearchTaskStatus[] = ['drafting', 'confirmed', 'running']
 const NON_RETRYABLE_CODES = new Set(['model_outcome_unknown', 'job_outcome_unknown', 'task_in_flight'])
+
+/**
+ * Display names for the allowlisted criterion fields. This map is presentation
+ * only: the field list itself is the host's, and an unknown path is shown as
+ * written rather than guessed at.
+ */
+const CRITERION_FIELD_LABELS: Record<string, string> = {
+  'economics.net_pnl.amount': 'Net P&L',
+  'economics.realized_pnl.amount': 'Realized P&L',
+  'economics.fees.amount': 'Fees paid',
+  'economics.total_return.value': 'Total return',
+  'economics.counts.fills': 'Fills',
+  'economics.counts.orders': 'Orders',
+  'economics.completed_round_trips': 'Completed round trips',
+}
+
+const OUTCOME_LABELS: Record<ResearchInterpretation['outcome'], string> = {
+  supported_in_scope: 'Consistent with the frozen criterion, within this one run',
+  not_supported: 'Opposite to the frozen criterion, within this one run',
+  insufficient_evidence: 'Not settled by this run',
+  capability_unsupported: 'Cannot be evaluated from this report',
+}
+
+/** Why the conclusion step did not publish; the run's own result is unaffected. */
+const INTERPRETATION_ERROR_EXPLANATIONS: Record<string, string> = {
+  model_not_configured: 'No model is configured, so no conclusion call was made. The completed run and its report are unchanged.',
+  model_outcome_unknown: 'A conclusion call left this process and its outcome is unproven. The call stays charged and is never re-dispatched automatically.',
+  claim_rejected: 'The model tried to record a conclusion that does not follow from the verified report, so nothing was published.',
+  no_conclusion_call: 'The model did not record a conclusion, so nothing was published.',
+  report_unavailable: 'The verified report could not be read, so no conclusion was published.',
+  report_identity_changed: 'The verified report no longer matches the one the conclusion was produced against, so nothing was published.',
+  budget_exceeded: 'The research model-call budget has no call left for a conclusion.',
+  cancelled_by_user: 'You cancelled before a conclusion was published. The completed run and its report are unchanged.',
+  interpretation_schema_unsupported: 'A stored conclusion was written under a semantics this version cannot re-render, so it is not served. The completed run and its report are unchanged.',
+}
 
 const STATUS_LABELS: Record<ResearchTaskStatus, string> = {
   drafting: 'drafting',
@@ -173,6 +211,8 @@ function SpecFacts({ spec }: { spec: ResearchSpec }) {
       <div><dt>Research data</dt><dd>{spec.dataset_id ?? 'Registered scenario data'}</dd></div>
       <div><dt>Initial cash</dt><dd>{spec.initial_cash}</dd></div>
       <div><dt>Parameters</dt><dd>{Object.entries(spec.parameters).map(([name, value]) => parameterDescription(name, value)).join(' · ') || 'Registered defaults'}</dd></div>
+      {spec.criterion && <div><dt>Frozen criterion</dt><dd>{CRITERION_FIELD_LABELS[spec.criterion.field] ?? spec.criterion.field} expected {spec.criterion.expectation} · frozen before the run</dd></div>}
+      {!spec.criterion && <div><dt>Frozen criterion</dt><dd>None was stated, so this run cannot be concluded for or against the idea.</dd></div>}
       {spec.selection && <div><dt>Selected capabilities</dt><dd>{LAYER_ORDER.flatMap(layer => {
         const component = spec.selection?.[layer]
         return component ? [`${LAYER_LABELS[layer]}: ${component.plugin_id} ${component.package_version}`] : []
@@ -1337,10 +1377,85 @@ export function ResearchTaskDetailRoute({ api }: { api: ApiAdapter }) {
   return <ResearchTaskDetail key={taskId} api={api} taskId={taskId} />
 }
 
+/**
+ * The bounded data provenance the host projected for a conclusion.
+ *
+ * A fact this product cannot prove is shown as unavailable rather than omitted,
+ * so a reader can never take this one run for more data than it actually had.
+ */
+function ConclusionScope({ scope }: { scope: ResearchDataScope | null | undefined }) {
+  if (!scope) return <p className="muted">The host recorded no data scope for this conclusion, so no scope is claimed here.</p>
+  const text = (value: string | number | boolean | null) => value === null ? 'Not available' : String(value)
+  // The replay window is the time and input policy the run recorded. It is shown
+  // as recorded and never read as coverage: an absent window stays unavailable.
+  const window = scope.time_range
+  const windowText = window === null
+    ? 'Not available'
+    : `${text(window.start_inclusive)} → ${text(window.end_exclusive)}${window.timezone === null ? '' : ` (${window.timezone}${window.selection_field === null ? '' : `, selected by ${window.selection_field}`})`}`
+  return <>
+    <h3>Data scope</h3>
+    <dl className="summary-list">
+      <div><dt>Records</dt><dd>{text(scope.record_count)}</dd></div>
+      <div><dt>Dataset</dt><dd>{text(scope.dataset_id)}</dd></div>
+      <div><dt>Input SHA-256</dt><dd>{text(scope.input_sha256)}</dd></div>
+      <div><dt>Scenario SHA-256</dt><dd>{text(scope.scenario_sha256)}</dd></div>
+      <div><dt>Recorded replay window</dt><dd>{windowText}</dd></div>
+      <div><dt>Point in time</dt><dd>{text(scope.point_in_time)}</dd></div>
+      <div><dt>Independently verified</dt><dd>{scope.quality_verified ? 'Verified' : 'Not available'}</dd></div>
+    </dl>
+    <p className="muted">Facts this run does not carry: {scope.unavailable.length > 0 ? scope.unavailable.join(', ') : 'none'}. Nothing here is claimed beyond the recorded facts.</p>
+  </>
+}
+
+/**
+ * The one conclusion for a succeeded run, exactly as the host rendered it.
+ *
+ * Nothing here is composed by this client: the outcome, the inference sentence,
+ * the criterion reading and the scope sentence are strings the host wrote from
+ * the verified report. The question is shown as the user's own input, never as
+ * a finding, and the model's own wording is never displayed at all.
+ */
+function ResearchConclusion({ interpretation, error }: { interpretation: ResearchInterpretation | null; error: ResearchError | null }) {
+  if (!interpretation) {
+    if (!error) return null
+    return <section className="panel" aria-label="Conclusion">
+      <header><h2>Conclusion</h2><span>Not published</span></header>
+      <p className="notice">{INTERPRETATION_ERROR_EXPLANATIONS[error.code] ?? 'The conclusion step did not publish a result.'}</p>
+      <dl className="summary-list"><div><dt>Code</dt><dd>{error.code}</dd></div><div><dt>Detail</dt><dd>{error.message}</dd></div></dl>
+      <p className="muted">This is a failure of the conclusion step alone. The backtest computation, its status and its verified report are unchanged.</p>
+    </section>
+  }
+  const reading = interpretation.observed
+  return <section className="panel" aria-label="Conclusion">
+    <header><h2>Conclusion</h2><span>{OUTCOME_LABELS[interpretation.outcome]}</span></header>
+    <dl className="summary-list">
+      <div><dt>Question (your input)</dt><dd>{interpretation.question}</dd></div>
+      <div><dt>Frozen criterion</dt><dd>{interpretation.criterion
+        ? `${CRITERION_FIELD_LABELS[interpretation.criterion.field] ?? interpretation.criterion.field} expected ${interpretation.criterion.expectation}`
+        : 'None was stated before the run'}</dd></div>
+      <div><dt>Read from the verified report</dt><dd>{reading.state === 'value' && reading.value !== undefined
+        ? `${reading.value}${reading.unit ? ` (${reading.unit})` : ''} · ${reading.sign}`
+        : 'No value could be read for this criterion'}</dd></div>
+      <div><dt>Criterion met</dt><dd>{interpretation.criterion_met === true
+        ? 'Met'
+        : interpretation.criterion_met === false ? 'Not met' : 'Not determined'}</dd></div>
+    </dl>
+    <p>{interpretation.outcome_text}</p>
+    <p className="muted">{interpretation.inference_text}</p>
+    <p className="muted">{interpretation.conclusion_scope_text}</p>
+    {interpretation.limitations.length > 0 && <>
+      <h3>What this run does not show</h3>
+      <ul className="assumption-list">{interpretation.limitations.map(item => <li key={item.code}>{item.text}</li>)}</ul>
+    </>}
+    <ConclusionScope scope={interpretation.data_scope} />
+    <p className="muted">Backtest only. This is one frozen criterion in one deterministic run, not a forecast, a promise of profit or a statement about the idea in general. The numbers above are read by the host from the verified report; no figure or sentence here was written by the model.</p>
+  </section>
+}
+
 export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: string }) {
   const [task, setTask] = useState<ResearchTask | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState<'confirm' | 'cancel' | 'retry' | null>(null)
+  const [busy, setBusy] = useState<'confirm' | 'cancel' | 'retry' | 'interpret' | null>(null)
   const [settings, setSettings] = useState<ModelConfigurationStatus | null>(null)
   const [settingsError, setSettingsError] = useState<string | null>(null)
   const [jobs, setJobs] = useState<Record<string, BacktestJob | null>>({})
@@ -1402,7 +1517,7 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
     return () => { active = false }
   }, [api, jobKey])
 
-  const mutate = async (kind: 'confirm' | 'cancel' | 'retry', call: () => Promise<ResearchTask>, fallback: string) => {
+  const mutate = async (kind: 'confirm' | 'cancel' | 'retry' | 'interpret', call: () => Promise<ResearchTask>, fallback: string) => {
     if (busyRef.current) return
     busyRef.current = true; setBusy(kind); setError(null)
     // A successful write is newer than every read dispatched before it completed.
@@ -1471,6 +1586,23 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
       <ul className="job-list">{task.jobs.map(jobId => <ResearchJob key={jobId} api={api} jobId={jobId} job={jobs[jobId] ?? null} holdouts={holdouts} />)}</ul>
       <p className="muted">Holdout evaluation and candidate creation stay on the existing evidence pages with their own explicit actions. Candidate acceptance records a research judgment only and grants no execution permission.</p>
       {succeededJobId && <p><Link to={`/backtests/${succeededJobId}`}>Open the succeeded run to evaluate its holdout and create the evaluated candidate</Link></p>}
+    </section>}
+
+    <ResearchConclusion
+      interpretation={task.interpretation ?? null}
+      error={task.interpretation_error ?? null}
+    />
+
+    {task.status === 'succeeded' && task.interpretation == null && task.interpretation_error == null && (api.interpretResearchTask || api.cancelResearchTask) && <section className="panel" aria-label="Conclusion action">
+      <header><h2>Draw one conclusion</h2><span>Explicit, never automatic</span></header>
+      <p className="muted">This asks the host to read the verified report for this run and publish one bounded conclusion against the criterion frozen before it. It spends at most one model call, starts no new backtest, and never changes the result above. Reading or refreshing this page never does this by itself.</p>
+      <div className="actions">
+        {api.interpretResearchTask && <button className="primary" disabled={busy !== null} onClick={() => { void mutate('interpret', () => api.interpretResearchTask!(taskId), 'The conclusion request was not accepted; the persisted task was reloaded.') }}>
+          {busy === 'interpret' ? 'Interpreting…' : 'Interpret this run'}
+        </button>}
+        {api.cancelResearchTask && <button disabled={busy !== null} onClick={() => { void mutate('cancel', () => api.cancelResearchTask!(taskId), 'Cancel was not confirmed; the persisted task was reloaded.') }}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel without a conclusion'}</button>}
+      </div>
+      <p className="muted">Cancelling here closes the conclusion only. It is final, and the completed run and its verified report are left exactly as they are.</p>
     </section>}
 
     </article><details className="research-context" open><summary>AI context & task controls</summary>

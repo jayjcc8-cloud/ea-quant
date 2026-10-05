@@ -180,6 +180,8 @@ export type ApiAdapter = {
   confirmResearchTask?(taskId: string): Promise<ResearchTask>
   retryResearchTask?(taskId: string): Promise<ResearchTask>
   cancelResearchTask?(taskId: string): Promise<ResearchTask>
+  /** The explicit conclusion step for one succeeded, verified run. */
+  interpretResearchTask?(taskId: string): Promise<ResearchTask>
   pluginCatalog?(): Promise<PluginCatalog>
   resolveRecipe?(selection: PluginSelection): Promise<RecipeResolution>
   listDeclarations?(): Promise<DeclarationCatalog>
@@ -261,6 +263,7 @@ const browserApi: ApiAdapter = {
   confirmResearchTask: taskId => researchApi.confirmTask(taskId),
   retryResearchTask: taskId => researchApi.retryTask(taskId),
   cancelResearchTask: taskId => researchApi.cancelTask(taskId),
+  interpretResearchTask: taskId => researchApi.interpretTask(taskId),
   pluginCatalog: () => researchApi.pluginCatalog(),
   resolveRecipe: selection => researchApi.resolveRecipe(selection),
   listDeclarations: () => researchApi.listDeclarations(),

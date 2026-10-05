@@ -63,6 +63,84 @@ export type ResearchSpec = {
   assumptions: string[]
   /** Present only when the user selected capabilities explicitly. */
   selection?: PluginSelection
+  /**
+   * One comparison frozen before the run. Absent on every task written before
+   * this field, and such a task concludes that nothing was stated to test.
+   */
+  criterion?: ReportCriterion | null
+}
+
+/** One frozen, allowlisted report field plus the sign the idea predicted. */
+export type ReportCriterion = {
+  schema: 'radian.report-criterion.v1'
+  field: string
+  expectation: 'positive' | 'negative' | 'zero'
+}
+
+/**
+ * The bounded provenance of the data a conclusion may lean on, as the host
+ * projected it. A fact this product cannot prove is named in `unavailable`
+ * rather than left out, so nothing here can be read as more scope than exists.
+ */
+export type ResearchDataScope = {
+  record_count: number | null
+  dataset_id: string | null
+  source_sha256: string | null
+  scenario_sha256: string | null
+  input_sha256: string | null
+  /**
+   * The replay window the verified report recorded, projected as the time and
+   * input policy of the run. Null when the report carries no window: a window is
+   * a selection policy, never proof that it covers the time a question is about.
+   */
+  time_range: {
+    start_inclusive: string | null
+    end_exclusive: string | null
+    timezone: string | null
+    selection_field: string | null
+  } | null
+  point_in_time: string | null
+  quality_verified: boolean
+  unavailable: string[]
+}
+
+/**
+ * The host-rendered conclusion for one verified report. Every sentence here is
+ * the host's own text: the model selects codes, never wording and never numbers.
+ */
+export type ResearchInterpretation = {
+  schema: 'radian.research-interpretation.v2'
+  /** The user's own question, carried as input and never as a finding. */
+  question: string
+  question_is_user_input: true
+  criterion: ReportCriterion | null
+  /**
+   * The host's own reading of the frozen criterion: true/false when the report
+   * settled it in the declared scope, null when it did not. A model selection
+   * can never change this value, and a wider declared scope never retracts it.
+   */
+  criterion_met: boolean | null
+  observed: {
+    state: string
+    field?: string
+    unit?: string
+    value?: string
+    sign?: string
+  }
+  /** The scope the claim was declared to hold over, and the host's sentence for it. */
+  conclusion_scope: 'frozen_single_run' | 'beyond_frozen_run'
+  conclusion_scope_text: string
+  /** The inference the host itself read from the report, regardless of the claim. */
+  host_inference: string
+  outcome: 'supported_in_scope' | 'not_supported' | 'insufficient_evidence' | 'capability_unsupported'
+  outcome_text: string
+  inference: string
+  inference_text: string
+  limitations: { code: string; text: string }[]
+  report: Record<string, unknown>
+  data_scope?: ResearchDataScope | null
+  model: Record<string, unknown> | null
+  versions: Record<string, unknown>
 }
 
 export type ResearchError = { step: string; code: string; message: string }
@@ -575,6 +653,12 @@ export type ResearchTask = {
   pinned_binding?: PluginBinding | null
   /** One host-verified declaration the model drafted. Never installed by the model. */
   declaration_draft?: DeclarationVerdict | null
+  /** The published conclusion, written entirely by the host from a verified report. */
+  interpretation?: ResearchInterpretation | null
+  /** Evidence for a conclusion, persisted before anything is published. */
+  interpretation_evidence?: Record<string, unknown> | null
+  /** A technical failure of the conclusion step; never rewrites a succeeded run. */
+  interpretation_error?: ResearchError | null
 }
 
 /** A local research request failure with the engine's own error code. */
@@ -628,6 +712,12 @@ export const researchApi = {
     write<ResearchTask>(`/api/research/tasks/${encodeURIComponent(taskId)}/retry`, {}),
   cancelTask: (taskId: string) =>
     write<ResearchTask>(`/api/research/tasks/${encodeURIComponent(taskId)}/cancel`, {}),
+  /**
+   * The explicit one-shot conclusion step. Reading a task never dispatches one:
+   * only this call asks the host to interpret a succeeded, verified run.
+   */
+  interpretTask: (taskId: string) =>
+    write<ResearchTask>(`/api/research/tasks/${encodeURIComponent(taskId)}/interpret`, {}),
   pluginCatalog: () => apiRequest<PluginCatalog>('/api/plugins/catalog'),
   resolveRecipe: (selection: PluginSelection) =>
     write<RecipeResolution>('/api/plugins/recipe/resolve', { selection }),

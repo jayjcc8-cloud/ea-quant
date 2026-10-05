@@ -16,7 +16,7 @@ PROVIDERS = ("anthropic", "openai-chat-completions-compatible")
 KEY = "fixture-not-a-credential"
 
 
-def store(tmp_path: Path, provider: str) -> RadianSettings:
+def store(tmp_path: Path, provider: str, *, max_model_calls: int = 2) -> RadianSettings:
     settings = RadianSettings(tmp_path / "settings.json")
     settings.save(
         {
@@ -27,7 +27,7 @@ def store(tmp_path: Path, provider: str) -> RadianSettings:
                 "api_key": KEY,
                 "base_url": "http://fixture.invalid/api",
             },
-            "research": {"max_model_calls": 2, "max_backtests": 1},
+            "research": {"max_model_calls": max_model_calls, "max_backtests": 1},
         }
     )
     return settings
@@ -245,7 +245,10 @@ def test_same_strategy_draft_repair_flow_and_restart_with_missing_usage(
     from unit.test_web_research import _propose_call, _service
 
     service = _service(tmp_path)
-    settings = store(tmp_path, provider)
+    # The two calls below are the proposal and its repair, so this fixture runs on
+    # a budget that also holds the final conclusion slot the single-experiment
+    # contract reserves up front; a two-call budget could never reach a conclusion.
+    settings = store(tmp_path, provider, max_model_calls=3)
     path = tmp_path / "research"
     orchestrator = research.ResearchOrchestrator(research.ResearchStore(path), service, settings)
     catalog = orchestrator._catalog()  # noqa: SLF001
