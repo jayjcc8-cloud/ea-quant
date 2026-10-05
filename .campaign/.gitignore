@@ -1,0 +1,8 @@
+# Regenerable campaign scratch; the committed evidence root is added explicitly.
+ea-fixtures/
+ea-home/
+backups/
+restored*/
+launchagents/
+run-config.env
+*.log

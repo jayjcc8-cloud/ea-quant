@@ -11,6 +11,7 @@ from ea.core.commission import commission_amount
 from ea.core.economics import (
     CanonicalDecimal,
     EconomicValidationError,
+    _scaled_text,
     require_quantized,
 )
 from ea.core.execution import (
@@ -1651,22 +1652,6 @@ def _signed(value: CanonicalDecimal, sign: int) -> CanonicalDecimal:
     if sign not in (-1, 1):
         raise AssertionError("internal decimal sign must be -1 or 1")
     return CanonicalDecimal(_scaled_text(value.coefficient * sign, value.scale))
-
-
-def _scaled_text(coefficient: int, scale: int) -> str:
-    if coefficient == 0:
-        return "0"
-    while scale > 0 and coefficient % 10 == 0:
-        coefficient //= 10
-        scale -= 1
-    sign = "-" if coefficient < 0 else ""
-    digits = str(abs(coefficient))
-    if scale == 0:
-        return sign + digits
-    if len(digits) <= scale:
-        digits = ("0" * (scale + 1 - len(digits))) + digits
-    split = len(digits) - scale
-    return f"{sign}{digits[:split]}.{digits[split:]}"
 
 
 def _structural_error(error: EconomicValidationError) -> PortfolioLedgerError:

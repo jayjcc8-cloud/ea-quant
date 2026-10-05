@@ -1,0 +1,39 @@
+{
+  "incomplete_outbound_intents": [
+    {
+      "classification": "unknown",
+      "client_submission_key": null,
+      "dispatch_sequence": 1,
+      "execution_request_sha256": null,
+      "order_owner_sequence": 1,
+      "terminal": null,
+      "venue_order_id": null
+    }
+  ],
+  "joint": {
+    "divergent_orders": [],
+    "exactly_once": true,
+    "not_sent_orders": [
+      1
+    ],
+    "open_orders": [],
+    "reason": null,
+    "recovered": true,
+    "recovered_fills": 0,
+    "recovered_orders": 1
+  },
+  "outbound_intents": [
+    {
+      "classification": "unknown",
+      "client_submission_key": null,
+      "dispatch_sequence": 1,
+      "execution_request_sha256": null,
+      "order_owner_sequence": 1,
+      "terminal": null,
+      "venue_order_id": null
+    }
+  ],
+  "reconciliation_required": false,
+  "run_id": "de339667-4708-4ee1-8b7b-1c2c24014ef1",
+  "state": "incomplete"
+}

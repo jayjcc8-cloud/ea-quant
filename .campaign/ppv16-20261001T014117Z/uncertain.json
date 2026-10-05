@@ -1,0 +1,55 @@
+{
+  "drill": "uncertain",
+  "fault_classes": [
+    "UNCERTAIN_SUBMIT",
+    "RESTART_RECOVERY",
+    "RECONCILIATION_AFTER_FAULT",
+    "FAIL_CLOSED",
+    "NO_DUPLICATE_ECONOMIC_EFFECT",
+    "EVIDENCE_TRUTHFUL"
+  ],
+  "seam": "deterministic crash_after seam through run_local_paper + real POSIX journal + resume",
+  "verdict": "PASS",
+  "windows": [
+    {
+      "cash_after_crash": "1000",
+      "classification": "unknown",
+      "fills_after_crash": 0,
+      "resolution": "not_sent",
+      "terminal": null,
+      "window": "PAPER_SUBMISSION_AUTHORIZATION"
+    },
+    {
+      "cash_after_crash": "1000",
+      "classification": "sent_confirmed",
+      "fills_after_crash": 0,
+      "resolution": "open",
+      "terminal": null,
+      "window": "PAPER_SUBMISSION_RESULT"
+    },
+    {
+      "cash_after_crash": "1000",
+      "classification": "sent_confirmed",
+      "fills_after_crash": 0,
+      "resolution": "open",
+      "terminal": null,
+      "window": "PAPER_FACT_DISPATCH"
+    },
+    {
+      "cash_after_crash": "1000",
+      "classification": "sent_confirmed",
+      "fills_after_crash": 0,
+      "resolution": "open",
+      "terminal": null,
+      "window": "EXECUTION_FACT_PROCESSING_OUTCOME"
+    },
+    {
+      "cash_after_crash": "1000",
+      "classification": "sent_confirmed",
+      "fills_after_crash": 0,
+      "resolution": "open",
+      "terminal": null,
+      "window": "PORTFOLIO_LEDGER_HANDOFF_OUTCOME"
+    }
+  ]
+}

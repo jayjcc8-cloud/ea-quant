@@ -1,0 +1,27 @@
+{
+  "incomplete_outbound_intents": [],
+  "joint": {
+    "divergent_orders": [],
+    "exactly_once": true,
+    "not_sent_orders": [],
+    "open_orders": [],
+    "reason": null,
+    "recovered": true,
+    "recovered_fills": 1,
+    "recovered_orders": 1
+  },
+  "outbound_intents": [
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "0dab1e6394c8672a465195c0c26ecbedcef39b6f21afd7f8e5e1c4335294dd30",
+      "dispatch_sequence": 1,
+      "execution_request_sha256": "704bf443222dc1ef43b26a6f4d24d5af8c9d3c68e619ced06bf2e68ec9c1883f",
+      "order_owner_sequence": 1,
+      "terminal": "filled",
+      "venue_order_id": "paper-0dab1e6394c8672a465195c0c26ecbedcef39b6f21afd7f8e5e1c4335294dd30"
+    }
+  ],
+  "reconciliation_required": false,
+  "run_id": "540370ef-0d81-4750-b19c-8224fbbcd874",
+  "state": "incomplete"
+}

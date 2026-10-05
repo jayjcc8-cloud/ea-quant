@@ -1,0 +1,17 @@
+{
+  "checks": [
+    "admission matches the durable-record truth exactly"
+  ],
+  "drill": "backup-restore",
+  "fault_classes": [
+    "BACKUP_RESTORE_AFTER_FAULT",
+    "RESTART_RECOVERY",
+    "RECONCILIATION_AFTER_FAULT",
+    "NO_DUPLICATE_ECONOMIC_EFFECT",
+    "EVIDENCE_TRUTHFUL"
+  ],
+  "restored_run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/restored/d50f5170-3051-4797-9762-8fe54c061051",
+  "seam": "ea paper backup/inspect/restore/resume CLI round trip over a faulted attempt",
+  "source_run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-storm/d50f5170-3051-4797-9762-8fe54c061051",
+  "verdict": "PASS"
+}

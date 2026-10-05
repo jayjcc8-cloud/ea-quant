@@ -1,0 +1,10 @@
+{
+  "checks": [
+    "git HEAD 4a012ea784788ce9371f8dd6b47fdeb7458428ad recorded at campaign start; tracked files unchanged while drills ran",
+    "paper_evidence.py byte-identical to the authoritative start main",
+    "no drill tooling can turn FAIL/INVALID into PASS: the gate is never re-judged here",
+    "LIVE stays DENIED: no run mode, credential, or real-broker effect was used"
+  ],
+  "drill": "gate-invariant",
+  "verdict": "PASS"
+}

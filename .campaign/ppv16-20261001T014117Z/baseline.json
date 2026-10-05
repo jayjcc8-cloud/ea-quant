@@ -1,0 +1,18 @@
+{
+  "checks": [
+    "exit 0; state stopped reason stop_requested",
+    "cash 986.8 equity 986.8 position 0",
+    "fills 6 observed_fills 6 duplicate_facts 6",
+    "ledger_sequence 7",
+    "completed_round_trips 3"
+  ],
+  "drill": "baseline",
+  "fault_classes": [
+    "DUPLICATE_FACT",
+    "LATE_FACT",
+    "NO_DUPLICATE_ECONOMIC_EFFECT"
+  ],
+  "run_dir": "/Users/mo/Documents/EA/.claude/worktrees/ppv16-fault-campaign/.campaign/runtime-baseline/da94cb8e-0908-4e59-a240-1048fa12fad0",
+  "seam": "real ea paper start/stop/status/resume subprocess",
+  "verdict": "PASS"
+}

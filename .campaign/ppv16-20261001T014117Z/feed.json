@@ -1,0 +1,14 @@
+{
+  "checks": [
+    "event_limit=3 -> exit 3, 3 market events, 0 pending facts, terminal resume",
+    "stall -> exit 3, reason source_stalled, market_events 8->9, pending_facts 0"
+  ],
+  "drill": "feed",
+  "fault_classes": [
+    "FEED_INTERRUPTION",
+    "FAIL_CLOSED",
+    "EVIDENCE_TRUTHFUL"
+  ],
+  "seam": "real ea paper subprocess; SIGSTOP/SIGCONT through the existing stall/freshness guards; --event-limit exhaustion",
+  "verdict": "PASS"
+}

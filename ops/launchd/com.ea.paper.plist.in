@@ -8,10 +8,11 @@
   under ~/EA, and it must neither run as root nor outlive the login session
   that owns those files.
 
-  The supervised program is `ea-runtime run`, which pins the operator's config
-  and then `exec`s `ea paper start` in the foreground. `exec` keeps launchd's
-  PID equal to the real Paper PID, so an abnormal kill of the job's process is
-  an abnormal kill of the trading process, never a surviving orphan.
+  The supervised program is `ea-runtime run` invoked with the supervised flag
+  declared in ProgramArguments below, which pins the operator's config and then
+  `exec`s `ea paper start` in the foreground. `exec` keeps launchd's PID equal
+  to the real Paper PID, so an abnormal kill of the job's process is an abnormal
+  kill of the trading process, never a surviving orphan.
 
   No EnvironmentVariables block is declared deliberately. launchd starts a job
   with a clean environment, and `ea paper start` rejects EA_CONFIG_PATH,
@@ -30,6 +31,12 @@
     <string>/bin/sh</string>
     <string>__SUPERVISOR_DIR__/ea-runtime</string>
     <string>run</string>
+    <!--
+      This flag is what makes the job the single writer: `ea-runtime run`
+      without it is refused while this label is loaded, so a hand-run cannot
+      become a second, unsupervised Paper process.
+    -->
+    <string>--supervised</string>
   </array>
   <key>WorkingDirectory</key>
   <string>__HOME_EA__</string>

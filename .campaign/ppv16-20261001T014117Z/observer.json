@@ -1,0 +1,89 @@
+{
+  "checks": [
+    "observer writes nothing; its availability or opinion affects no outcome"
+  ],
+  "drill": "observer",
+  "fault_classes": [],
+  "observer": {
+    "assessment": {
+      "anomalies": [
+        "Trade permission is blocked by the order-rate guard while a stop was requested.",
+        "projection_stale is true even though storage_state is reported as available.",
+        "process_alive is false and runtime_ready is false while runtime_state is reported as 'running'.",
+        "kill_switch_state is 'active' while kill_switch_halted is false.",
+        "alert_stream, backup, and operational_log sources are unavailable."
+      ],
+      "evidence_refs": [
+        "paper_status.health.reason_codes",
+        "paper_status.health.trade_permitted",
+        "paper_status.health.trade_reason",
+        "paper_status.health.process_alive",
+        "paper_status.health.projection_stale",
+        "paper_status.health.kill_switch_state",
+        "paper_status.reconciliation",
+        "paper_status.state",
+        "paper_status.reason",
+        "alert_stream.available",
+        "backup.available",
+        "operational_log.available"
+      ],
+      "observations": [
+        "paper_status source is available and reported at 2026-10-01T01:42:02.146064+00:00.",
+        "alert_stream source is unavailable because no alert stream path was supplied.",
+        "backup source is unavailable because no backup root was supplied.",
+        "operational_log source is unavailable because no operational log has been published at outputs/operational.jsonl.",
+        "paper_status state is 'stopped' with reason 'stop_requested' and terminal_durable true.",
+        "reconciliation state is 'clean' and reconciliation result is 'match'.",
+        "health trade_permitted is false with trade_reason 'order rate limit exceeded'.",
+        "health reason_codes are ['liveness.not_alive','projection.stale','trade_permission.order_rate'].",
+        "process_alive is false, runtime_ready is false, and projection_stale is true.",
+        "runtime_state is 'running' despite process_alive false and runtime_ready false.",
+        "kill_switch_state is 'active' but kill_switch_halted is false and operator_halt is false.",
+        "storage_state is 'available', broker_state is 'available', market_state is 'fresh', and strategy_heartbeat_state is 'live'.",
+        "recovery_state is 'not_required' and trade_blocking_guard is 'order_rate'.",
+        "The run shows 6 orders, 6 fills, 3 completed round trips, and 72 heartbeats with 0 pending orders and 0 pending facts."
+      ],
+      "operator_actions": [
+        "Confirm the stopped state with reason 'stop_requested' is intended.",
+        "Review the order rate limit configuration and determine whether the exceeded rate requires operator adjustment before further trading.",
+        "Confirm whether the process being not alive after the stop request is expected.",
+        "Investigate why projection_stale is true while storage_state is reported available.",
+        "Provide an alert stream path, a backup root, and an operational log if those evidence sources are needed for future diagnostics."
+      ],
+      "root_causes": [
+        "An order rate limit was exceeded, causing trade_blocking_guard 'order_rate' and trade_permitted false.",
+        "The process is not alive and runtime_ready is false, triggering the liveness.not_alive reason code.",
+        "projection_stale is true, triggering the projection.stale reason code.",
+        "A stop was requested, leaving the paper_status state stopped and terminal_durable true."
+      ],
+      "schema": "ea.claude-assessment.v1",
+      "severity": "warning",
+      "summary": "The paper runtime is stopped with a clean reconciliation, but trade permission is blocked by an order-rate limit while liveness and projection issues are reported."
+    },
+    "evidence": {
+      "active_alerts": 0,
+      "backup_state": null,
+      "kill_switch_state": "active",
+      "lease_held": false,
+      "operational_log_lines": 0,
+      "reconciliation_state": "clean",
+      "run_id": "da94cb8e-0908-4e59-a240-1048fa12fad0",
+      "runtime_ready": false,
+      "sources": {
+        "alert_stream": false,
+        "backup": false,
+        "operational_log": false,
+        "paper_status": true
+      },
+      "state": "stopped",
+      "trade_permitted": false
+    },
+    "observed_at": "2026-10-01T01:42:02.146064+00:00",
+    "observer": "claude",
+    "observer_status": "available",
+    "schema": "ea.observer-assessment.v1",
+    "unavailable_reason": null
+  },
+  "seam": "ea paper observer (WU-3) run once over the baseline attempt; diagnostic only",
+  "verdict": "PASS"
+}

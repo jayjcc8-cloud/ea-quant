@@ -1,0 +1,25 @@
+{
+  "drill": "durable-write",
+  "fault_classes": [
+    "DURABLE_WRITE_FAILURE",
+    "FAIL_CLOSED",
+    "EVIDENCE_TRUTHFUL",
+    "NO_DUPLICATE_ECONOMIC_EFFECT"
+  ],
+  "seam": "injected _AuditOps pwrite/fsync failure through the real POSIX journal at the PAPER_SUBMISSION_AUTHORIZATION frame",
+  "variants": [
+    {
+      "cash_after_failure": "1000",
+      "failure_type": "AuditContractError",
+      "mode": "pwrite",
+      "resolution": "no intent recorded (authorization frame never landed); truthful"
+    },
+    {
+      "cash_after_failure": "1000",
+      "failure_type": "AuditContractError",
+      "mode": "fsync",
+      "resolution": "unknown intent resolved not-sent by the broker observation"
+    }
+  ],
+  "verdict": "PASS"
+}

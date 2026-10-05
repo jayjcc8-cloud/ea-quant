@@ -1,0 +1,45 @@
+{
+  "incomplete_outbound_intents": [],
+  "joint": {
+    "divergent_orders": [],
+    "exactly_once": true,
+    "not_sent_orders": [],
+    "open_orders": [],
+    "reason": null,
+    "recovered": true,
+    "recovered_fills": 3,
+    "recovered_orders": 3
+  },
+  "outbound_intents": [
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "8ee6c3e7e7afc0cd5db734d54ce39c7635124e6a92447cb3654b65caf62a0434",
+      "dispatch_sequence": 1,
+      "execution_request_sha256": "38859ea4ed490743c09d1de5026c8dd3b7a6c14e03b0f682e8b803dbbda6985b",
+      "order_owner_sequence": 1,
+      "terminal": "filled",
+      "venue_order_id": "paper-8ee6c3e7e7afc0cd5db734d54ce39c7635124e6a92447cb3654b65caf62a0434"
+    },
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "4d29e2763788973440c92e4bfcadd07ece1ee0dced1fe5c27ba556f05eac3a68",
+      "dispatch_sequence": 6,
+      "execution_request_sha256": "cc6ad06bcbcd7ce8d786b5c77a657e7c0e7d2cd497650a1a74a9b314f9769859",
+      "order_owner_sequence": 2,
+      "terminal": "filled",
+      "venue_order_id": "paper-4d29e2763788973440c92e4bfcadd07ece1ee0dced1fe5c27ba556f05eac3a68"
+    },
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "3e9881c084d6fc24129100c003dce1852033aed635cbdca1fcd442e0efcd0fc3",
+      "dispatch_sequence": 11,
+      "execution_request_sha256": "962c785c296c2fbe8d03b9364bf3ec4464d2db73a1581c9b394c3645ecb0d8fc",
+      "order_owner_sequence": 3,
+      "terminal": "filled",
+      "venue_order_id": "paper-3e9881c084d6fc24129100c003dce1852033aed635cbdca1fcd442e0efcd0fc3"
+    }
+  ],
+  "reconciliation_required": false,
+  "run_id": "2cd70a81-2733-41d2-9252-ba0abbc09ead",
+  "state": "incomplete"
+}

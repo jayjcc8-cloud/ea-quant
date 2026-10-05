@@ -46,6 +46,28 @@ T1–T3 receive one primary review. If blockers exist, perform one concentrated 
 verification limited to those blockers and direct regressions. Then the Product Owner chooses
 merge, scope reduction, or closure. Do not open another reviewer chain.
 
+## Model routing
+
+Model selection is operator/tooling configuration, not governance. It deliberately stays out of
+`.governance/router.yaml`, which prohibits `select_model`; router tier output remains advisory and
+unchanged. The concrete role-to-upstream binding is machine-local and is not recorded here.
+
+| Work | Model role | Reasoning effort |
+| --- | --- | --- |
+| Normal engineering: implementation, refactor with established semantics, code reading, documentation, test maintenance, CLI/UI, routine bug fixes, lint/type repair, repository navigation | Sonnet | High |
+| Mechanical, low-risk subtasks once the semantic decision is already made | Haiku or Sonnet | Low–Medium |
+| Critical semantic engineering: architecture ownership, runtime or risk authority, accounting/settlement correctness, reconciliation, recovery and idempotency design, broker authority, Paper → Live boundary, major cross-module refactoring, ambiguous irreversible migration or deletion | Opus | Highest available |
+| Critical review: release candidate, adversarial review of a critical diff | Opus, fresh context | Highest available |
+| Subagents | Sonnet | as parent |
+
+Escalate by **semantic risk, not workload**. A long task, a large diff, many files, many tests, a
+large context, or tedium are not escalation grounds on their own.
+
+Critical review uses exactly one fresh-context reviewer, given the work-unit objective, invariants,
+exact diff, directly affected implementation and tests, and acceptance criteria — never the
+implementer's chain of reasoning or self-justification. Review only for real blockers. Do not build
+reviewer-of-reviewer chains or automatic multi-model voting.
+
 ## Completion
 
 When acceptance tests pass, the tier-required CI/review is green, and no qualifying blocker

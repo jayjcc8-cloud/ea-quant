@@ -13,6 +13,7 @@ from ea.core import (
     require_quantized,
     settle_product,
 )
+from ea.core.economics import _scaled_text
 
 
 def _assert_code(
@@ -274,3 +275,26 @@ def test_public_decimal_value_exposes_no_float_or_decimal_coercion_api() -> None
     assert not hasattr(value, "__float__")
     assert not hasattr(value, "as_decimal")
     assert not hasattr(value, "quantize")
+
+
+@pytest.mark.parametrize(
+    ("coefficient", "scale", "expected"),
+    [
+        (0, 0, "0"),
+        (0, 5, "0"),
+        (1, 0, "1"),
+        (100, 0, "100"),
+        (100, 2, "1"),
+        (100000, 5, "1"),
+        (123450, 5, "1.2345"),
+        (1250, 3, "1.25"),
+        (5, 3, "0.005"),
+        (1, 5, "0.00001"),
+        (-5, 3, "-0.005"),
+        (-123450, 5, "-1.2345"),
+    ],
+)
+def test_scaled_text_is_the_single_canonical_decimal_formatter(
+    coefficient: int, scale: int, expected: str
+) -> None:
+    assert _scaled_text(coefficient, scale) == expected

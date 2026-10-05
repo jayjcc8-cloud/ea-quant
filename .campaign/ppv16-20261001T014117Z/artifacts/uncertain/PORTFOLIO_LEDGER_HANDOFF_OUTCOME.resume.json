@@ -1,0 +1,39 @@
+{
+  "incomplete_outbound_intents": [
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "b74ef6b3c0a1516f314b6686ff875892e807145e971eedb3a04d354006effaa9",
+      "dispatch_sequence": 1,
+      "execution_request_sha256": "4e335bf92e193950ac7013487cac23a753f06ba0b8e9988fdc387b26ee455544",
+      "order_owner_sequence": 1,
+      "terminal": null,
+      "venue_order_id": "paper-b74ef6b3c0a1516f314b6686ff875892e807145e971eedb3a04d354006effaa9"
+    }
+  ],
+  "joint": {
+    "divergent_orders": [],
+    "exactly_once": true,
+    "not_sent_orders": [],
+    "open_orders": [
+      1
+    ],
+    "reason": null,
+    "recovered": true,
+    "recovered_fills": 0,
+    "recovered_orders": 1
+  },
+  "outbound_intents": [
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "b74ef6b3c0a1516f314b6686ff875892e807145e971eedb3a04d354006effaa9",
+      "dispatch_sequence": 1,
+      "execution_request_sha256": "4e335bf92e193950ac7013487cac23a753f06ba0b8e9988fdc387b26ee455544",
+      "order_owner_sequence": 1,
+      "terminal": null,
+      "venue_order_id": "paper-b74ef6b3c0a1516f314b6686ff875892e807145e971eedb3a04d354006effaa9"
+    }
+  ],
+  "reconciliation_required": false,
+  "run_id": "262f571d-b03e-4a6b-b2f1-2b05888d21fb",
+  "state": "incomplete"
+}

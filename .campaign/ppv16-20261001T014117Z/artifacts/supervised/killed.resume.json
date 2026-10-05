@@ -1,0 +1,57 @@
+{
+  "incomplete_outbound_intents": [
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "a2130d597d8b77f7022b1cb2a36b6c89dbca4c0b4dd567d48921d67a65ff21be",
+      "dispatch_sequence": 11,
+      "execution_request_sha256": "eb7a5ee318e889f00812441288b22cc63a1c85909c73f80e6996d93b42852820",
+      "order_owner_sequence": 3,
+      "terminal": null,
+      "venue_order_id": "paper-a2130d597d8b77f7022b1cb2a36b6c89dbca4c0b4dd567d48921d67a65ff21be"
+    }
+  ],
+  "joint": {
+    "divergent_orders": [],
+    "exactly_once": true,
+    "not_sent_orders": [],
+    "open_orders": [
+      3
+    ],
+    "reason": null,
+    "recovered": true,
+    "recovered_fills": 2,
+    "recovered_orders": 3
+  },
+  "outbound_intents": [
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "6b7ef9b8dc3607099891f9ad358d0752ccc3204904858ef9a64db8b72f68440b",
+      "dispatch_sequence": 1,
+      "execution_request_sha256": "b19c90845fc7558243ff0a6416ea093873cdd0c9a4c99180cb359f8e7a7f9008",
+      "order_owner_sequence": 1,
+      "terminal": "filled",
+      "venue_order_id": "paper-6b7ef9b8dc3607099891f9ad358d0752ccc3204904858ef9a64db8b72f68440b"
+    },
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "630085e79bdafd8279c05c3f6e2edec6274cc86b6aa49d527a928f0e8795525b",
+      "dispatch_sequence": 6,
+      "execution_request_sha256": "3d03b880116a642cc24a031dd5526ae9ca383ca9e731dcdecf0e4b6c94b8e7fd",
+      "order_owner_sequence": 2,
+      "terminal": "filled",
+      "venue_order_id": "paper-630085e79bdafd8279c05c3f6e2edec6274cc86b6aa49d527a928f0e8795525b"
+    },
+    {
+      "classification": "sent_confirmed",
+      "client_submission_key": "a2130d597d8b77f7022b1cb2a36b6c89dbca4c0b4dd567d48921d67a65ff21be",
+      "dispatch_sequence": 11,
+      "execution_request_sha256": "eb7a5ee318e889f00812441288b22cc63a1c85909c73f80e6996d93b42852820",
+      "order_owner_sequence": 3,
+      "terminal": null,
+      "venue_order_id": "paper-a2130d597d8b77f7022b1cb2a36b6c89dbca4c0b4dd567d48921d67a65ff21be"
+    }
+  ],
+  "reconciliation_required": false,
+  "run_id": "6ea29ffa-0a48-44a5-a752-83467fa9545a",
+  "state": "incomplete"
+}
