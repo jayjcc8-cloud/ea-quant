@@ -442,6 +442,20 @@ const unsupported: ResearchTask = {
 
 const withId = (task: ResearchTask, id: string): ResearchTask => ({ ...task, task_id: id })
 
+/**
+ * Scripted: what a separate experiment starts as when the reader prepares one from
+ * a terminal task. The draft is clean — its own counters, no confirmed spec and no
+ * run — and is already waiting for confirmation, so a state previews the two
+ * explicit steps a recovery takes. Its confirmed document is one of its own, which
+ * is why confirming it moves the dispatch counter exactly once.
+ *
+ * The id is only this page's own label for the created document: the adapter
+ * serves it under the id it was created with, and leaves the terminal task's own
+ * record in place and readable at its own route.
+ */
+const recoveryDraft: ResearchTask = withId(awaiting, 'scripted-task-recovery-draft')
+const recoveryConfirmed: ResearchTask = withId(running, 'scripted-task-recovery-draft')
+
 export const STATES: PreviewState[] = [
   {
     id: 'home-empty', label: 'Homepage · no task yet', path: '/research',
@@ -487,21 +501,31 @@ export const STATES: PreviewState[] = [
       ...observed,
       interpretation_error: { step: 'interpret', code: 'model_outcome_unknown', message: 'the conclusion call left this process and was never observed' },
     }, 'scripted-task-interpretation-error'),
-    concluded, retried: awaiting,
+    concluded, retried: awaiting, created: recoveryDraft, confirmed: recoveryConfirmed,
   },
   {
     id: 'failed', label: 'Failed · retryable model step', path: '/research/scripted-task-failed',
     task: withId(failed, 'scripted-task-failed'), retried: awaiting,
+    created: recoveryDraft, confirmed: recoveryConfirmed,
   },
   {
     id: 'failed-dispatch', label: 'Failed · retryable backtest dispatch', path: '/research/scripted-task-failed-dispatch',
     task: withId(failedBeforeDispatch, 'scripted-task-failed-dispatch'), retried: running,
     retryDispatchesBacktest: true,
+    created: recoveryDraft, confirmed: recoveryConfirmed,
   },
   // No retry is offered for this one: the submission left this process, so the
   // preview must not suggest a re-send is available.
-  { id: 'failed-unknown', label: 'Failed · outcome unknown', path: '/research/scripted-task-unknown', task: withId(unknown, 'scripted-task-unknown') },
-  { id: 'cancelled', label: 'Cancelled', path: '/research/scripted-task-cancelled', task: cancelTask(withId(awaiting, 'scripted-task-cancelled')) },
+  {
+    id: 'failed-unknown', label: 'Failed · outcome unknown', path: '/research/scripted-task-unknown',
+    task: withId(unknown, 'scripted-task-unknown'),
+    created: recoveryDraft, confirmed: recoveryConfirmed,
+  },
+  {
+    id: 'cancelled', label: 'Cancelled', path: '/research/scripted-task-cancelled',
+    task: cancelTask(withId(awaiting, 'scripted-task-cancelled')),
+    created: recoveryDraft, confirmed: recoveryConfirmed,
+  },
   { id: 'unsupported', label: 'Unsupported idea', path: '/research/scripted-task-unsupported', task: withId(unsupported, 'scripted-task-unsupported') },
   { id: 'backtests', label: 'Backtests · validation form', path: '/backtests', task: observed },
   { id: 'backtest', label: 'Backtest result · report, limits, curve', path: `/backtests/${OBSERVED.job_id}`, task: concluded },

@@ -96,9 +96,14 @@ function previewApi(
   flags: () => Flags,
   note: (text: string) => void,
 ): ApiAdapter {
-  let current = state.task
-  let created: ResearchTask | null = null
   const list = state.recent ?? [state.task]
+  // One document per task id, so a write to one task can never move or replace
+  // another: a draft created from a failed task leaves that task's own record
+  // exactly as it was, readable at its own route, and a lifecycle call to the new
+  // task is served for the new id rather than for the scenario's.
+  const documents = new Map<string, ResearchTask>([[state.task.task_id, state.task]])
+  /** The ids created through this adapter, which the list serves in front of its snapshot. */
+  const createdIds: string[] = []
   const read = async <T,>(name: string, value: T): Promise<T> => {
     record(name)
     await wait(READ_MS)
@@ -110,29 +115,40 @@ function previewApi(
     return value
   }
   /** A dispatch is only ever counted from the documents themselves. */
-  const adopt = (next: ResearchTask, what: string) => {
-    if (next.jobs.length > current.jobs.length) record('backtestDispatch')
-    // A lifecycle document belongs to the task this route is on. The fixtures for
-    // confirm, retry and interpret are built from the observed record and carry
-    // its id, so adopting that id verbatim would leave the route pointing at a
-    // task the next read cannot find: the list snapshot would come back and undo
-    // the write the reader just made. The routed id is preserved instead, and the
-    // job, run and report identities inside the document are served unchanged.
-    current = { ...next, task_id: current.task_id }
+  const adopt = (taskId: string, next: ResearchTask, what: string) => {
+    if (next.jobs.length > (documents.get(taskId)?.jobs.length ?? 0)) record('backtestDispatch')
+    // The document keeps the id of the task this call was made for. The fixtures
+    // for confirm, retry, cancel and interpret are built from the observed record
+    // and carry its id, so adopting that id verbatim would leave the route
+    // pointing at a task the next read cannot find: the list snapshot would come
+    // back and undo the write the reader just made. The routed id is preserved
+    // instead, and the job, run and report identities inside are served unchanged.
+    const stored = { ...next, task_id: taskId }
+    documents.set(taskId, stored)
     note(what)
-    return current
+    return stored
   }
   /** The persisted list, with this adapter's live documents in place of its snapshot. */
   const persisted = () => {
-    const live = created
-    const items = list.map(item => item.task_id === current.task_id ? current : item)
-    return live && !items.some(item => item.task_id === live.task_id) ? [live, ...items] : items
+    const items = list.map(item => documents.get(item.task_id) ?? item)
+    const fresh = createdIds.filter(id => !items.some(item => item.task_id === id)).map(id => documents.get(id)!)
+    return [...fresh, ...items]
   }
   /** A document for an id this page was never told about keeps that id, not another task's. */
   const known = (taskId: string) =>
-    [current, created].find(item => item?.task_id === taskId)
+    documents.get(taskId)
     ?? list.find(item => item.task_id === taskId)
-    ?? { ...current, task_id: taskId }
+    ?? { ...state.task, task_id: taskId }
+  /**
+   * The one host rule this page models rather than invents: while a failed or still
+   * active task already holds an idea, the host refuses a second one for it, which
+   * is why the recovery panel keeps its prepare action disabled until the reader
+   * cancels. It is read from the documents and the list this adapter actually
+   * serves, so the preview cannot show a create succeeding where the host would
+   * refuse one — and a cancel, which is a terminal state, releases the idea.
+   */
+  const HOLDING_STATUSES = new Set(['drafting', 'awaiting_confirmation', 'confirmed', 'running', 'failed'])
+  const holder = (idea: string) => persisted().find(item => item.raw_idea.trim() === idea.trim() && HOLDING_STATUSES.has(item.status))
   return {
     holdoutScenarios: () => read('holdoutScenarios', [scenario]),
     createHoldout: () => read('createHoldout', holdout),
@@ -179,40 +195,69 @@ function previewApi(
       record('createResearchTask')
       const said = selection ? `${Object.keys(selection).length} capability layer(s) selected` : 'no capability selection'
       await wait(WRITE_MS)
+      // The host's own duplicate-idea rule, in the host's own words.
+      if (holder(ideaText) !== undefined) throw new ResearchRequestError('research_task_exists', 'an active research task already exists for this idea')
       if (flags().createFailure) throw new ResearchRequestError('research_task_failed', 'scripted preview failure: the draft was refused')
       const fresh = state.created ?? { ...state.task, task_id: 'scripted-task-created' }
-      created = { ...fresh, raw_idea: ideaText, status: 'drafting', operation_kind: 'propose', spec_draft: null, jobs: [], interpretation: null, interpretation_error: null, error: null, cancel_note: null, usage: { ...fresh.usage, model_calls: 1, backtests: 0 } }
-      current = created
+      // A new draft starts clean: its own budget counters, no confirmed
+      // specification, no run, no reservation, no recorded operation and no
+      // failure carried over from the document it was created beside. Its own
+      // status and drafted spec are served exactly as the fixture states them, so
+      // a state can preview a draft that is already waiting for confirmation. The
+      // one model call that wrote it is scripted, so no token usage is claimed
+      // for it and that call is reported as unreported.
+      const next: ResearchTask = {
+        ...fresh,
+        raw_idea: ideaText,
+        spec_confirmed: [],
+        jobs: [],
+        usage: { model_calls: 1, input_tokens: 0, output_tokens: 0, backtests: 0, unavailable_model_calls: 1 },
+        request_id: null,
+        error: null,
+        cancel_note: null,
+        last_model: null,
+        reservation: null,
+        backtest_reservation: null,
+        spent_calls: [],
+        operation_generation: 0,
+        operation_completion_generation: 0,
+        operation_kind: null,
+        runtime_diagnostic: null,
+        interpretation: null,
+        interpretation_error: null,
+      }
+      documents.set(next.task_id, next)
+      if (next.task_id !== state.task.task_id) createdIds.push(next.task_id)
       note(`createResearchTask accepted ${ideaText.length} characters of idea with ${said}`)
-      return created
+      return next
     },
-    confirmResearchTask: async () => {
+    confirmResearchTask: async (taskId: string) => {
       record('confirmResearchTask')
       await wait(WRITE_MS)
       if (!state.confirmed) throw new ResearchRequestError('research_task_state', 'scripted preview: this state has nothing to confirm')
-      return adopt(state.confirmed, 'confirmResearchTask accepted; the returned document is what this page now serves')
+      return adopt(taskId, state.confirmed, `confirmResearchTask accepted for ${taskId}; the returned document is what this page now serves`)
     },
-    retryResearchTask: async () => {
+    retryResearchTask: async (taskId: string) => {
       record('retryResearchTask')
       await wait(WRITE_MS)
       if (!state.retried) throw new ResearchRequestError('research_task_state', 'scripted preview: this state has nothing to retry')
-      return adopt(state.retried, state.retryDispatchesBacktest
+      return adopt(taskId, state.retried, state.retryDispatchesBacktest
         ? 'retryResearchTask re-dispatched one backtest for this scripted state'
         : 'retryResearchTask resumed the model step; no backtest was dispatched')
     },
-    cancelResearchTask: async () => {
+    cancelResearchTask: async (taskId: string) => {
       record('cancelResearchTask')
       await wait(WRITE_MS)
       if (flags().cancelFailure) throw new ResearchRequestError('research_task_state', 'scripted preview failure: the cancel was refused')
-      return adopt(cancelTask(current), 'cancelResearchTask recorded a terminal cancel; the run and its report are unchanged')
+      return adopt(taskId, cancelTask(known(taskId)), 'cancelResearchTask recorded a terminal cancel; the run and its report are unchanged')
     },
-    interpretResearchTask: async () => {
+    interpretResearchTask: async (taskId: string) => {
       record('interpretResearchTask')
       await wait(WRITE_MS)
       if (state.interpretError) throw new ResearchRequestError(state.interpretError.code, state.interpretError.message)
       // A conclusion publishes text about the run that already exists; it never
       // dispatches anything, which is why this path moves no dispatch counter.
-      return adopt(state.concluded ?? current, 'interpretResearchTask published the host conclusion for the bound run')
+      return adopt(taskId, state.concluded ?? known(taskId), 'interpretResearchTask published the host conclusion for the bound run')
     },
   }
 }
@@ -303,6 +348,16 @@ function Preview() {
             non-decimal, missing or non-positive initial cash is refused so the product&rsquo;s own alert appears,
             and a valid one is answered with the scenario the request named. Validating dispatches no backtest and
             spends no model call, so only <code>validateScenario</code> moves.
+          </p>
+          <p className="preview-note">
+            A terminal task — failed, cancelled, or a run whose conclusion step failed — offers
+            <code> Prepare a new experiment</code>. On a failed task that button stays disabled until
+            <code> Cancel task</code> is used, and a create for an idea a failed or still active task already
+            holds is refused here the way the host refuses it. The button itself only carries the user's own
+            idea and the source task id into the workspace form: creating the draft and confirming it are two
+            further explicit clicks, so <code>backtestDispatch</code> moves once, on the confirm, and never on
+            the prepare or the create. The terminal task&rsquo;s own document stays readable at its own route
+            throughout, and an in-place retry still resumes that task rather than replacing it.
           </p>
           <p className="preview-note" aria-live="polite">{note}</p>
           <div className="preview-counters" aria-label="Adapter calls since this scenario was opened">

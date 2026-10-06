@@ -1,5 +1,5 @@
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ChronologicalHoldout, ScenarioSummary } from './app'
 import { GuidedMappingFields, readGuidedDeclaration } from './csv-mapping-form'
 import { pathPercent } from './equity-path'
@@ -57,6 +57,8 @@ import {
 
 const POLL_STATUSES: ResearchTaskStatus[] = ['drafting', 'confirmed', 'running']
 const NON_RETRYABLE_CODES = new Set(['model_outcome_unknown', 'job_outcome_unknown', 'task_in_flight'])
+/** The most the idea field holds, so the most a prepared one may bring with it. */
+const IDEA_LIMIT = 4000
 
 /**
  * Display names for the allowlisted criterion fields. This map is presentation
@@ -1357,10 +1359,37 @@ function ResearchJob({ api, jobId, job, holdouts }: { api: ApiAdapter; jobId: st
   </li>
 }
 
+/**
+ * The one handoff this workspace accepts from a finished task: the user's own
+ * idea, and the task it was read from.
+ *
+ * It arrives in this route's navigation state, so it is kept nowhere else — no
+ * query string, no storage, no endpoint — and it is validated here rather than
+ * trusted. Anything this page cannot read in full is ignored: the form stays
+ * empty and nothing is reported about it, because ambient navigation state is
+ * never a source of an experiment. Only those two fields cross over: no
+ * specification, run, report, budget, capability selection or confirmation is
+ * copied with them.
+ */
+function preparedExperiment(state: unknown): { sourceTaskId: string; idea: string } | null {
+  if (typeof state !== 'object' || state === null) return null
+  const { recovery } = state as { recovery?: unknown }
+  if (typeof recovery !== 'object' || recovery === null) return null
+  const { task_id: sourceTaskId, idea } = recovery as { task_id?: unknown; idea?: unknown }
+  if (typeof sourceTaskId !== 'string' || sourceTaskId === '') return null
+  if (typeof idea !== 'string' || idea.trim() === '' || idea.length > IDEA_LIMIT) return null
+  return { sourceTaskId, idea }
+}
+
 export function ResearchTasks({ api }: { api: ApiAdapter }) {
   const navigate = useNavigate()
+  const location = useLocation()
+  // Read once, when this route is mounted. This fills a form the user then edits,
+  // so it is not state this page keeps or re-applies: a later render, a refresh
+  // or a return to this route does not put the idea back.
+  const [prepared] = useState(() => preparedExperiment(location.state))
   const [tasks, setTasks] = useState<ResearchTask[] | null>(null)
-  const [idea, setIdea] = useState('')
+  const [idea, setIdea] = useState(prepared?.idea ?? '')
   const [selection, setSelection] = useState<Partial<Record<LayerName, string>>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1420,8 +1449,11 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
     </nav>
     <div className="research-list-layout"><section className="panel idea-panel">
       <header><h2>New research idea</h2><span>One active task per idea</span></header>
+      {prepared && <p role="note" aria-label="Prepared from a task" className="notice">
+        This idea was copied from task <code>{prepared.sourceTaskId}</code>, which is left exactly as it is. Only your own words came across: no specification, run, report, budget, capability selection or confirmation did. Review the capability selection again below — leaving it empty uses the host default route. Nothing is created or confirmed until you press the button yourself.
+      </p>}
       <label htmlFor="research-idea">Research idea</label>
-      <textarea id="research-idea" maxLength={4000} rows={3} value={idea} disabled={busy}
+      <textarea id="research-idea" maxLength={IDEA_LIMIT} rows={3} value={idea} disabled={busy}
         onChange={event => setIdea(event.target.value)} />
       <p className="muted">The idea is drafted into a spec that can only reference the registered strategy, instrument and scenario catalog. Confirmation is a separate, explicit step.</p>
       {api.pluginCatalog && <Disclosure title="Capability selection" subtitle="Optional · one exact version per layer">
@@ -1558,6 +1590,52 @@ function TaskStatePanel({ task }: { task: ResearchTask }) {
 }
 
 /**
+ * Preparing a separate experiment from a terminal task.
+ *
+ * Every figure is read from the persisted task and the run records this page
+ * loaded, and the copy is scoped to what this one action does — it prepares a new,
+ * separately budgeted, separately confirmed experiment — rather than to the page,
+ * which has its own legal in-place retry and cancel in the block above. The
+ * provider's own monetary charge is the one thing this workspace cannot state, and
+ * a dispatched or unobserved reservation is not refunded locally.
+ *
+ * The host refuses a second task for an idea a failed task already holds
+ * (`find_active_by_idea`), so while this task is failed the action is disabled and
+ * the legal order is stated: cancel first, then prepare. Cancelling is the
+ * reader's own explicit click; nothing here cancels on its own, and the prepared
+ * experiment is created and confirmed separately.
+ */
+function TaskRecoveryPanel({ task, readyReports }: { task: ResearchTask; readyReports: number }) {
+  const navigate = useNavigate()
+  const draft = task.spec_draft ? 1 : 0
+  const unavailableCalls = task.usage.unavailable_model_calls ?? 0
+  const tokens = unavailableCalls === 0
+    ? `${task.usage.input_tokens} input · ${task.usage.output_tokens} output`
+    : unavailableCalls === task.usage.model_calls
+      ? `None reported for any of the ${task.usage.model_calls} model call(s)`
+      : `${task.usage.input_tokens} reported input · ${task.usage.output_tokens} reported output · ${unavailableCalls} call(s) reported none`
+  const needsCancelFirst = task.status === 'failed'
+  return <section className="panel task-recovery" aria-label="Recovery">
+    <header><h2>Starting a separate experiment</h2><span>Kept as it is</span></header>
+    <dl className="summary-list">
+      <div><dt>Specifications kept</dt><dd>{task.spec_confirmed.length} confirmed · {draft} unconfirmed draft</dd></div>
+      <div><dt>Runs started</dt><dd>{task.jobs.length} · {readyReports} of the run records read here have a ready report</dd></div>
+      <div><dt>Usage recorded</dt><dd>{task.usage.model_calls} of {task.budget.max_model_calls} model calls · {task.usage.backtests} of {task.budget.max_backtests} backtests</dd></div>
+      <div><dt>Reported tokens</dt><dd>{tokens}</dd></div>
+    </dl>
+    <p className="muted">The provider's charge for those calls is not recorded here: this workspace records usage, not money, so it neither reports a cost nor refunds one, and a reservation that was dispatched or never observed is not refunded locally.</p>
+    {needsCancelFirst && <p className="notice">To start a separate experiment with the same idea, cancel this task first using <strong>Cancel task</strong>. Stored runs/reports remain; this does not undo any dispatched work.</p>}
+    <div className="actions">
+      <button className="primary" disabled={needsCancelFirst}
+        onClick={() => { navigate('/research', { state: { recovery: { task_id: task.task_id, idea: task.raw_idea } } }) }}>
+        Prepare a new experiment
+      </button>
+    </div>
+    <p className="muted">Preparing copies only your idea and this task's id, and creates and confirms nothing by itself. The new draft gets its own capability review — an empty selection uses the host default route — and its own confirmation before any backtest.</p>
+  </section>
+}
+
+/**
  * The one conclusion for a succeeded run, exactly as the host rendered it.
  *
  * Nothing here is composed by this client: the outcome, the inference sentence,
@@ -1591,7 +1669,7 @@ function ConclusionHero({ job, interpretation, error }: {
       <p className="muted">{job
         ? 'Use the report link above to inspect the run and its current report availability. '
         : 'No run is bound to this task, so there is no report to open for it. '}
-        Asking the same question again means a separate experiment, drafted in the <Link to="/research">Research workspace</Link>: it is budgeted and confirmed on its own, and nothing on this page starts one.</p>
+        Asking the same question again means a separate experiment, and the preparation for it is offered below: that experiment is budgeted and confirmed on its own.</p>
       {error && <Disclosure className="progressive" title="Recorded conclusion failure" subtitle="The code the host stored">
         <dl className="summary-list"><div><dt>Code</dt><dd>{error.code}</dd></div><div><dt>Detail</dt><dd>{error.message}</dd></div></dl>
       </Disclosure>}
@@ -1884,6 +1962,16 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   // no conclusion was drawn; its own state needs no separate panel there.
   const state = task.status === 'succeeded' ? null : <TaskStatePanel task={task} />
 
+  // A task the backend can no longer advance either way — failed, cancelled, or a
+  // run whose conclusion was refused — offers the same way forward: the record it
+  // keeps stays readable, and the question is asked again as a separate
+  // experiment. Unknown dispatches are among these, and the panel states plainly
+  // that they are never re-submitted from here.
+  const readyReports = Object.values(jobs).filter(job => job?.report_ready).length
+  const terminal = task.status === 'failed' || task.status === 'cancelled'
+    || (task.status === 'succeeded' && task.interpretation_error != null)
+  const recovery = terminal ? <TaskRecoveryPanel task={task} readyReports={readyReports} /> : null
+
   const concluded = task.interpretation != null || task.interpretation_error != null
   const reportSummary = task.status === 'succeeded' && succeededJob
     ? <RunReportSummary key={succeededJob.job_id} api={api} job={succeededJob} reportLink={!concluded} />
@@ -1997,9 +2085,15 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   // Waiting for a decision is the one state where the specification itself is the
   // decision, so the facts and the confirmation lead and the drafted reasoning
   // follows them; every other state keeps the specification as progressive detail.
+  // On a failed or cancelled task the in-place actions come before the prepared
+  // experiment: they are the legal next steps, and the copy of the separate
+  // experiment must not push them out of reach. Each action is still rendered once.
+  const blocked = task.status === 'failed' || task.status === 'cancelled'
   const blocks: ReactNode[] = confirmable
-    ? [conclusion, failure, unclaimedFailure, state, specification, taskActions, selectionEditor, selectionEvidence, declarationDraft, backtests]
-    : [conclusion, failure, unclaimedFailure, state, reportBlock, conclusionAction, taskActions, specification, selectionEditor, selectionEvidence, backtests, declarationDraft]
+    ? [conclusion, failure, unclaimedFailure, state, recovery, specification, taskActions, selectionEditor, selectionEvidence, declarationDraft, backtests]
+    : blocked
+      ? [conclusion, failure, unclaimedFailure, state, taskActions, recovery, reportBlock, conclusionAction, specification, selectionEditor, selectionEvidence, backtests, declarationDraft]
+      : [conclusion, failure, unclaimedFailure, state, recovery, reportBlock, conclusionAction, taskActions, specification, selectionEditor, selectionEvidence, backtests, declarationDraft]
 
   return <>
     {/* The page's own scope is stated where the result is, so the heading carries
