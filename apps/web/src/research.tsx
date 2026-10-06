@@ -1,6 +1,7 @@
-import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ChronologicalHoldout, ScenarioSummary } from './app'
+import { GuidedMappingFields, readGuidedDeclaration } from './csv-mapping-form'
 import { pathPercent } from './equity-path'
 import {
   AVAILABILITY_PROVIDED,
@@ -832,9 +833,17 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
   const [published, setPublished] = useState<UploadVersion | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<'preview' | 'publish' | null>(null)
+  // Which of the two editors writes the one declaration. The guided controls are
+  // the first-use path; the JSON fields are chosen explicitly.
+  const [declarationEditor, setDeclarationEditor] = useState<'guided' | 'advanced'>('guided')
   const previewUpload = api.previewUpload
 
   const mapped = mode === 'explicit-mapping'
+  // The declaration on screen, read back as choices for the guided controls. The
+  // JSON text is the only state, so the two editors cannot hold different
+  // declarations: a declaration the controls cannot express keeps the JSON editor
+  // and its reason instead of being dropped or re-pointed to fit a control.
+  const guided = useMemo(() => readGuidedDeclaration(mappingText, timeText), [mappingText, timeText])
   // The exact inputs a mapped preview verified. Any change to the payload, the
   // declaration or the policy makes the previewed declaration a different one,
   // so the preview no longer authorizes a publication.
@@ -851,6 +860,16 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
     : null
 
   const reset = () => { setPreview(null); setPreviewedFor(null); setPublished(null); setError(null) }
+  // A guided choice rewrites the declaration the panel sends, and the preview
+  // that verified the previous declaration stops authorizing a publication the
+  // moment it changes. The two JSON fields stay the one place a declaration
+  // lives, so the advanced editor and the guided controls cannot disagree: they
+  // are the same two strings.
+  const applyGuidedDeclaration = useCallback((nextMapping: string, nextTime: string) => {
+    setMappingText(nextMapping)
+    setTimeText(nextTime)
+    setPreview(null); setPreviewedFor(null); setPublished(null); setError(null)
+  }, [])
   // A file's own bytes are the payload; editing the text makes the text the payload.
   const tooLarge = fileBase64 === null && content.length > MAX_UPLOAD_CHARACTERS
 
@@ -941,13 +960,39 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
       onChange={event => { setContent(event.target.value); setFileBase64(null); reset() }} />
     {tooLarge && <p className="notice error">This content is above the {MAX_UPLOAD_CHARACTERS}-character ceiling this host accepts; it would be refused before anything is parsed.</p>}
     {mapped && <>
-      <label htmlFor="upload-mapping">Mapping declaration (JSON, every strict field declared)</label>
-      <textarea id="upload-mapping" rows={5} spellCheck={false} placeholder={MAPPING_EXAMPLE} value={mappingText} disabled={busy !== null}
-        onChange={event => { setMappingText(event.target.value); reset() }} />
-      <label htmlFor="upload-time">Time declaration (JSON, exact formats and timezone)</label>
-      <textarea id="upload-time" rows={3} spellCheck={false} placeholder={TIME_EXAMPLE} value={timeText} disabled={busy !== null}
-        onChange={event => { setTimeText(event.target.value); reset() }} />
-      <p className="muted">Each destination is one of the strict profile's own field names, and each timestamp names one exact form from {TIME_FORMAT_IDS.join(', ')}. A field you do not declare, a column this file does not have, and a format the values do not match are all refusals rather than guesses.</p>
+      {/* One declaration, an explicit choice of how to write it. The guided
+          controls are read from the JSON fields, so neither editor can overwrite
+          the other's declaration. */}
+      <fieldset className="declaration-editor">
+        <legend>How to declare this mapping</legend>
+        <label>
+          <input type="radio" name="upload-declaration-editor" checked={declarationEditor === 'guided'}
+            disabled={busy !== null || !guided.ok} onChange={() => setDeclarationEditor('guided')} />
+          Guided controls
+        </label>
+        <label>
+          <input type="radio" name="upload-declaration-editor" checked={declarationEditor === 'advanced'}
+            disabled={busy !== null} onChange={() => setDeclarationEditor('advanced')} />
+          Advanced JSON
+        </label>
+      </fieldset>
+      {!guided.ok && <p className="notice error" role="alert">
+        The guided controls cannot show the declaration on screen: {guided.problem} It stays here as JSON,
+        unchanged, until it is edited into one the controls can hold.
+      </p>}
+      {declarationEditor === 'guided' && guided.ok
+        ? <GuidedMappingFields content={content} policy={policy} disabled={busy !== null}
+            state={guided.state} onChange={applyGuidedDeclaration} />
+        : <div className="advanced-declaration">
+          <p className="muted">This is the same declaration, written as JSON. Nothing on this page decides whether it is acceptable: it is sent as it stands, and the host is the authority that accepts or refuses it. Switching back to the guided controls reads exactly what is here.</p>
+          <label htmlFor="upload-mapping">Mapping declaration (JSON, every strict field declared)</label>
+          <textarea id="upload-mapping" rows={5} spellCheck={false} placeholder={MAPPING_EXAMPLE} value={mappingText} disabled={busy !== null}
+            onChange={event => { setMappingText(event.target.value); reset() }} />
+          <label htmlFor="upload-time">Time declaration (JSON, exact formats and timezone)</label>
+          <textarea id="upload-time" rows={3} spellCheck={false} placeholder={TIME_EXAMPLE} value={timeText} disabled={busy !== null}
+            onChange={event => { setTimeText(event.target.value); reset() }} />
+          <p className="muted">Each destination is one of the strict profile's own field names, and each timestamp names one exact form from {TIME_FORMAT_IDS.join(', ')}. A field you do not declare, a column this file does not have, and a format the values do not match are all refusals rather than guesses. Under the simulated policy the host derives available_at itself, so a declaration that also states it is refused.</p>
+        </div>}
     </>}
     <div className="parameter-grid">
       <div><label htmlFor="upload-source">Source reference (your assertion)</label><input id="upload-source" maxLength={300} value={sourceReference} disabled={busy !== null} onChange={event => { setSourceReference(event.target.value); setPublished(null) }} /></div>
@@ -997,7 +1042,7 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
         <div><dt>Mapping evidence SHA-256</dt><dd>{mappedPreview.mapping_evidence_sha256 ?? 'Unavailable'}</dd></div>
         <div><dt>Declared timezone / formats</dt><dd>{mappedPreview.time?.timezone ?? 'Unavailable'} · {Object.entries(mappedPreview.time?.formats ?? {}).map(([field, format]) => `${field}: ${format}`).join(' · ') || 'Unavailable'}</dd></div>
       </dl>
-      {mappedPreview.first_error && <p className="notice error">{mappedPreview.first_error.code}: {mappedPreview.first_error.message}{mappedPreview.first_error.record_number ? ` · CSV record ${mappedPreview.first_error.record_number}` : ''}{mappedPreview.first_error.field_name ? ` · field ${mappedPreview.first_error.field_name}` : ''}</p>}
+      {mappedPreview.first_error && <p className="notice error" role="alert">{mappedPreview.first_error.code}: {mappedPreview.first_error.message}{mappedPreview.first_error.record_number ? ` · CSV record ${mappedPreview.first_error.record_number}` : ''}{mappedPreview.first_error.field_name ? ` · field ${mappedPreview.first_error.field_name}` : ''}</p>}
       {mappedPreview.quality && <dl className="summary-list">
         <div><dt>Bars / revisions</dt><dd>{mappedPreview.quality.bar_count} / {mappedPreview.quality.revision_count}</dd></div>
         <div><dt>Observed gaps</dt><dd>{mappedPreview.quality.observed_gap_count}{mappedPreview.quality.largest_gap_seconds ? ` · largest ${mappedPreview.quality.largest_gap_seconds}s` : ''}</dd></div>

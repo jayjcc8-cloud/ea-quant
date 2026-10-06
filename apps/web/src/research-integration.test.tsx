@@ -190,6 +190,9 @@ describe('explicitly mapped upload', () => {
     const content = await screen.findByLabelText('CSV content')
     fireEvent.change(content, { target: { value: 'seq,c\n1,100.5' } })
     await user.selectOptions(screen.getByLabelText('Upload mode'), 'explicit-mapping')
+    // The guided controls are the default editor; this file is about the
+    // declaration written as JSON, so it chooses that editor explicitly.
+    await user.click(screen.getByLabelText('Advanced JSON'))
     fireEvent.change(screen.getByLabelText(/^Mapping declaration/), { target: { value: MAPPING } })
     fireEvent.change(screen.getByLabelText(/^Time declaration/), { target: { value: TIME } })
     await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
@@ -278,6 +281,7 @@ describe('explicitly mapped upload', () => {
 
     fireEvent.change(await screen.findByLabelText('CSV content'), { target: { value: 'seq,c\n1,100.5' } })
     await user.selectOptions(screen.getByLabelText('Upload mode'), 'explicit-mapping')
+    await user.click(screen.getByLabelText('Advanced JSON'))
     fireEvent.change(screen.getByLabelText(/^Mapping declaration/), { target: { value: MAPPING } })
     fireEvent.change(screen.getByLabelText(/^Time declaration/), { target: { value: TIME } })
     await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)

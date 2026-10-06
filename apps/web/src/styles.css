@@ -222,6 +222,19 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
 .research-workspace-tools > .panel { min-width: 0; }
 .upload-panel textarea, .declaration-workbench textarea { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; font-size: 13px; line-height: 1.5; }
 .upload-panel input[type="file"] { padding: 8px 10px; background: #f7f8f6; }
+/* The guided mapping controls: one cell per strict destination, so the grid
+   collapses to a single column on a phone like every other parameter grid. */
+.upload-panel .guided-mapping { min-width: 0; margin-top: 18px; padding: 12px 14px 14px; border: 1px solid var(--line); border-radius: 6px; }
+.upload-panel .guided-mapping legend { padding: 0 6px; font-size: 14px; }
+.upload-panel .guided-mapping .parameter-grid { margin-top: 10px; gap: 12px; }
+.upload-panel .guided-mapping label { display: block; margin-top: 10px; font-size: 13px; }
+.upload-panel .guided-mapping small { display: block; margin-top: 4px; }
+.upload-panel .advanced-declaration { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+/* One declaration, two ways to write it: the choice of editor is explicit, so the
+   guided controls and the JSON fields are never both on screen as copies. */
+.upload-panel .declaration-editor { display: flex; gap: 18px; margin: 18px 0 0; padding: 10px 14px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.upload-panel .declaration-editor legend { padding: 0 6px; font-size: 13px; color: var(--muted); }
+.upload-panel .declaration-editor label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; }
 .upload-preview, .upload-version { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .upload-preview table { font-size: 13px; }
 .upload-preview table th, .upload-preview table td { padding: 5px 6px; white-space: nowrap; }
