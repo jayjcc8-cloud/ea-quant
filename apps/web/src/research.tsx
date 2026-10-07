@@ -1,6 +1,7 @@
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ChronologicalHoldout, ScenarioSummary } from './app'
+import { AppearanceSettings } from './appearance-settings'
 import { GuidedMappingFields, readGuidedDeclaration } from './csv-mapping-form'
 import { pathPercent } from './equity-path'
 import {
@@ -2134,5 +2135,7 @@ export function ResearchSettings({ api }: { api: ApiAdapter }) {
     void api.settingsStatus().then(value => { if (current) setStatus(value) }).catch(caught => { if (current) setError(messageOf(caught, 'Configuration status unavailable')) })
     return () => { current = false }
   }, [api])
-  return <><PageHeading title="Settings" subtitle="Current model configuration and local research limits." /><ModelConfigurationPanel status={status} error={api.settingsStatus ? error : 'Model configuration status is unavailable in this client.'} /></>
+  // The local appearance controls sit beside the model panel on this one Settings
+  // page; the model panel below is unchanged, down to its status semantics.
+  return <><PageHeading title="Settings" subtitle="Local appearance, current model configuration and local research limits." /><AppearanceSettings /><ModelConfigurationPanel status={status} error={api.settingsStatus ? error : 'Model configuration status is unavailable in this client.'} /></>
 }

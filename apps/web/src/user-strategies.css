@@ -28,8 +28,21 @@
   --q-red: var(--quine-red, #cf3f2c);
   --q-red-soft: var(--quine-red-soft, #fdeeeb);
   --q-red-line: var(--quine-red-line, #f2c8c0);
+  /* Additive names the shell did not have before: the graphite primary action and
+     its label as a pair, the readable red used for red *text*, the applied-state
+     green, and the border of a field. Each falls back to the light value, so this
+     page keeps its colours on a shell that defines none of them. */
+  --q-primary: var(--quine-primary, #1f2023);
+  --q-primary-ink: var(--quine-primary-ink, #ffffff);
+  --q-red-ink: var(--quine-red-ink, #a4301f);
+  --q-positive-soft: var(--quine-positive-soft, #eef6f0);
+  --q-positive-line: var(--quine-positive-line, #bfd7c6);
+  --q-positive-ink: var(--quine-positive-ink, #2c6a41);
+  --q-field-line: var(--field-line, #dcdcd8);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(344px, 396px);
+  /* The AI column is the width the reader set in local appearance; 396px is the
+     width this workspace already had, so an untouched install is unchanged. */
+  grid-template-columns: minmax(0, 1fr) minmax(320px, var(--quine-ai-width, 396px));
   gap: 20px;
   align-items: start;
   color: var(--q-ink);
@@ -45,10 +58,10 @@
 
 .strategy-workspace .create-cta {
   display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
-  min-height: 38px; padding: 8px 14px; border: 1px solid var(--q-ink); border-radius: 8px;
-  background: var(--q-ink); color: #ffffff; font-size: 13.5px; font-weight: 600; cursor: pointer;
+  min-height: 38px; padding: 8px 14px; border: 1px solid var(--q-primary); border-radius: 8px;
+  background: var(--q-primary); color: var(--q-primary-ink); font-size: 13.5px; font-weight: 600; cursor: pointer;
 }
-.strategy-workspace .create-cta:hover { border-color: var(--q-red); background: var(--q-red); color: #ffffff; }
+.strategy-workspace .create-cta:hover { border-color: var(--q-red); background: var(--q-red); color: var(--q-primary-ink); }
 
 /* The strategy table: one compact row per strategy */
 .strategy-list { display: block; padding: 0; }
@@ -81,15 +94,15 @@ table.strategy-table {
 /* A link in a row is the one thing on that row that can be followed, so it reads
    as a link rather than as another cell of plain text. */
 .strategy-table td a { color: var(--q-red); font-weight: 600; }
-.strategy-table td a:hover { color: #a4301f; text-decoration: underline; }
+.strategy-table td a:hover { color: var(--q-red-ink); text-decoration: underline; }
 
 /* Chips: a labelled state, never the only carrier of meaning */
 .strategy-workspace .chip {
   display: inline-flex; align-items: center; padding: 2px 8px; border: 1px solid var(--q-line);
   border-radius: 999px; background: var(--q-surface-soft); color: var(--q-ink); font-size: 12px; font-weight: 600;
 }
-.strategy-workspace .chip-draft, .strategy-workspace .chip-open { border-color: var(--q-red-line); background: var(--q-red-soft); color: #a4301f; }
-.strategy-workspace .chip-applied { border-color: #bfd7c6; background: #eef6f0; color: #2c6a41; }
+.strategy-workspace .chip-draft, .strategy-workspace .chip-open { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
+.strategy-workspace .chip-applied { border-color: var(--q-positive-line); background: var(--q-positive-soft); color: var(--q-positive-ink); }
 .strategy-workspace .chip-rejected, .strategy-workspace .chip-superseded { color: var(--q-ink-soft); }
 
 /* Creating a strategy: a compact disclosure, not a page */
@@ -103,7 +116,7 @@ table.strategy-table {
 .strategy-workspace .field { margin: 10px 0; }
 .strategy-workspace label { color: var(--q-ink-soft); font-size: 12.5px; font-weight: 600; }
 .strategy-workspace select, .strategy-workspace input, .strategy-workspace textarea {
-  min-height: 38px; padding: 8px 10px; border: 1px solid #dcdcd8; border-radius: 8px;
+  min-height: 38px; padding: 8px 10px; border: 1px solid var(--q-field-line); border-radius: 8px;
   background: var(--q-surface); color: var(--q-ink); font-size: 14px;
 }
 .strategy-workspace input[type="checkbox"] { width: auto; min-height: 0; }
@@ -149,17 +162,17 @@ table.strategy-table {
 
 .strategy-workspace .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .strategy-workspace button {
-  min-height: 38px; padding: 8px 12px; border: 1px solid #dcdcd8; border-radius: 8px;
+  min-height: 38px; padding: 8px 12px; border: 1px solid var(--q-field-line); border-radius: 8px;
   background: var(--q-surface); color: var(--q-ink); font-size: 13.5px;
 }
 .strategy-workspace button:hover:not(:disabled) { border-color: var(--q-ink); }
 .strategy-workspace button:disabled { opacity: .45; }
 .strategy-workspace button.primary, .strategy-workspace .button-link {
   display: inline-flex; align-items: center; min-height: 38px; padding: 8px 14px;
-  border: 1px solid var(--q-ink); border-radius: 8px; background: var(--q-ink); color: #ffffff;
+  border: 1px solid var(--q-primary); border-radius: 8px; background: var(--q-primary); color: var(--q-primary-ink);
   font-size: 13.5px; font-weight: 600;
 }
-.strategy-workspace button.primary:hover:not(:disabled), .strategy-workspace .button-link:hover { border-color: var(--q-red); background: var(--q-red); color: #ffffff; }
+.strategy-workspace button.primary:hover:not(:disabled), .strategy-workspace .button-link:hover { border-color: var(--q-red); background: var(--q-red); color: var(--q-primary-ink); }
 
 /* The draft's own sections */
 .strategy-workspace .change-list, .strategy-workspace .path-list, .strategy-workspace .history-list { margin: 8px 0 0; padding: 0; list-style: none; }
@@ -191,7 +204,7 @@ table.strategy-table {
 .strategy-workspace .proposal-list p { margin: 2px 0 0 24px; }
 .strategy-workspace .proposal-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
 .strategy-workspace .experiment-list a { color: var(--q-red); font-weight: 600; }
-.strategy-workspace .experiment-list a:hover { color: #a4301f; text-decoration: underline; }
+.strategy-workspace .experiment-list a:hover { color: var(--q-red-ink); text-decoration: underline; }
 .strategy-workspace .experiment-list p { margin: 2px 0; }
 
 .strategy-workspace .check { display: flex; gap: 8px; align-items: center; margin: 8px 0; color: var(--q-ink); font-size: 13px; font-weight: 600; }
@@ -225,8 +238,8 @@ table.strategy-table {
 /* Every state is written out in words; this marks the label, not the meaning. */
 .strategy-workspace .status { display: inline-block; padding: 1px 8px; border: 1px solid var(--q-line); border-radius: 999px; background: var(--q-surface); font-size: 12px; font-weight: 650; text-transform: none; letter-spacing: 0; }
 
-.strategy-workspace .notice { margin: 10px 0 0; padding: 10px 12px; border: 1px solid #dcdcd8; border-radius: 8px; background: var(--q-surface-soft); font-size: 13px; }
-.strategy-workspace .notice.error { border-color: var(--q-red-line); background: #fff6f4; color: #9c2f1e; }
+.strategy-workspace .notice { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--q-field-line); border-radius: 8px; background: var(--q-surface-soft); font-size: 13px; }
+.strategy-workspace .notice.error { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
 
 /* Narrower columns: the table keeps its density until the phone layout. */
 @media (max-width: 1239px) {
