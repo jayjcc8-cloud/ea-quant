@@ -2,330 +2,257 @@
  * QUINE strategy workspace.
  *
  * Scoped to .strategy-workspace so the legacy research, backtest, holdout and
- * candidate pages keep the shell they already have. The palette is warm
- * off-white paper, graphite text and one restrained terracotta accent that marks
- * the single action on a panel; nothing here is a status colour, because every
- * state on this page is written out in words as well.
+ * candidate pages keep the shell they already have. The palette is light white
+ * and fine grey surfaces, graphite text and one restrained vermilion accent that
+ * marks the selected row, the current section and the one declared action on a
+ * panel; primary actions are black. Nothing here is a status colour on its own,
+ * because every state on this page is written out in words as well.
  *
- * The global stylesheet styles bare `nav` and `nav a` elements for the left
- * shell, so the strategy list — which is a nav of its own — resets them.
+ * The global stylesheet styles bare `nav`, `table` and `button` elements for the
+ * rest of the shell, so this workspace resets the ones it lays out itself.
+ *
+ * This file also carries names the shell already knows — `.actions`, `.notice`,
+ * `.status`, `.chip`, `.check`, `.panel-head`, `.provenance` and the like. Every
+ * rule that is not already unique to this page is therefore written under
+ * `.strategy-workspace`, so a legacy page that has no `--q-*` token defined keeps
+ * the styling it had; inside the workspace nothing changes but the specificity.
  */
 
 .strategy-workspace {
-  --paper: #fbf8f4;
-  --paper-edge: #e8e1d8;
-  --graphite: #2c2b29;
-  --graphite-soft: #6a6660;
-  --terracotta: #a8583c;
-  --terracotta-soft: #f2e5de;
+  --q-ink: var(--quine-ink, #1f2023);
+  --q-ink-soft: var(--quine-ink-soft, #6b6f76);
+  --q-line: var(--quine-line, #e6e6e3);
+  --q-line-soft: var(--quine-line-soft, #efefec);
+  --q-surface: var(--quine-surface, #ffffff);
+  --q-surface-soft: var(--quine-surface-soft, #fafaf9);
+  --q-red: var(--quine-red, #cf3f2c);
+  --q-red-soft: var(--quine-red-soft, #fdeeeb);
+  --q-red-line: var(--quine-red-line, #f2c8c0);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
-  gap: 24px;
+  grid-template-columns: minmax(0, 1fr) minmax(344px, 396px);
+  gap: 20px;
   align-items: start;
-  color: var(--graphite);
+  color: var(--q-ink);
 }
 
-.strategy-column {
-  display: grid;
-  gap: 18px;
-  min-width: 0;
-}
+.strategy-column { display: grid; gap: 14px; min-width: 0; }
 
-.strategy-heading h1,
-.strategy-title h1 {
-  margin: 0 0 4px;
-  font-size: 24px;
-  letter-spacing: -0.01em;
-}
+/* Heading, count and the one creation action */
+.strategy-heading { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.strategy-heading h1 { margin: 0; font-size: 30px; font-weight: 650; letter-spacing: -.02em; }
+.strategy-count { color: var(--q-ink-soft); font-size: 14px; }
+.strategy-subtitle { margin: -8px 0 0; color: var(--q-ink-soft); font-size: 13.5px; }
 
-.strategy-heading p,
-.strategy-title p {
-  margin: 0;
-  color: var(--graphite-soft);
-  font-size: 14px;
+.strategy-workspace .create-cta {
+  display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
+  min-height: 38px; padding: 8px 14px; border: 1px solid var(--q-ink); border-radius: 8px;
+  background: var(--q-ink); color: #ffffff; font-size: 13.5px; font-weight: 600; cursor: pointer;
 }
+.strategy-workspace .create-cta:hover { border-color: var(--q-red); background: var(--q-red); color: #ffffff; }
 
-.strategy-panel,
+/* The strategy table: one compact row per strategy */
+.strategy-list { display: block; padding: 0; }
+/* The legacy shell styles bare `nav a` as a 44px navigation target with a hover
+   pill. The rows carry their own typography, so the row links reset it. */
+.strategy-list a { display: block; min-height: 0; padding: 0; border-radius: 0; }
+.strategy-list a:hover { background: transparent; }
+.strategy-empty { padding: 14px 16px; border: 1px dashed var(--q-line); border-radius: 10px; color: var(--q-ink-soft); font-size: 13.5px; }
+
+table.strategy-table {
+  width: 100%; margin: 0; border: 1px solid var(--q-line); border-radius: 10px;
+  border-collapse: separate; border-spacing: 0; overflow: hidden; background: var(--q-surface); font-size: 13.5px;
+}
+.strategy-table th, .strategy-table td { text-align: left; }
+.strategy-table thead th {
+  padding: 9px 14px; border-bottom: 1px solid var(--q-line); background: var(--q-surface-soft);
+  color: var(--q-ink-soft); font-size: 12px; font-weight: 600; letter-spacing: .02em;
+}
+.strategy-table tbody th { padding: 11px 14px; border-bottom: 1px solid var(--q-line-soft); font-weight: 400; }
+.strategy-table td { padding: 11px 14px; border-top: 0; border-bottom: 1px solid var(--q-line-soft); vertical-align: middle; }
+.strategy-table tbody tr:last-child th, .strategy-table tbody tr:last-child td { border-bottom: 0; }
+.strategy-table tbody tr.selected th, .strategy-table tbody tr.selected td { background: var(--q-red-soft); }
+.strategy-table tbody tr.selected th { box-shadow: inset 3px 0 0 var(--q-red); }
+.strategy-name { display: block; color: var(--q-ink); font-size: 15px; font-weight: 650; }
+.strategy-name:hover, .strategy-name:focus-visible { color: var(--q-red); }
+.strategy-name[aria-current="page"] { color: var(--q-red); }
+.strategy-instrument { display: block; margin-top: 2px; color: var(--q-ink-soft); font-size: 12px; }
+.strategy-evidence { color: var(--q-ink); font-size: 13px; }
+.strategy-workspace .table-muted { color: var(--q-ink-soft); font-size: 13px; }
+/* A link in a row is the one thing on that row that can be followed, so it reads
+   as a link rather than as another cell of plain text. */
+.strategy-table td a { color: var(--q-red); font-weight: 600; }
+.strategy-table td a:hover { color: #a4301f; text-decoration: underline; }
+
+/* Chips: a labelled state, never the only carrier of meaning */
+.strategy-workspace .chip {
+  display: inline-flex; align-items: center; padding: 2px 8px; border: 1px solid var(--q-line);
+  border-radius: 999px; background: var(--q-surface-soft); color: var(--q-ink); font-size: 12px; font-weight: 600;
+}
+.strategy-workspace .chip-draft, .strategy-workspace .chip-open { border-color: var(--q-red-line); background: var(--q-red-soft); color: #a4301f; }
+.strategy-workspace .chip-applied { border-color: #bfd7c6; background: #eef6f0; color: #2c6a41; }
+.strategy-workspace .chip-rejected, .strategy-workspace .chip-superseded { color: var(--q-ink-soft); }
+
+/* Creating a strategy: a compact disclosure, not a page */
 .strategy-create {
-  padding: 18px 20px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 10px;
-  background: var(--paper);
+  padding: 16px; border: 1px solid var(--q-line); border-radius: 10px; background: var(--q-surface-soft);
 }
+.strategy-workspace .create-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; }
+.strategy-workspace .create-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+.strategy-workspace .create-actions .muted { margin: 0; }
 
-.strategy-panel h2,
-.strategy-create h2 {
-  margin: 0 0 10px;
-  font-size: 16px;
-  font-weight: 650;
+.strategy-workspace .field { margin: 10px 0; }
+.strategy-workspace label { color: var(--q-ink-soft); font-size: 12.5px; font-weight: 600; }
+.strategy-workspace select, .strategy-workspace input, .strategy-workspace textarea {
+  min-height: 38px; padding: 8px 10px; border: 1px solid #dcdcd8; border-radius: 8px;
+  background: var(--q-surface); color: var(--q-ink); font-size: 14px;
 }
+.strategy-workspace input[type="checkbox"] { width: auto; min-height: 0; }
 
-.strategy-panel p,
-.strategy-create p {
-  margin: 6px 0;
-  font-size: 14px;
-}
+/* The selected strategy: its own card, its facts, its sections */
+.strategy-detail { border: 1px solid var(--q-line); border-radius: 10px; background: var(--q-surface); overflow: hidden; }
+.strategy-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 16px 12px; }
+.strategy-title h2 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+.strategy-open { margin-left: auto; color: var(--q-ink-soft); font-size: 13px; }
+.strategy-open:hover { color: var(--q-red); }
 
-/* The strategy list is a nav of the workspace, not the shell's left nav. */
-.strategy-list {
-  display: block;
-  padding: 0;
-}
+.strategy-workspace .draft-facts { padding: 10px 16px; border-top: 1px solid var(--q-line); border-bottom: 1px solid var(--q-line); background: var(--q-surface-soft); }
+.strategy-workspace .draft-facts dl { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 0; }
+.strategy-workspace .draft-facts div { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.strategy-workspace .draft-facts dt { color: var(--q-ink-soft); font-size: 12px; }
+.strategy-workspace .draft-facts dd { margin: 0; color: var(--q-ink); font-size: 13.5px; overflow-wrap: anywhere; }
 
-.strategy-list ul {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.strategy-workspace .detail-tabs { display: flex; flex-wrap: wrap; gap: 0 2px; padding: 0 12px; border-bottom: 1px solid var(--q-line); }
+.strategy-workspace .detail-tabs [role="tab"] {
+  min-height: 40px; padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  background: transparent; color: var(--q-ink-soft); font-size: 13.5px; font-weight: 500;
 }
+.strategy-workspace .detail-tabs [role="tab"]:hover { color: var(--q-ink); background: var(--q-surface-soft); }
+.strategy-workspace .detail-tabs [role="tab"][aria-selected="true"] { color: var(--q-ink); border-bottom-color: var(--q-red); font-weight: 650; }
+.strategy-workspace .detail-tabs [role="tab"][aria-selected="true"]:hover { background: transparent; }
+.strategy-tabpanel:focus-visible { outline: 2px solid var(--q-red); outline-offset: -2px; }
 
-.strategy-list li {
-  display: grid;
-  gap: 2px;
-  padding: 10px 12px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  background: var(--paper);
-  font-size: 13px;
-}
+/* Sections */
+.strategy-panel { padding: 16px; }
+.strategy-panel h2 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+.strategy-panel h3 { font-size: 14px; }
+.strategy-panel p { margin: 6px 0; font-size: 13.5px; line-height: 1.6; }
+.strategy-panel .muted, .strategy-workspace .muted { color: var(--q-ink-soft); font-size: 12.5px; }
+.strategy-workspace .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.strategy-workspace .panel-head h2 { margin: 0; }
+.strategy-intent { font-size: 15px; }
+.strategy-workspace .inline-field { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 12.5px; }
+.strategy-workspace .inline-field select { width: auto; min-height: 32px; padding: 4px 8px; font-size: 13px; }
 
-.strategy-list li.selected {
-  border-color: var(--terracotta);
-  background: var(--terracotta-soft);
-}
+.strategy-workspace .summary-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 22px; margin: 10px 0 0; }
+.strategy-workspace .summary-list dt { color: var(--q-ink-soft); font-size: 12px; text-transform: none; letter-spacing: 0; }
+.strategy-workspace .summary-list dd { margin: 2px 0 0; color: var(--q-ink); font-size: 13.5px; }
 
-.strategy-list a {
-  display: inline;
-  padding: 0;
-  color: var(--graphite);
-  font-size: 15px;
-  font-weight: 650;
-  text-decoration: none;
+.strategy-workspace .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.strategy-workspace button {
+  min-height: 38px; padding: 8px 12px; border: 1px solid #dcdcd8; border-radius: 8px;
+  background: var(--q-surface); color: var(--q-ink); font-size: 13.5px;
 }
+.strategy-workspace button:hover:not(:disabled) { border-color: var(--q-ink); }
+.strategy-workspace button:disabled { opacity: .45; }
+.strategy-workspace button.primary, .strategy-workspace .button-link {
+  display: inline-flex; align-items: center; min-height: 38px; padding: 8px 14px;
+  border: 1px solid var(--q-ink); border-radius: 8px; background: var(--q-ink); color: #ffffff;
+  font-size: 13.5px; font-weight: 600;
+}
+.strategy-workspace button.primary:hover:not(:disabled), .strategy-workspace .button-link:hover { border-color: var(--q-red); background: var(--q-red); color: #ffffff; }
 
-.strategy-list a:hover,
-.strategy-list a:focus-visible {
-  color: var(--terracotta);
-  text-decoration: underline;
-}
+/* The draft's own sections */
+.strategy-workspace .change-list, .strategy-workspace .path-list, .strategy-workspace .history-list { margin: 8px 0 0; padding: 0; list-style: none; }
+.strategy-workspace .change-list { display: grid; gap: 10px; }
+.strategy-workspace .change-list > li { padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .change-head { display: flex; align-items: center; gap: 8px; margin: 0; flex-wrap: wrap; }
+.strategy-workspace .path-list li { margin: 2px 0; color: var(--q-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.strategy-workspace .history-list li { padding: 6px 0; border-bottom: 1px solid var(--q-line-soft); }
+.strategy-workspace .provenance { margin-top: 12px; }
+.strategy-workspace .provenance summary { color: var(--q-ink-soft); font-size: 12.5px; cursor: pointer; }
 
-.strategy-list .muted {
-  color: var(--graphite-soft);
-  font-size: 12px;
-}
+/* Evidence: the frozen run's real job, report and equity path */
+.strategy-workspace .evidence-origin { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.strategy-workspace .evidence-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px 16px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .evidence-metrics dt { color: var(--q-ink-soft); font-size: 12px; }
+.strategy-workspace .evidence-metrics dd { margin: 3px 0 0; color: var(--q-ink); font-size: 17px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.strategy-workspace .evidence-curve { margin-top: 14px; }
+.strategy-workspace .equity-path { padding: 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; margin: 0; }
+.strategy-workspace .equity-path h2 { font-size: 14px; }
+.strategy-workspace .equity-path h3 { margin-top: 10px; font-size: 13px; }
+.strategy-workspace .equity-path svg { width: 100%; height: auto; color: var(--q-ink-soft); }
+.strategy-workspace .equity-path .summary-list { margin-top: 8px; }
 
-.strategy-create .field,
-.strategy-panel .field {
-  margin: 10px 0;
-}
+/* Proposal review and experiment list */
+.strategy-workspace .proposal-list, .strategy-workspace .experiment-list { display: grid; gap: 10px; margin: 10px 0; padding: 0; list-style: none; }
+.strategy-workspace .proposal-list li, .strategy-workspace .experiment-list li { padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .proposal-list .change { margin: 4px 0 2px 24px; color: var(--q-red); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.strategy-workspace .proposal-list .reason { margin: 0 0 0 24px; color: var(--q-ink-soft); font-size: 13px; }
+.strategy-workspace .proposal-list p { margin: 2px 0 0 24px; }
+.strategy-workspace .proposal-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.strategy-workspace .experiment-list a { color: var(--q-red); font-weight: 600; }
+.strategy-workspace .experiment-list a:hover { color: #a4301f; text-decoration: underline; }
+.strategy-workspace .experiment-list p { margin: 2px 0; }
 
-.strategy-create small {
-  display: block;
-  margin-top: 4px;
-  color: var(--graphite-soft);
-  font-size: 12px;
-}
+.strategy-workspace .check { display: flex; gap: 8px; align-items: center; margin: 8px 0; color: var(--q-ink); font-size: 13px; font-weight: 600; }
+.strategy-workspace .check input { margin: 0; accent-color: var(--q-red); }
 
-.check {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin: 8px 0;
-  color: var(--graphite);
-  font-size: 13px;
-  font-weight: 650;
-}
+.strategy-workspace .preview-facts { display: grid; gap: 6px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .preview-facts > div { display: grid; grid-template-columns: minmax(130px, 190px) minmax(0, 1fr); gap: 10px; }
+.strategy-workspace .preview-facts dt { color: var(--q-ink-soft); font-size: 12.5px; font-weight: 600; }
+.strategy-workspace .preview-facts dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.strategy-workspace .revise { margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--q-line); border-radius: 8px; }
+.strategy-workspace .revise button { margin-top: 4px; }
 
-.check input {
-  margin: 0;
-  accent-color: var(--terracotta);
-}
-
-.parameter-list {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  color: var(--graphite-soft);
-  font-size: 13px;
-}
-
-.parameter-list li {
-  margin: 2px 0;
-}
-
-/* The AI column keeps the conversation next to the draft it is about. */
-.strategy-ai {
-  position: sticky;
-  top: 24px;
-  display: grid;
-  gap: 18px;
-  min-width: 0;
-}
-
-.strategy-chat {
-  border-color: var(--terracotta);
-}
-
-.strategy-chat button {
-  border-color: var(--terracotta);
-  background: var(--terracotta);
-  color: #ffffff;
-}
-
-.call-note {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-left: 3px solid var(--terracotta);
-  border-radius: 0 8px 8px 0;
-  background: var(--terracotta-soft);
-}
-
-.call-note p {
-  margin: 4px 0;
-  font-size: 13px;
-}
-
-.message-list {
-  display: grid;
-  gap: 10px;
-  margin: 14px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.message {
-  padding: 10px 12px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.message-model {
-  border-left: 3px solid var(--terracotta);
-}
-
-.message p {
-  margin: 4px 0;
-  font-size: 13px;
-  white-space: pre-wrap;
-}
-
-.proposal-list {
-  display: grid;
-  gap: 12px;
-  margin: 10px 0;
-  padding: 0;
-  list-style: none;
-}
-
-.proposal-list li {
-  padding: 10px 12px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.proposal-list .change {
-  margin: 2px 0 2px 24px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px;
-  color: var(--terracotta);
-}
-
-.proposal-list .reason {
-  margin: 0 0 0 24px;
-  color: var(--graphite-soft);
-  font-size: 13px;
-}
-
-.preview-facts {
-  display: grid;
-  gap: 8px;
-  margin: 14px 0;
-  padding: 12px 14px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.preview-facts > div {
-  display: grid;
-  grid-template-columns: minmax(140px, 200px) minmax(0, 1fr);
-  gap: 12px;
-}
-
-.preview-facts dt {
-  color: var(--graphite-soft);
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.preview-facts dd {
-  margin: 0;
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-.experiment-list {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0;
-  padding: 0;
-  list-style: none;
-}
-
-.experiment-list li {
-  padding: 10px 12px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  background: #ffffff;
-  font-size: 13px;
-}
-
-.experiment-list a {
-  color: var(--terracotta);
-  font-weight: 650;
-}
-
-/* Asking for a different change is its own approved call, not part of Apply. */
-.revise {
-  margin-top: 12px;
-  padding: 12px 14px;
-  border: 1px dashed var(--paper-edge);
-  border-radius: 8px;
-}
-
-.revise button {
-  margin-top: 4px;
-}
-
-.revise .muted {
-  color: var(--graphite-soft);
-  font-size: 12px;
-}
+/* The AI column: the conversation of the strategy that is open, and its change */
+.strategy-ai { position: sticky; top: 20px; display: grid; gap: 14px; min-width: 0; align-content: start; }
+.strategy-chat { border: 1px solid var(--q-line); border-radius: 10px; background: var(--q-surface); }
+.strategy-workspace .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.strategy-workspace .chat-head h2 { margin: 0; font-size: 16px; font-weight: 650; }
+.strategy-workspace .chat-head select { width: auto; max-width: 190px; min-height: 32px; padding: 4px 8px; font-size: 13px; }
+.strategy-workspace .composer { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--q-line-soft); }
+.strategy-workspace .composer-actions { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.strategy-workspace .composer-actions .muted { margin: 0; max-width: 22rem; }
+.strategy-workspace .message-list { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
+.strategy-workspace .message { padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .message p { margin: 3px 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.strategy-workspace .message-role { color: var(--q-ink-soft); font-size: 12px; font-weight: 650; }
+.strategy-workspace .message-model { border-left: 2px solid var(--q-red); }
+.strategy-workspace .call-note { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--q-red); border-radius: 0 8px 8px 0; background: var(--q-red-soft); }
+.strategy-workspace .call-note p { margin: 3px 0; font-size: 12.5px; }
+.strategy-chat-empty p { font-size: 13.5px; }
 
 /* Every state is written out in words; this marks the label, not the meaning. */
-.status {
-  display: inline-block;
-  padding: 1px 8px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 999px;
-  background: #ffffff;
-  font-size: 12px;
-  font-weight: 650;
+.strategy-workspace .status { display: inline-block; padding: 1px 8px; border: 1px solid var(--q-line); border-radius: 999px; background: var(--q-surface); font-size: 12px; font-weight: 650; text-transform: none; letter-spacing: 0; }
+
+.strategy-workspace .notice { margin: 10px 0 0; padding: 10px 12px; border: 1px solid #dcdcd8; border-radius: 8px; background: var(--q-surface-soft); font-size: 13px; }
+.strategy-workspace .notice.error { border-color: var(--q-red-line); background: #fff6f4; color: #9c2f1e; }
+
+/* Narrower columns: the table keeps its density until the phone layout. */
+@media (max-width: 1239px) {
+  .strategy-workspace { grid-template-columns: minmax(0, 1fr); }
+  .strategy-ai { position: static; }
 }
 
-@media (max-width: 900px) {
-  .strategy-workspace {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .strategy-ai {
-    position: static;
-  }
-
-  .preview-facts > div {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
-  }
+@media (max-width: 640px) {
+  /* One card per strategy instead of a four-column grid, and a 44px target for
+     every control. */
+  .strategy-heading h1 { font-size: 26px; }
+  .strategy-count { flex: 1 0 auto; }
+  .strategy-workspace .create-cta { width: auto; }
+  table.strategy-table, .strategy-table tbody, .strategy-table tr, .strategy-table th, .strategy-table td { display: block; width: 100%; }
+  .strategy-table thead { display: none; }
+  .strategy-table tbody tr { padding: 10px 12px; border-bottom: 1px solid var(--q-line-soft); }
+  .strategy-table tbody tr:last-child { border-bottom: 0; }
+  .strategy-table tbody th, .strategy-table td { padding: 3px 0; border: 0; box-shadow: none; }
+  .strategy-table tbody tr.selected th { box-shadow: inset 3px 0 0 var(--q-red); padding-left: 9px; }
+  .strategy-table td[data-label]::before { content: attr(data-label) " "; color: var(--q-ink-soft); font-size: 12px; }
+  .strategy-workspace .create-fields { grid-template-columns: minmax(0, 1fr); }
+  .strategy-workspace .detail-tabs { flex-wrap: wrap; }
+  .strategy-workspace .detail-tabs [role="tab"] { min-height: 44px; }
+  .strategy-workspace button, .strategy-workspace .button-link, .strategy-workspace .create-cta { min-height: 44px; }
+  .strategy-workspace select, .strategy-workspace input, .strategy-workspace textarea { min-height: 44px; }
+  .strategy-workspace .summary-list { grid-template-columns: minmax(0, 1fr); }
+  .strategy-workspace .preview-facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .strategy-tabpanel { padding: 0; }
 }

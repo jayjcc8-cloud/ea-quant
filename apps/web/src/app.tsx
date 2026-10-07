@@ -404,15 +404,54 @@ function PageTitle({ title, subtitle, status }: { title: string; subtitle: strin
   return <header className="page-title"><div><h1>{title}</h1><p>{subtitle}</p></div>{status && <span className={`status status-${status}`}>{status}</span>}</header>
 }
 
+/**
+ * The QUINE working-name mark: one restrained black glyph, drawn rather than
+ * imported so the shell carries no asset dependency.
+ */
+function QuineMark() {
+  return <svg className="brand-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+    <rect x="1.7" y="1.7" width="20.6" height="20.6" rx="5.6" fill="none" stroke="currentColor" strokeWidth="2.3" />
+    <circle cx="12" cy="11.6" r="4.4" fill="none" stroke="currentColor" strokeWidth="2.3" />
+    <path d="M14.7 14.5 17.8 17.6" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" />
+  </svg>
+}
+
+/** The compact outline glyphs the sidebar navigation uses. */
+const NAV_ICONS = {
+  strategies: 'M4 4h16v16H4zM8 8h8M8 12h8M8 16h5',
+  runs: 'M7 4.5 19 12 7 19.5z',
+  settings: 'M12 9.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2ZM12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6',
+} as const
+
+function NavIcon({ name }: { name: keyof typeof NAV_ICONS }) {
+  return <svg className="nav-icon" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false">
+    <path d={NAV_ICONS[name]} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+}
+
 function Shell({ api }: { api: ApiAdapter }) {
   return <div className="app-shell">
     <aside className="sidebar">
-      <Link className="brand" to="/strategies"><i className="brand-mark" aria-hidden="true" /><span>EA</span><strong>QUANT</strong></Link>
-      <p className="workspace">RESEARCH WORKSPACE</p>
-      <nav aria-label="Primary navigation"><NavLink to="/strategies">Strategies</NavLink><NavLink to="/research">Research</NavLink><NavLink to="/candidates">Candidates</NavLink><NavLink to="/events">Event Validation</NavLink><NavLink to="/settings">Settings</NavLink></nav>
-      <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
+      <Link className="brand" to="/strategies"><QuineMark /><span>QUINE</span></Link>
+      <p className="workspace">工作名 · 本地研究环境</p>
+      {/* Every link is a real route. Capabilities this workspace does not serve —
+          external accounts, live or paper connectivity — are stated as unavailable
+          in the footer instead of being offered as navigation. */}
+      <nav aria-label="主导航">
+        <NavLink to="/strategies"><NavIcon name="strategies" />策略</NavLink>
+        <NavLink to="/backtests"><NavIcon name="runs" />运行</NavLink>
+        <p className="nav-group">资源与配置</p>
+        <NavLink className="nav-child" to="/research">研究</NavLink>
+        <NavLink className="nav-child" to="/holdouts">留出验证</NavLink>
+        <NavLink className="nav-child" to="/candidates">候选</NavLink>
+        <NavLink className="nav-child" to="/events">事件校验</NavLink>
+      </nav>
+      <div className="sidebar-bottom">
+        <NavLink className="nav-settings" to="/settings"><NavIcon name="settings" />自定义设置</NavLink>
+        <div className="sidebar-footer"><span className="status-dot" />仅本地回环 · 未连接实盘</div>
+      </div>
     </aside>
-    <main><header className="topbar"><span>Strategy research</span><span>Offline simulation</span></header><div className="content">
+    <main><header className="topbar"><span>本地研究</span><span>离线回测 · 不下单</span></header><div className="content">
       <Routes>
         <Route path="/strategies" element={<StrategiesWorkspace api={api} />} />
         <Route path="/strategies/:userStrategyId" element={<StrategiesWorkspace api={api} />} />

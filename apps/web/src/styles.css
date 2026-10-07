@@ -301,3 +301,60 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
   .hero-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
   .hero-facts > div:last-child { grid-column: 1 / -1; }
 }
+
+/* QUINE shell.
+   The working-name shell: a narrow, light sidebar with a restrained black Q mark,
+   compact icon navigation, and a thin toolbar. These tokens are additive — the
+   legacy research, backtest, holdout and candidate pages keep --accent and every
+   surface they already had; only the sidebar, the brand and the toolbar change. */
+:root {
+  --quine-ink: #1f2023;
+  --quine-ink-soft: #6b6f76;
+  --quine-line: #e6e6e3;
+  --quine-line-soft: #efefec;
+  --quine-surface: #ffffff;
+  --quine-surface-soft: #fafaf9;
+  --quine-red: #cf3f2c;
+  --quine-red-soft: #fdeeeb;
+  --quine-red-line: #f2c8c0;
+}
+
+.sidebar { padding: 18px 12px 14px; background: var(--quine-surface); border-right: 1px solid var(--quine-line); }
+.brand { gap: 9px; padding: 0 8px; }
+/* The shell's own mark: a drawn glyph, so the legacy clipped triangle background
+   is reset here rather than inherited from the rule above. */
+.brand-mark {
+  width: 22px; height: 22px; background: none; clip-path: none; color: var(--quine-ink);
+}
+.brand span { color: var(--quine-ink); font-size: 17px; font-weight: 750; letter-spacing: .08em; }
+.workspace { margin: 22px 8px 12px; color: var(--quine-ink-soft); font-size: 11px; letter-spacing: .1em; }
+
+.sidebar nav { gap: 1px; }
+.sidebar nav a { gap: 9px; padding: 9px 9px; border-radius: 7px; color: #5d626a; font-size: 14px; }
+.sidebar nav a:hover { color: var(--quine-ink); background: #f4f4f2; }
+.sidebar nav a.active { color: var(--quine-ink); background: var(--quine-red-soft); box-shadow: inset 2px 0 0 var(--quine-red); font-weight: 650; }
+.nav-icon { flex-shrink: 0; }
+.nav-group { margin: 16px 9px 5px; color: var(--quine-ink-soft); font-size: 11px; font-weight: 700; letter-spacing: .1em; }
+.sidebar nav a.nav-child { padding-left: 34px; font-size: 13px; }
+.sidebar-bottom { margin-top: auto; display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--quine-line); }
+.sidebar .sidebar-footer { margin: 0; padding: 0 9px; border: 0; color: var(--quine-ink-soft); font-size: 12px; }
+.status-dot { background: var(--quine-red); box-shadow: 0 0 0 3px var(--quine-red-soft); }
+
+.topbar { min-height: 48px; padding: 0 24px; background: var(--quine-surface); border-bottom: 1px solid var(--quine-line); }
+.topbar span:first-child { color: var(--quine-ink); font-weight: 600; }
+
+@media (max-width: 767px) {
+  /* The phone header is a few wrapped rows, so it scrolls away with the page
+     instead of staying pinned over the strategy, its sections and the AI column. */
+  .sidebar { position: static; padding: 10px 12px 0; }
+  .workspace { display: none; }
+  .nav-group { display: none; }
+  /* A wrapping row instead of a sideways-scrolling one: every destination stays
+     reachable without pushing the page itself wider than the viewport. */
+  .sidebar nav { display: flex; flex-wrap: wrap; gap: 0 2px; margin-top: 4px; overflow: visible; }
+  .sidebar nav a, .sidebar nav a.nav-child { flex: 0 0 auto; padding: 8px 9px; font-size: 13px; }
+  .sidebar nav a.active { background: transparent; box-shadow: inset 0 -2px 0 var(--quine-red); }
+  .sidebar-bottom { display: flex; align-items: center; gap: 2px; margin: 0; padding: 0 0 2px; border: 0; }
+  .sidebar .nav-settings { padding: 8px 9px; font-size: 13px; }
+  .sidebar .sidebar-footer { display: none; }
+}

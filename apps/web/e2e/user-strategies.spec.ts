@@ -67,10 +67,10 @@ type Preview = {
  * the page's own rule: what the scenario declares, or that it declares nothing.
  */
 function declared(value: unknown): string {
-  if (value === null || value === undefined) return 'not declared in this scenario'
+  if (value === null || value === undefined) return '该场景未声明'
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
-    return entries.length ? entries.map(([key, item]) => `${key} ${String(item)}`).join(', ') : 'declared empty'
+    return entries.length ? entries.map(([key, item]) => `${key} ${String(item)}`).join(', ') : '声明为空'
   }
   return String(value)
 }
@@ -114,17 +114,17 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // The default entry is the strategy workspace; the legacy pages stay reachable.
   await page.goto('/')
   await expect(page).toHaveURL(/\/strategies$/)
-  await expect(page.getByRole('heading', { name: 'Strategies' })).toBeVisible()
-  await expect(page.getByText('No strategies yet.')).toBeVisible()
-  await expect(page.getByRole('navigation', { name: 'Primary navigation' }).getByRole('link', { name: 'Research' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '策略' })).toBeVisible()
+  await expect(page.getByText('还没有策略。')).toBeVisible()
+  await expect(page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '研究' })).toBeVisible()
 
   // One strategy, created through the browser: a save, with a stated criterion.
-  await page.getByLabel('Strategy name').fill('Trend follow')
-  await page.getByLabel('Intent').fill('Check whether a delayed entry still pays for its own costs on the registered data')
-  await page.getByLabel('Scenario', { exact: true }).selectOption(scenario.scenario_id)
-  await page.getByLabel('Criterion field').selectOption('economics.net_pnl.amount')
-  await page.getByLabel('Expected sign').selectOption('positive')
-  await page.getByRole('button', { name: 'Create strategy' }).click()
+  await page.getByLabel('策略名称').fill('Trend follow')
+  await page.getByLabel('意图').fill('Check whether a delayed entry still pays for its own costs on the registered data')
+  await page.getByLabel('场景', { exact: true }).selectOption(scenario.scenario_id)
+  await page.getByLabel('准则字段').selectOption('economics.net_pnl.amount')
+  await page.getByLabel('预期方向').selectOption('positive')
+  await page.getByRole('button', { name: '创建策略' }).click()
   await expect(page).toHaveURL(/\/strategies\/[0-9a-f-]{36}$/)
   const firstId = new URL(page.url()).pathname.split('/').at(-1)!
   const first = await read(page, firstId)
@@ -140,12 +140,12 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   })
   // With a strategy open the save form gives way to the page, and one obvious
   // entry point to creating another stays on screen.
-  await expect(page.getByRole('region', { name: 'New strategy' })).toBeHidden()
-  await expect(page.getByRole('link', { name: 'New strategy' })).toBeVisible()
-  const draftPanel = page.getByRole('region', { name: 'Draft' })
-  await expect(draftPanel.getByText('Draft revision 1')).toBeVisible()
-  await expect(draftPanel.getByText(`Initial cash ${first.draft.initial_cash} USD`)).toBeVisible()
-  await expect(draftPanel.getByText('Criterion: Net P&L expected positive')).toBeVisible()
+  await expect(page.getByRole('region', { name: '新建策略' })).toBeHidden()
+  await expect(page.getByRole('link', { name: '新建策略' })).toBeVisible()
+  const draftPanel = page.getByRole('region', { name: '草稿' })
+  await expect(draftPanel.getByText('草稿修订 1')).toBeVisible()
+  await expect(draftPanel.getByText(`${first.draft.initial_cash} USD`)).toBeVisible()
+  await expect(draftPanel.getByText('净盈亏 预期为正')).toBeVisible()
 
   // A second strategy on the SAME registered strategy is a separate object with
   // its own draft, revision and experiment list.
@@ -162,17 +162,18 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   expect(second.experiments).toEqual([])
 
   await page.goto('/strategies')
-  const list = page.getByRole('navigation', { name: 'Strategies' })
+  const list = page.getByRole('navigation', { name: '策略列表' })
   await expect(list.getByRole('link', { name: 'Trend follow', exact: true })).toBeVisible()
   await expect(list.getByRole('link', { name: 'Trend follow, no criterion', exact: true })).toBeVisible()
 
   // The second strategy's preview is its own, and it says honestly that no
   // criterion was stated.
   await list.getByRole('link', { name: 'Trend follow, no criterion', exact: true }).click()
-  await page.getByRole('button', { name: 'Preview experiment' }).click()
+  await page.getByRole('tab', { name: '实验' }).click()
+  await page.getByRole('button', { name: '预览实验' }).click()
   const secondFacts = page.locator('dl.preview-facts')
-  await expect(secondFacts.getByText('Draft revision 1')).toBeVisible()
-  await expect(secondFacts.getByText('Criterion None was stated, so this run cannot be concluded for or against the idea')).toBeVisible()
+  await expect(secondFacts.getByText('草稿修订 1')).toBeVisible()
+  await expect(secondFacts.getByText('未声明准则，因此这次运行无法支持或否定该想法')).toBeVisible()
   // Previewing starts nothing.
   expect((await read(page, second.user_strategy_id)).experiments).toEqual([])
 
@@ -193,13 +194,14 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   expect((await read(page, firstId)).experiments).toEqual([])
 
   await page.goto(`/strategies/${firstId}`)
-  await page.getByRole('button', { name: 'Preview experiment' }).click()
+  await page.getByRole('tab', { name: '实验' }).click()
+  await page.getByRole('button', { name: '预览实验' }).click()
   const facts = page.locator('dl.preview-facts')
-  await expect(facts).toContainText(`Draft revision ${preview.draft_revision}`)
-  await expect(facts).toContainText(`Initial cash ${preview.initial_cash} USD`)
-  await expect(facts).toContainText('Criterion radian.report-criterion.v1 economics.net_pnl.amount positive')
+  await expect(facts).toContainText(`草稿修订 ${preview.draft_revision}`)
+  await expect(facts).toContainText(`初始资金 ${preview.initial_cash} USD`)
+  await expect(facts).toContainText('radian.report-criterion.v1 economics.net_pnl.amount positive')
   await expect(facts).toContainText(
-    `commission ${declared(preview.commission)} · slippage ${declared(preview.slippage)} · latency ${declared(preview.latency)}`,
+    `手续费 ${declared(preview.commission)} · 滑点 ${declared(preview.slippage)} · 延迟 ${declared(preview.latency)}`,
   )
   // The identity the confirmation will carry back is readable before the click.
   await expect(facts).toContainText(preview.preview_identity.slice(0, 19))
@@ -208,8 +210,8 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
     await expect(facts).toContainText(fingerprint.slice(0, 8))
   }
 
-  await page.getByRole('button', { name: 'Start experiment' }).click()
-  await expect(page.getByText('Started experiment li-1 from revision 1')).toBeVisible()
+  await page.getByRole('button', { name: '开始实验' }).click()
+  await expect(page.getByText('已从修订 1 启动实验 li-1')).toBeVisible()
   const launched = await read(page, firstId)
   const experiment = launched.experiments[0]
   expect(experiment.status).toBe('created')
@@ -227,13 +229,13 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   expect(launched.draft.revision).toBe(1)
   // One started run is not a finished piece of research, and this page says where
   // the rest of it belongs.
-  const experimentPanel = page.getByRole('region', { name: 'Experiment' })
-  await expect(experimentPanel.locator('p.muted', { hasText: /One run is one frozen result, not research that is finished/ })).toBeVisible()
-  await expect(experimentPanel.getByRole('link', { name: 'holdout' })).toHaveAttribute('href', '/holdouts')
-  await expect(experimentPanel.getByRole('link', { name: 'research' })).toHaveAttribute('href', '/research')
+  const experimentPanel = page.getByRole('region', { name: '实验' })
+  await expect(experimentPanel.locator('p.muted', { hasText: /一次运行只是一个冻结的结果，不是已经完成的研究/ })).toBeVisible()
+  await expect(experimentPanel.getByRole('link', { name: '留出验证' })).toHaveAttribute('href', '/holdouts')
+  await expect(experimentPanel.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/research')
 
   // Follow the real run and its formal report on the existing backtest page.
-  await page.getByRole('link', { name: 'Open the run to check its status and report' }).click()
+  await page.getByRole('link', { name: '打开运行以查看它的状态和报告' }).click()
   await expect(page).toHaveURL(new RegExp(`/backtests/${experiment.job_id}$`))
   const job = await waitForTerminalJob(page, experiment.job_id!)
   expect(job.status, job.message ?? 'the confirmed experiment must run').toBe('succeeded')
@@ -255,11 +257,64 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
     contentType: 'application/json',
   })
 
+  // The workspace's own view of that same run, still with no model anywhere: it
+  // reads the job, the formal report and the equity path through the existing
+  // adapter and prints the report's own figures. Nothing below is a fixture and
+  // nothing is recomputed here.
+  const fee = report.economics.fees
+  const netPnl = report.economics.net_pnl
+  expect(fee, 'the engine report must record its own fee total').toBeTruthy()
+  // The report the page may show is only ever the report of the run it was read for.
+  expect(report.run_id).toBe(jobDocument.engine_run_id)
+
+  await page.setViewportSize({ width: 1400, height: 1000 })
+  await page.goto(`/strategies/${firstId}`)
+  await expect(page.getByRole('tab', { name: '证据' })).toHaveAttribute('aria-selected', 'true')
+  const evidence = page.getByRole('region', { name: '证据' })
+  await expect(evidence.getByRole('link', { name: '打开运行页面' })).toHaveAttribute('href', `/backtests/${experiment.job_id}`)
+  const metrics = evidence.locator('dl.evidence-metrics')
+  await expect(metrics).toContainText(`${netPnl.amount} ${netPnl.currency ?? report.economics.currency}`)
+  await expect(metrics).toContainText(`${fee.amount} ${fee.currency ?? report.economics.currency}`)
+  // The identity this report was read under stays on screen: the web job, the
+  // engine run and the report digest are the persisted ones.
+  expect(jobDocument.engine_run_id, 'the engine run must have its own id').toBeTruthy()
+  await evidence.getByText('技术细节与来源').click()
+  const provenance = evidence.locator('details.provenance')
+  await expect(provenance).toContainText(jobDocument.engine_run_id)
+  await expect(provenance).toContainText(jobDocument.report_sha256)
+  // The curve is shown only because the equity path's own identity is this run's
+  // and this report's.
+  await expect(evidence.locator('.evidence-curve svg')).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('strategy-evidence-1400.png'), fullPage: true })
+
+  await page.setViewportSize({ width: 420, height: 900 })
+  await expect(evidence.locator('.evidence-curve svg')).toBeVisible()
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+    'the evidence view must not scroll sideways at a narrow width',
+  ).toBeLessThanOrEqual(1)
+  await page.screenshot({ path: testInfo.outputPath('strategy-evidence-420.png'), fullPage: true })
+
+  // The other way into creating one: a single click on the header action opens the
+  // form here, with every required field, and creates nothing by itself.
+  await page.setViewportSize({ width: 1400, height: 1000 })
+  await page.getByRole('link', { name: '新建策略' }).click()
+  await expect(page).toHaveURL(/\/strategies$/)
+  const createForm = page.getByRole('region', { name: '新建策略' })
+  await expect(createForm).toBeVisible()
+  await expect(createForm.getByLabel('策略名称')).toBeVisible()
+  await expect(createForm.getByLabel('场景', { exact: true })).toBeVisible()
+  await expect(createForm.getByLabel('意图')).toBeVisible()
+  await expect(createForm.getByLabel('准则字段')).toBeVisible()
+  await expect(createForm.getByLabel('预期方向')).toBeVisible()
+  expect((await read(page, firstId)).experiments).toEqual(launched.experiments)
+
   // Refreshing the strategy shows the same frozen experiment, on the same run,
   // while the second strategy is still untouched.
   await page.goto(`/strategies/${firstId}`)
-  await expect(page.getByText('Started experiment li-1 from revision 1')).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Open the run to check its status and report' }))
+  await page.getByRole('tab', { name: '实验' }).click()
+  await expect(page.getByText('已从修订 1 启动实验 li-1')).toBeVisible()
+  await expect(page.getByRole('link', { name: '打开运行以查看它的状态和报告' }))
     .toHaveAttribute('href', `/backtests/${experiment.job_id}`)
   const reread = await read(page, firstId)
   expect(reread.experiments).toEqual(launched.experiments)
@@ -276,22 +331,23 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   expect(refusal.status()).toBe(409)
   expect(JSON.stringify(await refusal.json())).toContain('frozen experiment of a user strategy')
 
-  // The list carries the frozen run on the strategy's own line, at the revision
-  // that ran rather than at today's head.
+  // The table carries the frozen run on the strategy's own row, at the revision
+  // that ran rather than at today's head, and it names the launch state without
+  // claiming the run succeeded.
   await page.goto('/strategies')
-  await expect(
-    page.getByRole('navigation', { name: 'Strategies' })
-      .getByText('Frozen run from revision 1 · run started'),
-  ).toBeVisible()
+  const table = page.getByRole('navigation', { name: '策略列表' })
+  await expect(table.getByText('冻结 v1')).toBeVisible()
+  await expect(table.getByRole('link', { name: '运行已启动' })).toHaveAttribute('href', `/backtests/${experiment.job_id}`)
   await page.screenshot({ path: testInfo.outputPath('strategy-workspace.png'), fullPage: true })
 
   // A narrow viewport with the real run and the admitted input on screen: the
   // workspace stays inside the viewport instead of scrolling sideways.
   await page.setViewportSize({ width: 420, height: 900 })
   await page.goto(`/strategies/${firstId}`)
-  await expect(page.getByText('Started experiment li-1 from revision 1')).toBeVisible()
-  await page.getByRole('button', { name: 'Preview experiment' }).click()
-  await expect(page.locator('dl.preview-facts')).toContainText(`Draft revision ${preview.draft_revision}`)
+  await page.getByRole('tab', { name: '实验' }).click()
+  await expect(page.getByText('已从修订 1 启动实验 li-1')).toBeVisible()
+  await page.getByRole('button', { name: '预览实验' }).click()
+  await expect(page.locator('dl.preview-facts')).toContainText(`草稿修订 ${preview.draft_revision}`)
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   )
