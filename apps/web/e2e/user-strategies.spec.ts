@@ -3,10 +3,12 @@
  *
  * This spec needs a server that is actually running, whose workspace registers a
  * runnable scenario and whose data root holds the data behind it. It scripts
- * nothing: the draft is created through the browser, the experiment is confirmed
- * from a preview read out of the live workspace, and the run it links to is the
- * engine's own backtest job with the engine's own report. No provider is needed,
- * because creating a strategy and confirming an experiment call no model.
+ * nothing: the idea is saved through the browser first, then bound to one
+ * registered scenario by one explicit confirmed choice, the experiment is
+ * confirmed from a preview read out of the live workspace, and the run it links to
+ * is the engine's own backtest job with the engine's own report. No provider is
+ * needed, because saving an idea, binding a scenario and confirming an experiment
+ * call no model.
  *
  *   EA_WEB_BASE_URL=http://127.0.0.1:8765 \
  *   npx playwright test e2e/user-strategies.spec.ts
@@ -28,6 +30,7 @@ type StrategyDocument = {
   user_strategy_id: string
   name: string
   draft: { revision: number; strategy_id: string; scenario_id: string; initial_cash: string; parameters: Record<string, string | number>; criterion: { schema: string; field: string; expectation: string } | null }
+  binding?: { scenario_id: string; from_revision: number; to_revision: number } | null
   messages: { message_id: string; role: 'user' | 'model'; text: string }[]
   experiments: {
     launch_intent_id: string
@@ -44,6 +47,18 @@ type StrategyDocument = {
       approved_budget?: { max_model_calls: number; max_backtests: number }
     }
   }[]
+}
+
+/**
+ * The same record while it is still only a saved idea: revision 1, no scenario and
+ * no executable field at all. It is read with its own type so an assertion about an
+ * intent cannot accidentally reach for a draft field that does not exist yet.
+ */
+type IntentDocument = {
+  user_strategy_id: string
+  draft: { kind: 'intent'; revision: number; scenario_id: null }
+  calls: unknown[]
+  experiments: unknown[]
 }
 
 type Preview = {
@@ -102,6 +117,9 @@ async function waitForTerminalJob(page: Page, jobId: string): Promise<{ status: 
 const read = (page: Page, id: string): Promise<StrategyDocument> =>
   page.request.get(`/api/user-strategies/${id}`).then((response) => response.json())
 
+const readIntent = (page: Page, id: string): Promise<IntentDocument> =>
+  page.request.get(`/api/user-strategies/${id}`).then((response) => response.json())
+
 test('a confirmed strategy experiment freezes one real run and two strategies stay independent', async ({ page }, testInfo) => {
   test.setTimeout(180_000)
   await waitForHealth()
@@ -119,19 +137,54 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(page.getByText('还没有策略。')).toBeVisible()
   await expect(page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '研究' })).toBeVisible()
 
-  // One strategy, created through the browser: a save, with a stated criterion.
+  // One idea, saved through the browser first: the entry point asks for the idea,
+  // not for a scenario, so a save needs no catalog and writes no executable field.
   await page.getByLabel('策略名称').fill('Trend follow')
   await page.getByLabel('意图').fill('Check whether a delayed entry still pays for its own costs on the registered data')
-  await page.getByLabel('场景', { exact: true }).selectOption(scenario.scenario_id)
-  await page.getByLabel('准则字段').selectOption('economics.net_pnl.amount')
-  await page.getByLabel('预期方向').selectOption('positive')
-  await page.getByRole('button', { name: '创建策略' }).click()
+  await page.getByRole('button', { name: '保存想法' }).click()
   await expect(page).toHaveURL(/\/strategies\/[0-9a-f-]{36}$/)
   const firstId = new URL(page.url()).pathname.split('/').at(-1)!
+  const savedIntent = await readIntent(page, firstId)
+  // The saved idea is revision 1 of the same durable strategy: no scenario, no
+  // strategy, symbol, funding or parameter, and nothing was called or run for it.
+  expect(savedIntent.draft).toEqual({ kind: 'intent', revision: 1, scenario_id: null })
+  expect(savedIntent.experiments).toEqual([])
+  expect(savedIntent.calls).toEqual([])
+  // The page says the same: it shows no strategy, instrument, funding or criterion
+  // where none exists, and it survives a reload of the same id.
+  const intentPanel = page.getByRole('region', { name: '草稿' })
+  await expect(intentPanel.getByText('意图修订 1')).toBeVisible()
+  await expect(intentPanel.getByText('尚未绑定：没有策略、标的、资金、数据来源或注册参数')).toBeVisible()
+  await page.reload()
+  const bindPanel = page.getByRole('region', { name: '绑定场景' })
+  await expect(bindPanel).toBeVisible()
+  expect((await readIntent(page, firstId)).draft).toEqual({ kind: 'intent', revision: 1, scenario_id: null })
+
+  // The one explicit choice that gives it a scenario. Nothing is preselected, the
+  // registered scenario is named by its exact id beside its own summary, and the
+  // button stays inert until the confirmation is ticked — so a reloaded intent
+  // cannot be bound by a stray click.
+  await expect(bindPanel.getByLabel('场景')).toHaveValue('')
+  expect(await bindPanel.getByRole('button', { name: '绑定场景' }).isDisabled()).toBe(true)
+  await bindPanel.getByLabel('场景').selectOption(scenario.scenario_id)
+  // Selecting a scenario still binds nothing: only the confirmed click does.
+  expect((await readIntent(page, firstId)).draft).toEqual({ kind: 'intent', revision: 1, scenario_id: null })
+  await bindPanel.getByLabel('准则字段').selectOption('economics.net_pnl.amount')
+  await bindPanel.getByLabel('预期方向').selectOption('positive')
+  await bindPanel.getByLabel('我确认把选中的这个场景绑定到这条策略').check()
+  await bindPanel.getByRole('button', { name: '绑定场景' }).click()
+  await expect(bindPanel).toHaveCount(0)
+
   const first = await read(page, firstId)
-  expect(first.draft.revision).toBe(1)
+  // One binding, one revision: the same strategy, the same id, the same messages —
+  // and the executable draft the host formed from the chosen scenario.
+  const boundRevision = 2
+  expect(first.user_strategy_id).toBe(firstId)
+  expect(first.draft.revision).toBe(boundRevision)
   expect(first.draft.scenario_id).toBe(scenario.scenario_id)
+  expect(first.binding?.scenario_id).toBe(scenario.scenario_id)
   expect(first.experiments).toEqual([])
+  expect(first.calls).toEqual([])
   // The host owns the criterion vocabulary: the browser sent a field and a sign,
   // and the stored draft carries the report's own schema.
   expect(first.draft.criterion).toEqual({
@@ -144,7 +197,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(page.getByRole('region', { name: '新建策略' })).toBeHidden()
   await expect(page.getByRole('link', { name: '新建策略' })).toBeVisible()
   const draftPanel = page.getByRole('region', { name: '草稿' })
-  await expect(draftPanel.getByText('草稿修订 1')).toBeVisible()
+  await expect(draftPanel.getByText(`草稿修订 ${boundRevision}`)).toBeVisible()
   await expect(draftPanel.getByText(`${first.draft.initial_cash} USD`)).toBeVisible()
   await expect(draftPanel.getByText('净盈亏 预期为正')).toBeVisible()
 
@@ -183,7 +236,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   const preview = (await page.request
     .get(`/api/user-strategies/${firstId}/experiment/preview`)
     .then((response) => response.json())) as Preview
-  expect(preview.draft_revision).toBe(1)
+  expect(preview.draft_revision).toBe(boundRevision)
   expect(preview.criterion).toEqual(first.draft.criterion)
   expect(preview.budget.max_backtests).toBeGreaterThanOrEqual(1)
   // The preview carries the admitted snapshot's own identity, and nothing about
@@ -212,7 +265,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   }
 
   await page.getByRole('button', { name: '开始实验' }).click()
-  await expect(page.getByText('已从修订 1 启动实验 li-1')).toBeVisible()
+  await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   const launched = await read(page, firstId)
   const experiment = launched.experiments[0]
   expect(experiment.status).toBe('created')
@@ -221,13 +274,13 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // The confirmed payload is retained on the record, not merely hashed: the
   // revision it froze, the input identity this confirmation named, and the budget
   // the workspace approved for it — one backtest and no model call.
-  expect(experiment.payload.draft_revision).toBe(1)
+  expect(experiment.payload.draft_revision).toBe(boundRevision)
   expect(experiment.payload.scenario_id).toBe(scenario.scenario_id)
   expect(experiment.payload.parameters).toEqual(first.draft.parameters)
   expect(experiment.payload.preview_identity).toBe(preview.preview_identity)
   expect(experiment.payload.input_sha256).toBe(preview.input_sha256)
   expect(experiment.payload.approved_budget).toEqual({ max_model_calls: 0, max_backtests: 1 })
-  expect(launched.draft.revision).toBe(1)
+  expect(launched.draft.revision).toBe(boundRevision)
   // One started run is not a finished piece of research, and this page says where
   // the rest of it belongs.
   const experimentPanel = page.getByRole('region', { name: '实验' })
@@ -296,30 +349,33 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   ).toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('strategy-evidence-420.png'), fullPage: true })
 
-  // The other way into creating one: a single click on the header action opens the
-  // form here, with every required field, and creates nothing by itself.
+  // The other way into saving one: a single click on the header action opens the
+  // form here, and it asks for the idea alone — no scenario, so no catalog is
+  // needed and nothing is created by opening it.
   await page.setViewportSize({ width: 1400, height: 1000 })
   await page.getByRole('link', { name: '新建策略' }).click()
   await expect(page).toHaveURL(/\/strategies$/)
   const createForm = page.getByRole('region', { name: '新建策略' })
   await expect(createForm).toBeVisible()
   await expect(createForm.getByLabel('策略名称')).toBeVisible()
-  await expect(createForm.getByLabel('场景', { exact: true })).toBeVisible()
   await expect(createForm.getByLabel('意图')).toBeVisible()
-  await expect(createForm.getByLabel('准则字段')).toBeVisible()
-  await expect(createForm.getByLabel('预期方向')).toBeVisible()
+  await expect(createForm.getByRole('button', { name: '保存想法' })).toBeVisible()
+  // The form chooses no scenario and states no criterion: both belong to the one
+  // explicit binding, on the strategy itself.
+  await expect(createForm.getByLabel('场景')).toHaveCount(0)
+  await expect(createForm.getByLabel('准则字段')).toHaveCount(0)
   expect((await read(page, firstId)).experiments).toEqual(launched.experiments)
 
   // Refreshing the strategy shows the same frozen experiment, on the same run,
   // while the second strategy is still untouched.
   await page.goto(`/strategies/${firstId}`)
   await page.getByRole('tab', { name: '实验' }).click()
-  await expect(page.getByText('已从修订 1 启动实验 li-1')).toBeVisible()
+  await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   await expect(page.getByRole('link', { name: '打开运行以查看它的状态和报告' }))
     .toHaveAttribute('href', `/backtests/${experiment.job_id}`)
   const reread = await read(page, firstId)
   expect(reread.experiments).toEqual(launched.experiments)
-  expect(reread.draft.revision).toBe(1)
+  expect(reread.draft.revision).toBe(boundRevision)
   expect((await read(page, second.user_strategy_id)).draft.revision).toBe(1)
   expect((await read(page, second.user_strategy_id)).experiments).toEqual([])
 
@@ -337,7 +393,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // claiming the run succeeded.
   await page.goto('/strategies')
   const table = page.getByRole('navigation', { name: '策略列表' })
-  await expect(table.getByText('冻结 v1')).toBeVisible()
+  await expect(table.getByText(`冻结 v${boundRevision}`)).toBeVisible()
   await expect(table.getByRole('link', { name: '运行已启动' })).toHaveAttribute('href', `/backtests/${experiment.job_id}`)
   await page.screenshot({ path: testInfo.outputPath('strategy-workspace.png'), fullPage: true })
 
@@ -346,7 +402,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await page.setViewportSize({ width: 420, height: 900 })
   await page.goto(`/strategies/${firstId}`)
   await page.getByRole('tab', { name: '实验' }).click()
-  await expect(page.getByText('已从修订 1 启动实验 li-1')).toBeVisible()
+  await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   await page.getByRole('button', { name: '预览实验' }).click()
   await expect(page.locator('dl.preview-facts')).toContainText(`草稿修订 ${preview.draft_revision}`)
   const overflow = await page.evaluate(

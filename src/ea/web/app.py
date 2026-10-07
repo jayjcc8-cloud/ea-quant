@@ -280,11 +280,27 @@ class ApprovedBudgetRequest(BaseModel):
 
 
 class UserStrategyCreateRequest(BaseModel):
-    """Creating a strategy is a save: no provider call and no experiment."""
+    """Creating a strategy is a save: no provider call and no experiment.
+
+    Without a scenario this saves an intent: it needs no catalog and writes no
+    executable draft. With one it is the executable revision 1 this route has
+    always created.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
     name: str = Field(min_length=1, max_length=120)
     intent: str = Field(min_length=1, max_length=2000)
+    scenario_id: str | None = Field(default=None, min_length=1, max_length=200)
+    # The user's own criterion in the report's registered vocabulary, or none.
+    criterion: dict[str, Any] | None = None
+
+
+class UserStrategyBindRequest(BaseModel):
+    """One explicit choice of one scenario for one saved intent."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    base_revision: int = Field(ge=1, le=1000000)
     scenario_id: str = Field(min_length=1, max_length=200)
     # The user's own criterion in the report's registered vocabulary, or none.
     criterion: dict[str, Any] | None = None
@@ -1400,6 +1416,24 @@ def create_app(settings: WebSettings) -> Any:
             # Every read re-classifies an interrupted experiment against the real
             # child and job records; it never dispatches anything.
             return user_strategy_service.reconcile(user_strategy_id).document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/bind-scenario")
+    def bind_user_strategy_scenario(
+        user_strategy_id: str, request: UserStrategyBindRequest
+    ) -> object:
+        try:
+            # One explicit choice of one registered scenario for one saved intent. The
+            # workspace validates it, and nothing is called, previewed or run here.
+            strategy = user_strategy_service.bind_scenario(
+                user_strategy_id,
+                operation_id=request.operation_id,
+                base_revision=request.base_revision,
+                scenario_id=request.scenario_id,
+                criterion=request.criterion,
+            )
+            return strategy.document()
         except (UserStrategyError, OSError) as caught:
             return strategy_refusal(caught)
 

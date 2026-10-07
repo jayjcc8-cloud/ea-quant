@@ -41,7 +41,7 @@ import {
   type RecipeResolution,
   type ResearchTask,
 } from './research-api'
-import type { UserStrategy } from './user-strategies-api'
+import { isIntentDraft, type UserStrategy } from './user-strategies-api'
 import './resources.css'
 
 const UNKNOWN = '未知'
@@ -310,11 +310,13 @@ export function deriveKnownReferences(sources: KnownReferenceSources): KnownRefe
   }
 
   // User strategies: the draft the user is editing, and the payload each
-  // experiment froze.
+  // experiment froze. A saved intent is not a draft this page can name: it holds
+  // no scenario, dataset or source at all, so it contributes no reference rather
+  // than one whose every identity this page would have to report as unknown.
   for (const strategy of sources.strategies ?? []) {
     const link = { to: `/strategies/${encodeURIComponent(strategy.user_strategy_id)}`, label: '策略' }
     const draft = strategy.draft
-    if (draft) {
+    if (draft && !isIntentDraft(draft)) {
       const reference = ensureReference(references, `draft:${strategy.user_strategy_id}:${draft.revision}`, 'draft', null)
       fillIdentity(reference, draft)
       push(reference.scope, '策略草稿')

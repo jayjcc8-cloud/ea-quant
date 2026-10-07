@@ -228,17 +228,28 @@ export type ApiAdapter = {
   inspectLocalStrategy?(contentBase64: string, manifest: Record<string, unknown>): Promise<LocalStrategyCapability>
   registerLocalStrategy?(request: LocalStrategyRegisterRequest): Promise<LocalStrategySlot>
   revokeLocalStrategy?(): Promise<LocalStrategySlot>
-  /** One durable user strategy: its draft, its approved AI calls, its frozen runs.
-   * Every member is optional so an existing injected adapter keeps working, and a
-   * workspace that serves none of them renders the honest empty state instead. */
+  /** One durable user strategy: its intent or draft, its approved AI calls, its
+   * frozen runs. Every member is optional so an existing injected adapter keeps
+   * working, and a workspace that serves none of them renders the honest empty
+   * state instead. `scenario_id` is absent when a save is a bare intent, and the
+   * binding below is the one explicit choice that later gives it a scenario. */
   listUserStrategies?(): Promise<UserStrategy[]>
   createUserStrategy?(input: {
     name: string
     intent: string
-    scenario_id: string
+    scenario_id?: string | null
     criterion?: { field: string; expectation: string } | null
   }): Promise<UserStrategy>
   getUserStrategy?(userStrategyId: string): Promise<UserStrategy>
+  bindUserStrategyScenario?(
+    userStrategyId: string,
+    input: {
+      operation_id: string
+      base_revision: number
+      scenario_id: string
+      criterion?: { field: string; expectation: string } | null
+    },
+  ): Promise<UserStrategy>
   sendUserStrategyMessage?(
     userStrategyId: string,
     input: {
@@ -356,6 +367,8 @@ const browserApi: ApiAdapter = {
   listUserStrategies: () => userStrategiesApi.list(),
   createUserStrategy: input => userStrategiesApi.create(input),
   getUserStrategy: userStrategyId => userStrategiesApi.get(userStrategyId),
+  bindUserStrategyScenario: (userStrategyId, input) =>
+    userStrategiesApi.bindScenario(userStrategyId, input),
   sendUserStrategyMessage: (userStrategyId, input) =>
     userStrategiesApi.sendMessage(userStrategyId, input),
   applyUserStrategyProposal: (userStrategyId, proposalId, input) =>

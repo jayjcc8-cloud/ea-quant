@@ -949,6 +949,22 @@ describe('known reference derivation', () => {
     expect(derived.filter((item) => item.key === 'job:job-gone')).toHaveLength(1)
   })
 
+  it('derives no draft reference from a saved intent, which has no scenario to name', () => {
+    // A saved intent holds no scenario, no dataset and no source at all. It is not
+    // a draft this page can name, so it contributes no reference rather than one
+    // whose every identity would have to be reported as unknown.
+    const savedIntent: UserStrategy = {
+      ...userStrategy,
+      user_strategy_id: 'us-intent',
+      draft: { kind: 'intent', revision: 1, scenario_id: null },
+      experiments: [],
+    }
+    expect(deriveKnownReferences({ strategies: [savedIntent] })).toEqual([])
+    // The bound strategy beside it still contributes its own draft and frozen run.
+    expect(deriveKnownReferences({ strategies: [savedIntent, userStrategy] }).map((item) => item.key))
+      .toEqual(['draft:us-1:2', 'job:job-frozen'])
+  })
+
   it('encodes each linked identifier and derives nothing from a source that was never read', () => {
     // The identifier is the host's; this pins the encoding rule, not one id shape.
     const derived = deriveKnownReferences({ jobs: [{ ...frozenJob, job_id: 'job/1 x' }] })

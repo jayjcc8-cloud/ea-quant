@@ -27,10 +27,11 @@ import { EquityCurve, pathPercent, type EquityPath } from './equity-path'
 import { exactDelta } from './decimal'
 import {
   UserStrategyRequestError,
+  isIntentDraft,
   type ApprovedBudget,
   type UserStrategy,
   type UserStrategyCall,
-  type UserStrategyDraft,
+  type UserStrategyDraftDocument,
   type UserStrategyExperiment,
   type UserStrategyPreview,
   type UserStrategyProposal,
@@ -64,6 +65,7 @@ const REQUEST_EXPLANATIONS: Record<string, string> = {
   stale_base_revision: '草稿修订已前进，这次修改没有被应用。请重新加载该策略后再试。',
   operation_conflict: '该操作编号已绑定到另一个修改，因此什么都没有应用。',
   approval_required: '这里需要一次明确的批准，而且它必须在该工作区的预算之内。',
+  user_strategy_invalid: '这个操作对这条策略的当前状态无效，因此什么都没有改变。',
   user_strategy_not_found: '该策略不在这个工作区里。请重新加载策略列表。',
   request_failed: '本地服务拒绝了这次请求，什么都没有改变。',
 }
@@ -108,10 +110,28 @@ const explain = (error: unknown) => {
   return error instanceof Error ? error.message : '这次请求失败了，什么都没有改变。'
 }
 
-const strategyLine = (draft: UserStrategyDraft) =>
-  `${draft.strategy_id} · ${draft.venue}:${draft.symbol}`
+/**
+ * One revision's strategy and instrument. An intent has neither, and says so
+ * instead of printing a blank where a strategy would be.
+ */
+const strategyLine = (draft: UserStrategyDraftDocument) =>
+  isIntentDraft(draft)
+    ? '尚未绑定场景，因此没有策略与标的'
+    : `${draft.strategy_id} · ${draft.venue}:${draft.symbol}`
 
 const revisionLabel = (revision: number) => `草稿修订 ${revision}`
+
+/** One revision, named for what it is: an executable draft, or a saved intent. */
+const revisionText = (draft: UserStrategyDraftDocument) =>
+  isIntentDraft(draft) ? `意图修订 ${draft.revision}` : revisionLabel(draft.revision)
+
+/** The short form of a revision, for the chips and table cells. */
+const revisionChip = (draft: UserStrategyDraftDocument) =>
+  isIntentDraft(draft) ? `v${draft.revision} 意图` : `v${draft.revision} 草稿`
+
+/** One durable change's kind, in the user's words. */
+const changeLabel = (kind: 'apply' | 'undo' | 'bind') =>
+  kind === 'apply' ? '应用' : kind === 'undo' ? '撤销' : '绑定场景'
 
 /** The criterion exactly as the report names it: schema, path, expectation. */
 const criterionLine = (criterion: ReportCriterion | null) =>
@@ -184,26 +204,52 @@ function CallNextStep({ call }: { call: UserStrategyCall }) {
   return null
 }
 
+/** The name a save falls back to: the user's own words, never a scene or a guess. */
+const TEMPORARY_NAME = '未命名想法'
+
+/** One string's UTF-8 length, counted here rather than through a browser-only encoder. */
+function utf8Length(text: string): number {
+  let bytes = 0
+  for (const character of text) {
+    const point = character.codePointAt(0) ?? 0
+    bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4
+  }
+  return bytes
+}
+
 /**
- * Create one strategy. This is a save: the scenario is read to freeze a valid
- * starting draft, and no provider, job or child experiment is touched. The form is
- * a compact disclosure rather than a page: creating one strategy selects it, and
+ * A visible temporary name taken from the user's own text, clipped on a character
+ * boundary to the host's own 120-byte bound. It stands in for a name the user did
+ * not give — it is never a scenario, a strategy or a default draft field.
+ */
+function temporaryName(intent: string): string {
+  const text = intent.trim().replace(/\s+/g, ' ')
+  if (!text) return TEMPORARY_NAME
+  let name = ''
+  let bytes = 0
+  for (const character of text) {
+    const size = utf8Length(character)
+    if (bytes + size > 120) break
+    name += character
+    bytes += size
+  }
+  return name
+}
+
+/**
+ * Create one strategy. This is a save of an idea: no scenario is chosen here, so
+ * no catalog is needed and no draft field, model call or run exists yet. The form
+ * is a compact disclosure rather than a page: creating one strategy selects it, and
  * the conversation for it opens immediately.
  */
-function CreateStrategy({ api, scenarios, created }: {
+function CreateStrategy({ api, created }: {
   api: ApiAdapter
-  scenarios: ScenarioSummary[]
   created: (strategy: UserStrategy) => void
 }) {
   const [name, setName] = useState('')
   const [intent, setIntent] = useState('')
-  const [scenarioId, setScenarioId] = useState('')
-  const [field, setField] = useState('')
-  const [expectation, setExpectation] = useState<string>('positive')
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
-
-  const usable = scenarios.filter(item => item.valid && item.summary && item.scenario_id)
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -216,18 +262,15 @@ function CreateStrategy({ api, scenarios, created }: {
     setBusy(true)
     setNote('')
     try {
+      // No scenario is named, so this saves an intent: the host needs no catalog
+      // for it and writes no executable field, and the scenario is chosen later,
+      // explicitly, on the strategy itself.
       const strategy = await createStrategy({
-        name: name.trim(),
+        name: name.trim() || temporaryName(intent),
         intent: intent.trim(),
-        scenario_id: scenarioId,
-        // The host validates this against the report's own vocabulary: what the
-        // creator states is a field and a sign, and what is stored is the complete
-        // validated criterion the host froze.
-        ...(field ? { criterion: { field, expectation } } : {}),
       })
       setName('')
       setIntent('')
-      setField('')
       created(strategy)
     } catch (error) {
       setNote(explain(error))
@@ -238,51 +281,25 @@ function CreateStrategy({ api, scenarios, created }: {
 
   return <section aria-label="新建策略" className="strategy-create">
     <form onSubmit={submit}>
-      <div className="create-fields">
-        <div className="field">
-          <label htmlFor="strategy-name">策略名称</label>
-          <input id="strategy-name" value={name} maxLength={120} required
-            onChange={event => setName(event.target.value)} />
-        </div>
-        <div className="field">
-          <label htmlFor="strategy-scenario">场景</label>
-          <select id="strategy-scenario" value={scenarioId} required
-            onChange={event => setScenarioId(event.target.value)}>
-            <option value="">选择一个已注册场景</option>
-            {usable.map(item => <option key={item.scenario_id} value={item.scenario_id}>
-              {`${item.summary?.strategy_id} · ${item.summary?.venue}:${item.summary?.symbol}`}
-            </option>)}
-          </select>
-          {!usable.length && <small>当前没有可用的有效注册场景。</small>}
-        </div>
-      </div>
       <div className="field">
         <label htmlFor="strategy-intent">意图</label>
         <textarea id="strategy-intent" value={intent} maxLength={2000} required rows={2}
           onChange={event => setIntent(event.target.value)} />
       </div>
-      <div className="create-fields">
-        <div className="field">
-          <label htmlFor="strategy-criterion-field">准则字段</label>
-          <select id="strategy-criterion-field" value={field}
-            onChange={event => setField(event.target.value)}>
-            <option value="">不声明准则</option>
-            {CRITERION_FIELDS.map(item => <option key={item.field} value={item.field}>{item.label}</option>)}
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor="strategy-criterion-expectation">预期方向</label>
-          <select id="strategy-criterion-expectation" value={expectation} disabled={!field}
-            onChange={event => setExpectation(event.target.value)}>
-            {EXPECTATIONS.map(item => <option key={item} value={item}>{EXPECTATION_LABELS[item]}</option>)}
-          </select>
-        </div>
+      <div className="field">
+        <label htmlFor="strategy-name">策略名称</label>
+        <input id="strategy-name" value={name} maxLength={120}
+          onChange={event => setName(event.target.value)} />
+        <small>{`可以留空；留空时用你自己的话作为临时名称：${temporaryName(intent)}`}</small>
       </div>
       <div className="create-actions">
-        <button type="submit" className="primary" disabled={busy || !name.trim() || !intent.trim() || !scenarioId}>
-          创建策略
+        <button type="submit" className="primary" disabled={busy || !intent.trim()}>
+          保存想法
         </button>
-        <p className="muted">创建策略只保存草稿：不调用模型，也不启动回测。</p>
+        <p className="muted">
+          保存只写下这个想法：不选择场景，不调用模型，也不启动回测。场景由你在策略里明确绑定，
+          在此之前这里没有策略、标的、资金或参数。
+        </p>
       </div>
       {note && <p role="alert" className="notice error">{note}</p>}
     </form>
@@ -290,18 +307,24 @@ function CreateStrategy({ api, scenarios, created }: {
 }
 
 /**
- * The frozen draft's own facts, always visible under the selected strategy: the
+ * The head revision's own facts, always visible under the selected strategy: the
  * revision, the strategy and instrument, the funding and the criterion. The detail
- * sections below it are read against exactly this draft.
+ * sections below it are read against exactly this revision. An intent has none of
+ * the executable facts yet, and states that instead of showing a blank or a guess.
  */
-function DraftFacts({ draft }: { draft: UserStrategyDraft }) {
+function DraftFacts({ draft }: { draft: UserStrategyDraftDocument }) {
   return <section aria-label="草稿" className="draft-facts">
-    <dl>
-      <div><dt>工作版本</dt><dd>{revisionLabel(draft.revision)}</dd></div>
-      <div><dt>策略与标的</dt><dd>{strategyLine(draft)}</dd></div>
-      <div><dt>初始资金</dt><dd>{`${draft.initial_cash} USD`}</dd></div>
-      <div><dt>准则</dt><dd>{criterionLabel(draft.criterion)}</dd></div>
-    </dl>
+    {isIntentDraft(draft)
+      ? <dl>
+          <div><dt>工作版本</dt><dd>{revisionText(draft)}</dd></div>
+          <div><dt>场景</dt><dd>尚未绑定：没有策略、标的、资金、数据来源或注册参数</dd></div>
+        </dl>
+      : <dl>
+          <div><dt>工作版本</dt><dd>{revisionLabel(draft.revision)}</dd></div>
+          <div><dt>策略与标的</dt><dd>{strategyLine(draft)}</dd></div>
+          <div><dt>初始资金</dt><dd>{`${draft.initial_cash} USD`}</dd></div>
+          <div><dt>准则</dt><dd>{criterionLabel(draft.criterion)}</dd></div>
+        </dl>}
   </section>
 }
 
@@ -360,11 +383,20 @@ function IntentSection({ strategy }: { strategy: UserStrategy }) {
             : `修订 ${latest.payload.draft_revision} · ${EXPERIMENT_STATUS_LABELS[latest.status]}`}
         </p>
       : <p className="muted">还没有确认过的实验。实验在「实验」里预览并确认，一次确认只允许一次运行。</p>}
-    <p className="muted">创建只保存草稿；一次批准只允许一次模型调用；一次确认只允许一次实验。</p>
+    <p className="muted">保存只写下想法；一次批准只允许一次模型调用；一次确认只允许一次实验。</p>
   </section>
 }
 
-function RulesSection({ draft }: { draft: UserStrategyDraft }) {
+function RulesSection({ draft }: { draft: UserStrategyDraftDocument }) {
+  if (isIntentDraft(draft)) {
+    return <section aria-label="规则与假设" className="strategy-panel">
+      <h2>规则与假设</h2>
+      <p className="muted">
+        这条策略还没有绑定场景，因此没有策略标识、标的、场景、资金、数据来源或注册参数可以显示，
+        也没有任何成本假设可以读。绑定一个已注册场景之后，这里会显示那个场景自己的规则与假设。
+      </p>
+    </section>
+  }
   return <section aria-label="规则与假设" className="strategy-panel">
     <h2>规则与假设</h2>
     <p>{`准则 ${criterionLine(draft.criterion)}`}</p>
@@ -396,10 +428,11 @@ function RevisionsSection({ strategy }: { strategy: UserStrategy }) {
           {strategy.changes.map(item => <li key={item.operation_id}>
             <p className="change-head">
               <span className={item.kind === 'apply' ? 'chip chip-draft' : 'chip'}>
-                {item.kind === 'apply' ? '应用' : '撤销'}
+                {changeLabel(item.kind)}
               </span>
               <span className="muted">{`修订 ${item.from_revision} → ${item.to_revision} · ${item.at}`}</span>
             </p>
+            {item.scenario_id && <p className="muted">{`绑定的场景：${item.scenario_id}`}</p>}
             {item.applied_paths.length > 0 && <ul className="path-list">
               {item.applied_paths.map(path => <li key={path}>{path}</li>)}
             </ul>}
@@ -414,8 +447,10 @@ function RevisionsSection({ strategy }: { strategy: UserStrategy }) {
       <summary>{`历史修订（${strategy.history.length}）`}</summary>
       <ul className="history-list">
         {strategy.history.map(revision => <li key={revision.revision}>
-          <p>{revisionLabel(revision.revision)}</p>
-          <p className="muted">{`${strategyLine(revision)} · 初始资金 ${revision.initial_cash} USD · ${criterionLabel(revision.criterion)}`}</p>
+          <p>{revisionText(revision)}</p>
+          {isIntentDraft(revision)
+            ? <p className="muted">保存的想法，尚未绑定场景。</p>
+            : <p className="muted">{`${strategyLine(revision)} · 初始资金 ${revision.initial_cash} USD · ${criterionLabel(revision.criterion)}`}</p>}
         </li>)}
       </ul>
     </details>}
@@ -579,10 +614,138 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
   </section>
 }
 
-/** A section of the selected strategy: the tab bar and the section it opens. */
-function StrategyDetail({ api, strategy, changed, failed }: {
+/**
+ * The one explicit choice that gives a saved intent a scenario.
+ *
+ * Nothing is preselected and nothing is inferred: the list is the workspace's own
+ * registry, each choice is named by its exact scenario id and by that scenario's
+ * own summary so two similar names stay told apart, and the button stays inert
+ * until the user ticks the confirmation. The host validates the scenario and forms
+ * the executable draft — this panel writes no field itself and never guesses a
+ * default. Binding is one revision of the same strategy and cannot be undone, so
+ * the panel says so before the click, not after it.
+ */
+function BindScenario({ api, strategy, scenarios, changed, failed }: {
   api: ApiAdapter
   strategy: UserStrategy
+  scenarios: ScenarioSummary[]
+  changed: (strategy: UserStrategy) => void
+  failed: (message: string) => void
+}) {
+  const [selected, setSelected] = useState('')
+  const [field, setField] = useState('')
+  const [expectation, setExpectation] = useState<string>('positive')
+  const [confirmed, setConfirmed] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const attempts = useRef(0)
+
+  const usable = scenarios.filter(item => item.valid && item.summary && item.scenario_id)
+  const candidate = usable.find(item => item.scenario_id === selected) ?? null
+
+  const bind = async () => {
+    if (!candidate) {
+      failed('请先选择一个已注册场景。没有被选中的场景就不会被绑定。')
+      return
+    }
+    if (!confirmed) {
+      failed('绑定需要一个明确的确认：勾选确认之后才会绑定。')
+      return
+    }
+    const bindScenario = api.bindUserStrategyScenario
+    if (!bindScenario) {
+      failed('这个工作区不提供场景绑定。')
+      return
+    }
+    setBusy(true)
+    failed('')
+    const attempt = attempts.current
+    try {
+      // One explicit choice, one operation id: a retry of this click replays it
+      // instead of binding a second time.
+      const updated = await bindScenario(strategy.user_strategy_id, {
+        operation_id: `bind-${strategy.user_strategy_id}-${strategy.draft.revision}-${attempt}`.slice(0, 64),
+        base_revision: strategy.draft.revision,
+        scenario_id: candidate.scenario_id,
+        // The host validates this against the report's own vocabulary: what the
+        // user states is a field and a sign, and what is stored is the complete
+        // validated criterion the host froze.
+        ...(field ? { criterion: { field, expectation } } : {}),
+      })
+      attempts.current += 1
+      setSelected('')
+      setField('')
+      setConfirmed(false)
+      changed(updated)
+    } catch (error) {
+      failed(explain(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <section aria-label="绑定场景" className="strategy-panel bind-panel">
+    <header className="panel-head">
+      <h2>绑定场景</h2>
+      <span className="chip">尚未绑定</span>
+    </header>
+    <p className="muted">
+      这条策略目前只是一个想法：没有策略、标的、资金或参数。绑定会把你选中的那个已注册场景
+      变成这条策略的可执行草稿（下一个修订），并保留这个想法、对话、调用和修订记录。
+      绑定只有一次，不能撤销，也不会调用模型或启动回测。
+    </p>
+    <div className="field">
+      <label htmlFor="bind-scenario">场景</label>
+      <select id="bind-scenario" value={selected} onChange={event => setSelected(event.target.value)}>
+        <option value="">选择一个已注册场景</option>
+        {usable.map(item => <option key={item.scenario_id} value={item.scenario_id}>
+          {`${item.scenario_id} · ${item.summary?.strategy_id} · ${item.summary?.venue}:${item.summary?.symbol}`}
+        </option>)}
+      </select>
+      {!usable.length && <small>当前没有可用的有效注册场景，因此现在没有可以绑定的东西。</small>}
+    </div>
+    {candidate?.summary && <dl className="summary-list">
+      <div><dt>策略标识</dt><dd>{candidate.summary.strategy_id}</dd></div>
+      <div><dt>标的</dt><dd>{`${candidate.summary.venue}:${candidate.summary.symbol}`}</dd></div>
+      <div><dt>初始资金</dt><dd>{`${candidate.summary.initial_cash} USD`}</dd></div>
+      <div><dt>记录数</dt><dd>{candidate.summary.record_count}</dd></div>
+    </dl>}
+    <div className="create-fields">
+      <div className="field">
+        <label htmlFor="bind-criterion-field">准则字段</label>
+        <select id="bind-criterion-field" value={field}
+          onChange={event => setField(event.target.value)}>
+          <option value="">不声明准则</option>
+          {CRITERION_FIELDS.map(item => <option key={item.field} value={item.field}>{item.label}</option>)}
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="bind-criterion-expectation">预期方向</label>
+        <select id="bind-criterion-expectation" value={expectation} disabled={!field}
+          onChange={event => setExpectation(event.target.value)}>
+          {EXPECTATIONS.map(item => <option key={item} value={item}>{EXPECTATION_LABELS[item]}</option>)}
+        </select>
+      </div>
+    </div>
+    <label className="check" htmlFor="bind-confirm">
+      <input id="bind-confirm" type="checkbox" checked={confirmed}
+        onChange={event => { setConfirmed(event.target.checked); failed('') }} />
+      我确认把选中的这个场景绑定到这条策略
+    </label>
+    <div className="actions">
+      <button type="button" className="primary" onClick={bind}
+        disabled={busy || !candidate || !confirmed}>绑定场景</button>
+    </div>
+    <p className="muted">
+      绑定是这条策略上的一次明确选择：它不会重发任何调用，也不会启动任何运行。
+    </p>
+  </section>
+}
+
+/** A section of the selected strategy: the tab bar and the section it opens. */
+function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
+  api: ApiAdapter
+  strategy: UserStrategy
+  scenarios: ScenarioSummary[]
   changed: (strategy: UserStrategy) => void
   failed: (message: string) => void
 }) {
@@ -594,12 +757,15 @@ function StrategyDetail({ api, strategy, changed, failed }: {
   return <section className="strategy-detail" aria-label="策略详情">
     <header className="strategy-title">
       <h2>{strategy.name}</h2>
-      <span className="chip chip-draft">{`v${strategy.draft.revision} 草稿`}</span>
+      <span className="chip chip-draft">{revisionChip(strategy.draft)}</span>
       <Link className="strategy-open" to={`/strategies/${encodeURIComponent(strategy.user_strategy_id)}`}>
         打开策略
       </Link>
     </header>
     <DraftFacts draft={strategy.draft} />
+    {isIntentDraft(strategy.draft) && <BindScenario
+      api={api} strategy={strategy} scenarios={scenarios}
+      changed={changed} failed={failed} />}
     <DetailTabs active={tab} select={setTab} idBase={idBase} />
     <div className="strategy-tabpanel" role="tabpanel" id={`${idBase}-panel-${tab}`}
       aria-labelledby={`${idBase}-tab-${tab}`} tabIndex={0}>
@@ -690,6 +856,10 @@ function ChatPanel({ api, strategy, strategies, changed }: {
       {latest.message && <p className="notice">{latest.message}</p>}
       <CallNextStep call={latest} />
     </div>}
+    {isIntentDraft(strategy.draft) && <p className="notice">
+      这条策略还没有绑定场景，因此这次对话只能澄清这个想法：模型不会提出任何字段修改，
+      也不会运行任何东西。绑定场景之后，它的建议才会变成可以应用的修改。
+    </p>}
     {unresolved && <p className="notice">
       还有一次已记录的调用没有结论。在它落实之前不会再问下一次，因此不会覆盖任何东西。
     </p>}
@@ -705,7 +875,9 @@ function ChatPanel({ api, strategy, strategies, changed }: {
         批准一次模型调用
       </label>
       <div className="composer-actions">
-        <p className="muted">一次批准只允许针对这个草稿修订的一次调用。模型可以解释，也可以提出一次有类型的修改，但它不运行任何东西，也不决定结果。</p>
+        <p className="muted">{isIntentDraft(strategy.draft)
+          ? '一次批准只允许一次调用，而且这一次调用只用来澄清这个想法：它不会提出字段修改，也不会启动回测。'
+          : '一次批准只允许针对这个草稿修订的一次调用。模型可以解释，也可以提出一次有类型的修改，但它不运行任何东西，也不决定结果。'}</p>
         <button type="button" className="primary" onClick={ask} disabled={busy || !message.trim()}>询问模型</button>
       </div>
       {note && <p role="alert" className="notice error">{note}</p>}
@@ -719,7 +891,7 @@ function EmptyChat() {
     <header className="chat-head"><h2>AI 协作</h2></header>
     <p className="muted">AI 提出建议，证据做出判断。</p>
     <p>先创建或选择一条策略。这里会显示该策略自己的对话、模型针对它提出的有类型修改，以及每次修改的应用记录。</p>
-    <p className="muted">创建策略只保存草稿：不调用模型，也不启动回测。整个对话始终属于当前打开的那一条策略。</p>
+    <p className="muted">保存只写下这个想法：不选择场景，不调用模型，也不启动回测。整个对话始终属于当前打开的那一条策略。</p>
   </section>
 }
 
@@ -963,6 +1135,22 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
     }
   }
 
+  if (isIntentDraft(strategy.draft)) {
+    // No scenario, so nothing to preview and nothing to confirm: this says so
+    // rather than offering a button whose only outcome is a host refusal.
+    return <section aria-label="实验" className="strategy-panel">
+      <h2>实验</h2>
+      <p className="muted">
+        这条策略还没有绑定场景，因此没有可以预览或运行的草稿：这里不显示任何输入、成本假设或预算，
+        因为一个都还不存在。
+      </p>
+      <p className="muted">
+        在「绑定场景」里明确选择一个已注册场景之后，这里才会显示那次运行将执行什么。
+        宿主也会自己把关：未绑定场景的策略不会被预览，也不会启动任何运行。
+      </p>
+    </section>
+  }
+
   return <section aria-label="实验" className="strategy-panel">
     <h2>实验</h2>
     <div className="actions">
@@ -1029,18 +1217,21 @@ function StrategyTable({ strategies, selectedId }: { strategies: UserStrategy[];
             {strategies.map(item => {
               const latest = item.experiments.at(-1)
               const selected = item.user_strategy_id === selectedId
+              // A saved intent has no scenario, so it has no frozen run to report
+              // and nothing that could be started: its row says that plainly.
+              const unbound = isIntentDraft(item.draft)
               return <tr key={item.user_strategy_id} className={selected ? 'selected' : undefined}>
                 <th scope="row">
                   <Link className="strategy-name" aria-current={selected ? 'page' : undefined}
                     to={`/strategies/${encodeURIComponent(item.user_strategy_id)}`}>{item.name}</Link>
                   <span className="strategy-instrument">{strategyLine(item.draft)}</span>
                 </th>
-                <td data-label="工作版本"><span className="chip chip-draft">{`v${item.draft.revision} 草稿`}</span></td>
+                <td data-label="工作版本"><span className="chip chip-draft">{revisionChip(item.draft)}</span></td>
                 <td data-label="最近证据">{latest
                   ? <span className="strategy-evidence">{`冻结 v${latest.payload.draft_revision}`}</span>
-                  : <span className="table-muted">待实验</span>}</td>
+                  : <span className="table-muted">{unbound ? '待绑定场景' : '待实验'}</span>}</td>
                 <td data-label="运行">{!latest
-                  ? <span className="table-muted">未启动</span>
+                  ? <span className="table-muted">{unbound ? '不可运行' : '未启动'}</span>
                   : latest.status === 'created' && latest.job_id
                     ? <Link to={`/backtests/${encodeURIComponent(latest.job_id)}`}>运行已启动</Link>
                     : <span className="table-muted">{EXPERIMENT_STATUS_LABELS[latest.status]}</span>}</td>
@@ -1184,14 +1375,14 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
       <p className="strategy-subtitle">每个想法一份草稿。在你确认之前，这里不会运行任何东西。</p>
       <StrategyTable strategies={strategies} selectedId={userStrategyId} />
       {listNote && <p role="alert" className="notice error">{listNote}</p>}
-      {showCreate && <CreateStrategy api={api} scenarios={scenarios} created={created} />}
+      {showCreate && <CreateStrategy api={api} created={created} />}
       {detailNote && detailNote.id === userStrategyId &&
         <p role="alert" className="notice error">{detailNote.text}</p>}
       {current && <>
         {actionNote && <p role="alert" className="notice error">{actionNote}</p>}
         <StrategyDetail
           key={current.user_strategy_id}
-          api={api} strategy={current} changed={changed}
+          api={api} strategy={current} scenarios={scenarios} changed={changed}
           failed={failedFor(current.user_strategy_id)} />
       </>}
     </div>

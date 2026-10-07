@@ -53,6 +53,7 @@ from ea.web.service import (
     WebService,
 )
 from ea.web.user_strategies import (
+    StrategyDraft,
     UserStrategyBudgetError,
     UserStrategyConflictError,
     UserStrategyError,
@@ -899,6 +900,7 @@ def test_an_answer_may_be_plain_text_and_a_diff_must_name_typed_executable_paths
         approved_budget=dict(CALL_BUDGET),
     )
     assert mistyped.proposals == ()
+    assert isinstance(mistyped.draft, StrategyDraft)
     assert mistyped.draft.parameters["entry_delay_bars"] == 0
     assert mistyped.calls[-1]["status"] == "refused"
     assert len(provider.calls) == 4
@@ -931,6 +933,7 @@ def test_applying_a_selected_subset_validates_the_whole_draft_and_stales_the_res
         paths=["parameters.target_quantity"],
     )
     assert applied.draft.revision == 2
+    assert isinstance(applied.draft, StrategyDraft)
     assert applied.draft.parameters["target_quantity"] == "3"
     assert applied.draft.parameters["entry_delay_bars"] == 0
     assert [item.revision for item in applied.history] == [1]
@@ -1081,6 +1084,7 @@ def test_a_whole_spec_rejection_writes_no_revision_even_for_the_valid_part_of_th
         )
     refused = strategies.get(strategy_id)
     assert refused.draft.revision == 1
+    assert isinstance(refused.draft, StrategyDraft)
     assert refused.draft.parameters["target_quantity"] == "2"
     assert refused.draft.parameters["entry_delay_bars"] == 0
     assert refused.changes == ()
@@ -1139,12 +1143,15 @@ def test_reject_revise_and_undo_keep_the_draft_and_history_honest(
     applied = strategies.apply_proposal(
         strategy_id, proposal_id=third["proposal_id"], operation_id="op-apply"
     )
-    assert applied.draft.revision == 2 and applied.draft.parameters["target_quantity"] == "4"
+    assert applied.draft.revision == 2
+    assert isinstance(applied.draft, StrategyDraft)
+    assert applied.draft.parameters["target_quantity"] == "4"
 
     undone = strategies.undo(
         strategy_id, operation_id="op-undo", head_revision=2, target_operation_id="op-apply"
     )
     assert undone.draft.revision == 3
+    assert isinstance(undone.draft, StrategyDraft)
     assert undone.draft.parameters["target_quantity"] == "2"
     assert [item.revision for item in undone.history] == [1, 2]
     undo_change = undone.changes[-1]
@@ -1370,6 +1377,7 @@ def test_a_json_number_for_a_decimal_field_is_refused_and_its_string_is_applied(
     assert refused.calls[-1]["message"]
     assert refused.proposals == ()
     assert refused.draft.revision == 1
+    assert isinstance(refused.draft, StrategyDraft)
     assert refused.draft.parameters["target_quantity"] == "2"
 
     _updated, proposal = _propose(
@@ -1385,6 +1393,7 @@ def test_a_json_number_for_a_decimal_field_is_refused_and_its_string_is_applied(
         strategy_id, proposal_id=proposal["proposal_id"], operation_id="op-1"
     )
     assert applied.draft.revision == 2
+    assert isinstance(applied.draft, StrategyDraft)
     assert applied.draft.parameters["target_quantity"] == "3"
     # Applying a typed diff executes nothing: no further model call, no child, no run.
     assert len(provider.calls) == 2
@@ -1490,6 +1499,7 @@ def test_a_registered_parameter_this_workspace_cannot_edit_is_read_only(
     assert refused.calls[-1]["status"] == "refused"
     assert refused.proposals == ()
     assert refused.draft.revision == 1
+    assert isinstance(refused.draft, StrategyDraft)
     assert "rule" not in refused.draft.parameters
 
 
@@ -2611,6 +2621,7 @@ def test_owned_replay_resolves_its_own_request_from_the_durable_record_alone(
         input_sha256=cast(str, envelope["input_sha256"]),
     )
     payload = cast(dict[str, Any], experiment["payload"])
+    assert isinstance(strategy.draft, StrategyDraft)
     parameters: dict[str, Any] = {
         "initial_cash": strategy.draft.initial_cash,
         "strategy_parameters": dict(strategy.draft.parameters),
@@ -3010,3 +3021,946 @@ def test_http_routes_bound_identities_and_keep_the_frozen_child_read_only(
         assert len(kept) == 1
         assert kept[0]["job_id"] == experiment["job_id"]
         assert kept[0]["status"] == "created"
+
+
+# --- intent first: one unbound intent and one explicit binding ----------------
+#
+# The same durable user strategy may exist before it has a scenario: an intent
+# with no executable draft, its own conversation and its own approved calls. A
+# scenario is bound later, explicitly, as one recorded revision of that same
+# record. Nothing here is a second chat object, a second store or a second
+# budget: the intent's identity, messages, calls, proposal history and
+# experiments are the ones the bound strategy keeps.
+
+#: The unbound draft as it is encoded and read back: an intent and nothing else.
+INTENT_DRAFT = {"kind": "intent", "revision": 1, "scenario_id": None}
+#: One user's research intent, stated before any scenario exists.
+INTENT = "Test whether buying a fixed-size dip has any edge on the fixture data"
+
+
+def _empty_stack(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[Any] | None = None,
+) -> tuple[UserStrategyService, ResearchOrchestrator, WebService, FakeProvider]:
+    """One process image whose scenario catalog is genuinely empty."""
+    root = tmp_path / "empty-scenarios"
+    root.mkdir(exist_ok=True)
+    service = WebService(root, tmp_path / "workspace")
+    service.start()
+    _STARTED.append(service)
+    research = ResearchOrchestrator(
+        ResearchStore(tmp_path / "workspace"), service, _settings_store(tmp_path, monkeypatch)
+    )
+    strategies = UserStrategyService(
+        UserStrategyStore(tmp_path / "workspace"),
+        research,
+        service,
+        _settings_store(tmp_path, monkeypatch),
+    )
+    provider = RoutedProvider(responses or [])
+    cast(Any, strategies)._provider = provider  # test seam, same ModelPort interface
+    return strategies, research, service, provider
+
+
+def _new_intent(
+    strategies: UserStrategyService, intent: str = INTENT, name: str = "New idea"
+) -> Any:
+    """One unbound strategy: a saved intent, no scenario and no executable draft."""
+    return strategies.create(name=name, intent=intent, scenario_id=None)
+
+
+def test_an_intent_is_saved_and_reopened_with_no_scenario_catalog(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first slice in one place: a save that needs no scenario to exist."""
+    strategies, _research, service, provider = _empty_stack(tmp_path, monkeypatch)
+    created = _new_intent(strategies)
+
+    # The draft is an intent and nothing else: no strategy, venue, symbol, funding,
+    # parameter or scenario is invented to make it look executable.
+    assert created.draft.document() == INTENT_DRAFT
+    assert created.user_strategy_id
+    assert created.name == "New idea" and created.intent == INTENT
+    assert created.history == () and created.messages == () and created.calls == ()
+    assert created.proposals == () and created.changes == () and created.experiments == ()
+    # Saving an intent is a save: no provider, no reservation, no job, no child.
+    assert provider.calls == [] and service.list_jobs() == [] and _children(tmp_path) == []
+    # This catalog really has nothing to bind, so no executable draft can exist here.
+    with pytest.raises(UserStrategyStateError):
+        strategies.create(name="Bound", intent=INTENT, scenario_id=SCENARIO)
+    assert len(strategies.list()) == 1
+
+    # A later process over the same workspace reopens the same identity, revision
+    # and conversation, and still cannot invent a scenario for it.
+    service.stop()
+    strategies, _research, service, provider = _empty_stack(tmp_path, monkeypatch)
+    reopened = strategies.get(created.user_strategy_id)
+    assert reopened == created
+    assert [item.user_strategy_id for item in strategies.list()] == [created.user_strategy_id]
+    with pytest.raises(UserStrategyStateError):
+        strategies.bind_scenario(
+            created.user_strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+        )
+    assert strategies.get(created.user_strategy_id).draft.document() == INTENT_DRAFT
+    assert strategies.get(created.user_strategy_id).changes == ()
+
+
+def test_an_unbound_clarification_is_plain_text_with_no_tools_and_its_own_history(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly one approved call, told only this intent's own facts and turns."""
+    # The catalog is genuinely empty here: an approved clarification of a saved
+    # intent is proven without a scenario existing anywhere in this workspace.
+    strategies, _research, service, provider = _empty_stack(tmp_path, monkeypatch)
+    runs = _forbid_engine_runs(monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+    other = _new_intent(strategies, intent="A second, unrelated idea", name="Other idea")
+
+    provider.responses.append(_response([], text="Tell me which market and data you have."))
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="What do you need from me?",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert answered.calls[-1]["status"] == "observed"
+    assert answered.messages[-1]["text"] == "Tell me which market and data you have."
+    assert answered.draft.document() == INTENT_DRAFT
+    assert answered.proposals == ()
+
+    call = provider.calls[-1]
+    # A clarification offers no tool and asks for no capability: there is nothing
+    # for this turn to call, and nothing it could change.
+    assert not call.get("tools")
+    assert not call.get("required_capabilities")
+    messages = cast(list[Any], call["messages"])
+    texts = [message.text for message in messages]
+    joined = "\n".join(texts)
+    opening = cast(str, texts[0])
+    assert INTENT in opening
+    assert other.intent not in opening and other.user_strategy_id not in opening
+    assert texts[-1] == "What do you need from me?"
+    assert texts.count("What do you need from me?") == 1
+    # The intent is stated once in this request, however the host words it.
+    assert joined.count(INTENT) == 1
+    # No scenario, strategy, instrument, funding or run is stated as a fact about
+    # this strategy, and the model is told plainly what it is: an intent with
+    # nothing bound yet, so it can only clarify.
+    assert SCENARIO not in opening and "bounded-long" not in opening
+    assert "Host-verified" not in opening
+    assert "no scenario" in opening.lower() or "unbound" in opening.lower()
+
+    # The next question carries the recorded conversation, once each, and this
+    # strategy's history stays its own.
+    provider.responses.append(_response([], text="One more answer."))
+    strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=1,
+        text="Second question",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    messages = cast(list[Any], provider.calls[-1]["messages"])
+    texts = [message.text for message in messages]
+    assert [message.role for message in messages] == ["user", "user", "assistant", "user"]
+    assert texts[-1] == "Second question" and texts.count("Second question") == 1
+    assert texts.count("What do you need from me?") == 1
+    assert texts.count("Tell me which market and data you have.") == 1
+    assert strategies.get(other.user_strategy_id).messages == ()
+    assert len(provider.calls) == 2
+    assert service.list_jobs() == [] and _children(tmp_path) == [] and runs["count"] == 0
+
+
+def test_an_unbound_clarification_with_no_configured_provider_is_still_saved_honestly(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No provider is a fact about the call, never a reason to lose the intent."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch, scripted=False)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+    assert not (tmp_path / "settings.json").exists()
+
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Explain what this idea still needs",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    call = answered.calls[-1]
+    assert call["status"] == "unconfigured"
+    assert call["message"]
+    # Nothing was measured, so nothing is reported as a measurement.
+    assert call["input_tokens"] is None and call["output_tokens"] is None
+    assert call["usage_available"] is False
+    assert call["cost"]["available"] is False and call["cost"]["amount"] is None
+    assert call["base_revision"] == 1
+    assert provider.calls == []
+    # The user's own turn and the honest call record are durable, and the intent is
+    # still the same intent it was before the call.
+    assert answered.messages[-1]["role"] == "user"
+    assert answered.messages[-1]["text"] == "Explain what this idea still needs"
+    assert answered.draft.document() == INTENT_DRAFT
+    durable = _durable(tmp_path, strategy_id)
+    assert durable.calls[-1]["status"] == "unconfigured"
+    assert durable.messages == answered.messages
+
+    service.stop()
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch, scripted=False)
+    reopened = strategies.get(strategy_id)
+    assert reopened.calls == durable.calls and reopened.messages == durable.messages
+    assert reopened.draft.document() == INTENT_DRAFT
+    assert service.list_jobs() == [] and _children(tmp_path) == []
+
+
+def test_an_unbound_clarification_replays_and_its_approval_is_per_request(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The intent's revision is revision 1, and it reuses the bound call ledger."""
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+
+    # No approval is no call, exactly as on a bound draft.
+    with pytest.raises(UserStrategyBudgetError):
+        strategies.send_message(strategy_id, call_id="call-1", base_revision=1, text="No approval")
+    with pytest.raises(UserStrategyBudgetError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-1",
+            base_revision=1,
+            text="No approval",
+            approved_budget={"max_model_calls": 99, "max_backtests": 0},
+        )
+    assert provider.calls == [] and strategies.get(strategy_id).calls == ()
+
+    provider.responses.append(_response([], text="One answer."))
+    first = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Same question",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert len(provider.calls) == 1
+    replayed = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Same question",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert len(provider.calls) == 1
+    assert replayed.calls == first.calls and replayed.messages == first.messages
+    assert _durable(tmp_path, strategy_id).calls == first.calls
+
+    with pytest.raises(UserStrategyConflictError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-1",
+            base_revision=1,
+            text="A different question",
+            approved_budget=dict(CALL_BUDGET),
+        )
+    with pytest.raises(UserStrategyConflictError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-1",
+            base_revision=1,
+            text="Same question",
+            approved_budget={"max_model_calls": 1, "max_backtests": 1},
+        )
+    # The intent's own revision is the base revision: no revision 0 is pretended.
+    with pytest.raises(UserStrategyStaleError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-2",
+            base_revision=2,
+            text="A revision this intent never had",
+            approved_budget=dict(CALL_BUDGET),
+        )
+    assert len(provider.calls) == 1
+
+
+def test_an_unbound_answer_that_calls_a_tool_is_refused_with_its_measured_usage(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No proposal can exist before a scenario is bound, and this answer was observed."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    runs = _forbid_engine_runs(monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+    provider.responses.append(_change(TWO_FIELDS, call_id="call-1"))
+
+    refused = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Change my draft, please",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    call = refused.calls[-1]
+    assert call["status"] == "refused" and call["message"]
+    # The provider answered, so what it used is a measurement, not a guess.
+    assert call["model"] == "fake-model"
+    assert call["input_tokens"] == 11 and call["output_tokens"] == 7
+    assert call["usage_available"] is True
+    assert refused.proposals == ()
+    assert all(item["kind"] != "proposal" for item in refused.messages)
+    assert refused.draft.document() == INTENT_DRAFT
+    assert refused.changes == () and refused.history == () and refused.experiments == ()
+    assert service.list_jobs() == [] and _children(tmp_path) == [] and runs["count"] == 0
+    # A refusal is a settled outcome, so recovery has nothing to classify here.
+    assert strategies.reconcile(strategy_id).calls[-1]["status"] == "refused"
+
+
+def test_an_unbound_tool_answer_never_becomes_a_proposal_after_binding(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer to an unbound turn can never be replayed as a proposal on the draft."""
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+    provider.responses.append(_change(TWO_FIELDS, call_id="call-1"))
+    strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Change my draft, please",
+        approved_budget=dict(CALL_BUDGET),
+    )
+
+    bound = strategies.bind_scenario(
+        strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+    )
+    assert bound.draft.revision == 2
+    assert bound.proposals == ()
+    # Nothing this turn observed becomes a proposal or a proposal message: both
+    # ledgers are read here as their own explicit type.
+    proposals: list[dict[str, Any]] = list(bound.proposals)
+    messages: list[dict[str, Any]] = list(bound.messages)
+    assert all(item["status"] != "open" for item in proposals)
+    assert all(item["kind"] != "proposal" for item in messages)
+    assert len(provider.calls) == 1
+
+
+def test_unbound_executable_actions_are_refused_before_any_effect(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hiding a button is not a guard: every executable action refuses on its own."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    runs = _forbid_engine_runs(monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+
+    with pytest.raises(UserStrategyStateError):
+        strategies.apply_proposal(strategy_id, proposal_id="proposal-1", operation_id="op-1")
+    with pytest.raises(UserStrategyStateError):
+        strategies.reject_proposal(strategy_id, proposal_id="proposal-1")
+    with pytest.raises(UserStrategyStateError):
+        strategies.revise_proposal(
+            strategy_id,
+            proposal_id="proposal-1",
+            call_id="call-1",
+            text="Try again",
+            approved_budget=dict(CALL_BUDGET),
+        )
+    with pytest.raises(UserStrategyStateError):
+        strategies.undo(
+            strategy_id, operation_id="op-1", head_revision=1, target_operation_id="op-0"
+        )
+    with pytest.raises(UserStrategyStateError):
+        strategies.preview_experiment(strategy_id)
+    with pytest.raises(UserStrategyStateError):
+        strategies.launch_experiment(
+            strategy_id,
+            launch_intent_id="li-1",
+            base_revision=1,
+            preview_identity="sha256:" + "0" * 64,
+            approved_budget=dict(RUN_BUDGET),
+        )
+
+    # Every refusal happened before a reservation, a call, a child or a job existed.
+    refused = strategies.get(strategy_id)
+    assert refused.draft.document() == INTENT_DRAFT
+    assert refused.messages == () and refused.calls == () and refused.proposals == ()
+    assert refused.changes == () and refused.history == () and refused.experiments == ()
+    assert provider.calls == []
+    assert service.list_jobs() == [] and _children(tmp_path) == [] and runs["count"] == 0
+    assert len(strategies.list()) == 1
+
+
+def test_binding_forms_the_executable_draft_of_the_chosen_scenario_once(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One explicit choice of one real scenario completes this same record."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    runs = _forbid_engine_runs(monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+    provider.responses.append(_response([], text="A clarification before binding."))
+    clarified = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="What would a first experiment need?",
+        approved_budget=dict(CALL_BUDGET),
+    )
+
+    bound = strategies.bind_scenario(
+        strategy_id,
+        operation_id="bind-1",
+        base_revision=1,
+        scenario_id=SCENARIO,
+        criterion=CRITERION,
+    )
+
+    # One identity, one conversation, one call ledger: binding forked nothing.
+    assert bound.user_strategy_id == strategy_id
+    assert bound.name == clarified.name and bound.intent == clarified.intent
+    assert bound.created_at == clarified.created_at
+    assert bound.messages == clarified.messages and bound.calls == clarified.calls
+    assert len(provider.calls) == 1
+    # The intent was revision 1; the executable draft is revision 2 of that same
+    # record, built exactly the way the legacy bound create builds it.
+    assert [item.document() for item in bound.history] == [INTENT_DRAFT]
+    assert bound.draft.revision == 2 and bound.draft.scenario_id == SCENARIO
+    legacy = _create(strategies, "Bound the legacy way")
+    assert bound.draft == replace(legacy.draft, revision=2)
+    assert bound.draft.criterion == FROZEN_CRITERION
+    # The binding is one durable operation with one recorded revision advance, and
+    # the request it was made from is kept to resolve a replay.
+    assert [item["operation_id"] for item in bound.changes] == ["bind-1"]
+    change = bound.changes[-1]
+    assert change["kind"] == "bind"
+    assert change["from_revision"] == 1 and change["to_revision"] == 2
+    assert change["scenario_id"] == SCENARIO
+    # Binding called no model, previewed nothing, created nothing and ran nothing.
+    assert service.list_jobs() == [] and _children(tmp_path) == [] and runs["count"] == 0
+    assert bound.experiments == ()
+    assert len(strategies.list()) == 2
+
+
+def test_a_repeated_binding_replays_and_a_changed_or_stale_one_is_refused(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One operation is one binding; an invalid, stale or second one binds nothing."""
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+
+    with pytest.raises(UserStrategyStateError):
+        strategies.bind_scenario(
+            strategy_id, operation_id="bind-0", base_revision=1, scenario_id="missing.yaml"
+        )
+    with pytest.raises(UserStrategyStaleError):
+        strategies.bind_scenario(
+            strategy_id, operation_id="bind-0", base_revision=2, scenario_id=SCENARIO
+        )
+    with pytest.raises(UserStrategyStateError):
+        strategies.bind_scenario(
+            strategy_id,
+            operation_id="bind-0",
+            base_revision=1,
+            scenario_id=SCENARIO,
+            criterion={"field": "made.up", "expectation": "positive"},
+        )
+    assert strategies.get(strategy_id).draft.document() == INTENT_DRAFT
+    assert strategies.get(strategy_id).changes == ()
+    assert provider.calls == []
+
+    bound = strategies.bind_scenario(
+        strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+    )
+    assert bound.draft.revision == 2
+    assert isinstance(bound.draft, StrategyDraft)
+    assert bound.draft.criterion is None
+
+    # The same operation with the same request is the same binding, not a second one.
+    replayed = strategies.bind_scenario(
+        strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+    )
+    assert replayed.draft == bound.draft and replayed.changes == bound.changes
+    # The whole request is its identity: another scenario, criterion or revision
+    # under that operation id is a conflict, never a second binding.
+    for scenario_id, criterion in (("flat.yaml", None), (SCENARIO, CRITERION)):
+        with pytest.raises(UserStrategyConflictError):
+            strategies.bind_scenario(
+                strategy_id,
+                operation_id="bind-1",
+                base_revision=1,
+                scenario_id=scenario_id,
+                criterion=criterion,
+            )
+    # A new operation cannot rebind an already executable draft.
+    with pytest.raises(UserStrategyStateError):
+        strategies.bind_scenario(
+            strategy_id, operation_id="bind-2", base_revision=2, scenario_id=SCENARIO
+        )
+    assert strategies.get(strategy_id).draft.revision == 2
+    assert provider.calls == []
+
+
+def test_an_approval_given_before_binding_is_never_spent_after_it(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The binding is a revision: an approval made on the intent is not a bound one."""
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+    provider.responses.append(_response([], text="A clarification."))
+    unbound = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="What is missing?",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    bound = strategies.bind_scenario(
+        strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+    )
+    assert bound.draft.revision == 2 and len(provider.calls) == 1
+
+    # A new request against the old intent revision is stale, and the old call id
+    # replays what it actually recorded instead of being spent a second time.
+    with pytest.raises(UserStrategyStaleError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-2",
+            base_revision=1,
+            text="A new question on the old revision",
+            approved_budget=dict(CALL_BUDGET),
+        )
+    replayed = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="What is missing?",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert replayed.calls == unbound.calls and replayed.messages == unbound.messages
+    assert replayed.draft.revision == 2
+    assert len(provider.calls) == 1
+
+
+def test_a_binding_replays_across_restart_and_after_the_draft_moves_on(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored request, not today's draft, is what a repeated binding resolves."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+    bound = strategies.bind_scenario(
+        strategy_id,
+        operation_id="bind-1",
+        base_revision=1,
+        scenario_id=SCENARIO,
+        criterion=CRITERION,
+    )
+    assert bound.draft.revision == 2
+
+    service.stop()
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    replayed = strategies.bind_scenario(
+        strategy_id,
+        operation_id="bind-1",
+        base_revision=1,
+        scenario_id=SCENARIO,
+        criterion=CRITERION,
+    )
+    assert replayed.draft.revision == 2 and len(replayed.changes) == 1
+
+    # The draft moves on; the original binding request is still the one resolved.
+    provider.responses.append(_change(TWO_FIELDS, call_id="call-2"))
+    proposed = strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=2,
+        text="Propose a change to the draft",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    applied = strategies.apply_proposal(
+        strategy_id, proposal_id=proposed.proposals[-1]["proposal_id"], operation_id="op-1"
+    )
+    assert applied.draft.revision == 3
+    still = strategies.bind_scenario(
+        strategy_id,
+        operation_id="bind-1",
+        base_revision=1,
+        scenario_id=SCENARIO,
+        criterion=CRITERION,
+    )
+    assert still.draft.revision == 3 and len(still.changes) == 2
+    # A new operation still cannot rebind, and none of this called the model.
+    with pytest.raises(UserStrategyStateError):
+        strategies.bind_scenario(
+            strategy_id, operation_id="bind-2", base_revision=3, scenario_id=SCENARIO
+        )
+    assert len(provider.calls) == 1
+    assert service.list_jobs() == [] and _children(tmp_path) == []
+
+
+@pytest.mark.parametrize("interruption", ["pending", "dispatched"])
+def test_binding_refuses_an_unresolved_call_until_recovery_classifies_it(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, interruption: str
+) -> None:
+    """An unresolved call is settled first; the binding never overwrites it."""
+    responses: list[Any] = [Crash()] if interruption == "dispatched" else []
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch, responses)
+    strategy = _new_intent(strategies, "An idea whose first call was interrupted")
+    strategy_id = strategy.user_strategy_id
+
+    def crash(*args: Any, **kwargs: Any) -> Any:
+        raise Crash()
+
+    if interruption == "pending":
+        # The process died after the reservation was durable and before dispatch.
+        monkeypatch.setattr(strategies, "_mark_dispatched", crash)
+    with pytest.raises(Crash):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-1",
+            base_revision=1,
+            text="Did this question reach the model?",
+            approved_budget=dict(CALL_BUDGET),
+        )
+    assert _durable(tmp_path, strategy_id).calls[-1]["status"] == interruption
+    assert len(provider.calls) == (1 if interruption == "dispatched" else 0)
+
+    with pytest.raises(UserStrategyStateError):
+        strategies.bind_scenario(
+            strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+        )
+    assert _durable(tmp_path, strategy_id).draft.document() == INTENT_DRAFT
+    assert _durable(tmp_path, strategy_id).changes == ()
+
+    service.stop()
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    reconciled = strategies.reconcile(strategy_id)
+    assert reconciled.calls[-1]["status"] == (
+        "unknown" if interruption == "dispatched" else "interrupted_before_dispatch"
+    )
+    assert provider.calls == []
+
+    # Only after recovery has classified it can the user bind the scenario.
+    bound = strategies.bind_scenario(
+        strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+    )
+    assert bound.draft.revision == 2 and bound.draft.scenario_id == SCENARIO
+    assert bound.calls == reconciled.calls
+    assert provider.calls == [] and service.list_jobs() == [] and _children(tmp_path) == []
+
+
+def test_a_binding_never_waits_for_an_in_flight_call_and_is_refused_while_it_is_held(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-strategy lock is shared, and a busy strategy refuses instead of waiting."""
+    strategies, _research, _service, _provider = _stack(tmp_path, monkeypatch)
+    strategy = _new_intent(strategies, "An idea being clarified right now")
+    strategy_id = strategy.user_strategy_id
+    provider = RoutedBlockingProvider([_response([], text="A clarification.")])
+    cast(Any, strategies)._provider = provider
+
+    failures: list[BaseException] = []
+
+    def clarify() -> None:
+        try:
+            strategies.send_message(
+                strategy_id,
+                call_id="call-1",
+                base_revision=1,
+                text="What data would this need?",
+                approved_budget=dict(CALL_BUDGET),
+            )
+        except BaseException as error:  # noqa: BLE001 — recorded for the assertion below
+            failures.append(error)
+
+    sender = threading.Thread(target=clarify)
+    sender.start()
+    assert provider.invoked.wait(10)
+
+    outcomes: list[BaseException] = []
+
+    def bind() -> None:
+        try:
+            strategies.bind_scenario(
+                strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+            )
+        except BaseException as error:  # noqa: BLE001 — recorded for the assertion below
+            outcomes.append(error)
+
+    binder = threading.Thread(target=bind)
+    binder.start()
+    try:
+        binder.join(10)
+        # A binding that waits for the in-flight model call is not a refusal, and
+        # binding after it silently would be worse: it must say it is busy.
+        assert not binder.is_alive()
+    finally:
+        provider.release.set()
+        sender.join(10)
+        binder.join(10)
+
+    assert failures == []
+    assert len(outcomes) == 1 and isinstance(outcomes[0], UserStrategyStateError)
+    # The refused binding consumed nothing and overwrote nothing: the intent is
+    # still the intent, and the approved call settled as its own record.
+    held = strategies.get(strategy_id)
+    assert held.draft.document() == INTENT_DRAFT
+    assert held.changes == () and held.calls[-1]["status"] == "observed"
+    assert len(provider.calls) == 1
+
+    # Once nothing is in flight, the same operation binds normally.
+    bound = strategies.bind_scenario(
+        strategy_id, operation_id="bind-1", base_revision=1, scenario_id=SCENARIO
+    )
+    assert bound.draft.revision == 2 and bound.draft.scenario_id == SCENARIO
+    assert bound.calls == held.calls
+    assert len(provider.calls) == 1
+
+
+def test_a_v1_record_without_an_intent_discriminator_still_reads_and_runs(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No bulk migration: the executable encoding written before this slice still works."""
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies, "A strategy written before the union existed")
+    strategy_id = strategy.user_strategy_id
+    path = tmp_path / "workspace" / "user-strategies" / f"{strategy_id}.json"
+    document = cast(dict[str, Any], json.loads(path.read_bytes()))
+
+    # The v1 executable record: the same fields, written before any discriminator
+    # existed. This is what an older workspace still holds on disk.
+    v1 = dict(document)
+    v1["schema"] = "ea.user-strategy.v1"
+    v1["draft"] = {key: value for key, value in document["draft"].items() if key != "kind"}
+    v1["history"] = [
+        {key: value for key, value in item.items() if key != "kind"}
+        for item in cast(list[dict[str, Any]], document.get("history") or [])
+    ]
+    v1.pop("binding", None)
+    assert v1["schema"] == "ea.user-strategy.v1"
+    assert "kind" not in v1["draft"]
+    path.write_bytes(json.dumps(v1, sort_keys=True, indent=2).encode())
+
+    reopened = strategies.get(strategy_id)
+    assert reopened.draft == strategy.draft
+    assert reopened.draft.revision == 1 and reopened.draft.scenario_id == SCENARIO
+    preview = strategies.preview_experiment(strategy_id)
+    assert preview["draft_revision"] == 1 and preview["scenario_id"] == SCENARIO
+
+    # The bound path over that record is unchanged: calls, proposals and revisions.
+    provider.responses.append(_response([], text="A bound answer."))
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Explain the draft",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert answered.calls[-1]["status"] == "observed"
+    _updated, proposal = _propose(strategies, provider, answered, TWO_FIELDS, call_id="call-2")
+    applied = strategies.apply_proposal(
+        strategy_id, proposal_id=proposal["proposal_id"], operation_id="op-1"
+    )
+    assert applied.draft.revision == 2
+    assert isinstance(applied.draft, StrategyDraft)
+    assert applied.draft.parameters["target_quantity"] == "3"
+
+
+def test_one_intent_binds_proposes_applies_and_runs_the_existing_experiment_path(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One scripted provider through the whole slice: clarify, bind, propose, run."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _new_intent(strategies)
+    strategy_id = strategy.user_strategy_id
+    assert [item.user_strategy_id for item in strategies.list()] == [strategy_id]
+
+    # 1. Clarification while unbound: one approved call, plain text, no tools.
+    provider.responses.append(_response([], text="Which registered scenario should this use?"))
+    clarified = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="What is missing before this can run?",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert clarified.draft.document() == INTENT_DRAFT
+    assert not provider.calls[-1].get("tools")
+
+    # 2. The user picks one exact scenario; the host validates it and advances once.
+    bound = strategies.bind_scenario(
+        strategy_id,
+        operation_id="bind-1",
+        base_revision=1,
+        scenario_id=SCENARIO,
+        criterion=CRITERION,
+    )
+    assert bound.draft.revision == 2 and bound.draft.scenario_id == SCENARIO
+    assert len(provider.calls) == 1
+
+    # 3. The bound path is the existing one: one typed diff, applied, running nothing.
+    _updated, proposal = _propose(
+        strategies, provider, bound, TWO_FIELDS, call_id="call-2", base_revision=2
+    )
+    applied = strategies.apply_proposal(
+        strategy_id, proposal_id=proposal["proposal_id"], operation_id="op-1"
+    )
+    assert applied.draft.revision == 3
+    assert isinstance(applied.draft, StrategyDraft)
+    assert applied.draft.parameters["target_quantity"] == "3"
+    assert service.list_jobs() == [] and _children(tmp_path) == []
+
+    # 4. The existing confirmation path runs the real engine and publishes its report.
+    experiment = _launch(strategies, strategy_id).experiments[-1]
+    job_id = cast(str, experiment["job_id"])
+    _terminal_job(service, job_id)
+    assert service.get_job(job_id).status == "succeeded"
+    report = json.loads(service.report(job_id))
+    assert report["completion"]["terminal_outcome"] == "success"
+    assert experiment["payload"]["criterion"] == FROZEN_CRITERION
+
+    # One identity, one conversation and one call ledger from start to finish.
+    kept = strategies.get(strategy_id)
+    assert kept.user_strategy_id == strategy_id
+    assert kept.intent == INTENT
+    assert kept.messages == applied.messages
+    assert [item["call_id"] for item in kept.calls] == ["call-1", "call-2"]
+    assert kept.draft.revision == 3
+    assert [item.user_strategy_id for item in strategies.list()] == [strategy_id]
+    assert len(_children(tmp_path)) == 1 and len(service.list_jobs()) == 1
+
+
+def test_http_saves_an_intent_binds_it_and_refuses_unbound_execution(tmp_path: Any) -> None:
+    """The same contract at the HTTP boundary: strict bodies, real ids, real refusals."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        created = client.post(
+            "/api/user-strategies",
+            headers=WRITE_HEADERS,
+            json={"name": "Idea first", "intent": INTENT},
+        )
+        assert created.status_code == 201, created.text
+        unbound = cast(dict[str, Any], created.json())
+        strategy_id = unbound["user_strategy_id"]
+        assert unbound["draft"] == INTENT_DRAFT
+        assert unbound["intent"] == INTENT
+        assert unbound["messages"] == [] and unbound["calls"] == []
+        assert unbound["experiments"] == [] and unbound["changes"] == []
+
+        # The same identity reopens with the same intent revision.
+        reloaded = cast(dict[str, Any], client.get(f"/api/user-strategies/{strategy_id}").json())
+        assert reloaded["draft"] == INTENT_DRAFT and reloaded["intent"] == INTENT
+
+        # Nothing executable exists yet, and every executable route says so itself.
+        preview = client.get(f"/api/user-strategies/{strategy_id}/experiment/preview")
+        assert preview.status_code == 422
+        assert preview.json()["error"]["code"] == "user_strategy_invalid"
+        apply = client.post(
+            f"/api/user-strategies/{strategy_id}/proposals/proposal-1/apply",
+            headers=WRITE_HEADERS,
+            json={"operation_id": "op-1"},
+        )
+        assert apply.status_code == 422
+        assert apply.json()["error"]["code"] == "user_strategy_invalid"
+        launch = client.post(
+            f"/api/user-strategies/{strategy_id}/experiments",
+            headers=WRITE_HEADERS,
+            json={
+                "launch_intent_id": "li-1",
+                "base_revision": 1,
+                "preview_identity": "sha256:" + "0" * 64,
+                "approved_budget": dict(RUN_BUDGET),
+            },
+        )
+        assert launch.status_code == 422
+        assert launch.json()["error"]["code"] == "user_strategy_invalid"
+
+        # The binding body is strict, its scenario must be real, and its revision
+        # must be the head the caller actually read.
+        incomplete = client.post(
+            f"/api/user-strategies/{strategy_id}/bind-scenario",
+            headers=WRITE_HEADERS,
+            json={"operation_id": "bind-1", "base_revision": 1},
+        )
+        assert incomplete.status_code == 422
+        unknown = client.post(
+            f"/api/user-strategies/{strategy_id}/bind-scenario",
+            headers=WRITE_HEADERS,
+            json={"operation_id": "bind-1", "base_revision": 1, "scenario_id": "missing.yaml"},
+        )
+        assert unknown.status_code == 422
+        assert unknown.json()["error"]["code"] == "user_strategy_invalid"
+        stale = client.post(
+            f"/api/user-strategies/{strategy_id}/bind-scenario",
+            headers=WRITE_HEADERS,
+            json={"operation_id": "bind-1", "base_revision": 9, "scenario_id": SCENARIO},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "stale_base_revision"
+        assert client.get(f"/api/user-strategies/{strategy_id}").json()["draft"] == INTENT_DRAFT
+
+        body = {
+            "operation_id": "bind-1",
+            "base_revision": 1,
+            "scenario_id": SCENARIO,
+            "criterion": CRITERION,
+        }
+        bound = client.post(
+            f"/api/user-strategies/{strategy_id}/bind-scenario",
+            headers=WRITE_HEADERS,
+            json=dict(body),
+        )
+        assert bound.status_code == 200, bound.text
+        executable = cast(dict[str, Any], bound.json())
+        assert executable["draft"]["revision"] == 2
+        assert executable["draft"]["scenario_id"] == SCENARIO
+        assert executable["draft"]["strategy_id"] == "bounded-long-v1"
+        assert executable["draft"]["criterion"] == FROZEN_CRITERION
+        assert executable["draft"]["parameters"]["target_quantity"] == "2"
+        assert executable["user_strategy_id"] == strategy_id
+
+        # The same operation replays as itself; a different request conflicts and a
+        # second operation cannot rebind.
+        replayed = client.post(
+            f"/api/user-strategies/{strategy_id}/bind-scenario",
+            headers=WRITE_HEADERS,
+            json=dict(body),
+        )
+        assert replayed.status_code == 200
+        assert replayed.json()["draft"] == executable["draft"]
+        assert replayed.json()["changes"] == executable["changes"]
+        conflict = client.post(
+            f"/api/user-strategies/{strategy_id}/bind-scenario",
+            headers=WRITE_HEADERS,
+            json={**body, "scenario_id": "flat.yaml"},
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "operation_conflict"
+        rebind = client.post(
+            f"/api/user-strategies/{strategy_id}/bind-scenario",
+            headers=WRITE_HEADERS,
+            json={"operation_id": "bind-2", "base_revision": 2, "scenario_id": SCENARIO},
+        )
+        assert rebind.status_code == 422
+        assert rebind.json()["error"]["code"] == "user_strategy_invalid"
+
+        # The legacy bound create is unchanged and still revision 1.
+        legacy = client.post(
+            "/api/user-strategies",
+            headers=WRITE_HEADERS,
+            json={
+                "name": "HTTP strategy",
+                "intent": "The same scenario, bound at creation",
+                "scenario_id": SCENARIO,
+                "criterion": CRITERION,
+            },
+        )
+        assert legacy.status_code == 201, legacy.text
+        assert legacy.json()["draft"]["revision"] == 1
+        assert legacy.json()["draft"]["scenario_id"] == SCENARIO
+        assert legacy.json()["draft"]["criterion"] == FROZEN_CRITERION

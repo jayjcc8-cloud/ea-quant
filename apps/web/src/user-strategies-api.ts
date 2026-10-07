@@ -2,7 +2,8 @@
  * QUINE user-strategy contract.
  *
  * These types mirror the durable documents served by the installed engine
- * (src/ea/web/user_strategies.py). One user strategy is a saved draft plus the
+ * (src/ea/web/user_strategies.py). One user strategy is a saved intent — or, once
+ * the user explicitly binds a scenario, an executable draft — plus the
  * record of what was done to it: the AI calls the user approved, the typed
  * proposals, the change history, and the frozen experiments confirmed from that
  * draft. This client derives nothing: it never invents a proposal, an outcome, a
@@ -15,8 +16,13 @@
 
 import type { ReportCriterion } from './research-api'
 
-/** One validated draft revision: exactly what an experiment would execute. */
+/**
+ * One validated draft revision: exactly what an experiment would execute. A
+ * record written before intents existed carries no `kind` at all, so the
+ * discriminator is optional here and absent means executable.
+ */
 export type UserStrategyDraft = {
+  kind?: 'strategy'
   revision: number
   strategy_id: string
   venue: string
@@ -27,6 +33,29 @@ export type UserStrategyDraft = {
   initial_cash: string
   parameters: Record<string, string | number>
   criterion: ReportCriterion | null
+}
+
+/**
+ * One revision of a saved intent: what a strategy is before a scenario is bound.
+ * It carries a revision and nothing else — no strategy, symbol, funding or
+ * parameter for this client to fill in with a guess, and never a default
+ * scenario. It cannot be previewed or run.
+ */
+export type UserStrategyIntentDraft = {
+  kind: 'intent'
+  revision: number
+  scenario_id: null
+}
+
+/** One draft revision of either kind, told apart by the discriminator alone. */
+export type UserStrategyDraftDocument = UserStrategyDraft | UserStrategyIntentDraft
+
+/**
+ * An intent is a draft of its own kind, and nothing about it is executable. The
+ * missing discriminator is the pre-intent encoding, which was executable.
+ */
+export function isIntentDraft(draft: UserStrategyDraftDocument): draft is UserStrategyIntentDraft {
+  return draft.kind === 'intent'
 }
 
 /**
@@ -114,10 +143,10 @@ export type UserStrategyProposal = {
   stale_paths: string[]
 }
 
-/** One applied or undone revision, exactly as it was written. */
+/** One applied, undone or bound revision, exactly as it was written. */
 export type UserStrategyChange = {
   operation_id: string
-  kind: 'apply' | 'undo'
+  kind: 'apply' | 'undo' | 'bind'
   proposal_id: string | null
   target_operation_id: string | null
   from_revision: number
@@ -128,6 +157,29 @@ export type UserStrategyChange = {
   evidence: string[]
   proposer: string
   at: string
+  /** A binding names the scenario it bound; no other kind of change carries one. */
+  scenario_id?: string | null
+  criterion?: ReportCriterion | null
+}
+
+/**
+ * The one immutable binding request this strategy was formed by. It is kept on
+ * the record itself, so replaying the same operation still resolves to itself
+ * after the change ledger has moved on. Nothing else is ever read from it.
+ */
+export type UserStrategyBinding = {
+  operation_id: string
+  request: {
+    action: 'bind'
+    base_revision: number
+    scenario_id: string
+    criterion: ReportCriterion | null
+  }
+  request_sha256: string
+  scenario_id: string
+  from_revision: number
+  to_revision: number
+  bound_at: string
 }
 
 export type UserStrategyExperimentStatus =
@@ -176,13 +228,16 @@ export type UserStrategy = {
   updated_at: string
   name: string
   intent: string
-  draft: UserStrategyDraft
-  history: UserStrategyDraft[]
+  /** The head revision: an executable draft, or a saved intent with no scenario. */
+  draft: UserStrategyDraftDocument
+  history: UserStrategyDraftDocument[]
   messages: UserStrategyMessage[]
   calls: UserStrategyCall[]
   proposals: UserStrategyProposal[]
   changes: UserStrategyChange[]
   experiments: UserStrategyExperiment[]
+  /** The one immutable binding that formed this strategy, if it has one. */
+  binding?: UserStrategyBinding | null
 }
 
 /**
@@ -259,14 +314,31 @@ export const userStrategiesApi = {
   async list(): Promise<UserStrategy[]> {
     return (await apiRequest<{ strategies: UserStrategy[] }>('/api/user-strategies')).strategies
   },
-  /** A save: this creates no model call and starts no experiment. */
+  /**
+   * A save. With a scenario it is the executable revision 1 it always was; with
+   * no scenario it saves an intent, which the host needs no catalog for. Either
+   * way this creates no model call and starts no experiment.
+   */
   create: (input: {
     name: string
     intent: string
-    scenario_id: string
+    scenario_id?: string | null
     criterion?: UserStrategyCriterionInput | null
   }) => write<UserStrategy>('/api/user-strategies', input),
   get: (userStrategyId: string) => apiRequest<UserStrategy>(base(userStrategyId)),
+  /**
+   * One explicit choice of one scenario for one saved intent. The host validates
+   * the scenario, forms the executable draft and advances the revision once.
+   */
+  bindScenario: (
+    userStrategyId: string,
+    input: {
+      operation_id: string
+      base_revision: number
+      scenario_id: string
+      criterion?: UserStrategyCriterionInput | null
+    },
+  ) => write<UserStrategy>(`${base(userStrategyId)}/bind-scenario`, input),
   sendMessage: (
     userStrategyId: string,
     input: { call_id: string; base_revision: number; text: string; approved_budget: ApprovedBudget },

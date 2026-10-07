@@ -116,6 +116,21 @@ _SYSTEM_PROMPT = (
     "model routing, budgets, data or frozen history. You cannot run anything, and nothing "
     "you say is a verified result: say plainly that a run is needed."
 )
+#: What a conversation is told when the strategy has no scenario yet. There is no
+#: draft to describe and nothing to change, so this turn clarifies the intent only.
+_INTENT_SYSTEM_PROMPT = (
+    "You are the research assistant inside one local backtest workspace. This user "
+    "strategy is an idea that has no scenario bound to it yet, so nothing about it is "
+    "executable: there is no strategy, instrument, funding, parameter, dataset or "
+    "registered scenario to describe, and nothing can be run. Answer in plain text and "
+    "help the user say what they mean, which market and data the idea needs, which "
+    "assumptions matter and what is still missing before it could be tested. You have no "
+    "tool here and cannot propose, apply or run anything; never suggest that a change was "
+    "made. Say plainly that the user must choose a scenario before anything can be "
+    "prepared or run."
+)
+#: The one discriminator a stored draft carries when it is not executable.
+_INTENT_KIND = "intent"
 #: The one tool a conversation may use. Its schema is built per call from the
 #: registered contract, so each path is offered with its real value type.
 _PROPOSE_TOOL_NAME = "propose_change"
@@ -311,6 +326,51 @@ class StrategyDraft:
 
 
 @dataclass(frozen=True, slots=True)
+class IntentDraft:
+    """One revision of a saved intent: what a strategy is before it has a scenario.
+
+    It carries a revision and nothing executable. There is deliberately no
+    strategy, venue, symbol, funding, parameter or scenario field to fill in
+    with a guess, and no default scenario: an intent is never previewed, planned
+    against or run. It is not a second kind of record either — it is revision
+    ``n`` of the same durable strategy, which one explicit binding replaces with
+    the executable draft of the scenario the user chose.
+    """
+
+    revision: int
+
+    @property
+    def scenario_id(self) -> None:
+        """An intent has no scenario, and that is stated rather than left absent."""
+        return None
+
+    def document(self) -> dict[str, Any]:
+        return {"kind": _INTENT_KIND, "revision": self.revision, "scenario_id": None}
+
+    @staticmethod
+    def decode(document: Any) -> IntentDraft:
+        if type(document) is not dict or document.get("kind") != _INTENT_KIND:
+            raise UserStrategyError("stored draft is unreadable")
+        return IntentDraft(revision=int(document["revision"]))
+
+
+#: One revision of one strategy: an executable draft, or a saved intent.
+Draft = IntentDraft | StrategyDraft
+
+
+def _decode_draft(document: Any) -> Draft:
+    """One stored draft, discriminated by its own kind.
+
+    A record written before this union existed carries no discriminator at all,
+    and its draft is the executable one it always was: absence is the legacy
+    encoding, never a missing intent.
+    """
+    if type(document) is dict and document.get("kind") == _INTENT_KIND:
+        return IntentDraft.decode(document)
+    return StrategyDraft.decode(document)
+
+
+@dataclass(frozen=True, slots=True)
 class UserStrategy:
     """One durable user strategy; every mutation goes through the store."""
 
@@ -319,13 +379,19 @@ class UserStrategy:
     updated_at: str
     name: str
     intent: str
-    draft: StrategyDraft
-    history: tuple[StrategyDraft, ...] = ()
+    draft: Draft
+    history: tuple[Draft, ...] = ()
     messages: tuple[dict[str, Any], ...] = ()
     calls: tuple[dict[str, Any], ...] = ()
     proposals: tuple[dict[str, Any], ...] = ()
     changes: tuple[dict[str, Any], ...] = ()
     experiments: tuple[dict[str, Any], ...] = ()
+    #: The one immutable binding this strategy was formed by, if it has one. It is
+    #: kept here rather than derived from ``changes`` because that ledger is bounded
+    #: and a later operation would push the original request out, which would make a
+    #: replay of the binding unresolvable. It is a record of one request, never a
+    #: second store: nothing else is ever read from it.
+    binding: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         return {
@@ -342,26 +408,45 @@ class UserStrategy:
             "proposals": [dict(item) for item in self.proposals],
             "changes": [dict(item) for item in self.changes],
             "experiments": [dict(item) for item in self.experiments],
+            "binding": None if self.binding is None else dict(self.binding),
         }
 
     @staticmethod
     def decode(document: Any) -> UserStrategy:
         if type(document) is not dict or document.get("schema") != SCHEMA:
             raise UserStrategyError("user strategy schema is not supported")
+        binding = document.get("binding")
         return UserStrategy(
             user_strategy_id=str(document["user_strategy_id"]),
             created_at=str(document["created_at"]),
             updated_at=str(document["updated_at"]),
             name=str(document["name"]),
             intent=str(document["intent"]),
-            draft=StrategyDraft.decode(document["draft"]),
-            history=tuple(StrategyDraft.decode(item) for item in document.get("history") or []),
+            draft=_decode_draft(document["draft"]),
+            history=tuple(_decode_draft(item) for item in document.get("history") or []),
             messages=tuple(dict(item) for item in document.get("messages") or []),
             calls=tuple(dict(item) for item in document.get("calls") or []),
             proposals=tuple(dict(item) for item in document.get("proposals") or []),
             changes=tuple(dict(item) for item in document.get("changes") or []),
             experiments=tuple(dict(item) for item in document.get("experiments") or []),
+            binding=None if binding is None else dict(binding),
         )
+
+
+def _executable(strategy: UserStrategy) -> StrategyDraft:
+    """This strategy's executable draft, or an honest refusal before any effect.
+
+    Every action that would change, preview or run a draft reads it through here,
+    so an intent refuses each of them itself rather than relying on a hidden
+    button, and never reaches a reservation, a child or a job.
+    """
+    draft = strategy.draft
+    if isinstance(draft, IntentDraft):
+        raise UserStrategyStateError(
+            "no scenario is bound to this strategy yet, so there is no executable draft "
+            "to change, preview or run; choose one explicitly first"
+        )
+    return draft
 
 
 #: The store and the service both define a ``list`` method, so a bare ``list[...]``
@@ -743,21 +828,15 @@ class UserStrategyService:
 
     # -- creation and reads -------------------------------------------------
 
-    def create(
-        self,
-        *,
-        name: object,
-        intent: object,
-        scenario_id: object,
-        criterion: Any = None,
-    ) -> UserStrategy:
-        title = _bounded(name, "name", _MAX_NAME)
-        purpose = _bounded(intent, "intent", _MAX_INTENT)
-        scenario = _bounded(scenario_id, "scenario_id", _MAX_SCENARIO_ID)
-        try:
-            frozen_criterion = validate_criterion(criterion)
-        except CriterionRejectedError as error:
-            raise UserStrategyStateError(str(error)) from None
+    def _scenario_draft(
+        self, scenario: str, criterion: dict[str, Any] | None, revision: int
+    ) -> StrategyDraft:
+        """One executable draft of one registered scenario, validated by the backend.
+
+        This is the only way an executable draft is ever formed — a bound creation
+        and a later binding both come through here — so what a binding produces is
+        the same draft this owner has always written and not a variant of it.
+        """
         document = self._scenario_document(scenario)
         summary = cast(dict[str, Any], document.get("summary") or {})
         parameters = {
@@ -767,9 +846,8 @@ class UserStrategyService:
             for item in self._contracts(document).values()
         }
         identity = self._source_identity(document)
-        now = _now()
         draft = StrategyDraft(
-            revision=1,
+            revision=revision,
             strategy_id=str(summary.get("strategy_id") or ""),
             venue=str(summary.get("venue") or ""),
             symbol=str(summary.get("symbol") or ""),
@@ -781,10 +859,45 @@ class UserStrategyService:
             source_sha256=cast(str | None, identity.get("source_sha256")),
             initial_cash=str(summary.get("initial_cash") or ""),
             parameters=parameters,
-            criterion=frozen_criterion,
+            criterion=criterion,
         )
         if not draft.strategy_id or not draft.initial_cash:
             raise UserStrategyStateError("the registered scenario has no executable strategy")
+        return draft
+
+    def create(
+        self,
+        *,
+        name: object,
+        intent: object,
+        scenario_id: object = None,
+        criterion: Any = None,
+    ) -> UserStrategy:
+        """One saved strategy: a saved intent, or an executable draft of a scenario.
+
+        Without a scenario this is an intent: it needs no catalog to exist, it
+        resolves nothing, and it writes no executable field, because there is
+        nothing yet to execute. With one, it is exactly the executable revision 1
+        this owner has always written, validated by the same backend before
+        anything is saved.
+        """
+        title = _bounded(name, "name", _MAX_NAME)
+        purpose = _bounded(intent, "intent", _MAX_INTENT)
+        now = _now()
+        draft: Draft
+        if scenario_id is None:
+            if criterion is not None:
+                raise UserStrategyStateError(
+                    "a criterion belongs to an executable draft; choose a scenario first"
+                )
+            draft = IntentDraft(revision=1)
+        else:
+            scenario = _bounded(scenario_id, "scenario_id", _MAX_SCENARIO_ID)
+            try:
+                frozen_criterion = validate_criterion(criterion)
+            except CriterionRejectedError as error:
+                raise UserStrategyStateError(str(error)) from None
+            draft = self._scenario_draft(scenario, frozen_criterion, revision=1)
         strategy = UserStrategy(
             user_strategy_id=str(uuid.uuid4()),
             created_at=now,
@@ -802,11 +915,155 @@ class UserStrategyService:
     def list(self) -> Strategies:
         return self._store.list()
 
+    # -- one explicit binding ------------------------------------------------
+
+    def bind_scenario(
+        self,
+        user_strategy_id: object,
+        *,
+        operation_id: object,
+        base_revision: object,
+        scenario_id: object,
+        criterion: Any = None,
+    ) -> UserStrategy:
+        """Bind one explicitly chosen scenario to one saved intent: one revision, once.
+
+        The user chooses the scenario; the host validates it. It must be a currently
+        registered, valid one, and the executable draft this forms is built exactly
+        the way a bound creation builds it, so what a binding produces is a draft the
+        engine can run and not a second kind of record. It is one revision of the
+        same strategy: the identity, the intent, the conversation, the calls, the
+        proposals and the experiments are kept, nothing is undone, and binding again
+        is refused. The original request is retained — in the change ledger, and,
+        because that ledger is bounded, on the record itself — so the same operation
+        replays as itself across a restart and after the draft has moved on, while a
+        different payload under that operation is a conflict.
+
+        The per-strategy lock is taken without waiting, so this never binds silently
+        behind an approved call that is still in flight, and a durable call whose
+        outcome was never observed is refused until recovery has classified it. No
+        model call, no preview, no child and no job is created here.
+        """
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        operation = _identifier(operation_id, "operation_id")
+        if type(base_revision) is not int:
+            raise UserStrategyStateError("base_revision must be an integer")
+        scenario = _bounded(scenario_id, "scenario_id", _MAX_SCENARIO_ID)
+        try:
+            frozen_criterion = validate_criterion(criterion)
+        except CriterionRejectedError as error:
+            raise UserStrategyStateError(str(error)) from None
+        # The whole request is this operation's identity: the revision the caller
+        # read, the exact scenario and the criterion, in the host's own vocabulary.
+        request: dict[str, Any] = {
+            "action": "bind",
+            "base_revision": base_revision,
+            "scenario_id": scenario,
+            "criterion": frozen_criterion,
+        }
+        lock = self._lock(identity)
+        if not lock.acquire(blocking=False):
+            raise UserStrategyStateError(
+                "this strategy is busy with a call that has not settled; nothing was bound, "
+                "so reload it and choose the scenario again"
+            )
+        try:
+            strategy = self._store.get(identity)
+            binding = strategy.binding
+            if binding is not None and binding.get("operation_id") == operation:
+                # The recorded binding is the answer to this operation: it is compared
+                # with the request it was made from, never with today's draft.
+                if binding.get("request") != request:
+                    raise UserStrategyConflictError(
+                        "operation_id is already bound to a different binding request"
+                    )
+                return strategy
+            if _entry(strategy.changes, "operation_id", operation) is not None:
+                # An apply, an undo or another binding already owns this operation id.
+                raise UserStrategyConflictError(
+                    "operation_id is already bound to a different operation"
+                )
+            if base_revision != strategy.draft.revision:
+                raise UserStrategyStaleError(
+                    "the strategy revision moved on; reload it before binding a scenario"
+                )
+            if not isinstance(strategy.draft, IntentDraft):
+                raise UserStrategyStateError(
+                    "a scenario is already bound to this strategy: binding is one explicit "
+                    "choice and cannot be repeated or undone"
+                )
+            if self._unresolved_call(strategy) is not None:
+                raise UserStrategyStateError(
+                    "an earlier call was never observed; reload the strategy so it is "
+                    "classified before a scenario is bound"
+                )
+            draft = self._scenario_draft(scenario, frozen_criterion, strategy.draft.revision + 1)
+            now = _now()
+            change: dict[str, Any] = {
+                "operation_id": operation,
+                "kind": "bind",
+                "proposal_id": None,
+                "target_operation_id": None,
+                "scenario_id": scenario,
+                "criterion": frozen_criterion,
+                "from_revision": strategy.draft.revision,
+                "to_revision": draft.revision,
+                "applied_paths": [],
+                "stale_paths": [],
+                "items": [],
+                "evidence": [],
+                "proposer": "user",
+                "at": now,
+            }
+            record = {
+                "operation_id": operation,
+                "request": request,
+                "request_sha256": _digest(request),
+                "scenario_id": scenario,
+                "from_revision": strategy.draft.revision,
+                "to_revision": draft.revision,
+                "bound_at": now,
+            }
+            # One durable write: the executable draft, the intent it came from and the
+            # request it was bound by exist together, or not at all.
+            next_strategy = replace(
+                strategy,
+                updated_at=now,
+                draft=draft,
+                history=(*strategy.history, strategy.draft)[-_MAX_HISTORY:],
+                changes=(*strategy.changes, change)[-_MAX_CHANGES:],
+                binding=record,
+            )
+            self._store.save(next_strategy)
+            return next_strategy
+        finally:
+            lock.release()
+
     # -- approved model calls -----------------------------------------------
 
     def _lock(self, user_strategy_id: str) -> threading.Lock:
         with threading.Lock():
             return self._locks.setdefault(user_strategy_id, threading.Lock())
+
+    def _unresolved_call(self, strategy: UserStrategy) -> dict[str, Any] | None:
+        """One durable call of this strategy whose outcome was never observed here.
+
+        A call that is in flight in this process right now is not unresolved: it is
+        being observed by the thread that holds it, and its own outcome is still
+        coming. Everything else pending or dispatched here is an interruption that
+        recovery has to classify before anything else touches this strategy.
+        """
+        for item in strategy.calls:
+            if (
+                item.get("status") in {"pending", "dispatched"}
+                and (
+                    strategy.user_strategy_id,
+                    str(item.get("call_id")),
+                )
+                not in self._active_calls
+            ):
+                return item
+        return None
 
     def _ask(
         self,
@@ -847,13 +1104,8 @@ class UserStrategyService:
             )
         if len(strategy.calls) >= _MAX_CALLS or len(strategy.messages) + 1 >= _MAX_MESSAGES:
             raise UserStrategyStateError("this strategy has reached its recorded call limit")
-        unresolved = [
-            item
-            for item in strategy.calls
-            if item.get("status") in {"pending", "dispatched"}
-            and (strategy.user_strategy_id, str(item.get("call_id"))) not in self._active_calls
-        ]
-        if unresolved:
+        unresolved = self._unresolved_call(strategy)
+        if unresolved is not None:
             # An earlier call whose outcome was never observed is settled first: a
             # new call never overwrites an unresolved dispatch.
             raise UserStrategyStateError(
@@ -921,11 +1173,14 @@ class UserStrategyService:
         self, strategy: UserStrategy, call: str, message: str, base_revision: int
     ) -> UserStrategy:
         port = self._model_port()
+        draft = strategy.draft
+        if isinstance(draft, IntentDraft):
+            return self._clarify(strategy, call, message)
         # The contract this call is described by is resolved locally, before the
         # dispatch boundary: a workspace that cannot read its own registered contract
         # never reaches the provider and never marks this call dispatched, so the
         # durable record stays a reservation that recovery classifies as unsent.
-        registered = self._registered_paths(strategy.draft)
+        registered = self._registered_paths(draft)
         strategy = self._mark_dispatched(strategy, call)
         key = (strategy.user_strategy_id, call)
         self._active_calls.add(key)
@@ -990,6 +1245,73 @@ class UserStrategyService:
             proposal_id=proposal_id,
         )
 
+    def _clarify(self, strategy: UserStrategy, call: str, message: str) -> UserStrategy:
+        """One approved clarification of an intent that has no scenario yet.
+
+        The request is the same approved call every other turn is — same identity,
+        same reservation, same ledger, same recovery — and it is only what it is
+        told that differs: this strategy's own intent and its own recorded turns,
+        and nothing about a strategy, instrument, funding, parameter, scenario or
+        run, because none of those exists yet. There is nothing a change could be
+        proposed against, so the call offers no tool and requires no capability,
+        and an answer that calls a tool anyway is refused whole with its measured
+        usage and zero proposals. An answer recorded here is a message: it can
+        never become a proposal later, when a scenario has been bound.
+        """
+        port = self._model_port()
+        strategy = self._mark_dispatched(strategy, call)
+        key = (strategy.user_strategy_id, call)
+        self._active_calls.add(key)
+        try:
+            try:
+                response: ModelResponse = port.complete(
+                    system=_INTENT_SYSTEM_PROMPT,
+                    messages=self._conversation(strategy, message, ()),
+                    tools=[],
+                    max_tokens=_MAX_TOKENS,
+                    required_capabilities=(),
+                )
+            except ModelNotConfigured as error:
+                return self._settle(strategy, call, "unconfigured", str(error), None)
+            except ModelProviderError as error:
+                return self._settle(strategy, call, "unknown", str(error), None)
+            except Exception as error:  # noqa: BLE001 — an unobserved outcome is unknown
+                return self._settle(
+                    strategy,
+                    call,
+                    "unknown",
+                    f"the provider outcome was not observed: {error}",
+                    None,
+                )
+            # The provider answered, so this outcome was observed: an answer this
+            # workspace cannot read is a refusal with its measured usage, never
+            # unknown, and never a proposal.
+            try:
+                text = _bounded(response.text, "response", _MAX_RESPONSE, required=False)
+                refusal = self._clarification_refusal(response)
+            except Exception as error:  # noqa: BLE001 — the observed answer is refused
+                return self._settle(strategy, call, "refused", str(error), response, text="")
+        finally:
+            self._active_calls.discard(key)
+        return self._settle(
+            strategy,
+            call,
+            "refused" if refusal is not None else "observed",
+            refusal,
+            response,
+            text=text,
+        )
+
+    @staticmethod
+    def _clarification_refusal(response: ModelResponse) -> str | None:
+        """Why one answer to an unbound intent is refused whole, or ``None``."""
+        if not response.tool_calls:
+            return None
+        return (
+            "no scenario is bound to this strategy yet, so this answer had nothing it "
+            "could change or run; nothing was proposed"
+        )
+
     def _conversation(
         self, strategy: UserStrategy, message: str, registered: tuple[RegisteredPath, ...]
     ) -> History:
@@ -1002,9 +1324,12 @@ class UserStrategyService:
         its exact JSON value type, current value and the bounds this workspace
         enforces, the read-only ones included — and — when this strategy has a
         frozen run whose report the workspace can verify — only the host's own
-        readings of that run.
+        readings of that run. A strategy that has no scenario yet states nothing
+        about a draft, because it has no draft to state.
         """
         draft = strategy.draft
+        if isinstance(draft, IntentDraft):
+            return self._intent_conversation(strategy, message)
         facts = [
             f"The user's stated intent for this strategy: {strategy.intent}",
             f"Strategy {draft.strategy_id} on {draft.venue}:{draft.symbol}",
@@ -1020,14 +1345,51 @@ class UserStrategyService:
                 f"{draft.criterion['field']} is {draft.criterion['expectation']}"
             )
         facts.extend(self._verified_facts(strategy))
-        history: History = [ModelMessage(role="user", text="\n".join(facts))]
+        return [
+            ModelMessage(role="user", text="\n".join(facts)),
+            *self._recorded_turns(strategy, message),
+        ]
+
+    def _intent_conversation(self, strategy: UserStrategy, message: str) -> History:
+        """One request about an intent: its own words and turns, and nothing else.
+
+        No strategy, venue, symbol, funding, parameter, scenario or run is stated,
+        not even as an example, because this strategy has none of them yet, and the
+        model is told plainly that it has no tool here and that this turn can only
+        clarify what the user means.
+        """
+        facts = [
+            f"The user's stated intent for this strategy: {strategy.intent}",
+            "No scenario is bound to this strategy yet, so there is no strategy, "
+            "instrument, funding, parameter, dataset or run to describe, and nothing "
+            "here can be changed, previewed or run.",
+            "This turn can only clarify the intent: what the user means, which market "
+            "and data the idea needs, which assumptions matter and what is still "
+            "missing. No change to a draft can be proposed until the user chooses a "
+            "scenario.",
+            "Intent revision " + str(strategy.draft.revision),
+        ]
+        facts.extend(self._verified_facts(strategy))
+        return [
+            ModelMessage(role="user", text="\n".join(facts)),
+            *self._recorded_turns(strategy, message),
+        ]
+
+    @staticmethod
+    def _recorded_turns(strategy: UserStrategy, message: str) -> History:
+        """The recorded conversation, once each, then the question asked here.
+
+        The user's own message is already persisted on this strategy and is the
+        question being asked, so it is sent exactly once, as the last turn.
+        """
+        turns: History = []
         for entry in strategy.messages[:-1][-6:]:
             role = "user" if entry.get("role") == "user" else "assistant"
             text = str(entry.get("text") or "")
             if text:
-                history.append(ModelMessage(role=cast(Any, role), text=text))
-        history.append(ModelMessage(role="user", text=message))
-        return history
+                turns.append(ModelMessage(role=cast(Any, role), text=text))
+        turns.append(ModelMessage(role="user", text=message))
+        return turns
 
     def _verified_facts(self, strategy: UserStrategy) -> Paths:
         """Bounded facts about this strategy's own frozen runs, or an honest absence.
@@ -1037,6 +1399,11 @@ class UserStrategyService:
         another run are all stated as unavailable instead of guessed. No model
         claim and no wider research context enters here, and this never raises.
         """
+        draft = strategy.draft
+        if not isinstance(draft, StrategyDraft):
+            # An intent has no frozen run and never can: a run needs an executable
+            # draft, so there is no fact about one to state.
+            return []
         record = next(
             (item for item in reversed(strategy.experiments) if item.get("job_id")),
             None,
@@ -1064,7 +1431,7 @@ class UserStrategyService:
             value = read_field(cast(dict[str, Any], report), path)
             if value is not None:
                 facts.append(f"  {path} = {value}")
-        reading = host_reading(strategy.draft.criterion, cast(dict[str, Any], report))
+        reading = host_reading(draft.criterion, cast(dict[str, Any], report))
         facts.append(
             "  the host's own reading of the stated criterion: "
             f"{reading['outcome'] or 'not evaluable on this report'} "
@@ -1077,6 +1444,7 @@ class UserStrategyService:
         self, strategy: UserStrategy, response: ModelResponse
     ) -> tuple[Documents, str | None]:
         """The typed diff this response proposes, or the reason it is refused whole."""
+        draft = _executable(strategy)
         calls = list(response.tool_calls)
         if not calls:
             return [], None
@@ -1086,7 +1454,7 @@ class UserStrategyService:
         raw = arguments.get("items") if isinstance(arguments, dict) else None
         if type(raw) is not list or not raw or len(raw) > _MAX_ITEMS:
             return [], "the proposed change had no readable fields; nothing was proposed"
-        document = self._scenario_document(strategy.draft.scenario_id)
+        document = self._scenario_document(draft.scenario_id)
         contracts = self._contracts(document)
         items: Documents = []
         seen: set[str] = set()
@@ -1099,8 +1467,8 @@ class UserStrategyService:
             if path in seen:
                 return [], f"{path} was proposed twice; nothing was proposed"
             seen.add(path)
-            before = self._current(strategy.draft, path)
-            after, reason = self._typed(contracts, path, entry.get("value"), strategy.draft)
+            before = self._current(draft, path)
+            after, reason = self._typed(contracts, path, entry.get("value"), draft)
             if reason is not None:
                 return [], reason
             items.append(
@@ -1290,6 +1658,9 @@ class UserStrategyService:
         target = _identifier(proposal_id, "proposal_id")
         with self._lock(identity):
             strategy = self._store.get(identity)
+            # There is no draft to revise while nothing is bound, and this refuses
+            # before the proposal lookup, so no call is admitted for an intent.
+            _executable(strategy)
             existing = _entry(strategy.proposals, "proposal_id", target)
             if existing is None:
                 raise UserStrategyStateError("this proposal is not part of the strategy")
@@ -1328,6 +1699,9 @@ class UserStrategyService:
         target = _identifier(proposal_id, "proposal_id")
         with self._lock(identity):
             strategy = self._store.get(identity)
+            # An intent has no proposal to reject, and saying so here is the guard
+            # itself rather than a hidden button.
+            _executable(strategy)
             existing = _entry(strategy.proposals, "proposal_id", target)
             if existing is None:
                 raise UserStrategyStateError("this proposal is not part of the strategy")
@@ -1360,6 +1734,9 @@ class UserStrategyService:
         operation = _identifier(operation_id, "operation_id")
         with self._lock(identity):
             strategy = self._store.get(identity)
+            # Nothing executable exists while this strategy is an intent: an apply is
+            # refused here, before any proposal, selection or revision is read.
+            draft = _executable(strategy)
             prior = _entry(strategy.changes, "operation_id", operation)
             if prior is not None:
                 # A repeated request is the same request: its selection is resolved
@@ -1401,7 +1778,7 @@ class UserStrategyService:
             selected = self._selection(paths, items)
             chosen = [item for item in items if item["path"] in selected]
             for item in chosen:
-                if self._current(strategy.draft, item["path"]) != item["before"]:
+                if self._current(draft, item["path"]) != item["before"]:
                     raise UserStrategyStaleError(
                         f"{item['path']} no longer has the value this proposal was made against"
                     )
@@ -1454,6 +1831,9 @@ class UserStrategyService:
             raise UserStrategyStateError("head_revision must be an integer")
         with self._lock(identity):
             strategy = self._store.get(identity)
+            # An intent has no applied change to reverse, and a binding is not one:
+            # a recorded binding is never a target here.
+            _executable(strategy)
             prior = _entry(strategy.changes, "operation_id", operation)
             if prior is not None:
                 if (
@@ -1517,8 +1897,9 @@ class UserStrategyService:
         proposer: str,
     ) -> UserStrategy:
         """Validate the complete resulting draft, then write exactly one revision."""
-        parameters = dict(strategy.draft.parameters)
-        initial_cash = strategy.draft.initial_cash
+        draft = _executable(strategy)
+        parameters = dict(draft.parameters)
+        initial_cash = draft.initial_cash
         for path, value in overrides.items():
             if path == "initial_cash":
                 initial_cash = value
@@ -1526,7 +1907,7 @@ class UserStrategyService:
                 parameters[path.split(".", 1)[1]] = value
         # The backend validates the whole draft, not just the selected fields, so a
         # dependent field that cannot hold the new value fails the whole subset.
-        document = self._validated(strategy.draft, parameters, initial_cash)
+        document = self._validated(draft, parameters, initial_cash)
         summary = cast(dict[str, Any], document.get("summary") or {})
         # The backend's own normalization wins per key, but the draft's parameter
         # set is exactly what the user confirmed: validation never adds or drops a
@@ -1535,8 +1916,8 @@ class UserStrategyService:
         if isinstance(normalized, dict):
             parameters = {name: normalized.get(name, value) for name, value in parameters.items()}
         revised = replace(
-            strategy.draft,
-            revision=strategy.draft.revision + 1,
+            draft,
+            revision=draft.revision + 1,
             initial_cash=str(summary.get("initial_cash") or initial_cash),
             parameters=parameters,
         )
@@ -1546,7 +1927,7 @@ class UserStrategyService:
             "kind": kind,
             "proposal_id": proposal_id,
             "target_operation_id": target_operation,
-            "from_revision": strategy.draft.revision,
+            "from_revision": draft.revision,
             "to_revision": revised.revision,
             "applied_paths": list(applied_paths),
             "stale_paths": list(stale_paths),
@@ -1583,7 +1964,7 @@ class UserStrategyService:
             strategy,
             updated_at=now,
             draft=revised,
-            history=(*strategy.history, strategy.draft)[-_MAX_HISTORY:],
+            history=(*strategy.history, draft)[-_MAX_HISTORY:],
             changes=(*strategy.changes, change)[-_MAX_CHANGES:],
             proposals=proposals,
         )
@@ -1601,7 +1982,9 @@ class UserStrategyService:
         created, reserved or dispatched.
         """
         strategy = self.get(user_strategy_id)
-        draft = strategy.draft
+        # A preview of an intent would describe a run that cannot exist, so this
+        # refuses before the admitted input is ever derived.
+        draft = _executable(strategy)
         admitted = self._admitted_request(draft)
         source = self._source_identity(admitted)
         normalized = self._normalized(admitted)
@@ -1675,7 +2058,9 @@ class UserStrategyService:
             budget = self._approval(approved_budget, model_calls=0, backtests=1)
             if len(strategy.experiments) >= _MAX_EXPERIMENTS:
                 raise UserStrategyStateError("this strategy has reached its experiment limit")
-            draft = strategy.draft
+            # Nothing can be launched while nothing is bound: this refuses before the
+            # admitted input is derived and before any child, reservation or job.
+            draft = _executable(strategy)
             # The admitted input is re-derived here, before anything durable exists:
             # a confirmation made against a preview that no longer describes what
             # would run is refused, and nothing is created or dispatched.

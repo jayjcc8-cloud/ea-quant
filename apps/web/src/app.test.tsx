@@ -1061,7 +1061,7 @@ describe('report to strategy return', () => {
     // The association names exactly the strategy that froze this job, on the very
     // revision that run froze — not the newer draft and not the other strategy.
     const association = await screen.findByRole('region', { name: '策略关联' })
-    expect(within(association).getByText('Bold entry')).toBeTruthy()
+    expect(await within(association).findByText('Bold entry')).toBeTruthy()
     expect(within(association).getByText('冻结 v2')).toBeTruthy()
     expect(within(association).queryByText('冻结 v5')).toBeNull()
     expect(within(association).queryByText('Quiet exit')).toBeNull()
@@ -1085,7 +1085,7 @@ describe('report to strategy return', () => {
     reportPage(adapter({ listUserStrategies: async () => [otherStrategy] }))
 
     const association = await associationPanel()
-    expect(within(association).getByText('没有已保存的用户策略冻结了这个运行。')).toBeTruthy()
+    expect(await within(association).findByText('没有已保存的用户策略冻结了这个运行。')).toBeTruthy()
     expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
     expect(within(association).getByRole('link', { name: '打开策略列表' }).getAttribute('href')).toBe('/strategies')
     // The formal report never depends on this read.
@@ -1096,7 +1096,7 @@ describe('report to strategy return', () => {
     const user = userEvent.setup()
     reportPage(adapter())
     const unavailable = await associationPanel()
-    expect(within(unavailable).getByText('这个工作区不提供已保存的用户策略。')).toBeTruthy()
+    expect(await within(unavailable).findByText('这个工作区不提供已保存的用户策略。')).toBeTruthy()
     expect(within(unavailable).getByRole('link', { name: '打开策略列表' }).getAttribute('href')).toBe('/strategies')
 
     cleanup()
@@ -1132,7 +1132,7 @@ describe('report to strategy return', () => {
     reportPage(adapter({ listUserStrategies: async () => [doubled] }))
 
     const association = await associationPanel()
-    expect(within(association).getByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
+    expect(await within(association).findByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
     expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
     // One distinct strategy is listed, named with its own id and no revision.
     const candidates = within(association).getAllByRole('link')
@@ -1153,7 +1153,7 @@ describe('report to strategy return', () => {
     reportPage(adapter({ listUserStrategies: async () => [disagreeing] }))
 
     const association = await associationPanel()
-    expect(within(association).getByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
+    expect(await within(association).findByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
     expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
     // The conflict is stated, and neither record's revision is presented as the
     // frozen one: the label names the strategy and its id only.
@@ -1170,7 +1170,7 @@ describe('report to strategy return', () => {
     reportPage(adapter({ listUserStrategies: async () => [ownerStrategy, twin] }))
 
     const association = await associationPanel()
-    expect(within(association).getByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
+    expect(await within(association).findByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
     expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
     expect(within(association).getByRole('link', { name: 'Bold entry · us-1' }).getAttribute('href')).toBe('/strategies/us-1')
     expect(within(association).getByRole('link', { name: 'Quiet exit · us-2' }).getAttribute('href')).toBe('/strategies/us-2')
@@ -1184,7 +1184,7 @@ describe('report to strategy return', () => {
     reportPage(adapter({ listUserStrategies: async () => [odd] }))
 
     const association = await associationPanel()
-    expect(within(association).getByText('冻结修订未知')).toBeTruthy()
+    expect(await within(association).findByText('冻结修订未知')).toBeTruthy()
     expect(within(association).queryByText(/v0/)).toBeNull()
     // The job identity still matched, so the way back is still offered.
     expect(within(association).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1')

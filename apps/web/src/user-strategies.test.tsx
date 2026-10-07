@@ -15,8 +15,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type ScenarioSummary } from './app'
 import {
   UserStrategyRequestError,
+  isIntentDraft,
   type UserStrategy,
   type UserStrategyChange,
+  type UserStrategyDraft,
   type UserStrategyPreview,
   type UserStrategyProposal,
 } from './user-strategies-api'
@@ -71,6 +73,36 @@ function strategy(overrides: Partial<UserStrategy> = {}): UserStrategy {
     experiments: [],
     ...overrides,
   }
+}
+
+/**
+ * The executable draft of a bound fixture. An intent fixture has none, so reaching
+ * for a draft field through this helper is a test that has said which one it means.
+ */
+function executable(value: UserStrategy): UserStrategyDraft {
+  const draft = value.draft
+  if (isIntentDraft(draft)) throw new Error('this fixture strategy is not bound to a scenario')
+  return draft
+}
+
+/** One saved idea: revision 1 of the same durable strategy, with nothing executable. */
+function intent(overrides: Partial<UserStrategy> = {}): UserStrategy {
+  return strategy({
+    draft: { kind: 'intent', revision: 1, scenario_id: null },
+    binding: null,
+    ...overrides,
+  })
+}
+
+/** One immutable binding record, exactly as the host keeps it on the record. */
+const BINDING = {
+  operation_id: 'bind-us-1-1-0',
+  request: { action: 'bind' as const, base_revision: 1, scenario_id: 'bounded-long.yaml', criterion: null },
+  request_sha256: 'a'.repeat(64),
+  scenario_id: 'bounded-long.yaml',
+  from_revision: 1,
+  to_revision: 2,
+  bound_at: '2026-10-06T10:02:00.000000Z',
 }
 
 function proposal(overrides: Partial<UserStrategyProposal> = {}): UserStrategyProposal {
@@ -177,6 +209,13 @@ const unresolved: UserStrategy['calls'][number] = {
 }
 
 const asked: { callId: string; baseRevision: number; approved: boolean }[] = []
+const created: { name: string; intent: string; scenario_id?: string | null }[] = []
+const boundCalls: {
+  operationId: string
+  baseRevision: number
+  scenarioId: string
+  criterion: { field: string; expectation: string } | null
+}[] = []
 const applied: { proposalId: string; operationId: string; paths: string[] | null }[] = []
 const revised: { callId: string; approved: number }[] = []
 const undone: { operationId: string; headRevision: number; target: string }[] = []
@@ -191,6 +230,8 @@ type Script = {
   strategies?: UserStrategy[]
   current?: () => UserStrategy
   read?: (id: string) => Promise<UserStrategy>
+  create?: (input: { name: string; intent: string }) => UserStrategy
+  bind?: (id: string) => Promise<UserStrategy>
   ask?: (id: string) => Promise<UserStrategy>
   apply?: (id: string) => Promise<UserStrategy>
   preview?: (id: string) => Promise<UserStrategyPreview>
@@ -205,7 +246,7 @@ function deferred<T>() {
 }
 
 function scripted(script: Script = {}) {
-  const calls = { list: 0, create: 0, get: 0, ask: 0, apply: 0, reject: 0, revise: 0, undo: 0, preview: 0, launch: 0 }
+  const calls = { list: 0, create: 0, get: 0, bind: 0, ask: 0, apply: 0, reject: 0, revise: 0, undo: 0, preview: 0, launch: 0 }
   const ids: string[] = []
   let persisted = strategy(script.strategies?.[0])
   const api: ApiAdapter = {
@@ -224,13 +265,32 @@ function scripted(script: Script = {}) {
     getEquityPath: async () => { throw new Error('unused') },
     artifactUrl: (jobId, name) => `/api/backtests/${jobId}/artifacts/${name}`,
     listUserStrategies: async () => { calls.list += 1; return script.strategies ?? [] },
-    createUserStrategy: async () => { calls.create += 1; return persisted },
+    createUserStrategy: async (input) => {
+      calls.create += 1
+      created.push({ name: input.name, intent: input.intent, scenario_id: input.scenario_id })
+      if (!script.create) return persisted
+      persisted = script.create({ name: input.name, intent: input.intent })
+      return persisted
+    },
     getUserStrategy: async (id) => {
       calls.get += 1
       ids.push(id)
       if (script.read) return script.read(id)
       const listed = script.strategies?.find(item => item.user_strategy_id === id)
       return script.current ? script.current() : (listed ?? persisted)
+    },
+    bindUserStrategyScenario: async (id, input) => {
+      calls.bind += 1
+      ids.push(id)
+      boundCalls.push({
+        operationId: input.operation_id,
+        baseRevision: input.base_revision,
+        scenarioId: input.scenario_id,
+        criterion: input.criterion ?? null,
+      })
+      if (!script.bind) throw new Error('unused')
+      persisted = await script.bind(id)
+      return persisted
     },
     sendUserStrategyMessage: async (id, input) => {
       calls.ask += 1
@@ -282,7 +342,7 @@ function scripted(script: Script = {}) {
           payload: {
             draft_revision: input.base_revision,
             scenario_id: 'bounded-long.yaml',
-            parameters: persisted.draft.parameters,
+            parameters: executable(persisted).parameters,
             preview_identity: input.preview_identity,
             input_sha256: preview.input_sha256,
             input_identity: preview.input_identity,
@@ -314,6 +374,8 @@ async function openSection(user: ReturnType<typeof userEvent.setup>, name: strin
 afterEach(() => {
   cleanup()
   asked.length = 0
+  created.length = 0
+  boundCalls.length = 0
   applied.length = 0
   revised.length = 0
   undone.length = 0
@@ -322,9 +384,13 @@ afterEach(() => {
 })
 
 describe('user strategy workspace', () => {
-  it('saves a draft on create and never asks the model', async () => {
+  it('saves an idea without a scenario and never asks the model', async () => {
     const user = userEvent.setup()
-    const { api, calls, ids } = scripted()
+    // The save the host really receives is what comes back: the name the form fell
+    // back to and the user's own words, with no scenario and nothing executable.
+    const { api, calls, ids } = scripted({
+      create: input => intent({ name: input.name, intent: input.intent }),
+    })
     window.history.pushState({}, '', '/strategies')
     render(<App api={api} />)
 
@@ -334,46 +400,173 @@ describe('user strategy workspace', () => {
     // will hold rather than pretending to hold a conversation.
     const emptyChat = screen.getByRole('region', { name: 'AI 协作' })
     expect(within(emptyChat).getByText(/先创建或选择一条策略/)).toBeTruthy()
-    expect(screen.getByText('创建策略只保存草稿：不调用模型，也不启动回测。')).toBeTruthy()
 
     const form = screen.getByRole('region', { name: '新建策略' })
-    await user.type(within(form).getByLabelText('策略名称'), 'Bold entry')
+    // The entry point asks for the idea alone. No scenario is chosen here, so a
+    // workspace with an empty catalog can still save, and no criterion is stated:
+    // both belong to the one explicit binding, on the strategy itself.
+    expect(within(form).queryByLabelText('场景')).toBeNull()
+    expect(within(form).queryByLabelText('准则字段')).toBeNull()
+    expect(within(form).queryByLabelText('预期方向')).toBeNull()
+    expect(within(form).getByText(/保存只写下这个想法/)).toBeTruthy()
     await user.type(within(form).getByLabelText('意图'), 'Test one registered entry')
-    // The scenario list is the real registry view, so it arrives asynchronously.
-    await within(form).findByRole('option', { name: 'bounded-long-v1 · XNAS:AAPL' })
-    await user.selectOptions(within(form).getByLabelText('场景'), 'bounded-long.yaml')
     expect(calls.create).toBe(0)
 
-    await user.click(within(form).getByRole('button', { name: '创建策略' }))
+    await user.click(within(form).getByRole('button', { name: '保存想法' }))
 
     expect(calls.create).toBe(1)
+    // The save named no scenario and no criterion, and the name it fell back to is
+    // the user's own words rather than a scenario or a default draft field.
+    expect(created).toEqual([{
+      name: 'Test one registered entry',
+      intent: 'Test one registered entry',
+      scenario_id: undefined,
+    }])
     // Only the save happened: no model call, no experiment, no extra navigation read.
     expect(calls.ask).toBe(0)
     expect(calls.launch).toBe(0)
+    expect(calls.bind).toBe(0)
     expect(asked).toEqual([])
     // One create selects the strategy it saved: its own detail and its own AI
     // column open immediately, with no second creation step.
-    expect(await screen.findByRole('heading', { name: 'Bold entry' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Test one registered entry' })).toBeTruthy()
     expect(screen.getByRole('region', { name: 'AI 协作' })).toBeTruthy()
     const draft = await screen.findByRole('region', { name: '草稿' })
-    expect(within(draft).getByText('草稿修订 1')).toBeTruthy()
-    expect(within(draft).getByText('10000 USD')).toBeTruthy()
+    // What is on screen is an intent: revision 1, and none of the executable facts
+    // a scenario would give it is invented to fill the space.
+    expect(within(draft).getByText('意图修订 1')).toBeTruthy()
+    expect(within(draft).getByText('尚未绑定：没有策略、标的、资金、数据来源或注册参数')).toBeTruthy()
+    expect(draft.textContent).not.toMatch(/USD|XNAS|bounded-long/)
     // The form gives way to the strategy that is now open, with one obvious way back.
     await waitFor(() => expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull())
     expect(screen.getByRole('link', { name: '新建策略' }).getAttribute('href')).toBe('/strategies')
     expect(ids).toEqual(['us-1'])
 
-    // One click on that entry point opens the create form here, with every required
-    // field, and creates nothing: saving is still an explicit submit of its own.
+    // One click on that entry point opens the create form here, with the fields a
+    // save needs, and creates nothing: saving is still an explicit submit of its own.
     await user.click(screen.getByRole('link', { name: '新建策略' }))
     const reopened = await screen.findByRole('region', { name: '新建策略' })
     expect(within(reopened).getByLabelText('策略名称')).toBeTruthy()
-    expect(within(reopened).getByLabelText('场景')).toBeTruthy()
     expect(within(reopened).getByLabelText('意图')).toBeTruthy()
-    expect(within(reopened).getByLabelText('准则字段')).toBeTruthy()
-    expect(within(reopened).getByRole('button', { name: '创建策略' })).toBeTruthy()
+    expect(within(reopened).getByRole('button', { name: '保存想法' })).toBeTruthy()
+    // Leaving the name empty is allowed, and the form shows exactly what it would
+    // save instead — never a scenario, never a strategy.
+    expect(within(reopened).getByText(/留空时用你自己的话作为临时名称：未命名想法/)).toBeTruthy()
     expect(calls.create).toBe(1)
     expect(calls.ask).toBe(0)
+  })
+
+  it('binds the one confirmed scenario to the saved idea, and nothing before that click', async () => {
+    const user = userEvent.setup()
+    // The clarification is plain text from an unbound strategy: an answer about
+    // the idea, with no typed proposal attached to it.
+    const clarified = intent({
+      calls: [{
+        call_id: 'call-1', base_revision: 1, status: 'observed',
+        route: { provider: 'scripted-fixture', model: 'scripted-fixture-v1', endpoint: 'http://127.0.0.1:9/unused' },
+        approved_budget: { max_model_calls: 1, max_backtests: 0 },
+        reserved_at: '2026-10-06T10:01:00.000000Z', message: null, model: 'scripted-fixture-v1',
+        input_tokens: 5, output_tokens: 3, usage_available: true,
+      }],
+      messages: [
+        { message_id: 'msg-1', role: 'user', kind: 'message', text: 'What is missing from this idea?', base_revision: 1, at: '2026-10-06T10:01:00.000000Z', call_id: 'call-1', proposal_id: null },
+        { message_id: 'msg-2', role: 'model', kind: 'message', text: 'Which costs would this idea have to beat?', base_revision: 1, at: '2026-10-06T10:01:01.000000Z', call_id: 'call-1', proposal_id: null },
+      ],
+    })
+    const bound = strategy({
+      draft: { ...executable(strategy()), revision: 2 },
+      binding: BINDING,
+      changes: [{
+        operation_id: 'bind-us-1-1-0',
+        kind: 'bind',
+        proposal_id: null,
+        target_operation_id: null,
+        scenario_id: 'bounded-long.yaml',
+        criterion: null,
+        from_revision: 1,
+        to_revision: 2,
+        applied_paths: [],
+        stale_paths: [],
+        items: [],
+        evidence: [],
+        proposer: 'user',
+        at: '2026-10-06T10:02:00.000000Z',
+      }],
+    })
+    const { api, calls, ids } = scripted({
+      strategies: [intent()], current: () => intent(),
+      ask: async () => clarified, bind: async () => bound,
+    })
+    detail(api)
+
+    expect(await screen.findByRole('heading', { name: 'Bold entry' })).toBeTruthy()
+    const panel = await screen.findByRole('region', { name: '绑定场景' })
+
+    // An unbound strategy offers no experiment at all, and says why: there is no
+    // draft it could preview or run.
+    const experiment = await openSection(user, '实验')
+    expect(within(experiment).queryByRole('button', { name: '预览实验' })).toBeNull()
+    expect(within(experiment).queryByRole('button', { name: '开始实验' })).toBeNull()
+    expect(experiment.textContent).toMatch(/没有可以预览或运行的草稿/)
+
+    // The conversation is available, and it is honest about what it can do.
+    const chat = screen.getByRole('region', { name: 'AI 协作' })
+    expect(chat.textContent).toMatch(/这次对话只能澄清这个想法/)
+    expect(within(chat).getByText(/这一次调用只用来澄清这个想法/)).toBeTruthy()
+    await user.type(within(chat).getByLabelText('消息'), 'What is missing from this idea?')
+    await user.click(within(chat).getByLabelText('批准一次模型调用'))
+    await user.click(within(chat).getByRole('button', { name: '询问模型' }))
+
+    await waitFor(() => expect(calls.ask).toBe(1))
+    // One approved call against the intent's own revision, and it proposes nothing.
+    expect(asked).toEqual([{ callId: 'call-1', baseRevision: 1, approved: true }])
+    expect(await within(chat).findByText('Which costs would this idea have to beat?')).toBeTruthy()
+    expect(within(chat).getByText('模型推断 — 不是正式证据。')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: '建议修改' })).toBeNull()
+    expect(calls.apply).toBe(0)
+
+    // Nothing is preselected, and the registered scenario is named by its exact id
+    // beside that scenario's own summary so two similar choices stay told apart.
+    const select = within(panel).getByLabelText('场景') as HTMLSelectElement
+    expect(select.value).toBe('')
+    expect(await within(panel).findByRole('option', { name: 'bounded-long.yaml · bounded-long-v1 · XNAS:AAPL' })).toBeTruthy()
+    const button = () => within(panel).getByRole('button', { name: '绑定场景' }) as HTMLButtonElement
+    expect(button().disabled).toBe(true)
+
+    await user.selectOptions(select, 'bounded-long.yaml')
+    // Choosing is not binding: without the explicit confirmation nothing is sent.
+    expect(button().disabled).toBe(true)
+    expect(calls.bind).toBe(0)
+
+    await user.selectOptions(within(panel).getByLabelText('准则字段'), 'economics.net_pnl.amount')
+    await user.selectOptions(within(panel).getByLabelText('预期方向'), 'positive')
+    expect(calls.bind).toBe(0)
+    await user.click(within(panel).getByLabelText('我确认把选中的这个场景绑定到这条策略'))
+    await user.click(button())
+
+    expect(calls.bind).toBe(1)
+    // One explicit choice, one operation id: the revision on screen, the exact
+    // scenario id and the criterion that belongs to this binding.
+    expect(boundCalls).toEqual([{
+      operationId: 'bind-us-1-1-0',
+      baseRevision: 1,
+      scenarioId: 'bounded-long.yaml',
+      criterion: { field: 'economics.net_pnl.amount', expectation: 'positive' },
+    }])
+    expect([...new Set(ids)]).toEqual(['us-1'])
+    // Binding is one choice of one scenario: it asks no model and starts nothing.
+    expect(calls.launch).toBe(0)
+    expect(calls.preview).toBe(0)
+
+    // The offer is gone and the executable revision the host formed is on screen.
+    await waitFor(() => expect(screen.queryByRole('region', { name: '绑定场景' })).toBeNull())
+    const draft = screen.getByRole('region', { name: '草稿' })
+    expect(within(draft).getByText('草稿修订 2')).toBeTruthy()
+    expect(within(draft).getByText('bounded-long-v1 · XNAS:AAPL')).toBeTruthy()
+    // The binding is named as its own kind of revision, with the scenario it bound.
+    const revisions = await openSection(user, '修订')
+    expect(within(revisions).getByText('绑定场景')).toBeTruthy()
+    expect(within(revisions).getByText('绑定的场景：bounded-long.yaml')).toBeTruthy()
   })
 
   it('asks the model only after an explicit approval and labels the answer as inference', async () => {
@@ -512,7 +705,7 @@ describe('user strategy workspace', () => {
   it('undoes the named change of the revision it is on', async () => {
     const user = userEvent.setup()
     const moved = strategy({
-      draft: { ...strategy().draft, revision: 2, parameters: { target_quantity: '3', entry_delay_bars: 0 } },
+      draft: { ...executable(strategy()), revision: 2, parameters: { target_quantity: '3', entry_delay_bars: 0 } },
       proposals: [proposal({ status: 'applied', applied_paths: ['parameters.target_quantity'] })],
       changes: [appliedChange],
     })
@@ -533,7 +726,7 @@ describe('user strategy workspace', () => {
 
   it('offers no undo for a revision that has no applied change', async () => {
     const ahead = strategy({
-      draft: { ...strategy().draft, revision: 3, parameters: { target_quantity: '3', entry_delay_bars: 1 } },
+      draft: { ...executable(strategy()), revision: 3, parameters: { target_quantity: '3', entry_delay_bars: 1 } },
       proposals: [proposal({ status: 'applied', applied_paths: ['parameters.target_quantity'] })],
       changes: [appliedChange],
     })
@@ -550,7 +743,7 @@ describe('user strategy workspace', () => {
     const user = userEvent.setup()
     const second = strategy({
       user_strategy_id: 'us-2', name: 'Quiet entry',
-      draft: { ...strategy().draft, revision: 3, parameters: { target_quantity: '1', entry_delay_bars: 0 } },
+      draft: { ...executable(strategy()), revision: 3, parameters: { target_quantity: '1', entry_delay_bars: 0 } },
     })
     const { api, calls, ids } = scripted({ strategies: [strategy(), second] })
     detail(api, 'us-2')
@@ -579,7 +772,7 @@ describe('user strategy workspace', () => {
     const user = userEvent.setup()
     const second = strategy({
       user_strategy_id: 'us-2', name: 'Quiet entry',
-      draft: { ...strategy().draft, revision: 3, parameters: { target_quantity: '1', entry_delay_bars: 0 } },
+      draft: { ...executable(strategy()), revision: 3, parameters: { target_quantity: '1', entry_delay_bars: 0 } },
     })
     const { api, calls } = scripted({ strategies: [strategy(), second] })
     detail(api, 'us-1')
@@ -610,7 +803,7 @@ describe('user strategy workspace', () => {
     const late = deferred<UserStrategy>()
     const second = strategy({
       user_strategy_id: 'us-2', name: 'Quiet entry',
-      draft: { ...strategy().draft, revision: 3, parameters: { target_quantity: '1', entry_delay_bars: 0 } },
+      draft: { ...executable(strategy()), revision: 3, parameters: { target_quantity: '1', entry_delay_bars: 0 } },
     })
     const { api } = scripted({
       strategies: [strategy(), second],
@@ -716,7 +909,7 @@ describe('user strategy workspace', () => {
   it('keeps a frozen run on the revision it ran and never claims its outcome', async () => {
     const user = userEvent.setup()
     const frozen = strategy({
-      draft: { ...strategy().draft, revision: 3, parameters: { target_quantity: '2', entry_delay_bars: 1 } },
+      draft: { ...executable(strategy()), revision: 3, parameters: { target_quantity: '2', entry_delay_bars: 1 } },
       experiments: [
         {
           launch_intent_id: 'li-1', request_id: 'request-1', payload_sha256: 'f'.repeat(64),
