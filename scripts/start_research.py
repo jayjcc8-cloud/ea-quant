@@ -87,6 +87,10 @@ TOOL_NAMES = ("uv", "node", "npm")
 SUPPORTED_PYTHON = "3.12"
 BOOTSTRAP_SCRIPT = "scripts/bootstrap_local.py"
 LOCKED_EXTRAS = ("dev", "web")
+# The one check that reads the locked environment rather than describing it. It is
+# a short program so that a failure is one import error, not a stack of them, and
+# it reads dependencies only: no settings document, no workspace, no key.
+WEB_PREFLIGHT_SOURCE = "import ea.web.server as server; server.check_web_dependencies()"
 SCENARIO_ROOT_PARTS = ("examples", "web-scenarios")
 UI_BUILD_PARTS = ("apps", "web")
 UI_DIST_PARTS = ("apps", "web", "dist")
@@ -243,8 +247,22 @@ def choose_offline() -> bool:
 
 
 def bootstrap_step(project_root: Path) -> Step:
-    """Create the locked 3.12 environment with the repository's own bootstrap."""
-    argv = ("uv", "run", "--no-project", "--python", SUPPORTED_PYTHON, "python", BOOTSTRAP_SCRIPT)
+    """Create the locked 3.12 environment with the repository's own bootstrap.
+
+    The Web extra is asked for by name: the server this launch ends with cannot
+    start without it, and a bootstrap that installs the development extra alone
+    leaves exactly the environment that fails later.
+    """
+    argv = (
+        "uv",
+        "run",
+        "--no-project",
+        "--python",
+        SUPPORTED_PYTHON,
+        "python",
+        BOOTSTRAP_SCRIPT,
+        "--web",
+    )
     return Step(
         argv=argv,
         cwd=project_root,
@@ -271,10 +289,33 @@ def npm_step(project_root: Path, args: Sequence[str]) -> Step:
     )
 
 
+def _scripts_dir(project_root: Path) -> Path:
+    """The installed scripts directory of the locked environment."""
+    return project_root / "venv" / ("Scripts" if os.name == "nt" else "bin")
+
+
 def _entrypoint(project_root: Path) -> Path:
     """The installed entrypoint of the locked environment, not whatever is on PATH."""
-    scripts = project_root / "venv" / ("Scripts" if os.name == "nt" else "bin")
-    return scripts / ("ea.exe" if os.name == "nt" else "ea")
+    return _scripts_dir(project_root) / ("ea.exe" if os.name == "nt" else "ea")
+
+
+def _venv_python(project_root: Path) -> Path:
+    """The interpreter of the locked environment: what a check has to run in."""
+    return _scripts_dir(project_root) / ("python.exe" if os.name == "nt" else "python")
+
+
+def web_preflight_step(project_root: Path) -> Step:
+    """Read the Web dependency stack of the locked environment before anything starts.
+
+    It runs that environment's own interpreter in isolated mode, so no
+    `PYTHONPATH` and no user site-packages can make a broken install look whole,
+    and it reads nothing else: no settings document, no workspace, no key.
+    """
+    return Step(
+        argv=(str(_venv_python(project_root)), "-I", "-c", WEB_PREFLIGHT_SOURCE),
+        cwd=project_root,
+        env=child_env(),
+    )
 
 
 def server_step(
@@ -325,10 +366,15 @@ def plan_steps(
     the server keeps the loopback host the existing command fixes: no `--host` is
     passed, here or anywhere else. An offline launch carries no key at all, whatever
     the caller passed, so a configured parent cannot leak a provider into it.
+
+    The dependency preflight follows the locked install and precedes everything
+    that would build, listen or ask for a key, so an environment that only looks
+    installed is reported while the host is still untouched.
     """
     return (
         bootstrap_step(project_root),
         sync_step(project_root),
+        web_preflight_step(project_root),
         npm_step(project_root, ("ci",)),
         npm_step(project_root, ("run", "build")),
         server_step(

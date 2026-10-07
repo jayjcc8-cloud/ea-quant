@@ -69,6 +69,12 @@ def _server_step(steps: Sequence[start_research.Step]) -> start_research.Step:
     return server
 
 
+def _venv_python(project_root: Path) -> Path:
+    """The locked environment's own interpreter: what a preflight has to use."""
+    scripts = project_root / "venv" / ("Scripts" if os.name == "nt" else "bin")
+    return scripts / ("python.exe" if os.name == "nt" else "python")
+
+
 def _document(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
@@ -512,3 +518,104 @@ def test_a_setup_failure_asks_for_no_key_and_starts_no_server(
     written = _written_sessions(workspace)
     assert len(written) == 1
     assert SYNTHETIC_TOKEN not in written[0].read_text(encoding="utf-8")
+
+
+def test_the_plan_bootstraps_the_web_extra_and_reads_it_before_the_server(tmp_path: Path) -> None:
+    """The environment the server needs is both asked for and actually read.
+
+    A locked sync that installs the Web extra and a later step that resolves the
+    environment without it leaves a directory that looks installed and an import
+    that fails; the plan therefore has to carry the extra into the bootstrap and
+    then *read* the resulting environment while nothing is listening.
+    """
+    workspace = tmp_path / "workspace"
+    settings = start_research.prepare_settings(workspace, model=None)
+    steps = start_research.plan_steps(
+        project_root=PROJECT_ROOT,
+        workspace=workspace,
+        settings_file=settings,
+        port=8799,
+        offline=True,
+        key=None,
+    )
+    argvs = [list(step.argv) for step in steps]
+
+    bootstrap = next(argv for argv in argvs if any("bootstrap_local.py" in part for part in argv))
+    assert "--web" in bootstrap
+
+    preflights = [step for step in steps if "check_web_dependencies" in " ".join(step.argv)]
+    assert len(preflights) == 1, argvs
+    preflight = preflights[0]
+    argv = list(preflight.argv)
+    # The check runs the locked environment's own interpreter non-interactively,
+    # not whatever python happened to start the launcher.
+    assert argv[0] == str(_venv_python(PROJECT_ROOT))
+    assert argv[1] == "-I"
+    assert "-c" in argv
+    code = argv[argv.index("-c") + 1]
+    assert "ea.web.server" in code
+    assert "check_web_dependencies" in code
+    # It reads dependencies only: no root, no port, no settings document.
+    assert "--workspace" not in argv
+
+    # After the extra is installed, and before the one long-running child, so a
+    # missing dependency is found while nothing is listening and no key exists.
+    preflight_index = next(index for index, step in enumerate(steps) if step is preflight)
+    sync_index = next(index for index, argv in enumerate(argvs) if "--extra" in argv)
+    assert sync_index < preflight_index < len(steps) - 1
+    assert list(steps[-1].argv[1:3]) == ["web", "serve"]
+
+    for name in (*KEY_LIKE_NAMES, "RADIAN_SETTINGS_FILE", "PYTHONPATH", "VIRTUAL_ENV"):
+        assert name not in preflight.env
+
+
+def test_a_failed_web_dependency_preflight_asks_for_no_key_and_starts_no_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken Web environment is reported before the key question is reached."""
+    monkeypatch.setattr(start_research, "which", _all_found)
+    attempted: list[start_research.Step] = []
+
+    def failing_preflight(step: start_research.Step) -> None:
+        attempted.append(step)
+        if "check_web_dependencies" in " ".join(step.argv):
+            raise start_research.LauncherError(
+                "the Web dependency preflight failed: No module named 'starlette'"
+            )
+
+    monkeypatch.setattr(start_research, "run_step", failing_preflight)
+    prompted: list[str] = []
+    monkeypatch.setattr(start_research, "prompt_secret", _key_recorder(prompted))
+    workspace = tmp_path / "workspace"
+
+    code = start_research.main(
+        [
+            "--provider",
+            start_research.DEEPSEEK_PROVIDER,
+            "--workspace",
+            str(workspace),
+            "--port",
+            "8799",
+        ]
+    )
+
+    assert code == 1
+    # The key is entered only after setup succeeds; the setup failed, so nothing
+    # was asked for, and the listener that key belongs to never started.
+    assert prompted == []
+    assert not any(list(step.argv[1:3]) == ["web", "serve"] for step in attempted)
+
+    preflight = next(step for step in attempted if "check_web_dependencies" in " ".join(step.argv))
+    preflight_index = next(index for index, step in enumerate(attempted) if step is preflight)
+    # Earlier setup ran, in the locked environment: the preflight reads that
+    # environment rather than the interpreter that started the launcher.
+    assert any("bootstrap_local.py" in " ".join(step.argv) for step in attempted)
+    assert preflight_index > next(
+        index for index, step in enumerate(attempted) if "--extra" in step.argv
+    )
+    assert preflight.argv[0] == str(_venv_python(PROJECT_ROOT))
+    assert preflight.argv[1] == "-I"
+    for name in (*KEY_LIKE_NAMES, "RADIAN_SETTINGS_FILE", "PYTHONPATH", "VIRTUAL_ENV"):
+        assert name not in preflight.env
+    assert all(SYNTHETIC_TOKEN not in value for value in preflight.env.values())
