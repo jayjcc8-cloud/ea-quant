@@ -312,6 +312,14 @@ class UserStrategyMessageRequest(BaseModel):
     base_revision: int = Field(ge=1, le=1000000)
     text: str = Field(min_length=1, max_length=4000)
     approved_budget: ApprovedBudgetRequest
+    # The frozen runs this turn is grounded in: one, or two ordered A then B, and
+    # each one of this strategy's own created runs. Absent means an ordinary
+    # conversation, which is exactly what every request made before this field
+    # existed is, so an old idempotent body still replays as itself. The shape is
+    # bounded here; whether each id is really a readable, identity-matched frozen
+    # run of this strategy is decided by the owner, which refuses the request whole
+    # before anything is written or sent.
+    evidence_job_ids: list[str] | None = Field(default=None, max_length=2)
 
 
 class UserStrategyReviseRequest(BaseModel):
@@ -1448,6 +1456,7 @@ def create_app(settings: WebSettings) -> Any:
                 base_revision=request.base_revision,
                 text=request.text,
                 approved_budget=request.approved_budget.model_dump(),
+                evidence_job_ids=request.evidence_job_ids,
             )
             return strategy.document()
         except (UserStrategyError, OSError) as caught:

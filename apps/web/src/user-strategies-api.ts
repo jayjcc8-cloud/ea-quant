@@ -78,9 +78,37 @@ export type UserStrategyCallStatus =
   | 'interrupted_before_dispatch'
 
 /**
+ * One frozen run a conversation was grounded in, exactly as the host read and
+ * verified it when that call was made. Every field is host-verified provenance:
+ * the run's own frozen revision and criterion, the digests it was admitted and
+ * published under, its admitted parameters and assumptions, the allowlisted report
+ * facts with the report's own currency, the host's own reading of the criterion,
+ * and the report's recorded limitations. A value this host could not read is
+ * absent here rather than guessed — never zero.
+ */
+export type UserStrategyEvidenceRun = {
+  job_id: string
+  launch_intent_id: string | null
+  draft_revision: number | null
+  criterion: ReportCriterion | null
+  run_id: string | null
+  report_sha256: string | null
+  input_sha256: string | null
+  record_count: number | null
+  parameters: Record<string, string | number>
+  /** The admitted, normalized blocks: strategy, execution, risk, funding, instrument, data. */
+  assumptions: Record<string, unknown>
+  facts: { path: string; value: string | number | null; currency: string | null }[]
+  reading: { outcome: string | null; inference: string | null }
+  limitations: string[]
+}
+
+/**
  * One recorded model call. `input_tokens`/`output_tokens` are null — not zero —
  * when the provider never reported usage, and `cost` is unavailable without a
- * price source, so nothing here can be read as a measured charge.
+ * price source, so nothing here can be read as a measured charge. `evidence` is
+ * present only on a call the user grounded in selected frozen runs, and it is the
+ * only thing such a call was told about them.
  */
 export type UserStrategyCall = {
   call_id: string
@@ -95,6 +123,7 @@ export type UserStrategyCall = {
   output_tokens: number | null
   usage_available: boolean
   cost?: { amount: string | null; available: boolean; reason: string }
+  evidence?: UserStrategyEvidenceRun[]
 }
 
 /** One change to one field, with the provenance that field was written with. */
@@ -202,6 +231,13 @@ export type UserStrategyExperimentPayload = {
   input_sha256?: string | null
   input_identity?: Record<string, unknown>
   approved_budget?: ApprovedBudget
+  /**
+   * The admitted, normalized blocks the preview showed — strategy, execution,
+   * risk, funding, instrument and data — kept exactly as the engine rendered
+   * them, so two frozen runs can be compared on the assumptions they really ran
+   * under rather than on today's scenario.
+   */
+  normalized?: Record<string, unknown>
 }
 
 /**
@@ -339,9 +375,21 @@ export const userStrategiesApi = {
       criterion?: UserStrategyCriterionInput | null
     },
   ) => write<UserStrategy>(`${base(userStrategyId)}/bind-scenario`, input),
+  /**
+   * One approved turn. `evidence_job_ids` is absent for an ordinary conversation;
+   * with it, the turn is grounded in one or two of this strategy's own frozen runs
+   * — A first, then B — and the host verifies each of them before anything is
+   * written or sent. Sending a message starts no experiment.
+   */
   sendMessage: (
     userStrategyId: string,
-    input: { call_id: string; base_revision: number; text: string; approved_budget: ApprovedBudget },
+    input: {
+      call_id: string
+      base_revision: number
+      text: string
+      approved_budget: ApprovedBudget
+      evidence_job_ids?: string[]
+    },
   ) => write<UserStrategy>(`${base(userStrategyId)}/messages`, input),
   applyProposal: (
     userStrategyId: string,

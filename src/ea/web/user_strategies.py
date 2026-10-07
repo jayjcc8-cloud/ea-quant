@@ -23,6 +23,7 @@ references, written with the same atomic-publish discipline the research store u
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -45,7 +46,9 @@ from ea.web.llm import (
     create_model_port,
 )
 from ea.web.report_claims import (
+    FIELD_SPECS_BY_PATH,
     CriterionRejectedError,
+    host_limitations,
     host_reading,
     read_field,
     validate_criterion,
@@ -81,6 +84,9 @@ _MAX_SCENARIO_ID = 200
 _MAX_REASON = 400
 _MAX_EVIDENCE_ITEM = 400
 _MAX_EVIDENCE = 8
+#: How many frozen runs one turn may be grounded in: A, and optionally B. A pair is
+#: the widest reading this product makes, and a third run would stop being a pair.
+_MAX_EVIDENCE_RUNS = 2
 _MAX_ITEMS = 20
 _MAX_MESSAGES = 200
 _MAX_CALLS = 200
@@ -1076,14 +1082,19 @@ class UserStrategyService:
         action: str = "message",
         proposal_id: str | None = None,
         before: Any = None,
+        evidence_job_ids: Any = None,
     ) -> UserStrategy:
         call = _identifier(call_id, "call_id")
         message = _bounded(text, "message", _MAX_MESSAGE)
         if type(base_revision) is not int:
             raise UserStrategyStateError("base_revision must be an integer")
+        selection = self._evidence_selection(evidence_job_ids)
         # The whole semantic request is bound to the call identity: the text, the
         # revision, the action and its target, and the exact approved budget. A
-        # different action, target or budget under the same id is a conflict.
+        # different action, target or budget under the same id is a conflict. The
+        # selected runs are part of that request too, and only a call that selected
+        # any carries the key at all, so a request written before this field existed
+        # still replays as exactly the request it was.
         request: dict[str, Any] = {
             "action": action,
             "text": message,
@@ -1091,6 +1102,8 @@ class UserStrategyService:
             "proposal_id": proposal_id,
             "approved_budget": _requested_budget(approved_budget),
         }
+        if selection is not None:
+            request["evidence_job_ids"] = selection
         existing = _entry(strategy.calls, "call_id", call)
         if existing is not None:
             # The recorded outcome is the answer to this identity, whatever it was,
@@ -1113,6 +1126,12 @@ class UserStrategyService:
                 "classified before another call is started"
             )
         budget = self._approval(approved_budget, model_calls=_CALL_APPROVAL, backtests=0)
+        # The selected runs are read, verified and frozen here: after the approval,
+        # before the durable reservation and before the provider can be reached, so a
+        # selection this workspace cannot verify leaves no call record and no
+        # dispatch behind it, and no conversation is ever grounded in a run the user
+        # did not select or that is no longer the run it names.
+        evidence = None if selection is None else self._evidence_context(strategy, selection)
         self._model_port()
         route = self._safe_route()
         now = _now()
@@ -1143,6 +1162,12 @@ class UserStrategyService:
                 "reason": "no price source is configured in this workspace",
             },
         }
+        if evidence is not None:
+            # The provenance of this turn, kept on the call it belongs to: the runs
+            # the user selected and the host-verified context each of them was read
+            # as. It is a record of what was explained, never a new authority over
+            # the draft, the runs or the budget.
+            record["evidence"] = evidence
         pending = before(strategy) if before is not None else strategy
         pending = replace(
             pending,
@@ -1181,6 +1206,10 @@ class UserStrategyService:
         # never reaches the provider and never marks this call dispatched, so the
         # durable record stays a reservation that recovery classifies as unsent.
         registered = self._registered_paths(draft)
+        # The evidence this turn was admitted with is read back from its own call
+        # record: a conversation is told what the user selected when this call was
+        # made, never whichever run happens to be the latest one now.
+        selected = self._call_evidence(strategy, call)
         strategy = self._mark_dispatched(strategy, call)
         key = (strategy.user_strategy_id, call)
         self._active_calls.add(key)
@@ -1188,7 +1217,7 @@ class UserStrategyService:
             try:
                 response: ModelResponse = port.complete(
                     system=_SYSTEM_PROMPT,
-                    messages=self._conversation(strategy, message, registered),
+                    messages=self._conversation(strategy, message, registered, selected),
                     tools=[self._propose_tool(registered)],
                     max_tokens=_MAX_TOKENS,
                     required_capabilities=("tool_use",),
@@ -1313,7 +1342,11 @@ class UserStrategyService:
         )
 
     def _conversation(
-        self, strategy: UserStrategy, message: str, registered: tuple[RegisteredPath, ...]
+        self,
+        strategy: UserStrategy,
+        message: str,
+        registered: tuple[RegisteredPath, ...],
+        evidence: Documents | None = None,
     ) -> History:
         """One request to the model: the strategy's own facts, plus its history.
 
@@ -1322,10 +1355,12 @@ class UserStrategyService:
         Everything before it is the recorded conversation, and the opening turn
         carries the stated intent, the registered paths of this draft — each with
         its exact JSON value type, current value and the bounds this workspace
-        enforces, the read-only ones included — and — when this strategy has a
-        frozen run whose report the workspace can verify — only the host's own
-        readings of that run. A strategy that has no scenario yet states nothing
-        about a draft, because it has no draft to state.
+        enforces, the read-only ones included — and, about frozen runs, only what
+        this call is allowed to state: the host's own verified readings of the runs
+        the user selected when it was made, or, for a call made without a selection,
+        the host's own readings of this strategy's latest frozen run. A strategy
+        that has no scenario yet states nothing about a draft, because it has no
+        draft to state.
         """
         draft = strategy.draft
         if isinstance(draft, IntentDraft):
@@ -1344,7 +1379,7 @@ class UserStrategyService:
                 "The user's stated criterion: "
                 f"{draft.criterion['field']} is {draft.criterion['expectation']}"
             )
-        facts.extend(self._verified_facts(strategy))
+        facts.extend(self._selected_facts(evidence) if evidence else self._verified_facts(strategy))
         return [
             ModelMessage(role="user", text="\n".join(facts)),
             *self._recorded_turns(strategy, message),
@@ -1438,6 +1473,315 @@ class UserStrategyService:
             f"({reading['inference'] or 'no inference code'})"
         )
         facts.append("One run that succeeded is one frozen run, not research that is complete.")
+        return facts
+
+    @staticmethod
+    def _call_evidence(strategy: UserStrategy, call: str) -> Documents | None:
+        """The frozen evidence one call was admitted with, read from that call.
+
+        This is provenance, not authority: it is read back from the call's own
+        durable record, so a conversation is grounded in what the user selected when
+        that call was made — never in whichever run happens to be latest by the time
+        the request is sent.
+        """
+        record = _entry(strategy.calls, "call_id", call)
+        if record is None:
+            return None
+        evidence = record.get("evidence")
+        if type(evidence) is not list or not evidence:
+            return None
+        return cast(Documents, evidence)
+
+    def _evidence_selection(self, evidence_job_ids: Any) -> Paths | None:
+        """The frozen runs one request selects, exactly as that request states them.
+
+        Absent means an ordinary conversation, which is what every call made before
+        this field existed is. A selection is one or two distinct bounded ids in the
+        order the user gave them: A first, and B after it.
+        """
+        if evidence_job_ids is None:
+            return None
+        if type(evidence_job_ids) is not list or not evidence_job_ids:
+            raise UserStrategyStateError(
+                "evidence_job_ids must name one or two frozen runs of this strategy; "
+                "nothing was asked"
+            )
+        if len(evidence_job_ids) > _MAX_EVIDENCE_RUNS:
+            raise UserStrategyStateError(
+                f"at most {_MAX_EVIDENCE_RUNS} frozen runs can be explained at once; "
+                "nothing was asked"
+            )
+        selection: Paths = []
+        for item in evidence_job_ids:
+            identifier = _identifier(item, "evidence_job_ids")
+            if identifier in selection:
+                raise UserStrategyStateError(
+                    "evidence_job_ids must name different frozen runs; nothing was asked"
+                )
+            selection.append(identifier)
+        return selection
+
+    def _evidence_context(self, strategy: UserStrategy, selection: Paths) -> Documents:
+        """The host-verified, frozen context of the runs one turn is grounded in.
+
+        Every fact here is read from this strategy's own retained record, the job
+        that record names and that job's verified report. A selected id that is not
+        exactly one created experiment of this strategy — foreign, duplicated,
+        ambiguous, failed, unreadable or mismatched — is refused here, before the
+        call record exists and before any provider can be reached, so a conversation
+        is never grounded in a run the user did not select.
+        """
+        created = [
+            item
+            for item in strategy.experiments
+            if item.get("status") == "created" and item.get("job_id")
+        ]
+        context: Documents = []
+        for job_id in selection:
+            matches = [item for item in created if str(item.get("job_id")) == job_id]
+            if len(matches) != 1:
+                raise UserStrategyStateError(
+                    "a selected id is not one frozen run of this strategy; nothing was asked"
+                )
+            context.append(self._evidence_run(matches[0], job_id))
+        return context
+
+    def _evidence_run(self, record: dict[str, Any], job_id: str) -> dict[str, Any]:
+        """One selected run, read and verified, or a refusal to explain anything.
+
+        The retained payload, the job it names and that job's report are held to one
+        another: the payload must still hash to the digest it was recorded with, the
+        run must have succeeded and published a report, the job must be the input this
+        strategy confirmed, the report must be the run it was read for and must still
+        hash to the digest the job published, the report must be readable as evidence
+        under the host's own vocabulary, and the report's own source identity must be
+        the one the run was admitted under. Anything else is an honest unavailability
+        rather than a reading of some other run.
+        """
+        # The retained payload is the authority for every contextual field read below —
+        # its revision, its parameters, its admitted blocks and its criterion. It is
+        # that authority only while it is the payload that was frozen: a missing or
+        # mismatched digest is refused here, before any of those fields is read, so an
+        # edited frozen block can never be stated as host-verified evidence.
+        stored = record.get("payload")
+        recorded = record.get("payload_sha256")
+        if (
+            not isinstance(stored, dict)
+            or not isinstance(recorded, str)
+            or _digest(stored) != recorded
+        ):
+            raise UserStrategyStateError(
+                "a selected run's frozen payload is not the payload it was recorded with; "
+                "nothing was asked"
+            )
+        payload = cast(dict[str, Any], stored)
+        try:
+            job = self._service.get_job(job_id)
+        except Exception:  # noqa: BLE001 — an unreadable run is not evidence
+            raise UserStrategyStateError(
+                "a selected run could not be read; nothing was asked"
+            ) from None
+        # The persisted record itself says whether this run produced a report: it is
+        # succeeded, and it published a report digest. Whether the bytes behind that
+        # digest are readable, and are the report they claim to be, is decided below by
+        # the workspace's own report authority.
+        if getattr(job, "status", None) != "succeeded":
+            raise UserStrategyStateError(
+                "a selected run has not succeeded, so it has no verified report; nothing was asked"
+            )
+        published = getattr(job, "report_sha256", None)
+        if not isinstance(published, str) or not published:
+            raise UserStrategyStateError(
+                "a selected run published no report, so it has no verified report; "
+                "nothing was asked"
+            )
+        run_id = getattr(job, "engine_run_id", None)
+        if not isinstance(run_id, str) or not run_id:
+            raise UserStrategyStateError(
+                "a selected run records no engine run id; nothing was asked"
+            )
+        if not self._job_matches_confirmation(record, job):
+            raise UserStrategyStateError(
+                "a selected run is not the input this strategy confirmed; nothing was asked"
+            )
+        try:
+            raw = self._service.report(job_id)
+            report = json.loads(raw)
+        except Exception:  # noqa: BLE001 — an unverifiable report is not evidence
+            raise UserStrategyStateError(
+                "a selected run has no readable verified report; nothing was asked"
+            ) from None
+        if not isinstance(report, dict) or report.get("run_id") != run_id:
+            raise UserStrategyStateError(
+                "a selected report is not the run it was read for; nothing was asked"
+            )
+        digest = hashlib.sha256(raw).hexdigest() if type(raw) is bytes else None
+        if digest is None or published != digest:
+            raise UserStrategyStateError(
+                "a selected report is not the report this run published; nothing was asked"
+            )
+        # The confirmed input identity is required, not optional: a report that states
+        # no source, or a record that kept none, is unverified rather than agreeing.
+        identity = payload.get("input_identity")
+        if not isinstance(identity, dict) or not self._report_source_matches(report, identity):
+            raise UserStrategyStateError(
+                "a selected report does not state the source this run was confirmed from; "
+                "nothing was asked"
+            )
+        verified = cast(dict[str, Any], report)
+        criterion = payload.get("criterion")
+        frozen_criterion = criterion if isinstance(criterion, dict) else None
+        # A run may have been frozen with no criterion at all; the host states that as
+        # its own reading (``not_stated``), which is a reading and not a refusal. What
+        # is refused is a report the host's vocabulary is not defined against — an
+        # unknown schema or a value of the wrong JSON type — because nothing can be
+        # published from it as evidence.
+        found = host_reading(frozen_criterion, verified)
+        if found["outcome"] is None:
+            raise UserStrategyStateError(
+                "a selected report cannot be read as evidence; nothing was asked"
+            )
+        facts: Documents = []
+        for path in _REPORT_FACTS:
+            value = read_field(verified, path)
+            if value is None:
+                continue
+            spec = FIELD_SPECS_BY_PATH.get(path)
+            currency = (
+                read_field(verified, spec.currency_path)
+                if spec is not None and spec.currency_path
+                else None
+            )
+            facts.append(
+                {
+                    "path": path,
+                    # A count stays a JSON integer; a decimal stays the report's own
+                    # canonical string and is never re-typed into a number here.
+                    "value": value if type(value) is int else str(value),
+                    "currency": currency if isinstance(currency, str) else None,
+                }
+            )
+        normalized = payload.get("normalized")
+        blocks = normalized if isinstance(normalized, dict) else {}
+        return {
+            "job_id": job_id,
+            "launch_intent_id": record.get("launch_intent_id"),
+            "draft_revision": payload.get("draft_revision"),
+            "criterion": frozen_criterion,
+            "run_id": run_id,
+            "report_sha256": digest,
+            "input_sha256": payload.get("input_sha256"),
+            "record_count": payload.get("record_count"),
+            "parameters": dict(payload.get("parameters") or {}),
+            # The admitted, normalized blocks of this run: the instrument, the data
+            # window, the cost, risk and funding assumptions it was run under, and
+            # the strategy implementation they name.
+            "assumptions": {
+                key: blocks.get(key)
+                for key in ("strategy", "execution", "risk", "funding", "instrument", "data")
+            },
+            "facts": facts,
+            "reading": {"outcome": found["outcome"], "inference": found["inference"]},
+            # The limitations this run's own recorded facts justify, from the host's
+            # closed vocabulary: they belong to what this run is evidence for.
+            "limitations": host_limitations(verified),
+        }
+
+    @staticmethod
+    def _report_source_matches(report: dict[str, Any], identity: dict[str, Any]) -> bool:
+        """Whether a report's own source is exactly the source this run was admitted from.
+
+        Both sides have to state it, and state the same thing: the scenario digest the
+        run was confirmed under and the report's own, and the admitted data fingerprint
+        against the one the report recorded. A report that states no source, or a record
+        that kept no identity, is not read as agreement — an unverified source fails
+        closed rather than being assumed to be the frozen one.
+        """
+        source = report.get("source")
+        scenario = source.get("scenario_sha256") if isinstance(source, dict) else None
+        expected_scenario = identity.get("scenario_sha256")
+        if not isinstance(scenario, str) or not isinstance(expected_scenario, str):
+            return False
+        if scenario != expected_scenario:
+            return False
+        data = source.get("data") if isinstance(source, dict) else None
+        fingerprint = data.get("fingerprint") if isinstance(data, dict) else None
+        digest = fingerprint.get("sha256") if isinstance(fingerprint, dict) else None
+        expected_data = identity.get("data_sha256")
+        if not isinstance(digest, str) or not isinstance(expected_data, str):
+            return False
+        return digest == expected_data
+
+    @staticmethod
+    def _selected_facts(evidence: Documents) -> Paths:
+        """What the user selected, stated as the host read it, and nothing wider.
+
+        Every line is a host-verified reading of one frozen run the user named for
+        this turn. Only those runs are described — no other run of this strategy is
+        mentioned, and no later run is read in their place — and the limits of a
+        single window are stated with them, so the model is told what a reading is
+        and what it is not. The registered fields above still describe today's draft,
+        and a proposal still targets that draft.
+        """
+        facts = [
+            "The user selected these frozen runs as this turn's evidence. Only these "
+            "are stated here: no other run of this strategy is described, and no later "
+            "run is read in their place.",
+        ]
+        for index, item in enumerate(evidence):
+            label = "A" if index == 0 else "B"
+            facts.append(
+                f"Selected run {label}: job {item.get('job_id')}, engine run "
+                f"{item.get('run_id')}, frozen draft revision {item.get('draft_revision')}, "
+                f"launch {item.get('launch_intent_id')}"
+            )
+            facts.append(
+                f"  its confirmed input digest {item.get('input_sha256')} and verified "
+                f"report digest {item.get('report_sha256')}, over "
+                f"{item.get('record_count')} records"
+            )
+            parameters = item.get("parameters") or {}
+            if parameters:
+                facts.append(
+                    "  the parameters it froze: "
+                    + ", ".join(f"{key} = {value}" for key, value in parameters.items())
+                )
+            facts.append(
+                "  the assumptions it was admitted under: "
+                + json.dumps(item.get("assumptions") or {}, sort_keys=True, default=str)
+            )
+            for reading in item.get("facts") or []:
+                unit = f" {reading['currency']}" if reading.get("currency") else ""
+                facts.append(f"  {reading['path']} = {reading['value']}{unit}")
+            criterion = item.get("criterion")
+            found = item.get("reading") or {}
+            if criterion is None:
+                facts.append(
+                    "  no criterion was frozen before this run, so its result cannot "
+                    "judge the thesis either way"
+                )
+            else:
+                facts.append(
+                    f"  its frozen criterion {criterion.get('field')} is "
+                    f"{criterion.get('expectation')}, and the host's own reading of it: "
+                    f"{found.get('outcome')} ({found.get('inference')})"
+                )
+            for code in item.get("limitations") or []:
+                facts.append(f"  limitation of this run: {code}")
+        facts.extend(
+            [
+                "These readings are host-verified facts about those frozen runs. "
+                "Anything you say beyond them is your own inference, not evidence.",
+                "One run over one window supports no causal claim, no profit claim and no "
+                "robustness claim; a difference between two runs is a comparability "
+                "question before it is an explanation.",
+                "Net P&L includes the valuation of any position still open at the end of "
+                "the window, so it is not realized profit.",
+                "Explaining these runs and proposing a next experiment are not running "
+                "anything: a run happens only from the user's own separate confirmation "
+                "of a preview.",
+            ]
+        )
         return facts
 
     def _diff(
@@ -1632,7 +1976,19 @@ class UserStrategyService:
         base_revision: object,
         text: object,
         approved_budget: Any = None,
+        evidence_job_ids: Any = None,
     ) -> UserStrategy:
+        """One approved turn, optionally grounded in this strategy's own frozen runs.
+
+        ``evidence_job_ids`` is absent for every ordinary turn, and absent means this
+        request is exactly the request it has always been: a call recorded before this
+        field existed still replays as itself. When it is present it names one or two
+        of this strategy's own frozen runs, in order — A first, then B — and those
+        runs, frozen with their verified readings, are the only evidence this turn
+        states. Nothing here runs anything: explaining evidence and proposing a next
+        experiment are model calls, and a run still happens only from the user's own
+        separate confirmation of a preview.
+        """
         identity = _identifier(user_strategy_id, "user_strategy_id")
         with self._lock(identity):
             strategy = self._store.get(identity)
@@ -1643,6 +1999,7 @@ class UserStrategyService:
                 text=text,
                 approved_budget=approved_budget,
                 action="message",
+                evidence_job_ids=evidence_job_ids,
             )
 
     def revise_proposal(

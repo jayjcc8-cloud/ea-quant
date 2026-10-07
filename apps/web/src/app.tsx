@@ -257,6 +257,11 @@ export type ApiAdapter = {
       base_revision: number
       text: string
       approved_budget: UserStrategyApprovedBudget
+      /** One or two of this strategy's own frozen runs, ordered A then B. Absent
+       * is an ordinary turn: the host verifies each id and refuses the selection
+       * whole rather than grounding a conversation in a run the user did not
+       * select. Sending a message never starts an experiment. */
+      evidence_job_ids?: string[]
     },
   ): Promise<UserStrategy>
   applyUserStrategyProposal?(

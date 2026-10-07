@@ -11,6 +11,7 @@ appearing in a module.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import threading
 import time
@@ -38,6 +39,7 @@ from ea.web.llm import (
     ModelResponse,
     ModelRoute,
 )
+from ea.web.report_claims import host_reading
 from ea.web.research import (
     InvalidSpecError,
     ResearchOrchestrator,
@@ -3964,3 +3966,721 @@ def test_http_saves_an_intent_binds_it_and_refuses_unbound_execution(tmp_path: A
         assert legacy.json()["draft"]["revision"] == 1
         assert legacy.json()["draft"]["scenario_id"] == SCENARIO
         assert legacy.json()["draft"]["criterion"] == FROZEN_CRITERION
+
+
+# --- selected frozen evidence: the runs one turn may explain -------------------
+#
+# A conversation may be grounded in the runs the user selected, and in nothing
+# else. A selection names one or two of this strategy's own created, readable,
+# identity-matched frozen runs; the host reads and verifies each of them and
+# retains that verified context on the call before the provider can be reached. A
+# selection that is not one of them is refused before anything is written or
+# sent, and the latest run is never silently substituted for the selected one.
+
+
+def _two_runs(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[UserStrategyService, WebService, FakeProvider, str, dict[str, Any], dict[str, Any]]:
+    """One strategy with two frozen runs: revision 1, then revision 2 of its draft."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    first = _launch(strategies, strategy_id).experiments[-1]
+    _terminal_job(service, cast(str, first["job_id"]))
+    _updated, proposal = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-1")
+    strategies.apply_proposal(strategy_id, proposal_id=proposal["proposal_id"], operation_id="op-1")
+    second = _launch(strategies, strategy_id, launch_intent_id="li-2").experiments[-1]
+    _terminal_job(service, cast(str, second["job_id"]))
+    assert first["status"] == second["status"] == "created"
+    assert first["payload"]["draft_revision"] == 1
+    assert second["payload"]["draft_revision"] == 2
+    return strategies, service, provider, strategy_id, first, second
+
+
+def _opening(provider: FakeProvider, index: int = -1) -> str:
+    """The one fact turn this owner opens a request with."""
+    return cast(str, cast(list[Any], provider.calls[index]["messages"])[0].text)
+
+
+#: One more typed change, proposed over selected evidence and applied by the user.
+NEXT_FIELDS: list[dict[str, Any]] = [
+    {
+        "path": "parameters.target_quantity",
+        "value": "4",
+        "reason": "Test a larger size next.",
+        "evidence": ["run: the selected frozen run"],
+    },
+]
+
+
+def test_one_selected_frozen_run_is_the_evidence_the_turn_is_grounded_in(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run the user selected is read, verified and stated — and no other run is."""
+    strategies, service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    job_id = cast(str, first["job_id"])
+    payload = cast(dict[str, Any], first["payload"])
+    job = service.get_job(job_id)
+    report = cast(dict[str, Any], json.loads(service.report(job_id)))
+
+    provider.responses.append(_response([], text="A reading of the run you selected."))
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=2,
+        text="解释所选证据",
+        approved_budget=dict(CALL_BUDGET),
+        evidence_job_ids=[job_id],
+    )
+    assert answered.calls[-1]["status"] == "observed"
+    assert answered.messages[-1]["text"] == "A reading of the run you selected."
+
+    opening = _opening(provider)
+    # The selected run is stated with its own frozen facts, and the run that was
+    # never selected is not described at all — not even as a comparison.
+    assert f"job {job_id}" in opening
+    assert cast(str, second["job_id"]) not in opening
+    assert "frozen draft revision 1" in opening
+    assert payload["input_sha256"] in opening
+    assert "Selected run A:" in opening and "Selected run B:" not in opening
+    # A run's own frozen criterion is read as that run's, and the limits of one
+    # window are stated with it so the turn is told what a reading is not.
+    assert "its frozen criterion economics.net_pnl.amount is positive" in opening
+    assert "one window" in opening and "not realized profit" in opening
+    # Nothing here is the older reading of whichever run happened to be latest,
+    # and the draft a proposal would still target is today's head revision.
+    assert "Host-verified readings of this strategy's own frozen run" not in opening
+    assert "Draft revision 2" in opening
+
+    call = _durable(tmp_path, strategy_id).calls[-1]
+    assert call["request"]["evidence_job_ids"] == [job_id]
+    assert call["payload_sha256"]
+    (record,) = cast(list[dict[str, Any]], call["evidence"])
+    assert record["job_id"] == job_id
+    assert record["launch_intent_id"] == "li-1"
+    assert record["draft_revision"] == payload["draft_revision"] == 1
+    assert record["run_id"] == job.engine_run_id
+    assert record["report_sha256"] == job.report_sha256
+    assert record["input_sha256"] == payload["input_sha256"]
+    assert record["record_count"] == payload["record_count"]
+    assert record["parameters"] == payload["parameters"]
+    assert set(cast(dict[str, Any], record["assumptions"])) == {
+        "strategy",
+        "execution",
+        "risk",
+        "funding",
+        "instrument",
+        "data",
+    }
+    assert record["criterion"] == FROZEN_CRITERION
+    reading = host_reading(FROZEN_CRITERION, report)
+    assert record["reading"] == {"outcome": reading["outcome"], "inference": reading["inference"]}
+    assert "backtest_only_no_live_execution" in cast(list[str], record["limitations"])
+    # Every stated fact is the report's own value with the report's own currency.
+    assert {
+        "path": "economics.net_pnl.amount",
+        "value": report["economics"]["net_pnl"]["amount"],
+        "currency": report["economics"]["currency"],
+    } in cast(list[dict[str, Any]], record["facts"])
+
+
+def test_two_selected_runs_keep_each_runs_own_frozen_criterion(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two runs are one bounded pair, ordered A then B, each read as the run it was."""
+    strategies, _service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    jobs = [cast(str, first["job_id"]), cast(str, second["job_id"])]
+
+    # The head draft moves on and now states a criterion the frozen runs were not
+    # confirmed under. The two selected runs keep their own, whatever today's head
+    # says: what was frozen is not rewritten by a later revision.
+    store = UserStrategyStore(tmp_path / "workspace")
+    saved = store.get(strategy_id)
+    draft = cast(StrategyDraft, saved.draft)
+    store.save(
+        replace(
+            saved,
+            draft=replace(
+                draft,
+                revision=draft.revision + 1,
+                criterion={"field": "economics.total_return.value", "expectation": "negative"},
+            ),
+        )
+    )
+
+    provider.responses.append(_response([], text="A reading of both runs."))
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=3,
+        text="解释所选证据",
+        approved_budget=dict(CALL_BUDGET),
+        evidence_job_ids=jobs,
+    )
+    assert answered.calls[-1]["status"] == "observed"
+
+    opening = _opening(provider)
+    assert opening.count("Selected run A:") == 1 and opening.count("Selected run B:") == 1
+    assert opening.index(jobs[0]) < opening.index(jobs[1])
+    assert "frozen draft revision 1" in opening and "frozen draft revision 2" in opening
+    assert "its frozen criterion economics.net_pnl.amount is positive" in opening
+    assert "its frozen criterion economics.total_return.value" not in opening
+    # The head draft's own criterion is still stated as the draft's, so the turn is
+    # in no doubt about which draft a proposal would be made against.
+    assert "The user's stated criterion: economics.total_return.value is negative" in opening
+    assert "Draft revision 3" in opening
+
+    records = cast(list[dict[str, Any]], _durable(tmp_path, strategy_id).calls[-1]["evidence"])
+    assert [item["job_id"] for item in records] == jobs
+    assert [item["draft_revision"] for item in records] == [1, 2]
+    assert records[0]["input_sha256"] == first["payload"]["input_sha256"]
+    assert records[1]["input_sha256"] == second["payload"]["input_sha256"]
+    assert records[0]["report_sha256"] != records[1]["report_sha256"]
+    assert records[0]["criterion"] == records[1]["criterion"] == FROZEN_CRITERION
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["foreign", "duplicate", "too_many", "empty", "not_an_id", "unknown", "not_created"],
+)
+def test_evidence_that_is_not_a_created_run_of_this_strategy_is_refused_before_dispatch(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A selection that is not this strategy's own readable frozen run asks nothing."""
+    strategies, service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    baseline = len(provider.calls)
+    first_id, second_id = cast(str, first["job_id"]), cast(str, second["job_id"])
+    other = _create(strategies, "Another strategy entirely")
+    foreign = cast(
+        str,
+        _launch(strategies, other.user_strategy_id, launch_intent_id="li-1").experiments[-1][
+            "job_id"
+        ],
+    )
+    _terminal_job(service, foreign)
+    assert len(service.list_jobs()) == 3
+
+    if case == "not_created":
+        # The second experiment is no longer a created run, so the id it named is not
+        # evidence this strategy holds — whatever the job index still carries.
+        store = UserStrategyStore(tmp_path / "workspace")
+        saved = store.get(strategy_id)
+        store.save(
+            replace(
+                saved,
+                experiments=tuple(
+                    {**item, "status": "pending", "job_id": None}
+                    if item["launch_intent_id"] == "li-2"
+                    else item
+                    for item in saved.experiments
+                ),
+            )
+        )
+
+    selection: dict[str, list[str]] = {
+        "foreign": [foreign],
+        "duplicate": [first_id, first_id],
+        "too_many": [first_id, second_id, foreign],
+        "empty": [],
+        "not_an_id": ["not a valid id"],
+        "unknown": ["job-that-never-existed"],
+        "not_created": [second_id],
+    }
+    provider.responses.append(_response([], text="An answer that must never be asked for."))
+    with pytest.raises(UserStrategyStateError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-2",
+            base_revision=2,
+            text="解释所选证据",
+            approved_budget=dict(CALL_BUDGET),
+            evidence_job_ids=selection[case],
+        )
+    # The refusal is complete and free: no call, no message, no proposal, no ask —
+    # the record this strategy already had is exactly the record it still has.
+    before = _durable(tmp_path, strategy_id)
+    provider.responses.append(_response([], text="An answer that must never be asked for."))
+    with pytest.raises(UserStrategyStateError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-2",
+            base_revision=2,
+            text="解释所选证据",
+            approved_budget=dict(CALL_BUDGET),
+            evidence_job_ids=selection[case],
+        )
+    durable = _durable(tmp_path, strategy_id)
+    assert durable.calls == before.calls and before.calls
+    assert durable.messages == before.messages
+    assert durable.proposals == before.proposals
+    assert durable.experiments == before.experiments
+    assert len(provider.calls) == baseline
+    assert len(service.list_jobs()) == 3
+
+
+def test_a_selected_run_whose_report_cannot_be_verified_is_refused_rather_than_guessed(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable, altered or other-run report is a refusal, never a reading."""
+    strategies, service, provider, strategy_id, first, _second = _two_runs(tmp_path, monkeypatch)
+    job_id = cast(str, first["job_id"])
+    baseline = len(provider.calls)
+    real_report = service.report
+    real_job = service.get_job(job_id)
+    mode = {"kind": "unreadable"}
+    before = _durable(tmp_path, strategy_id)
+
+    def report(identifier: str) -> bytes:
+        if mode["kind"] == "unreadable":
+            raise OSError("the report store cannot be read")
+        return real_report(identifier) + b" "
+
+    class AnotherRun:
+        """The same durable job, claiming a run this report does not belong to."""
+
+        engine_run_id = "another-run-entirely"
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_job, name)
+
+    def attempt(call_id: str) -> None:
+        with pytest.raises(UserStrategyStateError):
+            strategies.send_message(
+                strategy_id,
+                call_id=call_id,
+                base_revision=2,
+                text="解释所选证据",
+                approved_budget=dict(CALL_BUDGET),
+                evidence_job_ids=[job_id],
+            )
+
+    monkeypatch.setattr(service, "report", report)
+    attempt("call-unreadable")
+    mode["kind"] = "changed_bytes"
+    attempt("call-changed-report")
+    monkeypatch.setattr(service, "get_job", lambda identifier: AnotherRun())
+    attempt("call-another-run")
+
+    durable = _durable(tmp_path, strategy_id)
+    assert durable.calls == before.calls and before.calls
+    assert durable.messages == before.messages
+    assert durable.proposals == before.proposals
+    assert len(provider.calls) == baseline
+
+
+def test_a_selected_run_that_has_not_succeeded_has_no_evidence_to_explain(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run without a verified report is not evidence, so the turn is not told it is."""
+    strategies, service, provider, strategy_id, first, _second = _two_runs(tmp_path, monkeypatch)
+    job_id = cast(str, first["job_id"])
+    baseline = len(provider.calls)
+
+    class Running:
+        status = "running"
+        report_ready = False
+
+    before = _durable(tmp_path, strategy_id)
+    monkeypatch.setattr(service, "get_job", lambda identifier: Running())
+    with pytest.raises(UserStrategyStateError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-2",
+            base_revision=2,
+            text="解释所选证据",
+            approved_budget=dict(CALL_BUDGET),
+            evidence_job_ids=[job_id],
+        )
+    durable = _durable(tmp_path, strategy_id)
+    assert durable.calls == before.calls and before.calls
+    assert durable.messages == before.messages
+    assert len(provider.calls) == baseline
+
+
+def test_the_verified_evidence_is_durable_before_the_provider_is_reached(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frozen context is on the record before dispatch, so a crash cannot lose it."""
+    strategies, service, _provider, strategy_id, first, _second = _two_runs(tmp_path, monkeypatch)
+    job_id = cast(str, first["job_id"])
+    provider = RoutedBlockingProvider([_response([], text="A reading of the selected run.")])
+    cast(Any, strategies)._provider = provider
+
+    failures: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            strategies.send_message(
+                strategy_id,
+                call_id="call-2",
+                base_revision=2,
+                text="解释所选证据",
+                approved_budget=dict(CALL_BUDGET),
+                evidence_job_ids=[job_id],
+            )
+        except BaseException as error:  # noqa: BLE001 — recorded for the assertion below
+            failures.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert provider.invoked.wait(10)
+
+    # While the provider is still blocked, the verified context is already durable.
+    call = _durable(tmp_path, strategy_id).calls[-1]
+    assert call["status"] == "dispatched"
+    assert call["request"]["evidence_job_ids"] == [job_id]
+    (record,) = cast(list[dict[str, Any]], call["evidence"])
+    assert record["job_id"] == job_id
+    assert record["report_sha256"] == service.get_job(job_id).report_sha256
+    assert record["input_sha256"] == first["payload"]["input_sha256"]
+
+    provider.release.set()
+    thread.join(10)
+    assert failures == []
+    settled = _durable(tmp_path, strategy_id).calls[-1]
+    assert settled["status"] == "observed"
+    assert settled["evidence"] == call["evidence"]
+
+
+def test_a_replayed_evidence_call_answers_from_its_record_and_a_changed_selection_conflicts(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The selection is part of the call identity, and a replay rereads nothing."""
+    strategies, service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    jobs = [cast(str, first["job_id"]), cast(str, second["job_id"])]
+    provider.responses.append(_response([], text="One reading of A."))
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=2,
+        text="解释所选证据",
+        approved_budget=dict(CALL_BUDGET),
+        evidence_job_ids=[jobs[0]],
+    )
+    baseline = len(provider.calls)
+    assert answered.calls[-1]["status"] == "observed"
+
+    def send(selection: list[str] | None) -> Any:
+        return strategies.send_message(
+            strategy_id,
+            call_id="call-2",
+            base_revision=2,
+            text="解释所选证据",
+            approved_budget=dict(CALL_BUDGET),
+            evidence_job_ids=selection,
+        )
+
+    # The same request under the same id is that call, answered from its record.
+    replayed = send([jobs[0]])
+    assert replayed.calls == answered.calls and replayed.messages == answered.messages
+    assert len(provider.calls) == baseline
+    # Another selection, or none at all, is a different request under that id.
+    for selection in ([jobs[0], jobs[1]], [jobs[1]], None):
+        with pytest.raises(UserStrategyConflictError):
+            send(selection)
+    assert len(provider.calls) == baseline
+
+    # A replay reads its own recorded answer: evidence that is unreadable now is
+    # never reread, and the persisted result is what it was.
+    def never_reread(identifier: str) -> bytes:
+        raise AssertionError("a replay reread mutable evidence")
+
+    monkeypatch.setattr(service, "report", never_reread)
+    again = send([jobs[0]])
+    assert again.calls == answered.calls and again.messages == answered.messages
+    assert len(provider.calls) == baseline
+
+
+def test_applying_a_proposal_made_over_selected_evidence_leaves_the_runs_untouched(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The next experiment is proposed against today's draft; the frozen runs stay frozen."""
+    strategies, service, provider, strategy_id, first, _second = _two_runs(tmp_path, monkeypatch)
+    job_id = cast(str, first["job_id"])
+    provider.responses.append(_change(NEXT_FIELDS, call_id="call-2"))
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=2,
+        text="提出下一实验",
+        approved_budget=dict(CALL_BUDGET),
+        evidence_job_ids=[job_id],
+    )
+    proposal = answered.proposals[-1]
+    assert proposal["call_id"] == "call-2"
+    assert proposal["items"][0]["path"] == "parameters.target_quantity"
+
+    before = _durable(tmp_path, strategy_id)
+    assert cast(list[dict[str, Any]], before.calls[-1]["evidence"])[0]["job_id"] == job_id
+    applied = strategies.apply_proposal(
+        strategy_id, proposal_id=proposal["proposal_id"], operation_id="op-2"
+    )
+    assert applied.draft.revision == 3
+    assert isinstance(applied.draft, StrategyDraft)
+    assert applied.draft.parameters["target_quantity"] == "4"
+    # Applying writes one revision of the draft and nothing else: the frozen runs,
+    # the retained evidence and the run index are exactly what they were.
+    after = _durable(tmp_path, strategy_id)
+    assert after.experiments == before.experiments
+    assert after.calls == before.calls
+    assert after.calls[-1]["evidence"] == before.calls[-1]["evidence"]
+    assert applied.experiments == before.experiments
+    assert len(service.list_jobs()) == 2
+
+
+def test_an_intent_has_no_evidence_and_refuses_a_selection_before_any_dispatch(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An intent has no frozen run, so it has nothing to explain and asks nothing."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _new_intent(strategies)
+    with pytest.raises(UserStrategyStateError):
+        strategies.send_message(
+            strategy.user_strategy_id,
+            call_id="call-1",
+            base_revision=1,
+            text="解释所选证据",
+            approved_budget=dict(CALL_BUDGET),
+            evidence_job_ids=["job-that-never-existed"],
+        )
+    refused = strategies.get(strategy.user_strategy_id)
+    assert refused.calls == () and refused.messages == ()
+    assert provider.calls == [] and service.list_jobs() == [] and _children(tmp_path) == []
+
+
+def test_http_keeps_the_old_message_body_and_refuses_a_selection_it_cannot_verify(
+    tmp_path: Any,
+) -> None:
+    """The optional field is additive: an old body replays, and a bad selection is refused."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        created = client.post(
+            "/api/user-strategies",
+            headers=WRITE_HEADERS,
+            json={
+                "name": "HTTP evidence",
+                "intent": "Check the message body, not the model",
+                "scenario_id": SCENARIO,
+                "criterion": CRITERION,
+            },
+        )
+        assert created.status_code == 201, created.text
+        strategy_id = cast(dict[str, Any], created.json())["user_strategy_id"]
+        legacy = {
+            "call_id": "call-1",
+            "base_revision": 1,
+            "text": "Explain the draft",
+            "approved_budget": dict(CALL_BUDGET),
+        }
+
+        # The old request shape is the old request shape: the same idempotent body
+        # replays as one recorded call, with no evidence key anywhere on it.
+        first = client.post(
+            f"/api/user-strategies/{strategy_id}/messages", headers=WRITE_HEADERS, json=dict(legacy)
+        )
+        assert first.status_code == 200, first.text
+        call = cast(list[dict[str, Any]], first.json()["calls"])[0]
+        assert set(cast(dict[str, Any], call["request"])) == {
+            "action",
+            "text",
+            "base_revision",
+            "proposal_id",
+            "approved_budget",
+        }
+        assert "evidence" not in call
+        replayed = client.post(
+            f"/api/user-strategies/{strategy_id}/messages", headers=WRITE_HEADERS, json=dict(legacy)
+        )
+        assert replayed.status_code == 200, replayed.text
+        assert replayed.json()["calls"] == first.json()["calls"]
+
+        # A selection the host cannot verify is refused by the service, not by the
+        # body shape, and it is refused before anything is written or asked.
+        unknown = client.post(
+            f"/api/user-strategies/{strategy_id}/messages",
+            headers=WRITE_HEADERS,
+            json={**legacy, "call_id": "call-2", "evidence_job_ids": ["job-that-never-existed"]},
+        )
+        assert unknown.status_code == 422
+        assert unknown.json()["error"]["code"] == "user_strategy_invalid"
+        # An empty selection, and more than two runs, are not a shape this host reads.
+        empty = client.post(
+            f"/api/user-strategies/{strategy_id}/messages",
+            headers=WRITE_HEADERS,
+            json={**legacy, "call_id": "call-3", "evidence_job_ids": []},
+        )
+        assert empty.status_code == 422
+        assert empty.json()["error"]["code"] == "user_strategy_invalid"
+        too_many = client.post(
+            f"/api/user-strategies/{strategy_id}/messages",
+            headers=WRITE_HEADERS,
+            json={**legacy, "call_id": "call-4", "evidence_job_ids": ["a", "b", "c"]},
+        )
+        assert too_many.status_code == 422
+        assert too_many.json()["error"]["code"] == "invalid_request"
+
+        # Neither refusal touched the one call this strategy really recorded.
+        kept = cast(dict[str, Any], client.get(f"/api/user-strategies/{strategy_id}").json())
+        assert [item["call_id"] for item in cast(list[dict[str, Any]], kept["calls"])] == ["call-1"]
+
+
+def test_a_selected_run_frozen_without_a_criterion_is_still_explained_as_itself(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real run may be frozen before any criterion is stated; that is a reading."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    strategy = strategies.create(
+        name="No criterion yet",
+        intent="Run once before the user has stated what would count",
+        scenario_id=SCENARIO,
+    )
+    strategy_id = strategy.user_strategy_id
+    run = _launch(strategies, strategy_id).experiments[-1]
+    job_id = cast(str, run["job_id"])
+    _terminal_job(service, job_id)
+    assert run["payload"]["criterion"] is None
+    job = service.get_job(job_id)
+    assert job.status == "succeeded" and job.report_sha256
+
+    provider.responses.append(_response([], text="A reading of a run with no criterion."))
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="解释所选证据",
+        approved_budget=dict(CALL_BUDGET),
+        evidence_job_ids=[job_id],
+    )
+    assert answered.calls[-1]["status"] == "observed"
+    (record,) = cast(list[dict[str, Any]], _durable(tmp_path, strategy_id).calls[-1]["evidence"])
+    # The run's own absence of a criterion is what is recorded and stated: the host's
+    # reading of it is its own outcome, never a refusal and never a guessed criterion.
+    assert record["criterion"] is None
+    assert record["reading"] == {
+        "outcome": "insufficient_evidence",
+        "inference": "criterion_not_stated",
+    }
+    opening = _opening(provider)
+    assert f"job {job_id}" in opening
+    assert "no criterion was frozen before this run" in opening
+    assert "its frozen criterion" not in opening
+
+
+@pytest.mark.parametrize("edited", ["parameters", "normalized", "criterion", "draft_revision"])
+def test_a_frozen_payload_edited_under_its_own_digest_is_refused_before_dispatch(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, edited: str
+) -> None:
+    """The retained digest is what makes the retained payload evidence, and it is read.
+
+    A record whose frozen blocks were edited while the digest it was frozen under was
+    kept is not this strategy's evidence: the payload is refused whole, before any
+    contextual field is read, before any provider is reached and before any call or
+    reservation is written.
+    """
+    strategies, service, provider, strategy_id, first, _second = _two_runs(tmp_path, monkeypatch)
+    job_id = cast(str, first["job_id"])
+    baseline = len(provider.calls)
+    payload = cast(dict[str, Any], first["payload"])
+    replacements: dict[str, Any] = {
+        "parameters": {**cast(dict[str, Any], payload["parameters"]), "target_quantity": "999"},
+        "normalized": {"strategy": {"target_quantity": "999"}},
+        "criterion": {"field": "economics.net_pnl.amount", "expectation": "negative"},
+        "draft_revision": 99,
+    }
+    store = UserStrategyStore(tmp_path / "workspace")
+    saved = store.get(strategy_id)
+    store.save(
+        replace(
+            saved,
+            experiments=tuple(
+                {**item, "payload": {**payload, edited: replacements[edited]}}
+                if item["launch_intent_id"] == "li-1"
+                else item
+                for item in saved.experiments
+            ),
+        )
+    )
+    # The edit is exactly the one under test: the frozen blocks moved, the digest the
+    # record was frozen under did not.
+    corrupted = _durable(tmp_path, strategy_id).experiments[0]
+    assert corrupted["payload_sha256"] == first["payload_sha256"]
+    assert corrupted["payload"][edited] == replacements[edited]
+
+    before = _durable(tmp_path, strategy_id)
+    provider.responses.append(_response([], text="An answer that must never be asked for."))
+    with pytest.raises(UserStrategyStateError, match="frozen payload"):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-2",
+            base_revision=2,
+            text="解释所选证据",
+            approved_budget=dict(CALL_BUDGET),
+            evidence_job_ids=[job_id],
+        )
+    durable = _durable(tmp_path, strategy_id)
+    assert durable.calls == before.calls and before.calls
+    assert durable.messages == before.messages
+    assert durable.experiments == before.experiments
+    assert len(provider.calls) == baseline
+    assert len(service.list_jobs()) == 2
+
+
+def test_a_selected_report_that_states_no_matching_source_is_refused_rather_than_trusted(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A report is this run's only if it states the source the run was confirmed from.
+
+    The report is served under a digest that matches it, so only the source check can
+    refuse it: a report that states no source, and one that names another scenario, are
+    both unverified rather than agreeing with the frozen input.
+    """
+    strategies, service, provider, strategy_id, first, _second = _two_runs(tmp_path, monkeypatch)
+    job_id = cast(str, first["job_id"])
+    real_job = service.get_job(job_id)
+    real_report = service.report(job_id)
+    baseline = len(provider.calls)
+    before = _durable(tmp_path, strategy_id)
+
+    def altered(kind: str) -> tuple[bytes, str]:
+        document = cast(dict[str, Any], json.loads(real_report))
+        if kind == "no_source":
+            document.pop("source", None)
+        else:
+            source = cast(dict[str, Any], document["source"])
+            document["source"] = {**source, "scenario_sha256": "f" * 64}
+        raw = json.dumps(document).encode()
+        return raw, hashlib.sha256(raw).hexdigest()
+
+    class Published:
+        """The same durable job, publishing the digest of the report as it is served."""
+
+        def __init__(self, job: Any, digest: str) -> None:
+            self._job = job
+            self.report_sha256 = digest
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._job, name)
+
+    def attempt(kind: str, call_id: str) -> None:
+        raw, digest = altered(kind)
+        monkeypatch.setattr(service, "report", lambda identifier: raw)
+        monkeypatch.setattr(service, "get_job", lambda identifier: Published(real_job, digest))
+        with pytest.raises(UserStrategyStateError, match="does not state the source"):
+            strategies.send_message(
+                strategy_id,
+                call_id=call_id,
+                base_revision=2,
+                text="解释所选证据",
+                approved_budget=dict(CALL_BUDGET),
+                evidence_job_ids=[job_id],
+            )
+
+    attempt("no_source", "call-no-source")
+    attempt("other_scenario", "call-other-source")
+
+    durable = _durable(tmp_path, strategy_id)
+    assert durable.calls == before.calls and before.calls
+    assert durable.messages == before.messages
+    assert durable.experiments == before.experiments
+    assert len(provider.calls) == baseline
+    assert len(service.list_jobs()) == 2

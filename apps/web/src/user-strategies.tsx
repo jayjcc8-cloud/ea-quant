@@ -37,6 +37,7 @@ import {
   type UserStrategyProposal,
   type UserStrategyProposalStatus,
 } from './user-strategies-api'
+import { StrategyEvidenceResearch } from './user-strategy-research'
 
 /**
  * The allowlisted criterion fields, in the report's own paths. This list is
@@ -773,11 +774,48 @@ function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
       {tab === 'rules' && <RulesSection draft={strategy.draft} />}
       {tab === 'experiments' && <ExperimentPanel
         api={api} strategy={strategy} changed={changed} failed={failed} />}
-      {tab === 'evidence' && <EvidenceSection api={api} strategy={strategy} />}
+      {tab === 'evidence' && <>
+        <EvidenceSection api={api} strategy={strategy} />
+        {/* An intent has no frozen run, so there is nothing to select and nothing
+            to explain: the panel is not shown until a scenario is bound. */}
+        {!isIntentDraft(strategy.draft) && <StrategyEvidenceResearch
+          api={api} strategy={strategy} changed={changed} failed={failed} />}
+      </>}
       {tab === 'revisions' && <RevisionsSection strategy={strategy} />}
       {tab === 'candidates' && <CandidatesSection strategy={strategy} />}
     </div>
   </section>
+}
+
+/**
+ * The frozen runs one recorded call was grounded in, kept with that call.
+ *
+ * This is provenance and not authority: it says which runs one explanation was
+ * allowed to see, which revisions they froze and which digests they were read
+ * under, so that after a reload there is no ambiguity about what was explained.
+ * A call that selected nothing has no list and shows nothing here.
+ */
+function CallEvidence({ call }: { call: UserStrategyCall | undefined }) {
+  const evidence = call?.evidence ?? []
+  if (!evidence.length) return null
+  return <details className="provenance">
+    <summary>{`这次调用所依据的冻结证据（${evidence.length}）`}</summary>
+    <ul className="path-list">
+      {evidence.map(item => <li key={item.job_id}>
+        {`修订 ${item.draft_revision ?? '未记录'} · 确认 ${item.launch_intent_id ?? '未记录'}`
+          + ` · 运行 ${item.job_id}`
+          + ` · 输入 ${item.input_sha256?.slice(0, 16) ?? '未记录'}`
+          + ` · 报告 ${item.report_sha256?.slice(0, 16) ?? '未记录'}`
+          + (item.criterion
+            ? ` · 冻结准则 ${item.criterion.field} ${item.criterion.expectation}`
+            : ' · 该运行没有冻结准则')}
+      </li>)}
+    </ul>
+    <p className="muted">
+      这是这次调用被记录下来的证据来源：所选运行的冻结修订与摘要。它说明这次解释依据的是什么，
+      不是新的权限，也不会被后来的运行改写。
+    </p>
+  </details>
 }
 
 /**
@@ -855,6 +893,7 @@ function ChatPanel({ api, strategy, strategies, changed }: {
         <p className="muted">{`成本不可用：${latest.cost.reason}。`}</p>}
       {latest.message && <p className="notice">{latest.message}</p>}
       <CallNextStep call={latest} />
+      <CallEvidence call={latest} />
     </div>}
     {isIntentDraft(strategy.draft) && <p className="notice">
       这条策略还没有绑定场景，因此这次对话只能澄清这个想法：模型不会提出任何字段修改，
@@ -1033,6 +1072,7 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
     <p className="muted">
       {`针对草稿修订 ${proposal.base_revision} · 提案 ${proposal.proposal_id} · 由模型提出，等待你决定`}
     </p>
+    <CallEvidence call={strategy.calls.find(item => item.call_id === proposal.call_id)} />
     {stale && <p className="notice error">
       {`这条建议的部分字段是在更早的修订上写的，应用时会被宿主拒绝：${proposal.stale_paths.join(', ')}`}
     </p>}
