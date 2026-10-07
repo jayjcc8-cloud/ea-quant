@@ -4,6 +4,7 @@ import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings } from './research'
 import { StrategiesWorkspace } from './user-strategies'
 import { PaperStatus } from './paper-status'
+import { ResourcesPage } from './resources'
 import {
   userStrategiesApi,
   type ApprovedBudget as UserStrategyApprovedBudget,
@@ -11,7 +12,7 @@ import {
   type UserStrategyPreview,
 } from './user-strategies-api'
 import { radianApi } from './radian-api'
-import { researchApi, type DeclarationBody, type DeclarationCatalog, type DeclarationVerdict, type DatasetEntry, type LocalStrategyCapability, type LocalStrategyRegisterRequest, type LocalStrategySlot, type ModelConfigurationStatus, type PluginCatalog, type PluginSelection, type RecipeResolution, type ResearchTask, type UploadDeclaration, type UploadPreviewResponse, type UploadPublishRequest, type UploadVersion } from './research-api'
+import { researchApi, type AvailabilityPolicy, type DeclarationBody, type DeclarationCatalog, type DeclarationVerdict, type DatasetEntry, type LocalStrategyCapability, type LocalStrategyRegisterRequest, type LocalStrategySlot, type ModelConfigurationStatus, type PluginBinding, type PluginCatalog, type PluginSelection, type RecipeResolution, type ResearchTask, type UploadDeclaration, type UploadPreviewResponse, type UploadPublishRequest, type UploadVersion } from './research-api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
@@ -43,6 +44,12 @@ type Dataset = {
   bar_count?: number; revision_count?: number; bar_durations_seconds?: string[]
   observed_gap_count?: number; largest_gap_seconds?: string | null; bar_start_utc?: string; bar_end_utc?: string
   error_code?: string; record_number?: number | null; field_name?: string | null; message?: string
+  // The version evidence the host projects for a published or registered
+  // version. A registered scenario's own data carries none of it, so the
+  // resource directory reads these as the projection it is: present or absent,
+  // never inferred from the id.
+  origin?: 'registered' | 'upload'; capture_sha256?: string; data_sha256?: string
+  availability_policy?: AvailabilityPolicy; version_evidence_digest?: string
 }
 type DatasetReference = { dataset_id?: string; source_sha256?: string }
 export type InputIdentity = DatasetReference & { scenario_sha256: string; data_sha256: string; record_count: number }
@@ -83,6 +90,15 @@ export type ScenarioSummary = {
   normalized_input_identity?: InputIdentity
   error_code?: string; message?: string
 }
+/** The published dataset version one job recorded beside its accepted input. The
+ * host serves it as an additive job field; a run written before it existed
+ * carries none, and the catalog then says the version is unknown rather than
+ * reading today's version back into a historical run. */
+export type JobDatasetVersion = {
+  dataset_id: string; schema?: string; kind?: string; version?: number
+  capture_sha256?: string; data_sha256?: string; record_count?: number
+  [key: string]: unknown
+}
 export type BacktestJob = {
   schema: string; job_id: string; request_id: string; scenario_id: string; input_identity: InputIdentity
   status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'interrupted'; engine_run_id: string | null
@@ -90,6 +106,10 @@ export type BacktestJob = {
   equity_path_sha256?: string | null
   parameters?: ParameterMap; strategy_descriptor?: StrategyDescriptor
   created_at?: string; input_snapshot?: InputSnapshot; input_sha256?: string; attempt_id?: string | null
+  /** The exact capability identity this run froze. Absent on older runs. */
+  plugin_binding?: PluginBinding | null
+  /** The published dataset version this run's input was admitted from. */
+  dataset_version?: JobDatasetVersion | null
 }
 export type BatchMember = BacktestJob & { presentation_status: string }
 export type ExperimentBatch = {
@@ -444,6 +464,7 @@ function Shell({ api }: { api: ApiAdapter }) {
         <NavLink to="/runs"><NavIcon name="runs" />运行</NavLink>
         <NavLink to="/backtests"><NavIcon name="backtests" />回测</NavLink>
         <p className="nav-group">资源与配置</p>
+        <NavLink className="nav-child" to="/resources">资源中心</NavLink>
         <NavLink className="nav-child" to="/research">研究</NavLink>
         <NavLink className="nav-child" to="/holdouts">留出验证</NavLink>
         <NavLink className="nav-child" to="/candidates">候选</NavLink>
@@ -464,6 +485,7 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
         <Route path="/settings" element={<ResearchSettings api={api} />} />
         <Route path="/research" element={<ResearchTasks api={api} />} />
+        <Route path="/resources" element={<ResourcesPage api={api} />} />
         <Route path="/events" element={<EventValidation />} />
         <Route path="/research/:taskId" element={<ResearchTaskDetailRoute api={api} />} />
         <Route path="/candidates" element={<CandidateHistory api={api} />} />

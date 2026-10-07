@@ -954,6 +954,13 @@ describe('QUINE shell navigation', () => {
     expect(nav.getByRole('link', { name: '运行' }).getAttribute('href')).toBe('/runs')
     expect(nav.getByRole('link', { name: '回测' }).getAttribute('href')).toBe('/backtests')
 
+    // The resource center is one more destination inside 资源与配置, and every
+    // child that group already had keeps its own route.
+    expect(nav.getByRole('link', { name: '资源中心' }).getAttribute('href')).toBe('/resources')
+    for (const [label, href] of [['研究', '/research'], ['留出验证', '/holdouts'], ['候选', '/candidates'], ['事件校验', '/events']] as const) {
+      expect(nav.getByRole('link', { name: label }).getAttribute('href')).toBe(href)
+    }
+
     // The backtest destination keeps every route it already had.
     await user.click(nav.getByRole('link', { name: '回测' }))
     expect(window.location.pathname).toBe('/backtests')
