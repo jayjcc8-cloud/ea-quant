@@ -2,12 +2,22 @@ import { EventValidation } from './events'
 import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings } from './research'
+import { StrategiesWorkspace } from './user-strategies'
+import {
+  userStrategiesApi,
+  type ApprovedBudget as UserStrategyApprovedBudget,
+  type UserStrategy,
+  type UserStrategyPreview,
+} from './user-strategies-api'
 import { radianApi } from './radian-api'
 import { researchApi, type DeclarationBody, type DeclarationCatalog, type DeclarationVerdict, type DatasetEntry, type LocalStrategyCapability, type LocalStrategyRegisterRequest, type LocalStrategySlot, type ModelConfigurationStatus, type PluginCatalog, type PluginSelection, type RecipeResolution, type ResearchTask, type UploadDeclaration, type UploadPreviewResponse, type UploadPublishRequest, type UploadVersion } from './research-api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
 import { EquityCurve, pathPercent, type EquityPath } from './equity-path'
+// The user-strategy workspace's own stylesheet, imported where the routes that
+// render it are declared, the way the entry module imports styles.css.
+import './user-strategies.css'
 
 type ParameterMap = Record<string, string | number>
 type StrategySource = { kind: string; package_id: string; artifact_sha256: string }
@@ -196,6 +206,51 @@ export type ApiAdapter = {
   inspectLocalStrategy?(contentBase64: string, manifest: Record<string, unknown>): Promise<LocalStrategyCapability>
   registerLocalStrategy?(request: LocalStrategyRegisterRequest): Promise<LocalStrategySlot>
   revokeLocalStrategy?(): Promise<LocalStrategySlot>
+  /** One durable user strategy: its draft, its approved AI calls, its frozen runs.
+   * Every member is optional so an existing injected adapter keeps working, and a
+   * workspace that serves none of them renders the honest empty state instead. */
+  listUserStrategies?(): Promise<UserStrategy[]>
+  createUserStrategy?(input: {
+    name: string
+    intent: string
+    scenario_id: string
+    criterion?: { field: string; expectation: string } | null
+  }): Promise<UserStrategy>
+  getUserStrategy?(userStrategyId: string): Promise<UserStrategy>
+  sendUserStrategyMessage?(
+    userStrategyId: string,
+    input: {
+      call_id: string
+      base_revision: number
+      text: string
+      approved_budget: UserStrategyApprovedBudget
+    },
+  ): Promise<UserStrategy>
+  applyUserStrategyProposal?(
+    userStrategyId: string,
+    proposalId: string,
+    input: { operation_id: string; paths?: string[] | null },
+  ): Promise<UserStrategy>
+  rejectUserStrategyProposal?(userStrategyId: string, proposalId: string): Promise<UserStrategy>
+  reviseUserStrategyProposal?(
+    userStrategyId: string,
+    proposalId: string,
+    input: { call_id: string; text?: string; approved_budget: UserStrategyApprovedBudget },
+  ): Promise<UserStrategy>
+  undoUserStrategyChange?(
+    userStrategyId: string,
+    input: { operation_id: string; head_revision: number; target_operation_id: string },
+  ): Promise<UserStrategy>
+  previewUserStrategyExperiment?(userStrategyId: string): Promise<UserStrategyPreview>
+  launchUserStrategyExperiment?(
+    userStrategyId: string,
+    input: {
+      launch_intent_id: string
+      base_revision: number
+      preview_identity: string
+      approved_budget: UserStrategyApprovedBudget
+    },
+  ): Promise<UserStrategy>
 }
 
 async function loadTradeAnalytics(api: ApiAdapter, job: BacktestJob): Promise<TradeAnalytics | null> {
@@ -276,6 +331,23 @@ const browserApi: ApiAdapter = {
   inspectLocalStrategy: (contentBase64, manifest) => researchApi.inspectLocalStrategy(contentBase64, manifest),
   registerLocalStrategy: request => researchApi.registerLocalStrategy(request),
   revokeLocalStrategy: () => researchApi.revokeLocalStrategy(),
+  listUserStrategies: () => userStrategiesApi.list(),
+  createUserStrategy: input => userStrategiesApi.create(input),
+  getUserStrategy: userStrategyId => userStrategiesApi.get(userStrategyId),
+  sendUserStrategyMessage: (userStrategyId, input) =>
+    userStrategiesApi.sendMessage(userStrategyId, input),
+  applyUserStrategyProposal: (userStrategyId, proposalId, input) =>
+    userStrategiesApi.applyProposal(userStrategyId, proposalId, input),
+  rejectUserStrategyProposal: (userStrategyId, proposalId) =>
+    userStrategiesApi.rejectProposal(userStrategyId, proposalId),
+  reviseUserStrategyProposal: (userStrategyId, proposalId, input) =>
+    userStrategiesApi.reviseProposal(userStrategyId, proposalId, input),
+  undoUserStrategyChange: (userStrategyId, input) =>
+    userStrategiesApi.undo(userStrategyId, input),
+  previewUserStrategyExperiment: userStrategyId =>
+    userStrategiesApi.previewExperiment(userStrategyId),
+  launchUserStrategyExperiment: (userStrategyId, input) =>
+    userStrategiesApi.launchExperiment(userStrategyId, input),
 }
 
 async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath | null> {
@@ -335,13 +407,15 @@ function PageTitle({ title, subtitle, status }: { title: string; subtitle: strin
 function Shell({ api }: { api: ApiAdapter }) {
   return <div className="app-shell">
     <aside className="sidebar">
-      <Link className="brand" to="/research"><i className="brand-mark" aria-hidden="true" /><span>EA</span><strong>QUANT</strong></Link>
+      <Link className="brand" to="/strategies"><i className="brand-mark" aria-hidden="true" /><span>EA</span><strong>QUANT</strong></Link>
       <p className="workspace">RESEARCH WORKSPACE</p>
-      <nav aria-label="Primary navigation"><NavLink to="/research">Research</NavLink><NavLink to="/candidates">Candidates</NavLink><NavLink to="/events">Event Validation</NavLink><NavLink to="/settings">Settings</NavLink></nav>
+      <nav aria-label="Primary navigation"><NavLink to="/strategies">Strategies</NavLink><NavLink to="/research">Research</NavLink><NavLink to="/candidates">Candidates</NavLink><NavLink to="/events">Event Validation</NavLink><NavLink to="/settings">Settings</NavLink></nav>
       <div className="sidebar-footer"><span className="status-dot" />Loopback only · live unavailable</div>
     </aside>
     <main><header className="topbar"><span>Strategy research</span><span>Offline simulation</span></header><div className="content">
       <Routes>
+        <Route path="/strategies" element={<StrategiesWorkspace api={api} />} />
+        <Route path="/strategies/:userStrategyId" element={<StrategiesWorkspace api={api} />} />
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
@@ -356,7 +430,7 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/holdouts/:validationId" element={<HoldoutDetailRoute api={api} />} />
         <Route path="/batches/new" element={<BatchCreator api={api} />} />
         <Route path="/batches/:batchId" element={<BatchDetailRoute api={api} />} />
-        <Route path="*" element={<Navigate replace to="/research" />} />
+        <Route path="*" element={<Navigate replace to="/strategies" />} />
       </Routes>
     </div></main>
   </div>

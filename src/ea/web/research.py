@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -64,7 +65,14 @@ from ea.web.llm import (
     ToolDefinition,
     create_model_port,
 )
-from ea.web.service import JobNotFoundError, WebService
+from ea.web.service import (
+    ExpectedInput,
+    JobNotFoundError,
+    WebBoundaryError,
+    WebService,
+    input_snapshot_sha256,
+    read_input_snapshot,
+)
 from ea.web.settings import RadianSettings, RadianSettingsError
 
 _SCHEMA = "radian.research-task.v1"
@@ -84,6 +92,14 @@ _INTERRUPTED = "interrupted_before_dispatch"
 _UNKNOWN_MODEL = "model_outcome_unknown"
 _UNKNOWN_OUTCOME = "job_outcome_unknown"
 _NON_RETRYABLE_CODES = frozenset({_UNKNOWN_MODEL, _UNKNOWN_OUTCOME, "task_in_flight"})
+# A user strategy's child carries the full input the user confirmed. Both codes
+# below are definite failures with nothing submitted: they are retryable only in
+# the sense that no charge was left behind, and the frozen child guard means the
+# strategy's own launch intent is the only thing that may create another run.
+_UNREADABLE_INPUT = "owned_input_unreadable"
+_CHANGED_INPUT = "owned_input_changed"
+_REFUSED_SUBMISSION = "submission_refused"
+_EXPECTED_INPUT_SCHEMA = "radian.owned-expected-input.v1"
 _MAX_IDEA_BYTES = 4000
 _MAX_ASSUMPTION_BYTES = 300
 _MAX_ASSUMPTIONS = 12
@@ -263,6 +279,19 @@ class ResearchTask:
     interpretation: dict[str, Any] | None = None
     interpretation_evidence: dict[str, Any] | None = None
     interpretation_error: dict[str, Any] | None = None
+    # A task created as one user strategy's frozen experiment. Both are additive:
+    # a task written before them, or created by the legacy idea path, keeps its
+    # shape and stays fully editable. When the first is set this task is a frozen
+    # child — one immutable confirmed spec and one dispatch — and every legacy
+    # path that could edit or re-run it is refused.
+    owner_user_strategy_id: str | None = None
+    owner_launch_intent_id: str | None = None
+    # The full admitted input an owned child was created from: the canonical
+    # snapshot the user confirmed, its own digest and the draft revision it was
+    # confirmed at, bound to this child's own stable request identity. It is the
+    # frozen expectation every later read of this child is checked against, so a
+    # source that changed after the confirmation can never be run under it.
+    expected_input: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         document: dict[str, Any] = {
@@ -307,6 +336,11 @@ class ResearchTask:
             document["interpretation_evidence"] = self.interpretation_evidence
         if self.interpretation_error is not None:
             document["interpretation_error"] = self.interpretation_error
+        if self.owner_user_strategy_id is not None:
+            document["owner_user_strategy_id"] = self.owner_user_strategy_id
+            document["owner_launch_intent_id"] = self.owner_launch_intent_id
+        if self.expected_input is not None:
+            document["expected_input"] = self.expected_input
         return document
 
 
@@ -360,6 +394,21 @@ def _unproven_submission_message(detail: str) -> str:
         f"{detail} The backtest slot stays charged and this task stays paused; nothing is "
         "re-submitted automatically. Cancel this task and create a new one if you want "
         "another attempt"
+    )
+
+
+def _frozen_child_message() -> str:
+    """Why a strategy-owned child refuses every legacy mutation path.
+
+    The child is not a second editable draft and not a run anybody may repeat:
+    its spec was confirmed and its dispatch reserved when the user confirmed the
+    experiment. The only writer that may create one is the user-strategy launch
+    bridge, and the only way to get another is a new launch intent there.
+    """
+    return (
+        "this task is the frozen experiment of a user strategy: its confirmed spec and its "
+        "run are immutable, so it can only be read. Change the strategy draft and confirm a "
+        "new experiment there"
     )
 
 
@@ -462,6 +511,7 @@ class ResearchStore:
         interpretation = document.get("interpretation")
         interpretation_evidence = document.get("interpretation_evidence")
         interpretation_error = document.get("interpretation_error")
+        expectation = document.get("expected_input")
         for name, value in (
             ("interpretation", interpretation),
             ("interpretation evidence", interpretation_evidence),
@@ -506,6 +556,24 @@ class ResearchStore:
             interpretation=interpretation,
             interpretation_evidence=interpretation_evidence,
             interpretation_error=interpretation_error,
+            owner_user_strategy_id=(
+                None
+                if document.get("owner_user_strategy_id") is None
+                else str(document["owner_user_strategy_id"])
+            ),
+            owner_launch_intent_id=(
+                None
+                if document.get("owner_launch_intent_id") is None
+                else str(document["owner_launch_intent_id"])
+            ),
+            # Read as written: an envelope that is not one document is kept as an
+            # unreadable one rather than repaired or dropped, so an owned child
+            # whose confirmation cannot be read is refused where it is used. Its
+            # absence is a property of this record, never a licence to fall back
+            # to legacy.
+            expected_input=(
+                None if expectation is None else (expectation if type(expectation) is dict else {})
+            ),
         )
 
     def _publish(self, task: ResearchTask, payload: bytes) -> None:
@@ -1965,9 +2033,177 @@ class ResearchOrchestrator:
         except JobNotFoundError:
             return None
 
+    @staticmethod
+    def _frozen_expected_input(task: ResearchTask) -> dict[str, Any] | None:
+        """The confirmed input an owned child must run, or ``None`` for a legacy task.
+
+        Ownership is read from the record's own trusted markers — the complete
+        owner pair the host wrote when it created this child — never from whether
+        an expectation happens to be present. An owned record whose envelope is
+        missing, malformed, bound to a different request, owned by somebody else,
+        or carrying a snapshot whose own bytes do not reproduce the digest it
+        claims is unreadable: it is refused rather than run as if it had never
+        been an owned child.
+        """
+        owners = (task.owner_user_strategy_id, task.owner_launch_intent_id)
+        envelope = task.expected_input
+        if all(owner is None for owner in owners) and envelope is None:
+            # A genuine legacy task: no ownership marker and nothing to hold it to.
+            return None
+        if (
+            any(owner is None for owner in owners)
+            or envelope is None
+            or task.request_id is None
+            or envelope.get("schema") != _EXPECTED_INPUT_SCHEMA
+            or envelope.get("owner_user_strategy_id") != task.owner_user_strategy_id
+            or envelope.get("owner_launch_intent_id") != task.owner_launch_intent_id
+            or envelope.get("request_id") != task.request_id
+            or type(envelope.get("input_sha256")) is not str
+            or type(envelope.get("source_revision")) is not int
+            or cast(int, envelope.get("source_revision")) < 1
+        ):
+            raise TaskStateError(
+                "the input this experiment was confirmed with cannot be read; nothing "
+                "runs without the input the user confirmed"
+            )
+        snapshot = read_input_snapshot(envelope.get("snapshot"))
+        if snapshot is None or input_snapshot_sha256(snapshot) != envelope["input_sha256"]:
+            raise TaskStateError(
+                "the input this experiment was confirmed with cannot be read; nothing "
+                "runs without the input the user confirmed"
+            )
+        return envelope
+
+    @staticmethod
+    def _record_is_expected(record: Any, expected: dict[str, Any]) -> bool:
+        """Whether one durable job is the run this child's confirmed input froze.
+
+        The stored job's own frozen snapshot is the authority: the document it
+        would run, the digest recomputed from that document, the request identity
+        it was published under and the source identity it was admitted with must
+        all be the confirmed ones. A stored block edited under a retained digest,
+        or a run of some other input found by request identity, is not this run.
+        """
+        snapshot = read_input_snapshot(expected.get("snapshot"))
+        claimed = expected.get("input_sha256")
+        if snapshot is None or type(claimed) is not str:
+            return False
+        stored = getattr(record, "input_snapshot_bytes", None)
+        document: object = None
+        if type(stored) is bytes:
+            try:
+                document = json.loads(stored)
+            except ValueError:
+                document = None
+        frozen = read_input_snapshot(document)
+        if frozen is None or frozen != snapshot:
+            return False
+        return bool(
+            getattr(record, "request_id", None) == expected.get("request_id")
+            and getattr(record, "input_sha256", None) == claimed
+            and getattr(record, "input_identity", None) == snapshot.get("source_identity")
+            and input_snapshot_sha256(frozen) == claimed
+        )
+
     def _bind(self, task_id: str, generation: int, record: Any) -> ResearchTask:
+        """Bind one durable job to this task, if it is this task's own frozen run.
+
+        A recovered job is not evidence about which input ran: for an owned child
+        the stored job's own snapshot identity and digest must be the confirmed
+        ones, so a job found by request identity can never stand in for a run of
+        something the user did not confirm.
+        """
+        try:
+            expected = self._frozen_expected_input(self._store.get(task_id))
+        except TaskStateError as error:
+            return self._failure(
+                task_id, generation, _UNREADABLE_INPUT, str(error), "start_backtest"
+            )
+        if expected is not None and not self._record_is_expected(record, expected):
+            return self._failure(
+                task_id,
+                generation,
+                _CHANGED_INPUT,
+                "the run found for this experiment is not the input that was confirmed; "
+                "preview the experiment again and confirm the new one",
+                "start_backtest",
+            )
         self._transition(task_id, generation, "job_found", record=record)
         return self._transition(task_id, generation, "job_state", record=record, finish=True)
+
+    def _dispatch_reserved_backtest(self, task_id: str, generation: int) -> None:
+        """The publication gate for an owned child: affirm, or refuse to publish.
+
+        This is the only thing that marks a confirmed run dispatched, and it is
+        called from the service boundary after the final input check and
+        immediately before the first durable job record. It holds the task lock
+        and makes no service call, so the service lock the caller already holds is
+        never inverted. The reservation is only dispatched if this exact operation
+        generation still owns a pending backtest on a task that was not cancelled:
+        a transition that would have been a no-op is refused here instead of being
+        mistaken for a dispatch.
+        """
+        with self._task_lock(task_id):
+            task = self._store.get(task_id)
+            reservation = task.backtest_reservation
+            if (
+                self._active.get(task_id) != generation
+                or task.operation_generation != generation
+                or task.operation_completion_generation == generation
+                or task.status == "cancelled"
+                or reservation is None
+                or reservation.status != "pending"
+            ):
+                raise WebBoundaryError(
+                    "the reserved backtest is no longer this operation's to dispatch"
+                )
+            updated = self._transition(task_id, generation, "backtest_dispatch")
+        if (
+            updated.operation_completion_generation == generation
+            or updated.backtest_reservation is None
+            or updated.backtest_reservation.status != "dispatched"
+        ):
+            raise WebBoundaryError("the backtest dispatch was not durable")
+
+    def _submission_refused_or_unknown(
+        self, task_id: str, generation: int, error: Exception
+    ) -> ResearchTask:
+        """Classify a failed submission from what is durably known about it.
+
+        A dispatch write that did not confirm durability proves nothing: it may
+        have been applied before the barrier failed, so ownership is retained, no
+        slot is released here and the record is surfaced with its persistence
+        diagnostic — exactly as any other unconfirmed save is. Only when no write
+        of this operation is outstanding does the durable reservation decide: a
+        reservation that never left pending proves the engine boundary was never
+        reached, so a refusal there is a definite failure and its slot is released
+        once; a dispatched reservation stays charged and unknown, never re-sent
+        and never refunded.
+        """
+        if task_id in self._persistence_errors:
+            return self._view(task_id)
+        reservation = self._store.get(task_id).backtest_reservation
+        if reservation is None:
+            # The slot is no longer this task's: another writer settled it, so
+            # there is nothing here to release and nothing to call unknown.
+            return self._transition(task_id, generation, "noop", finish=True)
+        if reservation.status != "pending":
+            return self._unknown_job(
+                task_id,
+                generation,
+                f"Job submission failed ({error}); publication was not confirmed.",
+            )
+        return self._transition(
+            task_id,
+            generation,
+            "backtest_pending_release",
+            finish=True,
+            error=self._error(
+                _REFUSED_SUBMISSION,
+                f"the run was refused before any submission: {error}",
+                "start_backtest",
+            ),
+        )
 
     def _unknown_job(self, task_id: str, generation: int, detail: str) -> ResearchTask:
         return self._failure(
@@ -1986,6 +2222,15 @@ class ResearchOrchestrator:
         task = self._store.get(task_id)
         if task.status == "cancelled":
             return self._transition(task_id, generation, "noop", finish=True)
+        try:
+            # The confirmed input of an owned child is read before any shortcut,
+            # so a record whose confirmation cannot be read is refused instead of
+            # being rebound to a job or recovered as if it were a legacy task.
+            expected = self._frozen_expected_input(task)
+        except TaskStateError as error:
+            return self._failure(
+                task_id, generation, _UNREADABLE_INPUT, str(error), "start_backtest"
+            )
         try:
             record = self._bound_job_record(task.request_id)
         except Exception as error:  # noqa: BLE001 — unknown index boundary
@@ -2007,9 +2252,15 @@ class ResearchOrchestrator:
                 "no confirmed spec exists",
                 "start_backtest",
             )
-        if task.usage["model_calls"] >= task.budget["max_model_calls"]:
+        if (
+            task.owner_user_strategy_id is None
+            and task.usage["model_calls"] >= task.budget["max_model_calls"]
+        ):
             # The conclusion slot is gone: this run's own result could never be
-            # interpreted, so it is refused before the engine sees it.
+            # interpreted, so it is refused before the engine sees it. A strategy's
+            # frozen child is never interpreted — its run is read — so it has no
+            # conclusion slot to protect and keeps exactly the budget it was
+            # approved with.
             return self._failure(
                 task_id,
                 generation,
@@ -2076,15 +2327,19 @@ class ResearchOrchestrator:
             )
         if task.status == "cancelled":
             return self._transition(task_id, generation, "noop", finish=True)
-        task = self._transition(task_id, generation, "backtest_dispatch")
-        if task.status == "cancelled":
-            return self._transition(
-                task_id,
-                generation,
-                "backtest_pending_release",
-                finish=True,
-                error=self._error(_INTERRUPTED, "cancelled before dispatch", "start_backtest"),
-            )
+        if expected is None:
+            # A legacy task keeps its existing submission contract: its dispatch is
+            # recorded before the engine boundary, so an interruption there stays
+            # unknown exactly as it always has.
+            task = self._transition(task_id, generation, "backtest_dispatch")
+            if task.status == "cancelled":
+                return self._transition(
+                    task_id,
+                    generation,
+                    "backtest_pending_release",
+                    finish=True,
+                    error=self._error(_INTERRUPTED, "cancelled before dispatch", "start_backtest"),
+                )
         try:
             # Second boundary lookup preserves the existing submission contract.
             record = self._bound_job_record(task.request_id)
@@ -2096,7 +2351,17 @@ class ResearchOrchestrator:
             try:
                 record, _created = self._service.create_job(
                     scenario_id=scenario_id,
-                    input_identity=cast(dict[str, object], validated["input_identity"]),
+                    # An owned submission is admitted with the source identity the
+                    # user confirmed, never with today's reading of the scenario:
+                    # the job boundary re-derives the identity of what it is about
+                    # to freeze and refuses anything else. The owned dispatch gate
+                    # runs at the very end of that boundary, so a refusal there
+                    # publishes nothing and submits nothing.
+                    input_identity=(
+                        cast(dict[str, object], validated["input_identity"])
+                        if expected is None
+                        else cast(dict[str, object], expected["snapshot"]["source_identity"])
+                    ),
                     parameters={
                         "initial_cash": confirmed.initial_cash,
                         "strategy_parameters": confirmed.parameters,
@@ -2105,6 +2370,19 @@ class ResearchOrchestrator:
                     },
                     request_id=cast(str, task.request_id),
                     plugin_binding=None if binding is None else binding.document(),
+                    expected_input=(
+                        None
+                        if expected is None
+                        else ExpectedInput(
+                            snapshot=cast(dict[str, object], expected["snapshot"]),
+                            input_sha256=cast(str, expected["input_sha256"]),
+                        )
+                    ),
+                    before_publish=(
+                        None
+                        if expected is None
+                        else partial(self._dispatch_reserved_backtest, task_id, generation)
+                    ),
                 )
             except Exception as error:  # noqa: BLE001 — may have published before raising
                 try:
@@ -2112,11 +2390,7 @@ class ResearchOrchestrator:
                 except Exception:  # noqa: BLE001 — still no absence proof
                     record = None
                 if record is None:
-                    return self._unknown_job(
-                        task_id,
-                        generation,
-                        f"Job submission failed ({error}); publication was not confirmed.",
-                    )
+                    return self._submission_refused_or_unknown(task_id, generation, error)
         return self._bind(task_id, generation, record)
 
     # -- the conclusion axis -------------------------------------------------
@@ -2930,9 +3204,11 @@ class ResearchOrchestrator:
                 bound_record = self._service.get_job(task.jobs[-1])
             except Exception:  # noqa: BLE001 — a view failure is not a retry
                 return self._transition(task_id, generation, "noop", finish=True)
-            return self._transition(
-                task_id, generation, "job_state", record=bound_record, finish=True
-            )
+            # Every read of a bound run is held to this child's own retained input,
+            # so a job whose stored snapshot is not the confirmed one is never
+            # served as it — and one that is unreadable is refused, not trusted
+            # because an earlier read once bound it.
+            return self._bind(task_id, generation, bound_record)
         if task.status in {"drafting", "confirmed"}:
             try:
                 record = self._bound_job_record(task.request_id)
@@ -2970,6 +3246,9 @@ class ResearchOrchestrator:
 
     def retry(self, task_id: str) -> ResearchTask:
         task = self.reconcile(task_id)
+        # Another run of a strategy-owned child is another experiment, and only the
+        # strategy's own launch intent may create one.
+        self._require_not_frozen_child(task)
         if task.status == "cancelled":
             raise TaskStateError("a cancelled research task cannot be retried")
         if self._is_active(task_id):
@@ -2995,6 +3274,180 @@ class ResearchOrchestrator:
 
     def cancel(self, task_id: str) -> ResearchTask:
         return self._transition(task_id, None, "cancel")
+
+    # -- one user strategy's frozen experiment ------------------------------
+
+    @staticmethod
+    def _require_not_frozen_child(task: ResearchTask) -> None:
+        if task.owner_user_strategy_id is not None:
+            raise TaskStateError(_frozen_child_message())
+
+    def owned_experiment(self, request_id: str) -> ResearchTask | None:
+        """The frozen child one launch intent created, by its own request identity.
+
+        This is a read of the durable records and starts nothing; a caller that is
+        unsure whether a launch reached the store uses it to find out.
+        """
+        for task in self._store.list():
+            if task.request_id == request_id and task.owner_user_strategy_id is not None:
+                return task
+        return None
+
+    def _require_same_confirmation(
+        self,
+        existing: ResearchTask,
+        *,
+        user_strategy_id: str,
+        launch_intent_id: str,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> ResearchTask:
+        """Resolve one request identity onto its child, or refuse to reuse it.
+
+        A second call with the same request identity normally resolves to the
+        child already created for it. It does so only when that child's own
+        retained envelope is readable and is still exactly this launch's own
+        confirmation — the same owners, the same request identity, the same draft
+        revision and the same admitted snapshot with the digest recomputed from
+        it. Trusting an earlier bind is not enough: the durable record is what a
+        restarted process reads.
+        """
+        frozen = self._frozen_expected_input(existing)
+        if (
+            frozen is None
+            or existing.request_id != request_id
+            or frozen.get("owner_user_strategy_id") != user_strategy_id
+            or frozen.get("owner_launch_intent_id") != launch_intent_id
+            or frozen.get("source_revision") != payload.get("draft_revision")
+            or frozen.get("input_sha256") != payload.get("input_sha256")
+            or frozen.get("snapshot") != payload.get("snapshot")
+        ):
+            raise TaskStateError(
+                "the experiment already created for this launch is not the one it "
+                "confirmed; preview the experiment again and confirm the new one"
+            )
+        return existing
+
+    def create_owned_experiment(
+        self,
+        *,
+        user_strategy_id: str,
+        launch_intent_id: str,
+        request_id: str,
+        spec: ResearchSpec,
+        payload: dict[str, Any],
+        budget: dict[str, int],
+    ) -> ResearchTask:
+        """Freeze one user strategy's confirmed draft as a child, then dispatch it once.
+
+        The caller persisted this intent and its payload before calling, so the
+        child is created from it rather than from whatever the draft or the
+        workspace says now. The spec is re-validated against the registered
+        catalog, the admitted input is re-derived and compared with the whole
+        snapshot the user confirmed — the source identity, the canonical scenario,
+        the digest — and only then is one child written carrying that same
+        snapshot as the input it will be held to, and the existing backtest
+        dispatch reused. The child carries exactly the approved budget — no model
+        call and one backtest — and is never interpreted. A second call with the
+        same request identity returns the child already created and starts nothing.
+        """
+        existing = self.owned_experiment(request_id)
+        if existing is not None:
+            return self._require_same_confirmation(
+                existing,
+                user_strategy_id=user_strategy_id,
+                launch_intent_id=launch_intent_id,
+                request_id=request_id,
+                payload=payload,
+            )
+        self._validate_spec(spec)
+        frozen = self._with_defaults(spec)
+        scenario_id = frozen.scenario_id or self._resolve_scenario_id(frozen)
+        try:
+            prepared = self._service.prepare_input_snapshot(
+                scenario_id,
+                parameters={
+                    "initial_cash": frozen.initial_cash,
+                    "strategy_parameters": frozen.parameters,
+                    "quantity": None,
+                    "strategy_source": None,
+                },
+                dataset_id=frozen.dataset_id,
+                source_sha256=frozen.source_sha256,
+            )
+        except Exception as error:  # noqa: BLE001 — nothing was created or dispatched
+            raise InvalidSpecError(str(error)) from None
+        # The admitted input itself, not a hash the caller computed: the source
+        # identity, the whole confirmed snapshot and its digest must all be the
+        # ones the user confirmed.
+        snapshot = payload.get("snapshot")
+        revision = payload.get("draft_revision")
+        if (
+            type(snapshot) is not dict
+            or type(payload.get("input_sha256")) is not str
+            or type(revision) is not int
+            or type(snapshot.get("source_identity")) is not dict
+        ):
+            raise InvalidSpecError("this launch carries no readable confirmed input snapshot")
+        if (
+            payload.get("input_sha256") != prepared["input_sha256"]
+            or payload.get("input_identity") != prepared["input_identity"]
+            or snapshot != prepared["snapshot"]
+        ):
+            # The confirmed input is gone or changed. Failing here is honest and
+            # free: no child, no reservation and no engine submission exist yet.
+            raise InvalidSpecError(
+                "the data behind this experiment is no longer the input that was confirmed; "
+                "preview the experiment again and confirm the new one"
+            )
+        now = _now()
+        task = ResearchTask(
+            task_id=str(uuid4()),
+            created_at=now,
+            updated_at=now,
+            status="confirmed",
+            raw_idea=f"Frozen experiment of user strategy {user_strategy_id}",
+            gap=None,
+            # Exactly the budget the user approved for this one experiment: one
+            # backtest and no model call. This child's run is read, never
+            # interpreted, so it is given no workspace model allowance.
+            budget=dict(budget),
+            usage={
+                "model_calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "backtests": 0,
+                "unavailable_model_calls": 0,
+            },
+            spec_draft=None,
+            spec_confirmed=((1, now, frozen),),
+            jobs=(),
+            request_id=request_id,
+            error=None,
+            cancel_note=None,
+            last_model=None,
+            owner_user_strategy_id=user_strategy_id,
+            owner_launch_intent_id=launch_intent_id,
+            # The frozen expectation every later read of this child is held to:
+            # the whole confirmed snapshot, its digest, the draft revision it was
+            # confirmed at, this child's own stable request identity and the
+            # complete owner pair the host wrote here. It is written in the same
+            # durable record as the child, so there is no instant in which the
+            # child exists without the input it must run, and an envelope bound to
+            # anybody else's strategy or intent is refused rather than used.
+            expected_input={
+                "schema": _EXPECTED_INPUT_SCHEMA,
+                "owner_user_strategy_id": user_strategy_id,
+                "owner_launch_intent_id": launch_intent_id,
+                "request_id": request_id,
+                "source_revision": revision,
+                "input_sha256": payload["input_sha256"],
+                "snapshot": snapshot,
+            },
+        )
+        with self._creation_lock:
+            self._transition(task.task_id, None, "create", task=task)
+        return self._start_backtest(task.task_id)
 
     @staticmethod
     def _spec_from_input(input_: dict[str, Any]) -> ResearchSpec:
@@ -3046,6 +3499,7 @@ class ResearchOrchestrator:
             raise InvalidSpecError(str(error)) from None
 
     def _edited_spec(self, task: ResearchTask, fields: dict[str, Any]) -> ResearchSpec:
+        self._require_not_frozen_child(task)
         if task.status not in {"awaiting_confirmation", "drafting"} or task.spec_draft is None:
             raise TaskStateError("only an unconfirmed draft spec can be edited")
         draft = task.spec_draft
@@ -3107,6 +3561,8 @@ class ResearchOrchestrator:
         return self._transition(task_id, generation, "edit", finish=True, spec=spec)
 
     def confirm(self, task_id: str, *, auto_run: bool = True) -> ResearchTask:
+        # A strategy-owned child was confirmed when the user confirmed it there.
+        self._require_not_frozen_child(self._store.get(task_id))
         generation = self._begin(task_id, "confirm")
         if generation is None:
             raise TaskStateError("task is cancelled or an operation is in flight")

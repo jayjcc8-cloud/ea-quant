@@ -271,6 +271,69 @@ class ResearchConfirmRequest(BaseModel):
     auto_run: bool = True
 
 
+class ApprovedBudgetRequest(BaseModel):
+    """The explicit approval one model call or experiment needs, and nothing else."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    max_model_calls: int = Field(ge=0, le=100)
+    max_backtests: int = Field(ge=0, le=100)
+
+
+class UserStrategyCreateRequest(BaseModel):
+    """Creating a strategy is a save: no provider call and no experiment."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    name: str = Field(min_length=1, max_length=120)
+    intent: str = Field(min_length=1, max_length=2000)
+    scenario_id: str = Field(min_length=1, max_length=200)
+    # The user's own criterion in the report's registered vocabulary, or none.
+    criterion: dict[str, Any] | None = None
+
+
+class UserStrategyMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    call_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    base_revision: int = Field(ge=1, le=1000000)
+    text: str = Field(min_length=1, max_length=4000)
+    approved_budget: ApprovedBudgetRequest
+
+
+class UserStrategyReviseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    call_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    text: str = Field(default="", max_length=4000)
+    approved_budget: ApprovedBudgetRequest
+
+
+class UserStrategyApplyRequest(BaseModel):
+    """The user's selection: the whole proposal, or exactly the checked paths."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    paths: list[str] | None = Field(default=None, max_length=64)
+
+
+class UserStrategyUndoRequest(BaseModel):
+    """One named application of the revision the caller is looking at."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    head_revision: int = Field(ge=1, le=1000000)
+    target_operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class UserStrategyLaunchRequest(BaseModel):
+    """One explicit confirmation of one already-previewed experiment."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    launch_intent_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    base_revision: int = Field(ge=1, le=1000000)
+    # The identity of the preview this confirmation was made against: the exact
+    # admitted input, not just the draft revision.
+    preview_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    approved_budget: ApprovedBudgetRequest
+
+
 class EventSimulationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     as_of: str = Field(min_length=1, max_length=64)
@@ -363,6 +426,24 @@ def create_app(settings: WebSettings) -> Any:
         research_store, service, RadianSettings(RadianSettings.default_path())
     )
 
+    from ea.web.user_strategies import (
+        UserStrategyBudgetError,
+        UserStrategyConflictError,
+        UserStrategyError,
+        UserStrategyNotFoundError,
+        UserStrategyService,
+        UserStrategyStaleError,
+        UserStrategyStateError,
+        UserStrategyStore,
+    )
+
+    user_strategy_service = UserStrategyService(
+        UserStrategyStore(workspace_root),
+        research_orchestrator,
+        service,
+        RadianSettings(RadianSettings.default_path()),
+    )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         service.start()
@@ -374,6 +455,11 @@ def create_app(settings: WebSettings) -> Any:
             # so a reconciliation error leaves the record for its own read path.
             with contextlib.suppress(OSError, ResearchTaskError):
                 research_orchestrator.reconcile_all()
+            # The same read-only classification for a strategy's experiments: an
+            # interrupted launch is re-bound to the child and job it really has,
+            # and nothing is dispatched, re-sent or refunded here.
+            with contextlib.suppress(OSError, UserStrategyError):
+                user_strategy_service.reconcile_all()
             yield
         finally:
             service.stop()
@@ -1266,6 +1352,149 @@ def create_app(settings: WebSettings) -> Any:
             return error(409, "interpret_rejected", str(caught))
         except ResearchTaskError as caught:
             return error(422, "research_task_invalid", str(caught))
+
+    # -- one durable user strategy ------------------------------------------
+    #
+    # These routes own a draft, the AI calls the user approved, the typed diffs
+    # applied to that draft, and the experiments confirmed from it. Every identity
+    # in the path is bounded before it can name a file, every write body is a
+    # strict schema, and the same-origin middleware at the top of this app applies
+    # unchanged. Nothing here is a second engine or a second scheduler: the
+    # experiment path reuses the research task, its request id and its dispatch.
+
+    def strategy_refusal(caught: UserStrategyError | OSError) -> JSONResponse:
+        if isinstance(caught, UserStrategyNotFoundError):
+            return error(404, "user_strategy_not_found", str(caught))
+        if isinstance(caught, OSError):
+            return error(500, "user_strategy_unavailable", str(caught))
+        if isinstance(caught, UserStrategyStaleError):
+            return error(409, "stale_base_revision", str(caught))
+        if isinstance(caught, UserStrategyConflictError):
+            return error(409, "operation_conflict", str(caught))
+        if isinstance(caught, UserStrategyBudgetError):
+            return error(422, "approval_required", str(caught))
+        if isinstance(caught, UserStrategyStateError):
+            return error(422, "user_strategy_invalid", str(caught))
+        return error(422, "user_strategy_invalid", str(caught))
+
+    @app.post("/api/user-strategies", status_code=201)
+    def create_user_strategy(request: UserStrategyCreateRequest) -> object:
+        try:
+            strategy = user_strategy_service.create(
+                name=request.name,
+                intent=request.intent,
+                scenario_id=request.scenario_id,
+                criterion=request.criterion,
+            )
+            return strategy.document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.get("/api/user-strategies")
+    def list_user_strategies() -> object:
+        return {"strategies": [item.document() for item in user_strategy_service.list()]}
+
+    @app.get("/api/user-strategies/{user_strategy_id}")
+    def get_user_strategy(user_strategy_id: str) -> object:
+        try:
+            # Every read re-classifies an interrupted experiment against the real
+            # child and job records; it never dispatches anything.
+            return user_strategy_service.reconcile(user_strategy_id).document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/messages")
+    def send_user_strategy_message(
+        user_strategy_id: str, request: UserStrategyMessageRequest
+    ) -> object:
+        try:
+            strategy = user_strategy_service.send_message(
+                user_strategy_id,
+                call_id=request.call_id,
+                base_revision=request.base_revision,
+                text=request.text,
+                approved_budget=request.approved_budget.model_dump(),
+            )
+            return strategy.document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/proposals/{proposal_id}/apply")
+    def apply_user_strategy_proposal(
+        user_strategy_id: str, proposal_id: str, request: UserStrategyApplyRequest
+    ) -> object:
+        try:
+            strategy = user_strategy_service.apply_proposal(
+                user_strategy_id,
+                proposal_id=proposal_id,
+                operation_id=request.operation_id,
+                paths=request.paths,
+            )
+            return strategy.document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/proposals/{proposal_id}/reject")
+    def reject_user_strategy_proposal(user_strategy_id: str, proposal_id: str) -> object:
+        try:
+            return user_strategy_service.reject_proposal(
+                user_strategy_id, proposal_id=proposal_id
+            ).document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/proposals/{proposal_id}/revise")
+    def revise_user_strategy_proposal(
+        user_strategy_id: str, proposal_id: str, request: UserStrategyReviseRequest
+    ) -> object:
+        try:
+            strategy = user_strategy_service.revise_proposal(
+                user_strategy_id,
+                proposal_id=proposal_id,
+                call_id=request.call_id,
+                text=request.text,
+                approved_budget=request.approved_budget.model_dump(),
+            )
+            return strategy.document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/undo")
+    def undo_user_strategy_change(
+        user_strategy_id: str, request: UserStrategyUndoRequest
+    ) -> object:
+        try:
+            return user_strategy_service.undo(
+                user_strategy_id,
+                operation_id=request.operation_id,
+                head_revision=request.head_revision,
+                target_operation_id=request.target_operation_id,
+            ).document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.get("/api/user-strategies/{user_strategy_id}/experiment/preview")
+    def preview_user_strategy_experiment(user_strategy_id: str) -> object:
+        try:
+            return user_strategy_service.preview_experiment(user_strategy_id)
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/experiments")
+    def launch_user_strategy_experiment(
+        user_strategy_id: str, request: UserStrategyLaunchRequest
+    ) -> object:
+        try:
+            strategy = user_strategy_service.launch_experiment(
+                user_strategy_id,
+                launch_intent_id=request.launch_intent_id,
+                base_revision=request.base_revision,
+                preview_identity=request.preview_identity,
+                approved_budget=request.approved_budget.model_dump(),
+            )
+            return strategy.document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
 
     @app.get("/{full_path:path}")
     def frontend(full_path: str) -> Response:

@@ -1,0 +1,318 @@
+/**
+ * QUINE user-strategy contract.
+ *
+ * These types mirror the durable documents served by the installed engine
+ * (src/ea/web/user_strategies.py). One user strategy is a saved draft plus the
+ * record of what was done to it: the AI calls the user approved, the typed
+ * proposals, the change history, and the frozen experiments confirmed from that
+ * draft. This client derives nothing: it never invents a proposal, an outcome, a
+ * measured cost or a started run, and every model sentence it displays is labelled
+ * as inference rather than evidence.
+ *
+ * The criterion vocabulary is the report's own (see research-api): the user picks
+ * one allowlisted report field and the sign they expect, and the host freezes it.
+ */
+
+import type { ReportCriterion } from './research-api'
+
+/** One validated draft revision: exactly what an experiment would execute. */
+export type UserStrategyDraft = {
+  revision: number
+  strategy_id: string
+  venue: string
+  symbol: string
+  scenario_id: string
+  dataset_id: string | null
+  source_sha256: string | null
+  initial_cash: string
+  parameters: Record<string, string | number>
+  criterion: ReportCriterion | null
+}
+
+/**
+ * The route this workspace would use, exactly as the host projects it. Never a
+ * credential and never a resolution value: provider, model and endpoint only.
+ */
+export type UserStrategyRoute = {
+  provider: string | null
+  model: string | null
+  endpoint: string | null
+}
+
+export type UserStrategyCallStatus =
+  | 'pending'
+  | 'dispatched'
+  | 'observed'
+  | 'refused'
+  | 'unconfigured'
+  | 'unknown'
+  | 'interrupted_before_dispatch'
+
+/**
+ * One recorded model call. `input_tokens`/`output_tokens` are null — not zero —
+ * when the provider never reported usage, and `cost` is unavailable without a
+ * price source, so nothing here can be read as a measured charge.
+ */
+export type UserStrategyCall = {
+  call_id: string
+  base_revision: number
+  status: UserStrategyCallStatus
+  route: UserStrategyRoute
+  approved_budget: { max_model_calls: number; max_backtests: number }
+  reserved_at: string
+  message: string | null
+  model: string | null
+  input_tokens: number | null
+  output_tokens: number | null
+  usage_available: boolean
+  cost?: { amount: string | null; available: boolean; reason: string }
+}
+
+/** One change to one field, with the provenance that field was written with. */
+export type UserStrategyChangeItem = {
+  path: string
+  before: string | number | null
+  after: string | number
+  reason: string
+  /** Model-supplied references for this field. Claims, never verified facts. */
+  evidence?: string[]
+  proposer?: string
+}
+
+export type UserStrategyMessage = {
+  message_id: string
+  role: 'user' | 'model'
+  kind: 'message' | 'proposal'
+  text: string
+  base_revision: number
+  at: string
+  call_id: string
+  proposal_id: string | null
+}
+
+/** One typed field change: a registered parameter path, with its before value. */
+export type UserStrategyProposalItem = {
+  path: string
+  before: string | number | null
+  after: string | number
+  reason: string
+  /** Model-supplied references. They are claims, never host-verified facts. */
+  evidence: string[]
+  proposer: string
+}
+
+export type UserStrategyProposalStatus = 'open' | 'applied' | 'rejected' | 'superseded'
+
+export type UserStrategyProposal = {
+  proposal_id: string
+  call_id: string
+  base_revision: number
+  status: UserStrategyProposalStatus
+  created_at: string
+  items: UserStrategyProposalItem[]
+  applied_paths: string[]
+  stale_paths: string[]
+}
+
+/** One applied or undone revision, exactly as it was written. */
+export type UserStrategyChange = {
+  operation_id: string
+  kind: 'apply' | 'undo'
+  proposal_id: string | null
+  target_operation_id: string | null
+  from_revision: number
+  to_revision: number
+  applied_paths: string[]
+  stale_paths: string[]
+  items: UserStrategyChangeItem[]
+  evidence: string[]
+  proposer: string
+  at: string
+}
+
+export type UserStrategyExperimentStatus =
+  | 'pending'
+  | 'created'
+  | 'failed'
+  | 'unknown'
+  | 'interrupted_before_dispatch'
+
+/**
+ * The immutable request one launch intent froze: the draft revision, the exact
+ * admitted input identity it was confirmed against, and the exact budget. The
+ * same intent always resolves to this payload, never to today's draft.
+ */
+export type UserStrategyExperimentPayload = {
+  draft_revision: number
+  scenario_id: string
+  parameters: Record<string, string | number>
+  preview_identity?: string
+  input_sha256?: string | null
+  input_identity?: Record<string, unknown>
+  approved_budget?: ApprovedBudget
+}
+
+/**
+ * One launch intent and the experiment it froze. The payload it was confirmed
+ * with is retained on the record, so the same intent always resolves to the same
+ * run even after the draft moves on.
+ */
+export type UserStrategyExperiment = {
+  launch_intent_id: string
+  request_id: string
+  payload_sha256: string
+  payload: UserStrategyExperimentPayload
+  task_id: string | null
+  job_id: string | null
+  status: UserStrategyExperimentStatus
+  message?: string | null
+  created_at: string
+}
+
+export type UserStrategy = {
+  schema: 'ea.user-strategy.v1'
+  user_strategy_id: string
+  created_at: string
+  updated_at: string
+  name: string
+  intent: string
+  draft: UserStrategyDraft
+  history: UserStrategyDraft[]
+  messages: UserStrategyMessage[]
+  calls: UserStrategyCall[]
+  proposals: UserStrategyProposal[]
+  changes: UserStrategyChange[]
+  experiments: UserStrategyExperiment[]
+}
+
+/**
+ * What one experiment would do, read from the live workspace: the draft revision,
+ * the real admitted input of the scenario — its source identity, its normalized
+ * cost, risk and strategy binding — and the budget this workspace grants. A
+ * preview starts nothing, and `preview_identity` is what a confirmation carries
+ * back: a confirmation whose preview no longer describes what would run is
+ * refused instead of silently running something else.
+ */
+export type UserStrategyPreview = {
+  draft_revision: number
+  strategy_id: string
+  scenario_id: string
+  venue: string
+  symbol: string
+  initial_cash: string
+  parameters: Record<string, string | number>
+  record_count: number | null
+  data: Record<string, unknown>
+  input_identity: Record<string, unknown>
+  input_sha256: string | null
+  preview_identity: string
+  normalized: Record<string, unknown>
+  /** The scenario's real cost assumptions, exactly as admitted. */
+  commission: unknown
+  slippage: unknown
+  latency: unknown
+  criterion: ReportCriterion | null
+  budget: { max_model_calls: number; max_backtests: number }
+}
+
+export type ApprovedBudget = { max_model_calls: number; max_backtests: number }
+
+/**
+ * The criterion the creator states, in the report's own vocabulary: one
+ * allowlisted field and the sign expected. The host validates it and the stored
+ * result is a complete ReportCriterion.
+ */
+export type UserStrategyCriterionInput = { field: string; expectation: string }
+
+/** A user-strategy request failure, carrying the host's own error code. */
+export class UserStrategyRequestError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init)
+  const payload = await response.json()
+  if (!response.ok) {
+    const detail = payload?.error ?? payload
+    throw new UserStrategyRequestError(
+      detail?.code ?? 'request_failed',
+      detail?.message ?? 'User strategy request failed',
+    )
+  }
+  return payload as T
+}
+
+const writeHeaders = { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }
+
+const write = <T,>(path: string, body: unknown) =>
+  apiRequest<T>(path, { method: 'POST', headers: writeHeaders, body: JSON.stringify(body) })
+
+const base = (userStrategyId: string) =>
+  `/api/user-strategies/${encodeURIComponent(userStrategyId)}`
+
+export const userStrategiesApi = {
+  async list(): Promise<UserStrategy[]> {
+    return (await apiRequest<{ strategies: UserStrategy[] }>('/api/user-strategies')).strategies
+  },
+  /** A save: this creates no model call and starts no experiment. */
+  create: (input: {
+    name: string
+    intent: string
+    scenario_id: string
+    criterion?: UserStrategyCriterionInput | null
+  }) => write<UserStrategy>('/api/user-strategies', input),
+  get: (userStrategyId: string) => apiRequest<UserStrategy>(base(userStrategyId)),
+  sendMessage: (
+    userStrategyId: string,
+    input: { call_id: string; base_revision: number; text: string; approved_budget: ApprovedBudget },
+  ) => write<UserStrategy>(`${base(userStrategyId)}/messages`, input),
+  applyProposal: (
+    userStrategyId: string,
+    proposalId: string,
+    input: { operation_id: string; paths?: string[] | null },
+  ) =>
+    write<UserStrategy>(
+      `${base(userStrategyId)}/proposals/${encodeURIComponent(proposalId)}/apply`,
+      input,
+    ),
+  rejectProposal: (userStrategyId: string, proposalId: string) =>
+    write<UserStrategy>(
+      `${base(userStrategyId)}/proposals/${encodeURIComponent(proposalId)}/reject`,
+      {},
+    ),
+  reviseProposal: (
+    userStrategyId: string,
+    proposalId: string,
+    input: { call_id: string; text?: string; approved_budget: ApprovedBudget },
+  ) =>
+    write<UserStrategy>(
+      `${base(userStrategyId)}/proposals/${encodeURIComponent(proposalId)}/revise`,
+      input,
+    ),
+  /**
+   * Reverse one named application of the revision the caller is looking at: the
+   * head revision and the application are both named, so a stale page cannot undo
+   * whatever happens to be newest.
+   */
+  undo: (
+    userStrategyId: string,
+    input: { operation_id: string; head_revision: number; target_operation_id: string },
+  ) => write<UserStrategy>(`${base(userStrategyId)}/undo`, input),
+  previewExperiment: (userStrategyId: string) =>
+    apiRequest<UserStrategyPreview>(`${base(userStrategyId)}/experiment/preview`),
+  /** One confirmation, of exactly the input this preview identity named. */
+  launchExperiment: (
+    userStrategyId: string,
+    input: {
+      launch_intent_id: string
+      base_revision: number
+      preview_identity: string
+      approved_budget: ApprovedBudget
+    },
+  ) => write<UserStrategy>(`${base(userStrategyId)}/experiments`, input),
+}

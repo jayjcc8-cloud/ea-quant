@@ -9,7 +9,7 @@ import shutil
 import stat
 import tempfile
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -343,6 +343,70 @@ def _input_snapshot(
     return payload, sha256(_INPUT_DIGEST_DOMAIN + payload).hexdigest()
 
 
+#: The exact keys one admitted input snapshot carries, and the exact keys one
+#: admitted input identity carries. The source binding pair is present only when
+#: the input is bound to a registered dataset.
+_SNAPSHOT_KEYS = frozenset({"schema", "scenario_id", "source_identity", "identity", "scenario"})
+_IDENTITY_KEYS = frozenset({"scenario_sha256", "data_sha256", "record_count"})
+_BOUND_IDENTITY_KEYS = _IDENTITY_KEYS | {"dataset_id", "source_sha256"}
+
+
+def _input_identity_block(value: object) -> dict[str, object] | None:
+    """One admitted input identity, or ``None`` when it is not exactly one."""
+    if type(value) is not dict:
+        return None
+    identity = cast(dict[str, object], value)
+    keys = frozenset(identity)
+    if keys not in {_IDENTITY_KEYS, _BOUND_IDENTITY_KEYS}:
+        return None
+    if (
+        type(identity["scenario_sha256"]) is not str
+        or type(identity["data_sha256"]) is not str
+        or type(identity["record_count"]) is not int
+    ):
+        return None
+    if keys == _BOUND_IDENTITY_KEYS and (
+        type(identity["dataset_id"]) is not str or type(identity["source_sha256"]) is not str
+    ):
+        return None
+    return identity
+
+
+def read_input_snapshot(value: object) -> dict[str, object] | None:
+    """The canonical snapshot document ``_input_snapshot`` renders, or ``None``.
+
+    The same shape every durable job record enforces: the schema, the scenario it
+    was admitted as, the source identity it was read under, the normalized
+    identity it runs as, and the whole canonical scenario. A partial document, an
+    extra block or an unreadable identity is not evidence about what ran, so a
+    caller that must decide what a stored snapshot means is given ``None`` rather
+    than a repaired guess.
+    """
+    if type(value) is not dict:
+        return None
+    snapshot = cast(dict[str, object], value)
+    schema = snapshot.get("schema")
+    extra = {"research_input"} if schema == VALIDATOR_INPUT_SCHEMAS[-1] else set()
+    if (
+        frozenset(snapshot) != (_SNAPSHOT_KEYS | extra)
+        or schema not in set(VALIDATOR_INPUT_SCHEMAS)
+        or type(snapshot.get("scenario_id")) is not str
+        or not snapshot.get("scenario_id")
+        or _input_identity_block(snapshot.get("source_identity")) is None
+        or _input_identity_block(snapshot.get("identity")) is None
+        or type(snapshot.get("scenario")) is not dict
+        or not snapshot.get("scenario")
+        or ("research_input" in snapshot and type(snapshot.get("research_input")) is not dict)
+    ):
+        return None
+    return snapshot
+
+
+def input_snapshot_sha256(snapshot: dict[str, object]) -> str:
+    """The digest one snapshot document carries, recomputed from its own bytes."""
+    return sha256(_INPUT_DIGEST_DOMAIN + _canonical_json(snapshot)).hexdigest()
+
+
 def _created_at() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -567,6 +631,21 @@ class BatchRecord:
 class PreparedJob:
     scenario: LoadedBacktestScenario
     input_snapshot_bytes: bytes
+    input_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedInput:
+    """The one confirmed input an owned submission must reproduce exactly.
+
+    ``snapshot`` is the canonical input snapshot the user confirmed — schema,
+    scenario id, source identity, normalized identity, the whole canonical
+    scenario and any research input — and ``input_sha256`` is that snapshot's own
+    digest. A submission whose final materialized scenario, data and cost
+    assumptions produce anything else is refused before it is published.
+    """
+
+    snapshot: dict[str, object]
     input_sha256: str
 
 
@@ -1481,6 +1560,46 @@ class WebService:
         source_summary["normalized_input_identity"] = normalized_summary["input_identity"]
         return source_summary
 
+    def prepare_input_snapshot(
+        self,
+        scenario_id: str,
+        *,
+        parameters: dict[str, object] | None = None,
+        dataset_id: str | None = None,
+        source_sha256: str | None = None,
+    ) -> dict[str, object]:
+        """The exact normalized input this workspace would admit for one job.
+
+        This is the authoritative preview of an engine submission: it resolves the
+        same dataset binding, normalizes the same parameters through the same
+        validator and renders the same input snapshot ``create_job`` would freeze,
+        and it creates nothing — no job, no reservation, no engine effect. A caller
+        that shows the user what would run and later confirms it compares the
+        admitted snapshot's own identity and digest against what was previewed,
+        instead of trusting a hash it computed itself. The identity is re-derived
+        between the two steps, so a change between them is refused here.
+        """
+        with self._lock:
+            validated = self.validate_scenario(
+                scenario_id,
+                parameters=parameters,
+                dataset_id=dataset_id,
+                source_sha256=source_sha256,
+            )
+            identity = cast(dict[str, object], validated["input_identity"])
+            self._require_upload_binding(identity, None)
+            self._require_local_binding(scenario_id, None)
+            prepared = self._prepare_job(
+                scenario_id=scenario_id,
+                input_identity=identity,
+                parameters=parameters,
+            )
+            return {
+                "input_identity": _scenario_identity(prepared.scenario),
+                "input_sha256": prepared.input_sha256,
+                "snapshot": json.loads(prepared.input_snapshot_bytes),
+            }
+
     def get_job(self, job_id: str) -> JobRecord:
         with self._lock:
             try:
@@ -1580,6 +1699,157 @@ class WebService:
             input_sha256=input_sha256,
         )
 
+    def _require_expected_input(
+        self,
+        scenario_id: str,
+        scenario: LoadedBacktestScenario,
+        prepared: PreparedJob,
+        expected: ExpectedInput,
+    ) -> None:
+        """Refuse a materialized input that is not the one that was confirmed.
+
+        The comparison is made against the actual scenario this job would run —
+        its materialized document, its data as it is read back and its declared
+        cost assumptions — and never against a caller's hash of something else.
+        A snapshot that differs in any block names a run the user did not confirm,
+        so it is refused here, before the job is stored and before the engine is
+        reached. The checked object is the same one the record and the run use.
+        """
+        confirmed = read_input_snapshot(expected.snapshot)
+        if (
+            confirmed is None
+            or confirmed.get("scenario_id") != scenario_id
+            or input_snapshot_sha256(confirmed) != expected.input_sha256
+        ):
+            # A confirmation whose own document does not carry the digest it
+            # claims, or that names another scenario, is not readable evidence.
+            raise WebBoundaryError("the confirmed input envelope is unreadable")
+        source_identity = confirmed["source_identity"]
+        actual_bytes, actual_sha256 = _input_snapshot(
+            scenario_id, scenario, cast(dict[str, object], source_identity)
+        )
+        if actual_bytes != prepared.input_snapshot_bytes:
+            raise WebBoundaryError("the materialized input is not the one that was admitted")
+        if actual_sha256 != expected.input_sha256 or json.loads(actual_bytes) != confirmed:
+            raise InputChangedError(
+                "the input this run would freeze is not the input that was confirmed; "
+                "preview the experiment again and confirm the new one"
+            )
+
+    def _require_existing_is_expected(self, existing: JobRecord, expected: ExpectedInput) -> None:
+        """Refuse to resolve a request identity onto a job that froze other input.
+
+        The comparison uses the published job's own frozen snapshot — never a
+        fresh read of the live source, which may legitimately have moved on since
+        a successful run — and requires the claimed digest to be recomputable from
+        that document, so a stored block edited under a retained digest is refused
+        rather than accepted as the confirmed run.
+        """
+        stored = existing.input_snapshot_bytes
+        document: object = None
+        if type(stored) is bytes:
+            try:
+                document = json.loads(stored)
+            except ValueError:
+                document = None
+        frozen = read_input_snapshot(document)
+        if (
+            frozen is None
+            or frozen != expected.snapshot
+            or existing.input_sha256 != expected.input_sha256
+            or input_snapshot_sha256(frozen) != expected.input_sha256
+        ):
+            raise InputChangedError(
+                "the run already bound to this request is not the input that was confirmed; "
+                "preview the experiment again and confirm the new one"
+            )
+
+    def _require_replay_is_expected(
+        self,
+        existing: JobRecord,
+        *,
+        scenario_id: str,
+        input_identity: dict[str, object],
+        parameters: dict[str, object] | None,
+        plugin_binding: dict[str, object] | None,
+        expected: ExpectedInput,
+    ) -> None:
+        """Resolve one owned replay from the record the request already published.
+
+        A request that already published a job is answered from that record and
+        from the caller's own confirmation alone: the registered scenario, its
+        data and its cost assumptions are not read again, so a source that moved
+        on or disappeared after a completed run cannot re-label, re-run or refuse
+        what that run froze. Every claim the replay makes — request, scenario,
+        source identity, plugin binding, the confirmation's own snapshot, digest
+        and normalized identity — is held to the record, so anything but the same
+        input is refused rather than resolved.
+        """
+        if existing.input_snapshot_bytes is None or existing.input_sha256 is None:
+            raise InputChangedError(
+                "the run already bound to this request carries no readable input evidence"
+            )
+        self._require_existing_is_expected(existing, expected)
+        if (
+            existing.scenario_id != scenario_id
+            or existing.input_identity != input_identity
+            or existing.plugin_binding != plugin_binding
+        ):
+            raise RequestConflictError("request_id is already bound to different input")
+        if expected.snapshot.get("source_identity") != existing.input_identity:
+            raise InputChangedError(
+                "the run already bound to this request is not the input that was confirmed; "
+                "preview the experiment again and confirm the new one"
+            )
+        self._require_replay_parameters(existing, parameters)
+
+    def _require_replay_parameters(
+        self, existing: JobRecord, parameters: dict[str, object] | None
+    ) -> None:
+        """Hold a replay's own explicit parameters to the input the record froze.
+
+        The stored canonical snapshot is the authority and it is projected exactly
+        as a reader is shown it, so explicit cash, strategy parameters, quantity or
+        strategy source that do not describe that input name a different request.
+        A replay that carries no parameters claims nothing beyond the confirmation
+        it already supplies.
+        """
+        if parameters is None:
+            return
+        frozen = cast(
+            dict[str, object], json.loads(cast(bytes, existing.input_snapshot_bytes))["scenario"]
+        )
+        strategy = cast(dict[str, object], frozen["strategy"])
+        if parameters.get("strategy_source") not in (None, strategy.get("source")):
+            raise RequestConflictError("request_id is already bound to different input")
+        initial_cash = parameters.get("initial_cash")
+        if type(initial_cash) is not str:
+            raise BacktestScenarioError("initial_cash must be an ea-decimal-v1 string")
+        if initial_cash != cast(dict[str, object], frozen["funding"])["initial_cash"]:
+            raise RequestConflictError("request_id is already bound to different input")
+        strategy_parameters = parameters.get("strategy_parameters")
+        if strategy_parameters is None:
+            # The original quantity-only request shape claims one parameter, and
+            # the frozen strategy block is where the record carries it.
+            quantity = parameters.get("quantity")
+            if quantity is not None and quantity != strategy.get("target_quantity"):
+                raise RequestConflictError("request_id is already bound to different input")
+            return
+        if type(strategy_parameters) is not dict:
+            raise BacktestScenarioError("strategy_parameters must be a mapping")
+        if parameters.get("quantity") is not None:
+            raise BacktestScenarioError("quantity conflicts with strategy_parameters")
+        entry = ResearchStrategyCatalogV1(
+            () if existing.strategy_package is None else (existing.strategy_package,)
+        ).resolve(strategy)
+        stored = existing.document(presentation=True)["parameters"]
+        try:
+            claimed = entry.normalize(cast(dict[str, object], strategy_parameters))
+        except ValueError:
+            raise RequestConflictError("request_id is already bound to different input") from None
+        if claimed != stored:
+            raise RequestConflictError("request_id is already bound to different input")
+
     def create_job(
         self,
         *,
@@ -1588,16 +1858,43 @@ class WebService:
         parameters: dict[str, object] | None = None,
         request_id: str,
         plugin_binding: dict[str, object] | None = None,
+        expected_input: ExpectedInput | None = None,
+        before_publish: Callable[[], None] | None = None,
     ) -> tuple[JobRecord, bool]:
+        """Admit, freeze and publish one job.
+
+        Two optional arguments exist for an owned submission whose confirmed input
+        is frozen elsewhere. ``expected_input`` is the confirmed snapshot the
+        materialized input must reproduce exactly. ``before_publish`` is the
+        owner's own dispatch gate: it is called after that final check and
+        immediately before the first durable job record, and it must affirm that
+        publication is still this operation's to make, or raise. Either one may
+        refuse; a refusal publishes nothing and submits nothing.
+        """
         with self._lock:
             self._require_upload_binding(input_identity, plugin_binding)
             self._require_local_binding(scenario_id, plugin_binding)
+            existing_id = self._requests.get(request_id)
+            if existing_id is not None and expected_input is not None:
+                # An owned replay is answered from what this request already
+                # published, before any read of the registered source: a scenario
+                # that changed or disappeared after the run completed is not
+                # evidence about what that run froze.
+                existing = self._jobs[existing_id]
+                self._require_replay_is_expected(
+                    existing,
+                    scenario_id=scenario_id,
+                    input_identity=input_identity,
+                    parameters=parameters,
+                    plugin_binding=plugin_binding,
+                    expected=expected_input,
+                )
+                return existing, False
             prepared = self._prepare_job(
                 scenario_id=scenario_id,
                 input_identity=input_identity,
                 parameters=parameters,
             )
-            existing_id = self._requests.get(request_id)
             if existing_id is not None:
                 existing = self._jobs[existing_id]
                 if (
@@ -1613,6 +1910,8 @@ class WebService:
             job_id = str(uuid4())
             attempt_id = RunId(str(uuid4()))
             scenario = self._materialize_scenario(job_id, prepared.scenario)
+            if expected_input is not None:
+                self._require_expected_input(scenario_id, scenario, prepared, expected_input)
             record = JobRecord(
                 schema=_job_schema(prepared.scenario),
                 strategy_package=prepared.scenario.strategy_package,
@@ -1628,6 +1927,8 @@ class WebService:
                 plugin_binding=plugin_binding,
                 dataset_version=self._dataset_version(input_identity.get("dataset_id")),
             )
+            if before_publish is not None:
+                before_publish()
             self._store(record)
             self._active = record.job_id
             self._executor.submit(self._run, record.job_id, scenario)

@@ -1,0 +1,331 @@
+/*
+ * QUINE strategy workspace.
+ *
+ * Scoped to .strategy-workspace so the legacy research, backtest, holdout and
+ * candidate pages keep the shell they already have. The palette is warm
+ * off-white paper, graphite text and one restrained terracotta accent that marks
+ * the single action on a panel; nothing here is a status colour, because every
+ * state on this page is written out in words as well.
+ *
+ * The global stylesheet styles bare `nav` and `nav a` elements for the left
+ * shell, so the strategy list — which is a nav of its own — resets them.
+ */
+
+.strategy-workspace {
+  --paper: #fbf8f4;
+  --paper-edge: #e8e1d8;
+  --graphite: #2c2b29;
+  --graphite-soft: #6a6660;
+  --terracotta: #a8583c;
+  --terracotta-soft: #f2e5de;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+  gap: 24px;
+  align-items: start;
+  color: var(--graphite);
+}
+
+.strategy-column {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.strategy-heading h1,
+.strategy-title h1 {
+  margin: 0 0 4px;
+  font-size: 24px;
+  letter-spacing: -0.01em;
+}
+
+.strategy-heading p,
+.strategy-title p {
+  margin: 0;
+  color: var(--graphite-soft);
+  font-size: 14px;
+}
+
+.strategy-panel,
+.strategy-create {
+  padding: 18px 20px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 10px;
+  background: var(--paper);
+}
+
+.strategy-panel h2,
+.strategy-create h2 {
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.strategy-panel p,
+.strategy-create p {
+  margin: 6px 0;
+  font-size: 14px;
+}
+
+/* The strategy list is a nav of the workspace, not the shell's left nav. */
+.strategy-list {
+  display: block;
+  padding: 0;
+}
+
+.strategy-list ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.strategy-list li {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: var(--paper);
+  font-size: 13px;
+}
+
+.strategy-list li.selected {
+  border-color: var(--terracotta);
+  background: var(--terracotta-soft);
+}
+
+.strategy-list a {
+  display: inline;
+  padding: 0;
+  color: var(--graphite);
+  font-size: 15px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.strategy-list a:hover,
+.strategy-list a:focus-visible {
+  color: var(--terracotta);
+  text-decoration: underline;
+}
+
+.strategy-list .muted {
+  color: var(--graphite-soft);
+  font-size: 12px;
+}
+
+.strategy-create .field,
+.strategy-panel .field {
+  margin: 10px 0;
+}
+
+.strategy-create small {
+  display: block;
+  margin-top: 4px;
+  color: var(--graphite-soft);
+  font-size: 12px;
+}
+
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0;
+  color: var(--graphite);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.check input {
+  margin: 0;
+  accent-color: var(--terracotta);
+}
+
+.parameter-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--graphite-soft);
+  font-size: 13px;
+}
+
+.parameter-list li {
+  margin: 2px 0;
+}
+
+/* The AI column keeps the conversation next to the draft it is about. */
+.strategy-ai {
+  position: sticky;
+  top: 24px;
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.strategy-chat {
+  border-color: var(--terracotta);
+}
+
+.strategy-chat button {
+  border-color: var(--terracotta);
+  background: var(--terracotta);
+  color: #ffffff;
+}
+
+.call-note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--terracotta);
+  border-radius: 0 8px 8px 0;
+  background: var(--terracotta-soft);
+}
+
+.call-note p {
+  margin: 4px 0;
+  font-size: 13px;
+}
+
+.message-list {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.message {
+  padding: 10px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.message-model {
+  border-left: 3px solid var(--terracotta);
+}
+
+.message p {
+  margin: 4px 0;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.proposal-list {
+  display: grid;
+  gap: 12px;
+  margin: 10px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.proposal-list li {
+  padding: 10px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.proposal-list .change {
+  margin: 2px 0 2px 24px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  color: var(--terracotta);
+}
+
+.proposal-list .reason {
+  margin: 0 0 0 24px;
+  color: var(--graphite-soft);
+  font-size: 13px;
+}
+
+.preview-facts {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.preview-facts > div {
+  display: grid;
+  grid-template-columns: minmax(140px, 200px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.preview-facts dt {
+  color: var(--graphite-soft);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.preview-facts dd {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.experiment-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.experiment-list li {
+  padding: 10px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 13px;
+}
+
+.experiment-list a {
+  color: var(--terracotta);
+  font-weight: 650;
+}
+
+/* Asking for a different change is its own approved call, not part of Apply. */
+.revise {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px dashed var(--paper-edge);
+  border-radius: 8px;
+}
+
+.revise button {
+  margin-top: 4px;
+}
+
+.revise .muted {
+  color: var(--graphite-soft);
+  font-size: 12px;
+}
+
+/* Every state is written out in words; this marks the label, not the meaning. */
+.status {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 999px;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+@media (max-width: 900px) {
+  .strategy-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .strategy-ai {
+    position: static;
+  }
+
+  .preview-facts > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
