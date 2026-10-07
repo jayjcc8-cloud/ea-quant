@@ -61,6 +61,10 @@ export type PaperHealth = {
   trade_reason?: string | null
   trade_permission_basis?: string | null
   trade_blocking_guard?: string | null
+  /** Guards the permission probe did not exercise, so the basis stays narrow. */
+  trade_permission_unexercised_guards?: string[]
+  /** Age of the projection the overlay was built from, in seconds. */
+  age_seconds?: number
   reason_codes?: string[]
   candidate_id?: string
 }
@@ -86,6 +90,8 @@ export type PaperOverview = {
   valuation_time?: string | null
   orders?: number
   fills?: number
+  /** Observed fill facts, which may differ from the committed `fills` count. */
+  observed_fills?: number
   market_events?: number
   fact_events?: number
   ledger_sequence?: number
@@ -129,7 +135,8 @@ export type PaperEvents = {
   available: boolean
   reason?: string
   run_id?: string
-  events: PaperEvent[]
+  /** Omitted by the host when no log is available, so it is never assumed empty. */
+  events?: PaperEvent[]
   count?: number
   total_lines?: number
   truncated?: boolean

@@ -944,3 +944,29 @@ it('removes candidate decision controls when fresh evidence rejects a decision',
   expect(screen.queryByRole('button', { name: 'Accept candidate' })).toBeNull()
   expect(screen.queryByRole('button', { name: 'Reject candidate' })).toBeNull()
 })
+
+describe('QUINE shell navigation', () => {
+  it('offers 运行 and 回测 as two independent destinations without moving the backtest routes', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/backtests')
+    render(<App api={adapter()} />)
+    const nav = within(screen.getByRole('navigation', { name: '主导航' }))
+    expect(nav.getByRole('link', { name: '运行' }).getAttribute('href')).toBe('/runs')
+    expect(nav.getByRole('link', { name: '回测' }).getAttribute('href')).toBe('/backtests')
+
+    // The backtest destination keeps every route it already had.
+    await user.click(nav.getByRole('link', { name: '回测' }))
+    expect(window.location.pathname).toBe('/backtests')
+    expect(await screen.findByRole('heading', { name: 'Offline Backtests' })).toBeTruthy()
+
+    cleanup()
+    window.history.pushState({}, '', '/backtests/job-1')
+    render(<App api={adapter()} />)
+    expect(await screen.findByRole('heading', { name: 'Backtest Result' })).toBeTruthy()
+
+    cleanup()
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={adapter()} />)
+    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+  })
+})

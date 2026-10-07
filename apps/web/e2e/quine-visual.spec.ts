@@ -143,7 +143,8 @@ test('the empty workspace keeps the AI column visible and creates inline', async
   await expect(ai.getByText(/先创建或选择一条策略/)).toBeVisible()
   // Legacy pages stay reachable from the QUINE navigation.
   const nav = page.getByRole('navigation', { name: '主导航' })
-  await expect(nav.getByRole('link', { name: '运行' })).toHaveAttribute('href', '/backtests')
+  await expect(nav.getByRole('link', { name: '运行' })).toHaveAttribute('href', '/runs')
+  await expect(nav.getByRole('link', { name: '回测' })).toHaveAttribute('href', '/backtests')
   await expect(nav.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/research')
   await page.screenshot({ path: testInfo.outputPath('quine-empty-1400.png'), fullPage: true })
 

@@ -3,6 +3,7 @@ import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } fr
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings } from './research'
 import { StrategiesWorkspace } from './user-strategies'
+import { PaperStatus } from './paper-status'
 import {
   userStrategiesApi,
   type ApprovedBudget as UserStrategyApprovedBudget,
@@ -420,6 +421,7 @@ function QuineMark() {
 const NAV_ICONS = {
   strategies: 'M4 4h16v16H4zM8 8h8M8 12h8M8 16h5',
   runs: 'M7 4.5 19 12 7 19.5z',
+  backtests: 'M4 20V10M10 20V4M16 20v-7M22 20H2',
   settings: 'M12 9.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2ZM12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6',
 } as const
 
@@ -439,7 +441,8 @@ function Shell({ api }: { api: ApiAdapter }) {
           in the footer instead of being offered as navigation. */}
       <nav aria-label="主导航">
         <NavLink to="/strategies"><NavIcon name="strategies" />策略</NavLink>
-        <NavLink to="/backtests"><NavIcon name="runs" />运行</NavLink>
+        <NavLink to="/runs"><NavIcon name="runs" />运行</NavLink>
+        <NavLink to="/backtests"><NavIcon name="backtests" />回测</NavLink>
         <p className="nav-group">资源与配置</p>
         <NavLink className="nav-child" to="/research">研究</NavLink>
         <NavLink className="nav-child" to="/holdouts">留出验证</NavLink>
@@ -455,6 +458,7 @@ function Shell({ api }: { api: ApiAdapter }) {
       <Routes>
         <Route path="/strategies" element={<StrategiesWorkspace api={api} />} />
         <Route path="/strategies/:userStrategyId" element={<StrategiesWorkspace api={api} />} />
+        <Route path="/runs" element={<PaperStatus />} />
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
