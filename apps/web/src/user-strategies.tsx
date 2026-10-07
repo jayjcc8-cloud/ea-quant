@@ -88,6 +88,18 @@ const PROPOSAL_STATUS_LABELS: Record<UserStrategyProposalStatus, string> = {
   superseded: '已被取代',
 }
 
+/**
+ * Who proposed one change and where it stands. Only a proposal that is still open
+ * is waiting for a decision; a closed one says what became of it instead of asking
+ * again for a decision that has already been made.
+ */
+const PROPOSAL_ORIGIN: Record<UserStrategyProposalStatus, string> = {
+  open: '由模型提出，等待你决定',
+  applied: '由模型提出，已应用；修改记录已保留。',
+  rejected: '由模型提出，已拒绝：它没有写入任何修订，只留作历史',
+  superseded: '由模型提出，已被取代：它只留作历史，不再是这条策略当前的建议',
+}
+
 const EXPERIMENT_NOTES: Record<string, string> = {
   pending: '这次确认在运行存在之前就被记录了，什么都没有派发。',
   interrupted_before_dispatch: '这次确认从未派发过运行，也没有创建重复的运行。',
@@ -97,7 +109,9 @@ const EXPERIMENT_NOTES: Record<string, string> = {
 
 const EXPERIMENT_STATUS_LABELS: Record<UserStrategyExperiment['status'], string> = {
   pending: '已记录，未派发',
-  created: '运行已启动',
+  // The record says a dispatch was created, not that the run has started or
+  // finished: the run's own state lives on its backtest page.
+  created: '运行已创建',
   failed: '派发前被拒绝',
   unknown: '结果未知',
   interrupted_before_dispatch: '从未派发',
@@ -109,6 +123,15 @@ const explain = (error: unknown) => {
     return explanation ? `${explanation} · 服务端：${error.message}` : `服务端：${error.message}`
   }
   return error instanceof Error ? error.message : '这次请求失败了，什么都没有改变。'
+}
+
+/**
+ * The clock time of one recorded instant, to the minute, in UTC. The exact value
+ * stays on the element that shows it, so nothing here rounds a timestamp away.
+ */
+function utcClock(at: string): string {
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})/.exec(at)
+  return match ? `${match[2]}:${match[3]} UTC` : at
 }
 
 /**
@@ -242,15 +265,19 @@ function temporaryName(intent: string): string {
  * no catalog is needed and no draft field, model call or run exists yet. The form
  * is a compact disclosure rather than a page: creating one strategy selects it, and
  * the conversation for it opens immediately.
+ *
+ * What is typed lives above the form, so opening a strategy and coming back leaves
+ * the half-written idea where the user left it.
  */
-function CreateStrategy({ api, created }: {
+function CreateStrategy({ api, created, value, update }: {
   api: ApiAdapter
   created: (strategy: UserStrategy) => void
+  value: { name: string; intent: string }
+  update: (value: { name: string; intent: string }) => void
 }) {
-  const [name, setName] = useState('')
-  const [intent, setIntent] = useState('')
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  const { name, intent } = value
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -270,8 +297,7 @@ function CreateStrategy({ api, created }: {
         name: name.trim() || temporaryName(intent),
         intent: intent.trim(),
       })
-      setName('')
-      setIntent('')
+      update({ name: '', intent: '' })
       created(strategy)
     } catch (error) {
       setNote(explain(error))
@@ -285,12 +311,12 @@ function CreateStrategy({ api, created }: {
       <div className="field">
         <label htmlFor="strategy-intent">意图</label>
         <textarea id="strategy-intent" value={intent} maxLength={2000} required rows={2}
-          onChange={event => setIntent(event.target.value)} />
+          onChange={event => update({ name, intent: event.target.value })} />
       </div>
       <div className="field">
         <label htmlFor="strategy-name">策略名称</label>
         <input id="strategy-name" value={name} maxLength={120}
-          onChange={event => setName(event.target.value)} />
+          onChange={event => update({ name: event.target.value, intent })} />
         <small>{`可以留空；留空时用你自己的话作为临时名称：${temporaryName(intent)}`}</small>
       </div>
       <div className="create-actions">
@@ -755,13 +781,15 @@ function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
   // intent when there is not: an honest empty state rather than a hidden form.
   const [tab, setTab] = useState<TabKey>(hasRun ? 'evidence' : 'intent')
   const idBase = `detail-${strategy.user_strategy_id}`
-  return <section className="strategy-detail" aria-label="策略详情">
+  // The strategy and the conversation are two columns on a wide screen and two
+  // stacked blocks on a narrow one, where the jump links are the way between them.
+  // Both targets are focusable, so a fragment jump really moves the reader there.
+  return <section className="strategy-detail" id="strategy-detail" tabIndex={-1} aria-label="策略详情">
     <header className="strategy-title">
       <h2>{strategy.name}</h2>
       <span className="chip chip-draft">{revisionChip(strategy.draft)}</span>
-      <Link className="strategy-open" to={`/strategies/${encodeURIComponent(strategy.user_strategy_id)}`}>
-        打开策略
-      </Link>
+      <a className="jump-link jump-to-ai" href="#strategy-ai-column">跳到 AI 协作</a>
+      <Link className="strategy-open" to="/strategies">返回策略列表</Link>
     </header>
     <DraftFacts draft={strategy.draft} />
     {isIntentDraft(strategy.draft) && <BindScenario
@@ -812,8 +840,8 @@ function CallEvidence({ call }: { call: UserStrategyCall | undefined }) {
       </li>)}
     </ul>
     <p className="muted">
-      这是这次调用被记录下来的证据来源：所选运行的冻结修订与摘要。它说明这次解释依据的是什么，
-      不是新的权限，也不会被后来的运行改写。
+      这是这次调用被记录下来的证据来源：所选运行的冻结修订与摘要，不是新的权限，
+      也不会被后来的运行改写。
     </p>
   </details>
 }
@@ -822,6 +850,10 @@ function CallEvidence({ call }: { call: UserStrategyCall | undefined }) {
  * The AI conversation: approved calls, labelled inference, no implied authority.
  * The header names the strategy the conversation belongs to and switches between
  * the real strategies of this workspace.
+ *
+ * Only the history scrolls. The last call's own status, usage and unavailable cost
+ * and the composer stay outside the scroller, so the control the user acts on is
+ * never somewhere inside a list of past answers.
  */
 function ChatPanel({ api, strategy, strategies, changed }: {
   api: ApiAdapter
@@ -879,13 +911,21 @@ function ChatPanel({ api, strategy, strategies, changed }: {
         </select>
       </label>}
     </header>
-    {strategy.messages.length > 0 && <ol className="message-list">
-      {strategy.messages.map(item => <li key={item.message_id} className={`message message-${item.role}`}>
-        <p className="message-role">{item.role === 'model' ? 'QUINE' : '你'} <span className="muted">{item.at}</span></p>
-        <p>{item.text}</p>
-        {item.role === 'model' && <p className="muted">模型推断 — 不是正式证据。</p>}
-      </li>)}
-    </ol>}
+    {strategy.messages.length > 0 &&
+      // The history is the one bounded surface on this page: it scrolls on its
+      // own, by keyboard as well as by pointer, and every message stays in it.
+      <div className="message-scroll" role="group" aria-label="对话记录" tabIndex={0}>
+        <ol className="message-list">
+          {strategy.messages.map(item => <li key={item.message_id} className={`message message-${item.role}`}>
+            <p className="message-role">
+              {item.role === 'model' ? 'QUINE' : '你'}{' '}
+              <time className="muted" dateTime={item.at} title={item.at}>{utcClock(item.at)}</time>
+            </p>
+            <p>{item.text}</p>
+            {item.role === 'model' && <p className="muted">模型推断 — 不是正式证据。</p>}
+          </li>)}
+        </ol>
+      </div>}
     {latest && <div className="call-note">
       <p><span className={`status status-${latest.status}`}>{CALL_STATUS_LABELS[latest.status]}</span></p>
       <p className="muted">{usageLine(latest)}</p>
@@ -896,8 +936,8 @@ function ChatPanel({ api, strategy, strategies, changed }: {
       <CallEvidence call={latest} />
     </div>}
     {isIntentDraft(strategy.draft) && <p className="notice">
-      这条策略还没有绑定场景，因此这次对话只能澄清这个想法：模型不会提出任何字段修改，
-      也不会运行任何东西。绑定场景之后，它的建议才会变成可以应用的修改。
+      这条策略还没有绑定场景：这次对话只能澄清这个想法，模型不会提出任何字段修改，也不会运行任何东西。
+      绑定场景之后，它的建议才会变成可以应用的修改。
     </p>}
     {unresolved && <p className="notice">
       还有一次已记录的调用没有结论。在它落实之前不会再问下一次，因此不会覆盖任何东西。
@@ -915,8 +955,8 @@ function ChatPanel({ api, strategy, strategies, changed }: {
       </label>
       <div className="composer-actions">
         <p className="muted">{isIntentDraft(strategy.draft)
-          ? '一次批准只允许一次调用，而且这一次调用只用来澄清这个想法：它不会提出字段修改，也不会启动回测。'
-          : '一次批准只允许针对这个草稿修订的一次调用。模型可以解释，也可以提出一次有类型的修改，但它不运行任何东西，也不决定结果。'}</p>
+          ? '一次批准只允许一次调用，这一次调用只用来澄清这个想法：它不提出字段修改，也不启动回测。'
+          : '本次批准仅针对当前修订调用模型一次，解释或提出修改；不应用提案，也不运行回测。'}</p>
         <button type="button" className="primary" onClick={ask} disabled={busy || !message.trim()}>询问模型</button>
       </div>
       {note && <p role="alert" className="notice error">{note}</p>}
@@ -924,13 +964,20 @@ function ChatPanel({ api, strategy, strategies, changed }: {
   </section>
 }
 
-/** The AI column before anything is open: it explains what it will hold. */
-function EmptyChat() {
+/**
+ * The AI column before anything is open: it explains what it will hold. While a
+ * selected strategy is still being read it says that instead, so a read in flight
+ * is never shown as "nothing is selected", and a read that failed says so too.
+ */
+function EmptyChat({ note, live = false }: { note?: string; live?: boolean }) {
   return <section aria-label="AI 协作" className="strategy-panel strategy-chat strategy-chat-empty">
     <header className="chat-head"><h2>AI 协作</h2></header>
-    <p className="muted">AI 提出建议，证据做出判断。</p>
-    <p>先创建或选择一条策略。这里会显示该策略自己的对话、模型针对它提出的有类型修改，以及每次修改的应用记录。</p>
-    <p className="muted">保存只写下这个想法：不选择场景，不调用模型，也不启动回测。整个对话始终属于当前打开的那一条策略。</p>
+    {note
+      ? <p className="muted" role={live ? 'status' : undefined} aria-live={live ? 'polite' : undefined}>{note}</p>
+      : <>
+          <p className="muted">AI 提出建议，证据做出判断。</p>
+          <p>先创建或选择一条策略：这里会显示它自己的对话、模型针对它提出的有类型修改，以及每次修改的应用记录。整个对话始终属于当前打开的那一条策略。</p>
+        </>}
   </section>
 }
 
@@ -1069,8 +1116,8 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
       <h2>建议修改</h2>
       <span className={`chip chip-${proposal.status}`}>{PROPOSAL_STATUS_LABELS[proposal.status]}</span>
     </header>
-    <p className="muted">
-      {`针对草稿修订 ${proposal.base_revision} · 提案 ${proposal.proposal_id} · 由模型提出，等待你决定`}
+    <p className="muted proposal-origin">
+      {`针对草稿修订 ${proposal.base_revision} · 提案 ${proposal.proposal_id} · ${PROPOSAL_ORIGIN[proposal.status]}`}
     </p>
     <CallEvidence call={strategy.calls.find(item => item.call_id === proposal.call_id)} />
     {stale && <p className="notice error">
@@ -1273,7 +1320,7 @@ function StrategyTable({ strategies, selectedId }: { strategies: UserStrategy[];
                 <td data-label="运行">{!latest
                   ? <span className="table-muted">{unbound ? '不可运行' : '未启动'}</span>
                   : latest.status === 'created' && latest.job_id
-                    ? <Link to={`/backtests/${encodeURIComponent(latest.job_id)}`}>运行已启动</Link>
+                    ? <Link to={`/backtests/${encodeURIComponent(latest.job_id)}`}>{EXPERIMENT_STATUS_LABELS.created}</Link>
                     : <span className="table-muted">{EXPERIMENT_STATUS_LABELS[latest.status]}</span>}</td>
               </tr>
             })}
@@ -1290,8 +1337,16 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   const [strategies, setStrategies] = useState<UserStrategy[]>([])
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([])
   const [detail, setDetail] = useState<{ id: string; value: UserStrategy } | null>(null)
+  // The list read is a state of its own: until it answers, an empty array is not an
+  // empty workspace, and the count, the empty claim and the create form wait for it.
+  // It is kept with the adapter it was read from, so "still reading" is derived
+  // rather than written when the effect starts, and neither another adapter's answer
+  // nor a late one from an adapter this workspace has left is read as this one's.
+  const [listRead, setListRead] = useState<{ api: ApiAdapter; ok: boolean; note: string } | null>(null)
   const [creating, setCreating] = useState(false)
-  const [listNote, setListNote] = useState('')
+  // The half-written idea is kept above the form, so leaving the collection route
+  // and coming back does not throw away what the user had typed.
+  const [createDraft, setCreateDraft] = useState({ name: '', intent: '' })
   const [detailNote, setDetailNote] = useState<{ id: string; text: string } | null>(null)
   // Every refusal is kept under the strategy it was made on. A note is written and
   // read for one strategy only, so a late answer for a strategy that is no longer
@@ -1306,17 +1361,17 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
         // The optional method is settled asynchronously, so a workspace that
         // unmounts or swaps its api never writes this note from a stale load.
         await Promise.resolve()
-        if (active) setListNote('这个工作区不提供用户策略。')
+        if (active) setListRead({ api, ok: false, note: '这个工作区不提供用户策略。' })
         return
       }
       try {
         const items = await list()
         if (active) {
           setStrategies(items)
-          setListNote('')
+          setListRead({ api, ok: true, note: '' })
         }
       } catch (error) {
-        if (active) setListNote(explain(error))
+        if (active) setListRead({ api, ok: false, note: explain(error) })
       }
     }
     void load()
@@ -1330,9 +1385,17 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   }, [api])
 
   useEffect(() => {
+    if (!userStrategyId) return
     const read = api.getUserStrategy
-    if (!userStrategyId || !read) return
     let active = true
+    if (!read) {
+      // Settled asynchronously for the same reason as the list above: this note is
+      // never written by a read the workspace has already left.
+      void Promise.resolve().then(() => {
+        if (active) setDetailNote({ id: userStrategyId, text: '这个工作区不提供读取单条策略。' })
+      })
+      return () => { active = false }
+    }
     read(userStrategyId)
       .then(value => { if (active) { setDetail({ id: value.user_strategy_id, value }); setDetailNote(null) } })
       // The failure names the strategy it was read for, so it is not shown over
@@ -1346,6 +1409,12 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   // a slow answer or a stale callback cannot put another object's editable draft,
   // preview or approval under this route.
   const current = detail && detail.id === userStrategyId ? detail.value : null
+
+  // Loading, ready and failed, read from the adapter this list state belongs to.
+  const listSettled = listRead && listRead.api === api ? listRead : null
+  const listState: 'reading' | 'ready' | 'failed' =
+    !listSettled ? 'reading' : listSettled.ok ? 'ready' : 'failed'
+  const listNote = listSettled?.note ?? ''
 
   /** Write (or clear) the refusal of exactly one strategy, and of no other. */
   const note = (id: string, message: string) => setNotes(currentNotes => {
@@ -1387,18 +1456,30 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
     : null
 
   // The create flow is a disclosure, open by itself only while this workspace has
-  // nothing to select at all — or when the header action was followed from an open
-  // strategy, which opens the form here in that one click.
+  // nothing to select at all — or when the header action was followed from a
+  // selected strategy's own route, which opens the form here in that one click. It
+  // is offered on the collection route only: a strategy that is open is not a place
+  // to create another one above it.
   const wantsCreate = (location.state as { createStrategy?: boolean } | null)?.createStrategy === true
-  const showCreate = creating || wantsCreate || (current === null && strategies.length === 0 && !userStrategyId)
+  const showCreate = !userStrategyId
+    && (creating || wantsCreate || (listState === 'ready' && strategies.length === 0))
   const actionNote = current ? notes[current.user_strategy_id] ?? '' : ''
+  // A selected strategy that has neither answered nor failed is still being read;
+  // that is a state to say out loud, not an empty selection and not an empty page.
+  const detailFailed = Boolean(userStrategyId) && detailNote?.id === userStrategyId
+  const detailReading = Boolean(userStrategyId) && current === null && !detailFailed
 
   return <div className="strategy-workspace">
     <div className="strategy-column">
       <header className="strategy-heading">
         <h1>策略</h1>
-        <span className="strategy-count">{`${strategies.length} 个策略`}</span>
-        {current
+        {listState === 'ready' && <span className="strategy-count">{`${strategies.length} 个策略`}</span>}
+        {/* The control follows the routed id, not what has been read: a selected
+            strategy whose read is still in flight or has failed is still a selected
+            route, where the form is not offered. There the one click goes to the
+            collection route and opens the form, rather than toggling a disclosure
+            that this route can never show. */}
+        {userStrategyId
           ? <Link className="create-cta" to="/strategies" state={{ createStrategy: true }}>
               <span aria-hidden="true">+</span>新建策略
             </Link>
@@ -1413,11 +1494,14 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
             </button>}
       </header>
       <p className="strategy-subtitle">每个想法一份草稿。在你确认之前，这里不会运行任何东西。</p>
-      <StrategyTable strategies={strategies} selectedId={userStrategyId} />
+      {listState === 'reading'
+        ? <p className="muted" role="status" aria-live="polite">正在读取策略…</p>
+        : listState === 'ready' && <StrategyTable strategies={strategies} selectedId={userStrategyId} />}
       {listNote && <p role="alert" className="notice error">{listNote}</p>}
-      {showCreate && <CreateStrategy api={api} created={created} />}
+      {showCreate && <CreateStrategy api={api} created={created} value={createDraft} update={setCreateDraft} />}
       {detailNote && detailNote.id === userStrategyId &&
         <p role="alert" className="notice error">{detailNote.text}</p>}
+      {detailReading && <p className="muted" role="status" aria-live="polite">正在读取策略…</p>}
       {current && <>
         {actionNote && <p role="alert" className="notice error">{actionNote}</p>}
         <StrategyDetail
@@ -1426,12 +1510,17 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
           failed={failedFor(current.user_strategy_id)} />
       </>}
     </div>
-    <aside className="strategy-ai">
+    <aside className="strategy-ai" id="strategy-ai-column" tabIndex={-1}>
+      {current && <a className="jump-link jump-to-details" href="#strategy-detail">返回策略详情</a>}
       {current
         ? <ChatPanel
             key={`${current.user_strategy_id}-${current.draft.revision}`}
             api={api} strategy={current} strategies={strategies} changed={changed} />
-        : <EmptyChat />}
+        : detailReading
+          ? <EmptyChat note="正在读取这条策略的对话…" live />
+          : detailFailed
+            ? <EmptyChat note="这条策略没有被读到，因此这里没有对话。" />
+            : <EmptyChat />}
       {current && proposal && <ProposalPanel
         key={`${current.user_strategy_id}-${proposal.proposal_id}-${proposal.base_revision}-${proposal.status}`}
         api={api} strategy={current} proposal={proposal}

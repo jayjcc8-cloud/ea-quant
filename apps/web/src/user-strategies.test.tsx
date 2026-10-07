@@ -228,6 +228,8 @@ const launched: {
 
 type Script = {
   strategies?: UserStrategy[]
+  /** The list read, when a test needs to hold it open rather than answer at once. */
+  list?: () => Promise<UserStrategy[]>
   current?: () => UserStrategy
   read?: (id: string) => Promise<UserStrategy>
   create?: (input: { name: string; intent: string }) => UserStrategy
@@ -264,7 +266,10 @@ function scripted(script: Script = {}) {
     getReport: async () => { throw new Error('unused') },
     getEquityPath: async () => { throw new Error('unused') },
     artifactUrl: (jobId, name) => `/api/backtests/${jobId}/artifacts/${name}`,
-    listUserStrategies: async () => { calls.list += 1; return script.strategies ?? [] },
+    listUserStrategies: async () => {
+      calls.list += 1
+      return script.list ? script.list() : script.strategies ?? []
+    },
     createUserStrategy: async (input) => {
       calls.create += 1
       created.push({ name: input.name, intent: input.intent, scenario_id: input.scenario_id })
@@ -598,7 +603,7 @@ describe('user strategy workspace', () => {
     expect(within(chat).getByText('模型推断 — 不是正式证据。')).toBeTruthy()
     expect(within(chat).getByText('输入 11 tokens · 输出 7 tokens')).toBeTruthy()
     // Approval is one call, not a price: nothing here is written as money.
-    expect(within(chat).getByText(/一次批准只允许针对这个草稿修订的一次调用/)).toBeTruthy()
+    expect(within(chat).getByText(/本次批准仅针对当前修订调用模型一次/)).toBeTruthy()
     expect(chat.textContent).not.toMatch(/\$\s?\d/)
     expect(screen.queryByRole('region', { name: '建议修改' })).toBeNull()
   })
@@ -983,5 +988,215 @@ describe('user strategy workspace', () => {
     expect(await within(panel).findByText(/报告的身份与该运行的 engine run id 不一致/)).toBeTruthy()
     expect(panel.textContent).not.toMatch(/期末权益/)
     expect(panel.textContent).not.toMatch(/100 USD/)
+  })
+
+  it('creates only on the collection route, and keeps the idea that was typed', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted({ strategies: [strategy()] })
+    window.history.pushState({}, '', '/strategies')
+    render(<App api={api} />)
+
+    // A workspace with something to select opens no form.
+    expect(await screen.findByRole('link', { name: 'Bold entry' })).toBeTruthy()
+    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: '新建策略' }))
+    const form = await screen.findByRole('region', { name: '新建策略' })
+    await user.type(within(form).getByLabelText('意图'), 'A quieter entry')
+
+    // Opening a strategy is not a reason to keep the creation form over it.
+    await user.click(screen.getByRole('link', { name: 'Bold entry' }))
+    expect(await screen.findByRole('heading', { name: 'Bold entry' })).toBeTruthy()
+    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+    expect(calls.create).toBe(0)
+
+    // Coming back to the list offers the same half-written idea again.
+    await user.click(screen.getByRole('link', { name: '返回策略列表' }))
+    const back = await screen.findByRole('region', { name: '新建策略' })
+    expect((within(back).getByLabelText('意图') as HTMLTextAreaElement).value).toBe('A quieter entry')
+    expect(calls.create).toBe(0)
+  })
+
+  it('reads before it can claim an empty workspace or an unselected strategy', async () => {
+    const user = userEvent.setup()
+    const listed = deferred<UserStrategy[]>()
+    const read = deferred<UserStrategy>()
+    const { api } = scripted({ list: () => listed.promise, read: () => read.promise })
+    window.history.pushState({}, '', '/strategies')
+    render(<App api={api} />)
+
+    // Nothing has been read, so there is no count, no empty claim and no form.
+    expect((await screen.findByText('正在读取策略…')).getAttribute('role')).toBe('status')
+    expect(screen.queryByText('还没有策略。')).toBeNull()
+    expect(screen.queryByText('0 个策略')).toBeNull()
+    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+
+    listed.resolve([strategy()])
+    expect(await screen.findByRole('link', { name: 'Bold entry' })).toBeTruthy()
+    expect(screen.getByText('1 个策略')).toBeTruthy()
+
+    await user.click(screen.getByRole('link', { name: 'Bold entry' }))
+    // The selected strategy has not answered yet: the AI column says that rather
+    // than asking for a strategy that is already selected.
+    expect(await screen.findByText('正在读取这条策略的对话…')).toBeTruthy()
+    expect(screen.queryByText(/先创建或选择一条策略/)).toBeNull()
+
+    read.resolve(strategy())
+    expect(await screen.findByRole('region', { name: '草稿' })).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: 'AI 协作' })).getByLabelText('消息')).toBeTruthy()
+  })
+
+  it('keeps a failed read a failure rather than an empty or unselected page', async () => {
+    const user = userEvent.setup()
+    const refused = scripted({
+      list: () => Promise.reject(new UserStrategyRequestError('request_failed', 'the service refused the list')),
+    })
+    window.history.pushState({}, '', '/strategies')
+    render(<App api={refused.api} />)
+
+    const listFailure = await screen.findByRole('alert')
+    expect(listFailure.textContent).toContain('the service refused the list')
+    expect(screen.queryByText('还没有策略。')).toBeNull()
+    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+
+    cleanup()
+    const missing = scripted({
+      list: () => Promise.resolve([]),
+      read: () => Promise.reject(new UserStrategyRequestError('user_strategy_not_found', 'no such strategy here')),
+    })
+    detail(missing.api, 'us-9')
+
+    const detailFailure = await screen.findByRole('alert')
+    expect(detailFailure.textContent).toContain('no such strategy here')
+    expect(await screen.findByText('这条策略没有被读到，因此这里没有对话。')).toBeTruthy()
+    expect(screen.queryByText(/先创建或选择一条策略/)).toBeNull()
+
+    // A selected route whose strategy could not be read is not a dead end: its
+    // header offers creation as a way to the collection route, where the form is,
+    // and following it really opens that form.
+    expect(screen.getByRole('link', { name: '新建策略' }).getAttribute('href')).toBe('/strategies')
+    await user.click(screen.getByRole('link', { name: '新建策略' }))
+    expect(await screen.findByRole('region', { name: '新建策略' })).toBeTruthy()
+  })
+
+  it('scrolls the history on its own and keeps the composer, approval and last call outside it', async () => {
+    const { api } = scripted({
+      current: () => strategy({
+        // A cost the workspace could not price stays an unavailable cost, said out
+        // loud rather than quietly read as zero.
+        calls: [{ ...unconfigured, cost: { amount: null, available: false, reason: '这个工作区没有价格来源' } }],
+        messages: [
+          { message_id: 'msg-1', role: 'user', kind: 'message', text: 'What does my draft do?', base_revision: 1, at: '2026-10-06T10:01:00.000000Z', call_id: 'call-1', proposal_id: null },
+          { message_id: 'msg-2', role: 'model', kind: 'message', text: 'A first answer that ran long. '.repeat(20), base_revision: 1, at: '2026-10-06T10:02:00.000000Z', call_id: 'call-1', proposal_id: null },
+          { message_id: 'msg-3', role: 'user', kind: 'message', text: 'And the fees?', base_revision: 1, at: '2026-10-06T10:03:00.000000Z', call_id: 'call-1', proposal_id: null },
+          { message_id: 'msg-4', role: 'model', kind: 'message', text: 'The scenario declares its own commission.', base_revision: 1, at: '2026-10-06T10:04:00.000000Z', call_id: 'call-1', proposal_id: null },
+        ],
+      }),
+    })
+    detail(api)
+    // The real conversation, not the placeholder the AI column shows while the
+    // strategy is still being read: the column is ready when its composer is.
+    await screen.findByLabelText('消息')
+    const chat = screen.getByRole('region', { name: 'AI 协作' })
+
+    // Every message is still here, inside one named, keyboard-scrollable region.
+    const history = within(chat).getByRole('group', { name: '对话记录' })
+    expect(within(history).getAllByRole('listitem')).toHaveLength(4)
+    expect(history.getAttribute('tabindex')).toBe('0')
+
+    const outside = [
+      within(chat).getByLabelText('消息'),
+      within(chat).getByLabelText('批准一次模型调用'),
+      within(chat).getByRole('button', { name: '询问模型' }),
+      within(chat).getByText('未配置'),
+      within(chat).getByText('这次调用没有上报 token 用量，因此不会按零计费'),
+      within(chat).getByText('成本不可用：这个工作区没有价格来源。'),
+    ]
+    for (const control of outside) expect(history.contains(control)).toBe(false)
+
+    // The recorded instant stays readable, and its exact value stays available.
+    const stamp = within(history).getByText('10:01 UTC')
+    expect(stamp.tagName).toBe('TIME')
+    expect(stamp.getAttribute('title')).toBe('2026-10-06T10:01:00.000000Z')
+    expect(stamp.getAttribute('datetime')).toBe('2026-10-06T10:01:00.000000Z')
+  })
+
+  it('asks for a decision only while a proposal is still open', async () => {
+    const open = scripted({ current: () => strategy({ proposals: [proposal()] }) })
+    detail(open.api)
+    const openPanel = await screen.findByRole('region', { name: '建议修改' })
+    expect(openPanel.textContent).toMatch(/针对草稿修订 1 · 提案 prop-1 · 由模型提出，等待你决定/)
+
+    cleanup()
+    const applied = scripted({
+      current: () => strategy({
+        proposals: [proposal({ status: 'applied', applied_paths: ['parameters.target_quantity'] })],
+      }),
+    })
+    detail(applied.api)
+    const closedPanel = await screen.findByRole('region', { name: '建议修改' })
+
+    // The status, the provenance, the fields and the decisions stay; only the
+    // waiting for a decision that is already made is gone.
+    expect(closedPanel.textContent).toMatch(/由模型提出，已应用/)
+    expect(closedPanel.textContent).not.toMatch(/等待你决定/)
+    expect(within(closedPanel).getByLabelText('parameters.target_quantity')).toBeTruthy()
+    expect(closedPanel.textContent).toMatch(/应用会用整份已校验的草稿写出一个新修订/)
+    expect((within(closedPanel).getByRole('button', { name: '应用所选' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(closedPanel).getByRole('button', { name: '拒绝建议' }) as HTMLButtonElement).disabled).toBe(true)
+
+    cleanup()
+    const rejected = scripted({ current: () => strategy({ proposals: [proposal({ status: 'rejected' })] }) })
+    detail(rejected.api)
+    const rejectedPanel = await screen.findByRole('region', { name: '建议修改' })
+    expect(rejectedPanel.textContent).toMatch(/由模型提出，已拒绝/)
+    expect(rejectedPanel.textContent).not.toMatch(/等待你决定/)
+  })
+
+  it('names a created experiment as created, not as a run that is still starting', async () => {
+    const user = userEvent.setup()
+    const frozen = strategy({
+      experiments: [{
+        launch_intent_id: 'li-1', request_id: 'request-1', payload_sha256: 'f'.repeat(64),
+        payload: { draft_revision: 1, scenario_id: 'bounded-long.yaml', parameters: { target_quantity: '2', entry_delay_bars: 0 } },
+        task_id: 'task-1', job_id: 'job-1', status: 'created', created_at: '2026-10-06T10:02:00.000000Z',
+      }],
+    })
+    const { api } = scripted({ strategies: [frozen], current: () => frozen })
+    detail(api)
+
+    const table = within(await screen.findByRole('navigation', { name: '策略列表' }))
+    expect(table.getByRole('link', { name: '运行已创建' }).getAttribute('href')).toBe('/backtests/job-1')
+    expect(table.queryByText('运行已启动')).toBeNull()
+
+    const intent = await openSection(user, '意图')
+    expect(within(intent).getByText('修订 1 · 运行已创建')).toBeTruthy()
+  })
+
+  it('returns to the list, and offers a keyboard path between the strategy and its conversation', async () => {
+    const { api } = scripted({ strategies: [strategy()] })
+    detail(api)
+    await screen.findByRole('heading', { name: 'Bold entry' })
+
+    // The detail no longer links to the page it is already on.
+    expect(screen.queryByRole('link', { name: '打开策略' })).toBeNull()
+    expect(screen.getByRole('link', { name: '返回策略列表' }).getAttribute('href')).toBe('/strategies')
+
+    // Both jumps are real anchors to real, focusable targets. They are read as
+    // text rather than by role because the stacked layout, not this test, decides
+    // whether they are on screen.
+    const toAi = screen.getByText('跳到 AI 协作')
+    expect(toAi.tagName).toBe('A')
+    expect(toAi.getAttribute('href')).toBe('#strategy-ai-column')
+    const column = document.getElementById('strategy-ai-column')!
+    expect(column.getAttribute('tabindex')).toBe('-1')
+    expect(column.contains(screen.getByRole('region', { name: 'AI 协作' }))).toBe(true)
+
+    const toDetails = screen.getByText('返回策略详情')
+    expect(toDetails.tagName).toBe('A')
+    expect(toDetails.getAttribute('href')).toBe('#strategy-detail')
+    const strategyDetail = document.getElementById('strategy-detail')!
+    expect(strategyDetail.getAttribute('tabindex')).toBe('-1')
+    expect(strategyDetail.contains(screen.getByRole('heading', { name: 'Bold entry' }))).toBe(true)
   })
 })

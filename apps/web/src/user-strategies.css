@@ -121,6 +121,21 @@ table.strategy-table {
 }
 .strategy-workspace input[type="checkbox"] { width: auto; min-height: 0; }
 
+/* The way between the strategy and its conversation. The links belong to the
+   stacked single-column layout, where the two blocks are no longer side by side;
+   they are hidden here and shown by the media query below. Both targets are
+   focusable, so following one really moves the reader and the keyboard.
+   A long id, path or digest wraps inside its own line instead of widening the page. */
+.strategy-workspace .jump-link { display: none; }
+.strategy-detail:focus-visible, .strategy-ai:focus-visible { outline: 2px solid var(--q-red); outline-offset: 2px; }
+.strategy-workspace .strategy-name,
+.strategy-workspace .strategy-instrument,
+.strategy-workspace .summary-list dd,
+.strategy-workspace .path-list li,
+.strategy-workspace .proposal-origin,
+.strategy-workspace .proposal-path,
+.strategy-workspace .draft-facts dd { overflow-wrap: anywhere; }
+
 /* The selected strategy: its own card, its facts, its sections */
 .strategy-detail { border: 1px solid var(--q-line); border-radius: 10px; background: var(--q-surface); overflow: hidden; }
 .strategy-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 16px 12px; }
@@ -217,8 +232,10 @@ table.strategy-table {
 .strategy-workspace .revise { margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--q-line); border-radius: 8px; }
 .strategy-workspace .revise button { margin-top: 4px; }
 
-/* The AI column: the conversation of the strategy that is open, and its change */
-.strategy-ai { position: sticky; top: 20px; display: grid; gap: 14px; min-width: 0; align-content: start; }
+/* The AI column: the conversation of the strategy that is open, and its change.
+   It is not pinned: a sticky column taller than the viewport would hold its own
+   composer and proposal below the fold, out of reach while the page scrolls. */
+.strategy-ai { display: grid; gap: 14px; min-width: 0; align-content: start; }
 .strategy-chat { border: 1px solid var(--q-line); border-radius: 10px; background: var(--q-surface); }
 .strategy-workspace .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .strategy-workspace .chat-head h2 { margin: 0; font-size: 16px; font-weight: 650; }
@@ -226,7 +243,13 @@ table.strategy-table {
 .strategy-workspace .composer { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--q-line-soft); }
 .strategy-workspace .composer-actions { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .strategy-workspace .composer-actions .muted { margin: 0; max-width: 22rem; }
-.strategy-workspace .message-list { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
+/* The conversation history is the one bounded surface. It scrolls on its own, by
+   keyboard as well as by pointer, and everything the user acts on — the last
+   call's own status, usage and unavailable cost, the approval and the composer —
+   is kept outside it. */
+.strategy-workspace .message-scroll { margin-top: 12px; max-height: min(24vh, 220px); overflow-y: auto; padding: 2px; }
+.strategy-workspace .message-scroll:focus-visible { outline: 2px solid var(--q-red); outline-offset: -2px; }
+.strategy-workspace .message-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
 .strategy-workspace .message { padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
 .strategy-workspace .message p { margin: 3px 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .strategy-workspace .message-role { color: var(--q-ink-soft); font-size: 12px; font-weight: 650; }
@@ -241,10 +264,16 @@ table.strategy-table {
 .strategy-workspace .notice { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--q-field-line); border-radius: 8px; background: var(--q-surface-soft); font-size: 13px; }
 .strategy-workspace .notice.error { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
 
-/* Narrower columns: the table keeps its density until the phone layout. */
+/* Narrower columns: the table keeps its density until the phone layout. Below the
+   two-column width the strategy and its conversation are stacked, so the jump
+   links appear — plain text links, not another control competing with the page. */
 @media (max-width: 1239px) {
   .strategy-workspace { grid-template-columns: minmax(0, 1fr); }
-  .strategy-ai { position: static; }
+  .strategy-workspace .jump-link {
+    display: inline-flex; align-items: center; min-height: 32px; color: var(--q-ink-soft);
+    font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px;
+  }
+  .strategy-workspace .jump-link:hover { color: var(--q-red); }
 }
 
 @media (max-width: 640px) {
@@ -264,8 +293,17 @@ table.strategy-table {
   .strategy-workspace .detail-tabs { flex-wrap: wrap; }
   .strategy-workspace .detail-tabs [role="tab"] { min-height: 44px; }
   .strategy-workspace button, .strategy-workspace .button-link, .strategy-workspace .create-cta { min-height: 44px; }
+  .strategy-workspace .jump-link { min-height: 44px; }
   .strategy-workspace select, .strategy-workspace input, .strategy-workspace textarea { min-height: 44px; }
   .strategy-workspace .summary-list { grid-template-columns: minmax(0, 1fr); }
   .strategy-workspace .preview-facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .strategy-tabpanel { padding: 0; }
+}
+
+/* Compact density keeps its own, never-larger bound on the history at desktop
+   widths; below 768px the phone layout owns the spacing, as it does everywhere
+   else. The composer, the approval and the last call's status, usage and
+   unavailable cost stay outside the scroller at every width. */
+@media (min-width: 768px) {
+  :root[data-density="compact"] .strategy-workspace .message-scroll { max-height: min(22vh, 200px); }
 }
