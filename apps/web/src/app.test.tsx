@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type InputSnapshot } from './app'
 import type { Candidate } from './candidates'
+import type { UserStrategy, UserStrategyDraft, UserStrategyExperiment } from './user-strategies-api'
 
 it('shows local simulation preparation blockers without authorizing a start', async () => {
   window.history.pushState({}, '', '/candidates/candidate-1')
@@ -975,5 +976,260 @@ describe('QUINE shell navigation', () => {
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={adapter()} />)
     expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+  })
+})
+
+/** One draft of a fixed strategy fixture, at the revision named. */
+function strategyDraft(revision: number): UserStrategyDraft {
+  return {
+    revision, strategy_id: 'bounded-long-v1', venue: 'XNAS', symbol: 'AAPL',
+    scenario_id: 'bounded-long.yaml', dataset_id: null, source_sha256: null,
+    initial_cash: '10000', parameters: { target_quantity: '2', entry_delay_bars: 0 }, criterion: null,
+  }
+}
+
+/** One frozen experiment record: the job it froze, and the revision it ran. */
+function frozenExperiment(jobId: string, revision: number, at: string, launchIntentId = `li-${jobId}`): UserStrategyExperiment {
+  return {
+    launch_intent_id: launchIntentId, request_id: `request-${launchIntentId}`, payload_sha256: 'f'.repeat(64),
+    // The immutable request the launch froze: the revision it ran, never today's.
+    payload: {
+      draft_revision: revision, scenario_id: 'bounded-long.yaml',
+      parameters: { target_quantity: '2', entry_delay_bars: 0 },
+    },
+    task_id: `task-${launchIntentId}`, job_id: jobId, status: 'created', created_at: at,
+  }
+}
+
+/**
+ * Two fixed strategy fixtures of one workspace, on the same registered engine
+ * strategy. Only the first froze job-1, and both drafts have moved past the
+ * revision their run was frozen on.
+ */
+const ownerStrategy: UserStrategy = {
+  schema: 'ea.user-strategy.v1', user_strategy_id: 'us-1',
+  created_at: '2026-10-06T10:00:00.000000Z', updated_at: '2026-10-06T11:00:00.000000Z',
+  name: 'Bold entry', intent: 'Test one registered entry on the fixture data',
+  draft: strategyDraft(5), history: [strategyDraft(2)], messages: [], calls: [], proposals: [], changes: [],
+  experiments: [frozenExperiment('job-1', 2, '2026-10-06T10:30:00.000000Z')],
+}
+const otherStrategy: UserStrategy = {
+  ...ownerStrategy, user_strategy_id: 'us-2', name: 'Quiet exit', draft: strategyDraft(8), history: [],
+  experiments: [frozenExperiment('job-2', 7, '2026-10-06T10:40:00.000000Z')],
+}
+
+/** The formal report of job-1, opened directly at its own route. */
+function reportPage(api: ApiAdapter) {
+  window.history.pushState({}, '', '/backtests/job-1')
+  render(<App api={api} />)
+}
+
+/** The association panel of the loaded report page. */
+async function associationPanel() {
+  expect(await screen.findByRole('heading', { name: 'Backtest Result' })).toBeTruthy()
+  return screen.findByRole('region', { name: '策略关联' })
+}
+
+describe('report to strategy return', () => {
+  it('returns an opened formal report to the persisted strategy whose frozen run it is', async () => {
+    const user = userEvent.setup()
+    // Every strategy write is a refusal here: following the report back to its
+    // strategy is navigation, and nothing else may happen on the way.
+    const writes: string[] = []
+    const refuse = (name: string) => async (): Promise<never> => {
+      writes.push(name)
+      throw new Error(`${name} is not a navigation action`)
+    }
+
+    reportPage(adapter({
+      listUserStrategies: async () => [ownerStrategy, otherStrategy],
+      getUserStrategy: async (userStrategyId) => (userStrategyId === 'us-2' ? otherStrategy : ownerStrategy),
+      createUserStrategy: refuse('createUserStrategy'),
+      sendUserStrategyMessage: refuse('sendUserStrategyMessage'),
+      applyUserStrategyProposal: refuse('applyUserStrategyProposal'),
+      rejectUserStrategyProposal: refuse('rejectUserStrategyProposal'),
+      reviseUserStrategyProposal: refuse('reviseUserStrategyProposal'),
+      undoUserStrategyChange: refuse('undoUserStrategyChange'),
+      previewUserStrategyExperiment: refuse('previewUserStrategyExperiment'),
+      launchUserStrategyExperiment: refuse('launchUserStrategyExperiment'),
+    }))
+
+    // The formal report stays the page, and stays readable beside the association.
+    expect(await screen.findByRole('heading', { name: 'Backtest Result' })).toBeTruthy()
+    expect(await screen.findByText('10017 USD')).toBeTruthy()
+
+    // The association names exactly the strategy that froze this job, on the very
+    // revision that run froze — not the newer draft and not the other strategy.
+    const association = await screen.findByRole('region', { name: '策略关联' })
+    expect(within(association).getByText('Bold entry')).toBeTruthy()
+    expect(within(association).getByText('冻结 v2')).toBeTruthy()
+    expect(within(association).queryByText('冻结 v5')).toBeNull()
+    expect(within(association).queryByText('Quiet exit')).toBeNull()
+    const back = within(association).getByRole('link', { name: '返回此策略继续研究' })
+    expect(back.getAttribute('href')).toBe('/strategies/us-1')
+
+    await user.click(back)
+    await waitFor(() => expect(window.location.pathname).toBe('/strategies/us-1'))
+    const detail = await screen.findByRole('region', { name: '策略详情' })
+    expect(within(detail).getByRole('heading', { name: 'Bold entry' })).toBeTruthy()
+    // The draft has moved on to revision 5; the frozen revision was read from the
+    // record and not from the current draft.
+    expect(within(detail).getByText('v5 草稿')).toBeTruthy()
+    expect(within(detail).queryByRole('heading', { name: 'Quiet exit' })).toBeNull()
+
+    // Nothing was messaged, proposed, applied, undone, previewed or launched.
+    expect(writes).toEqual([])
+  })
+
+  it('says no persisted strategy froze this run and offers the strategy list instead', async () => {
+    reportPage(adapter({ listUserStrategies: async () => [otherStrategy] }))
+
+    const association = await associationPanel()
+    expect(within(association).getByText('没有已保存的用户策略冻结了这个运行。')).toBeTruthy()
+    expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+    expect(within(association).getByRole('link', { name: '打开策略列表' }).getAttribute('href')).toBe('/strategies')
+    // The formal report never depends on this read.
+    expect(await screen.findByText('10017 USD')).toBeTruthy()
+  })
+
+  it('names a workspace without saved strategies, and recovers a refused association read on Refresh', async () => {
+    const user = userEvent.setup()
+    reportPage(adapter())
+    const unavailable = await associationPanel()
+    expect(within(unavailable).getByText('这个工作区不提供已保存的用户策略。')).toBeTruthy()
+    expect(within(unavailable).getByRole('link', { name: '打开策略列表' }).getAttribute('href')).toBe('/strategies')
+
+    cleanup()
+    let reads = 0
+    reportPage(adapter({
+      listUserStrategies: async () => {
+        reads += 1
+        if (reads === 1) throw new Error('strategy list is unavailable')
+        return [ownerStrategy, otherStrategy]
+      },
+    }))
+    const failed = await associationPanel()
+    expect(await within(failed).findByText(/strategy list is unavailable · 这次关联读取失败了，正式报告不受影响。/)).toBeTruthy()
+    expect(await screen.findByText('10017 USD')).toBeTruthy()
+
+    // The explicit Refresh re-reads the association, and only it. The refreshed
+    // panel is its own element: the failed one is replaced, not written over.
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    const recovered = await screen.findByRole('region', { name: '策略关联' })
+    expect(await within(recovered).findByText('Bold entry')).toBeTruthy()
+    expect(within(recovered).getByText('冻结 v2')).toBeTruthy()
+    expect(within(recovered).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1')
+  })
+
+  it('refuses to choose between two frozen records of one strategy', async () => {
+    const doubled: UserStrategy = {
+      ...ownerStrategy,
+      experiments: [
+        frozenExperiment('job-1', 2, '2026-10-06T10:30:00.000000Z', 'li-a'),
+        frozenExperiment('job-1', 2, '2026-10-06T10:31:00.000000Z', 'li-b'),
+      ],
+    }
+    reportPage(adapter({ listUserStrategies: async () => [doubled] }))
+
+    const association = await associationPanel()
+    expect(within(association).getByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
+    expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+    // One distinct strategy is listed, named with its own id and no revision.
+    const candidates = within(association).getAllByRole('link')
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0].textContent).toBe('Bold entry · us-1')
+    expect(candidates[0].getAttribute('href')).toBe('/strategies/us-1')
+    expect(within(association).queryByText(/冻结 v/)).toBeNull()
+  })
+
+  it('picks no revision when duplicated records disagree about the frozen revision', async () => {
+    const disagreeing: UserStrategy = {
+      ...ownerStrategy,
+      experiments: [
+        frozenExperiment('job-1', 2, '2026-10-06T10:30:00.000000Z', 'li-a'),
+        frozenExperiment('job-1', 3, '2026-10-06T10:31:00.000000Z', 'li-b'),
+      ],
+    }
+    reportPage(adapter({ listUserStrategies: async () => [disagreeing] }))
+
+    const association = await associationPanel()
+    expect(within(association).getByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
+    expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+    // The conflict is stated, and neither record's revision is presented as the
+    // frozen one: the label names the strategy and its id only.
+    expect(within(association).getByRole('link', { name: 'Bold entry · us-1' }).getAttribute('href')).toBe('/strategies/us-1')
+    expect(within(association).queryByText(/冻结 v2/)).toBeNull()
+    expect(within(association).queryByText(/冻结 v3/)).toBeNull()
+  })
+
+  it('lists both persisted strategies when two of them froze the same run', async () => {
+    const twin: UserStrategy = {
+      ...otherStrategy,
+      experiments: [frozenExperiment('job-1', 3, '2026-10-06T10:41:00.000000Z')],
+    }
+    reportPage(adapter({ listUserStrategies: async () => [ownerStrategy, twin] }))
+
+    const association = await associationPanel()
+    expect(within(association).getByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
+    expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+    expect(within(association).getByRole('link', { name: 'Bold entry · us-1' }).getAttribute('href')).toBe('/strategies/us-1')
+    expect(within(association).getByRole('link', { name: 'Quiet exit · us-2' }).getAttribute('href')).toBe('/strategies/us-2')
+  })
+
+  it('never prints an invented revision when the frozen payload carries none', async () => {
+    const odd: UserStrategy = {
+      ...ownerStrategy,
+      experiments: [frozenExperiment('job-1', 0, '2026-10-06T10:30:00.000000Z')],
+    }
+    reportPage(adapter({ listUserStrategies: async () => [odd] }))
+
+    const association = await associationPanel()
+    expect(within(association).getByText('冻结修订未知')).toBeTruthy()
+    expect(within(association).queryByText(/v0/)).toBeNull()
+    // The job identity still matched, so the way back is still offered.
+    expect(within(association).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1')
+  })
+
+  it('never shows the job it left behind when a late association answer arrives', async () => {
+    const user = userEvent.setup()
+    let resolveFirst: ((value: UserStrategy[]) => void) | undefined
+    const firstRead = new Promise<UserStrategy[]>((resolve) => { resolveFirst = resolve })
+    const flatJob: BacktestJob = {
+      ...job, job_id: 'job-2', request_id: 'request-2', scenario_id: 'flat.yaml', engine_run_id: 'run-2',
+    }
+    const flatReport: BacktestReport = {
+      ...report, run_id: 'run-2', economics: { ...report.economics, equity: { amount: '20008', currency: 'USD' } },
+    }
+    const later: UserStrategy = {
+      ...otherStrategy,
+      experiments: [frozenExperiment('job-2', 4, '2026-10-06T10:50:00.000000Z')],
+    }
+    let reads = 0
+    reportPage(adapter({
+      listBacktests: async () => [job, flatJob],
+      getBacktest: async (jobId) => (jobId === 'job-1' ? job : flatJob),
+      getReport: async (jobId) => (jobId === 'job-1' ? report : flatReport),
+      listUserStrategies: async () => {
+        reads += 1
+        return reads === 1 ? await firstRead : [later]
+      },
+    }))
+
+    const association = await associationPanel()
+    expect(within(association).getByText('正在读取冻结了这个运行的已保存策略……')).toBeTruthy()
+
+    await user.click(screen.getByRole('link', { name: '← New or saved backtest' }))
+    const flatJobLink = (await screen.findByText('flat.yaml')).closest('a')
+    expect(flatJobLink).toBeTruthy()
+    await user.click(flatJobLink!)
+    expect(await screen.findByText('20008 USD')).toBeTruthy()
+    const moved = await screen.findByRole('region', { name: '策略关联' })
+    expect(await within(moved).findByText('Quiet exit')).toBeTruthy()
+
+    // The first job's answer arrives after the page has moved on.
+    resolveFirst?.([ownerStrategy])
+    await waitFor(() => expect(screen.queryByText('Bold entry')).toBeNull())
+    expect(within(moved).getByText('Quiet exit')).toBeTruthy()
+    expect(within(moved).getByText('冻结 v4')).toBeTruthy()
   })
 })

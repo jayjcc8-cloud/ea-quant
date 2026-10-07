@@ -28,6 +28,7 @@ type StrategyDocument = {
   user_strategy_id: string
   name: string
   draft: { revision: number; strategy_id: string; scenario_id: string; initial_cash: string; parameters: Record<string, string | number>; criterion: { schema: string; field: string; expectation: string } | null }
+  messages: { message_id: string; role: 'user' | 'model'; text: string }[]
   experiments: {
     launch_intent_id: string
     request_id: string
@@ -353,4 +354,175 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   )
   expect(overflow, 'the workspace must not scroll sideways at a narrow width').toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('strategy-workspace-narrow.png'), fullPage: true })
+})
+
+/**
+ * The way back from an already-existing formal report to the persisted strategy
+ * that froze it.
+ *
+ * This test scripts nothing. It reads the real workspace with GET only, follows
+ * the link the page itself renders, and re-reads the same documents afterwards.
+ * It starts no run, creates no strategy, previews nothing, asks no model and
+ * writes no setting: the sample is named by the environment, because it must
+ * already exist in the workspace under test.
+ *
+ *   EA_REPORT_JOB_ID=<persisted experiment job> \
+ *   EA_REPORT_STRATEGY_ID=<the strategy that froze it> \
+ *   EA_REPORT_OTHER_STRATEGY_ID=<a strategy on the same engine strategy> \
+ *   EA_WEB_BASE_URL=http://127.0.0.1:8765 \
+ *   npx playwright test e2e/user-strategies.spec.ts -g 'existing report returns'
+ *
+ * The recorded call counts, the experiment lists and the two strategy documents
+ * are compared with their own baseline before the page is opened, so the claim
+ * "the return writes nothing" is checked against this workspace's real state and
+ * not against a number this test assumed.
+ */
+test('existing report returns to its persisted strategy without writes', async ({ page, context }, testInfo) => {
+  test.setTimeout(120_000)
+  const jobId = process.env.EA_REPORT_JOB_ID ?? ''
+  const strategyId = process.env.EA_REPORT_STRATEGY_ID ?? ''
+  const otherStrategyId = process.env.EA_REPORT_OTHER_STRATEGY_ID ?? ''
+  expect(jobId, 'EA_REPORT_JOB_ID must name the persisted experiment job').not.toBe('')
+  expect(strategyId, 'EA_REPORT_STRATEGY_ID must name the strategy that froze it').not.toBe('')
+  expect(otherStrategyId, 'EA_REPORT_OTHER_STRATEGY_ID must name a same-engine strategy').not.toBe('')
+  await waitForHealth()
+
+  // Every non-GET the pages themselves attempt, on both pages this test opens.
+  const nonGet: string[] = []
+  const recordNonGet = (target: Page) => target.on('request', (request) => {
+    const url = new URL(request.url())
+    if (url.origin === new URL(baseURL).origin && url.pathname.startsWith('/api/') && request.method() !== 'GET') {
+      nonGet.push(`${request.method()} ${url.pathname}`)
+    }
+  })
+  recordNonGet(page)
+
+  // The records this page must agree with, read before anything is opened: the
+  // strategy that froze the job, the strategy that did not, the job and its report.
+  const strategy = await read(page, strategyId)
+  const other = await read(page, otherStrategyId)
+  const job = await page.request.get(`/api/backtests/${jobId}`).then((response) => response.json())
+  const report = await page.request.get(`/api/backtests/${jobId}/report`).then((response) => response.json())
+  expect(strategy.draft.strategy_id, 'the other strategy must be on the same engine strategy').toBe(other.draft.strategy_id)
+  expect(other.experiments.some((item) => item.job_id === jobId), 'the other strategy must not own this job').toBe(false)
+  expect(strategy.experiments.length, 'the sample must carry at least one frozen experiment').toBeGreaterThanOrEqual(1)
+  const matching = strategy.experiments.filter((item) => item.job_id === jobId)
+  expect(matching, 'the supplied sample must freeze this job exactly once').toHaveLength(1)
+  const frozen = matching[0].payload.draft_revision
+  expect(Number.isInteger(frozen) && frozen > 0, 'the frozen revision must be a real revision').toBe(true)
+  expect(job.status, job.message ?? 'the supplied job must have succeeded').toBe('succeeded')
+  expect(job.report_ready).toBe(true)
+  expect(report.run_id).toBe(job.engine_run_id)
+
+  // The appearance this browser already had, then an explicit dark/compact choice
+  // through the existing Settings controls, which must survive the whole journey.
+  await page.goto('/settings')
+  const appearanceBefore = await page.evaluate(() => window.localStorage.getItem('ea.quine.appearance.v1'))
+  const appearanceSettings = page.getByRole('region', { name: '本地外观' })
+  await expect(appearanceSettings).toBeVisible()
+  await appearanceSettings.getByRole('radio', { name: '深色' }).check()
+  await appearanceSettings.getByRole('radio', { name: '紧凑' }).check()
+  const appearanceInForce = () => page.evaluate(
+    () => [document.documentElement.dataset.theme, document.documentElement.dataset.density],
+  )
+  expect(await appearanceInForce()).toEqual(['dark', 'compact'])
+  await page.reload()
+  expect(await appearanceInForce(), 'the appearance choice must survive a reload').toEqual(['dark', 'compact'])
+  const appearanceAfter = await page.evaluate(() => window.localStorage.getItem('ea.quine.appearance.v1'))
+  const storedAppearance = JSON.parse(appearanceAfter ?? '{}') as { theme?: string; density?: string }
+  expect(storedAppearance.theme).toBe('dark')
+  expect(storedAppearance.density).toBe('compact')
+
+  // The formal report, opened directly, at the desktop width.
+  const association = page.getByRole('region', { name: '策略关联' })
+  const returnLink = association.getByRole('link', { name: '返回此策略继续研究' })
+  await page.setViewportSize({ width: 1400, height: 1000 })
+  await page.goto(`/backtests/${jobId}`)
+  await expect(page.locator('.page-title .status')).toHaveText('succeeded')
+  await expect(association.getByText(strategy.name, { exact: true })).toBeVisible()
+  await expect(association.getByText(`冻结 v${frozen}`)).toBeVisible()
+  if (other.name === strategy.name) {
+    // Two strategies that share a display name must still be told apart by id.
+    expect(otherStrategyId).not.toBe(strategyId)
+  } else {
+    await expect(association.getByText(other.name, { exact: true })).toHaveCount(0)
+  }
+  await expect(returnLink).toHaveAttribute('href', `/strategies/${strategyId}`)
+  // The formal report stays the report: its own evidence and downloads are intact.
+  await expect(page.getByRole('link', { name: 'Download report.json' })).toBeVisible()
+  expect(await appearanceInForce(), 'opening the report must not disturb the appearance').toEqual(['dark', 'compact'])
+  await page.screenshot({ path: testInfo.outputPath('report-return-1400.png'), fullPage: true })
+
+  // Following it lands on the very strategy that froze the run, with its own
+  // conversation, evidence and AI column intact and the other one never selected.
+  const origin = new URL(baseURL).origin
+  await returnLink.click()
+  await expect(page).toHaveURL(`${origin}/strategies/${strategyId}`)
+  await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '证据' })).toBeVisible()
+  await expect(page.locator('ol.message-list li')).toHaveCount(strategy.messages.length)
+  if (strategy.messages.length > 0) {
+    await expect(page.locator('ol.message-list li').first()).toContainText(strategy.messages[0].text)
+  }
+  await expect(page.getByLabel('当前策略')).toHaveValue(strategyId)
+  await expect(page.getByLabel('当前策略')).not.toHaveValue(otherStrategyId)
+  await page.screenshot({ path: testInfo.outputPath('report-return-strategy-1400.png'), fullPage: true })
+
+  // A reload of the report shows the same association, read again from the records.
+  await page.goto(`/backtests/${jobId}`)
+  await page.reload()
+  await expect(association.getByText(`冻结 v${frozen}`)).toBeVisible()
+  await expect(returnLink).toHaveAttribute('href', `/strategies/${strategyId}`)
+
+  // The narrow width: the same return, still clickable, with no sideways scroll.
+  await page.setViewportSize({ width: 420, height: 900 })
+  await page.goto(`/backtests/${jobId}`)
+  await expect(returnLink).toBeVisible()
+  const narrowOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  )
+  expect(narrowOverflow, 'the report with its association must not scroll sideways at 420 px').toBeLessThanOrEqual(1)
+  await page.screenshot({ path: testInfo.outputPath('report-return-420.png'), fullPage: true })
+  await returnLink.click()
+  await expect(page).toHaveURL(`${origin}/strategies/${strategyId}`)
+  await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
+  expect(await appearanceInForce(), 'the appearance must survive the navigation').toEqual(['dark', 'compact'])
+
+  // One independent page, never navigated by this test, reaching the same report
+  // directly: the association is the records' own, not a carried-over page state.
+  const independent = await context.newPage()
+  recordNonGet(independent)
+  await independent.setViewportSize({ width: 420, height: 900 })
+  await independent.goto(`${baseURL}/backtests/${jobId}`)
+  const independentAssociation = independent.getByRole('region', { name: '策略关联' })
+  await expect(independentAssociation.getByText(strategy.name, { exact: true })).toBeVisible()
+  await expect(independentAssociation.getByText(`冻结 v${frozen}`)).toBeVisible()
+  await expect(independentAssociation.getByRole('link', { name: '返回此策略继续研究' }))
+    .toHaveAttribute('href', `/strategies/${strategyId}`)
+  expect(
+    await independent.evaluate(() => [document.documentElement.dataset.theme, document.documentElement.dataset.density]),
+    'this browser keeps the appearance it saved',
+  ).toEqual(['dark', 'compact'])
+  await independent.screenshot({ path: testInfo.outputPath('report-return-independent-420.png'), fullPage: true })
+  await independent.getByRole('link', { name: '返回此策略继续研究' }).click()
+  await expect(independent).toHaveURL(`${origin}/strategies/${strategyId}`)
+  await expect(independent.getByRole('region', { name: 'AI 协作' })).toBeVisible()
+  await independent.close()
+
+  // Nothing was written on the way: both documents and both counts are exactly
+  // what they were before the report was opened, and no non-GET was attempted.
+  const after = await read(page, strategyId)
+  const afterOther = await read(page, otherStrategyId)
+  expect(after, 'following the report back must not change the strategy').toEqual(strategy)
+  expect(afterOther, 'the other strategy must stay untouched').toEqual(other)
+  expect(after.experiments, 'the frozen record set must be unchanged').toEqual(strategy.experiments)
+  expect(nonGet, 'the return path must issue no write of any kind').toEqual([])
+  await testInfo.attach('report-return-evidence', {
+    body: JSON.stringify({
+      jobId, strategyId, otherStrategyId, frozenRevision: frozen,
+      strategy, other, job, report,
+      appearanceBefore, appearanceAfter, nonGetRequests: nonGet,
+    }, null, 2),
+    contentType: 'application/json',
+  })
 })
