@@ -29,6 +29,7 @@ from ea.core import CanonicalDecimal, ReplayWindow
 from ea.core.commission import commission_policy_identity
 from ea.data import decode_phase1_ohlcv_csv
 from ea.product.backtest import run_backtest_scenario as engine_run_backtest_scenario
+from ea.strategy.rules import DEFAULT_RULE
 from ea.web import service as service_module
 from ea.web.app import create_app
 from ea.web.llm import (
@@ -1186,6 +1187,310 @@ def test_reject_revise_and_undo_keep_the_draft_and_history_honest(
         )
     assert strategies.get(strategy_id).draft.revision == 3
     assert len(strategies.get(strategy_id).changes) == 2
+
+
+# --- the registered contract the model is given --------------------------------
+
+
+def _contracts(service: WebService) -> dict[str, dict[str, Any]]:
+    """The fixture scenario's own registered parameter contracts, as it states them."""
+    document = cast(dict[str, Any], service.validate_scenario(SCENARIO))
+    return {
+        str(item["name"]): item
+        for item in cast(list[dict[str, Any]], document["strategy_parameters"])
+    }
+
+
+def _branches(call: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The proposal-tool branches the provider actually received, keyed by path."""
+    tools = cast(list[Any], call["tools"])
+    assert [tool.name for tool in tools] == ["propose_change"]
+    schema = cast(dict[str, Any], tools[0].parameters)
+    properties = cast(dict[str, Any], schema["properties"])
+    array = cast(dict[str, Any], properties["items"])
+    # The tool's one property is the array of proposed fields, and the alternatives
+    # are the schema of each item in it.
+    assert array["type"] == "array"
+    item = cast(dict[str, Any], array["items"])
+    by_path: dict[str, dict[str, Any]] = {}
+    for branch in cast(list[dict[str, Any]], item["oneOf"]):
+        declared = cast(dict[str, Any], cast(dict[str, Any], branch["properties"])["path"])
+        paths = declared.get("enum") or [declared.get("const")]
+        assert len(paths) == 1 and paths[0] not in by_path
+        by_path[str(paths[0])] = branch
+    return by_path
+
+
+def _assert_bounds(sentence: str, contract: dict[str, Any]) -> None:
+    """The registered bounds are stated in the value's own JSON type, or as absent."""
+    minimum = contract["minimum"]
+    maximum = contract["maximum"]
+    assert (
+        (f"registered minimum {json.dumps(minimum)}" in sentence)
+        if minimum is not None
+        else ("no registered minimum" in sentence)
+    )
+    assert (
+        (f"registered maximum {json.dumps(maximum)}" in sentence)
+        if maximum is not None
+        else ("no registered maximum" in sentence)
+    )
+
+
+def test_the_proposal_tool_is_typed_per_registered_path_with_the_actual_bounds(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the provider receives is the host's own contract, not a lossy summary.
+
+    Each changeable path is one branch that names its JSON type: a decimal is a
+    string, an integer is an integer, and only what this workspace can really edit
+    is offered at all.
+    """
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+
+    provider.responses.append(_response([], text="An answer."))
+    strategies.send_message(
+        strategy.user_strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="What does my draft do?",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    call = provider.calls[-1]
+    branches = _branches(call)
+    contracts = _contracts(service)
+
+    # The scenario the user picked registers only kinds this workspace can edit, so
+    # every registered parameter is a changeable path and nothing else is.
+    editable = {
+        name: item for name, item in contracts.items() if item["type"] in {"integer", "decimal"}
+    }
+    assert editable == contracts
+    assert set(branches) == {"initial_cash"} | {f"parameters.{name}" for name in editable}
+
+    for name, contract in contracts.items():
+        branch = branches[f"parameters.{name}"]
+        properties = cast(dict[str, Any], branch["properties"])
+        value_schema = cast(dict[str, Any], properties["value"])
+        sentence = cast(str, branch["description"])
+        current = strategy.draft.parameters[name]
+        assert set(cast(list[str], branch["required"])) == {"path", "value", "reason"}
+        if contract["type"] == "integer":
+            assert value_schema["type"] == "integer"
+            assert type(current) is int
+            assert f"current value {json.dumps(current)}" in sentence
+            # An integer is a JSON integer here: not a string and not a boolean.
+            assert f'current value "{current}"' not in sentence
+        else:
+            assert value_schema["type"] == "string"
+            assert isinstance(current, str)
+            assert f'current value "{current}"' in sentence
+        _assert_bounds(sentence, contract)
+
+    # The initial cash is the one field that is not a registered parameter, and it
+    # is a positive decimal string exactly as the host requires it.
+    cash = branches["initial_cash"]
+    cash_properties = cast(dict[str, Any], cash["properties"])
+    cash_schema = cast(dict[str, Any], cash_properties["value"])
+    cash_sentence = cast(str, cash["description"])
+    assert cash_schema["type"] == "string"
+    assert f'current value "{strategy.draft.initial_cash}"' in cash_sentence
+    assert "positive" in cash_sentence
+    assert "no registered minimum" in cash_sentence
+    assert "no registered maximum" in cash_sentence
+
+    # The instruction the model is given: propose only when the user asks for it.
+    system = cast(str, call["system"])
+    assert "propose_change" in system
+    assert "explicit" in system.lower()
+
+
+def test_the_conversation_states_each_contract_the_way_the_tool_schema_states_it(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One contract description, the same in the conversation and in the tool."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+
+    provider.responses.append(_response([], text="An answer."))
+    strategies.send_message(
+        strategy.user_strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Explain the draft",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    call = provider.calls[-1]
+    opening = cast(str, cast(list[Any], call["messages"])[0].text)
+    branches = _branches(call)
+
+    for name, contract in _contracts(service).items():
+        branch = branches[f"parameters.{name}"]
+        current = strategy.draft.parameters[name]
+        # The very sentence the tool branch carries is the one the model reads here.
+        assert cast(str, branch["description"]) in opening
+        assert f"current value {json.dumps(current)}" in opening
+        if contract["type"] == "decimal":
+            # A decimal is shown as a JSON string, never as a bare number.
+            assert f'current value "{current}"' in opening
+        else:
+            assert f'current value "{current}"' not in opening
+    assert cast(str, branches["initial_cash"]["description"]) in opening
+    assert f'current value "{strategy.draft.initial_cash}"' in opening
+
+
+def test_a_json_number_for_a_decimal_field_is_refused_and_its_string_is_applied(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The change the provider must not get away with for a decimal field: 3.
+
+    The real call returned no tool call at all, so this is the shape a model that
+    reads the old, untyped schema would send. The host refuses it and proposes
+    nothing, and the same change stated as the canonical decimal string the
+    contract asks for is a normal proposal that applies as revision 2 — with no
+    model call and no experiment behind it.
+    """
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    runs = _forbid_engine_runs(monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+
+    provider.responses.append(
+        _change([{"path": "parameters.target_quantity", "value": 3, "reason": "More size."}])
+    )
+    refused = strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Make the size three",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert refused.calls[-1]["status"] == "refused"
+    assert refused.calls[-1]["message"]
+    assert refused.proposals == ()
+    assert refused.draft.revision == 1
+    assert refused.draft.parameters["target_quantity"] == "2"
+
+    _updated, proposal = _propose(
+        strategies,
+        provider,
+        strategy,
+        [{"path": "parameters.target_quantity", "value": "3", "reason": "More size."}],
+        call_id="call-2",
+    )
+    assert proposal["status"] == "open"
+    assert proposal["items"][0]["before"] == "2" and proposal["items"][0]["after"] == "3"
+    applied = strategies.apply_proposal(
+        strategy_id, proposal_id=proposal["proposal_id"], operation_id="op-1"
+    )
+    assert applied.draft.revision == 2
+    assert applied.draft.parameters["target_quantity"] == "3"
+    # Applying a typed diff executes nothing: no further model call, no child, no run.
+    assert len(provider.calls) == 2
+    assert service.list_jobs() == [] and _children(tmp_path) == [] and runs["count"] == 0
+
+
+def test_a_local_contract_failure_reaches_no_provider_and_leaves_the_pending_call(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading the contract is local: it happens before the dispatch boundary."""
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    real = strategies._scenario_document
+
+    def unavailable(scenario_id: str) -> dict[str, Any]:
+        raise UserStrategyStateError("the registered scenario is not readable here")
+
+    monkeypatch.setattr(strategies, "_scenario_document", unavailable)
+    with pytest.raises(UserStrategyStateError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-1",
+            base_revision=1,
+            text="Explain the draft",
+            approved_budget=dict(CALL_BUDGET),
+        )
+    # No provider was reached and the reservation never became a dispatch.
+    assert provider.calls == []
+    durable = _durable(tmp_path, strategy_id)
+    assert durable.calls[-1]["status"] == "pending"
+    assert "dispatched_at" not in durable.calls[-1]
+    assert durable.messages[-1]["role"] == "user"
+    assert durable.messages[-1]["call_id"] == "call-1"
+    assert all(item["kind"] != "proposal" for item in durable.messages)
+
+    # Existing recovery classifies it exactly as any interruption before dispatch.
+    monkeypatch.setattr(strategies, "_scenario_document", real)
+    reconciled = strategies.reconcile(strategy_id)
+    assert reconciled.calls[-1]["status"] == "interrupted_before_dispatch"
+    assert provider.calls == []
+
+
+def test_a_registered_parameter_this_workspace_cannot_edit_is_read_only(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A price rule is a registered parameter, and it is not a changeable path.
+
+    The fixture scenario registers only editable kinds, so one read-only parameter
+    is added to the document this owner reads — the same contract shape the
+    workspace itself produces, and the same kind the host already refuses to edit.
+    """
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    document = cast(dict[str, Any], service.validate_scenario(SCENARIO))
+    document["strategy_parameters"] = [
+        *cast(list[dict[str, Any]], document["strategy_parameters"]),
+        {
+            "name": "rule",
+            "type": "price-rule-v1",
+            "required": True,
+            "default": DEFAULT_RULE,
+            "static_minimum": None,
+            "static_maximum": None,
+            "minimum": None,
+            "maximum": None,
+            "current_value": DEFAULT_RULE,
+        },
+    ]
+    monkeypatch.setattr(strategies, "_scenario_document", lambda scenario_id: document)
+
+    provider.responses.append(_response([], text="An answer."))
+    strategies.send_message(
+        strategy_id,
+        call_id="call-1",
+        base_revision=1,
+        text="Explain the draft",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    call = provider.calls[-1]
+    branches = _branches(call)
+    assert set(branches) == {
+        "initial_cash",
+        "parameters.target_quantity",
+        "parameters.entry_delay_bars",
+    }
+    opening = cast(str, cast(list[Any], call["messages"])[0].text)
+    line = next(item for item in opening.split("\n") if "parameters.rule" in item)
+    assert "price-rule-v1" in line and "read-only" in line
+
+    # Naming it anyway is refused by the host, and the draft does not move.
+    provider.responses.append(
+        _change([{"path": "parameters.rule", "value": DEFAULT_RULE, "reason": "Use this rule."}])
+    )
+    refused = strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=1,
+        text="Use this rule",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert refused.calls[-1]["status"] == "refused"
+    assert refused.proposals == ()
+    assert refused.draft.revision == 1
+    assert "rule" not in refused.draft.parameters
 
 
 # --- frozen experiments -------------------------------------------------------

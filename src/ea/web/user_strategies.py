@@ -107,37 +107,70 @@ _SYSTEM_PROMPT = (
     "You are the research assistant inside one local backtest workspace. Answer the user's "
     "question in plain text when a question is what they asked; an ordinary explanation or "
     "clarification needs no tool call. You may propose a change to the strategy draft only "
-    "with the propose_change tool, one entry per field, and only for the registered "
-    "parameters listed in this conversation. You never propose changes to strategy identity, "
-    "instruments, permissions, model routing, budgets, data or frozen history. You cannot run "
-    "anything, and nothing you say is a verified result: say plainly that a run is needed."
+    "with the propose_change tool, one entry per field, and only for the registered paths "
+    "listed in this conversation, using the exact JSON type, current value and registered "
+    "bounds stated there for each one: a decimal field is a canonical decimal JSON string, "
+    "and an integer field is a JSON integer, never a string. Propose a change only when the "
+    "user explicitly asks for one in this message; never ask for a separate confirmation of "
+    "your own. You never propose changes to strategy identity, instruments, permissions, "
+    "model routing, budgets, data or frozen history. You cannot run anything, and nothing "
+    "you say is a verified result: say plainly that a run is needed."
 )
-_PROPOSE_TOOL = ToolDefinition(
-    name="propose_change",
-    description=(
-        "Propose a change to one or more registered draft parameters. Use it only when the "
-        "user asks for a change; a question needs no call."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "value": {},
-                        "reason": {"type": "string"},
-                        "evidence": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["path", "value", "reason"],
-                },
-            }
-        },
-        "required": ["items"],
-    },
-)
+#: The one tool a conversation may use. Its schema is built per call from the
+#: registered contract, so each path is offered with its real value type.
+_PROPOSE_TOOL_NAME = "propose_change"
+#: The registered kinds this owner can edit, and the JSON type each one's value has
+#: in the tool schema. A kind outside this map is never a changeable path.
+_EDITABLE_KINDS = {"integer": "integer", "decimal": "string"}
+#: How one editable kind is described in words, next to its JSON type.
+_KIND_LABELS = {"integer": "JSON integer", "decimal": "decimal held as a canonical JSON string"}
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredPath:
+    """One path a conversation is described by, in the registered contract's terms.
+
+    ``kind`` is the registered parameter type exactly as the scenario states it, or
+    the plain words this owner uses for the initial cash. ``editable`` is whether a
+    typed diff may name this path at all: a kind :meth:`_typed` cannot type is
+    carried here as a fact about the draft, never as a changeable path.
+    """
+
+    path: str
+    kind: str
+    current: Any
+    minimum: Any
+    maximum: Any
+    editable: bool
+
+    @property
+    def json_type(self) -> str:
+        return _EDITABLE_KINDS.get(self.kind, "string")
+
+    def described(self) -> str:
+        if not self.editable:
+            return (
+                f"{self.path} is registered as {self.kind} and is read-only here: this "
+                "workspace cannot propose a change to it"
+            )
+        if self.path == "initial_cash":
+            return f"{self.path} is a registered positive decimal held as a canonical JSON string"
+        return f"{self.path} is a registered {_KIND_LABELS.get(self.kind, self.kind)}"
+
+    def sentence(self) -> str:
+        """The one description of this path the conversation and the tool share."""
+        parts = [self.described(), f"current value {json.dumps(self.current, default=str)}"]
+        parts.append(
+            "registered minimum " + json.dumps(self.minimum, default=str)
+            if self.minimum is not None
+            else "no registered minimum"
+        )
+        parts.append(
+            "registered maximum " + json.dumps(self.maximum, default=str)
+            if self.maximum is not None
+            else "no registered maximum"
+        )
+        return "; ".join(parts) + "."
 
 
 class UserStrategyError(ValueError):
@@ -518,6 +551,84 @@ class UserStrategyService:
                 contracts[name] = entry
         return contracts
 
+    def _registered_paths(self, draft: StrategyDraft) -> tuple[RegisteredPath, ...]:
+        """The registered contract of one draft, resolved once per call.
+
+        Read from the same scenario document a typed diff is validated against, so
+        every path is described with the value type and the bounds this workspace
+        really enforces rather than a name this owner guessed. The draft's own value
+        is the current one; a registered parameter the draft does not carry is
+        described by the contract's own value. Nothing here decides anything: the
+        whole resulting draft is still validated by the backend, and a path whose
+        registered kind :meth:`_typed` cannot edit is carried as read-only.
+        """
+        document = self._scenario_document(draft.scenario_id)
+        paths = [
+            RegisteredPath(
+                path="initial_cash",
+                kind="positive decimal",
+                current=draft.initial_cash,
+                minimum=None,
+                maximum=None,
+                editable=True,
+            )
+        ]
+        for name, contract in sorted(self._contracts(document).items()):
+            kind = str(contract.get("type") or "")
+            current = draft.parameters.get(name)
+            if current is None:
+                current = contract.get("current_value")
+            if current is None:
+                current = contract.get("default")
+            paths.append(
+                RegisteredPath(
+                    path=f"parameters.{name}",
+                    kind=kind,
+                    current=current,
+                    minimum=contract.get("minimum"),
+                    maximum=contract.get("maximum"),
+                    editable=kind in _EDITABLE_KINDS,
+                )
+            )
+        return tuple(paths)
+
+    @staticmethod
+    def _propose_tool(paths: tuple[RegisteredPath, ...]) -> ToolDefinition:
+        """The one tool, whose every alternative is one changeable registered path.
+
+        Each branch names the path it applies to and the JSON type its value must
+        have, and repeats the same sentence the conversation states. This guides the
+        model; it is not a guarantee — the runtime whole-draft and quantum
+        validation remains the authority on what a draft may become.
+        """
+        branches = [
+            {
+                "type": "object",
+                "description": entry.sentence(),
+                "properties": {
+                    "path": {"type": "string", "enum": [entry.path]},
+                    "value": {"type": entry.json_type},
+                    "reason": {"type": "string"},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["path", "value", "reason"],
+            }
+            for entry in paths
+            if entry.editable
+        ]
+        return ToolDefinition(
+            name=_PROPOSE_TOOL_NAME,
+            description=(
+                "Propose a change to one or more registered draft paths. Use it only when "
+                "the user explicitly asks for a change; a question needs no call."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"items": {"type": "array", "items": {"oneOf": branches}}},
+                "required": ["items"],
+            },
+        )
+
     def _validated(
         self, draft: StrategyDraft, parameters: dict[str, Any], initial_cash: str
     ) -> dict[str, Any]:
@@ -810,6 +921,11 @@ class UserStrategyService:
         self, strategy: UserStrategy, call: str, message: str, base_revision: int
     ) -> UserStrategy:
         port = self._model_port()
+        # The contract this call is described by is resolved locally, before the
+        # dispatch boundary: a workspace that cannot read its own registered contract
+        # never reaches the provider and never marks this call dispatched, so the
+        # durable record stays a reservation that recovery classifies as unsent.
+        registered = self._registered_paths(strategy.draft)
         strategy = self._mark_dispatched(strategy, call)
         key = (strategy.user_strategy_id, call)
         self._active_calls.add(key)
@@ -817,8 +933,8 @@ class UserStrategyService:
             try:
                 response: ModelResponse = port.complete(
                     system=_SYSTEM_PROMPT,
-                    messages=self._conversation(strategy, message),
-                    tools=[_PROPOSE_TOOL],
+                    messages=self._conversation(strategy, message, registered),
+                    tools=[self._propose_tool(registered)],
                     max_tokens=_MAX_TOKENS,
                     required_capabilities=("tool_use",),
                 )
@@ -874,25 +990,30 @@ class UserStrategyService:
             proposal_id=proposal_id,
         )
 
-    def _conversation(self, strategy: UserStrategy, message: str) -> History:
+    def _conversation(
+        self, strategy: UserStrategy, message: str, registered: tuple[RegisteredPath, ...]
+    ) -> History:
         """One request to the model: the strategy's own facts, plus its history.
 
         The user's own message is already persisted on this strategy and is the
         question being asked here, so it is sent exactly once, as the last turn.
         Everything before it is the recorded conversation, and the opening turn
-        carries the stated intent, the verified draft facts and — when this
-        strategy has a frozen run whose report the workspace can verify — only the
-        host's own readings of that run.
+        carries the stated intent, the registered paths of this draft — each with
+        its exact JSON value type, current value and the bounds this workspace
+        enforces, the read-only ones included — and — when this strategy has a
+        frozen run whose report the workspace can verify — only the host's own
+        readings of that run.
         """
         draft = strategy.draft
         facts = [
             f"The user's stated intent for this strategy: {strategy.intent}",
             f"Strategy {draft.strategy_id} on {draft.venue}:{draft.symbol}",
-            f"Scenario {draft.scenario_id}, initial cash {draft.initial_cash}",
-            "Registered parameters: "
-            + ", ".join(f"{name}={value}" for name, value in sorted(draft.parameters.items())),
-            "Draft revision " + str(draft.revision),
+            f"Scenario {draft.scenario_id}",
+            "The registered fields of this draft, each stated with the exact JSON value "
+            "type and the bounds this workspace enforces:",
         ]
+        facts.extend(f"  {entry.sentence()}" for entry in registered)
+        facts.append("Draft revision " + str(draft.revision))
         if draft.criterion is not None:
             facts.append(
                 "The user's stated criterion: "
@@ -959,7 +1080,7 @@ class UserStrategyService:
         calls = list(response.tool_calls)
         if not calls:
             return [], None
-        if len(calls) != 1 or calls[0].name != _PROPOSE_TOOL.name:
+        if len(calls) != 1 or calls[0].name != _PROPOSE_TOOL_NAME:
             return [], "the model used an unknown tool; nothing was proposed"
         arguments = calls[0].arguments
         raw = arguments.get("items") if isinstance(arguments, dict) else None
