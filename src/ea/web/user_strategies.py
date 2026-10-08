@@ -1083,6 +1083,7 @@ class UserStrategyService:
         proposal_id: str | None = None,
         before: Any = None,
         evidence_job_ids: Any = None,
+        expected_evidence: Documents | None = None,
     ) -> UserStrategy:
         call = _identifier(call_id, "call_id")
         message = _bounded(text, "message", _MAX_MESSAGE)
@@ -1132,6 +1133,19 @@ class UserStrategyService:
         # dispatch behind it, and no conversation is ever grounded in a run the user
         # did not select or that is no longer the run it names.
         evidence = None if selection is None else self._evidence_context(strategy, selection)
+        # A revision that inherits a selection is re-verified here, after the replay
+        # short-circuit above and before the reservation, the durable record and the
+        # provider: the runs it is grounded in have to be the runs the call that
+        # produced this proposal recorded, under the same frozen identities, so a
+        # report that has since been re-published is refused rather than silently
+        # substituted for the evidence the user's proposal was made over.
+        if expected_evidence is not None and (
+            evidence is None or not self._same_evidence(expected_evidence, evidence)
+        ):
+            raise UserStrategyStateError(
+                "the runs this proposal was made over are no longer the runs it recorded; "
+                "nothing was asked"
+            )
         self._model_port()
         route = self._safe_route()
         now = _now()
@@ -1491,6 +1505,132 @@ class UserStrategyService:
         if type(evidence) is not list or not evidence:
             return None
         return cast(Documents, evidence)
+
+    @staticmethod
+    def _same_evidence(recorded: Documents, verified: Documents) -> bool:
+        """Whether re-verified runs are, one by one, the runs that were recorded.
+
+        A run is the same run only while its own frozen identity still holds: the
+        job it names, the engine run it published, the report digest it was read
+        under and the input digest it was confirmed from. A report re-published
+        under a new digest is a different reading of that job, not the evidence the
+        original call was grounded in, so it is never substituted for it.
+        """
+        if len(recorded) != len(verified):
+            return False
+        keys = ("job_id", "run_id", "report_sha256", "input_sha256")
+        return all(
+            all(was.get(key) == now.get(key) for key in keys)
+            for was, now in zip(recorded, verified, strict=True)
+        )
+
+    def _proposal_evidence(
+        self, strategy: UserStrategy, proposal: dict[str, Any]
+    ) -> Documents | None:
+        """The runs one proposal was made over, read from its own originating call.
+
+        A proposal is grounded only through the call that produced it and this
+        strategy retained: the recorded proposal message and the proposal name the
+        same call as this strategy's own observed answer from the model, that call is
+        exactly one call of this strategy, its request is still the request it was
+        recorded under, its request and its retained evidence state the same runs in
+        the same order, and the revision the proposal records is the one that call
+        froze. A genuinely ungrounded proposal — no selection and no evidence at all,
+        on a call whose recorded request digest and observed outcome still hold — is
+        returned as an honest ``None``, which is a different thing from a grounded
+        record whose pair has been damaged. A missing or ambiguous call, a request
+        that no longer hashes to the digest it was stored with, a call that recorded
+        no observed answer of the model's, a selection and evidence that disagree, one
+        side of an originally grounded pair that is gone, or a conflicting revision is
+        refused here, before any reservation, write or provider. What is returned is
+        provenance, never authority: the runs are re-verified against this workspace's
+        own frozen identities before a new call exists.
+        """
+        proposal_id = proposal.get("proposal_id")
+        call_id = proposal.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            raise UserStrategyStateError(
+                "this proposal does not name the call it came from; nothing was asked"
+            )
+        recorded = [
+            item
+            for item in strategy.messages
+            if item.get("kind") == "proposal" and item.get("proposal_id") == proposal_id
+        ]
+        if (
+            len(recorded) != 1
+            or recorded[0].get("call_id") != call_id
+            or recorded[0].get("role") != "model"
+        ):
+            raise UserStrategyStateError(
+                "this proposal is not the one its originating call recorded; nothing was asked"
+            )
+        matches = [item for item in strategy.calls if item.get("call_id") == call_id]
+        if len(matches) != 1:
+            raise UserStrategyStateError(
+                "this proposal's originating call is not one call of this strategy; "
+                "nothing was asked"
+            )
+        call = matches[0]
+        request = call.get("request")
+        if not isinstance(request, dict):
+            raise UserStrategyStateError(
+                "this proposal's originating call kept no readable request; nothing was asked"
+            )
+        # The originating call is a source only while it is still the request it was
+        # recorded under and an answer it actually observed. A request whose stored
+        # digest no longer hashes to it — one member of the pair quietly removed
+        # included — is no longer that request, and a call with no observed outcome
+        # recorded no answer to have proposed anything: both are inconsistent sources
+        # rather than an ordinary ungrounded proposal, and neither may fall back to
+        # this strategy's latest run.
+        if call.get("payload_sha256") != _digest(request):
+            raise UserStrategyStateError(
+                "this proposal's originating call is not the request it was recorded "
+                "under; nothing was asked"
+            )
+        if call.get("status") != "observed":
+            raise UserStrategyStateError(
+                "this proposal's originating call recorded no observed answer; nothing was asked"
+            )
+        revision = request.get("base_revision")
+        if (
+            revision != proposal.get("base_revision")
+            or revision != recorded[0].get("base_revision")
+            or revision != call.get("base_revision")
+        ):
+            raise UserStrategyStateError(
+                "this proposal and its originating call record different revisions; "
+                "nothing was asked"
+            )
+        selection = request.get("evidence_job_ids")
+        evidence = call.get("evidence")
+        if selection is None:
+            # Absence on both sides is a genuinely ungrounded proposal: an ordinary
+            # turn has no run to lose, which is not the same as a damaged pair.
+            if evidence not in (None, []):
+                raise UserStrategyStateError(
+                    "this proposal's originating call recorded evidence it never selected; "
+                    "nothing was asked"
+                )
+            return None
+        selected = self._evidence_selection(selection)
+        if (
+            type(evidence) is not list
+            or not evidence
+            or any(type(item) is not dict for item in evidence)
+        ):
+            raise UserStrategyStateError(
+                "this proposal's originating call kept no evidence for the runs it selected; "
+                "nothing was asked"
+            )
+        records = cast(Documents, evidence)
+        if [item.get("job_id") for item in records] != selected:
+            raise UserStrategyStateError(
+                "this proposal's recorded evidence is not the runs its request selected; "
+                "nothing was asked"
+            )
+        return records
 
     def _evidence_selection(self, evidence_job_ids: Any) -> Paths | None:
         """The frozen runs one request selects, exactly as that request states them.
@@ -2046,6 +2186,13 @@ class UserStrategyService:
                     ),
                 )
 
+            # The runs this proposal was made over are read from its own originating
+            # call, and that retained pair — not today's draft, not the caller's own
+            # ids and not the conversation text — is what the refinement inherits.
+            # A record that no longer holds the proposal and its call together is
+            # refused here, before any reservation or provider.
+            origin = self._proposal_evidence(strategy, existing)
+
             return self._ask(
                 strategy,
                 call_id=call_id,
@@ -2055,6 +2202,10 @@ class UserStrategyService:
                 approved_budget=approved_budget,
                 action="revise",
                 proposal_id=target,
+                evidence_job_ids=(
+                    None if origin is None else [record["job_id"] for record in origin]
+                ),
+                expected_evidence=origin,
                 before=supersede,
             )
 

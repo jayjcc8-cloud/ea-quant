@@ -4549,6 +4549,588 @@ def test_an_intent_has_no_evidence_and_refuses_a_selection_before_any_dispatch(
     assert provider.calls == [] and service.list_jobs() == [] and _children(tmp_path) == []
 
 
+# --- revising a proposal that was made over selected evidence -----------------
+#
+# A proposal made over two runs the user selected is a question about those runs.
+# Asking to clarify or refine it is that same question about the same evidence, so
+# the new call is grounded in exactly the pair the original proposal was made over
+# — in the order the user named them, A then B — read back from this strategy's own
+# durable record and re-verified against the frozen runs before the provider can be
+# reached. It is never re-grounded in whichever run happens to be latest by then.
+# A retained record that no longer holds that pair together is refused whole: the
+# open proposal, the draft, the calls and the messages stay exactly as they were,
+# and no provider is contacted.
+
+
+def _observed_turn(
+    strategies: UserStrategyService,
+    provider: FakeProvider,
+    strategy_id: str,
+    *,
+    call_id: str,
+    base_revision: int,
+) -> None:
+    """One ordinary observed turn: a plain answer, no tool call and no proposal."""
+    provider.responses.append(_response([], text="An ordinary reading."))
+    strategies.send_message(
+        strategy_id,
+        call_id=call_id,
+        base_revision=base_revision,
+        text="What does this draft do?",
+        approved_budget=dict(CALL_BUDGET),
+    )
+
+
+def _grounded_proposal(
+    strategies: UserStrategyService,
+    provider: FakeProvider,
+    strategy_id: str,
+    selected: list[str],
+    *,
+    call_id: str = "call-2",
+    base_revision: int = 2,
+) -> dict[str, Any]:
+    """One open proposal made over the runs the user selected, in the order given."""
+    provider.responses.append(_change(NEXT_FIELDS, call_id=call_id))
+    updated = strategies.send_message(
+        strategy_id,
+        call_id=call_id,
+        base_revision=base_revision,
+        text="Propose the next experiment over the selected runs",
+        approved_budget=dict(CALL_BUDGET),
+        evidence_job_ids=list(selected),
+    )
+    return updated.proposals[-1]
+
+
+def _scripted_revise(
+    strategies: UserStrategyService,
+    provider: FakeProvider,
+    strategy_id: str,
+    proposal_id: str,
+    *,
+    call_id: str = "call-3",
+    text: str = "Refine the proposed change",
+) -> Any:
+    """One scripted refinement: the model answers with one more typed diff."""
+    provider.responses.append(_change(NEXT_FIELDS, call_id=call_id))
+    return strategies.revise_proposal(
+        strategy_id,
+        proposal_id=proposal_id,
+        call_id=call_id,
+        text=text,
+        approved_budget=dict(CALL_BUDGET),
+    )
+
+
+def _damage_originating_call(
+    tmp_path: Any,
+    strategy_id: str,
+    proposal_id: str,
+    case: str,
+    *,
+    call_id: str = "call-2",
+    impersonator: str = "call-9",
+) -> None:
+    """One retained record edited the way a damaged store would read back.
+
+    Every case edits only this strategy's own durable document — the proposal, the
+    call its ``call_id`` names, that call's request/evidence pair, or the recorded
+    model message — so each case is a record this strategy would really read, never a
+    test-only second owner.
+    """
+    store = UserStrategyStore(tmp_path / "workspace")
+    saved = store.get(strategy_id)
+    calls = [dict(item) for item in saved.calls]
+    proposals = [dict(item) for item in saved.proposals]
+    messages = [dict(item) for item in saved.messages]
+    index = next(i for i, item in enumerate(calls) if item.get("call_id") == call_id)
+    if case == "missing_call":
+        calls = [item for item in calls if item.get("call_id") != call_id]
+    elif case == "ambiguous_call":
+        calls.insert(index, dict(calls[index]))
+    elif case == "mislabelled_call":
+        proposals = [
+            {**item, "call_id": "call-1"} if item.get("proposal_id") == proposal_id else item
+            for item in proposals
+        ]
+    elif case == "impersonating_call":
+        # A genuine observed call at the same revision that did not produce this
+        # proposal: only the recorded proposal/call linkage can tell them apart.
+        proposals = [
+            {**item, "call_id": impersonator} if item.get("proposal_id") == proposal_id else item
+            for item in proposals
+        ]
+    elif case == "stripped_selection":
+        # Both members of the originally grounded pair removed together, with the
+        # call's recorded request digest left in place: the digest no longer hashes
+        # to the request that is stored, so this is not a legacy ungrounded proposal.
+        request = cast(dict[str, Any], calls[index]["request"])
+        stripped = {key: value for key, value in calls[index].items() if key != "evidence"}
+        calls[index] = {
+            **stripped,
+            "request": {key: value for key, value in request.items() if key != "evidence_job_ids"},
+        }
+    elif case == "corrupted_request_digest":
+        calls[index] = {**calls[index], "payload_sha256": "0" * 64}
+    elif case == "missing_request_digest":
+        calls[index] = {
+            key: value for key, value in calls[index].items() if key != "payload_sha256"
+        }
+    elif case == "unobserved_source":
+        # The request and its evidence are intact, but the call that kept them never
+        # records an observed answer, so it records no proposal either.
+        calls[index] = {**calls[index], "status": "unknown"}
+    elif case == "foreign_role_message":
+        # The recorded model message this proposal is read back from is not one the
+        # observed settle path could have written.
+        messages = [
+            {**item, "role": "user"}
+            if item.get("kind") == "proposal" and item.get("proposal_id") == proposal_id
+            else item
+            for item in messages
+        ]
+    elif case == "request_without_evidence":
+        request = cast(dict[str, Any], calls[index]["request"])
+        calls[index] = {
+            **calls[index],
+            "request": {key: value for key, value in request.items() if key != "evidence_job_ids"},
+        }
+    elif case == "evidence_without_request":
+        calls[index] = {key: value for key, value in calls[index].items() if key != "evidence"}
+    elif case == "reordered_evidence":
+        calls[index] = {
+            **calls[index],
+            "evidence": list(reversed(cast(list[Any], calls[index]["evidence"]))),
+        }
+    elif case == "altered_evidence_job":
+        records = [dict(item) for item in cast(list[Any], calls[index]["evidence"])]
+        records[0]["job_id"] = "job-elsewhere"
+        calls[index] = {**calls[index], "evidence": records}
+    elif case == "conflicting_revision":
+        proposals = [
+            {**item, "base_revision": 1} if item.get("proposal_id") == proposal_id else item
+            for item in proposals
+        ]
+    else:  # pragma: no cover - a case this helper does not own
+        raise AssertionError(f"unknown damage case {case}")
+    store.save(
+        replace(saved, calls=tuple(calls), proposals=tuple(proposals), messages=tuple(messages))
+    )
+
+
+def _unreadable_report(identifier: str) -> bytes:
+    """A report store that cannot be read at all."""
+    raise OSError("the report store cannot be read")
+
+
+def _damage_frozen_run(tmp_path: Any, strategy_id: str, case: str) -> None:
+    """One frozen run this strategy kept, edited so it is no longer that run."""
+    store = UserStrategyStore(tmp_path / "workspace")
+    saved = store.get(strategy_id)
+    experiments = [dict(item) for item in saved.experiments]
+    index = next(i for i, item in enumerate(experiments) if item.get("launch_intent_id") == "li-2")
+    if case == "not_created":
+        experiments[index] = {**experiments[index], "status": "pending", "job_id": None}
+    elif case == "stale_payload":
+        payload = cast(dict[str, Any], experiments[index]["payload"])
+        experiments[index] = {
+            **experiments[index],
+            "payload": {**payload, "record_count": int(payload["record_count"]) + 1},
+        }
+    else:  # pragma: no cover - a case this helper does not own
+        raise AssertionError(f"unknown frozen-run damage {case}")
+    store.save(replace(saved, experiments=tuple(experiments)))
+
+
+def test_revise_evidence_inherits_the_ordered_pair_the_proposal_was_made_over(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refinement of a grounded proposal keeps that proposal's own pair, in order.
+
+    The proposal was made over two runs the user selected as A and B in deliberately
+    reverse chronological order, which is not the order the runs themselves happened
+    in. Refining it is the same question about the same evidence: the new call's
+    request and its host-verified evidence are that ordered pair, read from this
+    strategy's own record and re-verified against the frozen runs, and the new
+    proposal targets today's draft revision. The original proposal is superseded as
+    any revise supersedes it, and nothing is applied or run.
+    """
+    strategies, service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    pair = [cast(str, second["job_id"]), cast(str, first["job_id"])]
+    proposal = _grounded_proposal(strategies, provider, strategy_id, pair)
+    assert proposal["call_id"] == "call-2" and proposal["base_revision"] == 2
+    jobs_before = len(service.list_jobs())
+    changes_before = len(_durable(tmp_path, strategy_id).changes)
+    calls_before = len(provider.calls)
+
+    revised = _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+
+    # One approval is exactly one provider call, and a revise runs nothing.
+    assert len(provider.calls) == calls_before + 1
+    # Normal revise semantics: one new open proposal against today's revision, the
+    # original superseded, and the draft itself untouched.
+    assert revised.draft.revision == 2
+    superseded = next(
+        item for item in revised.proposals if item["proposal_id"] == proposal["proposal_id"]
+    )
+    assert superseded["status"] == "superseded"
+    new_proposal = revised.proposals[-1]
+    assert new_proposal["status"] == "open"
+    assert new_proposal["call_id"] == "call-3" and new_proposal["base_revision"] == 2
+
+    call = revised.calls[-1]
+    assert call["call_id"] == "call-3"
+    assert call["request"]["action"] == "revise"
+    assert call["request"]["proposal_id"] == proposal["proposal_id"]
+    assert call["request"]["evidence_job_ids"] == pair
+    assert [item["job_id"] for item in call["evidence"]] == pair
+    # Each inherited record is that run's own frozen facts, not a later run's.
+    for record, run in zip(call["evidence"], (second, first), strict=True):
+        payload = cast(dict[str, Any], run["payload"])
+        assert record["draft_revision"] == payload["draft_revision"]
+        assert record["input_sha256"] == payload["input_sha256"]
+        assert record["parameters"] == payload["parameters"]
+        assert record["criterion"] == FROZEN_CRITERION
+        assert record["report_sha256"] == service.get_job(cast(str, run["job_id"])).report_sha256
+
+    # The one request the model was sent states both runs, in the pair's own order,
+    # and states no other run in their place.
+    opening = _opening(provider)
+    assert opening.count("Selected run A:") == 1 and opening.count("Selected run B:") == 1
+    assert opening.index(pair[0]) < opening.index(pair[1])
+    assert "no other run of this strategy is described" in opening
+    assert "Host-verified readings of this strategy's own frozen run" not in opening
+    assert "Draft revision 2" in opening
+
+    # The persisted state a later process reads back holds the same pair.
+    durable = _durable(tmp_path, strategy_id)
+    assert durable.calls[-1]["request"]["evidence_job_ids"] == pair
+    assert [item["job_id"] for item in durable.calls[-1]["evidence"]] == pair
+    # A revise is a model call and no more: nothing was applied and nothing ran.
+    assert len(durable.changes) == changes_before
+    assert len(durable.experiments) == 2
+    assert len(service.list_jobs()) == jobs_before
+
+
+def test_revise_evidence_keeps_a_single_selected_run_as_the_whole_of_the_evidence(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One selected run stays one run: a refinement never invents a second report."""
+    strategies, _service, provider, strategy_id, first, _second = _two_runs(tmp_path, monkeypatch)
+    single = [cast(str, first["job_id"])]
+    proposal = _grounded_proposal(strategies, provider, strategy_id, single)
+
+    revised = _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+
+    call = revised.calls[-1]
+    assert call["request"]["evidence_job_ids"] == single
+    assert [item["job_id"] for item in call["evidence"]] == single
+    opening = _opening(provider)
+    assert "Selected run A:" in opening and "Selected run B:" not in opening
+    assert single[0] in opening
+
+
+def test_revise_evidence_is_not_invented_for_an_ordinary_proposal(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A proposal made with no selection keeps revising with none.
+
+    An ordinary proposal has no evidence selection and no frozen context, which is a
+    different thing from a grounded proposal whose provenance is damaged: revising
+    it asks for no run at all, and a run is never forced on it.
+    """
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    _strategy, proposal = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-1")
+    assert "evidence_job_ids" not in _durable(tmp_path, strategy_id).calls[-1]["request"]
+
+    revised = _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+
+    new_call = revised.calls[-1]
+    assert "evidence_job_ids" not in new_call["request"]
+    assert "evidence" not in new_call
+    assert revised.draft.revision == 1
+    new_proposal = revised.proposals[-1]
+    assert new_proposal["status"] == "open" and new_proposal["base_revision"] == 1
+    superseded = next(
+        item for item in revised.proposals if item["proposal_id"] == proposal["proposal_id"]
+    )
+    assert superseded["status"] == "superseded"
+    assert "Host-verified readings" not in _opening(provider)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_call",
+        "ambiguous_call",
+        "mislabelled_call",
+        "impersonating_call",
+        "stripped_selection",
+        "corrupted_request_digest",
+        "missing_request_digest",
+        "unobserved_source",
+        "foreign_role_message",
+        "request_without_evidence",
+        "evidence_without_request",
+        "reordered_evidence",
+        "altered_evidence_job",
+        "conflicting_revision",
+    ],
+)
+def test_revise_evidence_refuses_a_record_that_no_longer_holds_the_pair_together(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A refinement is grounded through the proposal's own originating call, or not at all.
+
+    The pair is inherited through the proposal -> its unique originating call of this
+    same strategy -> that call's own recorded request and verified evidence, and the
+    two sides of that record have to agree with the proposal. An originating call
+    that is gone or is present twice, a proposal whose ``call_id`` no longer names
+    the call that produced it — whether that is an older call or a genuine observed
+    call at the same revision that produced no proposal — a request and evidence
+    pair with one side missing, an evidence order or identity that disagrees with
+    the request, and a proposal whose recorded revision disagrees with its call are
+    each refused whole rather than silently re-grounded in some other run or in no
+    run at all.
+
+    The originating call is a source only while it is still the request it was
+    recorded under and an answer it actually observed. Both members of the pair
+    removed together leave the request no longer hashing to the digest the call kept
+    for it; a digest that is corrupted or gone leaves nothing to hash against; a
+    call whose recorded outcome is not an observed answer, and a recorded model
+    message the observed settle path could not have written, are sources that never
+    produced this proposal. Each of those is a damaged record rather than an
+    ordinary ungrounded proposal, so none may quietly become a refinement grounded
+    in this strategy's latest run: nothing is written and no provider is contacted.
+    """
+    strategies, service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    pair = [cast(str, second["job_id"]), cast(str, first["job_id"])]
+    proposal = _grounded_proposal(strategies, provider, strategy_id, pair)
+    # One more genuine, observed turn at the same revision that produced no proposal.
+    _observed_turn(strategies, provider, strategy_id, call_id="call-9", base_revision=2)
+    _damage_originating_call(tmp_path, strategy_id, proposal["proposal_id"], case)
+    baseline = len(provider.calls)
+    jobs_before = len(service.list_jobs())
+    before = _durable(tmp_path, strategy_id)
+
+    with pytest.raises(UserStrategyStateError):
+        _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+
+    after = _durable(tmp_path, strategy_id)
+    assert after.calls == before.calls and before.calls
+    assert after.proposals == before.proposals
+    assert after.messages == before.messages
+    assert after.draft == before.draft
+    assert after.history == before.history
+    assert after.experiments == before.experiments
+    # The original proposal stands rather than being superseded by a refine that was
+    # refused before it could be admitted.
+    still_open = next(
+        item for item in after.proposals if item["proposal_id"] == proposal["proposal_id"]
+    )
+    assert still_open["status"] == "open"
+    assert len(provider.calls) == baseline
+    assert len(service.list_jobs()) == jobs_before
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "unreadable_report",
+        "changed_report",
+        "another_run",
+        "not_succeeded",
+        "not_created",
+        "stale_payload",
+        "republished_report",
+    ],
+)
+def test_revise_evidence_reverifies_the_frozen_runs_before_any_new_dispatch(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A refinement re-proves its own pair on the frozen runs, and never guesses.
+
+    The pair is read again from this strategy's own record, and before a new call
+    exists each run is held to its frozen payload, its job and that job's report. A
+    report that cannot be read, a report that is no longer the run it was read for,
+    a run that is no longer the run it names or no longer succeeded, a frozen
+    payload that no longer hashes to what was recorded, a run that is no longer one
+    this strategy created, and a report that has since been re-published under a
+    different digest are all refused whole. The open proposal, the draft, the calls
+    and the messages stay exactly as they were, nothing is silently re-grounded in a
+    single latest run or in a newer reading of the same job, and no provider is
+    contacted.
+    """
+    strategies, service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    pair = [cast(str, second["job_id"]), cast(str, first["job_id"])]
+    proposal = _grounded_proposal(strategies, provider, strategy_id, pair)
+    baseline = len(provider.calls)
+    real_job = service.get_job(pair[0])
+    real_report = service.report
+    real_jobs = {job_id: service.get_job(job_id) for job_id in pair}
+
+    class AnotherRun:
+        """The same durable job, claiming a run this report does not belong to."""
+
+        engine_run_id = "another-run-entirely"
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_job, name)
+
+    class Running:
+        status = "running"
+        report_ready = False
+
+    class Republished:
+        """The same durable job, publishing the digest of a re-published report."""
+
+        def __init__(self, digest: str) -> None:
+            self.report_sha256 = digest
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_job, name)
+
+    if case == "unreadable_report":
+        monkeypatch.setattr(service, "report", _unreadable_report)
+    elif case == "changed_report":
+        monkeypatch.setattr(service, "report", lambda identifier: real_report(identifier) + b" ")
+    elif case == "another_run":
+        monkeypatch.setattr(service, "get_job", lambda identifier: AnotherRun())
+    elif case == "not_succeeded":
+        monkeypatch.setattr(service, "get_job", lambda identifier: Running())
+    elif case == "republished_report":
+        # Today's report for that job is internally valid — it hashes to the digest
+        # the job now publishes — but it is not the report the original call recorded,
+        # so it may not silently replace the evidence that call was grounded in.
+        today = real_report(pair[0]) + b"\n"
+        monkeypatch.setattr(
+            service,
+            "report",
+            lambda identifier: today if identifier == pair[0] else real_report(identifier),
+        )
+        monkeypatch.setattr(
+            service,
+            "get_job",
+            lambda identifier: (
+                Republished(hashlib.sha256(today).hexdigest())
+                if identifier == pair[0]
+                else real_jobs[identifier]
+            ),
+        )
+    else:
+        _damage_frozen_run(tmp_path, strategy_id, case)
+
+    before = _durable(tmp_path, strategy_id)
+    with pytest.raises(UserStrategyStateError):
+        _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+
+    after = _durable(tmp_path, strategy_id)
+    assert after.calls == before.calls and before.calls
+    assert after.proposals == before.proposals
+    assert after.messages == before.messages
+    assert after.draft == before.draft
+    still_open = next(
+        item for item in after.proposals if item["proposal_id"] == proposal["proposal_id"]
+    )
+    assert still_open["status"] == "open"
+    assert len(provider.calls) == baseline
+
+
+def test_revise_evidence_replays_an_identical_request_without_a_second_call(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One request under one call id is one call, however many times it is sent."""
+    strategies, service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    pair = [cast(str, second["job_id"]), cast(str, first["job_id"])]
+    proposal = _grounded_proposal(strategies, provider, strategy_id, pair)
+    revised = _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+    baseline = len(provider.calls)
+    assert revised.calls[-1]["request"]["evidence_job_ids"] == pair
+
+    replayed = _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+    assert replayed.calls == revised.calls
+    assert replayed.messages == revised.messages
+    assert replayed.proposals == revised.proposals
+    assert len(provider.calls) == baseline
+
+    # The recorded answer is the answer to this identity, so the runs are not re-read
+    # to replay it: evidence that has become unreadable since is never consulted.
+    def never_reread(identifier: str) -> bytes:
+        raise AssertionError("a replay reread mutable evidence")
+
+    monkeypatch.setattr(service, "report", never_reread)
+    again = _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+    assert again.calls == revised.calls and again.messages == revised.messages
+    assert len(provider.calls) == baseline
+
+    # The same id carrying a different request is a conflict, and asks nothing.
+    with pytest.raises(UserStrategyConflictError):
+        _scripted_revise(
+            strategies,
+            provider,
+            strategy_id,
+            proposal["proposal_id"],
+            text="A different refinement",
+        )
+    assert len(provider.calls) == baseline
+    assert _durable(tmp_path, strategy_id).calls == revised.calls
+
+
+def test_revise_evidence_needs_its_own_explicit_approval_before_any_dispatch(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A grounded refinement is one approved model call, and nothing happens without it."""
+    strategies, _service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    pair = [cast(str, second["job_id"]), cast(str, first["job_id"])]
+    proposal = _grounded_proposal(strategies, provider, strategy_id, pair)
+    baseline = len(provider.calls)
+    before = _durable(tmp_path, strategy_id)
+
+    with pytest.raises(UserStrategyBudgetError):
+        strategies.revise_proposal(
+            strategy_id,
+            proposal_id=proposal["proposal_id"],
+            call_id="call-3",
+            text="Refine the proposed change",
+        )
+
+    after = _durable(tmp_path, strategy_id)
+    assert after.calls == before.calls and before.calls
+    assert after.proposals == before.proposals
+    assert after.messages == before.messages
+    assert len(provider.calls) == baseline
+
+
+def test_revise_evidence_keeps_its_pair_after_the_draft_has_moved_on(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A proposal's own revision ages with the draft, and that is not damage.
+
+    The runs the proposal was made over, and the readings they were frozen with, are
+    what they were; the refinement is still made against today's draft, and the pair
+    it inherits is unchanged by the draft having advanced.
+    """
+    strategies, _service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    pair = [cast(str, second["job_id"]), cast(str, first["job_id"])]
+    proposal = _grounded_proposal(strategies, provider, strategy_id, pair)
+    store = UserStrategyStore(tmp_path / "workspace")
+    saved = store.get(strategy_id)
+    draft = cast(StrategyDraft, saved.draft)
+    store.save(replace(saved, draft=replace(draft, revision=draft.revision + 1)))
+
+    revised = _scripted_revise(strategies, provider, strategy_id, proposal["proposal_id"])
+
+    assert revised.draft.revision == 3
+    new_proposal = revised.proposals[-1]
+    assert new_proposal["status"] == "open" and new_proposal["base_revision"] == 3
+    assert revised.calls[-1]["request"]["evidence_job_ids"] == pair
+    assert [item["job_id"] for item in revised.calls[-1]["evidence"]] == pair
+    assert "Draft revision 3" in _opening(provider)
+
+
 def test_http_keeps_the_old_message_body_and_refuses_a_selection_it_cannot_verify(
     tmp_path: Any,
 ) -> None:
