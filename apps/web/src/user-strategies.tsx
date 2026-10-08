@@ -139,6 +139,21 @@ const explain = (error: unknown) => {
 }
 
 /**
+ * A refused apply, said the way it can actually be recovered from. The proposal was
+ * written against a revision that has since moved on, so reloading and pressing
+ * Apply again cannot make this same change valid: the next step is a new proposal on
+ * the current draft, or a rejection. Only this action reads it this way; every other
+ * refusal keeps the ordinary explanation, and the host's own message is unchanged.
+ */
+const applyFailure = (error: unknown) => {
+  if (error instanceof UserStrategyRequestError && error.code === 'stale_base_revision') {
+    return '草稿修订已前进，这次修改没有被应用。请基于当前草稿重新提出建议，或拒绝此建议。'
+      + ` · 服务端：${error.message}`
+  }
+  return explain(error)
+}
+
+/**
  * The clock time of one recorded instant, to the minute, in UTC. The exact value
  * stays on the element that shows it, so nothing here rounds a timestamp away.
  */
@@ -1187,20 +1202,26 @@ function EmptyChat({ note, live = false }: { note?: string; live?: boolean }) {
  * This panel is mounted per proposal identity and per revision, so the checked
  * set and the approval below always belong to the proposal on screen: switching
  * strategy or revision mounts a fresh panel instead of carrying a stale
- * selection, a stale approval or a stale undo target across.
+ * selection, a stale approval, a stale refusal or a stale undo target across.
  */
-function ProposalPanel({ api, strategy, proposal, changed, failed }: {
+function ProposalPanel({ api, strategy, proposal, changed }: {
   api: ApiAdapter
   strategy: UserStrategy
   proposal: UserStrategyProposal
   changed: (strategy: UserStrategy) => void
-  failed: (message: string) => void
 }) {
   const [checked, setChecked] = useState<string[]>(proposal.items.map(item => item.path))
   const [reviseMessage, setReviseMessage] = useState('')
   const [reviseApproved, setReviseApproved] = useState(false)
   const attempts = useRef(0)
   const [busy, setBusy] = useState(false)
+  // The refusal of the action just taken, held here rather than in the page's own
+  // notice area: these controls live in the AI column, which on a narrow screen is
+  // far below whatever the page says at its top, so the answer to a click has to be
+  // where the click was made. It belongs to this panel instance — a later attempt
+  // replaces it, a decision or a remount forgets it — so it never leaks across a
+  // strategy or a proposal.
+  const [actionError, setActionError] = useState('')
 
   const open = proposal.status === 'open'
   const selected = proposal.items.map(item => item.path).filter(path => checked.includes(path))
@@ -1210,16 +1231,16 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
 
   const apply = async () => {
     if (!selected.length) {
-      failed('至少选择一个字段再应用，或者改为拒绝这条建议。')
+      setActionError('至少选择一个字段再应用，或者改为拒绝这条建议。')
       return
     }
     const applyChange = api.applyUserStrategyProposal
     if (!applyChange) {
-      failed('这个工作区不提供应用修改。')
+      setActionError('这个工作区不提供应用修改。')
       return
     }
     setBusy(true)
-    failed('')
+    setActionError('')
     const attempt = attempts.current
     try {
       // One intent, one operation id: a retry of this click replays it instead of
@@ -1232,7 +1253,9 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
       attempts.current += 1
       changed(updated)
     } catch (error) {
-      failed(explain(error))
+      // A refusal answers the click that is still on screen; a refusal is not a
+      // reason to ask the host again on its own.
+      setActionError(applyFailure(error))
     } finally {
       setBusy(false)
     }
@@ -1242,11 +1265,11 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
     const rejectChange = api.rejectUserStrategyProposal
     if (!rejectChange) return
     setBusy(true)
-    failed('')
+    setActionError('')
     try {
       changed(await rejectChange(strategy.user_strategy_id, proposal.proposal_id))
     } catch (error) {
-      failed(explain(error))
+      setActionError(explain(error))
     } finally {
       setBusy(false)
     }
@@ -1259,11 +1282,11 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
     // revision on screen. A stale page cannot undo whatever happens to be newest.
     const target = strategy.changes.filter(item => item.kind === 'apply').at(-1)
     if (!target || target.to_revision !== strategy.draft.revision) {
-      failed('当前修订上没有可撤销的已应用修改。')
+      setActionError('当前修订上没有可撤销的已应用修改。')
       return
     }
     setBusy(true)
-    failed('')
+    setActionError('')
     try {
       changed(await undoChange(strategy.user_strategy_id, {
         operation_id: `undo-${target.operation_id}-${strategy.draft.revision}`.slice(0, 64),
@@ -1271,7 +1294,7 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
         target_operation_id: target.operation_id,
       }))
     } catch (error) {
-      failed(explain(error))
+      setActionError(explain(error))
     } finally {
       setBusy(false)
     }
@@ -1279,16 +1302,16 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
 
   const revise = async () => {
     if (!reviseApproved) {
-      failed('在修改这条建议之前，需要先批准一次模型调用。')
+      setActionError('在修改这条建议之前，需要先批准一次模型调用。')
       return
     }
     const reviseChange = api.reviseUserStrategyProposal
     if (!reviseChange) {
-      failed('这个工作区不提供修改建议。')
+      setActionError('这个工作区不提供修改建议。')
       return
     }
     setBusy(true)
-    failed('')
+    setActionError('')
     try {
       // A fresh call with a fresh approval: the old proposal is kept as history and
       // this one is superseded by whatever the model proposes on the current base.
@@ -1301,7 +1324,7 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
       setReviseMessage('')
       changed(updated)
     } catch (error) {
-      failed(explain(error))
+      setActionError(explain(error))
     } finally {
       setBusy(false)
     }
@@ -1361,7 +1384,7 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
         </div>
         <label className="check" htmlFor={`${proposal.proposal_id}-revise-approve`}>
           <input id={`${proposal.proposal_id}-revise-approve`} type="checkbox" checked={reviseApproved}
-            onChange={event => { setReviseApproved(event.target.checked); failed('') }} />
+            onChange={event => { setReviseApproved(event.target.checked); setActionError('') }} />
           为这个修订批准一次模型调用
         </label>
         <button type="button" onClick={revise} disabled={busy}>修改这条建议</button>
@@ -1382,6 +1405,12 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
     {PROPOSAL_STATUS_LABELS[proposal.status]}
   </span>
   const undoButton = <button type="button" onClick={undo} disabled={busy}>撤销最近一次修改</button>
+  // One alert at most, and it is the answer to the click the reader just made. It is
+  // placed with the controls in whichever state is on screen, so it is read where it
+  // happened rather than at the far end of a long panel or at the top of the page.
+  const actionAlert = actionError
+    ? <p role="alert" className="notice error">{actionError}</p>
+    : null
   // A closed proposal's own line names the effective state and nothing else: what
   // this record now amounts to on the ledger — 已撤销 when it was reversed, the
   // proposal's own status otherwise. The status it was recorded with stays inside
@@ -1402,6 +1431,7 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
           {origin}
           {callEvidence}
           {changeDetail}
+          {actionAlert}
           <div className="actions">
             <button type="button" className="primary" onClick={apply} disabled={busy}>应用所选</button>
             <button type="button" onClick={reject} disabled={busy}>拒绝建议</button>
@@ -1429,8 +1459,13 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
             </div>
           </details>
           {/* The one action that can still change the draft stays on the first
-              screen, outside the history it belongs to; it is not repeated inside. */}
-          {canUndo && <div className="actions">{undoButton}</div>}
+              screen, outside the history it belongs to; it is not repeated inside.
+              Its own refusal is announced there with it, not at the top of the
+              page. */}
+          {canUndo && <>
+            {actionAlert}
+            <div className="actions">{undoButton}</div>
+          </>}
         </>}
   </section>
 }
@@ -1962,7 +1997,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
               ? <ProposalPanel
                   key={`${current.user_strategy_id}-${proposal.proposal_id}-${proposal.base_revision}-${proposal.status}`}
                   api={api} strategy={current} proposal={proposal}
-                  changed={changed} failed={failedFor(current.user_strategy_id)} />
+                  changed={changed} />
               : null} />
         : detailReading
           ? <EmptyChat note="正在读取这条策略的对话…" live />

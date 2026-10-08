@@ -1930,3 +1930,92 @@ describe('maturity round 1', () => {
     expect(continuation.textContent).not.toMatch(/运行已创建/)
   })
 })
+
+/**
+ * Where a refused proposal action is announced. The decision controls live in the AI
+ * column, which on a narrow screen sits far below whatever the page says at its top:
+ * a refusal that is only announced up there is a refusal the reader never sees. It
+ * belongs inside this proposal's own region, beside the controls that produced it —
+ * and it belongs to that one attempt, so a later action does not leave it standing.
+ */
+describe('proposal action feedback', () => {
+  it('announces a refused apply inside its own proposal region, beside the controls', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted({
+      current: () => strategy({ proposals: [proposal()] }),
+      // The revision moved on while this page was open: the host refuses the apply.
+      apply: async () => {
+        throw new UserStrategyRequestError('stale_base_revision', 'the draft revision moved on')
+      },
+    })
+    detail(api)
+    const panel = await screen.findByRole('region', { name: '建议修改' })
+
+    // The reader narrows the typed change to one field, so the selection that has to
+    // survive the refusal is not the one the panel started with.
+    await user.click(within(panel).getByLabelText('parameters.entry_delay_bars'))
+    await user.click(within(panel).getByRole('button', { name: '应用所选' }))
+
+    await waitFor(() => expect(calls.apply).toBe(1))
+    // The refusal is announced where the click was made: inside this proposal's own
+    // region, ahead of the controls, behind no disclosure.
+    const alert = await within(panel).findByRole('alert')
+    expect(alert.textContent).toContain('草稿修订已前进，这次修改没有被应用。')
+    // The recovery fits the refusal: the same old proposal cannot be re-applied to a
+    // draft that has moved on, so the reader is pointed at a new proposal or a
+    // rejection — never at simply reloading and pressing Apply again.
+    expect(alert.textContent).toContain('请基于当前草稿重新提出建议，或拒绝此建议。')
+    expect(alert.textContent).toContain('the draft revision moved on')
+    expect(collapsedAncestor(alert)).toBeNull()
+    expect(precedes(alert, within(panel).getByRole('button', { name: '应用所选' }))).toBe(true)
+    // Announced once, next to the action that failed — not also at the top of a page
+    // the reader has since scrolled away from.
+    expect(screen.getAllByText(/草稿修订已前进，这次修改没有被应用。/)).toHaveLength(1)
+
+    // One click is one attempt: a refused apply is not retried on its own.
+    expect(calls.apply).toBe(1)
+    expect(applied).toEqual([{ proposalId: 'prop-1', operationId: 'op-prop-1-1-0', paths: ['parameters.target_quantity'] }])
+
+    // The typed change and the reader's own selection are exactly as they were, and
+    // nothing was written to the draft.
+    expect((within(panel).getByLabelText('parameters.target_quantity') as HTMLInputElement).checked).toBe(true)
+    expect((within(panel).getByLabelText('parameters.entry_delay_bars') as HTMLInputElement).checked).toBe(false)
+    expect(within(panel).getByText('之前 2')).toBeTruthy()
+    expect(within(panel).getByText('之后 3')).toBeTruthy()
+    expect(within(panel).getByText('待处理')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 1')).toBeTruthy()
+  })
+
+  it('clears a refused apply when the reader decides the proposal instead', async () => {
+    const user = userEvent.setup()
+    // The strategy is seeded through the list the adapter persists against, so the
+    // decision this test makes is answered by a persisted proposal that really
+    // exists: a rejection returns the same strategy with that one proposal closed,
+    // rather than a strategy the double had no proposal for.
+    const seeded = strategy({ proposals: [proposal()] })
+    const { api, calls } = scripted({
+      strategies: [seeded],
+      apply: async () => {
+        throw new UserStrategyRequestError('stale_base_revision', 'the draft revision moved on')
+      },
+    })
+    detail(api)
+    const panel = await screen.findByRole('region', { name: '建议修改' })
+
+    await user.click(within(panel).getByRole('button', { name: '应用所选' }))
+    await waitFor(() => expect(calls.apply).toBe(1))
+    await within(panel).findByRole('alert')
+
+    await user.click(within(panel).getByRole('button', { name: '拒绝建议' }))
+    expect(calls.reject).toBe(1)
+
+    await waitFor(() => {
+      // The decision is the visible closed line of the record, not a chip hidden
+      // inside a disclosure the reader has not opened.
+      expect(within(screen.getByRole('region', { name: '建议修改' })).getByText(/已拒绝的修改与来源/)).toBeTruthy()
+    })
+    // The refusal belonged to that attempt, not to the proposal: once the reader has
+    // decided, no stale alert is left standing beside the decision.
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
