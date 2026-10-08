@@ -1072,8 +1072,10 @@ describe('report to strategy return', () => {
     expect(within(association).getByText('冻结 v2')).toBeTruthy()
     expect(within(association).queryByText('冻结 v5')).toBeNull()
     expect(within(association).queryByText('Quiet exit')).toBeNull()
+    // The way back carries the frozen run this report is about, so the strategy
+    // opens with that run as its evidence rather than with the latest one.
     const back = within(association).getByRole('link', { name: '返回此策略继续研究' })
-    expect(back.getAttribute('href')).toBe('/strategies/us-1')
+    expect(back.getAttribute('href')).toBe('/strategies/us-1?evidence_a=job-1')
 
     await user.click(back)
     await waitFor(() => expect(window.location.pathname).toBe('/strategies/us-1'))
@@ -1125,7 +1127,7 @@ describe('report to strategy return', () => {
     const recovered = await screen.findByRole('region', { name: '策略关联' })
     expect(await within(recovered).findByText('Bold entry')).toBeTruthy()
     expect(within(recovered).getByText('冻结 v2')).toBeTruthy()
-    expect(within(recovered).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1')
+    expect(within(recovered).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1?evidence_a=job-1')
   })
 
   it('refuses to choose between two frozen records of one strategy', async () => {
@@ -1193,8 +1195,9 @@ describe('report to strategy return', () => {
     const association = await associationPanel()
     expect(await within(association).findByText('冻结修订未知')).toBeTruthy()
     expect(within(association).queryByText(/v0/)).toBeNull()
-    // The job identity still matched, so the way back is still offered.
-    expect(within(association).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1')
+    // The job identity still matched, so the way back is still offered, and it
+    // still names the run it read rather than whatever ran later.
+    expect(within(association).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1?evidence_a=job-1')
   })
 
   it('never shows the job it left behind when a late association answer arrives', async () => {
@@ -1284,6 +1287,45 @@ const commonOwner: UserStrategy = {
     frozenExperiment('job-2', 7, '2026-10-06T10:40:00.000000Z', 'li-b'),
   ],
 }
+
+describe('evidence continuity from a report or a comparison', () => {
+  it('continuity: the report return link keeps the frozen run this report is about', async () => {
+    const user = userEvent.setup()
+    reportPage(adapter({
+      listUserStrategies: async () => [ownerStrategy, otherStrategy],
+      getUserStrategy: async () => ownerStrategy,
+    }))
+
+    const association = await associationPanel()
+    const back = await within(association).findByRole('link', { name: '返回此策略继续研究' })
+    expect(back.getAttribute('href')).toBe('/strategies/us-1?evidence_a=job-1')
+
+    // Following it lands on the strategy at the address that names this run, not on
+    // a bare strategy address that would silently reset the evidence to the latest.
+    await user.click(back)
+    await waitFor(() => expect(window.location.pathname).toBe('/strategies/us-1'))
+    expect(window.location.search).toBe('?evidence_a=job-1')
+    expect(await screen.findByRole('region', { name: '策略详情' })).toBeTruthy()
+  })
+
+  it('continuity: the comparison return link keeps A then B in the order shown', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({
+      listUserStrategies: async () => [commonOwner],
+      getUserStrategy: async () => commonOwner,
+    })} />)
+
+    const association = await screen.findByRole('region', { name: '对比策略关联' })
+    const back = await within(association).findByRole('link', { name: '返回此策略继续研究' })
+    // The left run is A and the right run is B: the same order this page shows.
+    expect(back.getAttribute('href')).toBe('/strategies/us-1?evidence_a=job-1&evidence_b=job-2')
+
+    await user.click(back)
+    await waitFor(() => expect(window.location.pathname).toBe('/strategies/us-1'))
+    expect(window.location.search).toBe('?evidence_a=job-1&evidence_b=job-2')
+  })
+})
 
 describe('maturity round 2', () => {
   it('leads with parameter and result differences before the identity disclosures', async () => {
@@ -1377,8 +1419,10 @@ describe('maturity round 2', () => {
     expect(within(association).getByText(/冻结 v2/)).toBeTruthy()
     expect(within(association).getByText(/冻结 v7/)).toBeTruthy()
     expect(within(association).queryByText(/冻结 v5/)).toBeNull()
+    // The way back carries both runs, A first and B second, exactly as this page
+    // shows them, so the strategy opens on the comparison it came from.
     const back = within(association).getByRole('link', { name: '返回此策略继续研究' })
-    expect(back.getAttribute('href')).toBe('/strategies/us-1')
+    expect(back.getAttribute('href')).toBe('/strategies/us-1?evidence_a=job-1&evidence_b=job-2')
 
     await user.click(back)
     await waitFor(() => expect(window.location.pathname).toBe('/strategies/us-1'))
@@ -1490,7 +1534,7 @@ describe('maturity round 2', () => {
     const association = await screen.findByRole('region', { name: '策略关联' })
     expect(await within(association).findByText('Bold entry')).toBeTruthy()
     expect(within(association).getByText('冻结 v2')).toBeTruthy()
-    expect(within(association).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1')
+    expect(within(association).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1?evidence_a=job-1')
 
     // The concise limitations stay visible; the detailed identities are reachable
     // through their own native disclosure instead of being printed up front.

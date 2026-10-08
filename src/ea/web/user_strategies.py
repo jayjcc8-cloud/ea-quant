@@ -1720,8 +1720,11 @@ class UserStrategyService:
         this turn. Only those runs are described — no other run of this strategy is
         mentioned, and no later run is read in their place — and the limits of a
         single window are stated with them, so the model is told what a reading is
-        and what it is not. The registered fields above still describe today's draft,
-        and a proposal still targets that draft.
+        and what it is not. One of those limits, no_benchmark_comparison, is stated
+        for what it is: the absence of a benchmark in one run's own configuration,
+        not a host finding about whether the selected runs can be compared. The
+        registered fields above still describe today's draft, and a proposal still
+        targets that draft.
         """
         facts = [
             "The user selected these frozen runs as this turn's evidence. Only these "
@@ -1775,6 +1778,12 @@ class UserStrategyService:
                 "One run over one window supports no causal claim, no profit claim and no "
                 "robustness claim; a difference between two runs is a comparability "
                 "question before it is an explanation.",
+                "A run whose limitations record no_benchmark_comparison is stating that "
+                "its own configuration carried no benchmark. That is not by itself a "
+                "finding that the selected runs cannot be compared, and it does not "
+                "settle the question either way: what the runs actually froze — their "
+                "inputs, data windows, costs and parameters — is what decides whether "
+                "their difference is comparable at all.",
                 "Net P&L includes the valuation of any position still open at the end of "
                 "the window, so it is not realized profit.",
                 "Explaining these runs and proposing a next experiment are not running "

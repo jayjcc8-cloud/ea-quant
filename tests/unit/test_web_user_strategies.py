@@ -4139,6 +4139,107 @@ def test_two_selected_runs_keep_each_runs_own_frozen_criterion(
     assert records[0]["criterion"] == records[1]["criterion"] == FROZEN_CRITERION
 
 
+def test_continuity_a_selected_pair_is_the_only_evidence_the_turn_is_grounded_in(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pair the user named is the whole of what this turn is told about runs.
+
+    Each selected run is stated as itself, in the user's own order, with its own
+    frozen parameters, revision and limits. A difference between two runs is a
+    comparability question before it is an explanation, and a report that records
+    no benchmark comparison says something about that run alone: it is not by
+    itself a finding that the selected runs cannot be compared. An ordinary answer
+    that calls no tool is handled as any other turn is and adds no proposal, so the
+    turn is one new call and the user's own message and nothing else.
+    """
+    strategies, _service, provider, strategy_id, first, second = _two_runs(tmp_path, monkeypatch)
+    # The user names the later run as A and the earlier one as B: what the request
+    # states is what the model is told, which is not the order they ran in.
+    jobs = [cast(str, second["job_id"]), cast(str, first["job_id"])]
+    asked = len(provider.calls)
+    before = _durable(tmp_path, strategy_id)
+    assert before.proposals
+
+    provider.responses.append(_response([], text="一个普通的回答。"))
+    answered = strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=2,
+        text="解释这两次运行",
+        approved_budget=dict(CALL_BUDGET),
+        evidence_job_ids=jobs,
+    )
+    assert len(provider.calls) == asked + 1
+    # An ordinary answer with no tool call is handled as any other turn is: the call
+    # is observed, its text is the answer, and nothing is proposed or applied.
+    assert answered.calls[-1]["status"] == "observed"
+    assert answered.messages[-1]["text"] == "一个普通的回答。"
+    assert answered.proposals == before.proposals
+    # What is added is the tail of the history — the user's own turn and its reply —
+    # and nothing else. The messages this strategy already had, this fixture's
+    # earlier proposal among them, are exactly the messages it still has.
+    assert answered.messages[: len(before.messages)] == before.messages
+    appended = answered.messages[len(before.messages) :]
+    assert all(item["kind"] != "proposal" for item in appended)
+    assert answered.draft.revision == 2
+    # The turn is one new call and the user's own turn: nothing else was added, and
+    # the history this strategy already had is still exactly that history.
+    assert len(answered.calls) == len(before.calls) + 1
+    assert len(answered.messages) == len(before.messages) + 2
+    assert len(appended) == 2
+    assert [item["job_id"] for item in answered.calls[-1]["evidence"]] == jobs
+
+    opening = _opening(provider)
+    lines = opening.split("\n")
+    a_line = next(line for line in lines if line.startswith("Selected run A:"))
+    b_line = next(line for line in lines if line.startswith("Selected run B:"))
+    assert f"job {jobs[0]}" in a_line
+    assert f"frozen draft revision {second['payload']['draft_revision']}, launch li-2" in a_line
+    assert f"frozen draft revision {first['payload']['draft_revision']}, launch li-1" in b_line
+    assert lines.index(a_line) < lines.index(b_line)
+    # Each run is stated as itself: neither line carries the other run's job, and
+    # each run's own frozen parameters are stated with it, in the selected order.
+    assert jobs[1] not in a_line and jobs[0] not in b_line
+    parameters = [line for line in lines if line.strip().startswith("the parameters it froze:")]
+    assert len(parameters) == 2
+    # Each line carries the run it belongs to, read back out of the document that run
+    # was frozen from: the two runs really did freeze different values, so neither
+    # line can be the other's.
+    first_frozen = cast(dict[str, Any], first["payload"]["parameters"])
+    second_frozen = cast(dict[str, Any], second["payload"]["parameters"])
+    assert second_frozen["target_quantity"] != first_frozen["target_quantity"]
+    assert f"target_quantity = {second_frozen['target_quantity']}" in parameters[0]
+    assert f"target_quantity = {first_frozen['target_quantity']}" in parameters[1]
+    # A verified reading of each run is stated, with that run's own input digest.
+    assert opening.count("economics.net_pnl.amount = ") == 2
+    assert cast(str, second["payload"]["input_sha256"]) in opening
+    assert cast(str, first["payload"]["input_sha256"]) in opening
+    assert "no other run of this strategy is described" in opening
+    assert "a difference between two runs is a comparability question" in opening
+    assert "no_benchmark_comparison" in opening
+    assert "not by itself" in opening
+    assert "One run over one window supports no causal claim" in opening
+    assert "Net P&L includes the valuation of any position still open" in opening
+    assert "are not running anything" in opening
+    # The draft a proposal would still target is today's head, not what was frozen.
+    assert "Draft revision 2" in opening
+
+    # A selection this strategy did not freeze is refused before anything is asked,
+    # and leaves no call record and no second request behind it.
+    after = _durable(tmp_path, strategy_id)
+    with pytest.raises(UserStrategyStateError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-3",
+            base_revision=2,
+            text="解释一次不属于这条策略的运行",
+            approved_budget=dict(CALL_BUDGET),
+            evidence_job_ids=["job-elsewhere"],
+        )
+    assert len(provider.calls) == asked + 1
+    assert _durable(tmp_path, strategy_id).calls == after.calls
+
+
 @pytest.mark.parametrize(
     "case",
     ["foreign", "duplicate", "too_many", "empty", "not_an_id", "unknown", "not_created"],

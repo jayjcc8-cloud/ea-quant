@@ -17,9 +17,16 @@
  * confirmation of a preview on the 实验 tab, and a proposal is still applied by
  * the user on the 建议修改 panel. Reading this section, choosing a run and
  * mounting it call no model and create no run.
+ *
+ * The address is the selection: a verified report or comparison carries the runs
+ * it is about back in evidence_a and evidence_b, and this panel reads that
+ * address instead of remembering a selection of its own, so a reload, the
+ * browser's own back and forward and a fresh load all agree. An address it cannot
+ * verify — an unknown, foreign or ambiguous run — is refused out loud, with one
+ * way to clear it, rather than answered from the latest run.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport } from './app'
 import { exactDelta } from './decimal'
 import {
@@ -50,6 +57,21 @@ const reason = (error: unknown) => {
   }
   return error instanceof Error ? error.message : '这次请求失败了，什么都没有发送。'
 }
+
+/** The two query parameters a verified report or comparison carries back here. */
+const EVIDENCE_A = 'evidence_a'
+const EVIDENCE_B = 'evidence_b'
+
+/**
+ * What the address asks this panel to explain: the default selection it has always
+ * had (the latest run as A, no B), the runs it names, or a refusal. An address that
+ * names something unverifiable is never quietly repaired into a pair that happens
+ * to be valid, and nothing is explained or sent from it.
+ */
+type Selection =
+  | { kind: 'default' }
+  | { kind: 'explicit'; a: UserStrategyExperiment; b: UserStrategyExperiment | null }
+  | { kind: 'invalid'; note: string }
 
 /** One amount as a report states it: the unit is optional in the wire type. */
 type Amount = { amount: string; currency?: string }
@@ -207,11 +229,24 @@ const EXPLAIN_PROMPT = [
  * 400 UTF-8 byte limit — a refusal this panel cannot turn into a proposal. So the
  * fields this workspace really bounds are asked for as one concise hypothesis and
  * test, and the limits are stated here rather than discovered by a refusal.
+ *
+ * One change is asked for only when the selected runs support one: a turn may
+ * answer that there is nothing worth changing. This is a prompt, not a guarantee
+ * that a proposal is well founded, and it neither forbids a deliberate rerun nor
+ * makes an arbitrary numeric difference count as a finding.
  */
 const nextPrompt = (revision: number) => [
   '提出下一实验。',
-  `针对当前草稿修订 ${revision}：用 propose_change 提出恰好一个有用的、有类型的字段修改，`
-    + '写明 path、value、reason 和可选的 evidence。',
+  `针对当前草稿修订 ${revision}：如果你能说出一个值得检验的、有类型的字段修改，就用 propose_change `
+    + '提出一个有类型的字段修改，写明 path、value、reason 和可选的 evidence；'
+    + '如果没有值得检验的、有类型的修改，就明确说明这次没有修改，也不要为了提出修改而修改：'
+    + '在正文里说清还缺哪一类证据、准则或数据，并建议用户做一个有边界的下一步'
+    + '（重新选择一次运行、明确地重跑一次，或者先把要检验的问题写清楚），'
+    + '由用户自己决定要不要做。',
+  '这一次修改只能有一个，并且要说清它相对所选 A/B 的差异：它要检验的假设、怎么检验这个假设，'
+    + '以及为什么这个差异有用、它能带来什么现在还没有的信息。'
+    + '不要把已经冻结过的输入当作新的证据；也不要把任何参数改动都当作有用的研究：'
+    + '只因为数值不同而不同，不构成值得检验的差异。',
   '完整解释写在回复正文里，不要写进 reason：正文用简体中文写一段约 400 个汉字以内的说明，'
     + '并把四件事分开写：（1）事实：来自哪一次运行（写明修订与 job）和报告里哪一个字段名；'
     + '（2）推断：你自己从这些事实读出的判断；（3）限制：所选运行读不出来的东西；'
@@ -242,6 +277,8 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
   failed: (message: string) => void
 }) {
   const idBase = `research-${strategy.user_strategy_id}`
+  const [searchParams, setSearchParams] = useSearchParams()
+  const location = useLocation()
   // Only this strategy's own created runs can be selected: a run with no job, a
   // failed launch or another strategy's run is not evidence this conversation may
   // be grounded in, and the host refuses it rather than explaining it.
@@ -249,17 +286,60 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
     () => strategy.experiments.filter(item => item.status === 'created' && item.job_id),
     [strategy],
   )
-  // A defaults to the run whose report the 证据 section above is already showing —
-  // the latest frozen run — and B starts absent: one run is one run, and inventing
-  // a second one is exactly what this panel refuses to do.
-  const [a, setA] = useState(runs.at(-1)?.launch_intent_id ?? '')
-  const [b, setB] = useState('')
-  const [busy, setBusy] = useState(false)
 
-  const aRun = runs.find(item => item.launch_intent_id === a) ?? runs.at(-1) ?? null
-  const bRun = b ? runs.find(item => item.launch_intent_id === b) ?? null : null
+  // The address is the selection, and it is the only copy of it: a return link from
+  // a report or a comparison, a refresh, the browser's own back and forward and a
+  // remount of this tab all read these same two parameters, and choosing a run
+  // writes them back. Nothing is remembered beside them, so this panel can never
+  // show a selection the address does not state.
+  const selection = useMemo<Selection>(() => {
+    const aParams = searchParams.getAll(EVIDENCE_A)
+    const bParams = searchParams.getAll(EVIDENCE_B)
+    // The address this panel has always accepted: nothing named, so nothing is
+    // claimed — A is the latest frozen run and B is absent.
+    if (!aParams.length && !bParams.length) return { kind: 'default' }
+    const invalid = (note: string): Selection => ({ kind: 'invalid', note })
+    if (aParams.length > 1 || bParams.length > 1) {
+      return invalid('同一个参数在地址里出现了多次，无法确定要解释哪一次运行。')
+    }
+    const aId = aParams[0] ?? ''
+    const bId = bParams[0] ?? ''
+    if (!aId) return invalid('A 是空的：空值不是一次运行。')
+    if (bParams.length && !bId) return invalid('B 是空的：空值不是一次运行。')
+    // Exactly one created record of this strategy per id, or the id is not the run it
+    // claims to be. An unknown, foreign or ambiguous id is refused here and refused
+    // again by the host, which never falls back to a run of its own choosing.
+    const own = (id: string) => runs.filter(item => item.job_id === id)
+    const aMatches = own(aId)
+    if (aMatches.length !== 1) {
+      return invalid(`A 指定的运行（${aId}）不是这条策略自己唯一的一次冻结运行。`)
+    }
+    if (!bParams.length) return { kind: 'explicit', a: aMatches[0], b: null }
+    if (bId === aId) return invalid('A 和 B 是同一次运行：一次运行不能与它自己比较。')
+    const bMatches = own(bId)
+    if (bMatches.length !== 1) {
+      return invalid(`B 指定的运行（${bId}）不是这条策略自己唯一的一次冻结运行。`)
+    }
+    return { kind: 'explicit', a: aMatches[0], b: bMatches[0] }
+  }, [searchParams, runs])
+
+  const invalid = selection.kind === 'invalid'
+  // A plain strategy address keeps the selection this panel has always had — the
+  // latest frozen run as A, and no B — while an address that names runs is used
+  // exactly as it is written, A first. An address this panel could not verify has
+  // no selection at all: it reads nothing, not even the latest run as a fallback.
+  const aRun = selection.kind === 'explicit'
+    ? selection.a
+    : selection.kind === 'default' ? runs.at(-1) ?? null : null
+  const bRun = selection.kind === 'explicit' ? selection.b : null
   const aState = useRunRead(api, aRun?.job_id ?? null)
   const bState = useRunRead(api, bRun?.job_id ?? null)
+  // Both actions are a request about these runs, so neither is available while a
+  // selected run is still being read, cannot be read, or its report is not the
+  // report of the run it was read for.
+  const contextReady = !invalid && aRun !== null
+    && aState?.kind === 'ready' && (bRun === null || bState?.kind === 'ready')
+  const [busy, setBusy] = useState(false)
 
   // This panel looks at exactly one request at a time: this strategy, this draft
   // revision and these two frozen runs, in the order they are sent. It is also the
@@ -279,22 +359,67 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
   const [approvedFor, setApprovedFor] = useState<string | null>(null)
   const approved = approvedFor === requestKey
 
+  // Every arrival at an address is its own visit, including the browser's own back
+  // to an address and a history key this panel already showed: the number only ever
+  // grows, so a request sent during an earlier visit can never own the panel again.
+  // What the departed visit was holding — the approval it was given and the busy
+  // state of the request it had in flight — is retired with it, so the visit the
+  // user arrives at is usable at once. That request is only ever ignored from here:
+  // nothing is cancelled, re-sent or retried, and it cannot report a refusal or a
+  // result into a visit it does not belong to.
+  const visitAt = `${location.key}|${location.pathname}${location.search}`
+  const [visit, setVisit] = useState({ at: visitAt, id: 0 })
+  if (visit.at !== visitAt) {
+    setVisit({ at: visitAt, id: visit.id + 1 })
+    setApprovedFor(null)
+    setBusy(false)
+  }
+  const visitId = visit.at === visitAt ? visit.id : visit.id + 1
+
   // Only the dispatch that is still this panel's current one may write anything, and
   // only while this panel is mounted: the answer to a request the page has moved on
-  // from — a revision change, another strategy, an unmount — never reaches the
-  // conversation, the refusal note or the busy state of the panel that replaced it.
+  // from — a revision change, another selection, another strategy, an unmount — never
+  // reaches the conversation, the refusal note or the busy state of the panel that
+  // replaced it.
   const live = useRef(true)
-  // The request the page is looking at as of the latest committed render, and the
-  // newest dispatch of this panel: together they say whether a completion still owns
-  // it. Both are written after the commit rather than during render, so a completion
-  // can never read a key the page has already left.
-  const shown = useRef(requestKey)
-  useLayoutEffect(() => { shown.current = requestKey })
+  // The request and the visit the page is looking at as of the latest committed
+  // render, and the newest dispatch of this panel: together they say whether a
+  // completion still owns it. Both are written after the commit rather than during
+  // render, so a completion can never read a context the page has already left —
+  // and a visit that has ended never comes back, not even by returning to the same
+  // address and history key.
+  const dispatchKey = `${visitId}|${requestKey}`
+  const shown = useRef(dispatchKey)
+  useLayoutEffect(() => { shown.current = dispatchKey })
   const newest = useRef(0)
   useEffect(() => {
     live.current = true
     return () => { live.current = false }
   }, [])
+
+  // Choosing writes the address, and the address is what this panel reads back: the
+  // approval given for the old selection is retired here rather than kept beside it,
+  // and unrelated parameters already in the address stay where they are.
+  const choose = (nextA: UserStrategyExperiment | null, nextB: UserStrategyExperiment | null) => {
+    const params = new URLSearchParams(searchParams)
+    params.delete(EVIDENCE_A)
+    params.delete(EVIDENCE_B)
+    if (nextA) params.set(EVIDENCE_A, nextA.job_id ?? '')
+    if (nextB) params.set(EVIDENCE_B, nextB.job_id ?? '')
+    setApprovedFor(null)
+    setSearchParams(params)
+  }
+
+  // The correction for an address that cannot be verified: it removes exactly the
+  // selection this panel could not check and keeps everything else, leaving the
+  // default selection in its place rather than a pair the panel guessed at.
+  const clearSelection = () => {
+    const params = new URLSearchParams(searchParams)
+    params.delete(EVIDENCE_A)
+    params.delete(EVIDENCE_B)
+    setApprovedFor(null)
+    setSearchParams(params, { replace: true })
+  }
 
   const send = async (kind: 'explain' | 'next') => {
     if (!approved) {
@@ -306,9 +431,16 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
       failed('这个工作区不提供模型协作。')
       return
     }
-    const selection = [aRun?.job_id ?? null, bRun?.job_id ?? null]
+    // The buttons already refuse this, and the request refuses it again: nothing is
+    // sent while a selected run is unreadable, or while its report is not the report
+    // of the run it was read for — whatever the panel happens to be showing.
+    if (!contextReady) {
+      failed('所选运行还没有可读、身份一致的正式报告，因此这次什么都没有发送。')
+      return
+    }
+    const evidence = [aRun?.job_id ?? null, bRun?.job_id ?? null]
       .filter((item): item is string => Boolean(item))
-    if (!selection.length) {
+    if (!evidence.length) {
       failed('请先选择一次冻结运行：没有选中的运行就没有可以解释的证据。')
       return
     }
@@ -318,7 +450,7 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
     // for, and which dispatch of this panel it is. Buttons are disabled while it is
     // in flight, so a second click asks nothing; if a completion ever races one, only
     // the newer ticket owns the panel.
-    const dispatched = requestKey
+    const dispatched = dispatchKey
     const ticket = newest.current + 1
     newest.current = ticket
     const mine = () => live.current && shown.current === dispatched
@@ -335,7 +467,7 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
         approved_budget: RESEARCH_APPROVAL,
         // The selection travels with the request, and the host verifies every id
         // before it writes anything: this turn is told about exactly these runs.
-        evidence_job_ids: selection,
+        evidence_job_ids: evidence,
       })
       // An obsolete answer is dropped whole: it is not applied here, it does not
       // clear the approval of the selection now on screen, and it is not shown as a
@@ -402,7 +534,18 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
       这里选择要解释的冻结运行：A 默认是最近一次运行，B 可以留空。选中的运行会随请求一起发送，
       宿主会先逐条核对它们确实是这条策略自己的、可读的冻结运行，然后这次对话只被这些运行的事实支撑。
     </p>
-    {runs.length === 0
+    {selection.kind === 'invalid'
+      ? <>
+          <p className="notice error" role="alert">{`无效的证据选择：${selection.note}`}</p>
+          <p className="muted">
+            这个地址里的选择无法核对，因此这里既不解释它，也不回退到最近一次运行，更不会发送任何请求。
+            清除之后可以重新选择要解释的运行。
+          </p>
+          <div className="actions">
+            <button type="button" onClick={clearSelection}>清除无效的证据选择</button>
+          </div>
+        </>
+      : runs.length === 0
       ? <p className="muted">
           这条策略还没有冻结运行。在「实验」里确认一次实验、并且那次运行成功之后，这里才会出现可选的运行。
         </p>
@@ -410,13 +553,13 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
           <div className="create-fields">
             <div className="field">
               <label htmlFor={`${idBase}-run-a`}>运行 A</label>
-              <select id={`${idBase}-run-a`} value={a} disabled={busy}
+              <select id={`${idBase}-run-a`} value={aRun?.launch_intent_id ?? ''} disabled={busy}
                 onChange={event => {
-                  setA(event.target.value)
-                  if (event.target.value === b) setB('')
-                  // A selection is a new request, so an approval given for the old
-                  // one is dropped here as well as by the key it was recorded under.
-                  setApprovedFor(null)
+                  // A different A that is the current B would name one run twice: the B
+                  // that cannot stay is dropped here rather than sent as a duplicate.
+                  const nextA = runs.find(item => item.launch_intent_id === event.target.value) ?? null
+                  const nextB = bRun && bRun.launch_intent_id !== nextA?.launch_intent_id ? bRun : null
+                  choose(nextA, nextB)
                 }}>
                 {runs.map(item => <option key={item.launch_intent_id} value={item.launch_intent_id}>
                   {`修订 ${item.payload.draft_revision} · ${item.launch_intent_id}`}
@@ -425,8 +568,11 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
             </div>
             <div className="field">
               <label htmlFor={`${idBase}-run-b`}>运行 B</label>
-              <select id={`${idBase}-run-b`} value={b} disabled={busy}
-                onChange={event => { setB(event.target.value); setApprovedFor(null) }}>
+              <select id={`${idBase}-run-b`} value={bRun?.launch_intent_id ?? ''} disabled={busy}
+                onChange={event => {
+                  const nextB = runs.find(item => item.launch_intent_id === event.target.value) ?? null
+                  choose(aRun, nextB)
+                }}>
                 <option value="">不含 B（只解释 A）</option>
                 {runs.filter(item => item.launch_intent_id !== aRun?.launch_intent_id)
                   .map(item => <option key={item.launch_intent_id} value={item.launch_intent_id}>
@@ -442,6 +588,16 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
             : !bRun && <p className="muted">
                 还没有选择 B：现在只解释 A，因此不显示任何 A/B 差值。
               </p>}
+
+          {/* What the address resolved to, said before anything is asked: the two
+              revisions this panel is holding, named compactly. The job ids and the
+              digests stay in the disclosure below, which remains the authority. */}
+          {aRun && <p className="muted">
+            {`这次要解释的运行：A 是修订 ${aRun.payload.draft_revision} 的冻结运行（确认 ${aRun.launch_intent_id}）`
+              + (bRun
+                ? `；B 是修订 ${bRun.payload.draft_revision} 的冻结运行（确认 ${bRun.launch_intent_id}）。`
+                : '；不含 B。')}
+          </p>}
 
           {aState?.kind === 'unavailable' && <p className="notice error">{`运行 A：${aState.note}`}</p>}
           {aState?.kind === 'loading' && <p className="muted">正在读取运行 A 的状态与正式报告……</p>}
@@ -508,20 +664,27 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
           </details>
 
           <label className="check" htmlFor={`${idBase}-approve`}>
-            <input id={`${idBase}-approve`} type="checkbox" checked={approved} disabled={busy}
+            <input id={`${idBase}-approve`} type="checkbox" checked={approved}
+              disabled={busy || !contextReady}
               onChange={event => { setApprovedFor(event.target.checked ? requestKey : null); failed('') }} />
             批准一次模型调用
           </label>
           <div className="actions">
             <button type="button" onClick={() => { void send('explain') }}
-              disabled={busy || !approved}>解释所选证据</button>
+              disabled={busy || !approved || !contextReady}>解释所选证据</button>
             <button type="button" className="primary" onClick={() => { void send('next') }}
-              disabled={busy || !approved}>提出下一实验</button>
+              disabled={busy || !approved || !contextReady}>提出下一实验</button>
           </div>
           <p className="muted">
             这两个动作各需要一次新的批准，各自只允许一次模型调用、不允许任何回测。它们把选中的运行
             作为证据发给既有对话：解释只说报告里的读数与模型的推断，「提出下一实验」只是针对当前草稿
             的有类型修改建议。两者都不会预览、启动或应用任何东西。
+          </p>
+          <p className="muted">
+            「提出下一实验」允许诚实地回答「这次没有修改」：如果所选运行支撑不起任何值得检验的、
+            有类型的改动，说清还缺哪一类证据、准则或数据，以及下一步能做什么，比提出一个可有可无的
+            改动更有用。这不改变发送的门槛：每一次发送仍然各需要一次新的批准，而且只允许一次模型调用、
+            不允许任何回测。
           </p>
         </>}
   </section>

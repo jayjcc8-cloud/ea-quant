@@ -9,7 +9,7 @@
  * the selected ids and starts nothing. No test here starts a run, applies a change
  * on its own, or lets a missing value pass as a zero.
  */
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type ScenarioSummary } from './app'
@@ -323,6 +323,12 @@ function detail(api: ApiAdapter) {
   render(<App api={api} />)
 }
 
+/** The same strategy opened at an explicit address, as a return link would open it. */
+function detailAt(api: ApiAdapter, search: string) {
+  window.history.pushState({}, '', `/strategies/us-1${search}`)
+  render(<App api={api} />)
+}
+
 /** The evidence tab of the open strategy, and this panel inside it. */
 async function openResearch(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole('tab', { name: '证据' }))
@@ -529,8 +535,9 @@ describe('user strategy evidence comparison', () => {
     // The preset the host measured its own refusal against: the reading is asked
     // for in the reply text, in four separated parts, and the tool's own fields are
     // told the byte limits this workspace really enforces instead of being asked
-    // for the whole explanation a 400-byte reason cannot hold.
-    expect(sent[1].text).toContain('用 propose_change 提出恰好一个')
+    // for the whole explanation a 400-byte reason cannot hold. It no longer asks
+    // for exactly one change: an honest "nothing to change" is an answer too.
+    expect(sent[1].text).toContain('用 propose_change 提出一个有类型的字段修改')
     expect(sent[1].text).toContain('不要写进 reason')
     expect(sent[1].text).toContain('（1）事实：')
     expect(sent[1].text).toContain('（2）推断：')
@@ -694,6 +701,285 @@ describe('user strategy evidence comparison', () => {
     await waitFor(() => expect(applied.length).toBe(1))
     expect(applied[0].paths).toEqual(['parameters.target_quantity'])
     // Applying is the user's own decision, and it starts no experiment.
+    expect(calls.launch).toBe(0)
+  })
+})
+
+/**
+ * The address is the whole of the selection: a verified comparison carries its two
+ * runs back to this strategy in the order the comparison showed them, and that
+ * address — not a hidden copy of the last render — is what the panel reads.
+ */
+describe('evidence address continuity', () => {
+  it('continuity: a comparison link opens the same two runs in the same order', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted()
+    detailAt(api, '?evidence_a=job-1&evidence_b=job-2')
+    const region = await openResearch(user)
+
+    // A is the left run of that comparison and B is the right one: the order the
+    // address states is the order shown here and the order a request would carry.
+    expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
+    expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-2')
+    expect(region.getByText(/修订 1 · 确认 li-1 · 运行 job-1/)).toBeTruthy()
+    expect(region.getByText(/修订 2 · 确认 li-2 · 运行 job-2/)).toBeTruthy()
+    expect(region.getByRole('link', { name: '在既有比较页面打开这两次运行' }).getAttribute('href'))
+      .toBe('/backtests/compare/job-1/job-2')
+    // Opening a link is a read: nothing is asked and nothing runs.
+    expect(calls.ask).toBe(0)
+    expect(calls.preview).toBe(0)
+    expect(calls.launch).toBe(0)
+  })
+
+  it('continuity: an explicit selection survives leaving the tab and a fresh load', async () => {
+    const user = userEvent.setup()
+    const { api } = scripted()
+    detailAt(api, '?evidence_a=job-2&evidence_b=job-1')
+    const region = await openResearch(user)
+    expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
+    expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-1')
+
+    // Leaving the tab and coming back mounts the panel again from scratch: what it
+    // shows is read from the address, not kept in a hidden copy of the last render.
+    await user.click(screen.getByRole('tab', { name: '实验' }))
+    await user.click(screen.getByRole('tab', { name: '证据' }))
+    const reopened = within(await screen.findByRole('region', { name: '证据对比' }))
+    expect((reopened.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
+    expect((reopened.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-1')
+
+    // A fresh load over the same address shows the same two runs.
+    cleanup()
+    render(<App api={api} />)
+    const reloaded = await openResearch(user)
+    expect((reloaded.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
+    expect((reloaded.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-1')
+  })
+
+  it('continuity: a manual selection writes the address and the panel follows it both ways', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted()
+    detail(api)
+    const region = await openResearch(user)
+    // A plain strategy address keeps its existing default: the latest run as A and
+    // no B at all.
+    expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
+    expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
+    expect(window.location.search).toBe('')
+
+    await user.selectOptions(region.getByLabelText('运行 B'), 'li-1')
+    await waitFor(() => expect(window.location.search).toBe('?evidence_a=job-2&evidence_b=job-1'))
+
+    // The address changes under the panel — another link, or the browser's own back
+    // and forward — and what is shown is what the address says, at once.
+    window.history.pushState(
+      { ...window.history.state, key: 'continuity-a' }, '', '/strategies/us-1?evidence_a=job-1')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() => expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1'))
+    expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
+
+    window.history.pushState(
+      { ...window.history.state, key: 'continuity-b' }, '', '/strategies/us-1')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() => expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2'))
+    expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
+    expect(calls.ask).toBe(0)
+  })
+
+  it('continuity: an approval does not survive a change of the evidence address', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted({ ask: async () => strategy() })
+    detail(api)
+    const region = await openResearch(user)
+    await user.click(region.getByLabelText('批准一次模型调用'))
+    expect(disabled(region.getByRole('button', { name: '解释所选证据' }))).toBe(false)
+
+    window.history.pushState(
+      { ...window.history.state, key: 'continuity-approval' },
+      '',
+      '/strategies/us-1?evidence_a=job-1&evidence_b=job-2',
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() => expect(disabled(region.getByRole('button', { name: '解释所选证据' }))).toBe(true))
+    expect(disabled(region.getByRole('button', { name: '提出下一实验' }))).toBe(true)
+    expect(calls.ask).toBe(0)
+  })
+
+  // Each of these names a context this strategy cannot verify. None of them falls
+  // back to the latest run, keeps a B it could not check, or asks anything.
+  it('continuity: an unverifiable evidence address is refused and can be cleared', async () => {
+    const user = userEvent.setup()
+    const cases = [
+      '?evidence_a=',
+      '?evidence_a=job-9',
+      '?evidence_a=job-1&evidence_a=job-2',
+      '?evidence_b=job-2',
+      '?evidence_a=job-1&evidence_b=',
+      '?evidence_a=job-1&evidence_b=job-1&evidence_b=job-2',
+      '?evidence_a=job-1&evidence_b=job-1',
+    ]
+    for (const search of cases) {
+      const { api, calls, sent } = scripted({ ask: async () => { throw new Error('nothing may be asked') } })
+      detailAt(api, search)
+      const region = await openResearch(user)
+
+      const alert = region.getByRole('alert')
+      expect([search, alert.textContent].join(' ')).toContain('无效的证据选择')
+      // Nothing is filled in from the latest run, so nothing here looks valid.
+      expect(region.queryByLabelText('运行 A')).toBeNull()
+      expect(region.queryByLabelText('批准一次模型调用')).toBeNull()
+      expect(sent).toEqual([])
+      expect(calls.ask).toBe(0)
+
+      // The explicit recovery clears the address and returns the panel to its plain
+      // default — the latest run as A, no B — where the user selects again.
+      await user.click(region.getByRole('button', { name: '清除无效的证据选择' }))
+      await waitFor(() => expect(window.location.search).toBe(''))
+      expect(region.queryByRole('alert')).toBeNull()
+      expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
+      expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
+      expect(sent).toEqual([])
+
+      cleanup()
+    }
+  })
+
+  it('continuity: an evidence address that names two frozen records of one run is refused', async () => {
+    const user = userEvent.setup()
+    // One job id recorded twice on this strategy: exactly the ambiguity the host
+    // refuses, and exactly what this panel must not resolve on its own.
+    const doubled = strategy({ experiments: [EARLIER, { ...EARLIER, launch_intent_id: 'li-3' }] })
+    const { api, calls, sent } = scripted({ ask: async () => { throw new Error('nothing may be asked') } })
+    api.listUserStrategies = async () => [doubled]
+    api.getUserStrategy = async () => doubled
+    detailAt(api, '?evidence_a=job-1')
+    const region = await openResearch(user)
+
+    expect(region.getByRole('alert').textContent).toContain('无效的证据选择')
+    expect(region.queryByLabelText('运行 A')).toBeNull()
+    expect(sent).toEqual([])
+    expect(calls.ask).toBe(0)
+  })
+
+  it('continuity: a run that is still being read, or whose report does not match, stops both actions', async () => {
+    const user = userEvent.setup()
+    // While either selected run is still being read, neither action is available:
+    // a value that has not arrived never looks like a verified one.
+    const pending = new Promise<BacktestReport>(() => {})
+    const loading = scripted({
+      report: async jobId => jobId === 'job-1' ? await pending : REPORTS[jobId],
+      ask: async () => { throw new Error('nothing may be asked') },
+    })
+    detailAt(loading.api, '?evidence_a=job-1&evidence_b=job-2')
+    let region = await openResearch(user)
+    await waitFor(() => expect(region.getByText('正在读取运行 A 的状态与正式报告……')).toBeTruthy())
+    expect(disabled(region.getByRole('button', { name: '解释所选证据' }))).toBe(true)
+    expect(disabled(region.getByRole('button', { name: '提出下一实验' }))).toBe(true)
+
+    // A report that belongs to another run is not a report for the selected one.
+    cleanup()
+    const mismatched = scripted({
+      report: async jobId => ({ ...REPORTS[jobId], run_id: 'another-run' } as unknown as BacktestReport),
+      ask: async () => { throw new Error('nothing may be asked') },
+    })
+    detailAt(mismatched.api, '?evidence_a=job-1&evidence_b=job-2')
+    region = await openResearch(user)
+    await waitFor(() => expect(region.getByText(/运行 A：报告的身份与该运行的 engine run id 不一致/)).toBeTruthy())
+    expect(disabled(region.getByRole('button', { name: '解释所选证据' }))).toBe(true)
+    expect(disabled(region.getByRole('button', { name: '提出下一实验' }))).toBe(true)
+    expect(loading.sent).toEqual([])
+    expect(mismatched.sent).toEqual([])
+    expect(loading.calls.ask).toBe(0)
+    expect(mismatched.calls.ask).toBe(0)
+  })
+
+  it('continuity: the next-experiment prompt allows an honest no-change and refuses repetition', async () => {
+    const user = userEvent.setup()
+    const { api, sent } = scripted({ ask: async () => strategy({ calls: [call(SELECTED)] }) })
+    detail(api)
+    const region = await openResearch(user)
+    await user.selectOptions(region.getByLabelText('运行 B'), 'li-1')
+    await user.click(region.getByLabelText('批准一次模型调用'))
+    await user.click(region.getByRole('button', { name: '提出下一实验' }))
+    await waitFor(() => expect(sent.length).toBe(1))
+
+    const prompt = sent[0].text
+    // No change at all is an honest answer when the evidence does not support one.
+    expect(prompt).toContain('如果没有值得检验的、有类型的修改，就明确说明这次没有修改')
+    expect(prompt).toContain('不要为了提出修改而修改')
+    expect(prompt).not.toContain('恰好一个')
+    // A repeated frozen input is not new evidence, and no parameter change is
+    // useful research by itself.
+    expect(prompt).toContain('不要把已经冻结过的输入当作新的证据')
+    expect(prompt).toContain('也不要把任何参数改动都当作有用的研究')
+    // What a proposed change has to name, against the selected runs.
+    expect(prompt).toContain('它相对所选 A/B 的差异')
+    expect(prompt).toContain('为什么这个差异有用')
+    // The request still carries the evidence it is grounded in, A then B.
+    expect(sent[0].evidenceJobIds).toEqual([LATEST_JOB, EARLIER_JOB])
+  })
+
+  it('continuity: a visit the page has left cannot hold the next one busy or revive its request', async () => {
+    const user = userEvent.setup()
+    // The answer is handed over by the test, so it can arrive after the page has left
+    // the visit that sent it — and after it has come back to the very address, and the
+    // very history key, that sent it. Answering before anything asked is a mistake in
+    // the test, not a quiet pass.
+    const handover: { respond: (value: UserStrategy) => void } = {
+      respond: value => { throw new Error(`nothing was awaiting an answer about ${value.user_strategy_id}`) },
+    }
+    const late = new Promise<UserStrategy>(resolve => { handover.respond = resolve })
+    const stale = strategy({ name: 'STALE ANSWER', experiments: [] })
+    const { api, calls, sent } = scripted({ ask: async () => await late })
+    detailAt(api, '?evidence_a=job-1')
+    const visit = { ...window.history.state }
+    const region = await openResearch(user)
+    expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
+
+    // One approval, one click: the request is in flight, so this visit is waiting and
+    // holds both selects while it does.
+    await waitFor(() => expect(disabled(region.getByLabelText('批准一次模型调用'))).toBe(false))
+    await user.click(region.getByLabelText('批准一次模型调用'))
+    await user.click(region.getByRole('button', { name: '解释所选证据' }))
+    await waitFor(() => expect(calls.ask).toBe(1))
+    await waitFor(() => expect(disabled(region.getByLabelText('运行 A'))).toBe(true))
+
+    // The page leaves for another evidence address while that answer is still owed.
+    window.history.pushState(
+      { ...window.history.state, key: 'continuity-departed' },
+      '',
+      '/strategies/us-1?evidence_a=job-2',
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    // The visit the user arrives at is usable at once: it is not held by a request it
+    // never sent, and it has no approval of its own to be spent.
+    await waitFor(() => expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2'))
+    await waitFor(() => expect(disabled(region.getByLabelText('批准一次模型调用'))).toBe(false))
+    expect(disabled(region.getByLabelText('运行 A'))).toBe(false)
+    expect((region.getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
+
+    // Back to the address — and the history key — the departed request was sent from.
+    // Arriving there again is a new visit, not a return to that request's ownership.
+    window.history.pushState(visit, '', '/strategies/us-1?evidence_a=job-1')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() => expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1'))
+    expect(disabled(region.getByLabelText('运行 A'))).toBe(false)
+    const approve = region.getByLabelText('批准一次模型调用') as HTMLInputElement
+    await waitFor(() => expect(disabled(approve)).toBe(false))
+    expect(approve.checked).toBe(false)
+    expect(disabled(region.getByRole('button', { name: '解释所选证据' }))).toBe(true)
+
+    // The answer finally arrives. It is dropped whole: it does not put its document on
+    // the page and it does not report a refusal for a request this visit never made.
+    // Nothing was asked again while it was owed, and nothing ran.
+    await act(async () => { handover.respond(stale) })
+    expect(screen.queryByText('STALE ANSWER')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText(/这条策略还没有冻结运行/)).toBeNull()
+    expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
+    expect(disabled(region.getByLabelText('运行 A'))).toBe(false)
+    expect(region.getByText(/修订 1 · 确认 li-1 · 运行 job-1/)).toBeTruthy()
+    expect(sent.length).toBe(1)
+    expect(calls.ask).toBe(1)
     expect(calls.launch).toBe(0)
   })
 })

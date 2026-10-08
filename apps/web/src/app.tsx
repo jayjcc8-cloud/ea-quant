@@ -1192,7 +1192,9 @@ function StrategyAssociation({ api, jobId }: { api: ApiAdapter; jobId: string })
     </>}
     {association.kind === 'one' && <>
       <p><strong>{association.record.name}</strong> · <span>{frozenRevisionText(association.record.revision)}</span></p>
-      <p><Link to={`/strategies/${encodeURIComponent(association.record.userStrategyId)}`}>返回此策略继续研究</Link></p>
+      {/* The way back names the frozen run this report is about, so the strategy
+          opens on that run instead of resetting the evidence to the latest one. */}
+      <p><Link to={`/strategies/${encodeURIComponent(association.record.userStrategyId)}?evidence_a=${encodeURIComponent(jobId)}`}>返回此策略继续研究</Link></p>
     </>}
     {association.kind === 'several' && <>
       <p className="notice error">{`这个运行匹配到 ${association.count} 条冻结记录，无法确定唯一的来源策略，因此这里不替你选择，也不显示任何冻结修订：请自己打开要继续的那一个。`}</p>
@@ -1269,7 +1271,9 @@ function StrategyComparisonAssociation({ api, leftJobId, rightJobId }: { api: Ap
     {pair.kind === 'owner' && <>
       <p><strong>{pair.record.name}</strong></p>
       <p><span>{`运行 A · ${frozenRevisionText(pair.leftRevision)}`}</span> · <span>{`运行 B · ${frozenRevisionText(pair.rightRevision)}`}</span></p>
-      <p><Link to={`/strategies/${encodeURIComponent(pair.record.userStrategyId)}`}>返回此策略继续研究</Link></p>
+      {/* The way back names both runs, in the order this comparison shows them, so
+          the strategy reopens on A then B instead of resetting the evidence. */}
+      <p><Link to={`/strategies/${encodeURIComponent(pair.record.userStrategyId)}?evidence_a=${encodeURIComponent(leftJobId)}&evidence_b=${encodeURIComponent(rightJobId)}`}>返回此策略继续研究</Link></p>
     </>}
   </section>
 }
