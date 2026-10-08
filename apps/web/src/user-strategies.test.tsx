@@ -7,9 +7,10 @@
  * creating a strategy is a save and never a model call, every model call needs an
  * explicit approval click, a confirmation names the very preview it was made
  * from, and only an explicit click applies a change, undoes one or starts an
- * experiment.
+ * experiment. One confirmation spends exactly the preview it was made from, and a
+ * preview the user gave up on is never read as consent.
  */
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type ScenarioSummary } from './app'
@@ -511,7 +512,7 @@ describe('user strategy workspace', () => {
     // draft it could preview or run.
     const experiment = await openSection(user, '实验')
     expect(within(experiment).queryByRole('button', { name: '预览实验' })).toBeNull()
-    expect(within(experiment).queryByRole('button', { name: '开始实验' })).toBeNull()
+    expect(within(experiment).queryByRole('button', { name: '确认并运行一次' })).toBeNull()
     expect(experiment.textContent).toMatch(/没有可以预览或运行的草稿/)
 
     // The conversation is available, and it is honest about what it can do.
@@ -854,6 +855,10 @@ describe('user strategy workspace', () => {
     expect(calls.preview).toBe(0)
     expect(calls.launch).toBe(0)
     expect(within(panel).queryByRole('link', { name: '打开运行以查看它的状态和报告' })).toBeNull()
+    // The confirmation is the one control that spends a run, and it is inert until
+    // there is an admitted preview to confirm.
+    const confirm = () => within(panel).getByRole('button', { name: '确认并运行一次' }) as HTMLButtonElement
+    expect(confirm().disabled).toBe(true)
 
     await user.click(within(panel).getByRole('button', { name: '预览实验' }))
 
@@ -865,12 +870,14 @@ describe('user strategy workspace', () => {
     // The scenario's own cost assumptions, read as they are declared.
     expect(within(panel).getByText(DECLARED_COSTS)).toBeTruthy()
     expect(within(panel).getByText('radian.report-criterion.v1 economics.net_pnl.amount positive')).toBeTruthy()
-    expect(within(panel).getByText('10 次模型调用 · 5 次回测')).toBeTruthy()
+    expect(within(panel).getByText(/10 次模型调用 · 5 次回测/)).toBeTruthy()
     // The identity a confirmation has to carry back is on screen before the click.
     expect(within(panel).getByText('sha256:aaaaaaaaaaaa')).toBeTruthy()
+    // One admitted preview is what makes the confirmation live.
+    expect(confirm().disabled).toBe(false)
     expect(calls.launch).toBe(0)
 
-    await user.click(within(panel).getByRole('button', { name: '开始实验' }))
+    await user.click(confirm())
 
     expect(calls.launch).toBe(1)
     // The confirmation names the previewed input and one backtest, no model call.
@@ -891,10 +898,12 @@ describe('user strategy workspace', () => {
     expect(within(panel).getByRole('link', { name: '研究' }).getAttribute('href')).toBe('/research')
   })
 
-  it('reports the cost assumptions the scenario declares and never invents one', async () => {
+  it('reports the cost assumptions and the data window the scenario declares, and invents neither', async () => {
     const user = userEvent.setup()
     const bare: UserStrategyPreview = {
       ...preview,
+      // A data block that declares no window at all: nothing here may be filled in.
+      data: { path: 'prices.csv', fingerprint: { sha256: 'a'.repeat(64), record_count: 4 } },
       commission: null,
       slippage: null,
       latency: null,
@@ -909,6 +918,264 @@ describe('user strategy workspace', () => {
     expect(await within(panel).findByText(
       '手续费 该场景未声明 · 滑点 该场景未声明 · 延迟 该场景未声明',
     )).toBeTruthy()
+    // A window the data does not declare is stated as missing, and no instant is
+    // invented to stand in for it.
+    expect(panel.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)
+    expect(within(panel).getByText(/未记录/)).toBeTruthy()
+  })
+
+  it('shows every admitted preview fact, including a parameter it has never heard of and a numeric zero', async () => {
+    const user = userEvent.setup()
+    // A registered scenario may carry a parameter name this page has no label for,
+    // and a parameter may legitimately be zero. Both are facts of the admitted
+    // input: the preview prints them exactly as they were admitted.
+    const { api } = scripted({
+      preview: async () => ({
+        ...preview,
+        parameters: { target_quantity: '2', entry_delay_bars: 0, half_spread_ticks: 0 },
+      }),
+    })
+    detail(api)
+    const panel = await openSection(user, '实验')
+
+    await user.click(within(panel).getByRole('button', { name: '预览实验' }))
+
+    // The scenario the run would execute is named by its own id.
+    expect(await within(panel).findByText(/bounded-long\.yaml/)).toBeTruthy()
+    // Every registered parameter is shown: a name this page has never heard of is
+    // printed rather than dropped, and a zero is a value rather than a missing one.
+    expect(within(panel).getByText(/target_quantity: 2/)).toBeTruthy()
+    expect(within(panel).getByText(/entry_delay_bars: 0/)).toBeTruthy()
+    expect(within(panel).getByText(/half_spread_ticks: 0/)).toBeTruthy()
+    // The admitted data window is read from the data block itself, and it is UTC.
+    const dataWindow = within(panel).getByText(/2024-01-02T09:31:00/)
+    expect(dataWindow.textContent).toContain('2024-01-05T09:34:00')
+    expect(dataWindow.textContent).toContain('UTC')
+    // The workspace's ceiling and what one confirmation allows are two different
+    // facts, and the preview states both: confirming spends one backtest and no
+    // model call.
+    expect(within(panel).getByText(/10 次模型调用 · 5 次回测/)).toBeTruthy()
+    expect(within(panel).getByText(/0 次模型调用 · 1 次回测/)).toBeTruthy()
+    // The confirmation says what its click does.
+    expect(within(panel).getByRole('button', { name: '确认并运行一次' })).toBeTruthy()
+  })
+
+  it('gives up an in-flight preview without writing anything, and can preview again afterwards', async () => {
+    const user = userEvent.setup()
+    // Two reads the test resolves by hand: the one given up on while it is still in
+    // flight, and the fresh one that follows it.
+    const abandoned = deferred<UserStrategyPreview>()
+    const admitted = deferred<UserStrategyPreview>()
+    const reads = [abandoned, admitted]
+    const { api, calls } = scripted({ preview: () => reads.shift()!.promise })
+    detail(api)
+    const panel = await openSection(user, '实验')
+    const confirm = () => within(panel).getByRole('button', { name: '确认并运行一次' }) as HTMLButtonElement
+    const previewButton = within(panel).getByRole('button', { name: '预览实验' })
+
+    await user.click(previewButton)
+    expect(calls.preview).toBe(1)
+    // While the read is in flight there is nothing to confirm, and giving up is
+    // possible rather than having to wait for it.
+    expect(confirm().disabled).toBe(true)
+    await user.click(within(panel).getByRole('button', { name: '取消预览' }))
+
+    // Giving up is local: it writes nothing and starts nothing.
+    expect(calls.launch).toBe(0)
+    expect(launched).toEqual([])
+
+    // The read that was given up on lands afterwards, and it is not read as consent.
+    await act(async () => { abandoned.resolve({ ...preview, initial_cash: '999999' }) })
+    expect(confirm().disabled).toBe(true)
+    expect(within(panel).queryByText('初始资金 999999 USD')).toBeNull()
+
+    // Previewing again is a new read of its own, and it works normally.
+    await user.click(previewButton)
+    expect(calls.preview).toBe(2)
+    await act(async () => { admitted.resolve(preview) })
+    await waitFor(() => expect(confirm().disabled).toBe(false))
+    expect(within(panel).getByText('初始资金 10000 USD')).toBeTruthy()
+    expect(within(panel).queryByText('初始资金 999999 USD')).toBeNull()
+    expect(calls.launch).toBe(0)
+  })
+
+  it('consumes the preview with one confirmation instead of running the same preview twice', async () => {
+    const user = userEvent.setup()
+    const pending = deferred<UserStrategy>()
+    const frozen = strategy({
+      experiments: [{
+        launch_intent_id: 'li-1', request_id: 'request-1', payload_sha256: 'f'.repeat(64),
+        payload: {
+          draft_revision: 1, scenario_id: 'bounded-long.yaml',
+          parameters: { target_quantity: '2', entry_delay_bars: 0 },
+          preview_identity: PREVIEW_IDENTITY,
+          approved_budget: { max_model_calls: 0, max_backtests: 1 },
+        },
+        task_id: 'task-1', job_id: 'job-1', status: 'created', created_at: '2026-10-06T10:02:00.000000Z',
+      }],
+    })
+    const { api, calls } = scripted({ launch: () => pending.promise })
+    detail(api)
+    const panel = await openSection(user, '实验')
+    const confirm = () => within(panel).getByRole('button', { name: '确认并运行一次' }) as HTMLButtonElement
+
+    await user.click(within(panel).getByRole('button', { name: '预览实验' }))
+    await within(panel).findByText(/bounded-long\.yaml/)
+    expect(confirm().disabled).toBe(false)
+
+    await user.click(confirm())
+
+    expect(calls.launch).toBe(1)
+    // One confirmation is one run: while it is in flight it cannot be pressed again.
+    expect(confirm().disabled).toBe(true)
+    expect(launched).toEqual([{
+      intent: 'li-1',
+      baseRevision: 1,
+      previewIdentity: PREVIEW_IDENTITY,
+      approved: { max_model_calls: 0, max_backtests: 1 },
+    }])
+    // One more attempt at the very same rendered control, while the first launch is
+    // still pending, dispatches nothing. The attempt is a click event on the button
+    // itself rather than a pointer gesture, so what is under test is the control
+    // refusing a second confirmation and not the helper declining to try.
+    fireEvent.click(confirm())
+    expect(calls.launch).toBe(1)
+
+    await act(async () => { pending.resolve(frozen) })
+
+    expect(await within(panel).findByText('已从修订 1 启动实验 li-1')).toBeTruthy()
+    // That confirmation consumed the preview: the same preview is not a licence for
+    // a second run, and there is nothing left here to confirm.
+    expect(confirm().disabled).toBe(true)
+    expect(within(panel).queryByText(/0 次模型调用 · 1 次回测/)).toBeNull()
+    fireEvent.click(confirm())
+    expect(calls.launch).toBe(1)
+    expect(launched).toHaveLength(1)
+  })
+
+  it('requires a new preview after a refused launch instead of keeping the stale consent', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted({
+      launch: () => Promise.reject(
+        new UserStrategyRequestError('user_strategy_invalid', 'the preview no longer describes what would run'),
+      ),
+    })
+    detail(api)
+    const panel = await openSection(user, '实验')
+    const confirm = () => within(panel).getByRole('button', { name: '确认并运行一次' }) as HTMLButtonElement
+
+    await user.click(within(panel).getByRole('button', { name: '预览实验' }))
+    await within(panel).findByText(/bounded-long\.yaml/)
+    await user.click(confirm())
+
+    expect(calls.launch).toBe(1)
+    // The refusal is on screen in the user's words and in the host's own.
+    const refusal = await screen.findByRole('alert')
+    expect(refusal.textContent).toContain('这个操作对这条策略的当前状态无效，因此什么都没有改变。')
+    expect(refusal.textContent).toContain('the preview no longer describes what would run')
+    // A refused confirmation leaves nothing to confirm: it is not kept as consent.
+    expect(confirm().disabled).toBe(true)
+    expect(within(panel).queryByText(/0 次模型调用 · 1 次回测/)).toBeNull()
+    expect(calls.launch).toBe(1)
+
+    // Recovering means previewing again, and that fresh preview can be confirmed.
+    await user.click(within(panel).getByRole('button', { name: '预览实验' }))
+    expect(calls.preview).toBe(2)
+    await waitFor(() => expect(confirm().disabled).toBe(false))
+  })
+
+  it('does not let a launch of an older revision overwrite the revision shown now', async () => {
+    const user = userEvent.setup()
+    const pending = deferred<UserStrategy>()
+    const revised = strategy({
+      draft: { ...executable(strategy()), revision: 2, parameters: { target_quantity: '3', entry_delay_bars: 0 } },
+      proposals: [proposal({ status: 'applied', applied_paths: ['parameters.target_quantity'] })],
+      changes: [appliedChange],
+    })
+    const { api, calls } = scripted({
+      current: () => strategy({ proposals: [proposal()] }),
+      apply: async () => revised,
+      launch: () => pending.promise,
+    })
+    detail(api)
+    const panel = await openSection(user, '实验')
+
+    await user.click(within(panel).getByRole('button', { name: '预览实验' }))
+    await within(panel).findByText(/bounded-long\.yaml/)
+    await user.click(within(panel).getByRole('button', { name: '确认并运行一次' }))
+    expect(calls.launch).toBe(1)
+    // The confirmation is sent, and this page says that it is waiting rather than
+    // pretending the request can be taken back.
+    expect(within(panel).getByText(/正在等待宿主回答/)).toBeTruthy()
+
+    // A parallel action on the same strategy moves the draft on while the launch is
+    // still in flight. The next revision is its own panel, not the old consent.
+    const proposals = await screen.findByRole('region', { name: '建议修改' })
+    await user.click(within(proposals).getByRole('button', { name: '应用所选' }))
+    expect(calls.apply).toBe(1)
+    expect(await screen.findByText('草稿修订 2')).toBeTruthy()
+    const advanced = screen.getByRole('region', { name: '实验' })
+    expect(within(advanced).queryByText(/正在等待宿主回答/)).toBeNull()
+    expect((within(advanced).getByRole('button', { name: '预览实验' }) as HTMLButtonElement).disabled).toBe(false)
+
+    // The launch answers afterwards with the revision it dispatched from. It is not
+    // written over the revision that is shown now, and it reports no error there.
+    await act(async () => {
+      pending.resolve(strategy({
+        experiments: [{
+          launch_intent_id: 'li-1', request_id: 'request-1', payload_sha256: 'f'.repeat(64),
+          payload: {
+            draft_revision: 1, scenario_id: 'bounded-long.yaml',
+            parameters: { target_quantity: '2', entry_delay_bars: 0 },
+          },
+          task_id: 'task-1', job_id: 'job-1', status: 'created', created_at: '2026-10-06T10:02:00.000000Z',
+        }],
+      }))
+    })
+
+    expect(screen.getByRole('region', { name: '草稿' }).textContent).toContain('草稿修订 2')
+    expect(within(screen.getByRole('region', { name: '实验' })).queryByText('已从修订 1 启动实验 li-1')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(calls.launch).toBe(1)
+  })
+
+  it('does not let a launch that outlives the page write into the strategy it left', async () => {
+    const user = userEvent.setup()
+    const pending = deferred<UserStrategy>()
+    const { api, calls } = scripted({ strategies: [strategy()], launch: () => pending.promise })
+    detail(api)
+    expect(await screen.findByRole('heading', { name: 'Bold entry' })).toBeTruthy()
+
+    const panel = await openSection(user, '实验')
+    await user.click(within(panel).getByRole('button', { name: '预览实验' }))
+    await within(panel).findByText(/bounded-long\.yaml/)
+    await user.click(within(panel).getByRole('button', { name: '确认并运行一次' }))
+    expect(calls.launch).toBe(1)
+
+    // The user leaves while the launch is still in flight, and comes back before the
+    // answer arrives: that answer belongs to the panel that was left.
+    await user.click(screen.getByRole('link', { name: '返回策略列表' }))
+    await user.click(await screen.findByRole('link', { name: 'Bold entry' }))
+    expect(await screen.findByRole('region', { name: '草稿' })).toBeTruthy()
+
+    await act(async () => {
+      pending.resolve(strategy({
+        experiments: [{
+          launch_intent_id: 'li-1', request_id: 'request-1', payload_sha256: 'f'.repeat(64),
+          payload: {
+            draft_revision: 1, scenario_id: 'bounded-long.yaml',
+            parameters: { target_quantity: '2', entry_delay_bars: 0 },
+          },
+          task_id: 'task-1', job_id: 'job-1', status: 'created', created_at: '2026-10-06T10:02:00.000000Z',
+        }],
+      }))
+    })
+
+    // What is shown is the strategy as it was read, not the run the left panel froze.
+    const intent = screen.getByRole('region', { name: '意图' })
+    expect(within(intent).getByText(/还没有确认过的实验/)).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(calls.launch).toBe(1)
   })
 
   it('keeps a frozen run on the revision it ran and never claims its outcome', async () => {

@@ -183,6 +183,28 @@ const dataLine = (preview: UserStrategyPreview) => {
 }
 
 /**
+ * Every registered parameter the preview admitted, exactly as it was admitted. The
+ * list is the scenario's own: a name this page has never heard of is printed rather
+ * than dropped, and a zero is a value rather than a missing one.
+ */
+const parameterLine = (preview: UserStrategyPreview) => {
+  const entries = Object.entries(preview.parameters).map(([key, value]) => `${key}: ${value}`)
+  return entries.join(' · ') || '没有注册参数'
+}
+
+/**
+ * The admitted data window, read from the data block itself and marked UTC. An
+ * endpoint the data does not declare is said to be missing; no instant is invented
+ * to stand in for it.
+ */
+const windowLine = (preview: UserStrategyPreview) => {
+  const data = preview.data as { start_utc?: unknown; end_utc?: unknown } | undefined
+  const endpoint = (value: unknown) =>
+    typeof value === 'string' && value ? `${value} UTC` : '未记录'
+  return `${endpoint(data?.start_utc)} → ${endpoint(data?.end_utc)}`
+}
+
+/**
  * One cost assumption exactly as the scenario declares it. A scenario that
  * declares none says so; nothing is filled in, guessed or priced here.
  */
@@ -801,6 +823,10 @@ function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
       {tab === 'intent' && <IntentSection strategy={strategy} />}
       {tab === 'rules' && <RulesSection draft={strategy.draft} />}
       {tab === 'experiments' && <ExperimentPanel
+        // One panel per strategy and revision: a revision that moves on while a
+        // preview or a launch is in flight mounts the next revision its own panel
+        // instead of carrying the old one's consent, phase or pending answer over.
+        key={`${strategy.user_strategy_id}-${strategy.draft.revision}`}
         api={api} strategy={strategy} changed={changed} failed={failed} />}
       {tab === 'evidence' && <>
         <EvidenceSection api={api} strategy={strategy} />
@@ -1167,7 +1193,24 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
   </section>
 }
 
-/** An experiment preview and the one explicit confirmation that launches it. */
+/**
+ * An experiment preview and the one explicit confirmation that launches it.
+ *
+ * The preview is a local read of what the host would run, and the confirmation is a
+ * single local consent for exactly that read. Confirming consumes it — before the
+ * request, and on success and failure alike — so one preview is never a licence for
+ * a second run and a refused launch cannot leave stale consent behind. Giving a
+ * preview up is local too: it abandons the read, it does not claim the host stopped
+ * anything, and an answer that arrives afterwards is not read as consent. A launch
+ * that is already in flight is not cancellable here.
+ *
+ * Every operation belongs to this panel instance and to the strategy and revision
+ * it is showing. The panel is mounted per revision, so an answer that arrives after
+ * the page has moved on — a revision applied in the sibling panel, another tab,
+ * another strategy, or this page being left — writes nothing into what is shown
+ * now: no detail, no refusal, no phase. The request it answered was really sent and
+ * is not recalled; a reload finds the work the host committed.
+ */
 function ExperimentPanel({ api, strategy, changed, failed }: {
   api: ApiAdapter
   strategy: UserStrategy
@@ -1175,25 +1218,60 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
   failed: (message: string) => void
 }) {
   const [preview, setPreview] = useState<UserStrategyPreview | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [phase, setPhase] = useState<'idle' | 'reading' | 'launching'>('idle')
+  // Every local operation is numbered against this panel instance: the preview read
+  // that is in flight and the launch it confirms. Leaving the screen — another tab,
+  // another strategy, a revision this panel no longer shows — ends that belonging,
+  // so a late answer writes nothing at all: not a preview, not a refusal, not a
+  // phase, not a detail.
+  const generation = useRef(0)
+  // One confirmation is one dispatch: a second event in the same tick is refused
+  // here, without waiting for a re-render to disable the button.
+  const dispatching = useRef(false)
+  useEffect(() => () => { generation.current += 1 }, [])
 
-  const previewExperiment = async () => {
-    const readPreview = api.previewUserStrategyExperiment
-    if (!readPreview) return
-    setBusy(true)
+  // The preview a confirmation would really run: the one read against the revision
+  // that is still the head. A preview whose revision has moved on is not offered as
+  // confirmable; the host's own full-preview gate is unchanged.
+  const live = preview && preview.draft_revision === strategy.draft.revision ? preview : null
+  const cancellable = phase === 'reading' || preview !== null
+  const hasRun = strategy.experiments.some(item => item.status === 'created')
+
+  const readPreview = async () => {
+    const read = api.previewUserStrategyExperiment
+    if (!read) return
+    const mine = generation.current + 1
+    generation.current = mine
+    setPhase('reading')
     failed('')
     try {
-      setPreview(await readPreview(strategy.user_strategy_id))
+      const value = await read(strategy.user_strategy_id)
+      if (generation.current !== mine) return
+      setPreview(value)
     } catch (error) {
+      if (generation.current !== mine) return
       setPreview(null)
       failed(explain(error))
     } finally {
-      setBusy(false)
+      if (generation.current === mine) setPhase('idle')
     }
   }
 
+  const cancelPreview = () => {
+    // Abandoning the preview is local: nothing is written, and the read it gives up
+    // on cannot come back as consent.
+    generation.current += 1
+    setPreview(null)
+    setPhase('idle')
+    failed('')
+  }
+
   const start = async () => {
-    if (!preview) {
+    if (dispatching.current) return
+    // The click confirms exactly the preview on screen. It is consumed here, before
+    // anything is sent, and the values it was made of are held by this click.
+    const confirmed = live
+    if (!confirmed) {
       failed('请先预览实验：在你读过它将运行什么之前，不会启动任何东西。')
       return
     }
@@ -1202,23 +1280,31 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
       failed('这个工作区不提供启动实验。')
       return
     }
-    setBusy(true)
+    // This dispatch belongs to the revision on screen now, and the answer is only
+    // written back while that is still the panel showing it.
+    const mine = generation.current
+    dispatching.current = true
+    setPreview(null)
+    setPhase('launching')
     failed('')
-    const intent = `li-${strategy.experiments.length + 1}`
     try {
       const updated = await launch(strategy.user_strategy_id, {
-        launch_intent_id: intent,
-        base_revision: preview.draft_revision,
+        launch_intent_id: `li-${strategy.experiments.length + 1}`,
+        base_revision: confirmed.draft_revision,
         // The confirmation names the input it was made against, so a preview that
         // no longer describes what would run is refused instead of silently run.
-        preview_identity: preview.preview_identity,
+        preview_identity: confirmed.preview_identity,
         approved_budget: RUN_APPROVAL,
       })
+      if (generation.current !== mine) return
       changed(updated)
     } catch (error) {
+      // A refused launch is not kept as consent: the next attempt is a new preview.
+      if (generation.current !== mine) return
       failed(explain(error))
     } finally {
-      setBusy(false)
+      dispatching.current = false
+      if (generation.current === mine) setPhase('idle')
     }
   }
 
@@ -1241,19 +1327,39 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
   return <section aria-label="实验" className="strategy-panel">
     <h2>实验</h2>
     <div className="actions">
-      <button type="button" onClick={previewExperiment} disabled={busy}>预览实验</button>
-      <button type="button" className="primary" onClick={start} disabled={busy || !preview}>开始实验</button>
+      <button type="button" onClick={readPreview} disabled={phase !== 'idle'}>预览实验</button>
+      <button type="button" onClick={cancelPreview} disabled={!cancellable}>取消预览</button>
+      <button type="button" className="primary" onClick={start}
+        disabled={phase !== 'idle' || !live}>确认并运行一次</button>
     </div>
-    {preview && <dl className="preview-facts">
-      <div><dt>草稿</dt><dd>{revisionLabel(preview.draft_revision)}</dd></div>
-      <div><dt>策略</dt><dd>{`${preview.strategy_id} · ${preview.venue}:${preview.symbol}`}</dd></div>
-      <div><dt>资金</dt><dd>{`初始资金 ${preview.initial_cash} USD`}</dd></div>
-      <div><dt>数据</dt><dd>{dataLine(preview)}</dd></div>
-      <div><dt>成本假设</dt><dd>{costLine(preview)}</dd></div>
-      <div><dt>输入身份</dt><dd>{preview.preview_identity.slice(0, 19)}</dd></div>
-      <div><dt>准则</dt><dd>{criterionLine(preview.criterion)}</dd></div>
+    {phase === 'reading' && <p className="muted" role="status" aria-live="polite">
+      正在读取这次实验将执行什么……这次读取不会启动任何运行，取消只是放弃这次读取。
+    </p>}
+    {phase === 'launching' && <p className="muted" role="status" aria-live="polite">
+      这次确认已经送出，正在等待宿主回答；这个页面不会撤回它，运行的状态在它自己的页面上。
+    </p>}
+    {phase === 'idle' && !live && (hasRun
+      ? <p className="muted">要再运行一次，先重新预览：一次确认只对应它自己读到的那个预览。</p>
+      : <p className="muted">先预览这次实验将执行什么，再确认。预览只读；一次确认只允许一次回测，且不调用模型。</p>)}
+    {live && <dl className="preview-facts">
+      <div><dt>草稿</dt><dd>{revisionLabel(live.draft_revision)}</dd></div>
+      <div><dt>策略</dt><dd>{`${live.strategy_id} · ${live.venue}:${live.symbol}`}</dd></div>
+      <div><dt>场景</dt><dd>{live.scenario_id}</dd></div>
+      <div><dt>资金</dt><dd>{`初始资金 ${live.initial_cash} USD`}</dd></div>
+      {/* Every admitted parameter, as admitted: an unknown name is not dropped and a
+          zero is not read as absent. */}
+      <div><dt>注册参数</dt><dd>{parameterLine(live)}</dd></div>
+      <div><dt>数据</dt><dd>{dataLine(live)}</dd></div>
+      <div><dt>数据窗口</dt><dd>{windowLine(live)}</dd></div>
+      <div><dt>成本假设</dt><dd>{costLine(live)}</dd></div>
+      <div><dt>输入身份</dt><dd>{live.preview_identity.slice(0, 19)}</dd></div>
+      <div><dt>准则</dt><dd>{criterionLine(live.criterion)}</dd></div>
       <div><dt>本工作区授予的预算</dt><dd>
-        {`${preview.budget.max_model_calls} 次模型调用 · ${preview.budget.max_backtests} 次回测`}
+        {`${live.budget.max_model_calls} 次模型调用 · ${live.budget.max_backtests} 次回测`}
+      </dd></div>
+      {/* What this one confirmation may spend, told apart from the ceiling above. */}
+      <div><dt>本次确认</dt><dd>
+        {`${RUN_APPROVAL.max_model_calls} 次模型调用 · ${RUN_APPROVAL.max_backtests} 次回测`}
       </dd></div>
     </dl>}
     {strategy.experiments.length > 0 && <ul className="experiment-list">
@@ -1275,7 +1381,7 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
       运行和它的状态在回测页面上，报告只在运行成功之后才存在——启动运行不等于有报告。
       已确认的实验会保留它冻结的那个修订，即使草稿继续前进。
     </p>
-    {strategy.experiments.some(item => item.status === 'created') && <p className="muted">
+    {hasRun && <p className="muted">
       一次运行只是一个冻结的结果，不是已经完成的研究：留出验证、下一个问题和结论属于
       <Link to="/holdouts">留出验证</Link> 和
       <Link to="/research"> 研究</Link> 页面。
