@@ -1,5 +1,5 @@
 /**
- * QUINE 运行 — a read-only observation of the local supervised Paper run.
+ * QUINE 模拟观测 — a read-only observation of the local supervised Paper run.
  *
  * The contract lives in `paper-status.test.tsx`. In short:
  * - One read on mount plus one per explicit 刷新 click. No polling, no run id or
@@ -44,7 +44,7 @@ const flag = (value: unknown): string =>
 
 /** Why the read projection has no run to publish. */
 const UNAVAILABLE_REASONS: Record<string, string> = {
-  runtime_root_not_configured: '没有配置受监督的本地 Paper 运行根目录，所以没有可读取的运行。',
+  runtime_root_not_configured: '没有配置本地模拟运行根目录，所以这里没有可观测的模拟运行。',
   no_supervised_run_directories: '运行根目录下还没有任何受监督的运行目录。',
   run_state_unreadable: '这个运行目录存在，但它的状态无法被读取，因此不作为事实。',
   operational_log_missing: '这次运行没有可读取的操作日志。',
@@ -179,9 +179,9 @@ export function PaperStatus({ api = radianApi }: { readonly api?: PaperStatusApi
     <div className="paper-status">
       <header className="paper-status-head">
         <div>
-          <h1>运行</h1>
+          <h1>模拟观测</h1>
           <p className="muted">
-            只读观测：本地生成行情，进程内 Paper 撮合。没有实盘，也没有启动、停止或重置控件。
+            本地模拟的只读快照：本地生成行情，进程内撮合。没有实盘，也没有启动、停止或重置控件。
           </p>
         </div>
         <button type="button" onClick={() => { void load() }} aria-busy={reading}>刷新</button>
@@ -189,11 +189,11 @@ export function PaperStatus({ api = radianApi }: { readonly api?: PaperStatusApi
 
       <p className="paper-status-model">
         <Link to="/strategies">AI 协作在策略工作区</Link>
-        <span>模型交互在策略工作区进行；本页只读观测，不调用模型，也不显示模型输出。</span>
+        <span>模型交互请进入策略工作区。</span>
       </p>
 
       <p data-paper="snapshot-notice" className="paper-snapshot-notice">
-        本页只在打开时和手动刷新时各读取一次，不会自动更新；每个读数都是读取那一刻的观测，不是持续状态。
+        本页只在打开或手动刷新时读取一次；读数是当时快照，不会自动更新。
       </p>
 
       {failure ? <p role="alert" className="notice error">{failure}</p> : null}
@@ -205,6 +205,12 @@ export function PaperStatus({ api = radianApi }: { readonly api?: PaperStatusApi
             <span>{UNAVAILABLE_REASONS[reason] ?? '无法读取这次运行的状态。'}</span>{' '}
             <code>{text(reason)}</code>
           </p>
+          {reason === 'runtime_root_not_configured' ? (
+            <p className="muted">
+              研究结论不在这一页：已保存的报告与证据在 <Link to="/backtests">回测实验</Link> 与{' '}
+              <Link to="/strategies">策略</Link> 里查看。
+            </p>
+          ) : null}
           {overview.run_id || overview.detail ? (
             <dl className="summary-list">
               {overview.run_id ? <Row name="unreadable_run" label="运行目录">{text(overview.run_id)}</Row> : null}

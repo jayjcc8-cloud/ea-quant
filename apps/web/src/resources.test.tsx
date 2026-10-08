@@ -731,7 +731,7 @@ describe('QUINE 资源中心 directory', () => {
     // The configuration status is re-read when the reader asks, and asking for it
     // reaches no resolve endpoint and starts nothing.
     expect(calls.settings).toBe(1)
-    await user.click(screen.getByRole('button', { name: '刷新模型状态' }))
+    await user.click(screen.getByRole('button', { name: '刷新配置状态' }))
     expect(calls.settings).toBe(2)
     expect(calls.resolve).toEqual([])
 

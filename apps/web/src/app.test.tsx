@@ -954,23 +954,23 @@ it('removes candidate decision controls when fresh evidence rejects a decision',
 })
 
 describe('QUINE shell navigation', () => {
-  it('offers 运行 and 回测 as two independent destinations without moving the backtest routes', async () => {
+  it('offers 模拟观测 and 回测实验 as two independent destinations without moving the backtest routes', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/backtests')
     render(<App api={adapter()} />)
     const nav = within(screen.getByRole('navigation', { name: '主导航' }))
-    expect(nav.getByRole('link', { name: '运行' }).getAttribute('href')).toBe('/runs')
-    expect(nav.getByRole('link', { name: '回测' }).getAttribute('href')).toBe('/backtests')
+    expect(nav.getByRole('link', { name: '模拟观测' }).getAttribute('href')).toBe('/runs')
+    expect(nav.getByRole('link', { name: '回测实验' }).getAttribute('href')).toBe('/backtests')
 
-    // The resource center is one more destination inside 资源与配置, and every
-    // child that group already had keeps its own route.
+    // The resource center is one more destination under its own plain group label,
+    // and every research and validation child keeps its own route.
     expect(nav.getByRole('link', { name: '资源中心' }).getAttribute('href')).toBe('/resources')
-    for (const [label, href] of [['研究', '/research'], ['留出验证', '/holdouts'], ['候选', '/candidates'], ['事件校验', '/events']] as const) {
+    for (const [label, href] of [['研究任务', '/research'], ['留出验证', '/holdouts'], ['候选', '/candidates'], ['事件校验', '/events']] as const) {
       expect(nav.getByRole('link', { name: label }).getAttribute('href')).toBe(href)
     }
 
     // The backtest destination keeps every route it already had.
-    await user.click(nav.getByRole('link', { name: '回测' }))
+    await user.click(nav.getByRole('link', { name: '回测实验' }))
     expect(window.location.pathname).toBe('/backtests')
     expect(await screen.findByRole('heading', { name: 'Offline Backtests' })).toBeTruthy()
 

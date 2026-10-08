@@ -265,33 +265,44 @@ function SpecRationale({ spec }: { spec: ResearchSpec }) {
 }
 
 function ModelConfigurationPanel({ status, error }: { status: ModelConfigurationStatus | null; error: string | null }) {
-  if (error) return <section className="panel" aria-label="Model provider configuration"><header><h2>Model provider</h2><span>Status unavailable</span></header><p className="notice error">{error}</p></section>
-  if (!status) return <section className="panel" aria-label="Model provider configuration"><header><h2>Model provider</h2><span>Loading</span></header><p className="muted">Reading the backend model configuration status…</p></section>
+  if (error) return <section className="panel" aria-label="模型提供方配置"><header><h2>模型提供方</h2><span>状态不可用</span></header><p className="notice error">{error}</p></section>
+  if (!status) return <section className="panel" aria-label="模型提供方配置"><header><h2>模型提供方</h2><span>读取中</span></header><p className="muted">正在读取后端模型配置状态…</p></section>
   const capabilities = status.capabilities ?? null
   const missing = status.missing_capabilities ?? []
   const capability = (name: 'tool_use' | 'structured_output' | 'usage', whenDeclared: string, whenAbsent: string) =>
-    capabilities ? (capabilities[name] ? whenDeclared : whenAbsent) : 'Not configured'
-  return <section className="panel" aria-label="Model provider configuration">
-    <header><h2>Model provider</h2><span>{status.configured ? 'Configured' : 'Not usable'}</span></header>
+    capabilities ? (capabilities[name] ? whenDeclared : whenAbsent) : '未配置'
+  // The visible part is what an operator wrote and what this page did not: the
+  // configuration, the credential, and the fact that no request was sent from
+  // here. An absent configuration_present or credential_available stays 未知 —
+  // never a false, never a zero. The protocol, the capability declarations and
+  // the settings file are the technical detail behind one native disclosure; a
+  // required capability the protocol does not declare stays an alert outside it.
+  return <section className="panel" aria-label="模型提供方配置">
+    <header><h2>模型提供方</h2><span>{status.configured ? '已配置' : '配置不可用'}</span></header>
     <p className={status.configured ? 'muted' : 'notice error'}>{status.configured
-      ? 'Drafting sends the idea to the configured provider. No default provider is used.'
-      : `Research cannot draft a spec: ${status.configuration_error ?? 'the model provider is not configured'}. Configure the backend settings file; this page never falls back to a default provider.`}</p>
+      ? '起草会把想法发送给已配置的提供方；不使用任何默认提供方。'
+      : `研究无法起草规范：${status.configuration_error ?? '模型提供方未配置'}。请在后端配置文件里配置；本页不会回退到默认提供方。`}</p>
     <dl className="summary-list">
-      <div><dt>Configuration present</dt><dd>{status.configuration_present === undefined ? 'Unavailable' : status.configuration_present ? 'Yes' : 'No'}</dd></div>
-      <div><dt>Credential available</dt><dd>{status.credential_available === undefined ? 'Unavailable' : status.credential_available ? 'Yes' : 'No'}</dd></div>
-      <div><dt>Real request validation</dt><dd>Not verified by settings; see observed task calls</dd></div>
-      <div><dt>Provider value</dt><dd>{status.provider ?? 'Not configured'}</dd></div>
-      <div><dt>Protocol</dt><dd>{status.protocol ?? 'Not configured'}</dd></div>
-      <div><dt>Model</dt><dd>{status.model ?? 'Not configured'}</dd></div>
-      <div><dt>Endpoint</dt><dd>{status.endpoint ?? 'Provider default endpoint'}</dd></div>
-      <div><dt>Required capabilities</dt><dd>{(status.required_capabilities ?? []).map(name => `${name} · ${missing.includes(name) ? 'missing' : 'declared'}`).join(' · ') || 'Not configured'}</dd></div>
-      <div><dt>Tool use</dt><dd>{capability('tool_use', 'Declared', 'Missing')}</dd></div>
-      <div><dt>Structured output</dt><dd>{capability('structured_output', 'Declared', 'Not declared')}</dd></div>
-      <div><dt>Usage reporting</dt><dd>{capability('usage', 'Declared', 'Not declared')}</dd></div>
-      <div><dt>Settings file</dt><dd>{status.settings_file}</dd></div>
+      <div><dt>是否已配置</dt><dd>{status.configuration_present === undefined ? '未知' : status.configuration_present ? '是' : '否'}</dd></div>
+      <div><dt>凭据是否可用</dt><dd>{status.credential_available === undefined ? '未知' : status.credential_available ? '是' : '否'}</dd></div>
+      <div><dt>提供方</dt><dd>{status.provider ?? '未配置'}</dd></div>
+      <div><dt>模型</dt><dd>{status.model ?? '未配置'}</dd></div>
+      <div><dt>端点</dt><dd>{status.endpoint ?? '未配置'}</dd></div>
+      <div><dt>真实请求校验</dt><dd>本页未发送验证请求；成功调用请查看策略中的调用记录</dd></div>
     </dl>
-    {status.endpoint && <p className="muted">A custom endpoint must implement the reported protocol. A different URL is not assumed to be compatible.</p>}
-    {missing.length > 0 && <p role="alert" className="notice error">The configured protocol does not declare: {missing.join(', ')}. Research fails closed and dispatches nothing.</p>}
+    <p className="muted">配置可用不代表连接或协议兼容性已验证。</p>
+    <details className="disclosure"><summary>协议、能力声明与配置文件</summary>
+      <dl className="summary-list">
+        <div><dt>协议</dt><dd>{status.protocol ?? '未配置'}</dd></div>
+        <div><dt>配置文件</dt><dd>{status.settings_file}</dd></div>
+        <div><dt>必需能力</dt><dd>{(status.required_capabilities ?? []).map(name => `${name} · ${missing.includes(name) ? '缺失' : '已声明'}`).join(' · ') || '未配置'}</dd></div>
+        <div><dt>工具调用</dt><dd>{capability('tool_use', '已声明', '缺失')}</dd></div>
+        <div><dt>结构化输出</dt><dd>{capability('structured_output', '已声明', '未声明')}</dd></div>
+        <div><dt>用量回报</dt><dd>{capability('usage', '已声明', '未声明')}</dd></div>
+      </dl>
+      {status.endpoint && <p className="muted">自定义端点必须实现所报告的协议；不同的地址不假定兼容。</p>}
+    </details>
+    {missing.length > 0 && <p role="alert" className="notice error">必需能力未声明：{missing.join('、')}。当前配置无法起草，未发送模型请求。</p>}
   </section>
 }
 
@@ -2135,7 +2146,7 @@ export function ResearchSettings({ api }: { api: ApiAdapter }) {
     void api.settingsStatus().then(value => { if (current) setStatus(value) }).catch(caught => { if (current) setError(messageOf(caught, 'Configuration status unavailable')) })
     return () => { current = false }
   }, [api])
-  // The local appearance controls sit beside the model panel on this one Settings
-  // page; the model panel below is unchanged, down to its status semantics.
-  return <><PageHeading title="Settings" subtitle="Local appearance, current model configuration and local research limits." /><AppearanceSettings /><ModelConfigurationPanel status={status} error={api.settingsStatus ? error : 'Model configuration status is unavailable in this client.'} /></>
+  // The model connection and configuration lead this page, so what AI research
+  // would draft with is inspectable before the local appearance controls.
+  return <><PageHeading title="设置" subtitle="当前模型配置、本地外观与本地研究限制。" /><ModelConfigurationPanel status={status} error={api.settingsStatus ? error : '本客户端无法读取模型配置状态。'} /><AppearanceSettings /></>
 }

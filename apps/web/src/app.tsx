@@ -479,18 +479,24 @@ function Shell({ api }: { api: ApiAdapter }) {
           external accounts, live or paper connectivity — are stated as unavailable
           in the footer instead of being offered as navigation. */}
       <nav aria-label="主导航">
+        {/* The first three stay the top-level destinations, 策略 first: 模拟观测 is the
+            read-only local simulation snapshot, 回测实验 the research backtests, and
+            they must not be read as one another. */}
         <NavLink to="/strategies"><NavIcon name="strategies" />策略</NavLink>
-        <NavLink to="/runs"><NavIcon name="runs" />运行</NavLink>
-        <NavLink to="/backtests"><NavIcon name="backtests" />回测</NavLink>
-        <p className="nav-group">资源与配置</p>
-        <NavLink className="nav-child" to="/resources">资源中心</NavLink>
-        <NavLink className="nav-child" to="/research">研究</NavLink>
+        <NavLink to="/runs"><NavIcon name="runs" />模拟观测</NavLink>
+        <NavLink to="/backtests"><NavIcon name="backtests" />回测实验</NavLink>
+        {/* Research and its validation surfaces share one plain group label; the
+            resource directory keeps its own. */}
+        <p className="nav-group">研究与验证</p>
+        <NavLink className="nav-child" to="/research">研究任务</NavLink>
         <NavLink className="nav-child" to="/holdouts">留出验证</NavLink>
         <NavLink className="nav-child" to="/candidates">候选</NavLink>
         <NavLink className="nav-child" to="/events">事件校验</NavLink>
+        <p className="nav-group">资源</p>
+        <NavLink className="nav-child" to="/resources">资源中心</NavLink>
       </nav>
       <div className="sidebar-bottom">
-        <NavLink className="nav-settings" to="/settings"><NavIcon name="settings" />自定义设置</NavLink>
+        <NavLink className="nav-settings" to="/settings"><NavIcon name="settings" />设置</NavLink>
         <div className="sidebar-footer"><span className="status-dot" />仅本地回环 · 未连接实盘</div>
       </div>
     </aside>

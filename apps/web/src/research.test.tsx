@@ -423,19 +423,28 @@ describe('research workspace', () => {
   })
 
   it('shows the reported protocol and capabilities instead of assuming a provider', async () => {
+    const user = userEvent.setup()
     const { api } = scripted({ settings: configured })
     detail(api)
 
     expect(await screen.findByText('example-provider')).toBeTruthy()
-    expect(screen.getByText('example-protocol')).toBeTruthy()
     expect(screen.getByText('example-model-v1')).toBeTruthy()
     expect(screen.getByText('http://127.0.0.1:9999')).toBeTruthy()
-    expect(screen.getByText('tool_use · declared')).toBeTruthy()
-    expect(screen.getByText('Configured')).toBeTruthy()
-    expect(screen.getByText(/A custom endpoint must implement the reported protocol/)).toBeTruthy()
+    expect(screen.getByText('已配置')).toBeTruthy()
+    // A configured endpoint is named as configured only: no request left this page.
+    expect(screen.getByText('本页未发送验证请求；成功调用请查看策略中的调用记录')).toBeTruthy()
+    expect(screen.getByText('配置可用不代表连接或协议兼容性已验证。')).toBeTruthy()
+    // The protocol, the capability declarations and the settings file sit behind one
+    // native disclosure, opened here so the assertions below read text a user sees.
+    await user.click(screen.getByText('协议、能力声明与配置文件'))
+    expect(screen.getByText('example-protocol')).toBeTruthy()
+    expect(screen.getByText('/tmp/radian/settings.json')).toBeTruthy()
+    expect(screen.getByText('tool_use · 已声明')).toBeTruthy()
+    expect(screen.getByText(/自定义端点必须实现所报告的协议/)).toBeTruthy()
   })
 
   it('fails closed when the reported protocol does not declare a required capability', async () => {
+    const user = userEvent.setup()
     const { api } = scripted({
       settings: {
         ...configured,
@@ -447,20 +456,22 @@ describe('research workspace', () => {
     })
     detail(api)
 
-    expect(await screen.findByText('Not usable')).toBeTruthy()
+    expect(await screen.findByText('配置不可用')).toBeTruthy()
     expect(screen.getByRole('alert')).toHaveProperty(
       'textContent',
-      'The configured protocol does not declare: tool_use. Research fails closed and dispatches nothing.',
+      '必需能力未声明：tool_use。当前配置无法起草，未发送模型请求。',
     )
-    expect(screen.getByText(/Research cannot draft a spec: the configured model protocol does not declare: tool_use/)).toBeTruthy()
-    expect(screen.getByText('Missing')).toBeTruthy()
+    expect(screen.getByText(/研究无法起草规范：the configured model protocol does not declare: tool_use/)).toBeTruthy()
+    // The declaration the protocol is missing stays visible next to the requirement.
+    await user.click(screen.getByText('协议、能力声明与配置文件'))
+    expect(screen.getByText('tool_use · 缺失')).toBeTruthy()
   })
 
   it('reports an unreadable model configuration instead of a false ready state', async () => {
     const { api } = scripted({ settingsError: new Error('Model configuration status is unavailable.') })
     detail(api)
 
-    expect(await screen.findByText('Status unavailable')).toBeTruthy()
+    expect(await screen.findByText('状态不可用')).toBeTruthy()
     expect(screen.getByText('Model configuration status is unavailable.')).toBeTruthy()
   })
 })

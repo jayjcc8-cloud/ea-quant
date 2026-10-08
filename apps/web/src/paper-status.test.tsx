@@ -1,5 +1,5 @@
 /**
- * QUINE 运行 page: the read-only contract of the observed local Paper run.
+ * QUINE 模拟观测 page: the read-only contract of the observed local Paper run.
  *
  * Every document below is a hand-written fixture served by a scripted double.
  * Nothing here is an engine result, a model output or a provider call: the double
@@ -155,7 +155,7 @@ const permissionChip = () => screen.getByRole('region', { name: '交易许可' }
 
 afterEach(() => { cleanup() })
 
-describe('QUINE 运行 page', () => {
+describe('QUINE 模拟观测 page', () => {
   it('names each unavailable reason distinctly and shows no run facts', async () => {
     const reasons = ['runtime_root_not_configured', 'no_supervised_run_directories', 'run_state_unreadable'] as const
     // The reason code and its explanation are one statement, so the sentence that
@@ -173,6 +173,12 @@ describe('QUINE 运行 page', () => {
       // An unavailable observation is stated as such and never dressed as facts.
       expect(screen.queryByRole('region', { name: '运行经济事实' })).toBeNull()
       expect(screen.queryByRole('region', { name: '运行标识' })).toBeNull()
+      // With no simulation configured, the page still points at the existing
+      // research evidence routes instead of leaving the reader at a dead end.
+      if (reason === 'runtime_root_not_configured') {
+        expect(screen.getByRole('link', { name: '回测实验' }).getAttribute('href')).toBe('/backtests')
+        expect(screen.getByRole('link', { name: '策略' }).getAttribute('href')).toBe('/strategies')
+      }
       expect(calls.overview).toBe(1)
       expect(calls.events).toEqual([])
       cleanup()
@@ -645,8 +651,9 @@ describe('QUINE 运行 page', () => {
     show(api)
     await findRegion('运行经济事实')
     expect(screen.getByRole('link', { name: /AI/ }).getAttribute('href')).toBe('/strategies')
-    // The page says where model interaction happens and that none happens here.
-    expect(await screen.findByText(/不调用模型/)).toBeTruthy()
+    // The page names the strategy workspace as where model work happens, and its
+    // adapter exposes the two Paper reads only, so no model call can be made here.
+    expect(await screen.findByText(/模型交互请进入策略工作区/)).toBeTruthy()
     expect(calls.overview).toBe(1)
     expect(calls.events).toHaveLength(1)
   })

@@ -646,7 +646,7 @@ export function ResourcesPage({ api }: { readonly api: ApiAdapter }) {
     <header className="page-title">
       <div>
         <h1>资源中心</h1>
-        <p>资源查看与兼容校验，不执行研究或交易。</p>
+        <p>本主机已声明资源的只读目录，以及组合授权校验。</p>
       </div>
     </header>
 
@@ -723,7 +723,7 @@ export function ResourcesPage({ api }: { readonly api: ApiAdapter }) {
         <h2>模型与协议封装</h2>
         <div className="resource-section-actions">
           <span className="muted">{catalog.state === 'ready' ? `${plugins.length} 个已声明能力` : loadStateText(catalog)}</span>
-          <button disabled={!api.settingsStatus} onClick={reloadSettings}>刷新模型状态</button>
+          <button disabled={!api.settingsStatus} onClick={reloadSettings}>刷新配置状态</button>
           <button disabled={!api.pluginCatalog} onClick={refreshCatalog}>刷新能力目录</button>
         </div>
       </header>
@@ -740,7 +740,7 @@ export function ResourcesPage({ api }: { readonly api: ApiAdapter }) {
         <div><dt>配置来源</dt><dd>{fromStatus(settings, (status) => present(status.configuration_present))}</dd></div>
         <div><dt>配置文件</dt><dd>{fromStatus(settings, (status) => textOrUnknown(status.settings_file))}</dd></div>
       </dl>
-      <p className="muted">主机可加载只说明这一个声明可以被加载；以上各项彼此独立，本页没有观测过连接，也没有校验过请求能力。</p>
+      <p className="muted">主机可加载不代表连接已验证。配置、凭据与验证状态分别显示；刷新只重读配置。真实调用记录请在策略工作区查看。</p>
       {settings.state === 'failed' && <p className="notice error" role="alert">模型配置状态不可用：{settings.message}</p>}
       {settings.state === 'ready' && settings.value.missing_capabilities?.length
         ? <p className="muted">主机报告的缺失能力：{settings.value.missing_capabilities.join(' · ')}</p>
