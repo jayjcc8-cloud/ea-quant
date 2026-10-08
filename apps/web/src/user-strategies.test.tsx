@@ -401,6 +401,25 @@ async function openSection(user: ReturnType<typeof userEvent.setup>, name: strin
   return screen.findByRole('region', { name })
 }
 
+/**
+ * Whether one node really comes before another in document order. Reading order is
+ * the DOM's own, so the maturity tests assert it with compareDocumentPosition rather
+ * than trusting a class name or a visual mirror of the layout.
+ */
+function precedes(first: Node, second: Node): boolean {
+  return Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING)
+}
+
+/** The nearest collapsed disclosure a node would be hidden inside, if there is one. */
+function collapsedAncestor(node: Element): HTMLDetailsElement | null {
+  let current: Element | null = node.parentElement
+  while (current) {
+    if (current instanceof HTMLDetailsElement && !current.open) return current
+    current = current.parentElement
+  }
+  return null
+}
+
 afterEach(() => {
   cleanup()
   asked.length = 0
@@ -769,6 +788,13 @@ describe('user strategy workspace', () => {
     detail(api)
     const panel = await screen.findByRole('region', { name: '建议修改' })
 
+    // The record is one collapsed disclosure, and the Undo it carries cannot act on
+    // this revision, so it stays inside with the rest of the history.
+    const disclosure = within(panel).getByText(/的修改与来源/).closest('details') as HTMLDetailsElement
+    expect(disclosure.open).toBe(false)
+    expect(collapsedAncestor(within(panel).getByText('撤销最近一次修改'))).toBe(disclosure)
+
+    fireEvent.click(within(panel).getByText(/的修改与来源/))
     expect((within(panel).getByRole('button', { name: '撤销最近一次修改' }) as HTMLButtonElement).disabled).toBe(true)
     expect(calls.undo).toBe(0)
     expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 3')).toBeTruthy()
@@ -791,15 +817,22 @@ describe('user strategy workspace', () => {
     detail(api)
     const panel = await screen.findByRole('region', { name: '建议修改' })
 
-    // An undo names the application it reversed, and the panel says exactly that.
-    // The proposal record keeps its own status, and the current draft is not
-    // presented as the result this proposal stands on.
-    expect(within(panel).getByText('已撤销')).toBeTruthy()
+    // An undo names the application it reversed, and the collapsed record already
+    // says what it amounts to — the effective state alone. The recorded status stays
+    // inside with the rest of the provenance, and the current draft is not presented
+    // as the result this proposal stands on.
+    const summary = within(panel).getByText(/已撤销的修改与来源/)
+    expect(summary.textContent).not.toMatch(/已应用/)
+    const disclosure = summary.closest('details') as HTMLDetailsElement
+    expect(disclosure.open).toBe(false)
     expect(panel.textContent).toMatch(/由模型提出，已应用/)
     expect(panel.textContent).toMatch(/这次应用已在修订 5 → 6 上被撤销/)
-    // There is nothing left to undo here, and the decision controls stay in place.
+
+    // The whole record is that one disclosure, decisions included: there is nothing
+    // left to undo here, and nothing on the first screen to press.
+    fireEvent.click(summary)
     expect((within(panel).getByRole('button', { name: '撤销最近一次修改' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(within(panel).getByRole('button', { name: '应用所选' })).toBeTruthy()
+    expect((within(panel).getByRole('button', { name: '应用所选' }) as HTMLButtonElement).disabled).toBe(true)
     expect(calls.undo).toBe(0)
   })
 
@@ -1479,6 +1512,9 @@ describe('user strategy workspace', () => {
     expect(closedPanel.textContent).not.toMatch(/等待你决定/)
     expect(within(closedPanel).getByLabelText('parameters.target_quantity')).toBeTruthy()
     expect(closedPanel.textContent).toMatch(/应用会用整份已校验的草稿写出一个新修订/)
+    // The whole record is one collapsed disclosure, so its controls are read after
+    // opening it — and they are still there, inert.
+    fireEvent.click(within(closedPanel).getByText(/的修改与来源/))
     expect((within(closedPanel).getByRole('button', { name: '应用所选' }) as HTMLButtonElement).disabled).toBe(true)
     expect((within(closedPanel).getByRole('button', { name: '拒绝建议' }) as HTMLButtonElement).disabled).toBe(true)
 
@@ -1623,10 +1659,14 @@ describe('user strategy workspace', () => {
 
     cleanup()
     // A job that is not the one this row asked for is refused, not shown as its run.
+    // The next step honestly reports the same refusal for its own read, so this row
+    // behavior is read inside the list the row lives in; the strip's own rendering is
+    // covered by the maturity tests.
     const other = scripted({ strategies: [frozen], current: () => frozen })
     other.api.getBacktest = async () => ({ ...runJob, job_id: 'job-2' })
     detail(other.api)
-    expect(await screen.findByText(/读取到的任务与这条运行不一致/)).toBeTruthy()
+    const mismatch = within(await screen.findByRole('navigation', { name: '策略列表' }))
+    expect(await mismatch.findByText(/读取到的任务与这条运行不一致/)).toBeTruthy()
 
     cleanup()
     // A read that fails stays unreadable here, and still points at the run itself.
@@ -1644,13 +1684,17 @@ describe('user strategy workspace', () => {
     detail(api)
     await screen.findByRole('heading', { name: 'Bold entry' })
 
-    // The strip names the revision that is open and the last one frozen, and it does
-    // not claim a created run has a readable report.
+    // The strip names what is frozen, and it does not claim a created run has a
+    // readable report. The revision that is open is not repeated here: the title chip
+    // and the facts already name it, so the strip carries only the frozen side.
     const strip = screen.getByRole('region', { name: '下一步' })
-    expect(within(strip).getByText('当前草稿')).toBeTruthy()
-    expect(within(strip).getByText('v1 草稿')).toBeTruthy()
+    expect(within(strip).queryByText('当前草稿')).toBeNull()
+    expect(within(strip).queryByText('v1 草稿')).toBeNull()
     expect(within(strip).getByText('还没有冻结运行')).toBeTruthy()
-    expect(strip.textContent).toMatch(/运行被创建不等于它已经有了可读的报告/)
+    // Nothing here claims an outcome the run has not reported, and the way forward is
+    // a reading step, not a launch.
+    expect(strip.textContent).not.toMatch(/成功|报告可读/)
+    expect(strip.textContent).toMatch(/本草稿尚未冻结为实验/)
 
     await user.click(within(strip).getByRole('button', { name: '去预览这个草稿' }))
 
@@ -1658,5 +1702,231 @@ describe('user strategy workspace', () => {
     expect(await screen.findByRole('region', { name: '实验' })).toBeTruthy()
     expect(calls.preview).toBe(0)
     expect(calls.launch).toBe(0)
+  })
+})
+
+/**
+ * Maturity round 1: the same local research surface, made easier to move through
+ * without adding a capability or weakening an approval or report rule. The composer
+ * precedes the long turn it answers, a closed proposal is one collapsed disclosure
+ * that still holds its whole history, and the next step reads the run's own job
+ * state instead of the dispatch record it was created from.
+ */
+describe('maturity round 1', () => {
+  /** One observed call, so a turn has an answer that belongs to it alone. */
+  function observedCall(
+    callId: string,
+    overrides: Partial<UserStrategy['calls'][number]> = {},
+  ): UserStrategy['calls'][number] {
+    return {
+      call_id: callId, base_revision: 1, status: 'observed',
+      route: { provider: 'scripted-fixture', model: 'scripted-fixture-v1', endpoint: 'http://127.0.0.1:9/unused' },
+      approved_budget: { max_model_calls: 1, max_backtests: 0 },
+      reserved_at: '2026-10-06T10:01:00.000000Z', message: null, model: 'scripted-fixture-v1',
+      input_tokens: 5, output_tokens: 3, usage_available: true,
+      ...overrides,
+    }
+  }
+
+  /** One application and the undo that reversed it, each with its own provenance. */
+  function appliedThenUndone(overrides: Partial<UserStrategy> = {}): UserStrategy {
+    return strategy({
+      draft: { ...executable(strategy()), revision: 6, parameters: { target_quantity: '2', entry_delay_bars: 1 } },
+      proposals: [proposal({ base_revision: 4, status: 'applied', applied_paths: ['parameters.target_quantity'] })],
+      changes: [
+        { ...appliedChange, from_revision: 4, to_revision: 5 },
+        {
+          operation_id: 'op-undo-1', kind: 'undo', proposal_id: null, target_operation_id: 'op-apply-1',
+          from_revision: 5, to_revision: 6, applied_paths: [], stale_paths: [], items: [],
+          evidence: [], proposer: 'user', at: '2026-10-06T10:05:00.000000Z',
+        },
+      ],
+      ...overrides,
+    })
+  }
+
+  it('puts the composer before the turn it answers and the closed proposal beside it', async () => {
+    const user = userEvent.setup()
+    // The latest answer is the longest thing on the page: the reader must still meet
+    // the composer before having to scroll or tab past all of it.
+    const LONG_ANSWER = Array.from({ length: 160 }, (_, index) => `第${index}句`).join(' ')
+    const reversed = appliedThenUndone({
+      calls: [observedCall('call-0'), observedCall('call-1', { base_revision: 4 })],
+      messages: [
+        { message_id: 'msg-0', role: 'user', kind: 'message', text: 'An earlier question.', base_revision: 1, at: '2026-10-06T10:00:00.000000Z', call_id: 'call-0', proposal_id: null },
+        { message_id: 'msg-1', role: 'model', kind: 'message', text: 'An earlier answer.', base_revision: 1, at: '2026-10-06T10:00:30.000000Z', call_id: 'call-0', proposal_id: null },
+        { message_id: 'msg-2', role: 'user', kind: 'message', text: 'Explain the whole draft.', base_revision: 4, at: '2026-10-06T10:01:00.000000Z', call_id: 'call-1', proposal_id: null },
+        { message_id: 'msg-3', role: 'model', kind: 'message', text: LONG_ANSWER, base_revision: 4, at: '2026-10-06T10:01:01.000000Z', call_id: 'call-1', proposal_id: null },
+      ],
+    })
+    const { api, calls } = scripted({ strategies: [reversed], current: () => reversed })
+    detail(api)
+
+    // The chat region also carries the loading placeholder, so wait for the composer
+    // itself before reading the region it lives in.
+    await screen.findByLabelText('消息')
+    const chat = screen.getByRole('region', { name: 'AI 协作' })
+    const composer = within(chat).getByLabelText('消息')
+    const turn = within(chat).getByRole('region', { name: '当前一轮' })
+    const proposalPanel = within(chat).getByRole('region', { name: '建议修改' })
+
+    // The usable action sequence is the DOM order, established by
+    // compareDocumentPosition rather than read off a class name: the composer comes
+    // before both the answer it belongs to and the closed proposal beside it.
+    expect(precedes(composer, turn)).toBe(true)
+    expect(precedes(composer, proposalPanel)).toBe(true)
+    expect(precedes(turn, composer)).toBe(false)
+
+    // The whole latest answer stays accessible, in its own bounded surface.
+    const answer = within(turn).getByRole('group', { name: '本轮回答' })
+    expect(within(answer).getByText(LONG_ANSWER)).toBeTruthy()
+
+    // So does the earlier conversation, behind its own disclosure.
+    await user.click(within(chat).getByText(/更早的对话/))
+    expect(within(chat).getByText('An earlier answer.')).toBeTruthy()
+    expect(within(chat).getByText('An earlier question.')).toBeTruthy()
+
+    // Nothing ran on its own: no approval is set and no call was sent.
+    expect(calls.ask).toBe(0)
+    expect(asked).toEqual([])
+    expect((within(chat).getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
+    expect((within(chat).getByLabelText('消息') as HTMLTextAreaElement).value).toBe('')
+  })
+
+  it('keeps a closed proposal whole inside one initially-collapsed disclosure that names the reversal', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted({ current: () => appliedThenUndone() })
+    detail(api)
+    const panel = await screen.findByRole('region', { name: '建议修改' })
+
+    const summary = within(panel).getByText(/的修改与来源/)
+    const disclosure = summary.closest('details') as HTMLDetailsElement | null
+    expect(disclosure).toBeTruthy()
+    // One native disclosure, closed until the reader opens it.
+    expect(disclosure!.open).toBe(false)
+    // Its summary carries the ledger's effective outcome alone — the reversal, not
+    // the status the proposal was recorded with, so the collapsed line never signals
+    // two states at once.
+    expect(summary.textContent).toMatch(/已撤销的修改与来源/)
+    expect(summary.textContent).not.toMatch(/已应用/)
+    // The application was reversed, so none of these controls can do anything now.
+    // They live with the rest of the record instead of on the first screen — the
+    // still-unavailable Undo included.
+    expect(collapsedAncestor(within(panel).getByText('应用所选'))).toBe(disclosure)
+    expect(collapsedAncestor(within(panel).getByText('撤销最近一次修改'))).toBe(disclosure)
+
+    await user.click(summary)
+    expect(disclosure!.open).toBe(true)
+
+    // The full history is inside it: origin, the status it was recorded with, the
+    // reversal's provenance, the model's cited evidence and both sides of the field.
+    expect(within(disclosure!).getByText(/由模型提出，已应用/)).toBeTruthy()
+    // The status the proposal was recorded with is kept here, inside the record.
+    expect(within(disclosure!).getByText('已应用')).toBeTruthy()
+    expect(within(disclosure!).getByText(/针对草稿修订 4 · 提案 prop-1/)).toBeTruthy()
+    expect(within(disclosure!).getByText(/这次应用已在修订 5 → 6 上被撤销/)).toBeTruthy()
+    expect(within(disclosure!).getByText('之前 2')).toBeTruthy()
+    expect(within(disclosure!).getByText('之后 3')).toBeTruthy()
+    expect(within(disclosure!).getByText(/模型引用：idea: more size/)).toBeTruthy()
+
+    // Opening the record reveals them, still inert: nothing here can apply, reject or
+    // undo a change the ledger already reversed.
+    expect((within(disclosure!).getByRole('button', { name: '应用所选' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(disclosure!).getByRole('button', { name: '拒绝建议' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(disclosure!).getByRole('button', { name: '撤销最近一次修改' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(calls.apply).toBe(0)
+    expect(calls.undo).toBe(0)
+    expect(calls.reject).toBe(0)
+
+    cleanup()
+    // A closed proposal whose application is still the head revision keeps its Undo
+    // live, and that Undo is reachable without opening the disclosure.
+    const applied = strategy({
+      draft: { ...executable(strategy()), revision: 2, parameters: { target_quantity: '3', entry_delay_bars: 0 } },
+      proposals: [proposal({ status: 'applied', applied_paths: ['parameters.target_quantity'] })],
+      changes: [appliedChange],
+    })
+    const second = scripted({ current: () => applied })
+    detail(second.api)
+    const appliedPanel = await screen.findByRole('region', { name: '建议修改' })
+    const undo = within(appliedPanel).getByRole('button', { name: '撤销最近一次修改' }) as HTMLButtonElement
+    expect(undo.disabled).toBe(false)
+    const appliedDisclosure = within(appliedPanel).getByText(/的修改与来源/).closest('details') as HTMLDetailsElement
+    expect(appliedDisclosure.open).toBe(false)
+    expect(collapsedAncestor(undo)).toBeNull()
+
+    cleanup()
+    // An open proposal is the decision in front of the reader: its typed diff and its
+    // Apply/reject controls are exposed at once, behind no disclosure.
+    const opened = scripted({ current: () => strategy({ proposals: [proposal()] }) })
+    detail(opened.api)
+    const openedPanel = await screen.findByRole('region', { name: '建议修改' })
+    const field = within(openedPanel).getByLabelText('parameters.target_quantity')
+    expect(collapsedAncestor(field)).toBeNull()
+    expect((within(openedPanel).getByRole('button', { name: '应用所选' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((within(openedPanel).getByRole('button', { name: '拒绝建议' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('reads the run’s own job state in the next step instead of the dispatch that created it', async () => {
+    const frozen = strategy({ experiments: [createdExperiment()] })
+
+    // A run that really succeeded and whose report is readable says exactly that, read
+    // from the job itself rather than from the dispatch record.
+    const succeededJob: BacktestJob = { ...runJob, status: 'succeeded', report_ready: true, report_sha256: 'd'.repeat(64) }
+    const succeeded = scripted({ strategies: [frozen], current: () => frozen })
+    succeeded.api.getBacktest = async () => succeededJob
+    detail(succeeded.api)
+    const strip = await screen.findByRole('region', { name: '下一步' })
+    expect(await within(strip).findByRole('link', { name: '成功 · 报告可读' })).toBeTruthy()
+    // The dispatch-only record is never repeated as if it were the run's outcome.
+    expect(within(strip).queryByText(/运行已创建/)).toBeNull()
+
+    cleanup()
+    // A run that failed is never shown as a success here.
+    const failedJob: BacktestJob = { ...runJob, status: 'failed', report_ready: false }
+    const failed = scripted({ strategies: [frozen], current: () => frozen })
+    failed.api.getBacktest = async () => failedJob
+    detail(failed.api)
+    const failedStrip = await screen.findByRole('region', { name: '下一步' })
+    expect(await within(failedStrip).findByRole('link', { name: '失败' })).toBeTruthy()
+    expect(failedStrip.textContent).not.toMatch(/成功/)
+
+    cleanup()
+    // A read that fails stays unreadable here and still points at the run itself —
+    // and never becomes a success.
+    const unreadable = scripted({ strategies: [frozen], current: () => frozen })
+    unreadable.api.getBacktest = async () => { throw new Error('offline') }
+    detail(unreadable.api)
+    const unreadableStrip = await screen.findByRole('region', { name: '下一步' })
+    expect(await within(unreadableStrip).findByText(/运行状态不可读/)).toBeTruthy()
+    expect(within(unreadableStrip).getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/backtests/job-1')
+    expect(unreadableStrip.textContent).not.toMatch(/成功/)
+  })
+
+  it('stops repeating the draft revision and the dispatch-only status where the facts already name them', async () => {
+    const frozen = strategy({ experiments: [createdExperiment()] })
+
+    // On the strategy's own page the revision is named by its title chip and its
+    // facts, so the next step does not print it a third time.
+    const detailRead = scripted({ strategies: [frozen], current: () => frozen })
+    detailRead.api.getBacktest = async () => runJob
+    detail(detailRead.api)
+    await screen.findByRole('heading', { name: 'Bold entry' })
+    const strip = await screen.findByRole('region', { name: '下一步' })
+    expect(within(strip).queryByText('当前草稿')).toBeNull()
+    expect(within(strip).queryByText('v1 草稿')).toBeNull()
+    expect(strip.textContent).not.toMatch(/草稿修订 1/)
+    expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 1')).toBeTruthy()
+
+    cleanup()
+    // The way back to the last strategy names the frozen revision, not a dispatch
+    // state that is not the run's own outcome.
+    const listed = scripted({ strategies: [frozen] })
+    listed.api.getBacktest = async () => runJob
+    window.history.pushState({}, '', '/strategies')
+    render(<App api={listed.api} />)
+    const continuation = await screen.findByRole('region', { name: '继续最近的策略' })
+    expect(continuation.textContent).toMatch(/最近冻结 v1/)
+    expect(continuation.textContent).not.toMatch(/运行已创建/)
   })
 })

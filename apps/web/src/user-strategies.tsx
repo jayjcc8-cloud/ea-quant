@@ -849,12 +849,16 @@ function BindScenario({ api, strategy, scenarios, changed, failed }: {
 }
 
 /**
- * The next step of the selected strategy, in one compact strip: the revision that
- * is open beside the most recent revision that was actually frozen. A draft that
- * no frozen run covers yet is offered one explicit way to the experiment tab —
- * that button only opens the tab; it reads no preview and starts no run.
+ * The next step of the selected strategy, in one compact strip: the most recent
+ * revision that was actually frozen and the real state of the job it dispatched,
+ * read from that job itself through the same cell the table uses. The revision that
+ * is open is not repeated here — the title chip and the facts already name it — so
+ * the strip carries only what is frozen and what is not. A draft no frozen run
+ * covers yet is offered one explicit way to the experiment tab; that button only
+ * opens the tab, it reads no preview and starts no run.
  */
-function NextStep({ strategy, openExperiments }: {
+function NextStep({ api, strategy, openExperiments }: {
+  api: ApiAdapter
   strategy: UserStrategy
   openExperiments: () => void
 }) {
@@ -864,15 +868,24 @@ function NextStep({ strategy, openExperiments }: {
   const covered = strategy.experiments.some(item =>
     item.status === 'created' && item.payload.draft_revision === draft.revision)
   const needsPreview = !isIntentDraft(draft) && !covered
+  // A created experiment has a real job; its state is that job's own, never the
+  // dispatch record's. An outcome this page has not read is not claimed here.
+  const jobId = latest?.status === 'created' ? latest.job_id : null
   return <section aria-label="下一步" className="next-step">
     <dl>
-      <div><dt>当前草稿</dt><dd>{revisionChip(draft)}</dd></div>
       <div><dt>最近冻结</dt><dd>{latest
-        ? `v${latest.payload.draft_revision} · ${EXPERIMENT_STATUS_LABELS[latest.status]}`
+        ? <>
+            {`v${latest.payload.draft_revision}`}
+            {jobId
+              ? <> · <JobStatusCell key={jobId} api={api} jobId={jobId} /></>
+              : ` · ${EXPERIMENT_STATUS_LABELS[latest.status]}`}
+          </>
         : isIntentDraft(draft) ? '尚未绑定场景' : '还没有冻结运行'}</dd></div>
     </dl>
-    {needsPreview && <button type="button" onClick={openExperiments}>去预览这个草稿</button>}
-    <p className="muted">运行被创建不等于它已经有了可读的报告。</p>
+    {needsPreview && <>
+      <p className="muted">本草稿尚未冻结为实验。</p>
+      <button type="button" onClick={openExperiments}>去预览这个草稿</button>
+    </>}
   </section>
 }
 
@@ -903,7 +916,7 @@ function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
     {isIntentDraft(strategy.draft) && <BindScenario
       api={api} strategy={strategy} scenarios={scenarios}
       changed={changed} failed={failed} />}
-    <NextStep strategy={strategy} openExperiments={() => setTab('experiments')} />
+    <NextStep api={api} strategy={strategy} openExperiments={() => setTab('experiments')} />
     <DetailTabs active={tab} select={setTab} idBase={idBase} />
     <div className="strategy-tabpanel" role="tabpanel" id={`${idBase}-panel-${tab}`}
       aria-labelledby={`${idBase}-tab-${tab}`} tabIndex={0}>
@@ -964,20 +977,22 @@ function CallEvidence({ call }: { call: UserStrategyCall | undefined }) {
  * The header names the strategy the conversation belongs to and switches between
  * the real strategies of this workspace.
  *
- * What the reader meets first is the current turn: the latest recorded call, its
- * own status and refusal, the prompt it was made with, and the answer that belongs
- * to that call. An answer of an earlier call is never shown as if it replied to
- * the latest one — a refusal or an unknown outcome says so, and the earlier
- * conversation stays whole in its own labelled, bounded, keyboard-scroll history
- * disclosure. Nothing the user acts on — the proposal, the approval, the composer —
- * is inside that scroller.
+ * What the reader meets first is the composer: the message, the one explicit
+ * approval and the ask, then the two states that qualify them — an unbound idea and
+ * an unresolved call. Only after that comes the current turn: the latest recorded
+ * call, its own status and refusal, the prompt it was made with, and the answer
+ * that belongs to that call. An answer of an earlier call is never shown as if it
+ * replied to the latest one — a refusal or an unknown outcome says so, and the
+ * earlier conversation stays whole in its own labelled, bounded, keyboard-scroll
+ * history disclosure. Nothing the user acts on — the proposal, the approval, the
+ * composer — is inside that scroller, and the DOM order is the keyboard order.
  */
 function ChatPanel({ api, strategy, strategies, changed, proposalSlot }: {
   api: ApiAdapter
   strategy: UserStrategy
   strategies: UserStrategy[]
   changed: (strategy: UserStrategy) => void
-  /** The current proposal, mounted between the conversation and the composer. */
+  /** The current proposal, mounted after the turn it belongs to and before history. */
   proposalSlot?: ReactNode
 }) {
   const navigate = useNavigate()
@@ -1040,6 +1055,40 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot }: {
         </select>
       </label>}
     </header>
+    {/* The composer is the one thing the reader acts with, so it comes first: the
+        message, the one explicit approval and the ask are met before the long answer
+        they belong to and before the proposal. The DOM order is the visual and
+        keyboard order, so the tab sequence follows the same usable path. */}
+    <div className="composer">
+      <div className="field">
+        <label htmlFor="strategy-message">消息</label>
+        <textarea id="strategy-message" rows={3} value={message} maxLength={4000}
+          placeholder="描述你想验证的问题…"
+          onChange={event => setMessage(event.target.value)} />
+      </div>
+      <label className="check" htmlFor="strategy-approve">
+        <input id="strategy-approve" type="checkbox" checked={approved}
+          onChange={event => { setApproved(event.target.checked); setNote('') }} />
+        批准一次模型调用
+      </label>
+      <div className="composer-actions">
+        <p className="muted">{isIntentDraft(strategy.draft)
+          ? '一次批准只允许一次调用，这一次调用只用来澄清这个想法：它不提出字段修改，也不启动回测。'
+          : '本次批准仅针对当前修订调用模型一次，解释或提出修改；不应用提案，也不运行回测。'}</p>
+        <button type="button" className="primary" onClick={ask} disabled={busy || !message.trim()}>询问模型</button>
+      </div>
+      {note && <p role="alert" className="notice error">{note}</p>}
+    </div>
+    {/* The two states that qualify the composer sit with it rather than at the far
+        end of the column: an unbound idea and an unresolved call are both about what
+        can be asked next. */}
+    {isIntentDraft(strategy.draft) && <p className="notice">
+      这条策略还没有绑定场景：这次对话只能澄清这个想法，模型不会提出任何字段修改，也不会运行任何东西。
+      绑定场景之后，它的建议才会变成可以应用的修改。
+    </p>}
+    {unresolved && <p className="notice">
+      还有一次已记录的调用没有结论。在它落实之前不会再问下一次，因此不会覆盖任何东西。
+    </p>}
     {latest && <section aria-label="当前一轮" className="turn">
       <p className="turn-head">
         <span className={`status status-${latest.status}`}>{CALL_STATUS_LABELS[latest.status]}</span>
@@ -1090,6 +1139,10 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot }: {
       </details>
       <CallEvidence call={latest} />
     </section>}
+    {/* The current change sits between the answer it follows and the earlier
+        conversation: an open one is right there to decide on, a closed one is a
+        single collapsed line. */}
+    {proposalSlot}
     {earlier.length > 0 &&
       // The earlier conversation is a bounded surface of its own: it scrolls by
       // keyboard as well as by pointer, and every earlier message stays in it.
@@ -1108,33 +1161,6 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot }: {
           </ol>
         </div>
       </details>}
-    {isIntentDraft(strategy.draft) && <p className="notice">
-      这条策略还没有绑定场景：这次对话只能澄清这个想法，模型不会提出任何字段修改，也不会运行任何东西。
-      绑定场景之后，它的建议才会变成可以应用的修改。
-    </p>}
-    {unresolved && <p className="notice">
-      还有一次已记录的调用没有结论。在它落实之前不会再问下一次，因此不会覆盖任何东西。
-    </p>}
-    {proposalSlot}
-    <div className="composer">
-      <div className="field">
-        <label htmlFor="strategy-message">消息</label>
-        <textarea id="strategy-message" rows={3} value={message} maxLength={4000}
-          onChange={event => setMessage(event.target.value)} />
-      </div>
-      <label className="check" htmlFor="strategy-approve">
-        <input id="strategy-approve" type="checkbox" checked={approved}
-          onChange={event => { setApproved(event.target.checked); setNote('') }} />
-        批准一次模型调用
-      </label>
-      <div className="composer-actions">
-        <p className="muted">{isIntentDraft(strategy.draft)
-          ? '一次批准只允许一次调用，这一次调用只用来澄清这个想法：它不提出字段修改，也不启动回测。'
-          : '本次批准仅针对当前修订调用模型一次，解释或提出修改；不应用提案，也不运行回测。'}</p>
-        <button type="button" className="primary" onClick={ask} disabled={busy || !message.trim()}>询问模型</button>
-      </div>
-      {note && <p role="alert" className="notice error">{note}</p>}
-    </div>
   </section>
 }
 
@@ -1346,35 +1372,66 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
     </details>}
   </>
 
+  // The proposal's own origin line, its grounded evidence and the recorded status
+  // are the same facts in both states; only where they live changes.
+  const origin = <p className="muted proposal-origin">
+    {`针对草稿修订 ${proposal.base_revision} · 提案 ${proposal.proposal_id} · ${PROPOSAL_ORIGIN[proposal.status]}`}
+  </p>
+  const callEvidence = <CallEvidence call={strategy.calls.find(item => item.call_id === proposal.call_id)} />
+  const recordedStatus = <span className={`chip chip-${proposal.status}`}>
+    {PROPOSAL_STATUS_LABELS[proposal.status]}
+  </span>
+  const undoButton = <button type="button" onClick={undo} disabled={busy}>撤销最近一次修改</button>
+  // A closed proposal's own line names the effective state and nothing else: what
+  // this record now amounts to on the ledger — 已撤销 when it was reversed, the
+  // proposal's own status otherwise. The status it was recorded with stays inside
+  // the disclosure, with the rest of the provenance, so the collapsed line never
+  // signals two different states at once.
+  const closedSummary = `${reversal ? '已撤销' : PROPOSAL_STATUS_LABELS[proposal.status]}`
+    + `的修改与来源（${proposal.items.length} 个字段）`
+
   return <section aria-label="建议修改" className="strategy-panel proposal-panel">
     <header className="panel-head">
       <h2>建议修改</h2>
-      <span className={`chip chip-${proposal.status}`}>{PROPOSAL_STATUS_LABELS[proposal.status]}</span>
-      {/* The ledger's own word for what became of this application, beside the
-          proposal's recorded status rather than in place of it. */}
-      {reversal && <span className="chip chip-undo">已撤销</span>}
+      {open && recordedStatus}
     </header>
-    <p className="muted proposal-origin">
-      {`针对草稿修订 ${proposal.base_revision} · 提案 ${proposal.proposal_id} · ${PROPOSAL_ORIGIN[proposal.status]}`}
-    </p>
-    {reversal && <p className="muted proposal-undone">
-      {`修改记录显示：这次应用已在修订 ${reversal.from_revision} → ${reversal.to_revision} 上被撤销，当前草稿不是它的结果。`}
-    </p>}
-    <CallEvidence call={strategy.calls.find(item => item.call_id === proposal.call_id)} />
-    {/* An open proposal is waiting for a decision, so it is what the reader meets.
-        A closed one is history: its changes, sources and prose are one disclosure,
-        and its controls stay outside it. */}
     {open
-      ? changeDetail
-      : <details className="provenance proposal-closed">
-          <summary>{`${PROPOSAL_STATUS_LABELS[proposal.status]}的修改与来源（${proposal.items.length} 个字段）`}</summary>
+      // A proposal waiting for a decision is the reader's to act on now: origin,
+      // evidence, the typed diff and the live controls are all exposed directly.
+      ? <>
+          {origin}
+          {callEvidence}
           {changeDetail}
-        </details>}
-    <div className="actions">
-      <button type="button" className="primary" onClick={apply} disabled={busy || !open}>应用所选</button>
-      <button type="button" onClick={reject} disabled={busy || !open}>拒绝建议</button>
-      <button type="button" onClick={undo} disabled={busy || !canUndo}>撤销最近一次修改</button>
-    </div>
+          <div className="actions">
+            <button type="button" className="primary" onClick={apply} disabled={busy}>应用所选</button>
+            <button type="button" onClick={reject} disabled={busy}>拒绝建议</button>
+            {canUndo && undoButton}
+          </div>
+        </>
+      // A closed one is history: one native disclosure, collapsed until the reader
+      // opens it, holds the origin and its UUID, the status it was recorded with,
+      // the ledger's reversal, the evidence it was grounded in, every field and the
+      // controls that can no longer act. Its summary already says what it amounts to.
+      : <>
+          <details className="provenance proposal-closed">
+            <summary>{closedSummary}</summary>
+            {origin}
+            <p className="proposal-record">{recordedStatus}</p>
+            {reversal && <p className="muted proposal-undone">
+              {`修改记录显示：这次应用已在修订 ${reversal.from_revision} → ${reversal.to_revision} 上被撤销，当前草稿不是它的结果。`}
+            </p>}
+            {callEvidence}
+            {changeDetail}
+            <div className="actions">
+              <button type="button" className="primary" onClick={apply} disabled>应用所选</button>
+              <button type="button" onClick={reject} disabled>拒绝建议</button>
+              {!canUndo && <button type="button" onClick={undo} disabled>撤销最近一次修改</button>}
+            </div>
+          </details>
+          {/* The one action that can still change the draft stays on the first
+              screen, outside the history it belongs to; it is not repeated inside. */}
+          {canUndo && <div className="actions">{undoButton}</div>}
+        </>}
   </section>
 }
 
@@ -1684,15 +1741,17 @@ function StrategyTable({ api, strategies, selectedId }: {
 
 /**
  * The way back into the work that moved most recently, on the collection route
- * only. It names the strategy, its revision and the state of its latest frozen
- * attempt, and it is a link — nothing redirects on its own and no approval of one
- * strategy is carried to another.
+ * only. It names the strategy, its working revision and the revision of its latest
+ * frozen attempt. A created dispatch is not a run outcome, so no dispatch-only
+ * state is claimed here: the run's own state is read on the strategy's page. It is
+ * a link — nothing redirects on its own and no approval of one strategy is carried
+ * to another.
  */
 function Continuation({ strategies }: { strategies: UserStrategy[] }) {
   const latest = strategies.reduce((best, item) => item.updated_at > best.updated_at ? item : best)
   const experiment = latest.experiments.at(-1)
   const frozen = experiment
-    ? `最近冻结 v${experiment.payload.draft_revision} · ${EXPERIMENT_STATUS_LABELS[experiment.status]}`
+    ? `最近冻结 v${experiment.payload.draft_revision}`
     : isIntentDraft(latest.draft) ? '尚未绑定场景' : '还没有冻结运行'
   return <section aria-label="继续最近的策略" className="continuation">
     <Link className="continuation-link"

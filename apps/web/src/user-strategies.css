@@ -160,7 +160,15 @@ table.strategy-table {
 .strategy-workspace .next-step dt { color: var(--q-ink-soft); font-size: 12px; }
 .strategy-workspace .next-step dd { margin: 0; color: var(--q-ink); font-size: 13px; overflow-wrap: anywhere; }
 .strategy-workspace .next-step button { margin-left: auto; }
-.strategy-workspace .next-step p.muted { flex: 1 1 100%; margin: 0; }
+/* The contextual note shares the strip's one row with the frozen status and the
+   action instead of claiming a row of its own: it sizes to its text and lets the
+   row grow around it, so the strip stays compact at desktop width. On a phone the
+   note takes the full row and the action keeps its own full-width row below. */
+.strategy-workspace .next-step p.muted { flex: 1 1 auto; min-width: 0; margin: 0; }
+/* The latest run's state is a link to that run's own page; it reads as one. */
+.strategy-workspace .next-step dd a { color: var(--q-red); font-weight: 600; }
+.strategy-workspace .next-step dd a:hover,
+.strategy-workspace .next-step dd a:focus-visible { color: var(--q-red-ink); text-decoration: underline; }
 
 /* The way back into the most recently updated work, on the collection route. */
 .strategy-workspace .continuation {
@@ -259,11 +267,17 @@ table.strategy-table {
 .strategy-workspace .preview-facts dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .strategy-workspace .revise { margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--q-line); border-radius: 8px; }
 .strategy-workspace .revise button { margin-top: 4px; }
-/* A proposal that is no longer waiting for a decision is history: its fields, its
-   sources and its prose are one disclosure, so the composer below it is not pushed
-   past the first screen. Its controls stay outside the disclosure. */
+/* A proposal that is no longer waiting for a decision is history, and the whole
+   verbose record is one native disclosure: origin, recorded status, reversal, the
+   evidence it was cited under, every field and the controls that can no longer act.
+   It collapses to a single line that already names the effective state, so a long
+   closed proposal never pushes the answer or the next strategy card past the fold.
+   A still-valid Undo is the one exception and stays outside it. */
 .strategy-workspace .proposal-closed { margin-top: 8px; }
+.strategy-workspace .proposal-closed > summary { color: var(--q-ink); font-size: 13px; font-weight: 600; }
 .strategy-workspace .proposal-closed .proposal-list { margin-top: 8px; }
+.strategy-workspace .proposal-closed .proposal-origin { margin: 8px 0 0; }
+.strategy-workspace .proposal-record { margin: 6px 0 0; }
 .strategy-workspace .chip-undo { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
 .strategy-workspace .proposal-undone { margin: 4px 0 0; }
 
@@ -276,9 +290,10 @@ table.strategy-table {
 .strategy-workspace .chat-head h2 { margin: 0; font-size: 16px; font-weight: 650; }
 .strategy-workspace .chat-head select { width: auto; max-width: 190px; min-height: 32px; padding: 4px 8px; font-size: 13px; }
 
-/* The current turn first: this call's own status, its answer labelled as
-   inference, and its prompt behind a disclosure. The earlier conversation is a
-   disclosure of its own below, so what the reader acts on is never inside it. */
+/* The current turn follows the composer: this call's own status, its answer
+   labelled as inference, and its prompt behind a disclosure. The earlier
+   conversation is a disclosure of its own below, so what the reader acts on — the
+   composer, the approval and the ask — is never inside it. */
 .strategy-workspace .turn { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; }
 .strategy-workspace .turn-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
 .strategy-workspace .turn-head .muted { font-size: 12px; overflow-wrap: anywhere; }
@@ -293,7 +308,11 @@ table.strategy-table {
 .strategy-workspace .answer-scroll:focus-visible { outline: 2px solid var(--q-red); outline-offset: -2px; }
 .strategy-workspace .turn-details { margin-top: 10px; }
 .strategy-workspace .turn-history { margin-top: 12px; }
-.strategy-workspace .composer { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--q-line-soft); }
+/* The composer is the first thing in the column, directly under the header: the
+   message, the one approval and the ask are met before the long answer they belong
+   to, so on a phone or by keyboard the usable controls are the first ones reached.
+   Its own rule separates it from the turn below rather than from the header above. */
+.strategy-workspace .composer { margin-top: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--q-line-soft); }
 .strategy-workspace .composer-actions { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .strategy-workspace .composer-actions .muted { margin: 0; max-width: 22rem; }
 /* The conversation history is one of the two bounded surfaces, the latest answer
@@ -352,10 +371,14 @@ table.strategy-table {
   .strategy-workspace .button-link, .strategy-workspace .create-cta { min-height: 44px; }
   .strategy-workspace .jump-link { min-height: 44px; }
   .strategy-workspace select, .strategy-workspace input, .strategy-workspace textarea { min-height: 44px; }
+  /* The approval and confirmation labels are tap targets, not just text: the whole
+     label carries the 44px height, so the checkbox itself keeps its own size. */
+  .strategy-workspace .check { min-height: 44px; }
   .strategy-workspace .summary-list { grid-template-columns: minmax(0, 1fr); }
   .strategy-workspace .preview-facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   /* On a phone the strip stacks and its one action takes the full width, so the
      composer and the actions below stay reachable without horizontal overflow. */
+  .strategy-workspace .next-step p.muted { flex: 1 1 100%; }
   .strategy-workspace .next-step button { margin-left: 0; width: 100%; }
   .strategy-workspace .turn { padding: 10px; }
   .strategy-tabpanel { padding: 0; }
