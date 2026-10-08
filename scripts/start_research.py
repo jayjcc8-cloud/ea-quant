@@ -11,18 +11,23 @@ Three properties are deliberate and each is enforced below rather than described
 * It runs on the `python3` a stock macOS already has. Nothing outside the standard
   library is imported here, and every 3.12-only step is handed to the repository's
   own locked environment through `uv`.
-* It never reads, copies, prints or reuses a key that already exists. The child
-  process environment is built from a short whitelist, so an exported provider key
-  and a stale `PYTHONPATH`/`VIRTUAL_ENV` cannot reach any step. The one key this
+* It never picks a key up from the environment: the child process environment is
+  built from a short whitelist, so an exported provider key and a stale
+  `PYTHONPATH`/`VIRTUAL_ENV` cannot reach any step. By default the one key this
   script handles is typed by the user at a real terminal, after setup has already
-  succeeded, and is handed to the server child alone.
+  succeeded, and is handed to the server child alone. An explicit `--project-env`
+  replaces that prompt with the single value this project's own `.env` names — read
+  at the same point, used in the same one child, and never copied, printed or
+  written anywhere. The application itself still never reads a `.env`; the value
+  becomes one environment variable in one child, which is what ADR 0005 asks for.
 * Each launch opens a new, exclusive, non-secret session settings document under
   the workspace. The document names the provider and the *name* of the environment
   variable the key arrives in; it never contains the key. A user's own settings
   store is never read, never written and never copied.
 
 `--check` reads prerequisites and prints the plan. It creates nothing, installs
-nothing, builds nothing, starts nothing and asks for nothing.
+nothing, builds nothing, starts nothing, asks for nothing and opens no `.env`: the
+key source it names is where a launch *would* read, not something it reads.
 
 One launch runs in one of two modes: offline, or the one provider profile this
 repository has validated end to end. A mode is chosen by `--offline` or
@@ -45,6 +50,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -104,6 +110,15 @@ USER_STORE_PARTS = (".config", "radian", "settings.json")
 # The name the session key travels under in the server child only. It is ours, not
 # a vendor's, so an inherited vendor key is never the credential these steps get.
 KEY_ENV_NAME = "RADIAN_MODEL_API_KEY"
+
+# The opt-in file source: one `.env` beside this script's own project root, and only
+# ever that path. It is read only when `--project-env` asks for it, only for a
+# provider launch whose mode was already stated on the command line, and only after
+# every setup step has succeeded.
+PROJECT_ENV_FILENAME = ".env"
+# One variable on one line is tiny. Anything larger is not that file, and is refused
+# by its size rather than read into memory.
+PROJECT_ENV_MAX_BYTES = 64 * 1024
 
 # The one provider profile this launcher offers, and the model id this repository
 # has actually run against. Another provider, another endpoint or another key
@@ -208,6 +223,207 @@ def prompt_secret(prompt: str) -> str:
     raise LauncherError(
         "no key was entered after three attempts; start again, or pass --offline to run with "
         "no model provider"
+    )
+
+
+def read_project_env(path: Path) -> str | None:
+    """The one key value an opt-in project `.env` names, or None when it names none.
+
+    This reads exactly one path for exactly one variable, and only ever because
+    `--project-env` asked for it. There is no dotenv implementation here: a line is
+    blank, a full-line `#` comment, or one `NAME=value` assignment. A line naming any
+    other variable is left alone; the target's value is the rest of its line, with one
+    matching pair of single or double quotes removed and nothing else interpreted. A
+    trailing CR of a CRLF file is its line ending, ordinary spaces and tabs around the
+    assignment and the value are not part of the value, and no other character is
+    trimmed. Nothing is evaluated — no escape, no interpolation, no command
+    substitution — so the text in the file is the text of the key.
+
+    What this format does not read is refused rather than half-taken: a line that is
+    not an assignment, an `export NAME=value` line, an unquoted `#` in a value, a
+    quote that never closes, and a control character in a line. The refusal says which
+    of those it was, and names the path only.
+
+    A file that is absent, or that names no value, returns None so the caller can ask
+    at the terminal instead. A file this function cannot take literally is a
+    `LauncherError` naming the path and nothing out of the file: no line, no value,
+    no decoder text and no operating-system error detail — a message like that would
+    be a place the value could leak to.
+    """
+    if path.is_symlink():
+        raise LauncherError(
+            f"refusing to read {path}: it is a symlink, so its value would not be this "
+            "project's own file and could change after it was read"
+        )
+    try:
+        status = os.stat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # Deliberately not the operating system's own message: it can carry more about
+        # this file than a user needs, and this line says what to check.
+        raise LauncherError(
+            f"cannot read {path}; check that it is a file this user can read"
+        ) from None
+    _require_plain_project_env_file(path, status)
+    # The open itself must not be able to wait: a path that was a regular file when it
+    # was checked can be a FIFO by the time it is opened, and a blocking open of a FIFO
+    # with no writer never returns.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise LauncherError(
+            f"cannot read {path}; check that it is a file this user can read"
+        ) from None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            # The descriptor is checked, not trusted: what was opened is what is read,
+            # so a path swapped between the check above and this open is refused here,
+            # and the file object closes it either way.
+            _require_plain_project_env_file(path, os.fstat(descriptor))
+            raw = handle.read(PROJECT_ENV_MAX_BYTES + 1)
+    except OSError:
+        raise LauncherError(
+            f"cannot read {path}; check that it is a file this user can read"
+        ) from None
+    if len(raw) > PROJECT_ENV_MAX_BYTES:
+        # Only reachable if the file grew after it was measured; the read above is
+        # bounded either way.
+        raise LauncherError(
+            f"refusing to read {path}: it is larger than {PROJECT_ENV_MAX_BYTES} bytes, and a "
+            f"file naming one {KEY_ENV_NAME} value is not"
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise LauncherError(f"refusing to read {path}: it is not UTF-8 text") from None
+    return _project_env_value(text, path)
+
+
+def _require_plain_project_env_file(path: Path, status: os.stat_result) -> None:
+    """Refuse anything that is not one small regular file, before a byte of it is read.
+
+    It is applied to the path once and to the opened descriptor again, so this also
+    covers a FIFO, a socket or a device, none of which is ever read.
+    """
+    if not stat.S_ISREG(status.st_mode):
+        raise LauncherError(f"refusing to read {path}: it is not a regular file")
+    if status.st_size > PROJECT_ENV_MAX_BYTES:
+        raise LauncherError(
+            f"refusing to read {path}: it is larger than {PROJECT_ENV_MAX_BYTES} bytes, and a "
+            f"file naming one {KEY_ENV_NAME} value is not"
+        )
+
+
+def _project_env_value(text: str, path: Path) -> str | None:
+    """The target variable's literal value in one `.env` text, or None when absent.
+
+    Lines are split on `\\n` alone — the one other line ending read here is the CR of
+    a CRLF file — and only spaces and tabs are trimmed around a line, the assignment
+    and the value. A control character cannot quietly become a line break, and it is
+    refused rather than trimmed away into a shorter value or a different assignment.
+    """
+    assigned = False
+    value = ""
+    for line in text.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
+        stripped = line.strip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _project_env_control(stripped):
+            raise LauncherError(
+                f"refusing to read {path}: a line holds a control character, and this file is "
+                "read as plain text rather than trimmed around one"
+            )
+        if stripped.split(None, 1)[0] == "export":
+            raise LauncherError(
+                f"refusing to read {path}: an 'export NAME=value' line is not a form this "
+                "reads; write the assignment as NAME=value"
+            )
+        name, separator, remainder = stripped.partition("=")
+        if not separator:
+            raise LauncherError(
+                f"refusing to read {path}: a line is not a NAME=value assignment, and this "
+                "file is read as assignments only"
+            )
+        if name.strip(" \t") != KEY_ENV_NAME:
+            continue
+        if assigned:
+            raise LauncherError(
+                f"refusing to read {path}: {KEY_ENV_NAME} is assigned more than once, so which "
+                "value is meant cannot be known"
+            )
+        assigned = True
+        value = _project_env_literal(remainder.strip(" \t"), path)
+    # An assignment that names nothing usable is not a value: the caller asks at the
+    # terminal, exactly as it would for a file that is not there.
+    return value if value.strip(" \t") else None
+
+
+def _project_env_control(line: str) -> bool:
+    """True when a line holds a character this plain-text format cannot carry.
+
+    A tab is ordinary whitespace beside an assignment, so it is not one of them; every
+    other control character is refused rather than stripped, because stripping one
+    could turn the line into an assignment it does not look like.
+    """
+    return any(ord(character) < 32 and character != "\t" for character in line)
+
+
+def _project_env_literal(raw: str, path: Path) -> str:
+    """One target line's value: the text itself, with one matching quote pair removed.
+
+    An unquoted `#` is refused rather than kept: it reads like an inline comment this
+    format does not strip, and taking it as the key would hand a guess to the provider.
+    Quoting the whole value is how a `#` that belongs to it is written.
+    """
+    if raw[:1] in ("'", '"'):
+        if len(raw) < 2 or raw[-1] != raw[0]:
+            raise LauncherError(
+                f"refusing to read {path}: the {KEY_ENV_NAME} value opens a quote that never "
+                "closes, and a value continued onto a second line is not a form this reads"
+            )
+        return _project_env_text(raw[1:-1], path)
+    if "#" in raw:
+        raise LauncherError(
+            f"refusing to read {path}: the unquoted {KEY_ENV_NAME} value holds a '#', and an "
+            "inline comment is not a form this reads; put the value in quotes if it really "
+            "contains one"
+        )
+    return _project_env_text(raw, path)
+
+
+def _project_env_text(value: str, path: Path) -> str:
+    """A value as it will be used: one line of printable characters, or a refusal."""
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise LauncherError(
+            f"refusing to read {path}: the {KEY_ENV_NAME} value contains a control character, "
+            "and a key is one line of printable characters"
+        )
+    return value
+
+
+def _session_key(*, project_env: bool, project_root: Path, provider: str | None) -> str:
+    """The key for one launch: the opt-in file's value when it has one, else the terminal.
+
+    This is called only after every setup step has succeeded, so the key is never held
+    across a slow install. What it prints is where the key came from and never the key
+    itself; what it returns goes no further than the one child environment the caller
+    builds from it.
+    """
+    if project_env:
+        env_path = project_root / PROJECT_ENV_FILENAME
+        value = read_project_env(env_path)
+        if value is not None:
+            print(f"using the {KEY_ENV_NAME} value in {env_path}; it is not printed.")
+            return value
+        print(f"no {KEY_ENV_NAME} value in {env_path}; the key is asked for here.")
+    return prompt_secret(
+        f"{provider} API key for this session (typed here, never written to disk): "
     )
 
 
@@ -571,6 +787,7 @@ def _print_check(
     port: int,
     offline: bool,
     provider: str | None,
+    project_env: bool,
     steps: Sequence[Step],
 ) -> None:
     """Print where this launch would put everything. Pure: it starts nothing."""
@@ -586,14 +803,24 @@ def _print_check(
     print(f"  port           {port} on 127.0.0.1 (the host is fixed; no --host is passed)")
     if offline:
         print("  model          offline: no provider is written, so no request can be made")
+        print("  key source     none: an offline launch asks for no key at all")
     elif provider is None:
         # This check asks nothing, so it reports the question a launch would ask.
         print(
             f"  model          asked at the terminal first: offline, or {DEEPSEEK_PROVIDER} "
             "with a key typed after setup"
         )
+        print("  key source     the terminal, after setup succeeds")
     else:
         print(f"  model          {provider}; the key is asked for once, after setup succeeds")
+        if project_env:
+            # A check opens no file: it reports the source a launch would read.
+            print(f"  key source     {project_root / PROJECT_ENV_FILENAME} (--project-env)")
+            print("                 used when it names a value, asked for at the terminal when")
+            print("                 it does not; a file it cannot read literally stops the")
+            print("                 launch. This check opened nothing.")
+        else:
+            print("  key source     the terminal, typed after setup succeeds")
     for name in TOOL_NAMES:
         print(f"  {name:<14} {which(name)}")
     print("  steps")
@@ -606,7 +833,7 @@ def _print_check(
 
 
 def _parser() -> argparse.ArgumentParser:
-    """The whole command line: one check, one launch, four options."""
+    """The whole command line: one check, one launch, five options."""
     parser = argparse.ArgumentParser(
         prog="python3 scripts/start_research.py",
         description=(
@@ -625,6 +852,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="start with no model provider: no key is asked for, and no model request is possible "
         "(this is also the answer a bare return key gives at the mode question)",
+    )
+    parser.add_argument(
+        "--project-env",
+        action="store_true",
+        help="read the key from this project's own .env instead of asking for it; needs the "
+        "provider mode stated with --provider or --model, and asks at the terminal when that "
+        "file names no value (a file it cannot read literally stops the launch, and the file is "
+        "never created or changed here)",
     )
     parser.add_argument(
         "--workspace",
@@ -664,6 +899,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     project_root = Path(__file__).resolve().parents[1]
     offline = bool(options.offline)
     model_name = None if options.model is None else str(options.model)
+    project_env = bool(options.project_env)
     # A mode is asked for only when nothing on the command line chose one. Either
     # flag is a decision; a launch given neither asks at a terminal.
     asked = not offline and options.provider is None and model_name is None
@@ -676,6 +912,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise LauncherError(
                 "--offline writes no provider at all, so it cannot be combined with --provider "
                 "or --model; pass one or the other"
+            )
+        if project_env and (offline or asked):
+            # A file source is a provider launch's decision, and it is refused here
+            # rather than later: at this point nothing has been created, no question
+            # has been asked, and no file has been opened.
+            raise LauncherError(
+                "--project-env reads the key from this project's own .env, which only a "
+                "provider launch has a use for; pass it with --provider "
+                f"{DEEPSEEK_PROVIDER} or --model, not with --offline or on a launch that has "
+                "not chosen a provider"
             )
         _validate_workspace(requested=requested, workspace=workspace, project_root=project_root)
         port = _validate_port(int(options.port))
@@ -711,6 +957,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             port=port,
             offline=offline,
             provider=provider,
+            project_env=project_env,
             steps=planned,
         )
         return 0
@@ -742,13 +989,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    print("EA local research launcher: one session, one key, no stored secret.")
+    print("EA local research launcher: one session, one key, no secret written by this script.")
     print(f"  workspace  {workspace}")
     print(f"  settings   {settings_file}")
     print("             a new session document; your own settings store is never read")
     print(f"  port       {port} on 127.0.0.1")
     if offline:
         print("  model      offline: no provider is written, so no request can be made")
+    elif project_env:
+        print(f"  model      {provider} ({model_name or DEFAULT_MODEL}); the key is read from")
+        print(f"             {project_root / PROJECT_ENV_FILENAME} when it names a value, and is")
+        print("             asked for here after setup when it does not")
     else:
         print(f"  model      {provider} ({model_name or DEFAULT_MODEL}); the key is asked for")
         print("             after setup succeeds, and this script verifies no model request")
@@ -759,10 +1010,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_step(step)
         final = steps[-1]
         if not offline:
-            # The key is entered only now: setup is done, so it is never held
+            # The key is resolved only now: setup is done, so it is never held
             # across a slow install, and it reaches this one child's environment.
-            key = prompt_secret(
-                f"{provider} API key for this session (typed here, never written to disk): "
+            key = _session_key(
+                project_env=project_env,
+                project_root=project_root,
+                provider=provider,
             )
             final = replace(final, env={**final.env, KEY_ENV_NAME: key})
         print(f"Starting the local application on http://127.0.0.1:{port} (Ctrl-C stops it).")
