@@ -380,9 +380,11 @@ describe('user strategy evidence comparison', () => {
     expect(region.getByText('+2')).toBeTruthy()
     expect(region.getByText('+1')).toBeTruthy()
     // The differences that make these two runs incomparable are named as limits,
-    // and no winner is declared.
+    // and no winner is declared. The edited quantity is a configuration difference,
+    // so the block that carries it is not called an implementation difference.
     expect(region.getByText('parameters.target_quantity：3 → 2')).toBeTruthy()
-    expect(region.getByText(/在数据窗口、策略实现、成本假设上不同/)).toBeTruthy()
+    expect(region.getByText(/在数据窗口、策略配置、成本假设上不同/)).toBeTruthy()
+    expect(region.queryByText(/策略实现/)).toBeNull()
     expect(region.getByText(/这里也不排名、不选优/)).toBeTruthy()
     expect(region.queryByText(/获胜|胜出|推荐/)).toBeNull()
     expect(region.getByRole('link', { name: '在既有比较页面打开这两次运行' }).getAttribute('href'))
@@ -524,8 +526,23 @@ describe('user strategy evidence comparison', () => {
     expect(sent[1].text).toContain('提出下一实验')
     expect(sent[1].text).toContain('针对当前草稿修订 2')
     expect(sent[1].text).toContain('不要声称任何结果')
+    // The preset the host measured its own refusal against: the reading is asked
+    // for in the reply text, in four separated parts, and the tool's own fields are
+    // told the byte limits this workspace really enforces instead of being asked
+    // for the whole explanation a 400-byte reason cannot hold.
+    expect(sent[1].text).toContain('用 propose_change 提出恰好一个')
+    expect(sent[1].text).toContain('不要写进 reason')
+    expect(sent[1].text).toContain('（1）事实：')
+    expect(sent[1].text).toContain('（2）推断：')
+    expect(sent[1].text).toContain('（3）限制：')
+    expect(sent[1].text).toContain('（4）下一个假设：')
+    expect(sent[1].text).toMatch(/reason[^。\n]*400 字节/)
+    expect(sent[1].text).toMatch(/evidence[^。\n]*400 字节/)
+    expect(sent[1].text).toContain('60 个汉字')
     expect(sent[1].evidenceJobIds).toEqual([LATEST_JOB, EARLIER_JOB])
     expect(sent[1].callId).not.toBe(sent[0].callId)
+    // Two clicks, two calls: nothing was asked again, and nothing ran.
+    expect(calls.ask).toBe(2)
     expect(calls.preview).toBe(0)
     expect(calls.launch).toBe(0)
   })

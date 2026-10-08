@@ -174,7 +174,11 @@ function countDelta(before: number, after: number) {
 const ASSUMPTION_BLOCKS: { key: string; label: string }[] = [
   { key: 'instrument', label: '标的' },
   { key: 'data', label: '数据窗口' },
-  { key: 'strategy', label: '策略实现' },
+  // This block is the strategy's configured parameters, not its implementation:
+  // the same strategy id with one edited quantity is a configuration difference,
+  // and calling it an implementation difference would be a claim this panel cannot
+  // make from two runs of one strategy.
+  { key: 'strategy', label: '策略配置' },
   { key: 'execution', label: '成本假设' },
   { key: 'risk', label: '风险' },
   { key: 'funding', label: '资金' },
@@ -195,13 +199,32 @@ const EXPLAIN_PROMPT = [
   '不要运行任何东西，不要启动或确认任何实验，也不要应用任何修改。',
 ].join('\n')
 
-/** What the next experiment should test, against the draft the user is looking at. */
+/**
+ * What the next experiment should test, against the draft the user is looking at.
+ *
+ * The model's own reading belongs in the reply text, because the host refuses a
+ * whole answer whose tool `reason` or evidence reference is longer than its own
+ * 400 UTF-8 byte limit — a refusal this panel cannot turn into a proposal. So the
+ * fields this workspace really bounds are asked for as one concise hypothesis and
+ * test, and the limits are stated here rather than discovered by a refusal.
+ */
 const nextPrompt = (revision: number) => [
   '提出下一实验。',
-  `针对当前草稿修订 ${revision}：用有类型的字段（path、value、reason）提出可编辑的修改，`
-    + '每个字段的 reason 要写明下一个实验要检验哪一个假设，以及为什么这样检验。',
+  `针对当前草稿修订 ${revision}：用 propose_change 提出恰好一个有用的、有类型的字段修改，`
+    + '写明 path、value、reason 和可选的 evidence。',
+  '完整解释写在回复正文里，不要写进 reason：正文用简体中文写一段约 400 个汉字以内的说明，'
+    + '并把四件事分开写：（1）事实：来自哪一次运行（写明修订与 job）和报告里哪一个字段名；'
+    + '（2）推断：你自己从这些事实读出的判断；（3）限制：所选运行读不出来的东西；'
+    + '（4）下一个假设：这次修改要检验什么、为什么这样检验。',
+  'reason 是这次修改的一句话理由，不能超过 400 字节（UTF-8），最好不超过 60 个汉字：'
+    + '只写简要的假设与检验，不要复述事实、推断或限制。',
+  'evidence 里的每一条引用也不能超过 400 字节（UTF-8）：只写简短的来源定位，'
+    + '例如修订、job 或报告字段路径。',
+  '如果相关，就诚实说明所选运行在数据窗口与运行条件上是否可比，并说明小样本、'
+    + '没有预先冻结的准则、以及未平仓头寸估值这些限制：净盈亏包含未平仓头寸的估值，'
+    + '它不是已实现盈利。',
   '每一个理由都要落在你这次被允许看到的、所选冻结运行的事实上；'
-    + '哪一句来自报告、哪一句是你的推断，要分开说。',
+    + '哪一句来自报告、哪一句是你的推断，要分开说；不要排名，也不要承诺盈利、因果或稳健性。',
   '不要声称任何结果，也不要说这次实验已经运行、已经得出结论或已经更好。',
   '不要运行任何东西，不要启动实验，也不要应用任何修改：应用由用户在建议修改面板里自己决定。',
 ].join('\n')
