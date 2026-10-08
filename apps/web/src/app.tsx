@@ -500,7 +500,7 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/strategies/:userStrategyId" element={<StrategiesWorkspace api={api} />} />
         <Route path="/runs" element={<PaperStatus />} />
         <Route path="/backtests" element={<Backtests api={api} />} />
-        <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktests api={api} />} />
+        <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktestsRoute api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
         <Route path="/settings" element={<ResearchSettings api={api} />} />
         <Route path="/research" element={<ResearchTasks api={api} />} />
@@ -862,15 +862,77 @@ function percent(value: string): string {
   return `${exactDelta('0', value, 2).replace(/^\+/, '')}%`
 }
 
-function CompareBacktests({ api }: { api: ApiAdapter }) {
+/** One row of the formal comparison. `key` is the stable internal identity the
+ * arithmetic and the availability rules read; `label` is only what the reader
+ * sees, so translating a heading can never change which rule runs. */
+type CompareMetric = {
+  key: string
+  label: string
+  before?: string
+  after?: string
+  shift: number
+  suffix: string
+  monetary: boolean
+  leftCurrency?: string
+  rightCurrency?: string
+}
+
+/** Trade analytics are the secondary evidence: an unavailable denominator is
+ * named, never folded into the primary comparison as zero. */
+const ANALYTICS_KEYS = ['closed_trades', 'wins', 'losses', 'breakeven', 'win_rate', 'average_win', 'average_loss', 'payoff_ratio', 'average_holding_seconds'] as const
+const ANALYTICS_LABELS: Record<(typeof ANALYTICS_KEYS)[number], string> = {
+  closed_trades: 'Closed trades', wins: 'Winning trades', losses: 'Losing trades', breakeven: 'Breakeven trades',
+  win_rate: 'Win rate (ratio)', average_win: 'Average win', average_loss: 'Average loss', payoff_ratio: 'Payoff ratio',
+  average_holding_seconds: 'Average holding time (seconds)',
+}
+const metricUnavailable = (key: string) =>
+  key.startsWith('max_drawdown') || (ANALYTICS_KEYS as readonly string[]).includes(key)
+function compareCell(row: CompareMetric, side: 'before' | 'after'): string {
+  const value = side === 'before' ? row.before : row.after
+  const currency = side === 'before' ? row.leftCurrency : row.rightCurrency
+  if (value === undefined) return metricUnavailable(row.key) ? 'Unavailable' : 'No report'
+  if (row.key === 'return') return percent(value)
+  return `${value}${currency ? ` ${currency}` : ''}`
+}
+function compareDelta(row: CompareMetric): string {
+  const { before, after } = row
+  if (before === undefined || after === undefined) return '—'
+  if (row.monetary && (!row.leftCurrency || !row.rightCurrency)) return 'Currency unavailable'
+  if (row.monetary && row.leftCurrency !== row.rightCurrency) return 'Different currencies'
+  return `${exactDelta(before, after, row.shift)}${row.suffix}${row.monetary ? ` ${row.leftCurrency}` : ''}`
+}
+
+/**
+ * The comparison route. The instance is keyed on the exact route pair, the way the
+ * report route is keyed on its job: naming another pair mounts a fresh comparison
+ * instead of leaving the previous pair's runs, reports, owner or errors on screen
+ * while the new one is still being read. Nothing of the old pair can be rendered
+ * under the new pair's ids, and a late answer for the old pair lands in a
+ * component that no longer exists.
+ */
+function CompareBacktestsRoute({ api }: { api: ApiAdapter }) {
   const { leftId = '', rightId = '' } = useParams()
+  return <CompareBacktests key={`${leftId}:${rightId}`} api={api} leftId={leftId} rightId={rightId} />
+}
+
+function CompareBacktests({ api, leftId, rightId }: { api: ApiAdapter; leftId: string; rightId: string }) {
   const [runs, setRuns] = useState<[ComparedRun, ComparedRun] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Two identical route ids are not two distinct experiments, so this page never
+  // presents them as a comparison and never claims a common owner for them. That is
+  // derived from the route instead of stored by the effect, so the page states it in
+  // the same render that decides to read nothing.
+  const identicalPairError = leftId === rightId ? '同一个运行不能与它自己对比：请选择两个不同的已持久化运行。' : null
 
   useEffect(() => {
     let active = true
+    // A pair the route does not really name is not read at all.
+    if (leftId === rightId) return () => { active = false }
     const load = async (jobId: string): Promise<ComparedRun> => {
       const job = await api.getBacktest(jobId)
+      // The route names the run this page may show. A host that answers with some
+      // other job is an identity conflict, not a comparison.
+      if (job.job_id !== jobId) throw new ApiFailure('job_identity_conflict', 'Loaded run identity does not match the requested run')
       if (job.status !== 'succeeded' || !job.report_ready) return { job, report: null }
       let report: BacktestReport
       try {
@@ -890,11 +952,30 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
     return () => { active = false }
   }, [api, leftId, rightId])
 
-  if (!runs) return <><PageTitle title="Compare Backtests" subtitle="Loading two persisted runs and verified reports." />{error && <section className="notice error">{error}</section>}</>
+  // The way back is part of every state of this route, and each persisted run
+  // keeps a direct link to its own formal report — visible, not behind a
+  // disclosure — so the comparison is never a dead end.
+  const toolbar = <div className="result-toolbar">
+    <Link to="/backtests">回测列表</Link>
+    {runs && <span className="compare-report-links">
+      <Link to={`/backtests/${runs[0].job.job_id}`}>运行 A 正式报告</Link>
+      <Link to={`/backtests/${runs[1].job.job_id}`}>运行 B 正式报告</Link>
+    </span>}
+  </div>
+
+  if (!runs) return <div className="compare-page">
+    <PageTitle title="回测对比" subtitle="读取两个已持久化运行及其正式报告的只读视图。" />
+    {toolbar}
+    {(error ?? identicalPairError) && <section className="notice error" role="alert">{error ?? identicalPairError}</section>}
+  </div>
   const [left, right] = runs
   const leftInput = left.job.input_snapshot?.scenario
   const rightInput = right.job.input_snapshot?.scenario
-  if (!leftInput || !rightInput) return <><PageTitle title="Compare Backtests" subtitle="Pairwise comparison requires v2 input snapshots." /><section className="notice error">Input snapshot unavailable</section></>
+  if (!leftInput || !rightInput) return <div className="compare-page">
+    <PageTitle title="回测对比" subtitle="两两对比需要已持久化的 v2 输入快照。" />
+    {toolbar}
+    <section className="notice error">输入快照不可用</section>
+  </div>
   const inputRows = [
     ['Initial Cash', leftInput.funding.initial_cash, rightInput.funding.initial_cash],
     ['Action contract', String(leftInput.strategy.action_contract ?? 'V1'), String(rightInput.strategy.action_contract ?? 'V1')],
@@ -908,55 +989,100 @@ function CompareBacktests({ api }: { api: ApiAdapter }) {
   ]
   const sameImplementation = (leftInput.strategy.source?.kind ?? 'builtin') === (rightInput.strategy.source?.kind ?? 'builtin') && leftInput.strategy.source?.artifact_sha256 === rightInput.strategy.source?.artifact_sha256
   const sameStrategy = sameImplementation && leftInput.strategy.id === rightInput.strategy.id && (leftInput.strategy.version ?? 1) === (rightInput.strategy.version ?? 1)
-  const parameterRows = sameStrategy ? (left.job.strategy_descriptor?.parameters.map(p => p.name) ?? Object.keys(jobParameters(left.job))).map(name => [name, String(jobParameters(left.job)[name]), String(jobParameters(right.job)[name])]) : []
-  const metricRows = [
-    {
-      label: 'Final Equity', before: left.report?.economics.equity.amount, after: right.report?.economics.equity.amount, shift: 0, suffix: '',
-      monetary: true,
-      leftCurrency: left.report?.economics.equity.currency ?? left.report?.economics.currency,
-      rightCurrency: right.report?.economics.equity.currency ?? right.report?.economics.currency,
-    },
-    {
-      label: 'Net P&L', before: left.report?.economics.net_pnl.amount, after: right.report?.economics.net_pnl.amount, shift: 0, suffix: '',
-      monetary: true,
-      leftCurrency: left.report?.economics.net_pnl.currency ?? left.report?.economics.currency,
-      rightCurrency: right.report?.economics.net_pnl.currency ?? right.report?.economics.currency,
-    },
-    { label: 'Fees', before: left.report?.economics.fees?.amount, after: right.report?.economics.fees?.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.report?.economics.fees?.currency ?? left.report?.economics.currency, rightCurrency: right.report?.economics.fees?.currency ?? right.report?.economics.currency },
-    { label: 'Maximum Drawdown Amount', before: left.path?.max_drawdown.amount, after: right.path?.max_drawdown.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.path?.currency, rightCurrency: right.path?.currency },
-    { label: 'Maximum Drawdown Ratio', before: left.path?.max_drawdown.ratio, after: right.path?.max_drawdown.ratio, shift: 0, suffix: '', monetary: false },
-    { label: 'Return', before: left.report?.economics.total_return.value, after: right.report?.economics.total_return.value, shift: 2, suffix: ' pp', monetary: false },
-    ...(['closed_trades', 'wins', 'losses', 'breakeven', 'win_rate', 'average_win', 'average_loss', 'payoff_ratio', 'average_holding_seconds'] as const).map(key => ({
-      label: ({ closed_trades: 'Closed trades', wins: 'Winning trades', losses: 'Losing trades', breakeven: 'Breakeven trades', win_rate: 'Win rate (ratio)', average_win: 'Average win', average_loss: 'Average loss', payoff_ratio: 'Payoff ratio', average_holding_seconds: 'Average holding time (seconds)' })[key],
-      before: left.analytics?.[key] == null ? undefined : String(left.analytics[key]),
-      after: right.analytics?.[key] == null ? undefined : String(right.analytics[key]),
-      shift: 0, suffix: '', monetary: key === 'average_win' || key === 'average_loss',
-      leftCurrency: key === 'average_win' || key === 'average_loss' ? left.analytics?.currency : undefined,
-      rightCurrency: key === 'average_win' || key === 'average_loss' ? right.analytics?.currency : undefined,
-    })),
-    { label: 'Orders', before: left.report ? String(left.report.economics.counts.orders) : undefined, after: right.report ? String(right.report.economics.counts.orders) : undefined, shift: 0, suffix: '', monetary: false },
-    { label: 'Fills', before: left.report ? String(left.report.economics.counts.fills) : undefined, after: right.report ? String(right.report.economics.counts.fills) : undefined, shift: 0, suffix: '', monetary: false },
+  const parameterRows = sameStrategy
+    ? (left.job.strategy_descriptor?.parameters.map(p => p.name) ?? Object.keys(jobParameters(left.job)))
+        .filter((name, index, all) => all.indexOf(name) === index)
+        .map(name => ({ label: name, before: String(jobParameters(left.job)[name]), after: String(jobParameters(right.job)[name]) }))
+        // Changed parameters lead: the reader came for what moved, and an
+        // unchanged row is context that follows it.
+        .sort((a, b) => Number(a.before === a.after) - Number(b.before === b.after))
+    : []
+  // The four figures a comparison is read for lead; every other recorded number
+  // stays in its own native disclosure below them, so none is dropped and none
+  // competes with these.
+  const primaryMetricRows: CompareMetric[] = [
+    { key: 'equity', label: '期末权益', before: left.report?.economics.equity.amount, after: right.report?.economics.equity.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.report?.economics.equity.currency ?? left.report?.economics.currency, rightCurrency: right.report?.economics.equity.currency ?? right.report?.economics.currency },
+    { key: 'net_pnl', label: '净盈亏', before: left.report?.economics.net_pnl.amount, after: right.report?.economics.net_pnl.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.report?.economics.net_pnl.currency ?? left.report?.economics.currency, rightCurrency: right.report?.economics.net_pnl.currency ?? right.report?.economics.currency },
+    { key: 'fees', label: '手续费', before: left.report?.economics.fees?.amount, after: right.report?.economics.fees?.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.report?.economics.fees?.currency ?? left.report?.economics.currency, rightCurrency: right.report?.economics.fees?.currency ?? right.report?.economics.currency },
+    { key: 'return', label: '收益率', before: left.report?.economics.total_return.value, after: right.report?.economics.total_return.value, shift: 2, suffix: ' pp', monetary: false },
   ]
-  return <>
-    <PageTitle title="Compare Backtests" subtitle="Derived read-only view over two persisted jobs and their formal reports." />
-    <div className="result-toolbar"><Link to="/backtests">← Recent Runs</Link><span>No comparison artifact is stored</span></div>
-    <section className="compare-identities">
-      {[left, right].map((run, index) => <article className="panel" key={run.job.job_id}><header><h2>Run {index === 0 ? 'A' : 'B'}</h2><span className={`status status-${run.job.status}`}>{run.job.status}</span></header><dl className="summary-list"><div><dt>Web job</dt><dd>{run.job.job_id}</dd></div><div><dt>Engine run</dt><dd>{run.job.engine_run_id ?? 'not available'}</dd></div><div><dt>Input SHA-256</dt><dd>{run.job.input_sha256 ?? 'not available'}</dd></div><div><dt>Outcome</dt><dd>{run.report ? 'Formal report' : run.job.error_code ?? 'No report'}</dd></div></dl>{!run.report && <p className="no-report">No report</p>}</article>)}
+  const secondaryMetricRows: CompareMetric[] = [
+    { key: 'max_drawdown_amount', label: '最大回撤金额', before: left.path?.max_drawdown.amount, after: right.path?.max_drawdown.amount, shift: 0, suffix: '', monetary: true, leftCurrency: left.path?.currency, rightCurrency: right.path?.currency },
+    { key: 'max_drawdown_ratio', label: '最大回撤比率', before: left.path?.max_drawdown.ratio, after: right.path?.max_drawdown.ratio, shift: 0, suffix: '', monetary: false },
+    { key: 'orders', label: '订单数', before: left.report ? String(left.report.economics.counts.orders) : undefined, after: right.report ? String(right.report.economics.counts.orders) : undefined, shift: 0, suffix: '', monetary: false },
+    { key: 'fills', label: '成交数', before: left.report ? String(left.report.economics.counts.fills) : undefined, after: right.report ? String(right.report.economics.counts.fills) : undefined, shift: 0, suffix: '', monetary: false },
+  ]
+  // Trade analytics are the secondary evidence: a metric the verified report does
+  // not carry is named unavailable and stays in its own disclosure, never folded
+  // into the primary comparison as a zero.
+  const analyticsRows: CompareMetric[] = ANALYTICS_KEYS.map(key => {
+    // An analytics value this workspace never served stays absent — the cell says
+    // so — instead of becoming a zero that would read as a measured result.
+    const before = left.analytics ? left.analytics[key] : null
+    const after = right.analytics ? right.analytics[key] : null
+    const monetary = key === 'average_win' || key === 'average_loss'
+    return {
+      key, label: ANALYTICS_LABELS[key],
+      before: before == null ? undefined : String(before),
+      after: after == null ? undefined : String(after),
+      shift: 0, suffix: '', monetary,
+      leftCurrency: monetary ? left.analytics?.currency : undefined,
+      rightCurrency: monetary ? right.analytics?.currency : undefined,
+    }
+  })
+  return <div className="compare-page">
+    <PageTitle title="回测对比" subtitle="基于两个已持久化运行及其正式报告的只读对比。" />
+    {toolbar}
+    {/* The association sits directly under the toolbar, so which saved strategy
+        these two runs belong to is read before the differences, not after them.
+        The whole comparison is keyed on the route pair by CompareBacktestsRoute,
+        which is what keeps another pair's owner off this page. */}
+    <StrategyComparisonAssociation api={api} leftJobId={left.job.job_id} rightJobId={right.job.job_id} />
+    <section className="panel comparison-panel" aria-label="参数差异">
+      <header><h2>参数差异</h2><span>已持久化的规范化策略输入</span></header>
+      {!sameImplementation ? <p>Strategy implementation changed</p> : !sameStrategy && <p>NO_PARAMETER_DELTA · Different strategy ID/version</p>}
+      <table><thead><tr><th>参数</th><th>运行 A</th><th>运行 B</th><th>差异</th></tr></thead><tbody>{parameterRows.map(row => <tr className={row.before === row.after ? '' : 'changed'} key={row.label}><th>{row.label}</th><td>{row.before}</td><td>{row.after}</td><td>{exactDelta(row.before, row.after)}</td></tr>)}</tbody></table>
     </section>
-    <section className="panel comparison-panel"><header><h2>Input Diff</h2><span>Normalized snapshots</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{inputRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{before === after ? 'Unchanged' : 'Changed'}</td></tr>)}</tbody></table></section>
-    <section className="panel comparison-panel">{!sameImplementation ? <p>Strategy implementation changed</p> : !sameStrategy && <p>NO_PARAMETER_DELTA · Different strategy ID/version</p>}<header><h2>Parameter Delta</h2><span>Persisted normalized strategy inputs</span></header><table><thead><tr><th>Parameter</th><th>Run A</th><th>Run B</th><th>Difference</th></tr></thead><tbody>{parameterRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{exactDelta(before, after)}</td></tr>)}</tbody></table></section>
-    <section className="panel comparison-panel"><header><h2>Result Diff</h2><span>Verified reports and path evidence</span></header><table><thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Δ</th></tr></thead><tbody>{metricRows.map(({ label, before, after, shift, suffix, monetary, leftCurrency, rightCurrency }) => {
-      const leftValue = before === undefined ? ((label.startsWith('Maximum Drawdown') || ['Closed trades', 'Winning trades', 'Losing trades', 'Breakeven trades', 'Win rate (ratio)', 'Average win', 'Average loss', 'Payoff ratio', 'Average holding time (seconds)'].includes(label)) ? 'Unavailable' : 'No report') : label === 'Return' ? percent(before) : `${before}${leftCurrency ? ` ${leftCurrency}` : ''}`
-      const rightValue = after === undefined ? ((label.startsWith('Maximum Drawdown') || ['Closed trades', 'Winning trades', 'Losing trades', 'Breakeven trades', 'Win rate (ratio)', 'Average win', 'Average loss', 'Payoff ratio', 'Average holding time (seconds)'].includes(label)) ? 'Unavailable' : 'No report') : label === 'Return' ? percent(after) : `${after}${rightCurrency ? ` ${rightCurrency}` : ''}`
-      let delta = '—'
-      if (before !== undefined && after !== undefined) {
-        if (monetary && (!leftCurrency || !rightCurrency)) delta = 'Currency unavailable'
-        else if (monetary && leftCurrency !== rightCurrency) delta = 'Different currencies'
-        else delta = `${exactDelta(before, after, shift)}${suffix}${monetary ? ` ${leftCurrency}` : ''}`
-      }
-      return <tr key={label}><th scope="row">{label}</th><td>{leftValue}</td><td>{rightValue}</td><td>{delta}</td></tr>
-    })}</tbody></table></section>
-  </>
+    <section className="panel comparison-panel" aria-label="结果对比">
+      <header><h2>结果对比</h2><span>已核验的正式报告与路径证据</span></header>
+      {/* What the reader has to know before reading a single number: how small each
+          window is, which way the delta runs, and what the P&L does not mean. The
+          digests themselves stay in the technical disclosure below. */}
+      <div className="compare-limits">
+        <dl className="summary-list">
+          {[left, right].map((run, index) => <div key={`count-${run.job.job_id}`}><dt>运行 {index === 0 ? 'A' : 'B'} 记录数</dt><dd>{run.job.input_identity.record_count} 条记录{run.job.input_identity.record_count <= 6 ? ' · 小样本：仅用于流程验证，不作稳健性结论' : ''}</dd></div>)}
+          <div><dt>差异方向</dt><dd>运行 B − 运行 A</dd></div>
+        </dl>
+        <p className="muted">差异仅作描述：数据、成本与运行条件都可能不同，本页不排序、不推荐。单一窗口不足以确立稳健性，正式报告是每个数字的唯一权威。</p>
+        <p className="muted">净盈亏包含窗口结束时仍持有头寸的估值，不是已实现利润。</p>
+      </div>
+      <table><thead><tr><th>指标</th><th>运行 A</th><th>运行 B</th><th>Δ</th></tr></thead><tbody>{primaryMetricRows.map(row => <tr key={row.key}><th scope="row">{row.label}</th><td>{compareCell(row, 'before')}</td><td>{compareCell(row, 'after')}</td><td>{compareDelta(row)}</td></tr>)}</tbody></table>
+      <details className="disclosure"><summary>其他结果指标</summary>
+        <table><thead><tr><th>指标</th><th>运行 A</th><th>运行 B</th><th>Δ</th></tr></thead><tbody>{secondaryMetricRows.map(row => <tr key={row.key}><th scope="row">{row.label}</th><td>{compareCell(row, 'before')}</td><td>{compareCell(row, 'after')}</td><td>{compareDelta(row)}</td></tr>)}</tbody></table>
+      </details>
+      <details className="disclosure"><summary>分析指标明细</summary>
+        <table><thead><tr><th>指标</th><th>运行 A</th><th>运行 B</th><th>Δ</th></tr></thead><tbody>{analyticsRows.map(row => <tr key={row.key}><th scope="row">{row.label}</th><td>{compareCell(row, 'before')}</td><td>{compareCell(row, 'after')}</td><td>{compareDelta(row)}</td></tr>)}</tbody></table>
+      </details>
+    </section>
+    <details className="disclosure"><summary>规范化输入</summary>
+      <table><thead><tr><th>参数</th><th>运行 A</th><th>运行 B</th><th>差异</th></tr></thead><tbody>{inputRows.map(([label, before, after]) => <tr className={before === after ? '' : 'changed'} key={label}><th>{label}</th><td>{before}</td><td>{after}</td><td>{before === after ? 'Unchanged' : 'Changed'}</td></tr>)}</tbody></table>
+    </details>
+    <details className="disclosure"><summary>运行身份与技术细节</summary>
+      <div className="compare-run-detail">
+        {[left, right].map((run, index) => <section className="panel" key={run.job.job_id}><header><h2>运行 {index === 0 ? 'A' : 'B'}</h2><span className={`status status-${run.job.status}`}>{run.job.status}</span></header>
+          <dl className="summary-list">
+            <div><dt>Web job</dt><dd>{run.job.job_id}</dd></div>
+            <div><dt>Engine run</dt><dd>{run.job.engine_run_id ?? 'not available'}</dd></div>
+            <div><dt>Input SHA-256</dt><dd>{run.job.input_sha256 ?? 'not available'}</dd></div>
+            <div><dt>Scenario SHA-256</dt><dd>{run.job.input_identity.scenario_sha256}</dd></div>
+            <div><dt>Data SHA-256</dt><dd>{run.job.input_identity.data_sha256}</dd></div>
+            <div><dt>Outcome</dt><dd>{run.report ? '正式报告' : run.job.error_code ?? 'No report'}</dd></div>
+          </dl>
+          <div className="downloads"><Link to={`/backtests/${run.job.job_id}`}>打开正式报告</Link><a href={api.artifactUrl(run.job.job_id, 'report.json')}>Download report.json</a><a href={api.artifactUrl(run.job.job_id, 'summary.txt')}>Download summary.txt</a></div>
+        </section>)}
+      </div>
+    </details>
+  </div>
 }
 
 type StrategyAssociationRecord = { userStrategyId: string; name: string; revision: number | null }
@@ -973,6 +1099,23 @@ function frozenRevision(payload: UserStrategyExperimentPayload | undefined): num
 
 const frozenRevisionText = (revision: number | null) =>
   revision === null ? '冻结修订未知' : `冻结 v${revision}`
+
+/**
+ * Every frozen record in the saved strategies whose own experiment names this
+ * exact job. This is the one association rule: the record's persisted `job_id`,
+ * never the report's strategy id, engine implementation, symbol, name, or a
+ * "first/latest/current" choice. Both the report page and the comparison page
+ * read it here, so neither can drift into a different rule.
+ */
+function experimentRecordsForJob(strategies: UserStrategy[], jobId: string): StrategyAssociationRecord[] {
+  return strategies.flatMap(strategy => strategy.experiments
+    .filter(experiment => experiment.job_id === jobId)
+    .map(experiment => ({
+      userStrategyId: strategy.user_strategy_id,
+      name: strategy.name,
+      revision: frozenRevision(experiment.payload),
+    })))
+}
 
 /**
  * The way back from one formal report to the persisted strategy whose frozen run
@@ -1011,13 +1154,7 @@ function StrategyAssociation({ api, jobId }: { api: ApiAdapter; jobId: string })
     }
     list().then(strategies => {
       if (generation.current !== read) return
-      const records = strategies.flatMap(strategy => strategy.experiments
-        .filter(experiment => experiment.job_id === jobId)
-        .map(experiment => ({
-          userStrategyId: strategy.user_strategy_id,
-          name: strategy.name,
-          revision: frozenRevision(experiment.payload),
-        })))
+      const records = experimentRecordsForJob(strategies, jobId)
       if (records.length === 1) setAssociation({ kind: 'one', record: records[0] })
       else if (records.length === 0) setAssociation({ kind: 'none', note: '没有已保存的用户策略冻结了这个运行。' })
       else setAssociation({ kind: 'several', count: records.length, records })
@@ -1056,6 +1193,77 @@ function StrategyAssociation({ api, jobId }: { api: ApiAdapter; jobId: string })
       <ul className="association-candidates">{candidates.map(candidate => <li key={candidate.userStrategyId}>
         <Link to={`/strategies/${encodeURIComponent(candidate.userStrategyId)}`}>{`${candidate.name} · ${candidate.userStrategyId}`}</Link>
       </li>)}</ul>
+    </>}
+  </section>
+}
+
+/**
+ * The read-only association of a two-run comparison with one saved strategy.
+ *
+ * A comparison has one honest answer only when each of the two distinct route
+ * jobs names exactly one frozen record, and both records belong to the same
+ * saved strategy. Anything else — two different owners, no record for a run, a
+ * run frozen twice, a workspace with no strategy list, a refused read — is named
+ * as such and falls back to the strategy list; this panel never guesses a common
+ * owner and never prints a revision it could not read. Sharing a registered
+ * engine strategy is not sharing an owner, so nothing here is matched by
+ * strategy id, name or the current draft.
+ *
+ * The read is generation-guarded and the caller keys this component on the route
+ * pair, so a late answer for one pair can never name an owner on another. A
+ * failed or missing association read stays local: the formal comparison above it
+ * keeps rendering.
+ */
+function StrategyComparisonAssociation({ api, leftJobId, rightJobId }: { api: ApiAdapter; leftJobId: string; rightJobId: string }) {
+  type Pair =
+    | { kind: 'reading' }
+    | { kind: 'none'; note: string }
+    | { kind: 'owner'; record: StrategyAssociationRecord; leftRevision: number | null; rightRevision: number | null }
+  const [pair, setPair] = useState<Pair>({ kind: 'reading' })
+  const generation = useRef(0)
+
+  useEffect(() => {
+    const read = ++generation.current
+    const list = api.listUserStrategies
+    if (!list) {
+      void Promise.resolve().then(() => {
+        if (generation.current === read) setPair({ kind: 'none', note: '这个工作区不提供已保存的用户策略。' })
+      })
+      return () => { generation.current += 1 }
+    }
+    const settled = (next: Pair) => { if (generation.current === read) setPair(next) }
+    list().then(strategies => {
+      const left = experimentRecordsForJob(strategies, leftJobId)
+      const right = experimentRecordsForJob(strategies, rightJobId)
+      if (left.length > 1 || right.length > 1) {
+        settled({ kind: 'none', note: '其中一个运行匹配到多条冻结记录，无法确定唯一来源，这里不替你选择，也不显示冻结修订。' })
+      } else if (left.length === 0 || right.length === 0) {
+        settled({ kind: 'none', note: '没有同一个已保存用户策略同时冻结了这两个运行。' })
+      } else if (left[0].userStrategyId !== right[0].userStrategyId) {
+        settled({ kind: 'none', note: '这两个运行分别由不同的已保存用户策略冻结，没有共同来源策略。' })
+      } else {
+        settled({ kind: 'owner', record: left[0], leftRevision: left[0].revision, rightRevision: right[0].revision })
+      }
+    }).catch(error => {
+      settled({
+        kind: 'none',
+        note: `${error instanceof Error ? error.message : '策略关联读取失败。'} · 这次关联读取失败了，上面的正式对比不受影响。`,
+      })
+    })
+    return () => { generation.current += 1 }
+  }, [api, leftJobId, rightJobId])
+
+  return <section className="panel association-panel" aria-label="对比策略关联">
+    <header><h2>对比策略关联</h2><span>只读 · 不启动任何运行</span></header>
+    {pair.kind === 'reading' && <p className="muted">正在读取冻结了这两个运行的已保存策略……</p>}
+    {pair.kind === 'none' && <>
+      <p className="muted">{pair.note}</p>
+      <p><Link to="/strategies">打开策略列表</Link></p>
+    </>}
+    {pair.kind === 'owner' && <>
+      <p><strong>{pair.record.name}</strong></p>
+      <p><span>{`运行 A · ${frozenRevisionText(pair.leftRevision)}`}</span> · <span>{`运行 B · ${frozenRevisionText(pair.rightRevision)}`}</span></p>
+      <p><Link to={`/strategies/${encodeURIComponent(pair.record.userStrategyId)}`}>返回此策略继续研究</Link></p>
     </>}
   </section>
 }
@@ -1112,7 +1320,14 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     return () => { active = false; refreshGeneration.current += 1; if (timer !== undefined) window.clearTimeout(timer) }
   }, [refresh])
 
-  if (!job) return <><PageTitle title="Backtest Result" subtitle="Loading the workspace job and formal report." />{disconnected && <section className="notice error">Local service is unreachable</section>}{error && <section className="notice error">{error}</section>}</>
+  if (!job) return <div className="report-page">
+    <PageTitle title="正式报告" subtitle="正在读取工作区运行与正式报告。" />
+    {/* The way back is part of the loading and failure states too, so a report that
+        never arrives is still a page the reader can leave. */}
+    <div className="result-toolbar"><Link to="/backtests">回测列表</Link></div>
+    {disconnected && <section className="notice error">Local service is unreachable</section>}
+    {error && <section className="notice error">{error}</section>}
+  </div>
   const economics = report?.economics
   // Each amount is shown with the unit the report recorded for that amount; the
   // run-level currency is the fallback for an amount that recorded none, and a
@@ -1126,51 +1341,43 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   }
   const strategy = report?.source?.strategy.id ?? report?.scenario?.strategy_id
   const instrument = report?.source?.instrument ?? report?.scenario?.instrument
-  return <>
-    <PageTitle title="Backtest Result" subtitle={`${job.scenario_id} · job ${job.job_id}`} status={job.status} />
+  return <div className="report-page">
+    <PageTitle title="正式报告" subtitle={`${job.scenario_id} · 离线回测正式报告`} status={job.status} />
     {disconnected && <section className="notice error">Local service is unreachable · loaded job status may be historical</section>}
     {error && <section className="notice error">{error}</section>}
     {job.message && <section className="notice error"><strong>{job.error_code}</strong> · {job.message}</section>}
-    <div className="result-toolbar"><Link to="/backtests">← New or saved backtest</Link><button onClick={() => { setAssociationRefresh(value => value + 1); void refresh() }}>Refresh</button></div>
+    <div className="result-toolbar"><Link to="/backtests">回测列表</Link><button onClick={() => { setAssociationRefresh(value => value + 1); void refresh() }}>刷新</button></div>
     {/* Keyed on the job and on the explicit refresh: another route — or a refresh —
         mounts a fresh association that starts out reading, instead of carrying this
         job's strategy across. The read below is independent of the report's own
-        load, and the explicit Refresh re-reads it without touching the report. */}
+        load, and the explicit refresh re-reads it without touching the report. */}
     <StrategyAssociation key={`${jobId}:${associationRefresh}`} api={api} jobId={jobId} />
     {economics ? <>
       <section className="metrics">
-        <Metric label="Initial cash" value={amount(economics.initial_funding)} />
-        <Metric label="Ending cash" value={amount(economics.ending_cash[0] ?? { amount: '0' })} />
-        <Metric label="Equity" value={amount(economics.equity)} />
-        <Metric label="Net P&L" value={amount(economics.net_pnl)} />
-        <Metric label="Total return" value={economics.total_return.value} />
-        <Metric label="Fees" value={amount(economics.fees)} />
-        <Metric label="Position quantity" value={economics.ending_positions[0]?.quantity ?? '0'} />
+        <Metric label="期末权益" value={amount(economics.equity)} />
+        <Metric label="净盈亏" value={amount(economics.net_pnl)} />
+        <Metric label="总收益率" value={percent(economics.total_return.value)} />
+        <Metric label="手续费" value={amount(economics.fees)} />
       </section>
-      <section className="panel result-limits" aria-label="What this result does not show">
-        <header><h2>What this result does not show</h2><span>One deterministic run</span></header>
-        <p className="muted">These are the limits the reporter itself records. The formal report is the authority for every figure above; nothing here is extrapolated from it.</p>
+      <section className="panel result-limits" aria-label="本结果不展示什么">
+        <header><h2>本结果不展示什么</h2><span>一次确定性运行</span></header>
         <dl className="summary-list">
-          <div><dt>Records in this run</dt><dd>{job.input_identity.record_count} records{job.input_identity.record_count <= 6 ? ' · small sample: workflow validation only, no robustness claim' : ''}</dd></div>
-          <div><dt>Net P&amp;L</dt><dd>Includes the valuation of any position still open at the end of the window; it is not realized profit.</dd></div>
-          <div><dt>Position quantity</dt><dd>A number of units in one ending position, not a count of trades.</dd></div>
-          <div><dt>Fees</dt><dd>Charged by the recorded commission policy, not observed from a venue.</dd></div>
-          <div><dt>Robustness</dt><dd>One window, no benchmark comparison, no out-of-sample period. A chronological holdout is a separate evaluation with its own explicit action.</dd></div>
-          <div><dt>Statistical claims</dt><dd>None are made here: no Sharpe ratio, no confidence interval and no significance test exists for this run.</dd></div>
+          <div><dt>本次运行记录数</dt><dd>{job.input_identity.record_count} 条记录{job.input_identity.record_count <= 6 ? ' · 小样本：仅用于流程验证，不作稳健性结论' : ''}</dd></div>
+          <div><dt>净盈亏</dt><dd>包含窗口结束时仍持有头寸的估值，不是已实现利润。</dd></div>
+          <div><dt>稳健性</dt><dd>单一窗口，无基准对比，无样本外区间。</dd></div>
         </dl>
+        {/* The reporter's own full limitations stay readable in one place; the
+            concise lines above are the same facts, not a summary that replaces them. */}
+        <details className="disclosure"><summary>完整限制说明</summary>
+          <p className="muted">These are the limits the reporter itself records. The formal report is the authority for every figure above; nothing here is extrapolated from it.</p>
+          <dl className="summary-list">
+            <div><dt>Position quantity</dt><dd>A number of units in one ending position, not a count of trades.</dd></div>
+            <div><dt>Fees</dt><dd>Charged by the recorded commission policy, not observed from a venue.</dd></div>
+            <div><dt>Robustness</dt><dd>One window, no benchmark comparison, no out-of-sample period. A chronological holdout is a separate evaluation with its own explicit action.</dd></div>
+            <div><dt>Statistical claims</dt><dd>None are made here: no Sharpe ratio, no confidence interval and no significance test exists for this run.</dd></div>
+          </dl>
+        </details>
       </section>
-      {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
-      <div className="backtest-grid">
-        <section className="panel"><header><h2>Execution</h2><span>Canonical strings</span></header><dl className="summary-list">
-          {report?.schema === 'ea.backtest-report.v3' ? <MultiRoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v2' ? <RoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v1' ? <>
-          <div><dt>Order</dt><dd>{report.economics.execution.order ? `${report.economics.execution.order.side} ${report.economics.execution.order.quantity}` : 'none'}</dd></div>
-          <div><dt>Fill quantity</dt><dd>{report.economics.execution.fill?.quantity ?? 'none'}</dd></div><div><dt>Fill price</dt><dd>{report.economics.execution.fill?.price ?? 'none'}</dd></div>
-          </> : null}
-          <div><dt>Valuation price</dt><dd>{economics.valuation.price}</dd></div><div><dt>Position value</dt><dd>{economics.valuation.position_value}</dd></div>
-          <div><dt>Counts</dt><dd><span>Orders {economics.counts.orders}</span> · <span>Fills {economics.counts.fills}</span></dd></div>
-        </dl></section>
-        <section className="panel"><header><h2>Artifacts</h2><span>Read-only downloads</span></header><div className="downloads"><a href={api.artifactUrl(jobId, 'report.json')}>Download report.json</a><a href={api.artifactUrl(jobId, 'summary.txt')}>Download summary.txt</a>{path && <a href={api.artifactUrl(jobId, 'equity-path.json')}>Download equity-path.json</a>}</div><p className="muted">Net P&amp;L may include open-position valuation; it is not presented as realized profit.</p></section>
-      </div>
     </> : <section className="panel"><p className="muted">{
       job.status === 'failed' || job.status === 'interrupted'
         ? 'No success report is available.'
@@ -1178,16 +1385,44 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
           ? error ? 'No current verified report is available.' : 'Loading the formal report.'
           : 'The installed engine is running. This page will refresh automatically.'
     }</p></section>}
-    <section className="panel identity-panel"><header><h2>Evidence identity</h2><span>Formal reporter only</span></header><dl className="summary-list">
-      <div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
-      {job.input_snapshot?.research_input && <><div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div><div><dt>Source SHA-256</dt><dd>{job.input_snapshot.research_input.source_sha256}</dd></div></>}
-    </dl></section>
+    {/* The technical identity is outside the report branch on purpose: the job and
+        engine a page is about are known from the route and the job record, so they
+        stay readable while the report is still loading or has failed. The fields
+        that only a report can supply stay named unavailable until one arrives. */}
+    <details className="disclosure"><summary>技术身份</summary>
+      <section className="panel identity-panel"><dl className="summary-list">
+        <div><dt>Web job</dt><dd>{job.job_id}</dd></div><div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
+        {job.input_snapshot?.research_input && <><div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div><div><dt>Source SHA-256</dt><dd>{job.input_snapshot.research_input.source_sha256}</dd></div></>}
+      </dl></section>
+    </details>
+    {economics && <>
+      {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
+      <section className="panel report-economics" aria-label="执行与经济事实">
+        <header><h2>执行与经济事实</h2><span>正式报告只读字段</span></header>
+        <dl className="summary-list">
+          <div><dt>Initial cash</dt><dd>{amount(economics.initial_funding)}</dd></div>
+          <div><dt>Ending cash</dt><dd>{amount(economics.ending_cash[0] ?? { amount: '0' })}</dd></div>
+          <div><dt>Position quantity</dt><dd>{economics.ending_positions[0]?.quantity ?? '0'}</dd></div>
+        </dl>
+        <div className="backtest-grid">
+          <section className="panel"><header><h2>Execution</h2><span>Canonical strings</span></header><dl className="summary-list">
+            {report?.schema === 'ea.backtest-report.v3' ? <MultiRoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v2' ? <RoundTripExecution economics={report.economics} /> : report?.schema === 'ea.backtest-report.v1' ? <>
+            <div><dt>Order</dt><dd>{report.economics.execution.order ? `${report.economics.execution.order.side} ${report.economics.execution.order.quantity}` : 'none'}</dd></div>
+            <div><dt>Fill quantity</dt><dd>{report.economics.execution.fill?.quantity ?? 'none'}</dd></div><div><dt>Fill price</dt><dd>{report.economics.execution.fill?.price ?? 'none'}</dd></div>
+            </> : null}
+            <div><dt>Valuation price</dt><dd>{economics.valuation.price}</dd></div><div><dt>Position value</dt><dd>{economics.valuation.position_value}</dd></div>
+            <div><dt>Counts</dt><dd><span>Orders {economics.counts.orders}</span> · <span>Fills {economics.counts.fills}</span></dd></div>
+          </dl></section>
+          <section className="panel"><header><h2>Artifacts</h2><span>Read-only downloads</span></header><div className="downloads"><a href={api.artifactUrl(jobId, 'report.json')}>Download report.json</a><a href={api.artifactUrl(jobId, 'summary.txt')}>Download summary.txt</a>{path && <a href={api.artifactUrl(jobId, 'equity-path.json')}>Download equity-path.json</a>}</div><p className="muted">Net P&amp;L may include open-position valuation; it is not presented as realized profit.</p></section>
+        </div>
+      </section>
+    </>}
     {job.input_snapshot && <p><span>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</span> · <span>{slippageLabel(job.input_snapshot.scenario.execution?.slippage)}</span> · <span>{latencyLabel(job.input_snapshot.scenario.execution?.latency)}</span></p>}
     {job.schema === 'ea.local-web-job.v5' && <p>Round trip limit: {String(job.input_snapshot?.scenario.strategy.max_round_trips)}</p>}
     {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
     {report && <TradeAnalyticsPanel analytics={analytics} />}
     {report && api.createCandidate && <CandidateCreate api={api} jobId={jobId} />}
-  </>
+  </div>
 }
 
 function HoldoutHistory({ api }: { api: ApiAdapter }) {

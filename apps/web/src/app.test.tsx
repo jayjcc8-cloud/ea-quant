@@ -195,8 +195,8 @@ describe('EA Quant local Web backtests', () => {
     await user.click(screen.getByLabelText('Select job-risk for comparison'))
     await user.click(screen.getByRole('button', { name: 'Compare selected runs' }))
 
-    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Parameter Delta' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '回测对比' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '参数差异' })).toBeTruthy()
     expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
   })
 
@@ -392,7 +392,7 @@ describe('EA Quant local Web backtests', () => {
     await user.click(screen.getByRole('button', { name: 'Validate input' }))
     await user.click(await screen.findByRole('button', { name: 'Run new backtest' }))
 
-    expect(await screen.findByRole('heading', { name: 'Backtest Result' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '正式报告' })).toBeTruthy()
     expect(screen.getByText('run-1')).toBeTruthy()
   })
 
@@ -444,21 +444,26 @@ describe('EA Quant local Web backtests', () => {
   })
 
   it('compares two successful persisted runs with exact input and result deltas', async () => {
+    const user = userEvent.setup()
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={adapter({
       getBacktest: async (jobId) => jobId === 'job-1' ? job : secondJob,
       getReport: async (jobId) => jobId === 'job-1' ? report : secondReport,
     })} />)
 
-    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Parameter Delta' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '回测对比' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '参数差异' })).toBeTruthy()
     expect(screen.getByRole('row', { name: /target_quantity 2 4 \+2/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /entry_delay_bars 0 2 \+2/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Final Equity 10017 USD 10034 USD \+17 USD/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Net P&L 17 USD 34 USD \+17 USD/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Return 0.17% 0.34% \+0.17 pp/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Orders 1 1 0/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Fills 1 1 0/i })).toBeTruthy()
+    // The four figures a comparison is read for are the primary result table.
+    expect(screen.getByRole('row', { name: /期末权益 10017 USD 10034 USD \+17 USD/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /净盈亏 17 USD 34 USD \+17 USD/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /手续费/ })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /收益率 0.17% 0.34% \+0.17 pp/i })).toBeTruthy()
+    // Every other recorded number stays reachable in its own disclosure.
+    await user.click(screen.getByText('其他结果指标'))
+    expect(screen.getByRole('row', { name: /订单数 1 1 0/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /成交数 1 1 0/i })).toBeTruthy()
   })
 
   it('does not subtract monetary results with different settlement currencies', async () => {
@@ -489,9 +494,9 @@ describe('EA Quant local Web backtests', () => {
       getReport: async (jobId) => jobId === 'job-1' ? report : euroReport,
     })} />)
 
-    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Final Equity 10017 USD 10034 EUR Different currencies/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Net P&L 17 USD 34 EUR Different currencies/i })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '回测对比' })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /期末权益 10017 USD 10034 EUR Different currencies/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /净盈亏 17 USD 34 EUR Different currencies/i })).toBeTruthy()
   })
 
   it('does not subtract monetary results when settlement currencies are unavailable', async () => {
@@ -509,9 +514,9 @@ describe('EA Quant local Web backtests', () => {
       getReport: async (jobId) => jobId === 'job-1' ? leftReport : rightReport,
     })} />)
 
-    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Final Equity 10017 10034 Currency unavailable/i })).toBeTruthy()
-    expect(screen.getByRole('row', { name: /Net P&L 17 34 Currency unavailable/i })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '回测对比' })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /期末权益 10017 10034 Currency unavailable/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /净盈亏 17 34 Currency unavailable/i })).toBeTruthy()
   })
 
   it('compares success with risk rejection without fabricating metrics or deltas', async () => {
@@ -524,7 +529,7 @@ describe('EA Quant local Web backtests', () => {
 
     expect(await screen.findByText('risk.rejected')).toBeTruthy()
     expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
-    expect(screen.getByRole('row', { name: /Final Equity 10017 USD No report —/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /期末权益 10017 USD No report —/i })).toBeTruthy()
     expect(reportRequests).toBe(1)
   })
 
@@ -538,11 +543,11 @@ describe('EA Quant local Web backtests', () => {
       },
     })} />)
 
-    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '回测对比' })).toBeTruthy()
     expect(screen.getByRole('row', { name: /target_quantity 2 4 \+2/i })).toBeTruthy()
     expect(screen.getByRole('row', { name: /entry_delay_bars 0 2 \+2/i })).toBeTruthy()
     expect(screen.getAllByText('No report').length).toBeGreaterThan(0)
-    expect(screen.getByRole('row', { name: /Final Equity No report 10034 USD —/i })).toBeTruthy()
+    expect(screen.getByRole('row', { name: /期末权益 No report 10034 USD —/i })).toBeTruthy()
     expect(screen.queryByText('verified report is unavailable')).toBeNull()
   })
 
@@ -551,7 +556,7 @@ describe('EA Quant local Web backtests', () => {
     render(<App api={adapter()} />)
 
     expect(await screen.findByText('10017 USD')).toBeTruthy()
-    ;['9797 USD', '101.5', '110', '17 USD', '0.0017', 'Orders 1', 'Fills 1'].forEach((value) => {
+    ;['9797 USD', '101.5', '110', '17 USD', '0.17%', 'Orders 1', 'Fills 1'].forEach((value) => {
       expect(screen.getByText(value)).toBeTruthy()
     })
     expect(screen.getAllByText('2')).toHaveLength(2)
@@ -612,7 +617,7 @@ it('states what one result does not show before the curve, execution detail and 
     }),
   })} />)
 
-  const limits = await screen.findByRole('region', { name: 'What this result does not show' })
+  const limits = await screen.findByRole('region', { name: '本结果不展示什么' })
   const precedes = (first: Element | null, second: Element) =>
     Boolean(first && first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING)
   expect(precedes(document.querySelector('.metrics'), limits)).toBe(true)
@@ -620,8 +625,8 @@ it('states what one result does not show before the curve, execution detail and 
   expect(precedes(limits, screen.getByRole('heading', { name: 'Execution' }))).toBe(true)
   expect(precedes(limits, screen.getByRole('link', { name: 'Download report.json' }))).toBe(true)
   // A run this small says so, and no statistic is claimed from it.
-  expect(limits.textContent).toContain('4 records')
-  expect(limits.textContent).toContain('small sample: workflow validation only, no robustness claim')
+  expect(limits.textContent).toContain('4 条记录')
+  expect(limits.textContent).toContain('小样本：仅用于流程验证，不作稳健性结论')
   expect(limits.textContent).toContain('no Sharpe ratio')
 })
 
@@ -638,7 +643,7 @@ it('states what one result does not show before the curve, execution detail and 
     })} />)
 
     expect(await screen.findByText('10017 USD')).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await user.click(screen.getByRole('button', { name: '刷新' }))
 
     expect(await screen.findByText('verified report is unavailable')).toBeTruthy()
     await waitFor(() => expect(screen.queryByText('10017 USD')).toBeNull())
@@ -662,7 +667,7 @@ it('states what one result does not show before the curve, execution detail and 
     })} />)
 
     expect(await screen.findByText('run-1')).toBeTruthy()
-    await user.click(screen.getByRole('link', { name: '← New or saved backtest' }))
+    await user.click(screen.getByRole('link', { name: '回测列表' }))
     const flatJobLink = (await screen.findByText('flat.yaml')).closest('a')
     expect(flatJobLink).toBeTruthy()
     await user.click(flatJobLink!)
@@ -712,8 +717,8 @@ describe('Chronological Holdout', () => {
     await waitFor(() => expect(submitted).toEqual({ source_job_id: 'job-1', scenario_id: 'bounded-long.yaml' }))
     await screen.findByRole('link', { name: 'Open IS formal run' })
     await screen.findByRole('link', { name: 'Open OOS formal run' })
-    expect(screen.queryByText('Parameter Delta')).toBeNull()
-    expect(screen.queryByText('Result Diff')).toBeNull()
+    expect(screen.queryByText('参数差异')).toBeNull()
+    expect(screen.queryByText('结果对比')).toBeNull()
   })
 })
 
@@ -790,10 +795,12 @@ it('names a report currency that was not recorded instead of assuming USD', asyn
   render(<App api={adapter({ getReport: async () => unrecorded })} />)
   await screen.findByText('10017 · currency not recorded by the report')
   const metrics = document.querySelector('.metrics')!.textContent ?? ''
-  expect(metrics).toContain('10000 · currency not recorded by the report')
-  expect(metrics).toContain('9797 · currency not recorded by the report')
-  expect(metrics).toContain('17 · currency not recorded by the report')
+  const economicsText = document.querySelector('.report-economics')!.textContent ?? ''
+  expect(economicsText).toContain('10000 · currency not recorded by the report')
+  expect(economicsText).toContain('9797 · currency not recorded by the report')
+  expect(`${metrics}${economicsText}`).toContain('17 · currency not recorded by the report')
   expect(metrics).not.toContain('USD')
+  expect(economicsText).not.toContain('USD')
 })
 
 it('sorts drawdown ratios exactly with stable missing-last legacy rows in both directions', async () => {
@@ -970,12 +977,12 @@ describe('QUINE shell navigation', () => {
     cleanup()
     window.history.pushState({}, '', '/backtests/job-1')
     render(<App api={adapter()} />)
-    expect(await screen.findByRole('heading', { name: 'Backtest Result' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '正式报告' })).toBeTruthy()
 
     cleanup()
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={adapter()} />)
-    expect(await screen.findByRole('heading', { name: 'Compare Backtests' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '回测对比' })).toBeTruthy()
   })
 })
 
@@ -1026,7 +1033,7 @@ function reportPage(api: ApiAdapter) {
 
 /** The association panel of the loaded report page. */
 async function associationPanel() {
-  expect(await screen.findByRole('heading', { name: 'Backtest Result' })).toBeTruthy()
+  expect(await screen.findByRole('heading', { name: '正式报告' })).toBeTruthy()
   return screen.findByRole('region', { name: '策略关联' })
 }
 
@@ -1055,7 +1062,7 @@ describe('report to strategy return', () => {
     }))
 
     // The formal report stays the page, and stays readable beside the association.
-    expect(await screen.findByRole('heading', { name: 'Backtest Result' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '正式报告' })).toBeTruthy()
     expect(await screen.findByText('10017 USD')).toBeTruthy()
 
     // The association names exactly the strategy that froze this job, on the very
@@ -1114,7 +1121,7 @@ describe('report to strategy return', () => {
 
     // The explicit Refresh re-reads the association, and only it. The refreshed
     // panel is its own element: the failed one is replaced, not written over.
-    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await user.click(screen.getByRole('button', { name: '刷新' }))
     const recovered = await screen.findByRole('region', { name: '策略关联' })
     expect(await within(recovered).findByText('Bold entry')).toBeTruthy()
     expect(within(recovered).getByText('冻结 v2')).toBeTruthy()
@@ -1218,7 +1225,7 @@ describe('report to strategy return', () => {
     const association = await associationPanel()
     expect(within(association).getByText('正在读取冻结了这个运行的已保存策略……')).toBeTruthy()
 
-    await user.click(screen.getByRole('link', { name: '← New or saved backtest' }))
+    await user.click(screen.getByRole('link', { name: '回测列表' }))
     const flatJobLink = (await screen.findByText('flat.yaml')).closest('a')
     expect(flatJobLink).toBeTruthy()
     await user.click(flatJobLink!)
@@ -1231,5 +1238,332 @@ describe('report to strategy return', () => {
     await waitFor(() => expect(screen.queryByText('Bold entry')).toBeNull())
     expect(within(moved).getByText('Quiet exit')).toBeTruthy()
     expect(within(moved).getByText('冻结 v4')).toBeTruthy()
+  })
+})
+
+/** The right-hand run of the compare fixtures, carrying its own admitted record
+ * count so each side's limit line is distinguishable from the other's. */
+const compareRight: BacktestJob = {
+  ...secondJob,
+  input_identity: { ...identity, record_count: 8 },
+  input_snapshot: {
+    ...secondJob.input_snapshot!,
+    identity: { ...secondJob.input_snapshot!.identity, record_count: 8 },
+    source_identity: { ...secondJob.input_snapshot!.source_identity, record_count: 8 },
+  },
+}
+
+/** A compare-route adapter over the three fixture runs and their formal reports.
+ * Each test injects only its own association read, so the runs are described once. */
+function compareAdapter(overrides: Partial<ApiAdapter> = {}): ApiAdapter {
+  return adapter({
+    listBacktests: async () => [job, compareRight, thirdJob],
+    getBacktest: async (jobId) => (jobId === 'job-2' ? compareRight : jobId === 'job-3' ? thirdJob : job),
+    getReport: async (jobId) => (jobId === 'job-2' ? secondReport : jobId === 'job-3' ? thirdReport : report),
+    ...overrides,
+  })
+}
+
+/** True when `first` precedes `second` in document order. */
+const precedes = (first: Element, second: Element) =>
+  Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING)
+
+/** The first native disclosure on the page whose text contains `text`. */
+const disclosure = (text: string) =>
+  Array.from(document.querySelectorAll('details')).find(element => (element.textContent ?? '').includes(text))
+
+/** The first link on the page whose href is exactly `href`. */
+const linkTo = (href: string) =>
+  screen.getAllByRole('link').find(element => element.getAttribute('href') === href)
+
+/** Both fixture runs frozen by one saved strategy, at the revisions each froze. */
+const commonOwner: UserStrategy = {
+  ...ownerStrategy,
+  experiments: [
+    frozenExperiment('job-1', 2, '2026-10-06T10:30:00.000000Z', 'li-a'),
+    frozenExperiment('job-2', 7, '2026-10-06T10:40:00.000000Z', 'li-b'),
+  ],
+}
+
+describe('maturity round 2', () => {
+  it('leads with parameter and result differences before the identity disclosures', async () => {
+    const user = userEvent.setup()
+    // Every write is a refusal: reading a comparison and following it are the
+    // only things this direct route may do.
+    const writes: string[] = []
+    const refuse = (name: string) => async (): Promise<never> => {
+      writes.push(name)
+      throw new Error(`${name} is not a read or a navigation`)
+    }
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({
+      createBacktest: refuse('createBacktest'),
+      createBatch: refuse('createBatch'),
+      createHoldout: refuse('createHoldout'),
+      createUserStrategy: refuse('createUserStrategy'),
+      launchUserStrategyExperiment: refuse('launchUserStrategyExperiment'),
+      previewUserStrategyExperiment: refuse('previewUserStrategyExperiment'),
+      registerLocalStrategy: refuse('registerLocalStrategy'),
+    })} />)
+
+    // What changed, and what each run's result was, lead the page in their own
+    // named sections.
+    const parameterDiff = await screen.findByRole('region', { name: '参数差异' })
+    const resultCompare = screen.getByRole('region', { name: '结果对比' })
+    expect(within(parameterDiff).getByText('target_quantity')).toBeTruthy()
+    expect(within(parameterDiff).getByText('entry_delay_bars')).toBeTruthy()
+
+    // Both formal reports are usable straight from the page: one link per run,
+    // never behind a disclosure the reader has to open first.
+    const reportA = linkTo('/backtests/job-1')
+    const reportB = linkTo('/backtests/job-2')
+    expect(reportA).toBeTruthy()
+    expect(reportB).toBeTruthy()
+    expect(reportA!.closest('details')).toBeNull()
+    expect(reportB!.closest('details')).toBeNull()
+
+    // The identity record and the unchanged-input record are the secondary native
+    // disclosures, and neither of them is ahead of the differences.
+    const identities = disclosure('Web job')
+    expect(identities).toBeTruthy()
+    expect(identities!.textContent).toContain('e'.repeat(64))
+    expect(precedes(parameterDiff, identities!)).toBe(true)
+    expect(precedes(resultCompare, identities!)).toBe(true)
+    const unchanged = disclosure('Unchanged')
+    expect(unchanged).toBeTruthy()
+    expect(precedes(parameterDiff, unchanged!)).toBe(true)
+
+    // Each run's own admitted record count stays visible beside its result.
+    expect(within(resultCompare).getAllByText(/4 条记录/).length).toBeGreaterThan(0)
+    expect(within(resultCompare).getAllByText(/8 条记录/).length).toBeGreaterThan(0)
+
+    // Missing analytics are named unavailable, never fabricated as zero, and the
+    // full rows stay reachable by opening their own disclosure.
+    const fullRows = disclosure('Closed trades')
+    expect(fullRows).toBeTruthy()
+    await user.click(within(fullRows as HTMLElement).getByText('分析指标明细'))
+    const closed = within(fullRows as HTMLElement).getByRole('row', { name: /Closed trades/ })
+    expect(within(closed).getAllByText('Unavailable')).toHaveLength(2)
+    expect(within(closed).queryByText('0')).toBeNull()
+
+    expect(writes).toEqual([])
+  })
+
+  it('returns a verified common owner at the exact revision each run froze', async () => {
+    const user = userEvent.setup()
+    // Every strategy write is a refusal: following the comparison back to its
+    // strategy is navigation, and nothing else may happen on the way.
+    const writes: string[] = []
+    const refuse = (name: string) => async (): Promise<never> => {
+      writes.push(name)
+      throw new Error(`${name} is not a read or a navigation`)
+    }
+    // A same-named decoy that froze nothing: the owner is matched by the job each
+    // record names, never by the strategy's registered id, name or current draft.
+    const decoy: UserStrategy = { ...otherStrategy, user_strategy_id: 'us-decoy', name: 'Bold entry', experiments: [] }
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({
+      listUserStrategies: async () => [decoy, commonOwner],
+      getUserStrategy: async () => commonOwner,
+      createUserStrategy: refuse('createUserStrategy'),
+      sendUserStrategyMessage: refuse('sendUserStrategyMessage'),
+      applyUserStrategyProposal: refuse('applyUserStrategyProposal'),
+      launchUserStrategyExperiment: refuse('launchUserStrategyExperiment'),
+    })} />)
+
+    const association = await screen.findByRole('region', { name: '对比策略关联' })
+    expect(await within(association).findByText(/Bold entry/)).toBeTruthy()
+    // The revision each side actually froze, never the draft's current revision.
+    expect(within(association).getByText(/冻结 v2/)).toBeTruthy()
+    expect(within(association).getByText(/冻结 v7/)).toBeTruthy()
+    expect(within(association).queryByText(/冻结 v5/)).toBeNull()
+    const back = within(association).getByRole('link', { name: '返回此策略继续研究' })
+    expect(back.getAttribute('href')).toBe('/strategies/us-1')
+
+    await user.click(back)
+    await waitFor(() => expect(window.location.pathname).toBe('/strategies/us-1'))
+    const detail = await screen.findByRole('region', { name: '策略详情' })
+    expect(within(detail).getByRole('heading', { name: 'Bold entry' })).toBeTruthy()
+    expect(writes).toEqual([])
+  })
+
+  it('never names an owner when the frozen records do not agree on exactly one', async () => {
+    // Two different saved strategies, one per run, both on the same registered
+    // engine strategy: sharing an engine strategy is not sharing an owner.
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({ listUserStrategies: async () => [ownerStrategy, otherStrategy] })} />)
+    let association = await screen.findByRole('region', { name: '对比策略关联' })
+    await waitFor(() => expect(within(association).queryByText(/正在读取/)).toBeNull())
+    expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+
+    // A duplicated association for one of the runs is ambiguous, so still no owner.
+    cleanup()
+    const ambiguous: UserStrategy = {
+      ...ownerStrategy,
+      experiments: [
+        frozenExperiment('job-1', 2, '2026-10-06T10:30:00.000000Z', 'li-a'),
+        frozenExperiment('job-1', 3, '2026-10-06T10:31:00.000000Z', 'li-b'),
+        frozenExperiment('job-2', 7, '2026-10-06T10:40:00.000000Z', 'li-c'),
+      ],
+    }
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({ listUserStrategies: async () => [ambiguous] })} />)
+    association = await screen.findByRole('region', { name: '对比策略关联' })
+    await waitFor(() => expect(within(association).queryByText(/正在读取/)).toBeNull())
+    expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+
+    // A refused strategy read does not blank the formal comparison, and falls
+    // back honestly to the strategy list.
+    cleanup()
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({ listUserStrategies: async () => { throw new Error('strategy list is unavailable') } })} />)
+    association = await screen.findByRole('region', { name: '对比策略关联' })
+    expect(await within(association).findByRole('link', { name: /策略列表/ })).toBeTruthy()
+    expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+    expect(await screen.findByText('10017 USD')).toBeTruthy()
+
+    // A workspace that serves no strategy list says so and points at the list too.
+    cleanup()
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter()} />)
+    association = await screen.findByRole('region', { name: '对比策略关联' })
+    expect(await within(association).findByRole('link', { name: /策略列表/ })).toBeTruthy()
+    expect(await screen.findByText('10017 USD')).toBeTruthy()
+  })
+
+  it('keeps the way back and never carries an owner across a route-pair change', async () => {
+    const user = userEvent.setup()
+
+    // Reading: the runs are still being loaded, and the way back is already there.
+    let settleRun: ((value: BacktestJob) => void) | undefined
+    const pendingRun = new Promise<BacktestJob>(resolve => { settleRun = resolve })
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({ getBacktest: async (jobId) => (jobId === 'job-1' ? pendingRun : compareRight) })} />)
+    expect(await screen.findByRole('heading', { name: '回测对比' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: /回测列表/ }).getAttribute('href')).toBe('/backtests')
+    settleRun?.(job)
+
+    // Failure: the pair cannot be read at all, and the way back survives it.
+    cleanup()
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({ getBacktest: async () => { throw new Error('run unavailable') } })} />)
+    expect(await screen.findByText('run unavailable')).toBeTruthy()
+    expect(screen.getByRole('link', { name: /回测列表/ }).getAttribute('href')).toBe('/backtests')
+
+    // Generation guard: a late association answer for the first pair must never
+    // reach the page after the route pair changes.
+    cleanup()
+    let resolveFirst: ((value: UserStrategy[]) => void) | undefined
+    const firstRead = new Promise<UserStrategy[]>(resolve => { resolveFirst = resolve })
+    let reads = 0
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({ listUserStrategies: async () => { reads += 1; return reads === 1 ? await firstRead : [] } })} />)
+    const reading = await screen.findByRole('region', { name: '对比策略关联' })
+    expect(within(reading).getByText(/正在读取/)).toBeTruthy()
+
+    await user.click(screen.getByRole('link', { name: /回测列表/ }))
+    await screen.findByRole('heading', { name: 'Offline Backtests' })
+    await user.click(screen.getByRole('checkbox', { name: 'Select job-2 for comparison' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Select job-3 for comparison' }))
+    await user.click(screen.getByRole('button', { name: 'Compare selected runs' }))
+    await waitFor(() => expect(window.location.pathname).toBe('/backtests/compare/job-2/job-3'))
+    const moved = await screen.findByRole('region', { name: '对比策略关联' })
+    await waitFor(() => expect(within(moved).queryByText(/正在读取/)).toBeNull())
+    expect(within(moved).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+
+    resolveFirst?.([commonOwner])
+    await waitFor(() => expect(screen.queryByText(/Bold entry/)).toBeNull())
+    expect(screen.queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+  })
+
+  it('keeps the report numbers and return while moving identities behind a disclosure', async () => {
+    reportPage(adapter({
+      listUserStrategies: async () => [ownerStrategy, otherStrategy],
+      getUserStrategy: async (userStrategyId) => (userStrategyId === 'us-2' ? otherStrategy : ownerStrategy),
+    }))
+
+    // The formal numbers are unchanged.
+    expect(await screen.findByRole('heading', { name: '正式报告' })).toBeTruthy()
+    expect(await screen.findByText('10017 USD')).toBeTruthy()
+
+    // The exact return to the strategy whose frozen run this is, unchanged.
+    const association = await screen.findByRole('region', { name: '策略关联' })
+    expect(await within(association).findByText('Bold entry')).toBeTruthy()
+    expect(within(association).getByText('冻结 v2')).toBeTruthy()
+    expect(within(association).getByRole('link', { name: '返回此策略继续研究' }).getAttribute('href')).toBe('/strategies/us-1')
+
+    // The concise limitations stay visible; the detailed identities are reachable
+    // through their own native disclosure instead of being printed up front.
+    const limitations = screen.getByRole('region', { name: '本结果不展示什么' })
+    expect(limitations.closest('details')).toBeNull()
+    const identities = disclosure('run-1')
+    expect(identities).toBeTruthy()
+    expect((identities as HTMLElement).textContent).toContain('bounded-long-v1')
+  })
+
+  it('drops the pair the route left behind when it names another while staying mounted', async () => {
+    // The first pair loads and is still waiting on its association read; the run the
+    // second pair names has not answered yet.
+    let resolveAssociation: ((value: UserStrategy[]) => void) | undefined
+    const associationRead = new Promise<UserStrategy[]>(resolve => { resolveAssociation = resolve })
+    let settleThird: ((value: BacktestJob) => void) | undefined
+    const pendingThird = new Promise<BacktestJob>(resolve => { settleThird = resolve })
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({
+      getBacktest: async (jobId) => jobId === 'job-1' ? job : jobId === 'job-2' ? compareRight : pendingThird,
+      listUserStrategies: async () => associationRead,
+    })} />)
+
+    expect(await screen.findByText('10017 USD')).toBeTruthy()
+    const first = await screen.findByRole('region', { name: '对比策略关联' })
+    expect(within(first).getByText(/正在读取/)).toBeTruthy()
+
+    // The route names another pair without leaving the page.
+    window.history.pushState({ ...window.history.state, key: 'pair-2' }, '', '/backtests/compare/job-2/job-3')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+
+    // Nothing of the pair the route left behind is readable under the new ids: not
+    // its numbers, not its parameter differences, not its owner.
+    await waitFor(() => expect(screen.queryByText('10017 USD')).toBeNull())
+    expect(screen.queryByRole('region', { name: '参数差异' })).toBeNull()
+    expect(screen.queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+
+    // The first pair's late answer cannot reappear on the new pair either.
+    resolveAssociation?.([commonOwner])
+    await waitFor(() => expect(screen.queryByText(/Bold entry/)).toBeNull())
+    expect(screen.queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+
+    // The new pair, once its run arrives, is its own comparison and claims no owner.
+    settleThird?.(thirdJob)
+    const movedDiff = await screen.findByRole('region', { name: '参数差异' })
+    expect(within(movedDiff).getByText('target_quantity')).toBeTruthy()
+    expect(screen.queryByText('10017 USD')).toBeNull()
+    const moved = screen.getByRole('region', { name: '对比策略关联' })
+    await waitFor(() => expect(within(moved).queryByText(/正在读取/)).toBeNull())
+    expect(within(moved).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+  })
+
+  it('refuses a comparison the route does not really name', async () => {
+    // The host answers with a run the route never asked for: that is an identity
+    // conflict to state, not a comparison to draw conclusions from.
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+    render(<App api={compareAdapter({
+      getBacktest: async (jobId) => ({ ...compareRight, job_id: jobId === 'job-1' ? 'job-9' : 'job-2' }),
+      listUserStrategies: async () => [commonOwner],
+    })} />)
+    expect(await screen.findByText('Loaded run identity does not match the requested run')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: '对比策略关联' })).toBeNull()
+    expect(screen.queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+    expect(screen.getByRole('link', { name: '回测列表' }).getAttribute('href')).toBe('/backtests')
+
+    // One run compared with itself is not two distinct experiments, so no owner is
+    // claimed for it and the way back is still offered.
+    cleanup()
+    window.history.pushState({}, '', '/backtests/compare/job-1/job-1')
+    render(<App api={compareAdapter({ listUserStrategies: async () => [commonOwner] })} />)
+    expect(await screen.findByText('同一个运行不能与它自己对比：请选择两个不同的已持久化运行。')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: '对比策略关联' })).toBeNull()
+    expect(screen.queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
+    expect(screen.getByRole('link', { name: '回测列表' }).getAttribute('href')).toBe('/backtests')
   })
 })

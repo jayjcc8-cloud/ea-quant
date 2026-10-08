@@ -492,3 +492,57 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
     scroll-behavior: auto !important;
   }
 }
+
+/* The formal comparison and the formal report: the two read-only routes.
+   Both carry wide result tables, so each of them owns the place a wide row can
+   scroll — the page body never does. The global table rule above is untouched;
+   only these routes get their own fit. */
+.compare-page, .report-page { min-width: 0; }
+.compare-report-links { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.compare-limits { margin-top: 18px; }
+.compare-limits .summary-list { margin-top: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.compare-limits > .muted { margin-top: 12px; }
+.compare-run-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.compare-run-detail > .panel { margin: 0; border: 0; padding: 0; background: transparent; }
+/* Disclosures on these two routes hold the provenance the reader opened them for;
+   one consistent inset keeps their tables and panels aligned with the summary. The
+   table width is measured against that inset too, so a full-width row can never
+   push the page wider than its own column. */
+.compare-page .disclosure > :not(summary):not(table),
+.report-page .disclosure > :not(summary):not(table) { margin-left: 16px; margin-right: 16px; }
+.compare-page .disclosure > table,
+.report-page .disclosure > table { width: calc(100% - 32px); margin: 12px 16px 16px; }
+.compare-page .disclosure > :not(summary):last-child,
+.report-page .disclosure > :not(summary):last-child { margin-bottom: 16px; }
+.compare-page .disclosure > table:last-child,
+.report-page .disclosure > table:last-child { margin-bottom: 16px; }
+.report-page .disclosure > .panel { margin-bottom: 16px; }
+.report-economics > .summary-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.report-economics .backtest-grid > .panel { border: 0; padding: 0; background: transparent; }
+@media (max-width: 960px) {
+  .compare-limits .summary-list { grid-template-columns: minmax(0, 1fr); }
+  .compare-run-detail { grid-template-columns: minmax(0, 1fr); }
+}
+/* A phone is narrower than any result row. Fixed layout plus wrapping cells keeps
+   every figure inside the viewport instead of scrolling the page sideways. */
+@media (max-width: 767px) {
+  .compare-page table, .report-page table { table-layout: fixed; }
+  .compare-page th, .compare-page td,
+  .report-page th, .report-page td { padding-left: 3px; padding-right: 3px; overflow-wrap: anywhere; }
+  .compare-page .disclosure > :not(summary):not(table),
+  .report-page .disclosure > :not(summary):not(table) { margin-left: 10px; margin-right: 10px; }
+  .compare-page .disclosure > table,
+  .report-page .disclosure > table { width: calc(100% - 20px); margin-left: 10px; margin-right: 10px; }
+  /* The report's four headline figures stay two columns on a phone, so the limits
+     below them arrive after two rows instead of four tall cards; a value longer
+     than its cell wraps rather than widening the page. Desktop is untouched. */
+  .report-page .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .report-page .metric-card { min-height: 0; padding: 14px; }
+  .report-page .metric-card strong { font-size: 22px; overflow-wrap: anywhere; }
+  .report-page .metric-card span { font-size: 12px; }
+  /* The comparison keeps all four columns: the first names the metric, so it takes
+     the room, and a long parameter id wraps inside its own cell. */
+  .compare-page .comparison-panel table { font-size: 13px; }
+  .compare-page .comparison-panel th:first-child,
+  .compare-page .comparison-panel td:first-child { width: 34%; }
+}
