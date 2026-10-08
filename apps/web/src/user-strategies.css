@@ -69,10 +69,10 @@
    pill. The rows carry their own typography, so the row links reset it. */
 .strategy-list a { display: block; min-height: 0; padding: 0; border-radius: 0; }
 .strategy-list a:hover { background: transparent; }
-.strategy-empty { padding: 14px 16px; border: 1px dashed var(--q-line); border-radius: 10px; color: var(--q-ink-soft); font-size: 13.5px; }
+.strategy-empty { padding: 14px 16px; border: 1px dashed var(--q-line); border-radius: 8px; color: var(--q-ink-soft); font-size: 13.5px; }
 
 table.strategy-table {
-  width: 100%; margin: 0; border: 1px solid var(--q-line); border-radius: 10px;
+  width: 100%; margin: 0; border: 1px solid var(--q-line); border-radius: 8px;
   border-collapse: separate; border-spacing: 0; overflow: hidden; background: var(--q-surface); font-size: 13.5px;
 }
 .strategy-table th, .strategy-table td { text-align: left; }
@@ -107,7 +107,7 @@ table.strategy-table {
 
 /* Creating a strategy: a compact disclosure, not a page */
 .strategy-create {
-  padding: 16px; border: 1px solid var(--q-line); border-radius: 10px; background: var(--q-surface-soft);
+  padding: 16px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface-soft);
 }
 .strategy-workspace .create-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; }
 .strategy-workspace .create-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
@@ -137,7 +137,7 @@ table.strategy-table {
 .strategy-workspace .draft-facts dd { overflow-wrap: anywhere; }
 
 /* The selected strategy: its own card, its facts, its sections */
-.strategy-detail { border: 1px solid var(--q-line); border-radius: 10px; background: var(--q-surface); overflow: hidden; }
+.strategy-detail { border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface); overflow: hidden; }
 .strategy-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 16px 12px; }
 .strategy-title h2 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
 .strategy-open { margin-left: auto; color: var(--q-ink-soft); font-size: 13px; }
@@ -148,6 +148,29 @@ table.strategy-table {
 .strategy-workspace .draft-facts div { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .strategy-workspace .draft-facts dt { color: var(--q-ink-soft); font-size: 12px; }
 .strategy-workspace .draft-facts dd { margin: 0; color: var(--q-ink); font-size: 13.5px; overflow-wrap: anywhere; }
+
+/* The one strip that says where this strategy stands and what the next step is:
+   the open revision beside the last frozen one, and one obvious way onward. */
+.strategy-workspace .next-step {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px;
+  padding: 10px 16px; border-top: 1px solid var(--q-line); background: var(--q-surface-soft);
+}
+.strategy-workspace .next-step dl { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; }
+.strategy-workspace .next-step div { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.strategy-workspace .next-step dt { color: var(--q-ink-soft); font-size: 12px; }
+.strategy-workspace .next-step dd { margin: 0; color: var(--q-ink); font-size: 13px; overflow-wrap: anywhere; }
+.strategy-workspace .next-step button { margin-left: auto; }
+.strategy-workspace .next-step p.muted { flex: 1 1 100%; margin: 0; }
+
+/* The way back into the most recently updated work, on the collection route. */
+.strategy-workspace .continuation {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
+  padding: 10px 14px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface-soft);
+}
+.strategy-workspace .continuation-link { color: var(--q-ink); font-size: 14px; font-weight: 650; }
+.strategy-workspace .continuation-link:hover, .strategy-workspace .continuation-link:focus-visible { color: var(--q-red); }
+.strategy-workspace .continuation .muted { margin: 0; }
+.strategy-workspace .continuation p.muted { flex: 1 1 100%; }
 
 .strategy-workspace .detail-tabs { display: flex; flex-wrap: wrap; gap: 0 2px; padding: 0 12px; border-bottom: 1px solid var(--q-line); }
 .strategy-workspace .detail-tabs [role="tab"] {
@@ -163,7 +186,7 @@ table.strategy-table {
 .strategy-panel { padding: 16px; }
 .strategy-panel h2 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
 .strategy-panel h3 { font-size: 14px; }
-.strategy-panel p { margin: 6px 0; font-size: 13.5px; line-height: 1.6; }
+.strategy-panel p { margin: 6px 0; font-size: 13.5px; line-height: 1.6; max-width: 82ch; }
 .strategy-panel .muted, .strategy-workspace .muted { color: var(--q-ink-soft); font-size: 12.5px; }
 .strategy-workspace .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .strategy-workspace .panel-head h2 { margin: 0; }
@@ -204,6 +227,11 @@ table.strategy-table {
 .strategy-workspace .evidence-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px 16px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
 .strategy-workspace .evidence-metrics dt { color: var(--q-ink-soft); font-size: 12px; }
 .strategy-workspace .evidence-metrics dd { margin: 3px 0 0; color: var(--q-ink); font-size: 17px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
+/* The limits sit with the figures they qualify, not in a footnote elsewhere. */
+.strategy-workspace .evidence-limits { margin: 0 0 12px; }
+.strategy-workspace .artifact-links { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; }
+.strategy-workspace .artifact-links a { color: var(--q-red); font-size: 12.5px; }
+.strategy-workspace .artifact-links a:hover { color: var(--q-red-ink); text-decoration: underline; }
 .strategy-workspace .evidence-curve { margin-top: 14px; }
 .strategy-workspace .equity-path { padding: 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; margin: 0; }
 .strategy-workspace .equity-path h2 { font-size: 14px; }
@@ -231,22 +259,47 @@ table.strategy-table {
 .strategy-workspace .preview-facts dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .strategy-workspace .revise { margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--q-line); border-radius: 8px; }
 .strategy-workspace .revise button { margin-top: 4px; }
+/* A proposal that is no longer waiting for a decision is history: its fields, its
+   sources and its prose are one disclosure, so the composer below it is not pushed
+   past the first screen. Its controls stay outside the disclosure. */
+.strategy-workspace .proposal-closed { margin-top: 8px; }
+.strategy-workspace .proposal-closed .proposal-list { margin-top: 8px; }
+.strategy-workspace .chip-undo { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
+.strategy-workspace .proposal-undone { margin: 4px 0 0; }
 
 /* The AI column: the conversation of the strategy that is open, and its change.
    It is not pinned: a sticky column taller than the viewport would hold its own
    composer and proposal below the fold, out of reach while the page scrolls. */
 .strategy-ai { display: grid; gap: 14px; min-width: 0; align-content: start; }
-.strategy-chat { border: 1px solid var(--q-line); border-radius: 10px; background: var(--q-surface); }
+.strategy-chat { border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface); }
 .strategy-workspace .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .strategy-workspace .chat-head h2 { margin: 0; font-size: 16px; font-weight: 650; }
 .strategy-workspace .chat-head select { width: auto; max-width: 190px; min-height: 32px; padding: 4px 8px; font-size: 13px; }
+
+/* The current turn first: this call's own status, its answer labelled as
+   inference, and its prompt behind a disclosure. The earlier conversation is a
+   disclosure of its own below, so what the reader acts on is never inside it. */
+.strategy-workspace .turn { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; }
+.strategy-workspace .turn-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
+.strategy-workspace .turn-head .muted { font-size: 12px; overflow-wrap: anywhere; }
+.strategy-workspace .turn-prompt { margin-top: 6px; }
+.strategy-workspace .turn-answer { margin: 8px 0 0; padding: 8px 10px; border-left: 2px solid var(--q-red); border-radius: 0 8px 8px 0; background: var(--q-surface-soft); }
+.strategy-workspace .turn-answer p { margin: 3px 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The latest answer is the longest text on this page, so it is the bounded surface:
+   about 220px and never more than a quarter of a tall viewport, scrolled by keyboard
+   and by pointer, with its own opening lines visible and the whole response still in
+   it. The inference label and the revision stay outside, below the scroller. */
+.strategy-workspace .answer-scroll { max-height: 220px; max-height: min(220px, 26vh); overflow-y: auto; padding-right: 4px; }
+.strategy-workspace .answer-scroll:focus-visible { outline: 2px solid var(--q-red); outline-offset: -2px; }
+.strategy-workspace .turn-details { margin-top: 10px; }
+.strategy-workspace .turn-history { margin-top: 12px; }
 .strategy-workspace .composer { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--q-line-soft); }
 .strategy-workspace .composer-actions { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .strategy-workspace .composer-actions .muted { margin: 0; max-width: 22rem; }
-/* The conversation history is the one bounded surface. It scrolls on its own, by
-   keyboard as well as by pointer, and everything the user acts on — the last
-   call's own status, usage and unavailable cost, the approval and the composer —
-   is kept outside it. */
+/* The conversation history is one of the two bounded surfaces, the latest answer
+   being the other. It scrolls on its own, by keyboard as well as by pointer, and
+   everything the user acts on — the last call's own status, usage and unavailable
+   cost, the approval and the composer — is kept outside it. */
 .strategy-workspace .message-scroll { margin-top: 12px; max-height: min(24vh, 220px); overflow-y: auto; padding: 2px; }
 .strategy-workspace .message-scroll:focus-visible { outline: 2px solid var(--q-red); outline-offset: -2px; }
 .strategy-workspace .message-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
@@ -292,18 +345,27 @@ table.strategy-table {
   .strategy-workspace .create-fields { grid-template-columns: minmax(0, 1fr); }
   .strategy-workspace .detail-tabs { flex-wrap: wrap; }
   .strategy-workspace .detail-tabs [role="tab"] { min-height: 44px; }
-  .strategy-workspace button, .strategy-workspace .button-link, .strategy-workspace .create-cta { min-height: 44px; }
+  /* `button.primary` and `.button-link` carry more specificity than a bare
+     `button`, so they are named here as well: otherwise the desktop 38px would
+     keep winning on a phone and the composer's own action would stay under 44px. */
+  .strategy-workspace button, .strategy-workspace button.primary,
+  .strategy-workspace .button-link, .strategy-workspace .create-cta { min-height: 44px; }
   .strategy-workspace .jump-link { min-height: 44px; }
   .strategy-workspace select, .strategy-workspace input, .strategy-workspace textarea { min-height: 44px; }
   .strategy-workspace .summary-list { grid-template-columns: minmax(0, 1fr); }
   .strategy-workspace .preview-facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  /* On a phone the strip stacks and its one action takes the full width, so the
+     composer and the actions below stay reachable without horizontal overflow. */
+  .strategy-workspace .next-step button { margin-left: 0; width: 100%; }
+  .strategy-workspace .turn { padding: 10px; }
   .strategy-tabpanel { padding: 0; }
 }
 
-/* Compact density keeps its own, never-larger bound on the history at desktop
-   widths; below 768px the phone layout owns the spacing, as it does everywhere
-   else. The composer, the approval and the last call's status, usage and
-   unavailable cost stay outside the scroller at every width. */
+/* Compact density keeps its own, never-larger bound on the history and on the
+   latest answer at desktop widths; below 768px the phone layout owns the spacing,
+   as it does everywhere else. The composer, the approval and the last call's
+   status, usage and unavailable cost stay outside both scrollers at every width. */
 @media (min-width: 768px) {
   :root[data-density="compact"] .strategy-workspace .message-scroll { max-height: min(22vh, 200px); }
+  :root[data-density="compact"] .strategy-workspace .answer-scroll { max-height: min(22vh, 200px); }
 }

@@ -13,7 +13,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
-import { App, type ApiAdapter, type ScenarioSummary } from './app'
+import { App, type ApiAdapter, type BacktestJob, type ScenarioSummary } from './app'
 import {
   UserStrategyRequestError,
   isIntentDraft,
@@ -187,6 +187,30 @@ const DECLARED_COSTS =
   '手续费 policy deterministic-commission-v1, commission_bps 100 · ' +
   '滑点 policy deterministic-slippage-v1, slippage_bps 100 · ' +
   '延迟 policy deterministic-latency-v1, latency_ms 60000'
+
+/** One web job, as the workspace's own read of a run returns it. */
+const runJob: BacktestJob = {
+  schema: 'ea.local-web-job.v5', job_id: 'job-1', request_id: 'request-1', scenario_id: 'bounded-long.yaml',
+  input_identity: { scenario_sha256: 'b'.repeat(64), data_sha256: 'a'.repeat(64), record_count: 4 },
+  status: 'running', engine_run_id: 'run-1', report_sha256: null, summary_sha256: null,
+  error_code: null, message: null, report_ready: false,
+}
+
+/** One created experiment record: a dispatch exists, nothing about its outcome. */
+function createdExperiment(overrides: Partial<UserStrategy['experiments'][number]> = {}) {
+  return {
+    launch_intent_id: 'li-1', request_id: 'request-1', payload_sha256: 'f'.repeat(64),
+    payload: {
+      draft_revision: 1, scenario_id: 'bounded-long.yaml',
+      parameters: { target_quantity: '2', entry_delay_bars: 0 },
+      preview_identity: PREVIEW_IDENTITY, input_sha256: preview.input_sha256,
+      approved_budget: { max_model_calls: 0, max_backtests: 1 },
+    },
+    task_id: 'task-1', job_id: 'job-1', status: 'created' as const,
+    created_at: '2026-10-06T10:02:00.000000Z',
+    ...overrides,
+  }
+}
 
 /** A recorded call the workspace could not make: honest, uncharged, no answer. */
 const unconfigured: UserStrategy['calls'][number] = {
@@ -638,11 +662,16 @@ describe('user strategy workspace', () => {
       expect.stringContaining('parameters.target_quantity'),
       expect.stringContaining('parameters.entry_delay_bars'),
     ])
-    expect(within(panel).getByText('2 → 3')).toBeTruthy()
-    expect(within(panel).getByText('0 → 1')).toBeTruthy()
+    expect(within(panel).getByText('之前 2')).toBeTruthy()
+    expect(within(panel).getByText('之后 3')).toBeTruthy()
+    expect(within(panel).getByText('之前 0')).toBeTruthy()
+    expect(within(panel).getByText('之后 1')).toBeTruthy()
     expect(within(panel).getByText('A wider sample size.')).toBeTruthy()
     expect(within(panel).getByText('Skip the first bar.')).toBeTruthy()
-    expect(within(panel).getAllByText('提议者：model')).toHaveLength(2)
+    expect(within(panel).getAllByText(/提议者：model/)).toHaveLength(2)
+    // Applying is a draft change, and the panel says what the next step after it is.
+    expect(panel.textContent).toMatch(/应用只改变草稿/)
+    expect(panel.textContent).toMatch(/在「实验」里预览这次草稿并确认一次运行/)
     expect(calls.apply).toBe(0)
 
     // Asking the model is not applying, and a recorded non-answer stays honest.
@@ -743,6 +772,35 @@ describe('user strategy workspace', () => {
     expect((within(panel).getByRole('button', { name: '撤销最近一次修改' }) as HTMLButtonElement).disabled).toBe(true)
     expect(calls.undo).toBe(0)
     expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 3')).toBeTruthy()
+  })
+
+  it('shows an applied-and-then-undone change as undone, without rewriting the proposal', async () => {
+    const reversed = strategy({
+      draft: { ...executable(strategy()), revision: 6, parameters: { target_quantity: '2', entry_delay_bars: 1 } },
+      proposals: [proposal({ base_revision: 4, status: 'applied', applied_paths: ['parameters.target_quantity'] })],
+      changes: [
+        { ...appliedChange, from_revision: 4, to_revision: 5 },
+        {
+          operation_id: 'op-undo-1', kind: 'undo', proposal_id: null, target_operation_id: 'op-apply-1',
+          from_revision: 5, to_revision: 6, applied_paths: [], stale_paths: [], items: [],
+          evidence: [], proposer: 'user', at: '2026-10-06T10:05:00.000000Z',
+        },
+      ],
+    })
+    const { api, calls } = scripted({ current: () => reversed })
+    detail(api)
+    const panel = await screen.findByRole('region', { name: '建议修改' })
+
+    // An undo names the application it reversed, and the panel says exactly that.
+    // The proposal record keeps its own status, and the current draft is not
+    // presented as the result this proposal stands on.
+    expect(within(panel).getByText('已撤销')).toBeTruthy()
+    expect(panel.textContent).toMatch(/由模型提出，已应用/)
+    expect(panel.textContent).toMatch(/这次应用已在修订 5 → 6 上被撤销/)
+    // There is nothing left to undo here, and the decision controls stay in place.
+    expect((within(panel).getByRole('button', { name: '撤销最近一次修改' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(within(panel).getByRole('button', { name: '应用所选' })).toBeTruthy()
+    expect(calls.undo).toBe(0)
   })
 
   it('keeps every request on the strategy that is open', async () => {
@@ -1349,14 +1407,25 @@ describe('user strategy workspace', () => {
   it('scrolls the history on its own and keeps the composer, approval and last call outside it', async () => {
     const { api } = scripted({
       current: () => strategy({
-        // A cost the workspace could not price stays an unavailable cost, said out
-        // loud rather than quietly read as zero.
-        calls: [{ ...unconfigured, cost: { amount: null, available: false, reason: '这个工作区没有价格来源' } }],
+        // An earlier call that was observed: its messages are the earlier
+        // conversation, kept out of the current turn.
+        calls: [
+          {
+            call_id: 'call-0', base_revision: 1, status: 'observed',
+            route: { provider: 'scripted-fixture', model: 'scripted-fixture-v1', endpoint: 'http://127.0.0.1:9/unused' },
+            approved_budget: { max_model_calls: 1, max_backtests: 0 },
+            reserved_at: '2026-10-06T10:00:00.000000Z', message: null, model: 'scripted-fixture-v1',
+            input_tokens: 5, output_tokens: 3, usage_available: true,
+          },
+          // The latest call: never sent, and a cost the workspace could not price
+          // stays an unavailable cost, said out loud rather than quietly read as zero.
+          { ...unconfigured, call_id: 'call-1', cost: { amount: null, available: false, reason: '这个工作区没有价格来源' } },
+        ],
         messages: [
-          { message_id: 'msg-1', role: 'user', kind: 'message', text: 'What does my draft do?', base_revision: 1, at: '2026-10-06T10:01:00.000000Z', call_id: 'call-1', proposal_id: null },
-          { message_id: 'msg-2', role: 'model', kind: 'message', text: 'A first answer that ran long. '.repeat(20), base_revision: 1, at: '2026-10-06T10:02:00.000000Z', call_id: 'call-1', proposal_id: null },
-          { message_id: 'msg-3', role: 'user', kind: 'message', text: 'And the fees?', base_revision: 1, at: '2026-10-06T10:03:00.000000Z', call_id: 'call-1', proposal_id: null },
-          { message_id: 'msg-4', role: 'model', kind: 'message', text: 'The scenario declares its own commission.', base_revision: 1, at: '2026-10-06T10:04:00.000000Z', call_id: 'call-1', proposal_id: null },
+          { message_id: 'msg-1', role: 'user', kind: 'message', text: 'What does my draft do?', base_revision: 1, at: '2026-10-06T10:01:00.000000Z', call_id: 'call-0', proposal_id: null },
+          { message_id: 'msg-2', role: 'model', kind: 'message', text: 'A first answer that ran long. '.repeat(20), base_revision: 1, at: '2026-10-06T10:02:00.000000Z', call_id: 'call-0', proposal_id: null },
+          { message_id: 'msg-3', role: 'user', kind: 'message', text: 'And the fees?', base_revision: 1, at: '2026-10-06T10:03:00.000000Z', call_id: 'call-0', proposal_id: null },
+          { message_id: 'msg-4', role: 'model', kind: 'message', text: 'The scenario declares its own commission.', base_revision: 1, at: '2026-10-06T10:04:00.000000Z', call_id: 'call-0', proposal_id: null },
         ],
       }),
     })
@@ -1366,7 +1435,8 @@ describe('user strategy workspace', () => {
     await screen.findByLabelText('消息')
     const chat = screen.getByRole('region', { name: 'AI 协作' })
 
-    // Every message is still here, inside one named, keyboard-scrollable region.
+    // Every earlier message is still here, inside one named, keyboard-scrollable
+    // region that the current turn's own status, usage and cost stay out of.
     const history = within(chat).getByRole('group', { name: '对话记录' })
     expect(within(history).getAllByRole('listitem')).toHaveLength(4)
     expect(history.getAttribute('tabindex')).toBe('0')
@@ -1422,19 +1492,19 @@ describe('user strategy workspace', () => {
 
   it('names a created experiment as created, not as a run that is still starting', async () => {
     const user = userEvent.setup()
-    const frozen = strategy({
-      experiments: [{
-        launch_intent_id: 'li-1', request_id: 'request-1', payload_sha256: 'f'.repeat(64),
-        payload: { draft_revision: 1, scenario_id: 'bounded-long.yaml', parameters: { target_quantity: '2', entry_delay_bars: 0 } },
-        task_id: 'task-1', job_id: 'job-1', status: 'created', created_at: '2026-10-06T10:02:00.000000Z',
-      }],
-    })
+    const frozen = strategy({ experiments: [createdExperiment()] })
     const { api } = scripted({ strategies: [frozen], current: () => frozen })
+    // The run column reads the run's own job; a created dispatch is not a result.
+    api.getBacktest = async () => runJob
     detail(api)
 
     const table = within(await screen.findByRole('navigation', { name: '策略列表' }))
-    expect(table.getByRole('link', { name: '运行已创建' }).getAttribute('href')).toBe('/backtests/job-1')
+    // The row carries the job's own state, and not the record it was created from.
+    const runLink = await table.findByRole('link', { name: '运行中' })
+    expect(runLink.getAttribute('href')).toBe('/backtests/job-1')
+    expect(table.queryByText('运行已创建')).toBeNull()
     expect(table.queryByText('运行已启动')).toBeNull()
+    expect(table.queryByText(/成功/)).toBeNull()
 
     const intent = await openSection(user, '意图')
     expect(within(intent).getByText('修订 1 · 运行已创建')).toBeTruthy()
@@ -1465,5 +1535,128 @@ describe('user strategy workspace', () => {
     const strategyDetail = document.getElementById('strategy-detail')!
     expect(strategyDetail.getAttribute('tabindex')).toBe('-1')
     expect(strategyDetail.contains(screen.getByRole('heading', { name: 'Bold entry' }))).toBe(true)
+  })
+
+  it('answers the latest call alone and keeps an earlier answer out of its turn', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted({
+      current: () => strategy({
+        calls: [
+          {
+            call_id: 'call-1', base_revision: 1, status: 'observed',
+            route: { provider: 'scripted-fixture', model: 'scripted-fixture-v1', endpoint: 'http://127.0.0.1:9/unused' },
+            approved_budget: { max_model_calls: 1, max_backtests: 0 },
+            reserved_at: '2026-10-06T10:01:00.000000Z', message: null, model: 'scripted-fixture-v1',
+            input_tokens: 5, output_tokens: 3, usage_available: true,
+          },
+          {
+            call_id: 'call-2', base_revision: 1, status: 'refused',
+            route: { provider: 'scripted-fixture', model: 'scripted-fixture-v1', endpoint: 'http://127.0.0.1:9/unused' },
+            approved_budget: { max_model_calls: 1, max_backtests: 0 },
+            reserved_at: '2026-10-06T10:05:00.000000Z', message: 'The host refused this call.',
+            model: null, input_tokens: null, output_tokens: null, usage_available: false,
+          },
+        ],
+        messages: [
+          { message_id: 'msg-1', role: 'user', kind: 'message', text: 'What does my draft do?', base_revision: 1, at: '2026-10-06T10:01:00.000000Z', call_id: 'call-1', proposal_id: null },
+          { message_id: 'msg-2', role: 'model', kind: 'message', text: 'An older answer about the draft.', base_revision: 1, at: '2026-10-06T10:01:01.000000Z', call_id: 'call-1', proposal_id: null },
+          { message_id: 'msg-3', role: 'user', kind: 'message', text: 'And now?', base_revision: 1, at: '2026-10-06T10:05:00.000000Z', call_id: 'call-2', proposal_id: null },
+        ],
+      }),
+    })
+    detail(api)
+    // The AI column is a placeholder until this strategy's own read answers, so the
+    // turn itself is what is waited for — not a timeout and not the column, which
+    // exists either way.
+    const turn = await screen.findByRole('region', { name: '当前一轮' })
+    const chat = screen.getByRole('region', { name: 'AI 协作' })
+
+    // The turn is the latest call's: its own status, its own reason and its own prompt.
+    expect(within(turn).getByText('被拒绝')).toBeTruthy()
+    expect(within(turn).getByText('The host refused this call.')).toBeTruthy()
+    expect(within(turn).getByText('And now?')).toBeTruthy()
+    // A refused call answers nothing, so the earlier answer is not shown as its own.
+    expect(within(turn).queryByText('An older answer about the draft.')).toBeNull()
+    expect(within(turn).getByText(/没有被观测到的模型回答/)).toBeTruthy()
+
+    // It is still readable as history: the reader opens that disclosure, and the
+    // region inside it is the one bounded, keyboard-scrollable surface.
+    await user.click(within(chat).getByText(/更早的对话/))
+    const history = within(chat).getByRole('group', { name: '对话记录' })
+    expect(within(history).getByText('An older answer about the draft.')).toBeTruthy()
+    expect(within(history).getByText('What does my draft do?')).toBeTruthy()
+    expect(history.getAttribute('tabindex')).toBe('0')
+    // Reading the conversation calls no model and starts nothing.
+    expect(calls.ask).toBe(0)
+  })
+
+  it('warns that a preview repeats a frozen input without cancelling or disabling it', async () => {
+    const user = userEvent.setup()
+    const frozen = strategy({ experiments: [createdExperiment()] })
+    const { api, calls } = scripted({ strategies: [frozen], current: () => frozen })
+    api.getBacktest = async () => runJob
+    detail(api)
+    const panel = await openSection(user, '实验')
+
+    await user.click(within(panel).getByRole('button', { name: '预览实验' }))
+
+    // The warning names the frozen launch and revision it matches, and says what a
+    // repeat is: the same engine input, not new evidence.
+    const warning = await within(panel).findByText(/与已确认的冻结运行 li-1（修订 1）完全相同/)
+    expect(warning.textContent).toMatch(/重复同一个引擎输入/)
+    expect(warning.textContent).toMatch(/不构成新的证据/)
+    // It is a warning, not a gate: nothing ran and nothing was disabled.
+    expect(calls.preview).toBe(1)
+    expect(calls.launch).toBe(0)
+    expect((within(panel).getByRole('button', { name: '确认并运行一次' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('shows the run’s own job status, and says so when that read fails or is another job', async () => {
+    const frozen = strategy({ experiments: [createdExperiment()] })
+    const read = scripted({ strategies: [frozen], current: () => frozen })
+    read.api.getBacktest = async () => runJob
+    detail(read.api)
+    const table = within(await screen.findByRole('navigation', { name: '策略列表' }))
+    const link = await table.findByRole('link', { name: '运行中' })
+    expect(link.getAttribute('href')).toBe('/backtests/job-1')
+    expect(table.queryByText(/成功/)).toBeNull()
+
+    cleanup()
+    // A job that is not the one this row asked for is refused, not shown as its run.
+    const other = scripted({ strategies: [frozen], current: () => frozen })
+    other.api.getBacktest = async () => ({ ...runJob, job_id: 'job-2' })
+    detail(other.api)
+    expect(await screen.findByText(/读取到的任务与这条运行不一致/)).toBeTruthy()
+
+    cleanup()
+    // A read that fails stays unreadable here, and still points at the run itself.
+    const failed = scripted({ strategies: [frozen], current: () => frozen })
+    failed.api.getBacktest = async () => { throw new Error('offline') }
+    detail(failed.api)
+    const fallback = within(await screen.findByRole('navigation', { name: '策略列表' }))
+    expect(await fallback.findByText(/运行状态不可读/)).toBeTruthy()
+    expect(fallback.getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/backtests/job-1')
+  })
+
+  it('opens the experiment tab from the next step, and runs nothing', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted({ strategies: [strategy()], current: () => strategy() })
+    detail(api)
+    await screen.findByRole('heading', { name: 'Bold entry' })
+
+    // The strip names the revision that is open and the last one frozen, and it does
+    // not claim a created run has a readable report.
+    const strip = screen.getByRole('region', { name: '下一步' })
+    expect(within(strip).getByText('当前草稿')).toBeTruthy()
+    expect(within(strip).getByText('v1 草稿')).toBeTruthy()
+    expect(within(strip).getByText('还没有冻结运行')).toBeTruthy()
+    expect(strip.textContent).toMatch(/运行被创建不等于它已经有了可读的报告/)
+
+    await user.click(within(strip).getByRole('button', { name: '去预览这个草稿' }))
+
+    // One click opens the existing tab: it reads no preview and starts no run.
+    expect(await screen.findByRole('region', { name: '实验' })).toBeTruthy()
+    expect(calls.preview).toBe(0)
+    expect(calls.launch).toBe(0)
   })
 })

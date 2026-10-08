@@ -19,7 +19,7 @@
  * existing ApiAdapter and refuses to show a report whose identity does not match
  * the run it was read for. Nothing here computes a metric the engine did not write.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ScenarioSummary } from './app'
 import type { ReportCriterion } from './research-api'
@@ -115,6 +115,19 @@ const EXPERIMENT_STATUS_LABELS: Record<UserStrategyExperiment['status'], string>
   failed: '派发前被拒绝',
   unknown: '结果未知',
   interrupted_before_dispatch: '从未派发',
+}
+
+/**
+ * The run's own state, as the job itself reports it. Nothing here is read from
+ * `experiment.created`, so a dispatch that was created is never shown as a run
+ * that succeeded, and no local Paper or simulation claim is made.
+ */
+const JOB_STATUS_LABELS: Record<BacktestJob['status'], string> = {
+  accepted: '已受理',
+  running: '运行中',
+  succeeded: '成功',
+  failed: '失败',
+  interrupted: '已中断',
 }
 
 const explain = (error: unknown) => {
@@ -617,6 +630,32 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
     return () => { active = false }
   }, [api, jobId])
 
+  // The criterion of the revision this run froze, read from that revision's own
+  // document when it is still retained. A revision this page cannot read is said
+  // to be unreadable rather than replaced by today's draft criterion.
+  const frozenRevision = experiment?.payload.draft_revision ?? null
+  const frozenDocument = frozenRevision === null
+    ? undefined
+    : [strategy.draft, ...strategy.history].find(item => item.revision === frozenRevision)
+  const frozenCriterion = frozenRevision === null
+    ? '这次运行没有记录冻结修订，因此这里不判断它的准则'
+    : !frozenDocument
+      ? `冻结修订 ${frozenRevision} 不在保留的修订记录里，它的准则在这里不可读`
+      : isIntentDraft(frozenDocument)
+        ? `冻结修订 ${frozenRevision} 是一份意图，没有声明准则`
+        : frozenDocument.criterion === null
+          ? `冻结修订 ${frozenRevision} 没有声明准则，这次运行无法支持或否定该想法`
+          : `冻结修订 ${frozenRevision} 的准则 ${criterionLine(frozenDocument.criterion)}`
+  // The sample size is the engine's own admitted record count on the run's job; a
+  // job that does not carry one is named unreadable, never guessed, and no
+  // sufficiency threshold is invented for it.
+  const records = state.kind === 'ready'
+    ? (state.job.input_identity as { record_count?: unknown }).record_count
+    : undefined
+  const sample = typeof records === 'number'
+    ? `该运行输入 ${records} 条记录`
+    : '该运行的输入记录数在这里不可读'
+
   return <section aria-label="证据" className="strategy-panel strategy-evidence">
     <header className="panel-head">
       <h2>证据</h2>
@@ -639,15 +678,29 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
         <span className="muted">{`正式报告由引擎产出，不是模型输出 · 运行状态 ${state.job.status}`}</span>
       </p>
       <EvidenceMetrics report={state.report} />
-      {state.path
-        ? <div className="evidence-curve"><EquityCurve analysis={state.path} /></div>
-        : <p className="muted">{state.pathNote ?? '该运行没有可读的权益曲线。'}</p>}
+      {/* The limits stand beside the figures they qualify: one window and one frozen
+          revision, and only the sample size the run's own job recorded. What is
+          claimed is what this run cannot do on its own, not an inventory of things
+          this page did not read. */}
+      <p className="muted evidence-limits">
+        {`${frozenCriterion} · ${sample}。这是一次单窗口的冻结运行：单窗口的结果本身无法证明稳健性，还需要更多验证。`}
+      </p>
       <div className="actions">
         <Link className="button-link" to={`/backtests/${encodeURIComponent(state.job.job_id)}`}>打开运行页面</Link>
-        <a className="button-link" href={api.artifactUrl(state.job.job_id, 'report.json')}>下载 report.json</a>
-        <a className="button-link" href={api.artifactUrl(state.job.job_id, 'summary.txt')}>下载 summary.txt</a>
-        {state.path && <a className="button-link" href={api.artifactUrl(state.job.job_id, 'equity-path.json')}>下载 equity-path.json</a>}
       </div>
+      {/* The curve and its drawdown are one disclosure of their own, so the
+          research panel below is reachable sooner; every point stays in it. */}
+      <details className="provenance evidence-curve-disclosure">
+        <summary>权益曲线与回撤</summary>
+        {state.path
+          ? <div className="evidence-curve"><EquityCurve analysis={state.path} /></div>
+          : <p className="muted">{state.pathNote ?? '该运行没有可读的权益曲线。'}</p>}
+        <dl className="summary-list">
+          <div><dt>最大回撤（曲线）</dt><dd>{state.path
+            ? `${state.path.max_drawdown.amount} ${state.path.currency} / ${pathPercent(state.path.max_drawdown.ratio)}`
+            : '不可用'}</dd></div>
+        </dl>
+      </details>
       <details className="provenance">
         <summary>技术细节与来源</summary>
         <dl className="summary-list">
@@ -656,8 +709,13 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
           <div><dt>报告 schema</dt><dd>{state.report.schema}</dd></div>
           <div><dt>报告 SHA-256</dt><dd>{state.job.report_sha256 ?? '未记录'}</dd></div>
           <div><dt>输入 SHA-256</dt><dd>{state.job.input_sha256 ?? '未记录'}</dd></div>
-          <div><dt>最大回撤（曲线）</dt><dd>{state.path ? `${state.path.max_drawdown.amount} ${state.path.currency} / ${pathPercent(state.path.max_drawdown.ratio)}` : '不可用'}</dd></div>
         </dl>
+        <p className="muted">原始产物下载（与上面这份报告同一身份）：</p>
+        <div className="artifact-links">
+          <a href={api.artifactUrl(state.job.job_id, 'report.json')}>下载 report.json</a>
+          <a href={api.artifactUrl(state.job.job_id, 'summary.txt')}>下载 summary.txt</a>
+          {state.path && <a href={api.artifactUrl(state.job.job_id, 'equity-path.json')}>下载 equity-path.json</a>}
+        </div>
       </details>
     </>}
   </section>
@@ -790,6 +848,34 @@ function BindScenario({ api, strategy, scenarios, changed, failed }: {
   </section>
 }
 
+/**
+ * The next step of the selected strategy, in one compact strip: the revision that
+ * is open beside the most recent revision that was actually frozen. A draft that
+ * no frozen run covers yet is offered one explicit way to the experiment tab —
+ * that button only opens the tab; it reads no preview and starts no run.
+ */
+function NextStep({ strategy, openExperiments }: {
+  strategy: UserStrategy
+  openExperiments: () => void
+}) {
+  const latest = strategy.experiments.at(-1)
+  const draft = strategy.draft
+  // A preview is still wanted while no created run covers the revision on screen.
+  const covered = strategy.experiments.some(item =>
+    item.status === 'created' && item.payload.draft_revision === draft.revision)
+  const needsPreview = !isIntentDraft(draft) && !covered
+  return <section aria-label="下一步" className="next-step">
+    <dl>
+      <div><dt>当前草稿</dt><dd>{revisionChip(draft)}</dd></div>
+      <div><dt>最近冻结</dt><dd>{latest
+        ? `v${latest.payload.draft_revision} · ${EXPERIMENT_STATUS_LABELS[latest.status]}`
+        : isIntentDraft(draft) ? '尚未绑定场景' : '还没有冻结运行'}</dd></div>
+    </dl>
+    {needsPreview && <button type="button" onClick={openExperiments}>去预览这个草稿</button>}
+    <p className="muted">运行被创建不等于它已经有了可读的报告。</p>
+  </section>
+}
+
 /** A section of the selected strategy: the tab bar and the section it opens. */
 function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
   api: ApiAdapter
@@ -817,6 +903,7 @@ function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
     {isIntentDraft(strategy.draft) && <BindScenario
       api={api} strategy={strategy} scenarios={scenarios}
       changed={changed} failed={failed} />}
+    <NextStep strategy={strategy} openExperiments={() => setTab('experiments')} />
     <DetailTabs active={tab} select={setTab} idBase={idBase} />
     <div className="strategy-tabpanel" role="tabpanel" id={`${idBase}-panel-${tab}`}
       aria-labelledby={`${idBase}-tab-${tab}`} tabIndex={0}>
@@ -877,15 +964,21 @@ function CallEvidence({ call }: { call: UserStrategyCall | undefined }) {
  * The header names the strategy the conversation belongs to and switches between
  * the real strategies of this workspace.
  *
- * Only the history scrolls. The last call's own status, usage and unavailable cost
- * and the composer stay outside the scroller, so the control the user acts on is
- * never somewhere inside a list of past answers.
+ * What the reader meets first is the current turn: the latest recorded call, its
+ * own status and refusal, the prompt it was made with, and the answer that belongs
+ * to that call. An answer of an earlier call is never shown as if it replied to
+ * the latest one — a refusal or an unknown outcome says so, and the earlier
+ * conversation stays whole in its own labelled, bounded, keyboard-scroll history
+ * disclosure. Nothing the user acts on — the proposal, the approval, the composer —
+ * is inside that scroller.
  */
-function ChatPanel({ api, strategy, strategies, changed }: {
+function ChatPanel({ api, strategy, strategies, changed, proposalSlot }: {
   api: ApiAdapter
   strategy: UserStrategy
   strategies: UserStrategy[]
   changed: (strategy: UserStrategy) => void
+  /** The current proposal, mounted between the conversation and the composer. */
+  proposalSlot?: ReactNode
 }) {
   const navigate = useNavigate()
   const [message, setMessage] = useState('')
@@ -895,6 +988,16 @@ function ChatPanel({ api, strategy, strategies, changed }: {
   const latest = strategy.calls.at(-1)
   const unresolved = strategy.calls.some(call =>
     call.status === 'pending' || call.status === 'dispatched')
+  // The turn is the latest call's own messages, matched by its call id: its own
+  // prompt and its own answer, never the earliest thing in the conversation.
+  const turnMessages = latest
+    ? strategy.messages.filter(item => item.call_id === latest.call_id)
+    : []
+  const prompt = turnMessages.filter(item => item.role === 'user').at(-1)
+  const answer = turnMessages.filter(item => item.role === 'model').at(-1)
+  const earlier = latest
+    ? strategy.messages.filter(item => item.call_id !== latest.call_id)
+    : strategy.messages
 
   const ask = async () => {
     if (!approved) {
@@ -937,30 +1040,74 @@ function ChatPanel({ api, strategy, strategies, changed }: {
         </select>
       </label>}
     </header>
-    {strategy.messages.length > 0 &&
-      // The history is the one bounded surface on this page: it scrolls on its
-      // own, by keyboard as well as by pointer, and every message stays in it.
-      <div className="message-scroll" role="group" aria-label="对话记录" tabIndex={0}>
-        <ol className="message-list">
-          {strategy.messages.map(item => <li key={item.message_id} className={`message message-${item.role}`}>
-            <p className="message-role">
-              {item.role === 'model' ? 'QUINE' : '你'}{' '}
-              <time className="muted" dateTime={item.at} title={item.at}>{utcClock(item.at)}</time>
+    {latest && <section aria-label="当前一轮" className="turn">
+      <p className="turn-head">
+        <span className={`status status-${latest.status}`}>{CALL_STATUS_LABELS[latest.status]}</span>
+        <span className="muted">{`草稿修订 ${latest.base_revision} · 调用 ${latest.call_id}`}</span>
+      </p>
+      {/* The prompt that produced this turn, kept behind a disclosure so the answer
+          is what is read first; the exact instant stays on the time element. */}
+      {prompt && <details className="provenance turn-prompt">
+        <summary>{`本轮问题 · ${utcClock(prompt.at)}`}</summary>
+        <p>{prompt.text}</p>
+      </details>}
+      {answer
+        ? <div className="turn-answer">
+            {/* The answer is the longest thing on this page, so it is the bounded
+                surface: it scrolls on its own, by keyboard as well as by pointer,
+                its first lines are what the reader meets, and the whole text stays
+                in it. The inference label and the revision belong outside it. */}
+            <div className="answer-scroll" role="group" aria-label="本轮回答" tabIndex={0}>
+              <p>{answer.text}</p>
+            </div>
+            <p className="muted">模型推断 — 不是正式证据。</p>
+            <p className="muted">
+              {`草稿修订 ${answer.base_revision} · `}
+              <time dateTime={answer.at} title={answer.at}>{utcClock(answer.at)}</time>
             </p>
-            <p>{item.text}</p>
-            {item.role === 'model' && <p className="muted">模型推断 — 不是正式证据。</p>}
-          </li>)}
-        </ol>
-      </div>}
-    {latest && <div className="call-note">
-      <p><span className={`status status-${latest.status}`}>{CALL_STATUS_LABELS[latest.status]}</span></p>
-      <p className="muted">{usageLine(latest)}</p>
-      {latest.cost && !latest.cost.available &&
-        <p className="muted">{`成本不可用：${latest.cost.reason}。`}</p>}
+          </div>
+        // A refusal, an unknown outcome or an unconfigured call answers nothing:
+        // this turn says so rather than showing an older answer as its own.
+        : <p className="muted">这一轮没有被观测到的模型回答；下面历史里的内容属于更早的调用，不是对它的回答。</p>}
       {latest.message && <p className="notice">{latest.message}</p>}
       <CallNextStep call={latest} />
+      {/* Usage, cost and the route are details of this call; an unavailable cost
+          still says so in the summary, so it is never silently dropped. */}
+      <details className="provenance turn-details">
+        <summary>{latest.cost && !latest.cost.available ? '用量、成本与来源 · 成本不可用' : '用量、成本与来源'}</summary>
+        <p className="muted">{usageLine(latest)}</p>
+        {latest.cost
+          ? <p className="muted">{latest.cost.available
+              ? `成本：${latest.cost.amount ?? '金额未记录'}`
+              : `成本不可用：${latest.cost.reason}。`}</p>
+          : <p className="muted">这次调用没有成本记录，因此这里不写任何金额。</p>}
+        <dl className="summary-list">
+          <div><dt>提供方</dt><dd>{latest.route.provider ?? '未记录'}</dd></div>
+          <div><dt>模型</dt><dd>{latest.model ?? latest.route.model ?? '未记录'}</dd></div>
+          <div><dt>端点</dt><dd>{latest.route.endpoint ?? '未记录'}</dd></div>
+          <div><dt>本次批准</dt><dd>{`${latest.approved_budget.max_model_calls} 次模型调用 · ${latest.approved_budget.max_backtests} 次回测`}</dd></div>
+        </dl>
+      </details>
       <CallEvidence call={latest} />
-    </div>}
+    </section>}
+    {earlier.length > 0 &&
+      // The earlier conversation is a bounded surface of its own: it scrolls by
+      // keyboard as well as by pointer, and every earlier message stays in it.
+      <details className="provenance turn-history">
+        <summary>{`更早的对话（${earlier.length}）`}</summary>
+        <div className="message-scroll" role="group" aria-label="对话记录" tabIndex={0}>
+          <ol className="message-list">
+            {earlier.map(item => <li key={item.message_id} className={`message message-${item.role}`}>
+              <p className="message-role">
+                {item.role === 'model' ? 'QUINE' : '你'}{' '}
+                <time className="muted" dateTime={item.at} title={item.at}>{utcClock(item.at)}</time>
+              </p>
+              <p>{item.text}</p>
+              {item.role === 'model' && <p className="muted">模型推断 — 不是正式证据。</p>}
+            </li>)}
+          </ol>
+        </div>
+      </details>}
     {isIntentDraft(strategy.draft) && <p className="notice">
       这条策略还没有绑定场景：这次对话只能澄清这个想法，模型不会提出任何字段修改，也不会运行任何东西。
       绑定场景之后，它的建议才会变成可以应用的修改。
@@ -968,6 +1115,7 @@ function ChatPanel({ api, strategy, strategies, changed }: {
     {unresolved && <p className="notice">
       还有一次已记录的调用没有结论。在它落实之前不会再问下一次，因此不会覆盖任何东西。
     </p>}
+    {proposalSlot}
     <div className="composer">
       <div className="field">
         <label htmlFor="strategy-message">消息</label>
@@ -1133,19 +1281,22 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
     }
   }
 
+  // The application this proposal really wrote, and whether an undo names it. The
+  // proposal record itself is never rewritten — what the ledger says happened is
+  // shown beside it, so a change that was applied and then reversed is not read as
+  // the result the current draft stands on.
+  const application = [...strategy.changes].reverse()
+    .find(item => item.kind === 'apply' && item.proposal_id === proposal.proposal_id)
+  const reversal = application
+    ? strategy.changes.find(item =>
+        item.kind === 'undo' && item.target_operation_id === application.operation_id)
+    : undefined
   const undone = strategy.changes.filter(item => item.kind === 'apply').at(-1)
   const canUndo = Boolean(undone && undone.to_revision === strategy.draft.revision)
   const stale = proposal.stale_paths.length > 0
 
-  return <section aria-label="建议修改" className="strategy-panel proposal-panel">
-    <header className="panel-head">
-      <h2>建议修改</h2>
-      <span className={`chip chip-${proposal.status}`}>{PROPOSAL_STATUS_LABELS[proposal.status]}</span>
-    </header>
-    <p className="muted proposal-origin">
-      {`针对草稿修订 ${proposal.base_revision} · 提案 ${proposal.proposal_id} · ${PROPOSAL_ORIGIN[proposal.status]}`}
-    </p>
-    <CallEvidence call={strategy.calls.find(item => item.call_id === proposal.call_id)} />
+  /** The change itself: every field with both values, its reason and its sources. */
+  const changeDetail = <>
     {stale && <p className="notice error">
       {`这条建议的部分字段是在更早的修订上写的，应用时会被宿主拒绝：${proposal.stale_paths.join(', ')}`}
     </p>}
@@ -1157,39 +1308,73 @@ function ProposalPanel({ api, strategy, proposal, changed, failed }: {
             onChange={event => toggle(item.path, event.target.checked)} />
           <span className="proposal-path">{item.path}</span>
         </label>
-        <p className="change"><span>{item.before ?? '无'} → {item.after}</span></p>
+        {/* Both values are labelled, so the two sides of the change are told apart
+            without relying on position or colour. */}
+        <p className="change"><span className="change-before">{`之前 ${item.before ?? '无'}`}</span><span aria-hidden="true"> → </span><span className="change-after">{`之后 ${item.after}`}</span></p>
         <p className="reason">{item.reason}</p>
-        <p className="muted">{`提议者：${item.proposer}`}</p>
-        {item.evidence.length > 0 && <p className="muted">
-          {`模型引用：${item.evidence.join(', ')} — 这是它自己的声明，不是已验证的事实。`}
-        </p>}
+        <details className="provenance">
+          <summary>来源与标识</summary>
+          <p className="muted">{`提议者：${item.proposer} · 提案 ${proposal.proposal_id} · 调用 ${proposal.call_id}`}</p>
+          {item.evidence.length > 0 && <p className="muted">
+            {`模型引用：${item.evidence.join(', ')} — 这是它自己的声明，不是已验证的事实。`}
+          </p>}
+        </details>
       </li>)}
     </ul>
+    <p className="muted">
+      应用会用整份已校验的草稿写出一个新修订：选中的字段如果无法同时成立，就什么都不会应用。
+      未勾选的字段留在旧建议里。应用只改变草稿——它不调用模型，也不启动回测；下一步是在「实验」里预览这次草稿并确认一次运行。
+    </p>
+    {open && <details className="provenance revise-disclosure">
+      <summary>要求一个不同的修改（需要一次新的批准）</summary>
+      <div className="revise">
+        <div className="field">
+          <label htmlFor={`${proposal.proposal_id}-revise`}>要求一个不同的修改</label>
+          <textarea id={`${proposal.proposal_id}-revise`} rows={2} maxLength={4000}
+            value={reviseMessage} onChange={event => setReviseMessage(event.target.value)} />
+        </div>
+        <label className="check" htmlFor={`${proposal.proposal_id}-revise-approve`}>
+          <input id={`${proposal.proposal_id}-revise-approve`} type="checkbox" checked={reviseApproved}
+            onChange={event => { setReviseApproved(event.target.checked); failed('') }} />
+          为这个修订批准一次模型调用
+        </label>
+        <button type="button" onClick={revise} disabled={busy}>修改这条建议</button>
+        <p className="muted">
+          修改会把当前建议留作历史，并在当前修订上用这一次已批准的调用重新询问模型。
+        </p>
+      </div>
+    </details>}
+  </>
+
+  return <section aria-label="建议修改" className="strategy-panel proposal-panel">
+    <header className="panel-head">
+      <h2>建议修改</h2>
+      <span className={`chip chip-${proposal.status}`}>{PROPOSAL_STATUS_LABELS[proposal.status]}</span>
+      {/* The ledger's own word for what became of this application, beside the
+          proposal's recorded status rather than in place of it. */}
+      {reversal && <span className="chip chip-undo">已撤销</span>}
+    </header>
+    <p className="muted proposal-origin">
+      {`针对草稿修订 ${proposal.base_revision} · 提案 ${proposal.proposal_id} · ${PROPOSAL_ORIGIN[proposal.status]}`}
+    </p>
+    {reversal && <p className="muted proposal-undone">
+      {`修改记录显示：这次应用已在修订 ${reversal.from_revision} → ${reversal.to_revision} 上被撤销，当前草稿不是它的结果。`}
+    </p>}
+    <CallEvidence call={strategy.calls.find(item => item.call_id === proposal.call_id)} />
+    {/* An open proposal is waiting for a decision, so it is what the reader meets.
+        A closed one is history: its changes, sources and prose are one disclosure,
+        and its controls stay outside it. */}
+    {open
+      ? changeDetail
+      : <details className="provenance proposal-closed">
+          <summary>{`${PROPOSAL_STATUS_LABELS[proposal.status]}的修改与来源（${proposal.items.length} 个字段）`}</summary>
+          {changeDetail}
+        </details>}
     <div className="actions">
       <button type="button" className="primary" onClick={apply} disabled={busy || !open}>应用所选</button>
       <button type="button" onClick={reject} disabled={busy || !open}>拒绝建议</button>
       <button type="button" onClick={undo} disabled={busy || !canUndo}>撤销最近一次修改</button>
     </div>
-    <p className="muted">
-      应用会用整份已校验的草稿写出一个新修订：选中的字段如果无法同时成立，就什么都不会应用。
-      未勾选的字段留在旧建议里。应用本身不是运行——它不调用模型，也不启动回测。
-    </p>
-    {open && <div className="revise">
-      <div className="field">
-        <label htmlFor={`${proposal.proposal_id}-revise`}>要求一个不同的修改</label>
-        <textarea id={`${proposal.proposal_id}-revise`} rows={2} maxLength={4000}
-          value={reviseMessage} onChange={event => setReviseMessage(event.target.value)} />
-      </div>
-      <label className="check" htmlFor={`${proposal.proposal_id}-revise-approve`}>
-        <input id={`${proposal.proposal_id}-revise-approve`} type="checkbox" checked={reviseApproved}
-          onChange={event => { setReviseApproved(event.target.checked); failed('') }} />
-        为这个修订批准一次模型调用
-      </label>
-      <button type="button" onClick={revise} disabled={busy}>修改这条建议</button>
-      <p className="muted">
-        修改会把当前建议留作历史，并在当前修订上用这一次已批准的调用重新询问模型。
-      </p>
-    </div>}
   </section>
 }
 
@@ -1236,6 +1421,16 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
   const live = preview && preview.draft_revision === strategy.draft.revision ? preview : null
   const cancellable = phase === 'reading' || preview !== null
   const hasRun = strategy.experiments.some(item => item.status === 'created')
+  // A repeat is only ever read from the admitted engine input: the preview's own
+  // nonempty input digest against the digest a created experiment froze. Equal
+  // digests mean this confirmation would repeat the same engine input; they are
+  // not read as equivalence from the parameters, and nothing is disabled for it —
+  // a deliberate reproduction is still the user's decision.
+  const duplicate = live && live.input_sha256
+    ? strategy.experiments.find(item =>
+        item.status === 'created' && Boolean(item.payload.input_sha256)
+        && item.payload.input_sha256 === live.input_sha256)
+    : undefined
 
   const readPreview = async () => {
     const read = api.previewUserStrategyExperiment
@@ -1362,6 +1557,10 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
         {`${RUN_APPROVAL.max_model_calls} 次模型调用 · ${RUN_APPROVAL.max_backtests} 次回测`}
       </dd></div>
     </dl>}
+    {duplicate && <p className="notice" role="status">
+      {`这次预览的引擎输入与已确认的冻结运行 ${duplicate.launch_intent_id}（修订 ${duplicate.payload.draft_revision}）完全相同：`
+        + '确认它会重复同一个引擎输入，不构成新的证据。是否重跑仍由你决定——这里不会自动取消或禁用它。'}
+    </p>}
     {strategy.experiments.length > 0 && <ul className="experiment-list">
       {strategy.experiments.map(item => <li key={item.launch_intent_id}>
         {item.status === 'created'
@@ -1390,12 +1589,60 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
 }
 
 /**
+ * One row's run cell: the real state of the job the latest created experiment
+ * dispatched, read from the job itself on mount and whenever the job id changes.
+ * The read is guarded, so an answer that arrives after the row moved on writes
+ * nothing; there is no polling, and a job id that does not match the one asked
+ * for is refused rather than shown as this row's run. A job this page cannot read
+ * says so and still links to the run's own page.
+ */
+function JobStatusCell({ api, jobId }: { api: ApiAdapter; jobId: string }) {
+  type JobRead =
+    | { kind: 'reading' }
+    | { kind: 'ready'; job: BacktestJob }
+    | { kind: 'unavailable'; note: string }
+  // Kept with the job it was read for: while another job is being read the cell
+  // shows that job's own load, never the previous job's status.
+  const [loaded, setLoaded] = useState<{ key: string; read: JobRead } | null>(null)
+  const state: JobRead = loaded && loaded.key === jobId ? loaded.read : { kind: 'reading' }
+
+  useEffect(() => {
+    let active = true
+    api.getBacktest(jobId).then(job => {
+      if (!active) return
+      setLoaded({ key: jobId, read: job.job_id === jobId
+        ? { kind: 'ready', job }
+        : { kind: 'unavailable', note: '读取到的任务与这条运行不一致' } })
+    }).catch(() => {
+      if (active) setLoaded({ key: jobId, read: { kind: 'unavailable', note: '运行状态不可读' } })
+    })
+    return () => { active = false }
+  }, [api, jobId])
+
+  if (state.kind === 'reading') return <span className="table-muted">正在读取运行状态…</span>
+  const link = <Link to={`/backtests/${encodeURIComponent(jobId)}`}>
+    {state.kind === 'ready'
+      ? `${JOB_STATUS_LABELS[state.job.status]}${state.job.status === 'succeeded'
+          ? state.job.report_ready ? ' · 报告可读' : ' · 报告不可读'
+          : ''}`
+      : '打开运行'}
+  </Link>
+  return state.kind === 'ready'
+    ? link
+    : <span className="table-muted">{`${state.note} · `}{link}</span>
+}
+
+/**
  * The workspace's strategy table: one compact row per strategy, in the columns the
  * decision is actually made in. The frozen evidence of a row is the revision its
- * latest confirmed experiment ran, and the run column is the state of that launch —
- * never a claim that a started run succeeded.
+ * latest confirmed experiment ran; the run column is that launch's own job, read
+ * from the job itself — never a claim that a created dispatch succeeded.
  */
-function StrategyTable({ strategies, selectedId }: { strategies: UserStrategy[]; selectedId?: string }) {
+function StrategyTable({ api, strategies, selectedId }: {
+  api: ApiAdapter
+  strategies: UserStrategy[]
+  selectedId?: string
+}) {
   return <nav aria-label="策略列表" className="strategy-list">
     {strategies.length === 0
       ? <p className="strategy-empty">还没有策略。</p>
@@ -1426,13 +1673,35 @@ function StrategyTable({ strategies, selectedId }: { strategies: UserStrategy[];
                 <td data-label="运行">{!latest
                   ? <span className="table-muted">{unbound ? '不可运行' : '未启动'}</span>
                   : latest.status === 'created' && latest.job_id
-                    ? <Link to={`/backtests/${encodeURIComponent(latest.job_id)}`}>{EXPERIMENT_STATUS_LABELS.created}</Link>
+                    ? <JobStatusCell key={latest.job_id} api={api} jobId={latest.job_id} />
                     : <span className="table-muted">{EXPERIMENT_STATUS_LABELS[latest.status]}</span>}</td>
               </tr>
             })}
           </tbody>
         </table>}
   </nav>
+}
+
+/**
+ * The way back into the work that moved most recently, on the collection route
+ * only. It names the strategy, its revision and the state of its latest frozen
+ * attempt, and it is a link — nothing redirects on its own and no approval of one
+ * strategy is carried to another.
+ */
+function Continuation({ strategies }: { strategies: UserStrategy[] }) {
+  const latest = strategies.reduce((best, item) => item.updated_at > best.updated_at ? item : best)
+  const experiment = latest.experiments.at(-1)
+  const frozen = experiment
+    ? `最近冻结 v${experiment.payload.draft_revision} · ${EXPERIMENT_STATUS_LABELS[experiment.status]}`
+    : isIntentDraft(latest.draft) ? '尚未绑定场景' : '还没有冻结运行'
+  return <section aria-label="继续最近的策略" className="continuation">
+    <Link className="continuation-link"
+      to={`/strategies/${encodeURIComponent(latest.user_strategy_id)}`}>
+      {`继续最近更新的策略：${latest.name}`}
+    </Link>
+    <span className="muted">{`${revisionChip(latest.draft)} · ${frozen}`}</span>
+    <p className="muted">点开它继续这条策略的下一步。</p>
+  </section>
 }
 
 /** The workspace itself: the table, the selected strategy and its AI column. */
@@ -1602,8 +1871,12 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
       <p className="strategy-subtitle">每个想法一份草稿。在你确认之前，这里不会运行任何东西。</p>
       {listState === 'reading'
         ? <p className="muted" role="status" aria-live="polite">正在读取策略…</p>
-        : listState === 'ready' && <StrategyTable strategies={strategies} selectedId={userStrategyId} />}
+        : listState === 'ready' && <StrategyTable api={api} strategies={strategies} selectedId={userStrategyId} />}
       {listNote && <p role="alert" className="notice error">{listNote}</p>}
+      {/* The collection route offers a way back into the work that moved last; it
+          is a link the reader chooses, not a redirect. */}
+      {!userStrategyId && listState === 'ready' && strategies.length > 0 &&
+        <Continuation strategies={strategies} />}
       {showCreate && <CreateStrategy api={api} created={created} value={createDraft} update={setCreateDraft} />}
       {detailNote && detailNote.id === userStrategyId &&
         <p role="alert" className="notice error">{detailNote.text}</p>}
@@ -1621,16 +1894,22 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
       {current
         ? <ChatPanel
             key={`${current.user_strategy_id}-${current.draft.revision}`}
-            api={api} strategy={current} strategies={strategies} changed={changed} />
+            api={api} strategy={current} strategies={strategies} changed={changed}
+            // The proposal sits in the AI column between the conversation and the
+            // composer: explanation, then the current change, then the way to ask
+            // again. It is keyed per proposal and revision, so no stale selection,
+            // approval or undo target is carried across a change.
+            proposalSlot={proposal
+              ? <ProposalPanel
+                  key={`${current.user_strategy_id}-${proposal.proposal_id}-${proposal.base_revision}-${proposal.status}`}
+                  api={api} strategy={current} proposal={proposal}
+                  changed={changed} failed={failedFor(current.user_strategy_id)} />
+              : null} />
         : detailReading
           ? <EmptyChat note="正在读取这条策略的对话…" live />
           : detailFailed
             ? <EmptyChat note="这条策略没有被读到，因此这里没有对话。" />
             : <EmptyChat />}
-      {current && proposal && <ProposalPanel
-        key={`${current.user_strategy_id}-${proposal.proposal_id}-${proposal.base_revision}-${proposal.status}`}
-        api={api} strategy={current} proposal={proposal}
-        changed={changed} failed={failedFor(current.user_strategy_id)} />}
     </aside>
   </div>
 }
