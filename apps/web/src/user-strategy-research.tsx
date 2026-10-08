@@ -29,6 +29,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport } from './app'
 import { exactDelta } from './decimal'
+import { evidenceAddress, readEvidenceSelection, selectableRuns, selectedRuns } from './evidence-selection'
 import {
   UserStrategyRequestError,
   type ApprovedBudget,
@@ -57,21 +58,6 @@ const reason = (error: unknown) => {
   }
   return error instanceof Error ? error.message : '这次请求失败了，什么都没有发送。'
 }
-
-/** The two query parameters a verified report or comparison carries back here. */
-const EVIDENCE_A = 'evidence_a'
-const EVIDENCE_B = 'evidence_b'
-
-/**
- * What the address asks this panel to explain: the default selection it has always
- * had (the latest run as A, no B), the runs it names, or a refusal. An address that
- * names something unverifiable is never quietly repaired into a pair that happens
- * to be valid, and nothing is explained or sent from it.
- */
-type Selection =
-  | { kind: 'default' }
-  | { kind: 'explicit'; a: UserStrategyExperiment; b: UserStrategyExperiment | null }
-  | { kind: 'invalid'; note: string }
 
 /** One amount as a report states it: the unit is optional in the wire type. */
 type Amount = { amount: string; currency?: string }
@@ -282,56 +268,22 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
   // Only this strategy's own created runs can be selected: a run with no job, a
   // failed launch or another strategy's run is not evidence this conversation may
   // be grounded in, and the host refuses it rather than explaining it.
-  const runs = useMemo(
-    () => strategy.experiments.filter(item => item.status === 'created' && item.job_id),
-    [strategy],
-  )
+  const runs = useMemo(() => selectableRuns(strategy), [strategy])
 
   // The address is the selection, and it is the only copy of it: a return link from
   // a report or a comparison, a refresh, the browser's own back and forward and a
   // remount of this tab all read these same two parameters, and choosing a run
   // writes them back. Nothing is remembered beside them, so this panel can never
-  // show a selection the address does not state.
-  const selection = useMemo<Selection>(() => {
-    const aParams = searchParams.getAll(EVIDENCE_A)
-    const bParams = searchParams.getAll(EVIDENCE_B)
-    // The address this panel has always accepted: nothing named, so nothing is
-    // claimed — A is the latest frozen run and B is absent.
-    if (!aParams.length && !bParams.length) return { kind: 'default' }
-    const invalid = (note: string): Selection => ({ kind: 'invalid', note })
-    if (aParams.length > 1 || bParams.length > 1) {
-      return invalid('同一个参数在地址里出现了多次，无法确定要解释哪一次运行。')
-    }
-    const aId = aParams[0] ?? ''
-    const bId = bParams[0] ?? ''
-    if (!aId) return invalid('A 是空的：空值不是一次运行。')
-    if (bParams.length && !bId) return invalid('B 是空的：空值不是一次运行。')
-    // Exactly one created record of this strategy per id, or the id is not the run it
-    // claims to be. An unknown, foreign or ambiguous id is refused here and refused
-    // again by the host, which never falls back to a run of its own choosing.
-    const own = (id: string) => runs.filter(item => item.job_id === id)
-    const aMatches = own(aId)
-    if (aMatches.length !== 1) {
-      return invalid(`A 指定的运行（${aId}）不是这条策略自己唯一的一次冻结运行。`)
-    }
-    if (!bParams.length) return { kind: 'explicit', a: aMatches[0], b: null }
-    if (bId === aId) return invalid('A 和 B 是同一次运行：一次运行不能与它自己比较。')
-    const bMatches = own(bId)
-    if (bMatches.length !== 1) {
-      return invalid(`B 指定的运行（${bId}）不是这条策略自己唯一的一次冻结运行。`)
-    }
-    return { kind: 'explicit', a: aMatches[0], b: bMatches[0] }
-  }, [searchParams, runs])
+  // show a selection the address does not state — and the report card above reads
+  // that same address through the same rules, so the two cannot disagree.
+  const selection = useMemo(() => readEvidenceSelection(searchParams, runs), [searchParams, runs])
 
   const invalid = selection.kind === 'invalid'
   // A plain strategy address keeps the selection this panel has always had — the
   // latest frozen run as A, and no B — while an address that names runs is used
   // exactly as it is written, A first. An address this panel could not verify has
   // no selection at all: it reads nothing, not even the latest run as a fallback.
-  const aRun = selection.kind === 'explicit'
-    ? selection.a
-    : selection.kind === 'default' ? runs.at(-1) ?? null : null
-  const bRun = selection.kind === 'explicit' ? selection.b : null
+  const { a: aRun, b: bRun } = selectedRuns(selection, runs)
   const aState = useRunRead(api, aRun?.job_id ?? null)
   const bState = useRunRead(api, bRun?.job_id ?? null)
   // Both actions are a request about these runs, so neither is available while a
@@ -401,24 +353,16 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
   // approval given for the old selection is retired here rather than kept beside it,
   // and unrelated parameters already in the address stay where they are.
   const choose = (nextA: UserStrategyExperiment | null, nextB: UserStrategyExperiment | null) => {
-    const params = new URLSearchParams(searchParams)
-    params.delete(EVIDENCE_A)
-    params.delete(EVIDENCE_B)
-    if (nextA) params.set(EVIDENCE_A, nextA.job_id ?? '')
-    if (nextB) params.set(EVIDENCE_B, nextB.job_id ?? '')
     setApprovedFor(null)
-    setSearchParams(params)
+    setSearchParams(evidenceAddress(searchParams, nextA, nextB))
   }
 
   // The correction for an address that cannot be verified: it removes exactly the
   // selection this panel could not check and keeps everything else, leaving the
   // default selection in its place rather than a pair the panel guessed at.
   const clearSelection = () => {
-    const params = new URLSearchParams(searchParams)
-    params.delete(EVIDENCE_A)
-    params.delete(EVIDENCE_B)
     setApprovedFor(null)
-    setSearchParams(params, { replace: true })
+    setSearchParams(evidenceAddress(searchParams, null, null), { replace: true })
   }
 
   const send = async (kind: 'explain' | 'next') => {

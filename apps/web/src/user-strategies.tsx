@@ -17,14 +17,18 @@
  *
  * The evidence section reads the run's own job, report and equity path through the
  * existing ApiAdapter and refuses to show a report whose identity does not match
- * the run it was read for. Nothing here computes a metric the engine did not write.
+ * the run it was read for. Which run it is about is the address's own selection —
+ * the same one the research panel below reads — so the top card and that panel can
+ * never be about two different runs. Nothing here computes a metric the engine did
+ * not write.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ScenarioSummary } from './app'
 import type { ReportCriterion } from './research-api'
 import { EquityCurve, pathPercent, type EquityPath } from './equity-path'
 import { exactDelta } from './decimal'
+import { evidenceAddress, readEvidenceSelection, selectableRuns, selectedRuns } from './evidence-selection'
 import {
   UserStrategyRequestError,
   isIntentDraft,
@@ -578,12 +582,15 @@ function EvidenceMetrics({ report }: { report: BacktestReport }) {
  * said out loud rather than replaced by a figure this page would have to invent.
  */
 function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStrategy }) {
-  const runs = useMemo(
-    () => strategy.experiments.filter(item => item.status === 'created' && item.job_id),
-    [strategy],
-  )
-  const [intent, setIntent] = useState(runs.at(-1)?.launch_intent_id ?? '')
-  const experiment = runs.find(item => item.launch_intent_id === intent) ?? runs.at(-1)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const runs = useMemo(() => selectableRuns(strategy), [strategy])
+  // This card and the research panel below are two views of one selection, so both
+  // read the address instead of keeping a choice of their own: the run a return link
+  // names is the run shown here, a plain address is the latest frozen run, and an
+  // address that cannot be verified shows no run at all rather than the latest one.
+  const selection = useMemo(() => readEvidenceSelection(searchParams, runs), [searchParams, runs])
+  const invalid = selection.kind === 'invalid'
+  const { a: experiment, b: selectedB } = selectedRuns(selection, runs)
   const jobId = experiment?.job_id ?? null
   // What was read is kept with the run it was read for. Nothing of another run is
   // ever shown as this one's — not even for the moment a new read is in flight —
@@ -673,21 +680,33 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
 
   return <section aria-label="证据" className="strategy-panel strategy-evidence">
     <header className="panel-head">
-      <h2>证据</h2>
-      {runs.length > 1 && <label className="inline-field">冻结运行
-        <select aria-label="选择冻结运行" value={intent} onChange={event => setIntent(event.target.value)}>
+      <h2>运行 A · 正式报告</h2>
+      {!invalid && runs.length > 1 && <label className="inline-field">运行 A
+        <select aria-label="选择冻结运行 A" value={experiment?.launch_intent_id ?? ''}
+          onChange={event => {
+            const nextA = runs.find(item => item.launch_intent_id === event.target.value)
+            if (!nextA) return
+            // Choosing here is choosing A for both surfaces: the address is the
+            // selection, so the research panel below follows this choice, a B that is
+            // a different run stays, and a B that is the run chosen as A is dropped.
+            setSearchParams(evidenceAddress(searchParams, nextA, selectedB))
+          }}>
           {runs.map(item => <option key={item.launch_intent_id} value={item.launch_intent_id}>
             {`修订 ${item.payload.draft_revision} · ${item.launch_intent_id}`}
           </option>)}
         </select>
       </label>}
     </header>
-    {state.kind === 'empty' && <p className="muted">
+    {invalid && <p className="notice error">
+      地址里的证据选择无法核对，这里不显示任何运行或报告。
+      {!isIntentDraft(strategy.draft) && '可在下方「证据对比」里清除这个选择后重新选择。'}
+    </p>}
+    {!invalid && state.kind === 'empty' && <p className="muted">
       还没有冻结运行。在「实验」里确认一次实验之后，这里会显示那次运行自己的正式报告——只有运行成功，报告才存在。
     </p>}
-    {state.kind === 'loading' && <p className="muted">正在读取该运行的状态与正式报告……</p>}
-    {state.kind === 'unavailable' && <p className="notice error">{state.note}</p>}
-    {state.kind === 'ready' && <>
+    {!invalid && state.kind === 'loading' && <p className="muted">正在读取该运行的状态与正式报告……</p>}
+    {!invalid && state.kind === 'unavailable' && <p className="notice error">{state.note}</p>}
+    {!invalid && state.kind === 'ready' && <>
       <p className="evidence-origin">
         <span className="chip">事实 · 引擎</span>
         <span className="muted">{`正式报告由引擎产出，不是模型输出 · 运行状态 ${state.job.status}`}</span>

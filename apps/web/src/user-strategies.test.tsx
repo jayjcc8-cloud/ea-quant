@@ -2019,3 +2019,296 @@ describe('proposal action feedback', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 })
+
+/**
+ * One selection, two surfaces.
+ *
+ * The report card at the top of the 证据 tab and the research panel below it are
+ * about the same frozen run. The address is what they share: a return link from a
+ * run's own report names that run, so the card shows that run's report — never the
+ * latest one — and the research panel is grounded in that same run. Choosing on
+ * either surface writes the address the other reads, an approval belongs to the
+ * selection it was given for, and an address that names no run of this strategy
+ * shows no report at all rather than the latest run's.
+ *
+ * Every job, report and figure below is a hand-written fixture: no engine result,
+ * no model answer, and no run started by any of these tests.
+ */
+describe('shared evidence selection', () => {
+  const OLD_JOB = 'job-1'
+  const NEW_JOB = 'job-2'
+  const LAST_JOB = 'job-3'
+
+  /** What the address says now, read as parameters rather than as one string. */
+  const address = () => new URLSearchParams(window.location.search)
+
+  /** One run's own formal report. The figures differ per run, so a card is readable. */
+  function figures(runId: string, equity: string, netPnl: string, totalReturn: string) {
+    return {
+      schema: 'ea.backtest-report.v1' as const,
+      run_id: runId,
+      economics: {
+        ending_cash: [{ amount: equity, currency: 'USD' }],
+        ending_positions: [],
+        valuation: { price: '1', position_value: '0' },
+        equity: { amount: equity, currency: 'USD' },
+        net_pnl: { amount: netPnl, currency: 'USD' },
+        total_return: { value: totalReturn },
+        counts: { orders: 1, fills: 1 },
+        execution: { order: null, fill: null },
+      },
+    }
+  }
+
+  /** One succeeded job, whose own report is the report read back for it. */
+  function succeeded(jobId: string, engineRunId: string, sha: string): BacktestJob {
+    return {
+      schema: 'ea.local-web-job.v5', job_id: jobId, request_id: `request-${jobId}`,
+      scenario_id: 'bounded-long.yaml',
+      input_identity: { scenario_sha256: 'b'.repeat(64), data_sha256: 'a'.repeat(64), record_count: 4 },
+      status: 'succeeded', engine_run_id: engineRunId, report_sha256: sha, summary_sha256: null,
+      error_code: null, message: null, report_ready: true,
+    }
+  }
+
+  const JOBS: Record<string, BacktestJob> = {
+    [OLD_JOB]: succeeded(OLD_JOB, 'run-1', 'd'.repeat(64)),
+    [NEW_JOB]: succeeded(NEW_JOB, 'run-2', 'e'.repeat(64)),
+    [LAST_JOB]: succeeded(LAST_JOB, 'run-3', 'f'.repeat(64)),
+  }
+  const REPORTS = {
+    [OLD_JOB]: figures('run-1', '10020.25', '20.25', '0.2025'),
+    [NEW_JOB]: figures('run-2', '10012.5', '12.5', '0.125'),
+    [LAST_JOB]: figures('run-3', '10005.75', '5.75', '0.0575'),
+  }
+
+  /** One created experiment: the dispatch exists, and its run is its own job. */
+  function frozenRun(
+    launchIntentId: string,
+    jobId: string,
+    revision: number,
+    quantity: string,
+    at: string,
+  ) {
+    return {
+      launch_intent_id: launchIntentId, request_id: `request-${jobId}`, payload_sha256: 'f'.repeat(64),
+      payload: {
+        draft_revision: revision, scenario_id: 'bounded-long.yaml',
+        parameters: { target_quantity: quantity, entry_delay_bars: 0 },
+      },
+      task_id: `task-${jobId}`, job_id: jobId, status: 'created' as const, created_at: at,
+    }
+  }
+
+  /** One strategy with an older run, a newer one, and the latest one. */
+  function frozenRuns(): UserStrategy {
+    return strategy({
+      experiments: [
+        frozenRun('li-1', OLD_JOB, 1, '2', '2026-10-06T10:02:00.000000Z'),
+        frozenRun('li-2', NEW_JOB, 2, '3', '2026-10-06T10:03:00.000000Z'),
+        frozenRun('li-3', LAST_JOB, 3, '4', '2026-10-06T10:04:00.000000Z'),
+      ],
+    })
+  }
+
+  /** The workspace over those runs, with both surfaces reading the same jobs. */
+  function wired() {
+    const value = frozenRuns()
+    const { api, calls } = scripted({ strategies: [value], current: () => value })
+    api.getBacktest = async jobId => {
+      const job = JOBS[jobId]
+      if (!job) throw new Error(`this fixture has no run ${jobId}`)
+      return job
+    }
+    api.getReport = async jobId => {
+      const report = REPORTS[jobId as keyof typeof REPORTS]
+      if (!report) throw new Error(`this fixture has no report for ${jobId}`)
+      return report
+    }
+    return { api, calls }
+  }
+
+  /** Opening the workspace at an address, the way a return link leaves one behind. */
+  function openedAt(api: ApiAdapter, search: string) {
+    window.history.pushState({}, '', `/strategies/us-1${search}`)
+    render(<App api={api} />)
+  }
+
+  it('opens the run the address names, on the card and in the research panel', async () => {
+    const { api, calls } = wired()
+    // The address a return link from the older run's own report leaves behind.
+    openedAt(api, `?evidence_a=${OLD_JOB}`)
+
+    const card = await screen.findByRole('region', { name: '证据' })
+    const research = await screen.findByRole('region', { name: '证据对比' })
+
+    // The card is the older run's own report: its figures and its job, never the
+    // latest run's.
+    expect(await within(card).findByText('20.25 USD')).toBeTruthy()
+    expect(within(card).getByText('10020.25 USD')).toBeTruthy()
+    expect(within(card).queryByText('5.75 USD')).toBeNull()
+    expect(within(card).getByText(OLD_JOB)).toBeTruthy()
+    // The card keeps its convenient selector, and that selector is A — the same
+    // choice the research panel below calls A, named as such on the card.
+    const selector = within(card).getByRole('combobox') as HTMLSelectElement
+    expect(selector.value).toBe('li-1')
+    expect(within(card).getByRole('combobox', { name: /A/ })).toBe(selector)
+    // The panel is grounded in the same run: A first, and no B.
+    expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
+    expect((within(research).getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
+    expect(within(research).getByText(/修订 1 · 确认 li-1 · 运行 job-1/)).toBeTruthy()
+    // Two surfaces of one selection still ask nothing and start nothing.
+    expect(calls.ask).toBe(0)
+    expect(calls.launch).toBe(0)
+    expect(launched).toEqual([])
+  })
+
+  it('keeps the same A across a reload and across back and forward', async () => {
+    const { api } = wired()
+    openedAt(api, `?evidence_a=${OLD_JOB}`)
+    let card = await screen.findByRole('region', { name: '证据' })
+    let research = await screen.findByRole('region', { name: '证据对比' })
+    expect(await within(card).findByText('20.25 USD')).toBeTruthy()
+    expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
+
+    // A fresh load over the same address reads the same run: nothing here is
+    // remembered from the visit before.
+    cleanup()
+    render(<App api={api} />)
+    card = await screen.findByRole('region', { name: '证据' })
+    research = await screen.findByRole('region', { name: '证据对比' })
+    expect(await within(card).findByText('20.25 USD')).toBeTruthy()
+    expect((within(card).getByRole('combobox') as HTMLSelectElement).value).toBe('li-1')
+    expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
+
+    // The browser's own move to a newer run and back to this one: the card and the
+    // panel travel together, because both read the address rather than a memory.
+    window.history.pushState({ key: 'shared-newer' }, '', `/strategies/us-1?evidence_a=${NEW_JOB}`)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() => expect((within(card).getByRole('combobox') as HTMLSelectElement).value).toBe('li-2'))
+    await waitFor(() => expect(within(card).getByText('12.5 USD')).toBeTruthy())
+    expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
+
+    window.history.pushState({ key: 'shared-older' }, '', `/strategies/us-1?evidence_a=${OLD_JOB}`)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() => expect((within(card).getByRole('combobox') as HTMLSelectElement).value).toBe('li-1'))
+    await waitFor(() => expect(within(card).getByText('20.25 USD')).toBeTruthy())
+    expect(within(card).queryByText('12.5 USD')).toBeNull()
+    expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
+  })
+
+  it('makes the card selector and the research chooser one choice in the address', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = wired()
+    // An unrelated parameter already in the address is none of this selection's
+    // business and stays where it is.
+    openedAt(api, `?evidence_a=${OLD_JOB}&view=x`)
+    const card = await screen.findByRole('region', { name: '证据' })
+    const research = await screen.findByRole('region', { name: '证据对比' })
+    await within(card).findByText('20.25 USD')
+
+    // Choosing on the card is choosing A: the address says so, and the panel below is
+    // grounded in the run that was chosen.
+    await user.selectOptions(within(card).getByRole('combobox'), 'li-3')
+    await waitFor(() => expect(address().get('evidence_a')).toBe(LAST_JOB))
+    await waitFor(() => expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-3'))
+    await waitFor(() => expect(within(card).getByText('5.75 USD')).toBeTruthy())
+    expect(address().get('view')).toBe('x')
+
+    // And the other way round: the chooser is the same choice, not a second copy of it.
+    await user.selectOptions(within(research).getByLabelText('运行 A'), 'li-2')
+    await waitFor(() => expect(address().get('evidence_a')).toBe(NEW_JOB))
+    await waitFor(() => expect((within(card).getByRole('combobox') as HTMLSelectElement).value).toBe('li-2'))
+    await waitFor(() => expect(within(card).getByText('12.5 USD')).toBeTruthy())
+    expect(address().get('view')).toBe('x')
+    // Selecting a run reads that run: it asks the model nothing and starts nothing.
+    expect(calls.ask).toBe(0)
+    expect(calls.launch).toBe(0)
+  })
+
+  it('retires the approval and keeps or drops B when the card changes A', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = wired()
+    // The older run as A and the latest as B: both are this strategy's own runs, and
+    // the comparison link names them in that order.
+    openedAt(api, `?evidence_a=${OLD_JOB}&evidence_b=${LAST_JOB}`)
+    const card = await screen.findByRole('region', { name: '证据' })
+    const research = await screen.findByRole('region', { name: '证据对比' })
+    await within(card).findByText('20.25 USD')
+    expect((within(research).getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-3')
+    expect(within(research).getByRole('link', { name: '在既有比较页面打开这两次运行' }).getAttribute('href'))
+      .toBe(`/backtests/compare/${OLD_JOB}/${LAST_JOB}`)
+
+    // An approval given for exactly this pair, with nothing asked yet.
+    const approve = () => within(research).getByLabelText('批准一次模型调用') as HTMLInputElement
+    const explain = () => within(research).getByRole('button', { name: '解释所选证据' }) as HTMLButtonElement
+    await waitFor(() => expect(approve().disabled).toBe(false))
+    await user.click(approve())
+    await waitFor(() => expect(explain().disabled).toBe(false))
+
+    // The card chooses another A. The B it is not naming is still a different, valid
+    // run, so it stays; the approval belonged to the pair that was on screen.
+    await user.selectOptions(within(card).getByRole('combobox'), 'li-2')
+    await waitFor(() => expect(address().get('evidence_a')).toBe(NEW_JOB))
+    await waitFor(() => expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2'))
+    expect(address().get('evidence_b')).toBe(LAST_JOB)
+    expect((within(research).getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-3')
+    expect(approve().checked).toBe(false)
+    expect(explain().disabled).toBe(true)
+    expect(calls.ask).toBe(0)
+
+    // Choosing the run that is already B as A drops B: one run cannot be both sides.
+    await user.selectOptions(within(card).getByRole('combobox'), 'li-3')
+    await waitFor(() => expect(address().get('evidence_a')).toBe(LAST_JOB))
+    await waitFor(() => expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-3'))
+    expect(address().get('evidence_b')).toBeNull()
+    expect((within(research).getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
+    expect(calls.ask).toBe(0)
+    expect(calls.launch).toBe(0)
+  })
+
+  it('shows no fallback report when the address names no run of this strategy', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = wired()
+    // A run that is not this strategy's own — not the latest one, not any of them.
+    openedAt(api, '?evidence_a=job-elsewhere')
+
+    const card = await screen.findByRole('region', { name: '证据' })
+    const research = await screen.findByRole('region', { name: '证据对比' })
+    expect(within(research).getByRole('alert').textContent).toContain('无效的证据选择')
+    expect(within(research).queryByLabelText('运行 A')).toBeNull()
+    // The card does not quietly become the latest run's report, and it names no run
+    // it was not asked about.
+    expect(within(card).queryByText(/USD/)).toBeNull()
+    expect(card.textContent).not.toMatch(/job-\d/)
+    expect(calls.ask).toBe(0)
+
+    // Clearing the refused selection is the way out: both surfaces fall back to the
+    // plain default — the latest run as A, and no B.
+    await user.click(within(research).getByRole('button', { name: '清除无效的证据选择' }))
+    await waitFor(() => expect(address().get('evidence_a')).toBeNull())
+    await waitFor(() => expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-3'))
+    await waitFor(() => expect(within(card).getByText('5.75 USD')).toBeTruthy())
+    expect(within(card).getByText(LAST_JOB)).toBeTruthy()
+  })
+
+  it('refuses a report of another run on the card the address names', async () => {
+    const { api } = wired()
+    // The address names the older run, and the report read back for it belongs to a
+    // different run: it is not that run's result, and no surface may show it as one.
+    api.getReport = async jobId => jobId === OLD_JOB
+      ? figures('run-2', '10020.25', '20.25', '0.2025')
+      : REPORTS[jobId as keyof typeof REPORTS]
+    openedAt(api, `?evidence_a=${OLD_JOB}`)
+
+    const card = await screen.findByRole('region', { name: '证据' })
+    const research = await screen.findByRole('region', { name: '证据对比' })
+    expect(await within(card).findByText(/报告的身份与该运行的 engine run id 不一致/)).toBeTruthy()
+    expect(within(card).queryByText(/USD/)).toBeNull()
+    // The panel is grounded in the same run, and that run has no readable report: its
+    // approval cannot be armed from one.
+    expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
+    expect((within(research).getByLabelText('批准一次模型调用') as HTMLInputElement).disabled).toBe(true)
+    expect((within(research).getByRole('button', { name: '解释所选证据' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+})
