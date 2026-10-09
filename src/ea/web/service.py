@@ -2591,6 +2591,7 @@ class WebService:
         scenario_id: str,
         dataset_id: str | None = None,
         source_sha256: str | None = None,
+        input_identity: dict[str, object] | None = None,
     ) -> dict[str, str]:
         with self._lock:
             source = self._holdout_source(source_job_id)
@@ -2606,9 +2607,20 @@ class WebService:
                         scenario_id=scenario_id,
                         dataset_id=dataset_id,
                         source_sha256=source_sha256,
+                        expected_identity=input_identity,
                     ),
                 )
             prepared = self._prepare_holdout(source_job_id, scenario_id, dataset_id, source_sha256)
+            if input_identity is not None:
+                # A supplied identity is honoured rather than ignored: the caller
+                # confirmed a specific admitted input, and the run that would start
+                # must be that one. Omitting it keeps the legacy behaviour of this
+                # workspace's own path, where the request carries no expected input.
+                admitted = json.loads(prepared.input_snapshot_bytes).get("identity")
+                if dict(input_identity) != admitted:
+                    raise InputChangedError(
+                        "holdout input changed; refresh and reselect the scenario before confirming"
+                    )
             if self._active is not None or self._closing:
                 raise ServiceBusyError("one local backtest or batch is already active")
             job_id = str(uuid4())

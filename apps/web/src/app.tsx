@@ -190,7 +190,7 @@ export type ApiAdapter = {
   decideCandidate?(id: string, outcome: string, reason: string): Promise<Candidate>
   holdoutScenarios(sourceJobId: string): Promise<ScenarioSummary[]>
   listDatasets?(): Promise<Dataset[]>
-  createHoldout(request: { source_job_id: string; scenario_id: string; dataset_id?: string; source_sha256?: string }): Promise<ChronologicalHoldout>
+  createHoldout(request: { source_job_id: string; scenario_id: string; input_identity?: InputIdentity; dataset_id?: string; source_sha256?: string }): Promise<ChronologicalHoldout>
   getHoldout(validationId: string): Promise<ChronologicalHoldout>
   listHoldouts(): Promise<ChronologicalHoldout[]>
   listScenarios(): Promise<ScenarioSummary[]>
@@ -1563,7 +1563,13 @@ function HoldoutCreator({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   const candidate = candidates.find(item => (item.input_identity?.dataset_id ? `${item.scenario_id}|${item.input_identity.dataset_id}` : item.scenario_id) === selected)
   const submit = async () => {
     setBusy(true); setError('')
-    try { const relation = await api.createHoldout({ source_job_id: jobId, scenario_id: candidate!.scenario_id, ...(candidate?.input_identity?.dataset_id ? { dataset_id: candidate.input_identity.dataset_id, source_sha256: candidate.input_identity.source_sha256 } : {}) }); navigate(`/holdouts/${relation.validation_id}`) }
+    try {
+      // The identity shown beside the selected target is the input the user is
+      // confirming, so it is sent exactly as displayed: the server refuses a target
+      // that changed between this selection and the click rather than running data
+      // the user never saw.
+      const relation = await api.createHoldout({ source_job_id: jobId, scenario_id: candidate!.scenario_id, input_identity: candidate!.input_identity!, ...(candidate?.input_identity?.dataset_id ? { dataset_id: candidate.input_identity.dataset_id, source_sha256: candidate.input_identity.source_sha256 } : {}) }); navigate(`/holdouts/${relation.validation_id}`)
+    }
     catch (caught) { setError(String(caught)); setBusy(false) }
   }
   return <><PageTitle title="New Chronological Holdout" subtitle="Chronological holdout evaluation using parameters frozen from your selected source." />
@@ -1572,8 +1578,9 @@ function HoldoutCreator({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     <section className="panel"><label htmlFor="holdout-scenario">Holdout scenario</label>
       <select id="holdout-scenario" value={selected} onChange={event => setSelected(event.target.value)}><option value="">Select a compatible later registered scenario</option>{candidates.map(item => <option key={(item.input_identity?.dataset_id ? `${item.scenario_id}|${item.input_identity.dataset_id}` : item.scenario_id)} value={(item.input_identity?.dataset_id ? `${item.scenario_id}|${item.input_identity.dataset_id}` : item.scenario_id)}>{item.name}</option>)}</select>
       {source && candidates.length === 0 && <p>No compatible later registered scenario with valid frozen parameters is available.</p>}
+      {candidate && !candidate.input_identity && <p className="notice error">This target carries no confirmed input identity, so it cannot be evaluated. Reopen this page to refresh the candidates.</p>}
       {candidate?.summary?.data && <dl className="summary-list"><div><dt>Window (UTC)</dt><dd>{candidate.summary.data.start_utc} → {candidate.summary.data.end_utc}</dd></div><div><dt>Data fingerprint</dt><dd>{candidate.summary.data.fingerprint.sha256}</dd></div><div><dt>Record count</dt><dd>{candidate.summary.data.fingerprint.record_count}</dd></div></dl>}
-      <button className="primary" disabled={!selected || !source?.report || busy} onClick={() => { void submit() }}>Run chronological holdout</button>
+      <button className="primary" disabled={!selected || !source?.report || !candidate?.input_identity || busy} onClick={() => { void submit() }}>Run chronological holdout</button>
     </section></>
 }
 

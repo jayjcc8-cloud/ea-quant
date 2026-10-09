@@ -109,6 +109,43 @@ def _await_job(client: TestClient, job_id: str) -> dict[str, Any]:
     raise AssertionError(f"run {job_id} never settled: {document}")
 
 
+def _offered(
+    client: TestClient, source: str, scenario_id: str, dataset_id: str | None = None
+) -> dict[str, Any]:
+    """The admitted identity the listing offered for one target, exactly as shown."""
+    response = client.get(f"/api/backtests/{source}/holdout-scenarios")
+    assert response.status_code == 200, response.text
+    for item in response.json()["scenarios"]:
+        if item["scenario_id"] != scenario_id:
+            continue
+        if (item["input_identity"].get("dataset_id") or None) != dataset_id:
+            continue
+        return cast(dict[str, Any], item["input_identity"])
+    raise AssertionError(f"{scenario_id} (dataset {dataset_id}) was not offered")
+
+
+def _post_holdout(
+    client: TestClient,
+    source: str,
+    scenario_id: str = "later.yaml",
+    identity: Any = None,
+    **extra: Any,
+) -> Any:
+    """One holdout request carrying the identity the user was shown, when given."""
+    body: dict[str, Any] = {"source_job_id": source, "scenario_id": scenario_id, **extra}
+    if identity is not None:
+        body["input_identity"] = identity
+    return client.post("/api/holdouts", headers=WRITE_HEADERS, json=body)
+
+
+def _service_identity(service: Any, source: str, scenario_id: str = "later.yaml") -> dict[str, Any]:
+    """The admitted identity the candidate listing offers for one target."""
+    for item in service.holdout_candidates(source):
+        if item["scenario_id"] == scenario_id:
+            return cast(dict[str, Any], item["input_identity"])
+    raise AssertionError(f"{scenario_id} was not offered")
+
+
 def _publish(settings: WebSettings, rows: int) -> tuple[str, bytes]:
     """Publish one synthetic capture into a Web workspace, before it is served."""
     from ea.web.uploads import AVAILABILITY_PROVIDED, ControlledUploadStoreV1
@@ -146,11 +183,8 @@ def test_a_core_owned_success_offers_and_runs_a_later_registered_holdout(
         offered = [item["scenario_id"] for item in candidates.json()["scenarios"]]
         assert offered == ["later.yaml"]
 
-        created = client.post(
-            "/api/holdouts",
-            headers=WRITE_HEADERS,
-            json={"source_job_id": source, "scenario_id": "later.yaml"},
-        )
+        # The exact identity the panel displayed is what the confirmation carries.
+        created = _post_holdout(client, source, identity=_offered(client, source, "later.yaml"))
         assert created.status_code == 202, created.text
         relation = cast(dict[str, Any], created.json())
         assert set(relation) == {
@@ -217,11 +251,7 @@ def test_the_relationship_and_both_reports_outlive_a_service_restart(
     with TestClient(create_app(settings), base_url=ORIGIN) as client:
         identity = _create_via_http(client)
         source = _source_job(client, identity)
-        created = client.post(
-            "/api/holdouts",
-            headers=WRITE_HEADERS,
-            json={"source_job_id": source, "scenario_id": "later.yaml"},
-        )
+        created = _post_holdout(client, source, identity=_offered(client, source, "later.yaml"))
         assert created.status_code == 202, created.text
         relation = cast(dict[str, Any], created.json())
         holdout = _await_job(client, relation["holdout_job_id"])
@@ -251,11 +281,7 @@ def test_the_relationship_outlives_a_core_restart(
         source = _source_job(client, identity)
         relation = cast(
             dict[str, Any],
-            client.post(
-                "/api/holdouts",
-                headers=WRITE_HEADERS,
-                json={"source_job_id": source, "scenario_id": "later.yaml"},
-            ).json(),
+            _post_holdout(client, source, identity=_offered(client, source, "later.yaml")).json(),
         )
         _await_job(client, relation["holdout_job_id"])
 
@@ -296,15 +322,13 @@ def test_a_core_owned_success_holds_out_into_a_later_uploaded_dataset(
         offered = client.get(f"/api/backtests/{source}/holdout-scenarios").json()["scenarios"]
         named = [item for item in offered if item["input_identity"].get("dataset_id") == dataset_id]
         assert len(named) == 1
-        created = client.post(
-            "/api/holdouts",
-            headers=WRITE_HEADERS,
-            json={
-                "source_job_id": source,
-                "scenario_id": named[0]["scenario_id"],
-                "dataset_id": dataset_id,
-                "source_sha256": named[0]["input_identity"]["source_sha256"],
-            },
+        created = _post_holdout(
+            client,
+            source,
+            named[0]["scenario_id"],
+            named[0]["input_identity"],
+            dataset_id=dataset_id,
+            source_sha256=named[0]["input_identity"]["source_sha256"],
         )
         assert created.status_code == 202, created.text
         relation = cast(dict[str, Any], created.json())
@@ -372,11 +396,7 @@ def test_a_holdout_never_needs_the_source_run_s_own_data_file(
         # it: the source's evidence travels inside the owner's retained envelope.
         shutil.move(str(settings.workspace / "uploads"), str(tmp_path / "uploads-gone"))
 
-        created = client.post(
-            "/api/holdouts",
-            headers=WRITE_HEADERS,
-            json={"source_job_id": source, "scenario_id": "later.yaml"},
-        )
+        created = _post_holdout(client, source, identity=_offered(client, source, "later.yaml"))
         assert created.status_code == 202, created.text
         relation = cast(dict[str, Any], created.json())
         document = _await_job(client, relation["holdout_job_id"])
@@ -390,6 +410,148 @@ def test_a_holdout_never_needs_the_source_run_s_own_data_file(
             == source_job["input_snapshot"]["scenario"]["strategy"]
         )
         assert client.get("/api/holdouts").json()["holdouts"] == [relation]
+
+
+# --- the confirmed target identity is bound -------------------------------
+
+
+def test_a_registered_target_that_changed_since_selection_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The panel's own offered identity is what the confirmation is held to.
+
+    The candidate was displayed, and then the registered target was replaced with
+    a different but perfectly valid later window before the user pressed Run. A
+    request carrying the identity the user actually saw must refuse rather than run
+    the replacement data, and must leave the owner's experiments and budgets
+    exactly as they were.
+    """
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    settings = _web_settings(tmp_path, core)
+    _commissioned(settings.scenario_root)
+    _target(settings.scenario_root, day="06")
+    counts = _no_python_owner(monkeypatch)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        identity = _create_via_http(client)
+        source = _source_job(client, identity)
+        bridge = QuineBridge(core.socket)
+        before = bridge.experiments()
+        offered = _offered(client, source, "later.yaml")
+
+        # The target is replaced with an equally valid, compatible, strictly later
+        # window after the user selected it.
+        _target(settings.scenario_root, day="07")
+
+        stale = _post_holdout(client, source, identity=offered)
+        assert stale.status_code == 422, stale.text
+        assert stale.json()["error"]["code"] == "holdout_invalid"
+        assert "changed" in stale.json()["error"]["message"]
+        assert client.get("/api/holdouts").json()["holdouts"] == []
+        assert bridge.experiments() == before, "the owner was never asked to admit this"
+        assert counts == {"children": 0, "owners": 0}
+        assert client.get("/api/backtests").json()["jobs"] == []
+
+        # Reselecting the target offers the new identity, and that one really runs.
+        refreshed = _offered(client, source, "later.yaml")
+        assert refreshed != offered
+        created = _post_holdout(client, source, identity=refreshed)
+        assert created.status_code == 202, created.text
+        relation = cast(dict[str, Any], created.json())
+        document = _await_job(client, relation["holdout_job_id"])
+        assert document["status"] == "succeeded", document["message"]
+        assert document["input_snapshot"]["identity"] == refreshed, (
+            "the admitted run is the identity the user reselected"
+        )
+        assert (
+            document["input_snapshot"]["scenario"]["data"]["start_utc"]
+            == "2026-01-07T09:31:00.000000Z"
+        )
+        assert counts == {"children": 0, "owners": 0}
+
+
+def test_a_window_only_change_is_refused_even_when_the_selected_data_is_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canonical-window change is a changed input, so a data-only check cannot pass.
+
+    The replacement selects exactly the same bars — the selected-data digest and
+    the record count are unchanged — while the confirmed replay window is not. The
+    identity binds the canonical effective window as well as the data, so this is
+    still a changed input and must be refused.
+    """
+    import yaml
+
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    settings = _web_settings(tmp_path, core)
+    _commissioned(settings.scenario_root)
+    _target(settings.scenario_root, day="06")
+    _no_python_owner(monkeypatch)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        identity = _create_via_http(client)
+        source = _source_job(client, identity)
+        bridge = QuineBridge(core.socket)
+        before = bridge.experiments()
+        offered = _offered(client, source, "later.yaml")
+
+        # Only the window's end moves, by one microsecond: the same bars are still
+        # selected, so the declared fingerprint and record count stay valid.
+        path = settings.scenario_root / "later.yaml"
+        document = yaml.safe_load(path.read_text())
+        document["data"]["end_utc"] = "2026-01-06T09:34:00.000001Z"
+        path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+        refreshed = _offered(client, source, "later.yaml")
+        assert refreshed["data_sha256"] == offered["data_sha256"]
+        assert refreshed["record_count"] == offered["record_count"]
+        assert refreshed["scenario_sha256"] != offered["scenario_sha256"]
+
+        stale = _post_holdout(client, source, identity=offered)
+        assert stale.status_code == 422, stale.text
+        assert stale.json()["error"]["code"] == "holdout_invalid"
+        assert bridge.experiments() == before
+        assert client.get("/api/holdouts").json()["holdouts"] == []
+
+        created = _post_holdout(client, source, identity=refreshed)
+        assert created.status_code == 202, created.text
+        relation = cast(dict[str, Any], created.json())
+        document = _await_job(client, relation["holdout_job_id"])
+        assert document["status"] == "succeeded", document["message"]
+        assert document["input_snapshot"]["identity"] == refreshed
+
+
+def test_a_rust_owned_holdout_without_the_confirmed_identity_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An owner-held source requires the identity the user confirmed.
+
+    A client written before this field existed must be told to refresh and
+    reselect; it is never silently confirmed against whatever the target holds now.
+    """
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    settings = _web_settings(tmp_path, core)
+    _commissioned(settings.scenario_root)
+    _target(settings.scenario_root)
+    counts = _no_python_owner(monkeypatch)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        identity = _create_via_http(client)
+        source = _source_job(client, identity)
+        bridge = QuineBridge(core.socket)
+        before = bridge.experiments()
+
+        refused = _post_holdout(client, source)
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["error"]["code"] == "holdout_invalid"
+        assert "reselect" in refused.json()["error"]["message"]
+        assert bridge.experiments() == before
+        assert client.get("/api/holdouts").json()["holdouts"] == []
+        assert counts == {"children": 0, "owners": 0}
+
+        # The same request with the confirmed identity is admitted.
+        created = _post_holdout(client, source, identity=_offered(client, source, "later.yaml"))
+        assert created.status_code == 202, created.text
 
 
 # --- every refusal happens before anything exists ----------------------------
@@ -626,7 +788,12 @@ def test_a_lost_holdout_reply_is_queried_and_never_confirmed_twice(
     # comes back is the owner's record, found by querying that one intent — never a
     # second confirmation.
     relation = cast(
-        dict[str, str], service.create_holdout(source_job_id=source, scenario_id="later.yaml")
+        dict[str, str],
+        service.create_holdout(
+            source_job_id=source,
+            scenario_id="later.yaml",
+            input_identity=_service_identity(service, source),
+        ),
     )
     assert client.confirms == 2
     assert len(bridge.experiments()) == 2
@@ -658,7 +825,11 @@ def test_a_lost_confirmation_and_query_remains_unknown_without_resending(
     counts = _no_python_owner(monkeypatch)
     _identity, source = _owner_source(strategies)
     with pytest.raises(QuineUnavailable, match="may already exist"):
-        service.create_holdout(source_job_id=source, scenario_id="later.yaml")
+        service.create_holdout(
+            source_job_id=source,
+            scenario_id="later.yaml",
+            input_identity=_service_identity(service, source),
+        )
     assert client.confirms == 2
     # The confirmation really reached Rust: its relation is recovered by a read,
     # even though neither the confirmation reply nor the recovery query arrived.
@@ -682,11 +853,8 @@ def test_an_unreachable_owner_fails_closed_and_caches_nothing(
     with TestClient(create_app(settings), base_url=ORIGIN) as client:
         identity = _create_via_http(client)
         source = _source_job(client, identity)
-        created = client.post(
-            "/api/holdouts",
-            headers=WRITE_HEADERS,
-            json={"source_job_id": source, "scenario_id": "later.yaml"},
-        )
+        offered = _offered(client, source, "later.yaml")
+        created = _post_holdout(client, source, identity=offered)
         assert created.status_code == 202, created.text
         relation = cast(dict[str, Any], created.json())
         _await_job(client, relation["holdout_job_id"])
@@ -697,11 +865,7 @@ def test_an_unreachable_owner_fails_closed_and_caches_nothing(
         assert listed.json()["error"]["code"] == "quine_unavailable"
         read = client.get(f"/api/holdouts/{relation['validation_id']}")
         assert read.status_code == 503, read.text
-        refused = client.post(
-            "/api/holdouts",
-            headers=WRITE_HEADERS,
-            json={"source_job_id": source, "scenario_id": "later.yaml"},
-        )
+        refused = _post_holdout(client, source, identity=offered)
         assert refused.status_code == 503, refused.text
         assert client.get(f"/api/backtests/{source}/holdout-scenarios").status_code == 503, (
             "an unreadable owner is never answered from a cached claim"
@@ -736,9 +900,12 @@ def test_a_busy_owner_slot_refuses_the_holdout_before_it_is_admitted(
 
     from ea.web.quine import QuineRefused
 
+    offered = _service_identity(service, source)
     before = bridge.experiments()
     with pytest.raises(QuineRefused) as refused:
-        service.create_holdout(source_job_id=source, scenario_id="later.yaml")
+        service.create_holdout(
+            source_job_id=source, scenario_id="later.yaml", input_identity=offered
+        )
     assert refused.value.code == "eligibility_held"
     assert bridge.experiments() == before
     assert service.list_holdouts() == []

@@ -714,11 +714,48 @@ describe('Chronological Holdout', () => {
     expect(screen.queryByRole('spinbutton')).toBeNull()
     await user.selectOptions(screen.getByLabelText('Holdout scenario'), 'bounded-long.yaml')
     await user.click(screen.getByRole('button', { name: 'Run chronological holdout' }))
-    await waitFor(() => expect(submitted).toEqual({ source_job_id: 'job-1', scenario_id: 'bounded-long.yaml' }))
+    await waitFor(() => expect(submitted).toEqual({ source_job_id: 'job-1', scenario_id: 'bounded-long.yaml', input_identity: identity }))
     await screen.findByRole('link', { name: 'Open IS formal run' })
     await screen.findByRole('link', { name: 'Open OOS formal run' })
     expect(screen.queryByText('参数差异')).toBeNull()
     expect(screen.queryByText('结果对比')).toBeNull()
+  })
+
+  it('will not offer a target whose admitted identity was not shown', async () => {
+    const user = userEvent.setup()
+    let submitted: unknown
+    window.history.pushState({}, '', '/holdouts/new/job-1')
+    const relation = { schema: 'ea.chronological-holdout.v1' as const, validation_id: 'validation-1', created_at: job.created_at!, source_job_id: 'job-1', holdout_job_id: 'job-2' }
+    render(<App api={adapter({
+      holdoutScenarios: async () => [{ ...scenarios[0], input_identity: undefined }],
+      createHoldout: async (request) => { submitted = request; return relation },
+      getHoldout: async () => relation,
+      getBacktest: async id => id === job.job_id ? job : secondJob,
+      getReport: async id => id === job.job_id ? report : secondReport,
+    })} />)
+    await screen.findByText('Frozen from source')
+    await user.selectOptions(screen.getByLabelText('Holdout scenario'), 'bounded-long.yaml')
+    // Without an identity there is nothing the user could be confirming, so the
+    // action is refused here rather than sent and guessed at on the server.
+    expect(screen.getByRole('button', { name: 'Run chronological holdout' })).toHaveProperty('disabled', true)
+    await user.click(screen.getByRole('button', { name: 'Run chronological holdout' }))
+    expect(submitted).toBeUndefined()
+    expect(screen.getByText(/carries no confirmed input identity/)).toBeTruthy()
+  })
+
+  it('surfaces a target that changed between selection and confirmation', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/holdouts/new/job-1')
+    render(<App api={adapter({
+      holdoutScenarios: async () => [scenarios[0]],
+      createHoldout: async () => { throw new Error('holdout input changed; refresh and reselect the scenario before confirming') },
+      getBacktest: async id => id === job.job_id ? job : secondJob,
+      getReport: async id => id === job.job_id ? report : secondReport,
+    })} />)
+    await screen.findByText('Frozen from source')
+    await user.selectOptions(screen.getByLabelText('Holdout scenario'), 'bounded-long.yaml')
+    await user.click(screen.getByRole('button', { name: 'Run chronological holdout' }))
+    expect(await screen.findByText(/holdout input changed; refresh and reselect/)).toBeTruthy()
   })
 })
 

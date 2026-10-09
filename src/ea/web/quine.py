@@ -1000,6 +1000,7 @@ class QuineHoldouts:
         scenario_id: str,
         dataset_id: str | None = None,
         source_sha256: str | None = None,
+        expected_identity: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         """Confirm one holdout under the owner, and answer with its relationship.
 
@@ -1008,6 +1009,15 @@ class QuineHoldouts:
         an unobserved answer never becomes a second run, and a refusal is the
         core's own. Nothing is written here — the relationship is the owner's own
         record.
+
+        ``expected_identity`` is the admitted input the caller was *shown* and is
+        now confirming. It is compared with the identity of the very same frozen
+        input this call is about to send, so a target that changed between the
+        selection and the click refuses here — before the owner reserves anything —
+        instead of running bytes the user never saw. This source is owned by the
+        experiment core, so the identity is required: a client that cannot state
+        what it confirmed is told to refresh and reselect rather than confirmed
+        against whatever the target holds now.
         """
         from ea.data.historical import HistoricalMarketDataError
         from ea.web.service import InputChangedError, WebBoundaryError
@@ -1040,6 +1050,17 @@ class QuineHoldouts:
             # later window cannot support — is refused as that validation, not as a
             # decision the owner made.
             raise WebBoundaryError(refusal.message) from None
+        admitted = self._admitted_identity(frozen)
+        if expected_identity is None:
+            raise WebBoundaryError(
+                "this source run is held by the experiment core, so the admitted input "
+                "that was confirmed is required with the request; refresh the candidates "
+                "and reselect the target before confirming"
+            )
+        if dict(expected_identity) != admitted:
+            raise InputChangedError(
+                "holdout input changed; refresh and reselect the scenario before confirming"
+            )
         receipt = self._bridge.confirm(
             strategy_id=HOLDOUT_OWNER,
             intent_id=validation_id,
@@ -1080,6 +1101,23 @@ class QuineHoldouts:
             if relation["validation_id"] == validation_id:
                 return relation
         raise JobNotFoundError("holdout was not found in this workspace")
+
+    @staticmethod
+    def _admitted_identity(frozen: QuineFrozen) -> dict[str, Any]:
+        """The admitted input identity of one frozen holdout, as it will be sent.
+
+        It is read from the frozen document this call is about to confirm — the
+        envelope, its snapshot and, through the snapshot digest the core re-checks,
+        the exact bytes — so comparing it is comparing what will really run rather
+        than a second rendering of the same scenario.
+        """
+        from ea.web.service import WebBoundaryError
+
+        snapshot = frozen.envelope.get("snapshot")
+        identity = None if type(snapshot) is not dict else snapshot.get("identity")
+        if type(identity) is not dict:
+            raise WebBoundaryError("the frozen holdout input carries no admitted identity")
+        return cast(dict[str, Any], identity)
 
     def _relation(self, experiment: dict[str, Any]) -> dict[str, str] | None:
         """One relationship, or ``None`` when this record is not a holdout at all.

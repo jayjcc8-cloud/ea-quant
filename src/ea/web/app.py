@@ -99,6 +99,12 @@ class BatchRequest(BaseModel):
 class HoldoutRequest(BaseModel):
     dataset_id: str | None = None
     source_sha256: str | None = None
+    #: The exact admitted input the caller was shown for this target and is now
+    #: confirming. It is optional at the HTTP schema so a client written before it
+    #: existed keeps working on the workspace's own legacy holdout path; a source
+    #: held by an experiment owner requires it, and a supplied value is never
+    #: silently ignored.
+    input_identity: InputIdentity | None = None
     model_config = ConfigDict(extra="forbid", strict=True)
 
     source_job_id: str = Field(min_length=1, max_length=128)
@@ -1207,6 +1213,11 @@ def create_app(settings: WebSettings) -> Any:
                     scenario_id=request.scenario_id,
                     dataset_id=request.dataset_id,
                     source_sha256=request.source_sha256,
+                    input_identity=(
+                        None
+                        if request.input_identity is None
+                        else request.input_identity.model_dump(exclude_none=True)
+                    ),
                 ),
             )
         except (JobNotFoundError, ScenarioNotFoundError) as caught:
