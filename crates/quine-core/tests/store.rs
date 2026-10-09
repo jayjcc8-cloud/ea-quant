@@ -42,7 +42,12 @@ fn frozen(payload: &serde_json::Value) -> FrozenInput {
     }
 }
 
-fn confirm(strategy: &str, intent: &str, revision: i64, payload: &serde_json::Value) -> ConfirmParams {
+fn confirm(
+    strategy: &str,
+    intent: &str,
+    revision: i64,
+    payload: &serde_json::Value,
+) -> ConfirmParams {
     let input = frozen(payload);
     ConfirmParams {
         strategy_id: strategy.to_string(),
@@ -65,7 +70,11 @@ fn payload(initial_cash: &str) -> serde_json::Value {
     })
 }
 
-fn submission(experiment: &Experiment, outcome: &str, result: &serde_json::Value) -> ResultSubmission {
+fn submission(
+    experiment: &Experiment,
+    outcome: &str,
+    result: &serde_json::Value,
+) -> ResultSubmission {
     ResultSubmission {
         strategy_id: experiment.strategy_id.clone(),
         intent_id: experiment.intent_id.clone(),
@@ -171,7 +180,12 @@ fn cancel_before_confirm_records_durable_barrier() {
     assert!(!receipt.is_empty());
     assert!(cancelled.experiment.is_none());
 
-    let query = store.query(&QueryParams { strategy_id: "s1".into(), intent_id: "i1".into() }).unwrap();
+    let query = store
+        .query(&QueryParams {
+            strategy_id: "s1".into(),
+            intent_id: "i1".into(),
+        })
+        .unwrap();
     assert!(query.experiment.is_none());
     assert_eq!(query.barrier.unwrap().cancel_receipt, receipt);
 
@@ -329,7 +343,14 @@ fn terminal_completion_frees_slot() {
     confirm_s1(&store, 1_001);
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
     store
-        .commit_result(&submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"})), 1_003)
+        .commit_result(
+            &submission(
+                &dispatched,
+                STATUS_SUCCEEDED,
+                &json!({"schema": "ea.report"}),
+            ),
+            1_003,
+        )
         .unwrap();
     confirm_s2(&store, 1_004);
     assert_eq!(query_experiment(&store, "s2", "i2").status, STATUS_ELIGIBLE);
@@ -366,14 +387,21 @@ fn lifecycle_advance_makes_old_fence_stale() {
     assert_eq!(error.code, CODE_ELIGIBILITY_HELD);
 
     // A submission with the pre-advance fence is stale and must not register.
-    let stale = submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"}));
+    let stale = submission(
+        &dispatched,
+        STATUS_SUCCEEDED,
+        &json!({"schema": "ea.report"}),
+    );
     let error = store.commit_result(&stale, 1_004).err().unwrap();
     assert_eq!(error.code, CODE_STALE_FENCE);
 
     // The current fence commits.
     let current = query_experiment(&store, "s1", "i1");
     store
-        .commit_result(&submission(&current, STATUS_SUCCEEDED, &json!({"schema": "ea.report"})), 1_005)
+        .commit_result(
+            &submission(&current, STATUS_SUCCEEDED, &json!({"schema": "ea.report"})),
+            1_005,
+        )
         .unwrap();
     store.release().unwrap();
 }
@@ -406,12 +434,25 @@ fn late_cancel_cannot_overwrite_committed_success() {
     confirm_s1(&store, 1_001);
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
     store
-        .commit_result(&submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"})), 1_003)
+        .commit_result(
+            &submission(
+                &dispatched,
+                STATUS_SUCCEEDED,
+                &json!({"schema": "ea.report"}),
+            ),
+            1_003,
+        )
         .unwrap();
 
-    let error = store.cancel(&cancel_params("s1", "i1"), 1_004).err().unwrap();
+    let error = store
+        .cancel(&cancel_params("s1", "i1"), 1_004)
+        .err()
+        .unwrap();
     assert_eq!(error.code, CODE_LATE_CANCEL_REFUSED);
-    assert_eq!(query_experiment(&store, "s1", "i1").status, STATUS_SUCCEEDED);
+    assert_eq!(
+        query_experiment(&store, "s1", "i1").status,
+        STATUS_SUCCEEDED
+    );
     store.release().unwrap();
 }
 
@@ -423,7 +464,10 @@ fn cancel_after_confirm_before_dispatch_cancels_and_blocks_dispatch() {
     let cancelled = store.cancel(&cancel_params("s1", "i1"), 1_002).unwrap();
     assert_eq!(cancelled.experiment.unwrap().status, "cancelled");
 
-    let error = store.dispatch("s1", "i1", "supervisor", 1_003).err().unwrap();
+    let error = store
+        .dispatch("s1", "i1", "supervisor", 1_003)
+        .err()
+        .unwrap();
     assert_eq!(error.code, CODE_INVALID_STATE);
     store.release().unwrap();
 }
@@ -445,7 +489,10 @@ fn result_commit_is_idempotent_and_conflict_safe() {
     assert_eq!(first.committed_at, second.committed_at);
 
     let conflict = store
-        .commit_result(&submission(&dispatched, STATUS_SUCCEEDED, &json!({"different": true})), 1_005)
+        .commit_result(
+            &submission(&dispatched, STATUS_SUCCEEDED, &json!({"different": true})),
+            1_005,
+        )
         .err()
         .unwrap();
     assert_eq!(conflict.code, CODE_CONFLICT);
@@ -458,11 +505,18 @@ fn commit_rejects_wrong_attempt_identity() {
     let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
     confirm_s1(&store, 1_001);
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
-    let mut sub = submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"}));
+    let mut sub = submission(
+        &dispatched,
+        STATUS_SUCCEEDED,
+        &json!({"schema": "ea.report"}),
+    );
     sub.attempt_id = "wrong-attempt".to_string();
     let error = store.commit_result(&sub, 1_003).err().unwrap();
     assert_eq!(error.code, CODE_CONFLICT);
-    assert_eq!(query_experiment(&store, "s1", "i1").status, STATUS_DISPATCHED);
+    assert_eq!(
+        query_experiment(&store, "s1", "i1").status,
+        STATUS_DISPATCHED
+    );
     store.release().unwrap();
 }
 
@@ -472,7 +526,11 @@ fn commit_rejects_wrong_job_identity() {
     let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
     confirm_s1(&store, 1_001);
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
-    let mut sub = submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"}));
+    let mut sub = submission(
+        &dispatched,
+        STATUS_SUCCEEDED,
+        &json!({"schema": "ea.report"}),
+    );
     sub.job_id = "wrong-job".to_string();
     let error = store.commit_result(&sub, 1_003).err().unwrap();
     assert_eq!(error.code, CODE_CONFLICT);
@@ -485,7 +543,11 @@ fn commit_rejects_wrong_request_identity() {
     let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
     confirm_s1(&store, 1_001);
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
-    let mut sub = submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"}));
+    let mut sub = submission(
+        &dispatched,
+        STATUS_SUCCEEDED,
+        &json!({"schema": "ea.report"}),
+    );
     sub.request_id = "wrong-request".to_string();
     let error = store.commit_result(&sub, 1_003).err().unwrap();
     assert_eq!(error.code, CODE_CONFLICT);
@@ -498,7 +560,11 @@ fn commit_rejects_wrong_frozen_revision() {
     let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
     confirm_s1(&store, 1_001);
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
-    let mut sub = submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"}));
+    let mut sub = submission(
+        &dispatched,
+        STATUS_SUCCEEDED,
+        &json!({"schema": "ea.report"}),
+    );
     sub.draft_revision = 99;
     let error = store.commit_result(&sub, 1_003).err().unwrap();
     assert_eq!(error.code, CODE_CONFLICT);
@@ -511,7 +577,11 @@ fn commit_rejects_wrong_frozen_digest() {
     let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
     confirm_s1(&store, 1_001);
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
-    let mut sub = submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"}));
+    let mut sub = submission(
+        &dispatched,
+        STATUS_SUCCEEDED,
+        &json!({"schema": "ea.report"}),
+    );
     sub.frozen_sha256 = "0".repeat(64);
     let error = store.commit_result(&sub, 1_003).err().unwrap();
     assert_eq!(error.code, CODE_DIGEST_MISMATCH);
@@ -524,7 +594,11 @@ fn commit_rejects_stale_fence() {
     let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
     confirm_s1(&store, 1_001);
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
-    let mut sub = submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"}));
+    let mut sub = submission(
+        &dispatched,
+        STATUS_SUCCEEDED,
+        &json!({"schema": "ea.report"}),
+    );
     sub.fence = 999;
     let error = store.commit_result(&sub, 1_003).err().unwrap();
     assert_eq!(error.code, CODE_STALE_FENCE);
@@ -539,7 +613,14 @@ fn commit_rejects_after_accepted_cancel_and_leaves_state_unchanged() {
     let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
     store.cancel(&cancel_params("s1", "i1"), 1_003).unwrap();
     let error = store
-        .commit_result(&submission(&dispatched, STATUS_SUCCEEDED, &json!({"schema": "ea.report"})), 1_004)
+        .commit_result(
+            &submission(
+                &dispatched,
+                STATUS_SUCCEEDED,
+                &json!({"schema": "ea.report"}),
+            ),
+            1_004,
+        )
         .err()
         .unwrap();
     assert_eq!(error.code, CODE_INVALID_STATE);

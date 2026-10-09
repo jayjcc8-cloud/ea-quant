@@ -18,7 +18,10 @@ impl std::fmt::Display for CanonicalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CanonicalError::UnsupportedNumber => {
-                write!(f, "a JSON number with a fraction or exponent is not canonical input")
+                write!(
+                    f,
+                    "a JSON number with a fraction or exponent is not canonical input"
+                )
             }
         }
     }

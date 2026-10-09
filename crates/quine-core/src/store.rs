@@ -169,6 +169,18 @@ pub struct Store {
     _lock: File,
 }
 
+/// The current persisted identity, fence and frozen binding of one attempt.
+#[derive(Debug, Clone)]
+pub struct AttemptContext {
+    pub status: String,
+    pub revision: i64,
+    pub job_id: String,
+    pub attempt_id: String,
+    pub request_id: String,
+    pub draft_revision: i64,
+    pub frozen_sha256: String,
+}
+
 impl Store {
     /// Open a workspace database and take the exclusive OS lock before any
     /// SQLite schema or write. The lock file is never unlinked or replaced while
@@ -190,6 +202,7 @@ impl Store {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&lock_path)?;
         if lock_file.try_lock().is_err() {
             let held = std::fs::read_to_string(&lock_path).unwrap_or_default();
@@ -486,12 +499,7 @@ impl Store {
                             "UPDATE attempt SET status = ?1, active = 0, revision = revision + 1,
                                cancelled_at = ?2
                              WHERE strategy_id = ?3 AND intent_id = ?4",
-                            params![
-                                STATUS_CANCELLED,
-                                now,
-                                params.strategy_id,
-                                params.intent_id
-                            ],
+                            params![STATUS_CANCELLED, now, params.strategy_id, params.intent_id],
                         )?;
                     }
                     // Compute may exist: the cancellation is accepted/pending,
@@ -502,12 +510,7 @@ impl Store {
                                cancelled_at = ?2
                              WHERE strategy_id = ?3 AND intent_id = ?4
                                AND status != ?1",
-                            params![
-                                STATUS_STOPPING,
-                                now,
-                                params.strategy_id,
-                                params.intent_id
-                            ],
+                            params![STATUS_STOPPING, now, params.strategy_id, params.intent_id],
                         )?;
                     }
                     _ => {}
@@ -544,7 +547,10 @@ impl Store {
                 },
             )
             .optional()?;
-        Ok(QueryResult { experiment, barrier })
+        Ok(QueryResult {
+            experiment,
+            barrier,
+        })
     }
 
     pub fn list(&self, _params: &ListParams) -> Result<ListResult, QuineError> {
@@ -605,7 +611,10 @@ impl Store {
             )
             .optional()?;
         let (status, held_owner) = current.ok_or_else(|| {
-            QuineError::new(CODE_NOT_FOUND, "no confirmed experiment matches this identity")
+            QuineError::new(
+                CODE_NOT_FOUND,
+                "no confirmed experiment matches this identity",
+            )
         })?;
         match status.as_str() {
             STATUS_ELIGIBLE => {
@@ -613,7 +622,13 @@ impl Store {
                     "UPDATE attempt SET status = ?1, active = 1, revision = revision + 1,
                        dispatch_owner = ?2, dispatched_at = ?3
                      WHERE strategy_id = ?4 AND intent_id = ?5",
-                    params![STATUS_DISPATCHED, dispatch_owner, now, strategy_id, intent_id],
+                    params![
+                        STATUS_DISPATCHED,
+                        dispatch_owner,
+                        now,
+                        strategy_id,
+                        intent_id
+                    ],
                 )?;
             }
             STATUS_DISPATCHED | STATUS_RUNNING | STATUS_STOPPING | STATUS_UNKNOWN => {
@@ -649,7 +664,13 @@ impl Store {
         intent_id: &str,
         fence: i64,
     ) -> Result<Experiment, QuineError> {
-        self.advance_lifecycle(strategy_id, intent_id, fence, &[STATUS_DISPATCHED], STATUS_RUNNING)
+        self.advance_lifecycle(
+            strategy_id,
+            intent_id,
+            fence,
+            &[STATUS_DISPATCHED],
+            STATUS_RUNNING,
+        )
     }
 
     /// Stage 2 seam: record that the worker exited without a proven outcome.
@@ -688,7 +709,10 @@ impl Store {
             )
             .optional()?;
         let (status, revision) = current.ok_or_else(|| {
-            QuineError::new(CODE_NOT_FOUND, "no confirmed experiment matches this identity")
+            QuineError::new(
+                CODE_NOT_FOUND,
+                "no confirmed experiment matches this identity",
+            )
         })?;
         if !from.contains(&status.as_str()) {
             transaction.rollback().ok();
@@ -709,9 +733,10 @@ impl Store {
              WHERE strategy_id = ?2 AND intent_id = ?3",
             params![to, strategy_id, intent_id],
         )?;
-        let experiment = Self::experiment_for(&transaction, strategy_id, intent_id)?.ok_or_else(|| {
-            QuineError::new(CODE_INTERNAL, "advanced experiment lost its attempt")
-        })?;
+        let experiment =
+            Self::experiment_for(&transaction, strategy_id, intent_id)?.ok_or_else(|| {
+                QuineError::new(CODE_INTERNAL, "advanced experiment lost its attempt")
+            })?;
         transaction.commit()?;
         Ok(experiment)
     }
@@ -777,10 +802,23 @@ impl Store {
                 },
             )
             .optional()?;
-        let (request_id, draft_revision, frozen_sha256, frozen_canonical, status, revision, job_id, attempt_id, stored_result, commit_fence) =
-            current.ok_or_else(|| {
-                QuineError::new(CODE_NOT_FOUND, "no confirmed experiment matches this identity")
-            })?;
+        let (
+            request_id,
+            draft_revision,
+            frozen_sha256,
+            frozen_canonical,
+            status,
+            revision,
+            job_id,
+            attempt_id,
+            stored_result,
+            commit_fence,
+        ) = current.ok_or_else(|| {
+            QuineError::new(
+                CODE_NOT_FOUND,
+                "no confirmed experiment matches this identity",
+            )
+        })?;
         if request_id != submission.request_id
             || job_id != submission.job_id
             || attempt_id != submission.attempt_id
@@ -815,7 +853,8 @@ impl Store {
             ));
         }
         if status == STATUS_SUCCEEDED || status == STATUS_FAILED {
-            if status.as_str() != outcome.as_str() || stored_result.as_deref() != Some(&result_json) {
+            if status.as_str() != outcome.as_str() || stored_result.as_deref() != Some(&result_json)
+            {
                 transaction.rollback().ok();
                 return Err(QuineError::new(
                     CODE_CONFLICT,
@@ -854,7 +893,10 @@ impl Store {
             transaction.rollback().ok();
             return Err(QuineError::new(
                 CODE_STALE_FENCE,
-                format!("the record moved on from fence {}; re-read it before submitting", submission.fence),
+                format!(
+                    "the record moved on from fence {}; re-read it before submitting",
+                    submission.fence
+                ),
             ));
         }
         if status != STATUS_DISPATCHED && status != STATUS_RUNNING {
@@ -868,7 +910,14 @@ impl Store {
             "UPDATE attempt SET status = ?1, result_json = ?2, committed_at = ?3,
                active = 0, revision = revision + 1, commit_fence = ?4
              WHERE strategy_id = ?5 AND intent_id = ?6",
-            params![outcome, result_json, now, submission.fence, strategy_id, intent_id],
+            params![
+                outcome,
+                result_json,
+                now,
+                submission.fence,
+                strategy_id,
+                intent_id
+            ],
         )?;
         let experiment =
             Self::experiment_for(&transaction, strategy_id, intent_id)?.ok_or_else(|| {
@@ -876,6 +925,158 @@ impl Store {
             })?;
         transaction.commit()?;
         Ok(experiment)
+    }
+
+    /// Advance every attempt whose compute this process did not start into the
+    /// honest `unknown` state. Called once when a core takes the workspace:
+    /// a dispatched, running, stopping or already-unknown attempt may still own
+    /// compute that no restart can prove ended, so it stays unknown and keeps
+    /// the single active slot. An `eligible` attempt is untouched: dispatch is
+    /// the first durable step before anything is spawned, so nothing ran.
+    pub fn reconcile_uncertain(&self, now: i64) -> Result<usize, QuineError> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE attempt SET status = ?1, active = 1, revision = revision + 1
+             WHERE status IN (?2, ?3, ?4)",
+            params![
+                STATUS_UNKNOWN,
+                STATUS_DISPATCHED,
+                STATUS_RUNNING,
+                STATUS_STOPPING
+            ],
+        )?;
+        transaction.commit()?;
+        let _ = now;
+        Ok(changed)
+    }
+
+    /// Record a stopped attempt whose whole group is proven gone after an
+    /// accepted cancellation. Only a proven-absent group reaches here, and only
+    /// from `stopping`: this is the one place a cancellation releases the slot.
+    pub fn settle_cancelled(
+        &self,
+        strategy_id: &str,
+        intent_id: &str,
+        fence: i64,
+        now: i64,
+    ) -> Result<Experiment, QuineError> {
+        validate_ids(strategy_id, intent_id)?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<(String, i64)> = transaction
+            .query_row(
+                "SELECT status, revision FROM attempt WHERE strategy_id = ?1 AND intent_id = ?2",
+                params![strategy_id, intent_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (status, revision) = current.ok_or_else(|| {
+            QuineError::new(
+                CODE_NOT_FOUND,
+                "no confirmed experiment matches this identity",
+            )
+        })?;
+        if status != STATUS_STOPPING {
+            transaction.rollback().ok();
+            return Err(QuineError::new(
+                CODE_INVALID_STATE,
+                format!("this experiment is {status} and is not a cancelled stop"),
+            ));
+        }
+        if revision != fence {
+            transaction.rollback().ok();
+            return Err(QuineError::new(
+                CODE_STALE_FENCE,
+                format!("the record moved on from fence {fence}; re-read it before acting"),
+            ));
+        }
+        transaction.execute(
+            "UPDATE attempt SET status = ?1, active = 0, revision = revision + 1,
+               cancelled_at = COALESCE(cancelled_at, ?2)
+             WHERE strategy_id = ?3 AND intent_id = ?4",
+            params![STATUS_CANCELLED, now, strategy_id, intent_id],
+        )?;
+        let experiment = Self::experiment_for(&transaction, strategy_id, intent_id)?
+            .ok_or_else(|| QuineError::new(CODE_INTERNAL, "settled experiment lost its attempt"))?;
+        transaction.commit()?;
+        Ok(experiment)
+    }
+
+    /// The exact frozen input bytes one confirmation retained, unparsed.
+    pub fn frozen_input(
+        &self,
+        strategy_id: &str,
+        intent_id: &str,
+    ) -> Result<Option<Vec<u8>>, QuineError> {
+        validate_ids(strategy_id, intent_id)?;
+        let conn = self.lock()?;
+        let stored: Option<(Vec<u8>, String)> = conn
+            .query_row(
+                "SELECT frozen_canonical, frozen_sha256 FROM experiment
+                 WHERE strategy_id = ?1 AND intent_id = ?2",
+                params![strategy_id, intent_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((bytes, claimed)) = stored else {
+            return Ok(None);
+        };
+        if sha256_hex(&bytes) != claimed {
+            return Err(QuineError::new(
+                CODE_INTERNAL,
+                "stored frozen input does not match its recorded digest",
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// The complete current identity and fence of one attempt, so a supervisor
+    /// never has to reconstruct it from several reads.
+    pub fn attempt_context(
+        &self,
+        strategy_id: &str,
+        intent_id: &str,
+    ) -> Result<Option<AttemptContext>, QuineError> {
+        validate_ids(strategy_id, intent_id)?;
+        let conn = self.lock()?;
+        let row: Option<AttemptContext> = conn
+            .query_row(
+                "SELECT a.status, a.revision, a.job_id, a.attempt_id, e.request_id,
+                        e.draft_revision, e.frozen_sha256
+                 FROM attempt a JOIN experiment e
+                   ON e.strategy_id = a.strategy_id AND e.intent_id = a.intent_id
+                 WHERE a.strategy_id = ?1 AND a.intent_id = ?2",
+                params![strategy_id, intent_id],
+                |row| {
+                    Ok(AttemptContext {
+                        status: row.get(0)?,
+                        revision: row.get(1)?,
+                        job_id: row.get(2)?,
+                        attempt_id: row.get(3)?,
+                        request_id: row.get(4)?,
+                        draft_revision: row.get(5)?,
+                        frozen_sha256: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// The complete current identity and fence of one attempt.
+    pub fn attempt_current(
+        &self,
+        strategy_id: &str,
+        intent_id: &str,
+    ) -> Result<AttemptContext, QuineError> {
+        self.attempt_context(strategy_id, intent_id)?
+            .ok_or_else(|| {
+                QuineError::new(
+                    CODE_NOT_FOUND,
+                    "no confirmed experiment matches this identity",
+                )
+            })
     }
 
     fn experiment_for(
@@ -950,9 +1151,8 @@ impl Store {
                 "stored frozen input does not match its recorded digest",
             ));
         }
-        let result = result_json
-            .map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .flatten();
+        let result =
+            result_json.and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
         let dispatch_eligible = active == 1 && status == STATUS_ELIGIBLE;
         Ok(Some(Experiment {
             strategy_id: strategy_id.to_string(),

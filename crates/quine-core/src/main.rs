@@ -1,28 +1,135 @@
-//! Sequential JSON-lines CLI for the quine-core store.
+//! The quine-core entry point.
 //!
-//! One line in, one line out. The process holds the single owner lease from
-//! startup until EOF, then releases it. Stage 2 adds IPC serving and direct
-//! worker supervision on top of the same store.
+//! ``serve`` runs the one long-running core for a workspace: it takes the
+//! exclusive lock, binds the private socket and supervises every child itself.
+//! ``request`` is a thin client that forwards JSON lines to that socket.
+//! Without either, the process is the stage-1 sequential store CLI, which
+//! answers the same confirmed-experiment methods over stdin.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
+use quine_core::core::{Core, CoreConfig};
+use quine_core::ipc;
 use quine_core::protocol::{
-    CancelParams, ConfirmParams, Envelope, FrozenInput, ListParams, QueryParams, ReplyEnvelope,
-    Request, PROTOCOL_VERSION,
+    ConfirmParams, Envelope, FrozenInput, ListParams, QueryParams, ReplyEnvelope, Request,
+    PROTOCOL_VERSION,
 };
 use quine_core::store::{QuineError, Store};
 
 fn main() {
-    let args = Args::parse();
-    let store = match Store::open(&args.db, &args.owner) {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    match arguments.first().map(String::as_str) {
+        Some("serve") => serve(&arguments[1..]),
+        Some("request") => request(&arguments[1..]),
+        _ => offline(&arguments),
+    }
+}
+
+fn serve(arguments: &[String]) {
+    let flags = Flags::parse(arguments);
+    let workspace = match flags.value("workspace") {
+        Some(value) => PathBuf::from(value),
+        None => {
+            eprintln!("serve requires --workspace");
+            std::process::exit(2);
+        }
+    };
+    let python = PathBuf::from(
+        flags
+            .value("python")
+            .unwrap_or_else(|| "python3".to_string()),
+    );
+    let mut config = CoreConfig::new(&workspace, &python);
+    if let Some(owner) = flags.value("owner") {
+        config.owner = owner;
+    }
+    if let Some(socket) = flags.value("socket") {
+        config.socket = PathBuf::from(socket);
+    }
+    config.test_hook = flags.value("test-hook");
+    if let Some(milliseconds) = flags
+        .value("test-commit-delay-ms")
+        .and_then(|value| value.parse().ok())
+    {
+        config.commit_delay = Duration::from_millis(milliseconds);
+    }
+    config.crash_before_commit = flags.present("test-crash-before-commit");
+    config.tamper_before_read = flags.present("test-tamper-before-read");
+
+    let mut core = match Core::open(config) {
+        Ok(core) => core,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = core.serve() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn request(arguments: &[String]) {
+    let flags = Flags::parse(arguments);
+    let socket = match flags.value("socket") {
+        Some(value) => PathBuf::from(value),
+        None => {
+            eprintln!("request requires --socket");
+            std::process::exit(2);
+        }
+    };
+    let mut stream = match ipc::connect(&socket) {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    let mut reader = std::io::BufReader::new(match stream.try_clone() {
+        Ok(clone) => clone,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    });
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => break,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if stream.write_all(line.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
+            break;
+        }
+        let mut reply = String::new();
+        if reader.read_line(&mut reply).is_err() || reply.is_empty() {
+            break;
+        }
+        if output.write_all(reply.as_bytes()).is_err() || output.flush().is_err() {
+            break;
+        }
+    }
+}
+
+/// The stage-1 sequential store CLI: the same methods, one process, no socket.
+fn offline(arguments: &[String]) {
+    let flags = Flags::parse(arguments);
+    let db = PathBuf::from(flags.value("db").unwrap_or_else(|| "quine.db".to_string()));
+    let owner = flags.value("owner").unwrap_or_else(|| "cli".to_string());
+    let store = match Store::open(&db, &owner) {
         Ok(store) => store,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);
         }
     };
-
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
@@ -102,35 +209,45 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-struct Args {
-    db: PathBuf,
-    owner: String,
+struct Flags {
+    values: Vec<(String, String)>,
 }
 
-impl Args {
-    fn parse() -> Args {
-        let mut db = None;
-        let mut owner = "cli".to_string();
-        let mut argv = std::env::args().skip(1);
-        while let Some(argument) = argv.next() {
-            match argument.as_str() {
-                "--db" => {
-                    db = argv.next();
-                }
-                "--owner" => {
-                    owner = argv.next().unwrap_or_else(|| "cli".to_string());
-                }
-                _ => {}
+impl Flags {
+    fn parse(arguments: &[String]) -> Flags {
+        let mut values = Vec::new();
+        let mut index = 0;
+        while index < arguments.len() {
+            let argument = &arguments[index];
+            if let Some(name) = argument.strip_prefix("--") {
+                let value =
+                    if index + 1 < arguments.len() && !arguments[index + 1].starts_with("--") {
+                        index += 1;
+                        arguments[index].clone()
+                    } else {
+                        String::new()
+                    };
+                values.push((name.to_string(), value));
             }
+            index += 1;
         }
-        Args {
-            db: PathBuf::from(db.unwrap_or_else(|| "quine.db".to_string())),
-            owner,
-        }
+        Flags { values }
+    }
+
+    fn value(&self, name: &str) -> Option<String> {
+        self.values
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn present(&self, name: &str) -> bool {
+        self.values.iter().any(|(key, _)| key == name)
     }
 }
 
 // Referenced only so the protocol types are linked into the binary for stage 2
 // callers; the CLI itself is the tested entry point today.
 #[allow(dead_code)]
-fn _protocol_types(_: ConfirmParams, _: CancelParams, _: QueryParams, _: ListParams, _: FrozenInput) {}
+fn _protocol_types(_: ConfirmParams, _: QueryParams, _: ListParams, _: FrozenInput) {}

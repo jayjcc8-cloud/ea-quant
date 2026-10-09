@@ -1,4 +1,9 @@
 pub mod canonical;
+pub mod core;
+pub mod domain;
+pub mod ipc;
 pub mod protocol;
+pub mod result;
 pub mod store;
+pub mod supervise;
 pub mod util;
