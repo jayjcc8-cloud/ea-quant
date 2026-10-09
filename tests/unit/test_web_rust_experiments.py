@@ -55,6 +55,7 @@ from ea.web.user_strategies import (
     UserStrategyStore,
 )
 from unit.test_web_api import ORIGIN, WRITE_HEADERS
+from unit.test_web_holdout import _target
 from unit.test_web_research import _scenario_root
 
 pytestmark = pytest.mark.filterwarnings(
@@ -1308,3 +1309,72 @@ def test_http_never_serves_a_cached_result_when_the_owner_is_killed(tmp_path: Pa
         assert settled["report_ready"] is False
         assert settled["facts"] is None
         assert "could not be reached" in cast(str, settled["message"])
+
+
+def test_holdout_over_a_core_owned_run_is_refused_before_any_python_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chronology holdout over a run another owner registered is refused.
+
+    Both entry points — the candidate query and the create call — are refused
+    against the *trusted* owner record of the source run, before this workspace
+    creates a job, a relation or an admitted input, and before any Python worker or
+    executor runs. A compatible later scenario really is registered here, so the
+    refusal is the owner boundary and not a missing candidate.
+    """
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    settings = _web_settings(tmp_path, core)
+    # The compatible later scenario the candidate query would otherwise offer.
+    _target(settings.scenario_root)
+    counts = _no_python_owner(monkeypatch)
+    app = create_app(settings)
+    with TestClient(app, base_url=ORIGIN) as client:
+        identity = _create_via_http(client)
+        preview = client.get(f"/api/user-strategies/{identity}/experiment/preview").json()
+        launched = client.post(
+            f"/api/user-strategies/{identity}/experiments",
+            headers=WRITE_HEADERS,
+            json={
+                "launch_intent_id": "li-1",
+                "base_revision": preview["draft_revision"],
+                "preview_identity": preview["preview_identity"],
+                "approved_budget": dict(RUN_BUDGET),
+            },
+        )
+        assert launched.status_code == 200, launched.text
+        row = _await_http_row(client, identity)
+        assert row["status"] == "created"
+        source = cast(str, row["job_id"])
+
+        bridge = QuineBridge(core.socket)
+        held = bridge.experiments()
+        jobs_before = sorted(path.name for path in (settings.workspace / "jobs").iterdir())
+        inputs_before = sorted(path.name for path in (settings.workspace / "inputs").iterdir())
+
+        candidates = client.get(f"/api/backtests/{source}/holdout-scenarios")
+        assert candidates.status_code == 422, candidates.text
+        assert candidates.json()["error"]["code"] == "holdout_invalid"
+        assert "not supported" in candidates.json()["error"]["message"]
+
+        created = client.post(
+            "/api/holdouts",
+            headers=WRITE_HEADERS,
+            json={"source_job_id": source, "scenario_id": "later.yaml"},
+        )
+        assert created.status_code == 422, created.text
+        assert created.json()["error"]["code"] == "holdout_invalid"
+        assert "not supported" in created.json()["error"]["message"]
+
+        # Nothing was written or dispatched here by either call: no relation, no
+        # job, no admitted input, and no Python child or research owner was reached.
+        assert client.get("/api/holdouts").json()["holdouts"] == []
+        assert sorted(path.name for path in (settings.workspace / "jobs").iterdir()) == jobs_before
+        assert (
+            sorted(path.name for path in (settings.workspace / "inputs").iterdir()) == inputs_before
+        )
+        assert counts == {"children": 0, "owners": 0}
+        # The owner's own record is untouched: the same run, identities and budget,
+        # and its official report is still readable.
+        assert bridge.experiments() == held
+        assert client.get(f"/api/backtests/{source}").json()["report_ready"] is True

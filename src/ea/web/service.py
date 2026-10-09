@@ -2401,6 +2401,21 @@ class WebService:
 
     def _holdout_source(self, source_job_id: str) -> dict[str, Any]:
         source = self.get_job(source_job_id)
+        if source.owner is not None:
+            # A chronology holdout continues the source attempt this workspace ran:
+            # it re-reads that attempt's evidence and freezes the source's own
+            # parameters into the later scenario. A run another owner registered has
+            # no attempt here to continue, and this path would otherwise freeze the
+            # source snapshot into a second Python job this workspace would run and
+            # publish itself. Both entry points — the candidate query and the create
+            # call — come through here first, so the refusal happens before any job,
+            # relation or admitted input exists and before any worker or executor is
+            # reached. There is no fallback: the source is not run again under
+            # another owner.
+            raise WebBoundaryError(
+                "a chronological holdout over a run another owner registered is not "
+                "supported here; that run's evidence is read through its own owner"
+            )
         report = json.loads(self.report(source_job_id))
         # Reuse canonical snapshot digest validation, including legacy exclusion.
         checked = _decode_job(_canonical_json(source.document()))
