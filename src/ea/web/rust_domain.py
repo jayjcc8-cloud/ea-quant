@@ -7,7 +7,7 @@ side either: it holds no job, attempt, budget, dispatch, cancellation or
 publication state, opens no service, and writes nothing durable except the one
 reply document it is asked for.
 
-Three bounded, side-effect-free modes, each ``<mode> <request.json> <reply.json>``:
+Four bounded, side-effect-free modes, each ``<mode> <request.json> <reply.json>``:
 
 ``snapshot``
     Load one registered scenario file through the existing strict loader, apply
@@ -36,6 +36,15 @@ Three bounded, side-effect-free modes, each ``<mode> <request.json> <reply.json>
     scenario and data identity, and return the artifact digests plus the
     host-verified economic readings.
 
+``rebind``
+    Render the *frozen input of one chronological holdout* from a source run's
+    own retained envelope: the target scenario's data binding replaces the
+    source's, every other fact — the exact source parameters, funding, cost,
+    risk, instrument, strategy implementation bytes and capability binding — is
+    carried from the source the core registered, and the target must be a
+    compatible, strictly later scenario. Nothing is run or published here; the
+    result is the envelope a confirmation carries into the same core.
+
 Only existing stateless product functions are reused. No economic rule is
 redefined here, and a decimal is never converted to a binary float.
 """
@@ -46,6 +55,7 @@ import json
 import os
 import sys
 import tempfile
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
@@ -61,9 +71,14 @@ from ea.product import (
     load_backtest_scenario,
 )
 from ea.product.equity_path import generate_equity_path_analysis
-from ea.product.scenario import load_backtest_scenario_bytes, rebind_research_dataset
+from ea.product.scenario import (
+    load_backtest_scenario_bytes,
+    parameterize_strategy_scenario,
+    rebind_research_dataset,
+)
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import read_regular, validate_package
+from ea.strategy.registry import project_parameters
 from ea.web.datasets import LocalResearchDatasetRegistryV1
 from ea.web.uploads import (
     ControlledUploadStoreV1,
@@ -958,6 +973,301 @@ def _bound_data_matches(binding: object, version: dict[str, Any]) -> bool:
     )
 
 
+# --- chronological holdout target -------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _HoldoutTarget:
+    """One admitted later-scenario target, before its source parameters are frozen."""
+
+    scenario_id: str
+    #: The target scenario as it was loaded, before the source's parameters are
+    #: applied. Its own identity is the input identity of the admitted run.
+    loaded: LoadedBacktestScenario
+    parameterized: LoadedBacktestScenario
+    research: dict[str, Any] | None
+    dataset_version: dict[str, Any] | None
+    dataset_catalog: dict[str, Any] | None
+    binding: dict[str, Any] | None
+
+
+def _holdout_data(document: dict[str, Any], scenario: LoadedBacktestScenario) -> dict[str, Any]:
+    """One target's data block, with the path its own load really resolved."""
+    return {**cast(dict[str, Any], document["data"]), "path": str(scenario.data_path)}
+
+
+def _require_chronology(source: dict[str, Any], target_data: dict[str, Any]) -> None:
+    from ea.web.holdout import require_chronology
+
+    try:
+        require_chronology(source, {"data": target_data})
+    except ValueError as error:
+        raise DomainRefusal("holdout_not_later", str(error)) from None
+
+
+def _require_compatible(source: dict[str, Any], document: dict[str, Any]) -> None:
+    from ea.web.holdout import compatible
+
+    _require(
+        compatible(source, document),
+        "holdout_incompatible",
+        "this scenario's configuration does not match the source run's frozen configuration",
+    )
+
+
+def _holdout_binding(source_binding: object, target_binding: object) -> dict[str, Any] | None:
+    """The source's own frozen capabilities, with only the data layer replaced.
+
+    A holdout continues the *source* implementation: its strategy, model,
+    validator and backtest capabilities are the ones the source run was confirmed
+    under, carried here unchanged. Only the data layer belongs to the target, so
+    the source's data capability — which named a dataset this run does not read —
+    is dropped and the target's own is bound in its place. The result is verified
+    by the frozen-binding decoder before it is ever carried, so a binding this
+    function could not have built from real components is refused rather than
+    frozen.
+    """
+    from ea.plugin.selection import BINDING_SCHEMA, LAYER_ORDER, PluginBindingV1
+
+    components: list[dict[str, Any]] = []
+    if source_binding is not None:
+        _require(
+            type(source_binding) is dict,
+            "invalid_request",
+            "the frozen source carries no readable capability binding",
+        )
+        components.extend(
+            dict(item)
+            for item in cast(dict[str, Any], source_binding)["components"]
+            if item["layer"] != "data"
+        )
+    if target_binding is not None:
+        _require(
+            type(target_binding) is dict,
+            "invalid_request",
+            "the target capability binding is not one document",
+        )
+        components.extend(
+            dict(item)
+            for item in cast(dict[str, Any], target_binding)["components"]
+            if item["layer"] == "data"
+        )
+    if not components:
+        return None
+    ordered = sorted(components, key=lambda item: LAYER_ORDER.index(item["layer"]))
+    payload = json.dumps(
+        ordered, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    )
+    try:
+        binding = PluginBindingV1.decode(
+            {
+                "schema": BINDING_SCHEMA,
+                "binding_sha256": _digest(payload.encode("ascii")),
+                "components": ordered,
+            }
+        )
+    except ManifestError as error:
+        raise DomainRefusal("binding_invalid", str(error)) from None
+    return binding.document()
+
+
+def _holdout_target(request: dict[str, Any]) -> _HoldoutTarget:
+    """One later target scenario, validated the way the source's own run was.
+
+    The base is the *source's* frozen canonical scenario, never today's draft or
+    the target's own defaults, so the exact source strategy, funding, cost, risk
+    and instrument are what is re-admitted; only the data binding is replaced. A
+    registered target must be a scenario that really exists and is compatible with
+    the source, and a target window that is not strictly later is refused. An
+    explicitly selected dataset resolves through this workspace's own catalog —
+    the registered root and the controlled upload store, never a caller's path —
+    and its published version evidence and required capability binding travel with
+    the confirmation.
+    """
+
+    envelope, _frozen, package = _decode_envelope(request.get("source"))
+    snapshot = cast(dict[str, Any], envelope["snapshot"])
+    source_document = cast(dict[str, Any], snapshot["scenario"])
+    scenario_id = request.get("scenario_id")
+    _require(
+        type(scenario_id) is str and bool(scenario_id),
+        "invalid_request",
+        "scenario_id is required",
+    )
+    document = {key: value for key, value in source_document.items() if key != "canonicalization"}
+    dataset_version: dict[str, Any] | None = None
+    dataset_catalog: dict[str, Any] | None = None
+    research: dict[str, Any] | None = None
+    raw_path = request.get("scenario_path")
+    dataset_id = request.get("dataset_id")
+    _require(
+        (raw_path is None) != (dataset_id is None),
+        "invalid_request",
+        "one holdout target is either a registered scenario or one selected dataset",
+    )
+    if raw_path is not None:
+        _require(
+            type(raw_path) is str and bool(raw_path),
+            "invalid_request",
+            "scenario_path must be one absolute file",
+        )
+        target_path = Path(cast(str, raw_path))
+        _require(target_path.is_absolute(), "invalid_request", "scenario_path must be absolute")
+        _require(
+            target_path.name == scenario_id,
+            "invalid_request",
+            "the named scenario is not the scenario file this holdout would run",
+        )
+        raw_strategy_root = request.get("strategy_root")
+        strategy_root: Path | None = None
+        if raw_strategy_root is not None:
+            _require(
+                type(raw_strategy_root) is str and bool(raw_strategy_root),
+                "invalid_request",
+                "strategy_root must be one absolute directory",
+            )
+            strategy_root = Path(cast(str, raw_strategy_root))
+            _require(
+                strategy_root.is_absolute(), "invalid_request", "strategy_root must be absolute"
+            )
+        try:
+            target = load_backtest_scenario(target_path, strategy_root=strategy_root)
+        except (BacktestScenarioError, OSError, ValueError) as error:
+            raise DomainRefusal(
+                "invalid_request", f"the later scenario is not readable: {error}"
+            ) from None
+        target_document = json.loads(target.canonical_bytes)
+        _require_compatible(source_document, target_document)
+        _require_chronology(source_document, _holdout_data(target_document, target))
+        document["data"] = _holdout_data(target_document, target)
+    else:
+        _require(
+            type(dataset_id) is str and bool(dataset_id),
+            "invalid_request",
+            "dataset_id must be one registered input name",
+        )
+        _require(
+            scenario_id == envelope.get("scenario_id"),
+            "invalid_request",
+            "a selected dataset continues the source run's own scenario",
+        )
+        catalog, uploads, roots = _dataset_catalog(request)
+        try:
+            data_path, dataset = catalog.load(cast(str, dataset_id))
+        except (HistoricalMarketDataError, OSError, ValueError) as error:
+            raise DomainRefusal(
+                "invalid_request", f"the registered research input is unusable: {error}"
+            ) from None
+        window = dataset.replay_window
+        document["data"] = {
+            "path": str(data_path),
+            "start_utc": window.start_inclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "end_utc": window.end_exclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "fingerprint": {
+                "sha256": dataset.selection.fingerprint.sha256.value,
+                "record_count": dataset.selection.fingerprint.record_count,
+            },
+        }
+        _require_chronology(source_document, document["data"])
+        research = {
+            "dataset_id": dataset_id,
+            "source_sha256": dataset.source_bytes_sha256.value,
+            "data_sha256": dataset.selection.fingerprint.sha256.value,
+            "record_count": dataset.selection.fingerprint.record_count,
+            "replay_start_utc": document["data"]["start_utc"],
+            "replay_end_utc": document["data"]["end_utc"],
+        }
+        dataset_version = _published_version(uploads, cast(str, dataset_id))
+        dataset_catalog = None if dataset_version is None else dict(roots)
+        _require(
+            dataset_version is None or _bound_data_matches(request.get("binding"), dataset_version),
+            "binding_invalid",
+            "the selected dataset version is not the capability binding this input carries",
+        )
+    strategy_catalog = ResearchStrategyCatalogV1(())
+    if package is not None:
+        claimed = envelope.get("package_sha256")
+        _require(type(claimed) is str, "invalid_request", "the strategy artifact digest is missing")
+        try:
+            strategy_catalog = ResearchStrategyCatalogV1(
+                (validate_package(package, expected_sha256=cast(str, claimed)),)
+            )
+        except (OSError, ValueError) as error:
+            raise DomainRefusal(
+                "invalid_request", f"the frozen strategy artifact is unreadable: {error}"
+            ) from None
+    try:
+        loaded = load_backtest_scenario_bytes(
+            canonical_json_bytes(document),
+            scenario_path=Path("/dev/null"),
+            catalog=strategy_catalog,
+        )
+    except (BacktestScenarioError, OSError, ValueError):
+        raise DomainRefusal(
+            "invalid_request", "the later scenario is not the scenario it claims"
+        ) from None
+    if research is not None:
+        loaded = _with_research_input(loaded, research)
+    strategy_document = cast(dict[str, Any], source_document["strategy"])
+    parameters = dict(
+        cast(dict[str, Any], strategy_document["parameters"])
+        if package is not None or source_document.get("schema_version") in (4, 5)
+        else project_parameters(strategy_document)
+    )
+    try:
+        parameterized = parameterize_strategy_scenario(
+            loaded,
+            initial_cash=cast(dict[str, Any], source_document["funding"])["initial_cash"],
+            parameters=parameters,
+        )
+    except (BacktestScenarioError, OSError, ValueError) as error:
+        raise DomainRefusal("invalid_request", str(error)) from None
+    return _HoldoutTarget(
+        scenario_id=cast(str, scenario_id),
+        loaded=loaded,
+        parameterized=parameterized,
+        research=research,
+        dataset_version=dataset_version,
+        dataset_catalog=dataset_catalog,
+        binding=_holdout_binding(envelope.get("plugin_binding"), request.get("binding")),
+    )
+
+
+def holdout_scenario(request: dict[str, Any]) -> tuple[str, LoadedBacktestScenario]:
+    """The exact target scenario one holdout would run, or a refusal.
+
+    This is the planning read the candidate listing uses: it resolves, checks and
+    parameterizes exactly what a confirmation would freeze, and creates nothing.
+    """
+    target = _holdout_target(request)
+    return target.scenario_id, target.parameterized
+
+
+def _mode_rebind(request: dict[str, Any]) -> dict[str, Any]:
+    from ea.web.service import _input_snapshot, _scenario_identity
+
+    target = _holdout_target(request)
+    source_identity = _scenario_identity(target.loaded)
+    snapshot_bytes, input_sha256 = _input_snapshot(
+        target.scenario_id, target.parameterized, source_identity
+    )
+    envelope = _frozen_envelope(
+        target.scenario_id,
+        target.loaded,
+        target.parameterized,
+        json.loads(snapshot_bytes),
+        input_sha256,
+        plugin_binding=target.binding,
+        dataset_version=target.dataset_version,
+        dataset_catalog=target.dataset_catalog,
+    )
+    return {
+        "frozen": envelope,
+        "input_sha256": input_sha256,
+        "input_identity": source_identity,
+    }
+
+
 def _mode_freeze(request: dict[str, Any]) -> dict[str, Any]:
     envelope, frozen, package = _decode_envelope(request.get("frozen"))
     scenario_path = Path(cast(str, request.get("scenario_path", "/dev/null")))
@@ -1154,7 +1464,12 @@ def _existing_directory(raw: object, field: str) -> Path:
     return resolved
 
 
-MODES = {"snapshot": _mode_snapshot, "freeze": _mode_freeze, "validate": _mode_validate}
+MODES = {
+    "snapshot": _mode_snapshot,
+    "freeze": _mode_freeze,
+    "validate": _mode_validate,
+    "rebind": _mode_rebind,
+}
 
 
 # --- entry point ------------------------------------------------------------

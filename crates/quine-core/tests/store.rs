@@ -12,8 +12,8 @@ use quine_core::protocol::{
 use quine_core::store::{
     Store, CODE_CANCELLED_BEFORE_CONFIRM, CODE_CONFLICT, CODE_DIGEST_MISMATCH,
     CODE_ELIGIBILITY_HELD, CODE_INVALID_STATE, CODE_LATE_CANCEL_REFUSED, CODE_LEASE_HELD,
-    CODE_STALE_FENCE, STATUS_DISPATCHED, STATUS_ELIGIBLE, STATUS_RUNNING, STATUS_STOPPING,
-    STATUS_SUCCEEDED, STATUS_UNKNOWN,
+    CODE_NOT_FOUND, CODE_STALE_FENCE, STATUS_DISPATCHED, STATUS_ELIGIBLE, STATUS_RUNNING,
+    STATUS_STOPPING, STATUS_SUCCEEDED, STATUS_UNKNOWN,
 };
 use quine_core::util::{hex_encode, sha256_hex};
 use serde_json::json;
@@ -661,5 +661,127 @@ fn terminal_replay_with_forged_fence_is_refused_and_state_unchanged() {
     assert_eq!(unchanged.result, Some(result));
     assert_eq!(unchanged.committed_at, Some(committed_at));
     assert_eq!(unchanged.revision, revision);
+    store.release().unwrap();
+}
+
+/// One succeeded source run, and the holdout metadata naming exactly it.
+fn succeeded_source(store: &Store, result: &serde_json::Value) -> (Experiment, serde_json::Value) {
+    confirm_s1(store, 1_001);
+    let dispatched = store.dispatch("s1", "i1", "supervisor", 1_002).unwrap();
+    let committed = store
+        .commit_result(&submission(&dispatched, STATUS_SUCCEEDED, result), 1_003)
+        .unwrap();
+    let canonical = quine_core::canonical::canonical_json_bytes(result).unwrap();
+    let holdout = json!({
+        "schema": "ea.quine-holdout.v1",
+        "validation_id": "6f1a4d5e-0000-4000-8000-000000000001",
+        "source_job_id": committed.job_id,
+        "source_frozen_sha256": committed.frozen_sha256,
+        "source_result_sha256": sha256_hex(&canonical),
+    });
+    (committed, holdout)
+}
+
+#[test]
+fn holdout_confirmation_is_admitted_over_the_registered_source() {
+    let dir = temp_dir("holdout-admitted");
+    let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
+    let result = json!({"schema": "ea.quine-official-result.v1", "run_id": "run-1"});
+    let (_source, holdout) = succeeded_source(&store, &result);
+
+    let payload = json!({"holdout": holdout, "target": {"scenario": "later.yaml"}});
+    let admitted = store
+        .confirm(&confirm("holdout", "v1", 1, &payload), 1_004)
+        .unwrap();
+    assert_eq!(admitted.experiment.status, STATUS_ELIGIBLE);
+    assert_ne!(admitted.experiment.job_id, "");
+    store.release().unwrap();
+}
+
+#[test]
+fn a_holdout_over_an_unknown_source_is_refused() {
+    let dir = temp_dir("holdout-unknown-source");
+    let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
+    let mut holdout = json!({
+        "validation_id": "6f1a4d5e-0000-4000-8000-000000000002",
+        "source_job_id": "no-such-job",
+        "source_frozen_sha256": "0".repeat(64),
+        "source_result_sha256": "0".repeat(64),
+    });
+    let error = store
+        .confirm(
+            &confirm("holdout", "v1", 1, &json!({"holdout": holdout})),
+            1_002,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(error.code, CODE_NOT_FOUND);
+
+    // A source that exists but has not reached a terminal success is refused too:
+    // confirming it is not the same fact as its being finished.
+    confirm_s1(&store, 1_003);
+    holdout["source_job_id"] = json!(query_experiment(&store, "s1", "i1").job_id);
+    let error = store
+        .confirm(
+            &confirm("holdout", "v2", 1, &json!({"holdout": holdout})),
+            1_004,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(error.code, CODE_INVALID_STATE);
+    store.release().unwrap();
+}
+
+#[test]
+fn a_holdout_whose_digests_do_not_reproduce_the_source_is_refused() {
+    let dir = temp_dir("holdout-digest-mismatch");
+    let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
+    let result = json!({"schema": "ea.quine-official-result.v1", "run_id": "run-1"});
+    let (_source, holdout) = succeeded_source(&store, &result);
+
+    let mut wrong_frozen = holdout.clone();
+    wrong_frozen["source_frozen_sha256"] = json!("f".repeat(64));
+    let error = store
+        .confirm(
+            &confirm("holdout", "v1", 1, &json!({"holdout": wrong_frozen})),
+            1_004,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(error.code, CODE_DIGEST_MISMATCH);
+
+    // The stored result is edited under the digest the metadata still names: the
+    // digest is recomputed from the core's own bytes, so this cannot pass.
+    let mut wrong_result = holdout;
+    wrong_result["source_result_sha256"] = json!("e".repeat(64));
+    let error = store
+        .confirm(
+            &confirm("holdout", "v2", 1, &json!({"holdout": wrong_result})),
+            1_005,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(error.code, CODE_DIGEST_MISMATCH);
+    store.release().unwrap();
+}
+
+#[test]
+fn a_malformed_holdout_reference_is_refused() {
+    let dir = temp_dir("holdout-malformed");
+    let store = Store::open(&dir.join("quine.db"), "owner").unwrap();
+    for holdout in [
+        json!({"source_job_id": "j", "source_frozen_sha256": "a".repeat(64),
+               "source_result_sha256": "a".repeat(64)}),
+        json!({"validation_id": "v", "source_job_id": "j",
+               "source_frozen_sha256": "not-a-digest", "source_result_sha256": "a".repeat(64)}),
+        json!({"validation_id": "v", "source_job_id": "a b",
+               "source_frozen_sha256": "a".repeat(64), "source_result_sha256": "a".repeat(64)}),
+    ] {
+        let error = store
+            .confirm(&confirm("holdout", "v1", 1, &json!({"holdout": holdout})), 1_002)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, quine_core::store::CODE_INVALID_REQUEST);
+    }
     store.release().unwrap();
 }

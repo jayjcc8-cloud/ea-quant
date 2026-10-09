@@ -464,6 +464,7 @@ def create_app(settings: WebSettings) -> Any:
     from ea.web.quine import (
         QuineBridge,
         QuineError,
+        QuineHoldouts,
         QuineJobReader,
         QuineUnavailable,
     )
@@ -499,6 +500,14 @@ def create_app(settings: WebSettings) -> Any:
     research_orchestrator = ResearchOrchestrator(
         research_store, service, RadianSettings(RadianSettings.default_path())
     )
+
+    # The core owns every run in this isolated workspace, so it owns their
+    # chronological holdouts too: the source evidence is its own record, the target
+    # input is frozen from that record, and the relationship is derived from the
+    # experiment it admits. The host's own catalog resolver is the only authority
+    # that may name a target dataset's capability.
+    if quine_bridge is not None:
+        service.attach_holdout_owner(QuineHoldouts(quine_bridge, service, research_orchestrator))
 
     from ea.web.user_strategies import (
         UserStrategyBudgetError,
@@ -1204,6 +1213,10 @@ def create_app(settings: WebSettings) -> Any:
             return error(404, "not_found", str(caught))
         except ServiceBusyError as caught:
             return error(409, "service_busy", str(caught))
+        except QuineError as caught:
+            # The owner's own refusal, or its unavailability, is reported as itself
+            # rather than being flattened into this workspace's validation error.
+            return owner_refusal(caught)
         except (WebBoundaryError, BacktestScenarioError, ValueError) as caught:
             return error(422, "holdout_invalid", str(caught))
         except Exception:
@@ -1211,7 +1224,10 @@ def create_app(settings: WebSettings) -> Any:
 
     @app.get("/api/holdouts")
     def list_holdouts() -> object:
-        return {"holdouts": service.list_holdouts()}
+        try:
+            return {"holdouts": service.list_holdouts()}
+        except QuineError as caught:
+            return owner_refusal(caught)
 
     @app.get("/api/holdouts/{validation_id}")
     def get_holdout(validation_id: str) -> object:
@@ -1219,6 +1235,8 @@ def create_app(settings: WebSettings) -> Any:
             return service.get_holdout(validation_id)
         except JobNotFoundError as caught:
             return error(404, "holdout_not_found", str(caught))
+        except QuineError as caught:
+            return owner_refusal(caught)
 
     @app.get("/api/backtests/{job_id}/holdout-scenarios")
     def holdout_scenarios(job_id: str) -> object:
@@ -1226,6 +1244,8 @@ def create_app(settings: WebSettings) -> Any:
             return {"scenarios": service.holdout_candidates(job_id)}
         except JobNotFoundError as caught:
             return error(404, "job_not_found", str(caught))
+        except QuineError as caught:
+            return owner_refusal(caught)
         except (WebBoundaryError, ValueError) as caught:
             return error(422, "holdout_invalid", str(caught))
 

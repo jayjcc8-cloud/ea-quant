@@ -54,6 +54,7 @@ from ea.web import candidates, worker
 from ea.web.datasets import LocalResearchDatasetRegistryV1
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
 from ea.web.local_packages import LOCAL_SCENARIO_ID, LocalStrategyStoreV1
+from ea.web.quine import JOB_OWNER, QuineHoldoutSource
 from ea.web.uploads import (
     MAPPED_VERSION_SCHEMA,
     OFFLINE_HISTORY_VERSION_SCHEMA,
@@ -1013,6 +1014,11 @@ class WebService:
         self._requests: dict[str, str] = {}
         self._batches: dict[str, BatchRecord] = {}
         self._holdouts: dict[str, HoldoutRecord] = {}
+        #: The chronological holdouts of an experiment owner that keeps its runs
+        #: elsewhere. When it is attached the owner admits and holds those runs,
+        #: and this workspace derives their relationships from it rather than
+        #: storing a second copy of them.
+        self._holdout_owner: Any = None
         self._active: str | None = None
         #: Another owner's runs, read only: a job this workspace does not store is
         #: looked up there, and a stop for one is forwarded to its owner. This
@@ -1032,6 +1038,16 @@ class WebService:
         # process stops writing them rather than risk overwriting a state the
         # durable file may already hold; it is a memory-only gate, not a store.
         self._uncertain: set[str] = set()
+
+    def attach_holdout_owner(self, owner: Any) -> None:
+        """Attach the experiment owner that admits chronological holdouts.
+
+        The owner is built from the same service it will be asked about, so it is
+        attached after construction rather than passed to it. Without an owner a
+        holdout over a run this workspace does not store stays refused, which is
+        the behaviour every non-isolated workspace keeps.
+        """
+        self._holdout_owner = owner
 
     def start(self) -> None:
         self._lease.acquire()
@@ -2417,35 +2433,40 @@ class WebService:
 
     def list_holdouts(self) -> list[dict[str, str]]:
         with self._lock:
-            return [
-                item.document()
-                for item in sorted(
-                    self._holdouts.values(),
-                    key=lambda item: (item.created_at, item.validation_id),
-                    reverse=True,
-                )
-            ]
+            relations = [item.document() for item in self._holdouts.values()]
+        if self._holdout_owner is not None:
+            # A holdout the owner holds is read from the owner, under the lock this
+            # workspace's own relations were read under: an owner that cannot be
+            # reached raises rather than being answered with a shorter list.
+            relations.extend(self._holdout_owner.relations())
+        return sorted(
+            relations,
+            key=lambda item: (item["created_at"], item["validation_id"]),
+            reverse=True,
+        )
 
     def get_holdout(self, validation_id: str) -> dict[str, str]:
         with self._lock:
-            try:
-                return self._holdouts[validation_id].document()
-            except KeyError:
-                raise JobNotFoundError("holdout was not found in this workspace") from None
+            record = self._holdouts.get(validation_id)
+        if record is not None:
+            return record.document()
+        if self._holdout_owner is not None:
+            return cast(dict[str, str], self._holdout_owner.relation(validation_id))
+        raise JobNotFoundError("holdout was not found in this workspace")
 
-    def _holdout_source(self, source_job_id: str) -> dict[str, Any]:
+    def _holdout_source(self, source_job_id: str) -> dict[str, Any] | QuineHoldoutSource:
         source = self.get_job(source_job_id)
         if source.owner is not None:
             # A chronology holdout continues the source attempt this workspace ran:
             # it re-reads that attempt's evidence and freezes the source's own
-            # parameters into the later scenario. A run another owner registered has
-            # no attempt here to continue, and this path would otherwise freeze the
-            # source snapshot into a second Python job this workspace would run and
-            # publish itself. Both entry points — the candidate query and the create
-            # call — come through here first, so the refusal happens before any job,
-            # relation or admitted input exists and before any worker or executor is
-            # reached. There is no fallback: the source is not run again under
-            # another owner.
+            # parameters into the later scenario. A run the Rust core registered is
+            # continued too, but by that owner: the target input is rendered from
+            # the owner's own retained envelope and admitted by the owner, so no
+            # second Python job is ever created for it here. Every other owner
+            # keeps the written refusal, and there is no fallback: the source is
+            # never run again under another owner.
+            if source.owner == JOB_OWNER and self._holdout_owner is not None:
+                return cast(QuineHoldoutSource, self._holdout_owner.source(source_job_id))
             raise WebBoundaryError(
                 "a chronological holdout over a run another owner registered is not "
                 "supported here; that run's evidence is read through its own owner"
@@ -2487,6 +2508,12 @@ class WebService:
         source_sha256: str | None = None,
     ) -> PreparedJob:
         source = self._holdout_source(source_job_id)
+        if isinstance(source, QuineHoldoutSource):
+            # This path continues an attempt *this* workspace ran; a run another
+            # owner holds is admitted by that owner, through its own entry point.
+            raise WebBoundaryError(
+                "a chronological holdout over a run another owner registered is not prepared here"
+            )
         if _binds_local_strategy(self.get_job(source_job_id).plugin_binding):
             # A holdout carries no capability binding of its own, so there is nothing
             # here that could freeze or re-check a local package identity: this path
@@ -2530,7 +2557,9 @@ class WebService:
 
     def holdout_candidates(self, source_job_id: str) -> list[dict[str, object]]:
         with self._lock:
-            self._holdout_source(source_job_id)
+            source = self._holdout_source(source_job_id)
+            if isinstance(source, QuineHoldoutSource):
+                return cast(list[dict[str, object]], self._holdout_owner.candidates(source))
             candidates = []
             for path in sorted(self.registry.root.glob("*.y*ml")):
                 scenario_id = path.name
@@ -2564,6 +2593,21 @@ class WebService:
         source_sha256: str | None = None,
     ) -> dict[str, str]:
         with self._lock:
+            source = self._holdout_source(source_job_id)
+            if isinstance(source, QuineHoldoutSource):
+                # The owner admits this holdout itself: it renders the target from
+                # the source run's own retained envelope, confirms it through the
+                # same core path every experiment uses, and holds the relationship.
+                # This workspace creates no job, relation or admitted input here.
+                return cast(
+                    dict[str, str],
+                    self._holdout_owner.create(
+                        source,
+                        scenario_id=scenario_id,
+                        dataset_id=dataset_id,
+                        source_sha256=source_sha256,
+                    ),
+                )
             prepared = self._prepare_holdout(source_job_id, scenario_id, dataset_id, source_sha256)
             if self._active is not None or self._closing:
                 raise ServiceBusyError("one local backtest or batch is already active")

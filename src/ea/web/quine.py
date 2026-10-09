@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from ea.core.encoding import canonical_json_bytes
 
@@ -40,6 +41,22 @@ PROTOCOL = "quine.v1"
 #: these bytes opaquely; they are the confirmation's own metadata, not a second
 #: authority and not something Rust parses.
 CONFIRMATION_SCHEMA = "ea.quine-confirmation.v1"
+
+#: The metadata block one chronological holdout's frozen input carries. It names
+#: the one source run the holdout continues, together with that run's own frozen
+#: input and official result digests, so the core's own confirmation transaction
+#: can prove the reference before the holdout is admitted. It is part of the
+#: frozen bytes, so the frozen-input digest already covers it.
+HOLDOUT_SCHEMA = "ea.quine-holdout.v1"
+
+#: The experiment namespace one holdout is confirmed under. A holdout is not a
+#: draft experiment of the user's strategy, so it is never restored into that
+#: strategy's own experiment list.
+HOLDOUT_OWNER = "holdout"
+
+#: The owner marker every job record this bridge projects carries, and the one
+#: marker the workspace reads to know a run is the core's and not its own.
+JOB_OWNER = "quine"
 
 #: The three verified artifact names the core publishes for one job.
 ARTIFACTS = ("report.json", "summary.txt", "equity-path.json")
@@ -325,6 +342,43 @@ class QuineBridge:
 
     # -- confirmed experiment methods ---------------------------------------
 
+    def freeze_holdout(
+        self, request: dict[str, Any], *, extras: dict[str, Any] | None = None
+    ) -> QuineFrozen:
+        """One holdout's frozen input, rendered by the domain adapter.
+
+        The adapter re-derives the target input from the *source run's* retained
+        envelope, so what is frozen continues that run's own strategy, parameters
+        and cost assumptions under a later data binding — never today's draft and
+        never the target's defaults. ``extras`` is merged in before the bytes are
+        canonicalized, which is how the holdout's own reference metadata becomes
+        part of the digest the owner retains.
+        """
+        from ea.web import rust_domain
+
+        reply = rust_domain.run("rebind", request)
+        if reply.get("status") != "ok":
+            code = reply.get("code") or "quine_refused"
+            message = reply.get("message") or "the holdout input could not be rendered"
+            raise QuineRefused(str(code), str(message))
+        result = reply.get("result")
+        if type(result) is not dict:
+            raise QuineUnavailable("the domain adapter produced no frozen input")
+        envelope = result.get("frozen")
+        if type(envelope) is not dict:
+            raise QuineUnavailable("the domain adapter produced no frozen envelope")
+        document = {**envelope, **(extras or {})}
+        canonical = canonical_json_bytes(document)
+        snapshot_sha256 = envelope.get("snapshot_sha256")
+        if type(snapshot_sha256) is not str:
+            raise QuineUnavailable("the frozen input carries no admitted snapshot digest")
+        return QuineFrozen(
+            envelope=document,
+            canonical=canonical,
+            sha256=_digest(canonical),
+            snapshot_sha256=snapshot_sha256,
+        )
+
     def confirm(
         self,
         *,
@@ -545,9 +599,40 @@ class QuineBridge:
                 if status in {"failed", "interrupted"} and result.get("message")
                 else None
             ),
-            owner="quine",
+            # The frozen capabilities and published version the owner retained for
+            # this run, read from the same verified envelope: a reader sees exactly
+            # what the confirmation was bound to rather than an absent field.
+            plugin_binding=(
+                cast(dict[str, object], envelope["plugin_binding"])
+                if type(envelope.get("plugin_binding")) is dict
+                else None
+            ),
+            dataset_version=(
+                cast(dict[str, object], envelope["dataset_version"])
+                if type(envelope.get("dataset_version")) is dict
+                else None
+            ),
+            # A frozen local artifact is presented from its own static identity: the
+            # package is inspected, never imported, so a revoked or replaced slot
+            # cannot make a historical read execute anything.
+            strategy_package=self._package_of(envelope),
+            owner=JOB_OWNER,
             artifacts_dir=self.workspace / "official" / job_id,
         )
+
+    @staticmethod
+    def _package_of(envelope: dict[str, Any]) -> Any:
+        """The frozen strategy artifact of one envelope, inspected and not executed."""
+        from ea.strategy.package import inspect_package
+
+        encoded = envelope.get("package_file")
+        claimed = envelope.get("package_sha256")
+        if type(encoded) is not str or type(claimed) is not str:
+            return None
+        try:
+            return inspect_package(bytes.fromhex(encoded), expected_sha256=claimed)
+        except (OSError, TypeError, ValueError):
+            return None
 
     # -- reads ---------------------------------------------------------------
 
@@ -750,3 +835,289 @@ class QuineJobReader:
         self._bridge.cancel(strategy_id, intent_id)
         fresh = self._bridge.job_experiment(job_id)
         return None if fresh is None else self._bridge.job_record(fresh)
+
+
+@dataclass(frozen=True, slots=True)
+class QuineHoldoutSource:
+    """One core-owned source run a chronological holdout may continue.
+
+    ``document`` is the source's own frozen canonical scenario, and the two
+    digests are the owner's registered identities of the run: the frozen input it
+    confirmed and the official result it committed. The core re-proves both when
+    it admits a holdout, so this is the reference the holdout is admitted over
+    rather than a claim this workspace makes about it.
+    """
+
+    job_id: str
+    scenario_id: str
+    envelope: dict[str, Any]
+    document: dict[str, Any]
+    frozen_sha256: str
+    result_sha256: str
+
+
+class QuineHoldouts:
+    """Chronological holdouts over runs the Rust core owns.
+
+    A holdout is a second, independent experiment: the target input is rendered
+    from the *source run's own retained envelope* — its exact strategy, parameters,
+    funding, cost, risk and instrument — under a strictly later data binding, and
+    it is confirmed through the same core confirmation, dispatch, cancellation,
+    recovery and result path every other experiment uses. Nothing here holds a
+    relation, a job or a second store: the relationship is derived from the
+    owner's own experiment record and the metadata inside its frozen input, so a
+    restart rebuilds it from the owner rather than from a cached claim. An owner
+    that cannot be reached raises rather than answering with nothing.
+    """
+
+    def __init__(self, bridge: QuineBridge, service: Any, research: Any) -> None:
+        self._bridge = bridge
+        self._service = service
+        #: The workspace's own catalog resolver, used only to name the exact data
+        #: capability a target dataset is bound to. It is the host's authority:
+        #: nothing a caller sends is ever accepted as a capability identity.
+        self._research = research
+
+    # -- the source ----------------------------------------------------------
+
+    def source(self, job_id: str) -> QuineHoldoutSource:
+        """One succeeded core-owned run, or a refusal that names why not."""
+        from ea.web.service import JobNotFoundError, WebBoundaryError
+
+        experiment = self._bridge.job_experiment(job_id)
+        if experiment is None:
+            raise JobNotFoundError("job was not found in this workspace")
+        if experiment.get("status") != "succeeded":
+            raise WebBoundaryError(
+                "a chronological holdout continues one succeeded run; this source run is "
+                f"{experiment.get('status')}"
+            )
+        envelope = self._bridge.frozen_document(experiment)
+        if envelope is None:
+            raise WebBoundaryError("this source run has no readable frozen input")
+        snapshot = envelope.get("snapshot")
+        identity = None if type(snapshot) is not dict else snapshot.get("identity")
+        document = None if type(snapshot) is not dict else snapshot.get("scenario")
+        scenario_id = envelope.get("scenario_id")
+        frozen_sha256 = experiment.get("frozen_sha256")
+        result = experiment.get("result")
+        if (
+            type(document) is not dict
+            or type(identity) is not dict
+            or type(scenario_id) is not str
+            or not scenario_id
+            or type(frozen_sha256) is not str
+            or type(result) is not dict
+        ):
+            raise WebBoundaryError("this source run has no readable admitted input")
+        # The run's verified formal report is its own result evidence, and it must
+        # name the same scenario identity its frozen input admits. A report that
+        # has been removed, replaced or republished is not a source a holdout may
+        # continue.
+        report = json.loads(self._service.report(job_id))
+        if report.get("source", {}).get("scenario_sha256") != identity.get("scenario_sha256"):
+            raise WebBoundaryError(
+                "this source run's verified report and its frozen input do not name the "
+                "same scenario"
+            )
+        return QuineHoldoutSource(
+            job_id=job_id,
+            scenario_id=scenario_id,
+            envelope=envelope,
+            document=cast(dict[str, Any], document),
+            frozen_sha256=frozen_sha256,
+            result_sha256=_digest(canonical_json_bytes(cast(dict[str, Any], result))),
+        )
+
+    # -- the target ----------------------------------------------------------
+
+    def _request(
+        self, source: QuineHoldoutSource, scenario_id: str, dataset_id: str | None
+    ) -> dict[str, Any]:
+        """One rebind request over this workspace's own registered entrances.
+
+        A registered target is named by the scenario file this workspace would
+        load; a selected dataset is named by its catalog identity and resolved
+        through the same registered root and controlled upload store the rest of
+        the product uses. No per-dataset path and no caller-supplied digest is
+        ever part of the request.
+        """
+        request: dict[str, Any] = {"source": source.envelope, "scenario_id": scenario_id}
+        if dataset_id is None:
+            request["scenario_path"] = str(self._service.registered_scenario_file(scenario_id))
+            strategy_root = self._service.registry.strategy_root
+            if strategy_root is not None:
+                request["strategy_root"] = str(strategy_root)
+            return request
+        request["dataset_id"] = dataset_id
+        request["workspace_root"] = str(self._service.uploads.root.parent)
+        if self._service.datasets is not None:
+            request["data_root"] = str(self._service.datasets.root)
+        if self._service.uploads.has(dataset_id):
+            binding = self._research.catalog_binding(dataset_id=dataset_id)
+            if binding is not None:
+                request["binding"] = binding.document()
+        return request
+
+    def candidates(self, source: QuineHoldoutSource) -> list[dict[str, object]]:
+        """Every compatible, strictly later target this source could continue into.
+
+        Each candidate is resolved and parameterized exactly as the confirmation
+        would freeze it, and is simply left out when it cannot be — a candidate
+        list is an offer, and nothing is created here.
+        """
+        from ea.web import rust_domain
+        from ea.web.service import _scenario_summary
+
+        items: list[dict[str, object]] = []
+        for path in sorted(self._service.registry.root.glob("*.y*ml")):
+            try:
+                scenario_id, scenario = rust_domain.holdout_scenario(
+                    self._request(source, path.name, None)
+                )
+            except (rust_domain.DomainRefusal, OSError, ValueError):
+                continue
+            items.append(_scenario_summary(scenario_id, scenario))
+        for entry in self._service.dataset_catalog.list():
+            dataset_id = entry.get("dataset_id")
+            if not entry.get("valid") or type(dataset_id) is not str or not dataset_id:
+                continue
+            try:
+                scenario_id, scenario = rust_domain.holdout_scenario(
+                    self._request(source, source.scenario_id, dataset_id)
+                )
+            except (rust_domain.DomainRefusal, OSError, ValueError):
+                continue
+            summary = _scenario_summary(scenario_id, scenario)
+            summary["name"] = dataset_id
+            items.append(summary)
+        return items
+
+    def create(
+        self,
+        source: QuineHoldoutSource,
+        *,
+        scenario_id: str,
+        dataset_id: str | None = None,
+        source_sha256: str | None = None,
+    ) -> dict[str, str]:
+        """Confirm one holdout under the owner, and answer with its relationship.
+
+        The confirmation carries the same stable intent semantics every other
+        experiment uses: a lost reply is resolved by querying that one intent, so
+        an unobserved answer never becomes a second run, and a refusal is the
+        core's own. Nothing is written here — the relationship is the owner's own
+        record.
+        """
+        from ea.data.historical import HistoricalMarketDataError
+        from ea.web.service import InputChangedError, WebBoundaryError
+
+        if dataset_id is not None:
+            try:
+                _path, dataset = self._service.dataset_catalog.load(dataset_id)
+            except (HistoricalMarketDataError, OSError, ValueError):
+                raise WebBoundaryError(
+                    f"{dataset_id} is not a dataset this workspace can bind a run to"
+                ) from None
+            if source_sha256 is not None and dataset.source_bytes_sha256.value != source_sha256:
+                raise InputChangedError("holdout dataset changed; reselect it")
+        validation_id = str(uuid4())
+        metadata = {
+            "schema": HOLDOUT_SCHEMA,
+            "validation_id": validation_id,
+            "source_job_id": source.job_id,
+            "source_frozen_sha256": source.frozen_sha256,
+            "source_result_sha256": source.result_sha256,
+        }
+        try:
+            frozen = self._bridge.freeze_holdout(
+                self._request(source, scenario_id, dataset_id), extras={"holdout": metadata}
+            )
+        except QuineRefused as refusal:
+            # Rendering the target input is this workspace's own validation, and it
+            # happens before the owner is reached at all. A target this workspace
+            # cannot freeze — an incompatible or non-later scenario, a parameter the
+            # later window cannot support — is refused as that validation, not as a
+            # decision the owner made.
+            raise WebBoundaryError(refusal.message) from None
+        receipt = self._bridge.confirm(
+            strategy_id=HOLDOUT_OWNER,
+            intent_id=validation_id,
+            draft_revision=1,
+            preview_identity=f"sha256:{frozen.sha256}",
+            max_model_calls=0,
+            frozen=frozen,
+        )
+        if receipt.experiment is None:
+            raise QuineUnavailable(
+                "the core's answer to this holdout confirmation could not be established; "
+                "the holdout may already exist. Nothing was re-sent. Reopen saved holdouts "
+                "when the core is available before starting another evaluation"
+            )
+        relation = self._relation(receipt.experiment)
+        if relation is None:
+            raise WebBoundaryError(
+                "the core's record for this holdout does not name the source run it was "
+                "confirmed over"
+            )
+        return relation
+
+    # -- reads ---------------------------------------------------------------
+
+    def relations(self) -> list[dict[str, str]]:
+        """Every holdout this owner holds, derived from the owner's own records."""
+        found: list[dict[str, str]] = []
+        for experiment in self._bridge.experiments():
+            relation = self._relation(experiment)
+            if relation is not None:
+                found.append(relation)
+        return found
+
+    def relation(self, validation_id: str) -> dict[str, str]:
+        from ea.web.service import JobNotFoundError
+
+        for relation in self.relations():
+            if relation["validation_id"] == validation_id:
+                return relation
+        raise JobNotFoundError("holdout was not found in this workspace")
+
+    def _relation(self, experiment: dict[str, Any]) -> dict[str, str] | None:
+        """One relationship, or ``None`` when this record is not a holdout at all.
+
+        The metadata travels inside the frozen input the owner retained, so the
+        relationship is read from the same bytes the confirmation was made of and
+        is held to the workspace's own relationship contract before it is served.
+        """
+        from datetime import UTC, datetime
+
+        from ea.web.holdout import HoldoutRecord, decode_holdout
+
+        envelope = self._bridge.frozen_document(experiment)
+        if envelope is None:
+            return None
+        holdout = envelope.get("holdout")
+        if type(holdout) is not dict or holdout.get("schema") != HOLDOUT_SCHEMA:
+            return None
+        job_id = experiment.get("job_id")
+        created_at = experiment.get("created_at")
+        validation_id = holdout.get("validation_id")
+        source_job_id = holdout.get("source_job_id")
+        if (
+            type(job_id) is not str
+            or not job_id
+            or type(created_at) is not int
+            or type(validation_id) is not str
+            or type(source_job_id) is not str
+        ):
+            return None
+        record = HoldoutRecord(
+            validation_id=validation_id,
+            created_at=datetime.fromtimestamp(created_at, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            source_job_id=source_job_id,
+            holdout_job_id=job_id,
+        )
+        try:
+            decode_holdout(canonical_json_bytes(record.document()))
+        except (TypeError, ValueError):
+            return None
+        return record.document()

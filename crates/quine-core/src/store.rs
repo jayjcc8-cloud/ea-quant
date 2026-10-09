@@ -169,6 +169,109 @@ pub struct Store {
     _lock: File,
 }
 
+/// One string field of a holdout reference, or a refusal that names it.
+fn holdout_field<'a>(holdout: &'a serde_json::Value, name: &str) -> Result<&'a str, QuineError> {
+    holdout
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            QuineError::new(
+                CODE_INVALID_REQUEST,
+                format!("holdout.{name} must be a string"),
+            )
+        })
+}
+
+/// Admit a holdout only over the source run its own metadata names.
+///
+/// The holdout metadata travels inside the frozen input, so the frozen-input
+/// digest already covers it. What this proves is the other half: that the
+/// referenced source is a record *this* core registered, that it reached a
+/// terminal success, and that the frozen input and official result the metadata
+/// names are still the ones this core holds. The official result's digest is
+/// recomputed with the project's canonical JSON rule, which Python and Rust
+/// share, so neither side can claim a digest of its own.
+fn guard_holdout_source(
+    transaction: &rusqlite::Transaction<'_>,
+    holdout: &serde_json::Value,
+) -> Result<(), QuineError> {
+    let validation_id = holdout_field(holdout, "validation_id")?;
+    if !is_safe_id(validation_id) {
+        return Err(QuineError::new(
+            CODE_INVALID_REQUEST,
+            "holdout.validation_id must be 1-64 characters of letters, digits, '-' or '_'",
+        ));
+    }
+    let source_job_id = holdout_field(holdout, "source_job_id")?;
+    if !is_safe_id(source_job_id) {
+        return Err(QuineError::new(
+            CODE_INVALID_REQUEST,
+            "holdout.source_job_id must be 1-64 characters of letters, digits, '-' or '_'",
+        ));
+    }
+    let source_frozen_sha256 = holdout_field(holdout, "source_frozen_sha256")?;
+    let source_result_sha256 = holdout_field(holdout, "source_result_sha256")?;
+    if !is_sha256(source_frozen_sha256) || !is_sha256(source_result_sha256) {
+        return Err(QuineError::new(
+            CODE_INVALID_REQUEST,
+            "holdout source digests must be lowercase 64-character SHA-256 hex",
+        ));
+    }
+    let source: Option<(String, String, Option<String>)> = transaction
+        .query_row(
+            "SELECT e.frozen_sha256, a.status, a.result_json
+             FROM attempt a JOIN experiment e
+               ON e.strategy_id = a.strategy_id AND e.intent_id = a.intent_id
+             WHERE a.job_id = ?1",
+            params![source_job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let (frozen_sha256, status, result_json) = source.ok_or_else(|| {
+        QuineError::new(
+            CODE_NOT_FOUND,
+            "this holdout names a source run this core never registered",
+        )
+    })?;
+    if status != STATUS_SUCCEEDED {
+        return Err(QuineError::new(
+            CODE_INVALID_STATE,
+            format!("this holdout's source run is {status}, not a registered success"),
+        ));
+    }
+    if frozen_sha256 != source_frozen_sha256 {
+        return Err(QuineError::new(
+            CODE_DIGEST_MISMATCH,
+            "this holdout's source frozen input is not the one this core registered",
+        ));
+    }
+    let stored = result_json.ok_or_else(|| {
+        QuineError::new(
+            CODE_INVALID_STATE,
+            "this holdout's source run registered no official result",
+        )
+    })?;
+    let result: serde_json::Value = serde_json::from_str(&stored).map_err(|error| {
+        QuineError::new(
+            CODE_INTERNAL,
+            format!("the source run's official result is unreadable: {error}"),
+        )
+    })?;
+    let canonical = crate::canonical::canonical_json_bytes(&result).map_err(|error| {
+        QuineError::new(
+            CODE_INTERNAL,
+            format!("the source run's official result is not canonical: {error}"),
+        )
+    })?;
+    if sha256_hex(&canonical) != source_result_sha256 {
+        return Err(QuineError::new(
+            CODE_DIGEST_MISMATCH,
+            "this holdout's source result is not the one this core registered",
+        ));
+    }
+    Ok(())
+}
+
 /// The current persisted identity, fence and frozen binding of one attempt.
 #[derive(Debug, Clone)]
 pub struct AttemptContext {
@@ -326,7 +429,7 @@ impl Store {
         // The frozen payload must be readable JSON, but it is never parsed into
         // economic numbers: the exact bytes are stored and their digest is the
         // identity binding.
-        serde_json::from_slice::<serde_json::Value>(&frozen).map_err(|error| {
+        let frozen_value: serde_json::Value = serde_json::from_slice(&frozen).map_err(|error| {
             QuineError::new(
                 CODE_INVALID_REQUEST,
                 format!("frozen_input.canonical_bytes is not readable JSON: {error}"),
@@ -397,6 +500,18 @@ impl Store {
                 CODE_CANCELLED_BEFORE_CONFIRM,
                 "this launch intent was cancelled before it was confirmed",
             ));
+        }
+
+        // A confirmation whose frozen input names a chronological holdout is
+        // admitted only when the source run it references is one this core really
+        // registered: present, terminal-successful, and still the exact frozen
+        // input and official result the holdout metadata names. This is a
+        // reference guard over the core's own records — no economic value is read
+        // or computed — and it runs in the same transaction that admits the
+        // holdout, so a holdout can never be stored against a source that did not
+        // exist at admission or is not the one it names.
+        if let Some(holdout) = frozen_value.get("holdout") {
+            guard_holdout_source(&transaction, holdout)?;
         }
 
         let request_id = request_id_for(&params.strategy_id, &params.intent_id);
