@@ -112,13 +112,21 @@ def _build_core() -> Path:
     The binary is rebuilt every session rather than reused because a stale one would
     prove the sources of whoever built it last instead of the sources under test —
     exactly the way a real change can pass here while being absent from the binary.
-    A machine with no Rust toolchain at all is an environment absence and is skipped
-    out loud; a toolchain that is present and cannot build this crate fails the test,
-    because that is a defect in the change rather than in the machine.
+
+    Every way of not having that binary is a failure of this precondition, never a
+    skip: these are the integration tests for the confirmed-experiment contract, and
+    a run in which they silently did not happen is not a run of them. A machine with
+    no Rust toolchain, a toolchain that cannot be executed, and a toolchain that
+    cannot build this crate are three different messages for one outcome — the tests
+    did not run, so the suite fails and says why.
     """
     toolchain = _cargo()
     if toolchain is None:
-        pytest.skip("no Rust toolchain is available here, so quine-core cannot be built")
+        raise AssertionError(
+            "no Rust toolchain is available here, so quine-core cannot be built from this "
+            f"checkout; these integration tests are never skipped. Expected cargo at {CARGO} "
+            "or on PATH."
+        )
     command, environment = toolchain
     try:
         built = subprocess.run(
@@ -130,7 +138,7 @@ def _build_core() -> Path:
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise AssertionError(
-            f"the Rust toolchain is present but could not be run: {error}"
+            f"the Rust toolchain {command!r} could not be run: {error}"
         ) from None
     if built.returncode != 0 or not CORE_BINARY.is_file():
         detail = built.stderr.decode("utf-8", errors="replace")[-4000:]
@@ -147,6 +155,29 @@ def _core_binary() -> Path:
     if _BUILT_CORE is None:
         _BUILT_CORE = _build_core()
     return _BUILT_CORE
+
+
+# --- the build precondition ---------------------------------------------------
+
+
+def test_a_missing_toolchain_fails_these_integration_tests_instead_of_skipping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not having a toolchain is a failed precondition, never a quiet absence."""
+    monkeypatch.setattr(sys.modules[__name__], "_cargo", lambda: None)
+    with pytest.raises(AssertionError, match="no Rust toolchain"):
+        _build_core()
+
+
+def test_a_toolchain_that_cannot_build_this_crate_fails_with_its_own_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolchain that is present and fails is reported as that build failure."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "_cargo", lambda: (sys.executable, dict(os.environ))
+    )
+    with pytest.raises(AssertionError, match="could not be built from this checkout"):
+        _build_core()
 
 
 class Core:
