@@ -1625,11 +1625,79 @@ class UserStrategyService:
                 "The user's stated criterion: "
                 f"{draft.criterion['field']} is {draft.criterion['expectation']}"
             )
+        facts.extend(self._data_version_facts(draft))
         facts.extend(self._selected_facts(evidence) if evidence else self._verified_facts(strategy))
         return [
             ModelMessage(role="user", text="\n".join(facts)),
             *self._recorded_turns(strategy, message),
         ]
+
+    def _data_version_facts(self, draft: StrategyDraft) -> Paths:
+        """The host's own verified facts about the data this draft would run on.
+
+        A conversation about a strategy is a conversation about *some* data, and the
+        selection is the draft's, not the model's: the identity here is re-derived at
+        this moment from the same dataset binding the engine would admit, and a
+        published version's evidence digest is read from this workspace's own catalog
+        now, so what the model is told is a fact this host just verified rather than
+        a field some caller sent. The block stays at identity and shape — the
+        dataset's own name, the digests that name its source and its selected bars,
+        how many bars those are and the window they replay over. No row of the
+        capture, no filesystem path and no capability beyond these facts is stated,
+        and this never raises: a binding this workspace cannot read now is stated as
+        the absence it is.
+        """
+        identity: dict[str, Any] = {
+            "dataset_id": draft.dataset_id,
+            "source_sha256": draft.source_sha256,
+        }
+        window: str | None = None
+        try:
+            document = self._draft_document(draft)
+            admitted = cast(dict[str, Any], document.get("input_identity") or {})
+            if admitted:
+                identity = admitted
+            data = cast(dict[str, Any], document.get("summary") or {}).get("data")
+            if isinstance(data, dict):
+                window = f"{data.get('start_utc')} .. {data.get('end_utc')}"
+        except Exception:  # noqa: BLE001 — an unreadable binding is stated, not raised
+            window = None
+        facts = ["The data this draft would run on, as this host verified it now:"]
+        dataset_id = identity.get("dataset_id")
+        if not isinstance(dataset_id, str) or not dataset_id:
+            facts.append(
+                "  It is the registered scenario's own data; no separate dataset version "
+                "is selected."
+            )
+            facts.append(
+                f"  Admitted source digest {identity.get('source_sha256') or 'unrecorded'}"
+            )
+        else:
+            evidence = self._published_version_digest(dataset_id)
+            facts.append(f"  Selected dataset version {dataset_id}")
+            facts.append(f"  Admitted source digest {identity.get('source_sha256')}")
+            facts.append(
+                f"  Published version evidence digest {evidence or 'unavailable right now'}"
+            )
+        facts.append(
+            "  Selected bars digest "
+            + str(identity.get("data_sha256") or "unrecorded")
+            + f" over {identity.get('record_count')} records"
+            + (f", replaying {window}" if window else "")
+        )
+        facts.append(
+            "  These are the host's own verified readings of the selected data; they are "
+            "not the user's claims, no proposal can change them, and the capture's rows "
+            "are not part of this conversation."
+        )
+        return facts
+
+    def _published_version_digest(self, dataset_id: str) -> str | None:
+        """This workspace's current evidence digest for one uploaded version."""
+        try:
+            return self._service.dataset_catalog.version_evidence_digest(dataset_id)
+        except Exception:  # noqa: BLE001 — a version that cannot be re-derived is absent
+            return None
 
     def _intent_conversation(self, strategy: UserStrategy, message: str) -> History:
         """One request about an intent: its own words and turns, and nothing else.

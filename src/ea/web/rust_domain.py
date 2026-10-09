@@ -157,6 +157,7 @@ def _frozen_envelope(
     *,
     plugin_binding: dict[str, Any] | None = None,
     dataset_version: dict[str, Any] | None = None,
+    dataset_catalog: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from ea.web.service import _PATH_SCHEMAS, _REPORT_SCHEMAS, _job_schema
 
@@ -186,6 +187,9 @@ def _frozen_envelope(
         "dataset_version_sha256": (
             None if dataset_version is None else _digest(canonical_json_bytes(dataset_version))
         ),
+        # Where that version was published from, so materialization can re-derive
+        # it and refuse a version that changed after this confirmation.
+        "dataset_catalog": dataset_catalog,
         # The capability binding this confirmation was made under: the exact
         # identity of the data and strategy implementations the admitted input
         # runs through. A caller's own document is only ever carried after this
@@ -395,6 +399,38 @@ def _verify_version_binding(envelope: dict[str, Any], snapshot: dict[str, Any]) 
         "binding_invalid",
         "a bound data capability was frozen without the research input it selects",
     )
+    _require_catalog_shape(envelope.get("dataset_catalog"))
+
+
+def _require_catalog_shape(value: object) -> None:
+    """One retained catalog reference, when the envelope carries one.
+
+    An envelope written before this field existed carries none, and is read exactly
+    as it was written. One that does carry it must name the workspace whose own
+    upload store published the version — the place the published evidence has to be
+    re-derived from at materialization — and nothing else.
+    """
+    if value is None:
+        return
+    _require(
+        type(value) is dict and set(cast(dict[str, Any], value)) == {"workspace_root", "data_root"},
+        "invalid_request",
+        "the frozen input's dataset catalog is not one document",
+    )
+    catalog = cast(dict[str, Any], value)
+    workspace = catalog.get("workspace_root")
+    _require(
+        isinstance(workspace, str) and bool(workspace) and Path(workspace).is_absolute(),
+        "invalid_request",
+        "the frozen input's dataset catalog names no absolute workspace",
+    )
+    data_root = catalog.get("data_root")
+    if data_root is not None:
+        _require(
+            isinstance(data_root, str) and bool(data_root) and Path(data_root).is_absolute(),
+            "invalid_request",
+            "the frozen input's dataset catalog names no usable registered root",
+        )
 
 
 def _verified_scenario(
@@ -550,6 +586,70 @@ def _decoded_capture(value: object) -> tuple[Path, str] | None:
     return path, cast(str, digest)
 
 
+def _revalidate_published_version(envelope: dict[str, Any]) -> None:
+    """The version published *now* must still be the version that was confirmed.
+
+    A confirmation names a released version of a local dataset, not merely bytes at
+    a path: its published evidence — the manifest, the retained raw capture and the
+    re-decoded selection — is the record the data capability was bound to. Between
+    the confirmation and this materialization that record can change, and a changed
+    record means the run would be computed from a version the user never confirmed.
+    So the evidence is re-derived here from this workspace's own store, before any
+    private snapshot is written, and must reproduce the confirmed digest exactly.
+    A registered input publishes no version and has nothing to re-derive.
+    """
+    version = envelope.get("dataset_version")
+    if version is None:
+        return
+    catalog = envelope.get("dataset_catalog")
+    _require(
+        type(catalog) is dict,
+        "input_changed",
+        "this input was confirmed against a published dataset version, and the frozen "
+        "input does not name the store it was published by; confirm the dataset again",
+    )
+    roots = cast(dict[str, Any], catalog)
+    workspace = Path(cast(str, roots["workspace_root"]))
+    raw_data_root = roots.get("data_root")
+    if type(raw_data_root) is str:
+        try:
+            LocalResearchDatasetRegistryV1(Path(raw_data_root))
+        except (OSError, ValueError):
+            raise DomainRefusal(
+                "input_changed",
+                "the registered data root this input was confirmed under is unavailable",
+            ) from None
+    try:
+        uploads = ControlledUploadStoreV1(workspace, sweep=False)
+    except (OSError, ValueError):
+        raise DomainRefusal(
+            "input_changed",
+            "the dataset store this input was confirmed from is unavailable",
+        ) from None
+    dataset_id = cast(dict[str, Any], version).get("dataset_id")
+    _require(
+        type(dataset_id) is str and bool(dataset_id),
+        "invalid_request",
+        "the frozen dataset version evidence names no dataset",
+    )
+    try:
+        current = uploads.version_evidence(cast(str, dataset_id))
+    except (HistoricalMarketDataError, OSError, ValueError):
+        # The store refuses to re-derive it: an edited declaration, an edited raw
+        # source or an edited capture is a changed version, not an unreadable one.
+        raise DomainRefusal(
+            "input_changed",
+            "the published version of this dataset can no longer be re-derived; "
+            "re-select the dataset and confirm again",
+        ) from None
+    _require(
+        evidence_digest(current) == evidence_digest(cast(dict[str, Any], version)),
+        "input_changed",
+        "the published version of this dataset changed after it was confirmed; "
+        "re-select the dataset and confirm again",
+    )
+
+
 def _capture_source(
     scenario: LoadedBacktestScenario, raw_path: object, envelope: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -696,6 +796,7 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
     # caller-named path, and a published version's evidence and bound data
     # capability are what the envelope carries.
     dataset_version: dict[str, Any] | None = None
+    dataset_catalog: dict[str, Any] | None = None
     dataset_id = request.get("dataset_id")
     if dataset_id is not None:
         _require(
@@ -703,7 +804,7 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
             "invalid_request",
             "dataset_id must be one registered input name",
         )
-        catalog, uploads = _dataset_catalog(request)
+        catalog, uploads, roots = _dataset_catalog(request)
         try:
             data_path, dataset = catalog.load(cast(str, dataset_id))
             source = rebind_research_dataset(
@@ -717,6 +818,11 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
                 "invalid_request", f"the registered research input is unusable: {error}"
             ) from None
         dataset_version = _published_version(uploads, cast(str, dataset_id))
+        # A published version is confirmed *from* one store, and materialization has
+        # to re-derive it from that same store rather than trust the copy carried
+        # here — so the store's own roots travel with the confirmation, and nothing
+        # else about this workspace does.
+        dataset_catalog = None if dataset_version is None else dict(roots)
         _require(
             dataset_version is None or _bound_data_matches(request.get("binding"), dataset_version),
             "binding_invalid",
@@ -744,6 +850,7 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
         input_sha256,
         plugin_binding=None if binding is None else cast(dict[str, Any], binding),
         dataset_version=dataset_version,
+        dataset_catalog=dataset_catalog,
     )
     return {"frozen": envelope, "input_sha256": input_sha256, "input_identity": source_identity}
 
@@ -753,6 +860,7 @@ def _dataset_catalog(
 ) -> tuple[
     LocalResearchDatasetCatalogV1 | LocalResearchDatasetRegistryV1,
     ControlledUploadStoreV1 | None,
+    dict[str, Any],
 ]:
     """The dataset entrances this workspace really has, and nothing else.
 
@@ -764,7 +872,12 @@ def _dataset_catalog(
     dataset nor its version evidence is ever read from the request. The store is
     opened without its start-up sweep: this invocation is a concurrent reader of
     a store another owner may be publishing into.
+
+    The roots themselves are returned beside the catalog so a confirmation can
+    retain exactly where its version was published from, and nothing else about
+    this workspace.
     """
+    roots: dict[str, Any] = {"workspace_root": None, "data_root": None}
     registered: LocalResearchDatasetRegistryV1 | None = None
     raw_data_root = request.get("data_root")
     if raw_data_root is not None:
@@ -777,6 +890,7 @@ def _dataset_catalog(
             registered = LocalResearchDatasetRegistryV1(Path(cast(str, raw_data_root)))
         except (OSError, ValueError) as error:
             raise DomainRefusal("invalid_request", f"the data root is unusable: {error}") from None
+        roots["data_root"] = str(registered.root)
     raw_workspace = request.get("workspace_root")
     if raw_workspace is None:
         _require(
@@ -784,7 +898,7 @@ def _dataset_catalog(
             "invalid_request",
             "a selected research input requires a dataset catalog this workspace owns",
         )
-        return cast(LocalResearchDatasetRegistryV1, registered), None
+        return cast(LocalResearchDatasetRegistryV1, registered), None, roots
     _require(
         type(raw_workspace) is str and bool(raw_workspace),
         "invalid_request",
@@ -798,7 +912,8 @@ def _dataset_catalog(
         raise DomainRefusal(
             "invalid_request", f"the controlled upload store is unusable: {error}"
         ) from None
-    return LocalResearchDatasetCatalogV1(registered, uploads), uploads
+    roots["workspace_root"] = str(workspace)
+    return LocalResearchDatasetCatalogV1(registered, uploads), uploads, roots
 
 
 def _published_version(
@@ -847,6 +962,11 @@ def _mode_freeze(request: dict[str, Any]) -> dict[str, Any]:
     envelope, frozen, package = _decode_envelope(request.get("frozen"))
     scenario_path = Path(cast(str, request.get("scenario_path", "/dev/null")))
     scenario = _verified_scenario(envelope, frozen, package, scenario_path)
+    # The confirmed version is re-derived from its own published store and held to
+    # the confirmed digest *before* anything is captured: a version that changed
+    # between the confirmation and this moment is refused here, so a run is never
+    # computed from a released version the user did not confirm.
+    _revalidate_published_version(envelope)
     # The confirmation is bound to a private snapshot of its own source here,
     # before anything is materialized: the worker runs from this capture and the
     # later independent validation reads the same one, so the run is a fact about

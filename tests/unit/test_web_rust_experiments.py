@@ -1606,6 +1606,37 @@ def test_a_registered_input_needs_no_version_and_still_resolves(tmp_path: Path) 
     assert registered["research_input"]["dataset_id"] == "full.csv"
 
 
+def test_freeze_refuses_a_published_version_that_changed_after_confirmation(
+    tmp_path: Path,
+) -> None:
+    """A version edit between admission and materialization never becomes a run."""
+    from ea.web import rust_domain
+
+    service = WebService(_scenario_root(tmp_path), tmp_path / "workspace")
+    service.start()
+    _STARTED.append(service)
+    dataset_id, _content = _publish_upload(service, 8)
+    snapshot = _upload_snapshot(service, tmp_path, dataset_id)
+    assert snapshot["status"] == "ok", snapshot
+
+    # The published version's own declaration is edited: the store itself refuses to
+    # re-derive that version's evidence any more.
+    version = service.uploads.root / "versions" / f"{dataset_id}.json"
+    changed = json.loads(version.read_bytes())
+    changed["source"]["reference"] = "changed between admission and materialization"
+    version.write_text(json.dumps(changed))
+    with pytest.raises(ValueError):
+        service.uploads.version_evidence(dataset_id)
+
+    target = tmp_path / "after-drift.data"
+    frozen = rust_domain.run(
+        "freeze",
+        {"frozen": snapshot["result"]["frozen"], "capture_path": str(target)},
+    )
+    assert frozen["status"] == "refused", frozen
+    assert not target.exists()
+
+
 def test_a_confirmed_experiment_runs_from_an_uploaded_dataset_and_outlives_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -5557,3 +5557,38 @@ def test_the_selected_dataset_bounds_what_a_candidate_may_change(
     assert reason is None and within and within[0]["after"] == after["maximum"]
     beyond, refused = propose(cast(int, after["maximum"]) + 1)
     assert beyond == [] and refused
+
+
+def test_a_conversation_states_the_selected_version_the_host_verified(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outgoing model context names the selected data version, and its rows don't."""
+    strategies, _research, service, provider = _stack(tmp_path, monkeypatch)
+    created = _create(strategies)
+    identity = created.user_strategy_id
+    dataset = _upload(service, 8)
+    selected = strategies.select_dataset(
+        identity, operation_id="select-1", base_revision=1, dataset_id=dataset
+    )
+
+    provider.responses.append(_response([], text="An observation."))
+    strategies.send_message(
+        identity,
+        call_id="call-1",
+        base_revision=2,
+        text="Describe the data this draft runs on",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    assert len(provider.calls) == 1
+    opening = cast(str, cast(list[Any], provider.calls[-1]["messages"])[0].text)
+    # What the model is told is the host's own reading of the selected version: the
+    # dataset it was admitted as, the source digest it was admitted under, and the
+    # evidence digest this workspace re-derives for that published version now.
+    assert dataset in opening
+    assert cast(str, selected.draft.source_sha256) in opening
+    assert cast(str, service.dataset_catalog.version_evidence_digest(dataset)) in opening
+    assert "entry_delay_bars" in opening
+    # The capture's rows, its path and this workspace's roots are not part of any
+    # model context: the block is identity and shape only.
+    assert str(service.uploads.root) not in opening
+    assert "100.5" not in opening
