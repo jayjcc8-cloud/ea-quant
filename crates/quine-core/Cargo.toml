@@ -1,0 +1,13 @@
+[package]
+name = "quine-core"
+version = "0.1.0"
+edition = "2021"
+description = "Confirmed experiment identity and single-owner dispatch store (stage 1)"
+license = "MIT"
+
+[dependencies]
+rusqlite = { version = "=0.31.0", features = ["bundled"] }
+serde = { version = "=1.0.203", features = ["derive"] }
+serde_json = { version = "=1.0.117" }
+sha2 = "=0.10.8"
+uuid = { version = "=1.8.0", features = ["v4", "v5"] }
