@@ -306,6 +306,22 @@ class UserStrategyBindRequest(BaseModel):
     criterion: dict[str, Any] | None = None
 
 
+class UserStrategySelectDatasetRequest(BaseModel):
+    """One explicit choice of one local dataset for one executable draft.
+
+    The dataset is named by the identity this workspace's dataset catalog lists it
+    under. It is not a path and not a digest: the host resolves the identity
+    through its own registered root and controlled upload store and binds the
+    published version it finds there, so a caller can never certify what it is
+    about to run against.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    base_revision: int = Field(ge=1, le=1000000)
+    dataset_id: str = Field(min_length=1, max_length=128)
+
+
 class UserStrategyMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     call_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
@@ -1519,6 +1535,28 @@ def create_app(settings: WebSettings) -> Any:
                 base_revision=request.base_revision,
                 scenario_id=request.scenario_id,
                 criterion=request.criterion,
+            )
+            return strategy.document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/select-dataset")
+    def select_user_strategy_dataset(
+        user_strategy_id: str, request: UserStrategySelectDatasetRequest
+    ) -> object:
+        """One explicit dataset choice for one draft: one revision, once.
+
+        The host resolves the identity through its own catalog and validates the
+        whole resulting draft against that data before writing anything. Nothing
+        is called, previewed or run here, and an experiment previewed before this
+        selection no longer names what a confirmation would run.
+        """
+        try:
+            strategy = user_strategy_service.select_dataset(
+                user_strategy_id,
+                operation_id=request.operation_id,
+                base_revision=request.base_revision,
+                dataset_id=request.dataset_id,
             )
             return strategy.document()
         except (UserStrategyError, OSError) as caught:

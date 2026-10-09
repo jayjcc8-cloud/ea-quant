@@ -92,30 +92,59 @@ def _short_workspace() -> Path:
     return workspace
 
 
-def _core_binary() -> Path:
-    """The real core binary, built from this checkout if it is not there yet."""
-    if CORE_BINARY.is_file():
-        return CORE_BINARY
+def _cargo() -> tuple[str, dict[str, str]] | None:
+    """The cargo to build with, and the environment that keeps it checkout-local."""
     environment = dict(os.environ)
     environment["CARGO_TARGET_DIR"] = str(ROOT / ".local" / "rust-target")
     if (ROOT / ".local" / "rust" / "cargo").is_dir():
         environment.setdefault("CARGO_HOME", str(ROOT / ".local" / "rust" / "cargo"))
     if (ROOT / ".local" / "rust" / "rustup").is_dir():
         environment.setdefault("RUSTUP_HOME", str(ROOT / ".local" / "rust" / "rustup"))
-    toolchain = str(CARGO) if CARGO.is_file() else "cargo"
+    if CARGO.is_file():
+        return str(CARGO), environment
+    found = shutil.which("cargo")
+    return (found, environment) if found is not None else None
+
+
+def _build_core() -> Path:
+    """The real core binary, built from *this* checkout's sources before any test runs.
+
+    The binary is rebuilt every session rather than reused because a stale one would
+    prove the sources of whoever built it last instead of the sources under test —
+    exactly the way a real change can pass here while being absent from the binary.
+    A machine with no Rust toolchain at all is an environment absence and is skipped
+    out loud; a toolchain that is present and cannot build this crate fails the test,
+    because that is a defect in the change rather than in the machine.
+    """
+    toolchain = _cargo()
+    if toolchain is None:
+        pytest.skip("no Rust toolchain is available here, so quine-core cannot be built")
+    command, environment = toolchain
     try:
-        subprocess.run(
-            [toolchain, "build", "--manifest-path", str(CRATE / "Cargo.toml")],
-            check=True,
+        built = subprocess.run(
+            [command, "build", "--manifest-path", str(CRATE / "Cargo.toml")],
+            check=False,
             capture_output=True,
             env=environment,
-            timeout=600,
+            timeout=900,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        pytest.skip(f"quine-core is not built and cannot be built here: {error}")
-    if not CORE_BINARY.is_file():
-        pytest.skip(f"quine-core was not produced at {CORE_BINARY}")
+        raise AssertionError(f"the Rust toolchain is present but could not be run: {error}") from None
+    if built.returncode != 0 or not CORE_BINARY.is_file():
+        detail = built.stderr.decode("utf-8", errors="replace")[-4000:]
+        raise AssertionError(f"quine-core could not be built from this checkout:\n{detail}")
     return CORE_BINARY
+
+
+_BUILT_CORE: Path | None = None
+
+
+def _core_binary() -> Path:
+    """The real core binary, built from this checkout once per test session."""
+    global _BUILT_CORE
+    if _BUILT_CORE is None:
+        _BUILT_CORE = _build_core()
+    return _BUILT_CORE
 
 
 class Core:

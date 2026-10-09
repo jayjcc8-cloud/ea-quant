@@ -499,8 +499,22 @@ fn real_run_is_registered_as_one_official_result_and_replays_its_identity() {
     assert_eq!(replay.attempt_id, first.attempt_id);
     let controls: Vec<_> = std::fs::read_dir(root.join("control")).unwrap().collect();
     assert_eq!(controls.len(), 1, "a replay spawned a second attempt");
-    let inputs: Vec<_> = std::fs::read_dir(root.join("inputs")).unwrap().collect();
-    assert_eq!(inputs.len(), 1, "a replay materialized a second input");
+    // One attempt materializes exactly two inputs of its own: the frozen scenario
+    // and the private snapshot of the source it was confirmed from. A replay adds
+    // neither, so a second materialization of any kind is still caught here.
+    let mut inputs: Vec<String> = std::fs::read_dir(root.join("inputs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    inputs.sort();
+    assert_eq!(
+        inputs,
+        vec![
+            format!("{}.data", first.job_id),
+            format!("{}.json", first.job_id)
+        ],
+        "a replay materialized a second input"
+    );
 
     core.kill();
 }

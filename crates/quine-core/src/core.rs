@@ -115,6 +115,11 @@ struct Run {
     attempt_id: String,
     frozen: Value,
     control: PathBuf,
+    /// The private snapshot of this attempt's confirmed source, once the input
+    /// check has captured it. Both the worker and the independent validator are
+    /// pointed at this one file, so the run is computed from the bytes the
+    /// confirmation admitted rather than from a path that may change under it.
+    data_capture: Option<(PathBuf, String)>,
     /// A cancellation this core has accepted for this attempt.
     stop: bool,
     /// The running-state receipt failed after a real spawn: the group is
@@ -334,6 +339,7 @@ impl Core {
             attempt_id: dispatched.attempt_id.clone(),
             frozen,
             control,
+            data_capture: None,
             stop: false,
             aborted: false,
             holding: false,
@@ -345,6 +351,11 @@ impl Core {
     }
 
     /// Re-verify the frozen input as a supervised child before anything is run.
+    ///
+    /// The check is also where the confirmation becomes a private snapshot: the
+    /// adapter is handed this attempt's own capture path under the core's
+    /// workspace, so drift landing before materialization is refused by the
+    /// check itself rather than frozen into a run.
     fn start_freeze(&mut self, key: &str) -> Result<(), QuineError> {
         let (dir, argv) = {
             let run = match self.runs.get(key) {
@@ -353,7 +364,14 @@ impl Core {
             };
             let dir = domain::staging_dir(&self.config.workspace, &run.job_id);
             let _ = std::fs::remove_dir_all(&dir);
-            let request = domain::write_request(&dir, &json!({"frozen": run.frozen}))?;
+            let capture = capture_path(&self.config.workspace, &run.job_id);
+            let request = domain::write_request(
+                &dir,
+                &json!({
+                    "frozen": run.frozen,
+                    "capture_path": capture.display().to_string(),
+                }),
+            )?;
             let reply = domain::reply_path(&dir);
             let argv = domain::argv(&self.config.python, "freeze", &request, &reply);
             (dir, argv)
@@ -501,13 +519,21 @@ impl Core {
 
     /// Write the frozen files, then spawn the existing worker directly.
     fn materialize_and_spawn(&mut self, key: &str, frozen_result: Value) -> Result<(), QuineError> {
-        let (control, argv) = {
+        let (control, argv, capture) = {
             let run = match self.runs.get(key) {
                 Some(run) => run,
                 None => return Ok(()),
             };
             let inputs = self.config.workspace.join("inputs");
             let scenario_path = inputs.join(format!("{}.json", run.job_id));
+            // The input check captures this attempt's confirmed source at the one
+            // path this core named for it. Nothing else is accepted as that
+            // capture, and the reference that goes to the worker is the core's
+            // own path with the digest the check proved.
+            let capture = decode_capture(
+                &frozen_result,
+                &capture_path(&self.config.workspace, &run.job_id),
+            )?;
             write_once(
                 &scenario_path,
                 &decode_hex_field(&frozen_result, "scenario_file")?,
@@ -559,6 +585,13 @@ impl Core {
                     "path": path.display().to_string(),
                     "sha256": frozen_result.get("package_sha256").cloned().unwrap_or(Value::Null),
                 })),
+                // The private snapshot the worker must compute from, or the fact
+                // that this input has none. The scenario file's own declared data
+                // path is never what the worker reads when this is present.
+                "data_capture": capture.as_ref().map(|(path, digest)| json!({
+                    "path": path.display().to_string(),
+                    "sha256": digest,
+                })),
                 "staging": {"runs": "runs", "reports": "reports"},
             });
             let mut argv = vec![
@@ -577,7 +610,7 @@ impl Core {
                 &run.control.join("request.json"),
                 &serde_json::to_vec(&request).map_err(io::Error::other)?,
             )?;
-            (run.control.clone(), argv)
+            (run.control.clone(), argv, capture)
         };
         let _ = control;
         let guard = ChildGuard::spawn(&argv, None, true).map_err(|error| {
@@ -589,6 +622,7 @@ impl Core {
         // exit is unproven.
         if let Some(run) = self.runs.get_mut(key) {
             run.phase = Phase::Worker { guard };
+            run.data_capture = capture;
         }
         let (strategy_id, intent_id) = split_key(key);
         if self.config.faults.hold_after_spawn {
@@ -692,8 +726,8 @@ impl Core {
             );
             return;
         }
-        let frozen = match self.runs.get(key) {
-            Some(run) => run.frozen.clone(),
+        let (frozen, capture) = match self.runs.get(key) {
+            Some(run) => (run.frozen.clone(), run.data_capture.clone()),
             None => return,
         };
         let dir = domain::staging_dir(&self.config.workspace, &format!("{job_id}-validate"));
@@ -704,6 +738,14 @@ impl Core {
             "job_id": job_id,
             "attempt_dir": result::staged_attempt(&control, &attempt_id).display().to_string(),
             "report_dir": result::staged_report(&control, &job_id).display().to_string(),
+            // The validator re-derives the run's economics from the same private
+            // snapshot the worker computed from, so the proof is about the bytes
+            // this attempt was confirmed on and not about a path that may since
+            // have changed or disappeared.
+            "data_capture": capture.as_ref().map(|(path, digest)| json!({
+                "path": path.display().to_string(),
+                "sha256": digest,
+            })),
         });
         let started = domain::write_request(&dir, &request).and_then(|request_path| {
             let argv = domain::argv(
@@ -978,6 +1020,50 @@ fn split_key(key: &str) -> (String, String) {
 
 fn decode_hex(encoded: &str) -> Result<Vec<u8>, QuineError> {
     hex_decode(encoded).ok_or_else(|| QuineError::new(INPUT_CHANGED, "frozen bytes are not hex"))
+}
+
+/// The one private snapshot path this core names for one attempt.
+fn capture_path(workspace: &Path, job_id: &str) -> PathBuf {
+    workspace.join("inputs").join(format!("{job_id}.data"))
+}
+
+/// The private snapshot one input check reported, held to the core's own path.
+///
+/// The check is the only thing that may produce this reference, and it may only
+/// agree with the path this core named: a snapshot the core did not ask for is
+/// not this attempt's own capture and is refused rather than passed on.
+fn decode_capture(
+    document: &Value,
+    expected: &Path,
+) -> Result<Option<(PathBuf, String)>, QuineError> {
+    let value = match document.get("data_capture") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) => value,
+    };
+    let path = value.get("path").and_then(Value::as_str).ok_or_else(|| {
+        QuineError::new(INPUT_CHANGED, "the input check named no private snapshot")
+    })?;
+    let digest = value.get("sha256").and_then(Value::as_str).ok_or_else(|| {
+        QuineError::new(INPUT_CHANGED, "the private snapshot carries no digest")
+    })?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(QuineError::new(
+            INPUT_CHANGED,
+            "the private snapshot digest is not one lowercase SHA-256",
+        ));
+    }
+    let path = PathBuf::from(path);
+    if path != expected {
+        return Err(QuineError::new(
+            INPUT_CHANGED,
+            "the private snapshot is not this attempt's own capture path",
+        ));
+    }
+    Ok(Some((path, digest.to_string())))
 }
 
 fn decode_hex_field(document: &Value, field: &str) -> Result<Vec<u8>, QuineError> {

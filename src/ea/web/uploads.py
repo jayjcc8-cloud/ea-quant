@@ -926,7 +926,7 @@ class ControlledUploadStoreV1:
     directories is outside what this store can defend.
     """
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, *, sweep: bool = True) -> None:
         self.root = workspace / "uploads"
         self._workspace_fd: int | None = None
         self._root_fd: int | None = None
@@ -940,7 +940,12 @@ class ControlledUploadStoreV1:
             self.close()
             raise
         self._lock = threading.RLock()
-        self._sweep_orphans()
+        if sweep:
+            # The owner's own store sweeps its unpublished leftovers at start-up.
+            # A concurrent reader of the same store must not: another process may
+            # be publishing into it right now, and its staging files are the
+            # store's own in-flight work rather than an owner's leavings.
+            self._sweep_orphans()
 
     def close(self) -> None:
         """Release the anchored directory descriptors; no file is touched."""

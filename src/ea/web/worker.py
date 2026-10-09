@@ -132,6 +132,7 @@ def build_request(
     research_input_bytes: bytes | None,
     package_path: Path | None,
     package_sha256: str | None,
+    data_capture: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """One frozen-input request. Paths and hashes only; no payloads.
 
@@ -141,6 +142,10 @@ def build_request(
     parameters were applied. A worker checks both: the first that it read the
     frozen bytes, the second that what it parsed is the scenario this job
     admitted rather than merely something that hashed correctly.
+
+    ``data_capture`` names the controller's private snapshot of this attempt's
+    confirmed source. A worker that is given one computes from that file, held to
+    its own digest, instead of from the path the frozen scenario declares.
     """
     scenario: dict[str, Any] = {
         "path": str(scenario_path),
@@ -153,7 +158,7 @@ def build_request(
     package = None
     if package_path is not None and package_sha256 is not None:
         package = {"path": str(package_path), "sha256": package_sha256}
-    return {
+    request: dict[str, Any] = {
         "schema": REQUEST_SCHEMA,
         "job_id": job_id,
         "attempt_id": attempt_id,
@@ -161,6 +166,14 @@ def build_request(
         "package": package,
         "staging": {"runs": RUNS_NAME, "reports": REPORTS_NAME},
     }
+    if data_capture is not None:
+        # Only a controller that captured this attempt's own source names one;
+        # the key is absent rather than empty when there is nothing to point at.
+        request["data_capture"] = {
+            "path": str(data_capture[0]),
+            "sha256": data_capture[1],
+        }
+    return request
 
 
 def write_request(control: Path, request: dict[str, Any]) -> None:
@@ -745,6 +758,12 @@ def _load_frozen_scenario(request: dict[str, Any]) -> LoadedBacktestScenario:
             read_regular(package_path, package_path.parent), expected_sha256=package_sha256
         )
     catalog = ResearchStrategyCatalogV1(() if package is None else (package,))
+    # The controller's private snapshot of this run's confirmed source replaces
+    # the scenario file's own declared data path. It was captured by the input
+    # check and is held here to its own digest, so the engine computes from the
+    # bytes this attempt was confirmed on and not from whatever the original
+    # source path holds now.
+    payload = _with_data_capture(payload, request.get("data_capture"))
     scenario = load_backtest_scenario_bytes(payload, scenario_path=path, catalog=catalog)
     if scenario.scenario_sha256.value != admitted:
         raise WorkerError("the parsed scenario is not the one this job admitted")
@@ -778,6 +797,38 @@ def _load_frozen_scenario(request: dict[str, Any]) -> LoadedBacktestScenario:
             raise WorkerError("the research input evidence is not this job's source")
         scenario = replace(scenario, research_input_bytes=encoded)
     return scenario
+
+
+def _with_data_capture(payload: bytes, reference: Any) -> bytes:
+    """The frozen scenario document, reading its data from the private snapshot.
+
+    The snapshot is the controller's own capture of the confirmed source. It is
+    held to the digest the controller recorded for it before anything is parsed,
+    and only its path is substituted: every other field of the frozen document —
+    including the data fingerprint the strict loader re-checks against the parsed
+    selection — is exactly what was admitted, so a snapshot that does not parse
+    to the confirmed selection is refused rather than run.
+    """
+    if reference is None:
+        return payload
+    if type(reference) is not dict:
+        raise WorkerError("worker request names an unreadable private snapshot")
+    capture_path = _absolute(reference.get("path"))
+    expected = reference.get("sha256")
+    if type(expected) is not str:
+        raise WorkerError("worker request names no private snapshot digest")
+    captured = read_regular(capture_path, capture_path.parent)
+    if _digest(captured) != expected:
+        raise WorkerError("the private snapshot changed before the worker read it")
+    try:
+        document = json.loads(payload)
+    except ValueError:
+        raise WorkerError("frozen scenario is not readable") from None
+    data = document.get("data") if type(document) is dict else None
+    if type(data) is not dict:
+        raise WorkerError("frozen scenario names no data")
+    data["path"] = str(capture_path)
+    return canonical_json_bytes(document)
 
 
 def _absolute(raw: object) -> Path:

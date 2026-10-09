@@ -14,13 +14,20 @@ Three bounded, side-effect-free modes, each ``<mode> <request.json> <reply.json>
     the user's parameters through the existing parameterizer, and render the
     *same* admitted input snapshot document and digest the Python Web service
     would freeze, together with the exact frozen scenario-file bytes the worker
-    reads. This is the frozen input a confirmation carries.
+    reads. This is the frozen input a confirmation carries. One explicitly
+    selected local dataset is resolved through the existing dataset catalog —
+    the registered root and the controlled upload store, never a caller's path —
+    and its published version evidence and required capability binding are bound
+    into the envelope.
 
 ``freeze``
     Re-verify one frozen input envelope from its own retained bytes: the
     snapshot document must reproduce its digest, the frozen scenario-file bytes
     must reproduce theirs, and re-loading those bytes must reproduce the
-    admitted scenario identity. It returns exactly the bytes to materialize.
+    admitted scenario identity. Along that check it captures the source bytes
+    the confirmation admitted into the private path the caller names, refusing a
+    source that no longer reproduces the confirmed digest, and returns the
+    capture's own path and digest beside the bytes to materialize.
 
 ``validate``
     After the whole worker group is gone, independently regenerate the formal
@@ -45,6 +52,8 @@ from typing import Any, cast
 
 from ea.core.encoding import canonical_json_bytes
 from ea.data.historical import HistoricalMarketDataError
+from ea.plugin.manifest import ManifestError
+from ea.plugin.selection import PluginBindingV1
 from ea.product import (
     BacktestScenarioError,
     LoadedBacktestScenario,
@@ -56,6 +65,11 @@ from ea.product.scenario import load_backtest_scenario_bytes, rebind_research_da
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import read_regular, validate_package
 from ea.web.datasets import LocalResearchDatasetRegistryV1
+from ea.web.uploads import (
+    ControlledUploadStoreV1,
+    LocalResearchDatasetCatalogV1,
+    evidence_digest,
+)
 
 DOMAIN_SCHEMA = "ea.quine-domain.v1"
 FROZEN_SCHEMA = "ea.quine-frozen-input.v1"
@@ -140,6 +154,9 @@ def _frozen_envelope(
     parameterized: LoadedBacktestScenario,
     snapshot: dict[str, Any],
     snapshot_sha256: str,
+    *,
+    plugin_binding: dict[str, Any] | None = None,
+    dataset_version: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from ea.web.service import _PATH_SCHEMAS, _REPORT_SCHEMAS, _job_schema
 
@@ -160,6 +177,23 @@ def _frozen_envelope(
         "research_input": research,
         "research_input_sha256": research_sha256,
         "research_input_canonical": research_canonical,
+        # The published version of the selected local dataset, when the selection
+        # is an uploaded one: the exact re-derived evidence document this host's
+        # controlled upload store vouches for, and the digest of its canonical
+        # bytes. A registered read-only input publishes no version, and that is
+        # carried as the absence it is rather than as an empty claim.
+        "dataset_version": dataset_version,
+        "dataset_version_sha256": (
+            None if dataset_version is None else _digest(canonical_json_bytes(dataset_version))
+        ),
+        # The capability binding this confirmation was made under: the exact
+        # identity of the data and strategy implementations the admitted input
+        # runs through. A caller's own document is only ever carried after this
+        # host's catalog has resolved and authorized it.
+        "plugin_binding": plugin_binding,
+        "plugin_binding_sha256": (
+            None if plugin_binding is None else plugin_binding.get("binding_sha256")
+        ),
         "job_schema": job_schema,
         "report_schema": _REPORT_SCHEMAS.get(job_schema, "ea.backtest-report.v1"),
         "path_schema": _PATH_SCHEMAS.get(job_schema, "ea.backtest-equity-path.v1"),
@@ -258,13 +292,128 @@ def _decode_envelope(value: object) -> tuple[dict[str, Any], bytes, bytes | None
             "identity_mismatch",
             "the frozen research evidence is not the one the snapshot admitted",
         )
+    _verify_version_binding(envelope, readable)
     return envelope, frozen, package
 
 
+def _verify_version_binding(
+    envelope: dict[str, Any], snapshot: dict[str, Any]
+) -> None:
+    """Hold one envelope's version evidence and binding to each other.
+
+    These two facts are what make a confirmation about a *version* of a local
+    dataset rather than about whatever bytes happen to sit at a path today: the
+    published evidence names the captured bytes, and the bound data capability
+    names the digest of exactly that evidence. Neither is trusted from the
+    envelope alone — each is re-derived from the value it claims — and the two
+    must name the same dataset and the same capture.
+    """
+    research = envelope.get("research_input")
+    version = envelope.get("dataset_version")
+    binding_value = envelope.get("plugin_binding")
+    binding: PluginBindingV1 | None = None
+    if binding_value is None:
+        _require(
+            envelope.get("plugin_binding_sha256") is None,
+            "identity_mismatch",
+            "the frozen input names a binding digest with no binding",
+        )
+    else:
+        _require(
+            type(binding_value) is dict,
+            "invalid_request",
+            "the frozen capability binding is not one document",
+        )
+        try:
+            binding = PluginBindingV1.decode(binding_value)
+        except ManifestError as error:
+            raise DomainRefusal("binding_invalid", str(error)) from None
+        _require(
+            envelope.get("plugin_binding_sha256") == binding.binding_sha256,
+            "identity_mismatch",
+            "the frozen capability binding does not reproduce its own digest",
+        )
+    if version is None:
+        _require(
+            envelope.get("dataset_version_sha256") is None,
+            "identity_mismatch",
+            "the frozen input names a dataset version digest with no version",
+        )
+        _require(
+            binding is None or binding.component("data") is None,
+            "binding_invalid",
+            "the frozen input binds a data capability to no published dataset version",
+        )
+        return
+    _require(
+        type(version) is dict,
+        "invalid_request",
+        "the frozen dataset version evidence is not one document",
+    )
+    evidence = cast(dict[str, Any], version)
+    _require(
+        envelope.get("dataset_version_sha256") == _digest(canonical_json_bytes(evidence)),
+        "digest_mismatch",
+        "the frozen dataset version evidence does not reproduce its own digest",
+    )
+    dataset_id = evidence.get("dataset_id")
+    _require(
+        type(dataset_id) is str and bool(dataset_id),
+        "invalid_request",
+        "the frozen dataset version evidence names no dataset",
+    )
+    # The evidence and the admitted research input are two records of one
+    # selection: an envelope whose version evidence describes other bytes than
+    # the input admitted is not a confirmation of either.
+    if type(research) is dict:
+        _require(
+            research.get("dataset_id") == dataset_id
+            and research.get("source_sha256") == evidence.get("capture_sha256")
+            and research.get("data_sha256") == evidence.get("data_sha256")
+            and research.get("record_count") == evidence.get("record_count"),
+            "identity_mismatch",
+            "the frozen dataset version is not the source this input admitted",
+        )
+    data = None if binding is None else binding.component("data")
+    if data is None:
+        _require(
+            type(research) is not dict,
+            "binding_invalid",
+            "a published dataset version was confirmed without its data capability",
+        )
+        return
+    _require(
+        data.plugin_id == f"ea.builtin.data.{dataset_id}",
+        "binding_invalid",
+        "the bound data capability does not name this published dataset version",
+    )
+    _require(
+        data.identity.get("version_evidence_sha256") == evidence_digest(evidence),
+        "binding_invalid",
+        "the bound data capability does not match this version's evidence",
+    )
+    _require(
+        snapshot.get("research_input") is not None,
+        "binding_invalid",
+        "a bound data capability was frozen without the research input it selects",
+    )
+
+
 def _verified_scenario(
-    envelope: dict[str, Any], frozen: bytes, package: bytes | None, scenario_path: Path
+    envelope: dict[str, Any],
+    frozen: bytes,
+    package: bytes | None,
+    scenario_path: Path,
+    captured: tuple[Path, str] | None = None,
 ) -> LoadedBacktestScenario:
-    """Re-load the frozen bytes and hold them to the admitted identity."""
+    """Re-load the frozen bytes and hold them to the admitted identity.
+
+    ``captured`` names the private snapshot of the source bytes this input was
+    confirmed from. When it is given the frozen file's declared data path is
+    replaced by that snapshot — the scenario identity does not bind a local file
+    path, so what is re-derived is still exactly the admitted scenario — and the
+    snapshot must reproduce its own recorded digest before anything is parsed.
+    """
     from ea.web.service import _scenario_identity
 
     catalog = None
@@ -276,9 +425,12 @@ def _verified_scenario(
         )
     else:
         catalog = ResearchStrategyCatalogV1(())
+    payload = frozen
+    if captured is not None:
+        payload = _rewrite_data_path(frozen, _verified_capture(captured))
     try:
         scenario = load_backtest_scenario_bytes(
-            frozen, scenario_path=scenario_path, catalog=catalog
+            payload, scenario_path=scenario_path, catalog=catalog
         )
     except (BacktestScenarioError, OSError, ValueError):
         raise DomainRefusal(
@@ -321,7 +473,7 @@ def _verified_scenario(
         "the frozen scenario file is not the scenario this input admitted",
     )
     try:
-        materialized = json.loads(frozen)
+        materialized = json.loads(payload)
     except ValueError:
         raise DomainRefusal("invalid_request", "the frozen scenario file is not readable") from None
     retained_data = cast(dict[str, Any], retained["data"])
@@ -333,6 +485,140 @@ def _verified_scenario(
         "the frozen scenario file does not materialize the snapshot this input admitted",
     )
     return scenario
+
+
+def _verified_capture(captured: tuple[Path, str]) -> Path:
+    """The private snapshot path, held to the digest it was captured as.
+
+    The capture is the run's own frozen data. A snapshot that no longer
+    reproduces the confirmed digest — truncated, edited or replaced — is refused
+    here rather than parsed as if it were the admitted source.
+    """
+    path, claimed = captured
+    try:
+        payload = read_regular(path, path.parent)
+    except OSError:
+        raise DomainRefusal(
+            "input_changed", "the private snapshot of this run's input is unavailable"
+        ) from None
+    _require(
+        _digest(payload) == claimed,
+        "input_changed",
+        "the private snapshot of this run's input no longer reproduces the confirmed bytes",
+    )
+    return path
+
+
+def _rewrite_data_path(frozen: bytes, data_path: Path) -> bytes:
+    """The frozen scenario document with only its data path replaced."""
+    try:
+        document = json.loads(frozen)
+    except ValueError:
+        raise DomainRefusal("invalid_request", "the frozen scenario file is not readable") from None
+    _require(
+        type(document) is dict and type(cast(dict[str, Any], document).get("data")) is dict,
+        "invalid_request",
+        "the frozen scenario file names no data",
+    )
+    value = cast(dict[str, Any], document)
+    value["data"] = {**cast(dict[str, Any], value["data"]), "path": str(data_path)}
+    return canonical_json_bytes(value)
+
+
+def _decoded_capture(value: object) -> tuple[Path, str] | None:
+    """One private snapshot reference from a request, or ``None`` when absent."""
+    if value is None:
+        return None
+    _require(
+        type(value) is dict and set(cast(dict[str, Any], value)) == {"path", "sha256"},
+        "invalid_request",
+        "the private snapshot reference is not one document",
+    )
+    reference = cast(dict[str, Any], value)
+    raw_path = reference.get("path")
+    digest = reference.get("sha256")
+    _require(
+        type(raw_path) is str and bool(raw_path),
+        "invalid_request",
+        "the private snapshot reference names no path",
+    )
+    _require(
+        type(digest) is str and len(digest) == 64,
+        "invalid_request",
+        "the private snapshot reference names no digest",
+    )
+    path = Path(cast(str, raw_path))
+    _require(path.is_absolute(), "invalid_request", "the private snapshot path must be absolute")
+    return path, cast(str, digest)
+
+
+def _capture_source(
+    scenario: LoadedBacktestScenario, raw_path: object, envelope: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Copy the exact source bytes this confirmation admitted into the private path.
+
+    The capture is what the run is actually computed from: the worker and the
+    independent validator both read this file and nothing else, so a later change
+    to or removal of the original upload cannot affect the experiment, and a
+    capture that no longer reproduces its digest is refused rather than parsed.
+    What is captured is held to the admitted evidence — the source digest of the
+    confirmed research input when there is one, and the digest of the source this
+    input was loaded from otherwise — so drift landing before materialization is
+    refused here rather than frozen into the run.
+    """
+    if raw_path is None:
+        return None
+    _require(
+        type(raw_path) is str and bool(raw_path),
+        "invalid_request",
+        "capture_path must be one absolute path",
+    )
+    target = Path(cast(str, raw_path))
+    _require(target.is_absolute(), "invalid_request", "capture_path must be absolute")
+    try:
+        payload = read_regular(scenario.data_path, scenario.data_path.parent)
+    except OSError:
+        raise DomainRefusal(
+            "input_changed", "the confirmed source of this input is no longer readable"
+        ) from None
+    research = envelope.get("research_input")
+    expected = (
+        cast(dict[str, Any], research).get("source_sha256")
+        if type(research) is dict
+        else scenario.dataset.source_bytes_sha256.value
+    )
+    digest = _digest(payload)
+    _require(
+        digest == expected,
+        "input_changed",
+        "the source this input was read from is not the source that was confirmed",
+    )
+    descriptor = _create_capture(target)
+    with os.fdopen(descriptor, "wb", closefd=True) as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    _require(
+        _digest(read_regular(target, target.parent)) == digest,
+        "internal",
+        "the private snapshot did not reproduce the confirmed bytes",
+    )
+    return {"path": str(target), "sha256": digest}
+
+
+def _create_capture(target: Path) -> int:
+    try:
+        return os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC, 0o600)
+    except FileExistsError:
+        # One private snapshot per attempt, written once. An existing file at this
+        # attempt's own path is not this run's capture and is never overwritten.
+        raise DomainRefusal(
+            "input_changed", "the private snapshot for this attempt already exists"
+        ) from None
+    except OSError:
+        raise DomainRefusal(
+            "invalid_request", "the private snapshot for this attempt cannot be written"
+        ) from None
 
 
 def _with_research_input(
@@ -404,9 +690,14 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
         source = load_backtest_scenario(path, strategy_root=strategy_root)
     except (BacktestScenarioError, OSError, ValueError) as error:
         raise DomainRefusal("invalid_request", f"scenario is not readable: {error}") from None
-    # One explicitly registered local research input replaces only the data
-    # binding, through the existing dataset registry and the existing rebinding
-    # validation, so the admitted snapshot carries that input's own evidence.
+    # One explicitly selected local research input replaces only the data
+    # binding, through the existing dataset catalog and the existing rebinding
+    # validation, so the admitted snapshot carries that input's own evidence. The
+    # selection is a catalog identity: the dataset is resolved from this
+    # workspace's own registered root and controlled upload store, never from a
+    # caller-named path, and a published version's evidence and bound data
+    # capability are what the envelope carries.
+    dataset_version: dict[str, Any] | None = None
     dataset_id = request.get("dataset_id")
     if dataset_id is not None:
         _require(
@@ -414,16 +705,9 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
             "invalid_request",
             "dataset_id must be one registered input name",
         )
-        raw_root = request.get("data_root")
-        _require(
-            type(raw_root) is str and bool(raw_root),
-            "invalid_request",
-            "a registered research input requires an explicit data_root",
-        )
+        catalog, uploads = _dataset_catalog(request)
         try:
-            data_path, dataset = LocalResearchDatasetRegistryV1(Path(cast(str, raw_root))).load(
-                cast(str, dataset_id)
-            )
+            data_path, dataset = catalog.load(cast(str, dataset_id))
             source = rebind_research_dataset(
                 source,
                 data_path=data_path,
@@ -434,6 +718,13 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
             raise DomainRefusal(
                 "invalid_request", f"the registered research input is unusable: {error}"
             ) from None
+        dataset_version = _published_version(uploads, cast(str, dataset_id))
+        _require(
+            dataset_version is None
+            or _bound_data_matches(request.get("binding"), dataset_version),
+            "binding_invalid",
+            "the selected dataset version is not the capability binding this input carries",
+        )
     scenario_id = path.name
     source_identity = _scenario_identity(source)
     parameters = request.get("parameters")
@@ -447,17 +738,135 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
             raise DomainRefusal("invalid_request", str(error)) from None
     snapshot_bytes, input_sha256 = _input_snapshot(scenario_id, parameterized, source_identity)
     snapshot = json.loads(snapshot_bytes)
-    envelope = _frozen_envelope(scenario_id, source, parameterized, snapshot, input_sha256)
+    binding = request.get("binding")
+    envelope = _frozen_envelope(
+        scenario_id,
+        source,
+        parameterized,
+        snapshot,
+        input_sha256,
+        plugin_binding=None if binding is None else cast(dict[str, Any], binding),
+        dataset_version=dataset_version,
+    )
     return {"frozen": envelope, "input_sha256": input_sha256, "input_identity": source_identity}
+
+
+def _dataset_catalog(
+    request: dict[str, Any],
+) -> tuple[LocalResearchDatasetCatalogV1 | LocalResearchDatasetRegistryV1, ControlledUploadStoreV1 | None]:
+    """The dataset entrances this workspace really has, and nothing else.
+
+    A Web workspace has two: its registered read-only root, when one is
+    configured, and its controlled upload store. A caller that names only a
+    registered root gets exactly that, so a workspace without an upload store
+    still resolves its registered inputs. Anything else — a per-dataset path, or
+    a digest the caller computed — is not an entrance at all, because neither the
+    dataset nor its version evidence is ever read from the request. The store is
+    opened without its start-up sweep: this invocation is a concurrent reader of
+    a store another owner may be publishing into.
+    """
+    registered: LocalResearchDatasetRegistryV1 | None = None
+    raw_data_root = request.get("data_root")
+    if raw_data_root is not None:
+        _require(
+            type(raw_data_root) is str and bool(raw_data_root),
+            "invalid_request",
+            "data_root must be one absolute directory",
+        )
+        try:
+            registered = LocalResearchDatasetRegistryV1(Path(cast(str, raw_data_root)))
+        except (OSError, ValueError) as error:
+            raise DomainRefusal("invalid_request", f"the data root is unusable: {error}") from None
+    raw_workspace = request.get("workspace_root")
+    if raw_workspace is None:
+        _require(
+            registered is not None,
+            "invalid_request",
+            "a selected research input requires a dataset catalog this workspace owns",
+        )
+        return cast(LocalResearchDatasetRegistryV1, registered), None
+    _require(
+        type(raw_workspace) is str and bool(raw_workspace),
+        "invalid_request",
+        "workspace_root must be one absolute directory",
+    )
+    workspace = Path(cast(str, raw_workspace))
+    _require(workspace.is_absolute(), "invalid_request", "workspace_root must be absolute")
+    try:
+        uploads = ControlledUploadStoreV1(workspace, sweep=False)
+    except (OSError, ValueError) as error:
+        raise DomainRefusal(
+            "invalid_request", f"the controlled upload store is unusable: {error}"
+        ) from None
+    return LocalResearchDatasetCatalogV1(registered, uploads), uploads
+
+
+def _published_version(
+    uploads: ControlledUploadStoreV1 | None, dataset_id: str
+) -> dict[str, Any] | None:
+    """The published version evidence of one uploaded input, or ``None``.
+
+    A registered read-only input publishes no version, which is carried as an
+    absence — and a workspace with no upload store can hold no uploaded input at
+    all. An uploaded one publishes the exact evidence digest a bound job freezes,
+    and a version whose evidence can no longer be re-derived is refused rather
+    than bound as if it had provenance.
+    """
+    if uploads is None or not uploads.has(dataset_id):
+        return None
+    try:
+        return uploads.version_evidence(dataset_id)
+    except (HistoricalMarketDataError, OSError, ValueError):
+        raise DomainRefusal(
+            "invalid_request",
+            "the published version of this dataset can no longer be re-derived; "
+            "re-select the dataset and confirm again",
+        ) from None
+
+
+def _bound_data_matches(binding: object, version: dict[str, Any]) -> bool:
+    """Whether a binding's data component names exactly one published version."""
+    if binding is None:
+        return False
+    if type(binding) is not dict:
+        return False
+    try:
+        decoded = PluginBindingV1.decode(binding)
+    except ManifestError:
+        return False
+    data = decoded.component("data")
+    if data is None:
+        return False
+    return bool(
+        data.plugin_id == f"ea.builtin.data.{version.get('dataset_id')}"
+        and data.identity.get("version_evidence_sha256") == evidence_digest(version)
+    )
 
 
 def _mode_freeze(request: dict[str, Any]) -> dict[str, Any]:
     envelope, frozen, package = _decode_envelope(request.get("frozen"))
     scenario_path = Path(cast(str, request.get("scenario_path", "/dev/null")))
-    _verified_scenario(envelope, frozen, package, scenario_path)
+    scenario = _verified_scenario(envelope, frozen, package, scenario_path)
+    # The confirmation is bound to a private snapshot of its own source here,
+    # before anything is materialized: the worker runs from this capture and the
+    # later independent validation reads the same one, so the run is a fact about
+    # the confirmed bytes rather than about whatever a path holds afterwards.
+    capture = _capture_source(scenario, request.get("capture_path"), envelope)
+    scenario_file = cast(str, envelope["scenario_file"])
+    scenario_file_sha256 = cast(str, envelope["scenario_file_sha256"])
+    if capture is not None:
+        # What is materialized reads its data from the private snapshot. The
+        # scenario *identity* does not include a local file path, so this is the
+        # same admitted scenario; the bytes the worker and the engine verify are
+        # the bytes that name this attempt's own capture, which is what lets the
+        # attempt's own manifest and its later re-verification agree with the
+        # files the run really read instead of with a path that may since move.
+        materialized = _rewrite_data_path(frozen, Path(cast(str, capture["path"])))
+        scenario_file = materialized.hex()
+        scenario_file_sha256 = _digest(materialized)
     return {
-        "scenario_file": envelope["scenario_file"],
-        "scenario_file_sha256": envelope["scenario_file_sha256"],
+        "scenario_file": scenario_file,
+        "scenario_file_sha256": scenario_file_sha256,
         "package_file": envelope["package_file"],
         "package_sha256": envelope["package_sha256"],
         "scenario_identity_sha256": envelope["scenario_identity_sha256"],
@@ -467,6 +876,11 @@ def _mode_freeze(request: dict[str, Any]) -> dict[str, Any]:
         "research_input": envelope.get("research_input"),
         "research_input_sha256": envelope.get("research_input_sha256"),
         "research_input_canonical": envelope.get("research_input_canonical"),
+        "dataset_version": envelope.get("dataset_version"),
+        "dataset_version_sha256": envelope.get("dataset_version_sha256"),
+        "plugin_binding": envelope.get("plugin_binding"),
+        "plugin_binding_sha256": envelope.get("plugin_binding_sha256"),
+        "data_capture": capture,
         "job_schema": envelope["job_schema"],
         "report_schema": envelope["report_schema"],
         "path_schema": envelope["path_schema"],
@@ -497,7 +911,14 @@ def _mode_validate(request: dict[str, Any]) -> dict[str, Any]:
         "identity_mismatch",
         "the staged report directory is not this job",
     )
-    scenario = _verified_scenario(envelope, frozen, package, attempt_dir.parent / "frozen.json")
+    # The independent validation runs over the same private snapshot the worker
+    # ran from, not over the path the original upload still happens to occupy: a
+    # changed, moved or deleted source cannot change what this run is, and a
+    # corrupted snapshot is refused by digest instead of being parsed.
+    captured = _decoded_capture(request.get("data_capture"))
+    scenario = _verified_scenario(
+        envelope, frozen, package, attempt_dir.parent / "frozen.json", captured=captured
+    )
 
     staged: dict[str, bytes] = {}
     for name in ARTIFACTS:

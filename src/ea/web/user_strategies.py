@@ -46,6 +46,7 @@ from ea.web.llm import (
     ToolDefinition,
     create_model_port,
 )
+from ea.web.local_packages import LOCAL_SCENARIO_ID
 from ea.web.quine import (
     CONFIRMATION_SCHEMA,
     QuineBridge,
@@ -90,6 +91,7 @@ _MAX_INTENT = 2000
 _MAX_MESSAGE = 4000
 _MAX_RESPONSE = 8000
 _MAX_SCENARIO_ID = 200
+_MAX_DATASET_ID = 128
 _MAX_REASON = 400
 _MAX_EVIDENCE_ITEM = 400
 _MAX_EVIDENCE = 8
@@ -409,6 +411,10 @@ class UserStrategy:
     #: replay of the binding unresolvable. It is a record of one request, never a
     #: second store: nothing else is ever read from it.
     binding: dict[str, Any] | None = None
+    #: The last explicit dataset selection, kept for the same reason: one request
+    #: record, so replaying the same operation across a restart resolves to the
+    #: revision it already produced instead of selecting a second time.
+    dataset: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         return {
@@ -426,6 +432,7 @@ class UserStrategy:
             "changes": [dict(item) for item in self.changes],
             "experiments": [dict(item) for item in self.experiments],
             "binding": None if self.binding is None else dict(self.binding),
+            "dataset": None if self.dataset is None else dict(self.dataset),
         }
 
     @staticmethod
@@ -433,6 +440,7 @@ class UserStrategy:
         if type(document) is not dict or document.get("schema") != SCHEMA:
             raise UserStrategyError("user strategy schema is not supported")
         binding = document.get("binding")
+        dataset = document.get("dataset")
         return UserStrategy(
             user_strategy_id=str(document["user_strategy_id"]),
             created_at=str(document["created_at"]),
@@ -447,6 +455,7 @@ class UserStrategy:
             changes=tuple(dict(item) for item in document.get("changes") or []),
             experiments=tuple(dict(item) for item in document.get("experiments") or []),
             binding=None if binding is None else dict(binding),
+            dataset=None if dataset is None else dict(dataset),
         )
 
 
@@ -642,13 +651,42 @@ class UserStrategyService:
 
     # -- scenario facts -----------------------------------------------------
 
-    def _scenario_document(self, scenario_id: str) -> dict[str, Any]:
+    def _scenario_document(
+        self, scenario_id: str, dataset_id: str | None = None
+    ) -> dict[str, Any]:
+        """One registered scenario's own facts, under the data it will really run on.
+
+        The dataset binding is part of the request, not an afterthought: a
+        registered parameter's bounds, its history requirement and the next-bar
+        constraint are derived from the bars the engine would actually admit, so
+        reading them from the scenario's default data would describe a different
+        run than the one a confirmation would start.
+        """
         try:
-            return cast(dict[str, Any], self._service.validate_scenario(scenario_id))
+            return cast(
+                dict[str, Any],
+                self._service.validate_scenario(
+                    scenario_id,
+                    # Only a draft that really selected a dataset names one, so a
+                    # scenario with no selection keeps the exact call it always made.
+                    **({} if dataset_id is None else {"dataset_id": dataset_id}),
+                ),
+            )
         except Exception as error:  # noqa: BLE001 — an unusable start is refused, not guessed
             raise UserStrategyStateError(
                 f"{scenario_id} is not a currently registered, valid scenario: {error}"
             ) from None
+
+    def _draft_document(self, draft: StrategyDraft) -> dict[str, Any]:
+        """One draft's registered scenario facts, under the data it selected.
+
+        A draft that selected a dataset is described by that data; one that did not
+        keeps the exact call it always made, so a scenario's own default remains the
+        description only for the drafts that never chose anything else.
+        """
+        if draft.dataset_id is None:
+            return self._scenario_document(draft.scenario_id)
+        return self._scenario_document(draft.scenario_id, draft.dataset_id)
 
     @staticmethod
     def _contracts(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -670,7 +708,7 @@ class UserStrategyService:
         whole resulting draft is still validated by the backend, and a path whose
         registered kind :meth:`_typed` cannot edit is carried as read-only.
         """
-        document = self._scenario_document(draft.scenario_id)
+        document = self._draft_document(draft)
         paths = [
             RegisteredPath(
                 path="initial_cash",
@@ -738,9 +776,14 @@ class UserStrategyService:
         )
 
     def _validated(
-        self, draft: StrategyDraft, parameters: dict[str, Any], initial_cash: str
+        self,
+        draft: StrategyDraft,
+        parameters: dict[str, Any],
+        initial_cash: str,
+        dataset_id: str | None = None,
     ) -> dict[str, Any]:
         """The whole resulting spec, validated by the real backend. Nothing else."""
+        selected = draft.dataset_id if dataset_id is None else dataset_id
         try:
             return cast(
                 dict[str, Any],
@@ -752,6 +795,9 @@ class UserStrategyService:
                         "quantity": None,
                         "strategy_source": None,
                     },
+                    # The data this draft would run on, so the backend validates the
+                    # parameters against the bars that would really be admitted.
+                    **({} if selected is None else {"dataset_id": selected}),
                 ),
             )
         except Exception as error:  # noqa: BLE001 — the backend is the authority here
@@ -767,13 +813,41 @@ class UserStrategyService:
             "strategy_source": None,
         }
 
+    def _binding_for(self, draft: StrategyDraft) -> dict[str, Any] | None:
+        """The capability binding this draft's input runs under, from this host.
+
+        The draft names catalog identities — the dataset it selected and, when it
+        is one, the workspace-local strategy scenario. This workspace's own plugin
+        catalog supplies the exact versions, identities and authorization for
+        them, so what is frozen is what this host currently verifies and never a
+        digest a caller could have certified. An input that needs a binding it
+        cannot be given is refused here, before anything is previewed or confirmed.
+        """
+        uploaded = type(draft.dataset_id) is str and self._service.uploads.has(draft.dataset_id)
+        local = draft.scenario_id == LOCAL_SCENARIO_ID
+        if not uploaded and not local:
+            return None
+        try:
+            binding = self._research.catalog_binding(
+                dataset_id=draft.dataset_id if uploaded else None,
+                local_strategy=local,
+            )
+        except Exception as error:  # noqa: BLE001 — an unresolved capability is a refusal
+            raise UserStrategyStateError(str(error)) from None
+        if binding is None:
+            raise UserStrategyStateError(
+                "this draft's input has no capability this workspace currently authorizes"
+            )
+        return binding.document()
+
     def _admitted_request(self, draft: StrategyDraft) -> dict[str, Any]:
         """The authoritative admitted input of one draft, read from the service.
 
         This is what the engine would execute: the same dataset binding, the same
-        normalized parameters and the same input snapshot a job would freeze. It
-        creates nothing and starts nothing, and it is the only source of the
-        source identity this owner stores — never the caller's own hash.
+        capability binding, the same normalized parameters and the same input
+        snapshot a job would freeze. It creates nothing and starts nothing, and it
+        is the only source of the source identity this owner stores — never the
+        caller's own hash.
         """
         try:
             return cast(
@@ -783,6 +857,7 @@ class UserStrategyService:
                     parameters=self._parameters(draft),
                     dataset_id=draft.dataset_id,
                     source_sha256=draft.source_sha256,
+                    plugin_binding=self._binding_for(draft),
                 ),
             )
         except Exception as error:  # noqa: BLE001 — the backend is the authority here
@@ -1060,6 +1135,143 @@ class UserStrategyService:
                 history=(*strategy.history, strategy.draft)[-_MAX_HISTORY:],
                 changes=(*strategy.changes, change)[-_MAX_CHANGES:],
                 binding=record,
+            )
+            self._store.save(next_strategy)
+            return next_strategy
+        finally:
+            lock.release()
+
+    # -- one explicit dataset selection --------------------------------------
+
+    def select_dataset(
+        self,
+        user_strategy_id: object,
+        *,
+        operation_id: object,
+        base_revision: object,
+        dataset_id: object,
+    ) -> UserStrategy:
+        """Choose one explicitly selected local dataset for one executable draft.
+
+        The user chooses the dataset by the identity this workspace's catalog lists
+        it under; the host resolves and validates it. The whole resulting draft —
+        the current parameters and funding included — is validated by the real
+        backend *against that dataset* before anything is written, so a parameter
+        the selected data cannot support is refused here rather than discovered at
+        confirmation, and the parameter bounds the model is shown come from the
+        same data rather than from the scenario's default. It is one revision of
+        the same strategy: identity, intent, conversation, calls, proposals and the
+        change ledger are kept and nothing is undone. Selecting again is a new
+        revision, which is exactly what makes an earlier preview stale — the
+        preview identity names the admitted input, so a confirmation of a preview
+        taken before this selection is refused instead of silently run.
+        """
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        operation = _identifier(operation_id, "operation_id")
+        if type(base_revision) is not int:
+            raise UserStrategyStateError("base_revision must be an integer")
+        dataset = _bounded(dataset_id, "dataset_id", _MAX_DATASET_ID)
+        # The whole request is this operation's identity: the revision the caller
+        # read and the exact dataset, in the host's own vocabulary.
+        request: dict[str, Any] = {
+            "action": "select-dataset",
+            "base_revision": base_revision,
+            "dataset_id": dataset,
+        }
+        lock = self._lock(identity)
+        if not lock.acquire(blocking=False):
+            raise UserStrategyStateError(
+                "this strategy is busy with a call that has not settled; nothing was selected, "
+                "so reload it and choose the dataset again"
+            )
+        try:
+            strategy = self._store.get(identity)
+            recorded = strategy.dataset
+            if recorded is not None and recorded.get("operation_id") == operation:
+                # The recorded selection is the answer to this operation: it is
+                # compared with the request it was made from, never with today's
+                # draft, so the same selection replays as itself across a restart.
+                if recorded.get("request") != request:
+                    raise UserStrategyConflictError(
+                        "operation_id is already bound to a different dataset selection"
+                    )
+                return strategy
+            if _entry(strategy.changes, "operation_id", operation) is not None:
+                raise UserStrategyConflictError(
+                    "operation_id is already bound to a different operation"
+                )
+            draft = _executable(strategy)
+            if base_revision != draft.revision:
+                raise UserStrategyStaleError(
+                    "the draft revision moved on; reload it before selecting a dataset"
+                )
+            if self._unresolved_call(strategy) is not None:
+                raise UserStrategyStateError(
+                    "an earlier call was never observed; reload the strategy so it is "
+                    "classified before a dataset is selected"
+                )
+            document = self._validated(
+                draft,
+                dict(draft.parameters),
+                draft.initial_cash,
+                dataset_id=dataset,
+            )
+            source = self._source_identity(document)
+            if source.get("dataset_id") != dataset or source.get("source_sha256") is None:
+                raise UserStrategyStateError(
+                    f"{dataset} is not a dataset this workspace can bind a run to"
+                )
+            summary = cast(dict[str, Any], document.get("summary") or {})
+            # The backend's own normalization wins per key, but the draft's
+            # parameter set is exactly what the user confirmed: validation never
+            # adds or drops a field, it only rejects a combination this data cannot
+            # support.
+            parameters = dict(draft.parameters)
+            normalized = summary.get("parameters")
+            if isinstance(normalized, dict):
+                parameters = {name: normalized.get(name, value) for name, value in parameters.items()}
+            revised = replace(
+                draft,
+                revision=draft.revision + 1,
+                dataset_id=dataset,
+                source_sha256=cast(str | None, source.get("source_sha256")),
+                initial_cash=str(summary.get("initial_cash") or draft.initial_cash),
+                parameters=parameters,
+            )
+            now = _now()
+            change: dict[str, Any] = {
+                "operation_id": operation,
+                "kind": "select-dataset",
+                "proposal_id": None,
+                "target_operation_id": None,
+                "dataset_id": dataset,
+                "from_revision": draft.revision,
+                "to_revision": revised.revision,
+                "applied_paths": [],
+                "stale_paths": [],
+                "items": [],
+                "evidence": [],
+                "proposer": "user",
+                "at": now,
+            }
+            record = {
+                "operation_id": operation,
+                "request": request,
+                "request_sha256": _digest(request),
+                "dataset_id": dataset,
+                "from_revision": draft.revision,
+                "to_revision": revised.revision,
+                "selected_at": now,
+            }
+            # One durable write: the revised draft and the request it was selected
+            # by exist together, or not at all.
+            next_strategy = replace(
+                strategy,
+                updated_at=now,
+                draft=revised,
+                history=(*strategy.history, draft)[-_MAX_HISTORY:],
+                changes=(*strategy.changes, change)[-_MAX_CHANGES:],
+                dataset=record,
             )
             self._store.save(next_strategy)
             return next_strategy
@@ -1968,7 +2180,7 @@ class UserStrategyService:
         raw = arguments.get("items") if isinstance(arguments, dict) else None
         if type(raw) is not list or not raw or len(raw) > _MAX_ITEMS:
             return [], "the proposed change had no readable fields; nothing was proposed"
-        document = self._scenario_document(draft.scenario_id)
+        document = self._draft_document(draft)
         contracts = self._contracts(document)
         items: Documents = []
         seen: set[str] = set()
@@ -2779,13 +2991,22 @@ class UserStrategyService:
                 "parameters": self._parameters(draft),
             }
             if draft.dataset_id is not None:
-                if self._service.datasets is None:
-                    raise UserStrategyStateError(
-                        "this draft runs on a registered research input, which this workspace "
-                        "does not configure a data root for"
-                    )
+                # The dataset is named by its catalog identity and resolved through
+                # the roots this workspace already owns: its registered read-only
+                # root, when it has one, and its controlled upload store. Nothing
+                # here is a per-dataset path, and the published version evidence the
+                # adapter binds comes from that same store.
                 request["dataset_id"] = draft.dataset_id
-                request["data_root"] = str(self._service.datasets.root)
+                request["workspace_root"] = str(self._service.uploads.root.parent)
+                if self._service.datasets is not None:
+                    request["data_root"] = str(self._service.datasets.root)
+            binding = self._binding_for(draft)
+            if binding is not None:
+                # The capability binding this input runs under, exactly as this
+                # host's catalog resolved it just now. It travels inside the frozen
+                # bytes, so what the core retains names the implementations and the
+                # dataset version the confirmation was actually made about.
+                request["binding"] = binding
             strategy_root = self._service.registry.strategy_root
             if strategy_root is not None:
                 request["strategy_root"] = str(strategy_root)

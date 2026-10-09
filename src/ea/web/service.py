@@ -1490,6 +1490,33 @@ class WebService:
             return None
         return self.uploads.manifest(dataset_id)
 
+    def _require_binding_names(
+        self, input_identity: dict[str, object], plugin_binding: dict[str, object] | None
+    ) -> None:
+        """A supplied binding may only select the input it is presented with.
+
+        The data component of a frozen binding names one dataset. Accepting a
+        binding that names a different one would freeze one dataset's provenance
+        onto another dataset's bytes, so the two are compared here, before any
+        evidence is checked against either.
+        """
+        if plugin_binding is None:
+            return
+        try:
+            binding = PluginBindingV1.decode(plugin_binding)
+        except ManifestError:
+            raise InputChangedError(
+                "the capability binding on this request is not readable"
+            ) from None
+        data = binding.component("data")
+        if data is None:
+            return
+        dataset_id = input_identity.get("dataset_id")
+        if type(dataset_id) is not str or data.plugin_id != f"ea.builtin.data.{dataset_id}":
+            raise InputChangedError(
+                "the bound data capability does not name this input's dataset"
+            )
+
     def _require_upload_binding(
         self, input_identity: dict[str, object], plugin_binding: dict[str, object] | None
     ) -> None:
@@ -1859,6 +1886,7 @@ class WebService:
         parameters: dict[str, object] | None = None,
         dataset_id: str | None = None,
         source_sha256: str | None = None,
+        plugin_binding: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """The exact normalized input this workspace would admit for one job.
 
@@ -1870,6 +1898,13 @@ class WebService:
         admitted snapshot's own identity and digest against what was previewed,
         instead of trusting a hash it computed itself. The identity is re-derived
         between the two steps, so a change between them is refused here.
+
+        ``plugin_binding`` is the frozen capability identity this input would run
+        under, exactly as this host's own catalog resolved it. It is re-checked
+        against the live evidence and the current grant rather than trusted: a
+        binding that no longer names this dataset's published version, or the local
+        strategy this workspace currently grants, is refused before anything is
+        admitted, and an input that needs a binding is refused when none is given.
         """
         with self._lock:
             validated = self.validate_scenario(
@@ -1879,8 +1914,9 @@ class WebService:
                 source_sha256=source_sha256,
             )
             identity = cast(dict[str, object], validated["input_identity"])
-            self._require_upload_binding(identity, None)
-            self._require_local_binding(scenario_id, None)
+            self._require_binding_names(identity, plugin_binding)
+            self._require_upload_binding(identity, plugin_binding)
+            self._require_local_binding(scenario_id, plugin_binding)
             prepared = self._prepare_job(
                 scenario_id=scenario_id,
                 input_identity=identity,

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from ea.data.historical import HistoricalMarketDataError
 from ea.plugin.builtins import builtin_capabilities, builtin_catalog
 from ea.plugin.catalog import PluginCatalogV1, VerifiedPluginV1
 from ea.plugin.declarative import (
@@ -1070,6 +1071,90 @@ class ResearchOrchestrator:
             )
         except ManifestError as error:
             raise SelectionRejectedError(error) from None
+
+    def catalog_binding(
+        self, *, dataset_id: str | None = None, local_strategy: bool = False
+    ) -> PluginBindingV1 | None:
+        """Resolve one explicit *catalog identity* into the capability it names.
+
+        A caller here names only which host entries it means — one local dataset by
+        the identifier this workspace's catalog lists it under, and/or this
+        workspace's currently granted local strategy — and the exact version,
+        identity and authorization come from this host's own plugin catalog.
+        Nothing the caller sends is trusted as an identity, so no caller can
+        certify a digest of its own, and an entry the catalog no longer offers is
+        refused instead of being substituted by a newer one. Naming no entries at
+        all is the absence of a binding, not an empty binding.
+        """
+        selection: dict[str, Any] = {}
+        if dataset_id is not None:
+            selection["data"] = {
+                "plugin_id": f"ea.builtin.data.{dataset_id}",
+                "package_version": self._data_capability_version(dataset_id),
+            }
+        if local_strategy:
+            selection["strategy"] = self._local_strategy_selection()
+        if not selection:
+            return None
+        binding = self._resolve_binding(selection)
+        data = binding.component("data")
+        if data is not None:
+            # The selected data capability carries the digest of the version
+            # evidence this host re-derives right now; a dataset that publishes no
+            # version evidence, or one whose evidence can no longer be re-derived,
+            # is refused rather than bound as if it had provenance.
+            try:
+                current = self._service.dataset_catalog.version_evidence_digest(
+                    cast(str, dataset_id)
+                )
+            except (HistoricalMarketDataError, OSError, ValueError):
+                current = None
+            if current is None or data.identity.get("version_evidence_sha256") != current:
+                raise SelectionRejectedError(
+                    ManifestError(
+                        "dataset_unavailable",
+                        f"{dataset_id} has no published version this run could be bound to",
+                    )
+                )
+        return binding
+
+    def _data_capability_version(self, dataset_id: str) -> str:
+        """The one version this host's catalog offers for one local dataset."""
+        plugin_id = f"ea.builtin.data.{dataset_id}"
+        versions = sorted(
+            str(entry.get("package_version"))
+            for entry in self._plugin_catalog().entries("data")
+            if entry.get("plugin_id") == plugin_id
+        )
+        if len(versions) != 1:
+            raise SelectionRejectedError(
+                ManifestError(
+                    "dataset_unavailable",
+                    f"{dataset_id} is not one usable local dataset in this workspace",
+                )
+            )
+        return versions[0]
+
+    def _local_strategy_selection(self) -> dict[str, str]:
+        """The exact selection of this workspace's currently granted local strategy."""
+        document = self._service.local_strategy_binding()
+        if document is None:
+            raise SelectionRejectedError(
+                ManifestError(
+                    "grant_required",
+                    "this run selects a local strategy, and this workspace has no "
+                    "currently trusted one",
+                )
+            )
+        try:
+            strategy = PluginBindingV1.decode(document).component("strategy")
+        except ManifestError as error:
+            raise SelectionRejectedError(error) from None
+        if strategy is None:
+            raise SelectionRejectedError(
+                ManifestError("grant_required", "the local strategy slot names no strategy")
+            )
+        return {"plugin_id": strategy.plugin_id, "package_version": strategy.package_version}
 
     @staticmethod
     def _selection_payload(selection: Any) -> dict[str, Any] | None:
