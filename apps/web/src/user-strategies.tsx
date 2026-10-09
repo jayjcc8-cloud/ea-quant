@@ -32,6 +32,7 @@ import { evidenceAddress, readEvidenceSelection, selectableRuns, selectedRuns } 
 import {
   UserStrategyRequestError,
   isIntentDraft,
+  userStrategiesApi,
   type ApprovedBudget,
   type UserStrategy,
   type UserStrategyCall,
@@ -109,6 +110,12 @@ const EXPERIMENT_NOTES: Record<string, string> = {
   interrupted_before_dispatch: '这次确认从未派发过运行，也没有创建重复的运行。',
   unknown: '中断之前可能已经派发了一次运行。在找到它之前，它不会被重发、不会被计数、也不会被退还。',
   failed: '这次实验在运行存在之前就被拒绝了。',
+  // The owner's own states. Each one is the core's answer, not a local guess.
+  confirmed: '运行的所有者已经确认了这次输入，但还没有开始运行它。',
+  running: '运行的所有者正在运行这次确认的冻结输入。',
+  stopping: '停止请求已被接受，所有者正在把这次运行自己的进程组收干净；在它记录之前，停止还不是已证实的。',
+  cancelled: '这次运行已被取消，所有者没有为它登记任何结果。',
+  unconfirmed: '所有者没有这次确认的记录：它没有被重发，也没有创建任何运行。同一次确认是唯一可以再次询问的对象。',
 }
 
 const EXPERIMENT_STATUS_LABELS: Record<UserStrategyExperiment['status'], string> = {
@@ -119,6 +126,35 @@ const EXPERIMENT_STATUS_LABELS: Record<UserStrategyExperiment['status'], string>
   failed: '派发前被拒绝',
   unknown: '结果未知',
   interrupted_before_dispatch: '从未派发',
+  confirmed: '已确认，待运行',
+  running: '运行中',
+  stopping: '正在停止',
+  cancelled: '已取消',
+  unconfirmed: '收据未确认',
+}
+
+/** The owner's own states a run can still move out of on its own. */
+const LIVE_EXPERIMENT_STATUSES: UserStrategyExperiment['status'][] = [
+  'confirmed', 'running', 'stopping',
+]
+/**
+ * A confirmation this page has not resolved yet. While one is open, the only
+ * request that may be repeated is that same confirmation: a new launch intent
+ * would be a second run, and the owner's answer to the first is still unknown.
+ */
+const UNRESOLVED_EXPERIMENT_STATUSES: UserStrategyExperiment['status'][] = [
+  'pending', 'unconfirmed', 'confirmed', 'running', 'stopping', 'unknown',
+]
+/**
+ * The stop request this panel uses. It is optional on the shared adapter, so a
+ * workspace that serves none renders the honest state; when the adapter does not
+ * provide it, the API module is asked directly rather than the action being dropped.
+ */
+type ExperimentOwnerApi = ApiAdapter & {
+  cancelUserStrategyExperiment?: (
+    userStrategyId: string,
+    launchIntentId: string,
+  ) => Promise<UserStrategy>
 }
 
 /**
@@ -1510,7 +1546,7 @@ function ProposalPanel({ api, strategy, proposal, changed }: {
  * is not recalled; a reload finds the work the host committed.
  */
 function ExperimentPanel({ api, strategy, changed, failed }: {
-  api: ApiAdapter
+  api: ExperimentOwnerApi
   strategy: UserStrategy
   changed: (strategy: UserStrategy) => void
   failed: (message: string) => void
@@ -1526,6 +1562,11 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
   // One confirmation is one dispatch: a second event in the same tick is refused
   // here, without waiting for a re-render to disable the button.
   const dispatching = useRef(false)
+  // The stop this panel asked for, and the ticket that makes its answer its own.
+  const [stopping, setStopping] = useState<string | null>(null)
+  const stopTicket = useRef(0)
+  // One progress read at a time, with the ticket of the read that started it.
+  const pollTicket = useRef(0)
   useEffect(() => () => { generation.current += 1 }, [])
 
   // The preview a confirmation would really run: the one read against the revision
@@ -1534,6 +1575,9 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
   const live = preview && preview.draft_revision === strategy.draft.revision ? preview : null
   const cancellable = phase === 'reading' || preview !== null
   const hasRun = strategy.experiments.some(item => item.status === 'created')
+  // Every run an owner holds, and whether one of them can still move on its own.
+  const owned = strategy.experiments.filter(item => item.owner === 'quine')
+  const activeRun = owned.find(item => LIVE_EXPERIMENT_STATUSES.includes(item.status)) ?? null
   // A repeat is only ever read from the admitted engine input: the preview's own
   // nonempty input digest against the digest a created experiment froze. Equal
   // digests mean this confirmation would repeat the same engine input; they are
@@ -1544,6 +1588,78 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
         item.status === 'created' && Boolean(item.payload.input_sha256)
         && item.payload.input_sha256 === live.input_sha256)
     : undefined
+
+  // The owner reads its own run and this page follows it: while a run can still
+  // move, the strategy is re-read on a timer until it reaches a state the owner
+  // will not change on its own, or until this panel unmounts. One read is in
+  // flight at a time, and an answer that belongs to a superseded read — or to a
+  // panel that is gone — is dropped rather than written.
+  useEffect(() => {
+    if (!activeRun) return
+    const read = api.getUserStrategy
+    if (!read) return
+    const strategyId = strategy.user_strategy_id
+    let mounted = true
+    let timer: number | undefined
+    const poll = async () => {
+      const at = ++pollTicket.current
+      let stillActive: boolean
+      try {
+        const updated = await read(strategyId)
+        if (!mounted || at !== pollTicket.current) return
+        if (updated.user_strategy_id !== strategyId) return
+        changed(updated)
+        stillActive = updated.experiments.some(item =>
+          item.owner === 'quine' && LIVE_EXPERIMENT_STATUSES.includes(item.status))
+      } catch {
+        // A read that failed is not an outcome: the last-read state stands and the
+        // next tick asks the owner again.
+        stillActive = true
+      }
+      if (mounted && at === pollTicket.current && stillActive) {
+        timer = window.setTimeout(() => { void poll() }, 1200)
+      }
+    }
+    timer = window.setTimeout(() => { void poll() }, 600)
+    return () => {
+      mounted = false
+      pollTicket.current += 1
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [api, changed, activeRun, strategy.user_strategy_id])
+
+  // The confirmation this click belongs to. While a previous confirmation of the
+  // same previewed input is still unresolved, that confirmation is the one asked
+  // about again: a new intent would be a second run while the first answer is
+  // unknown. A different preview is a different confirmation and gets its own.
+  const intentFor = (confirmed: UserStrategyPreview) => {
+    const open = [...strategy.experiments].reverse().find(item =>
+      item.owner === 'quine'
+      && UNRESOLVED_EXPERIMENT_STATUSES.includes(item.status)
+      && item.payload.preview_identity === confirmed.preview_identity)
+    return open ? open.launch_intent_id : `li-${strategy.experiments.length + 1}`
+  }
+
+  const stopRun = async (item: UserStrategyExperiment) => {
+    const cancel = api.cancelUserStrategyExperiment
+      ?? ((userStrategyId: string, launchIntentId: string) =>
+        userStrategiesApi.cancelExperiment(userStrategyId, launchIntentId))
+    const ticket = ++stopTicket.current
+    const mine = generation.current
+    setStopping(item.launch_intent_id)
+    failed('')
+    try {
+      const updated = await cancel(strategy.user_strategy_id, item.launch_intent_id)
+      if (stopTicket.current !== ticket || generation.current !== mine) return
+      if (updated.user_strategy_id !== strategy.user_strategy_id) return
+      changed(updated)
+    } catch (error) {
+      if (stopTicket.current !== ticket || generation.current !== mine) return
+      failed(explain(error))
+    } finally {
+      if (stopTicket.current === ticket) setStopping(null)
+    }
+  }
 
   const readPreview = async () => {
     const read = api.previewUserStrategyExperiment
@@ -1597,7 +1713,10 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
     failed('')
     try {
       const updated = await launch(strategy.user_strategy_id, {
-        launch_intent_id: `li-${strategy.experiments.length + 1}`,
+        // The intent is stable across an uncertain receipt: while a confirmation of
+        // this same previewed input is unresolved, it is that confirmation which is
+        // asked about again, and the owner answers from its own record.
+        launch_intent_id: intentFor(confirmed),
         base_revision: confirmed.draft_revision,
         // The confirmation names the input it was made against, so a preview that
         // no longer describes what would run is refused instead of silently run.
@@ -1646,6 +1765,14 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
     {phase === 'launching' && <p className="muted" role="status" aria-live="polite">
       这次确认已经送出，正在等待宿主回答；这个页面不会撤回它，运行的状态在它自己的页面上。
     </p>}
+    {/* The owner's own progress: this page follows the record the owner writes and
+        claims nothing of its own about a run that is still moving. */}
+    {activeRun && <p className="notice" role="status" aria-live="polite">
+      {`实验 ${activeRun.launch_intent_id} 的所有者状态：${EXPERIMENT_STATUS_LABELS[activeRun.status]}`
+        + (activeRun.phase ? ` · 阶段 ${activeRun.phase}` : '')}
+      {'。这个页面会继续读取所有者自己的记录，直到它进入不会再自行改变的状态；'
+        + '一次失败的读取不构成结果，也不会被当作停止或成功。'}
+    </p>}
     {phase === 'idle' && !live && (hasRun
       ? <p className="muted">要再运行一次，先重新预览：一次确认只对应它自己读到的那个预览。</p>
       : <p className="muted">先预览这次实验将执行什么，再确认。预览只读；一次确认只允许一次回测，且不调用模型。</p>)}
@@ -1679,10 +1806,34 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
         {item.status === 'created'
           ? <p>{`已从修订 ${item.payload.draft_revision} 启动实验 ${item.launch_intent_id}`}</p>
           : <p>{`实验 ${item.launch_intent_id} 来自修订 ${item.payload.draft_revision} — ${EXPERIMENT_STATUS_LABELS[item.status]}`}</p>}
+        {/* What the owner itself is doing, read back from its record: the phase it
+            recorded, the attempt it named and the frozen input it retained. */}
+        {item.owner === 'quine' && <p className="muted">
+          {`所有者 quine 核心`
+            + (item.phase ? ` · 阶段 ${item.phase}` : '')
+            + ` · 输入 ${item.payload.input_sha256?.slice(0, 16) ?? '未记录'}`
+            + ` · 冻结 ${item.frozen_sha256?.slice(0, 16) ?? '未记录'}`
+            + ` · 运行 ${item.attempt_id?.slice(0, 8) ?? '未记录'}`}
+        </p>}
+        {/* The run's own page: the owner's registered result is read through the
+            same run, report, path and analytics views every other run uses, so a
+            core-owned success keeps the mature report and comparison, not a
+            second, thinner reading of it. */}
         {item.status === 'created' && item.job_id &&
           <Link to={`/backtests/${encodeURIComponent(item.job_id)}`}>
             打开运行以查看它的状态和报告
           </Link>}
+        {/* One explicit stop request. It asks the owner; the owner's own record is
+            what says whether the run stopped. */}
+        {item.owner === 'quine' && LIVE_EXPERIMENT_STATUSES.includes(item.status) && <p className="actions">
+          <button type="button" onClick={() => { void stopRun(item) }}
+            disabled={stopping !== null || item.status === 'stopping'}>
+            {stopping === item.launch_intent_id ? '正在请求停止……' : '停止这次运行'}
+          </button>
+          <span className="muted">
+            停止请求只是请求：在所有者自己记录之前，停止没有被证实，这里也不会替它宣布停止。
+          </span>
+        </p>}
         {item.status !== 'created' && <p className="notice">
           {EXPERIMENT_NOTES[item.status] ?? '这次实验没有已确认的运行。'}
           {item.message ? ` ${item.message}` : ''}
@@ -1785,6 +1936,8 @@ function StrategyTable({ api, strategies, selectedId }: {
                   : <span className="table-muted">{unbound ? '待绑定场景' : '待实验'}</span>}</td>
                 <td data-label="运行">{!latest
                   ? <span className="table-muted">{unbound ? '不可运行' : '未启动'}</span>
+                  // A created run has a real run page, whatever owner registered it:
+                  // its state is read from that run itself, never from the record.
                   : latest.status === 'created' && latest.job_id
                     ? <JobStatusCell key={latest.job_id} api={api} jobId={latest.job_id} />
                     : <span className="table-muted">{EXPERIMENT_STATUS_LABELS[latest.status]}</span>}</td>

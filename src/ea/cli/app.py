@@ -330,6 +330,18 @@ def web_serve(
             metavar="FILE",
         ),
     ] = None,
+    quine_socket: Annotated[
+        Path | None,
+        typer.Option(
+            "--quine-socket",
+            help=(
+                "Optional private socket of a running quine core. Setting it makes this an "
+                "isolated candidate workspace: new experiments are confirmed through that "
+                "core, and there is no fallback owner when it cannot be reached."
+            ),
+            metavar="FILE",
+        ),
+    ] = None,
 ) -> None:
     """Serve the real offline Web backtest loop from explicit local roots."""
     try:
@@ -367,6 +379,27 @@ def web_serve(
         except (OSError, RuntimeError, ValueError):
             typer.echo("web input error: alerts stream cannot be resolved", err=True)
             raise typer.Exit(code=2) from None
+    # The isolated candidate mode is off unless a core socket is named, and it is
+    # never entered by accident: the socket and the core workspace it lives in must
+    # exist before this service starts, because an unreachable core is a refusal
+    # here rather than a silent fallback to the in-process owner.
+    resolved_quine: Path | None = None
+    if quine_socket is not None:
+        try:
+            resolved_quine = quine_socket.expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            typer.echo("web input error: quine core socket is unavailable", err=True)
+            raise typer.Exit(code=2) from None
+        core_workspace = resolved_quine.parent
+        if any(
+            core_workspace.is_relative_to(root) or root.is_relative_to(core_workspace)
+            for root in (*roots, *((resolved_runtime,) if resolved_runtime is not None else ()))
+        ):
+            typer.echo(
+                "web input error: quine core workspace must be separate from the Web roots",
+                err=True,
+            )
+            raise typer.Exit(code=2)
     try:
         from ea.web.app import WebSettings
         from ea.web.server import WebDependencyError, serve_local_web
@@ -381,6 +414,7 @@ def web_serve(
                 data_root=data_root,
                 runtime_root=resolved_runtime,
                 alerts_stream=resolved_alerts,
+                quine_socket=resolved_quine,
             )
         )
     except WebDependencyError as error:

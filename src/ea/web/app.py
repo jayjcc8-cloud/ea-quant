@@ -375,6 +375,10 @@ class WebSettings:
     data_root: Path | None = None
     runtime_root: Path | None = None
     alerts_stream: Path | None = None
+    #: The private socket of one quine core. When it is set this workspace is an
+    #: isolated candidate workspace: new experiments are confirmed through the
+    #: core, and there is no fallback to the in-process owner when it is unreachable.
+    quine_socket: Path | None = None
 
     @property
     def trusted_origin(self) -> str:
@@ -426,11 +430,41 @@ def create_app(settings: WebSettings) -> Any:
             raise WebBoundaryError("runtime root must be separate from the Web roots")
     if settings.alerts_stream is not None and not settings.alerts_stream.is_absolute():
         raise WebBoundaryError("alerts stream must be an absolute path")
+    quine_socket: Path | None = None
+    if settings.quine_socket is not None:
+        # The isolated candidate mode is explicit and fail-closed: the socket is
+        # resolved here, and the core's own workspace — the directory the socket
+        # lives in — must be a real directory separate from every Web root, because
+        # the runs it owns are read from there and never copied into this workspace.
+        candidate = settings.quine_socket
+        if not candidate.is_absolute():
+            raise WebBoundaryError("quine socket must be an absolute path")
+        quine_socket = candidate.resolve(strict=False)
+        core_workspace = quine_socket.parent
+        if not core_workspace.is_dir():
+            raise WebBoundaryError("quine core workspace is unavailable")
+        if roots_overlap(core_workspace, scenario_root, workspace_root, ui_root):
+            raise WebBoundaryError("quine core workspace must be separate from the Web roots")
+    from ea.web.quine import (
+        QuineBridge,
+        QuineError,
+        QuineJobReader,
+        QuineUnavailable,
+    )
+
+    quine_bridge: QuineBridge | None = (
+        QuineBridge(quine_socket) if quine_socket is not None else None
+    )
+    # The core's own runs are read through the same job vocabulary this workspace
+    # already serves, so the existing run, report, path, analytics and comparison
+    # views work for them unchanged. It is a read-only projection: nothing is
+    # published into this workspace's job index and no attempt is rerun.
     service = WebService(
         scenario_root,
         workspace_root,
         strategy_root=settings.strategy_root,
         data_root=settings.data_root,
+        external=None if quine_bridge is None else QuineJobReader(quine_bridge),
     )
 
     from ea.plugin.manifest import ManifestError
@@ -466,6 +500,7 @@ def create_app(settings: WebSettings) -> Any:
         research_orchestrator,
         service,
         RadianSettings(RadianSettings.default_path()),
+        quine=quine_bridge,
     )
 
     @asynccontextmanager
@@ -683,6 +718,17 @@ def create_app(settings: WebSettings) -> Any:
             if content_type != "application/json":
                 return error(415, "json_required", "write requests require application/json")
         return await call_next(request)
+
+    def owner_refusal(caught: QuineError) -> JSONResponse:
+        """One experiment owner's own refusal, mapped without being reinterpreted.
+
+        A run another owner registered is read and stopped through that owner. When
+        it cannot be reached, that is said as itself — never answered from a cached
+        reading and never turned into "this workspace never had that run".
+        """
+        if isinstance(caught, QuineUnavailable):
+            return error(503, "quine_unavailable", str(caught))
+        return error(422, caught.code, caught.message)
 
     from ea.web.events import SAMPLES, EventView, sample_document
 
@@ -1173,6 +1219,8 @@ def create_app(settings: WebSettings) -> Any:
             return service.get_job(job_id).document(presentation=True)
         except JobNotFoundError as caught:
             return error(404, "job_not_found", str(caught))
+        except QuineError as caught:
+            return owner_refusal(caught)
 
     @app.post("/api/backtests/{job_id}/stop")
     def stop_backtest(job_id: str) -> object:
@@ -1181,7 +1229,7 @@ def create_app(settings: WebSettings) -> Any:
         The answer is the controller's own job state, not a promise: a live run
         becomes ``stopping`` and only its supervisor records the confirmed
         ``stopped``; a run that already reached a terminal state is returned
-        unchanged.
+        unchanged. A run another owner registered is stopped through that owner.
         """
         try:
             return service.stop_job(job_id).document(presentation=True)
@@ -1189,6 +1237,8 @@ def create_app(settings: WebSettings) -> Any:
             return error(404, "job_not_found", str(caught))
         except (OSError, WebBoundaryError) as caught:
             return error(409, "stop_rejected", str(caught))
+        except QuineError as caught:
+            return owner_refusal(caught)
 
     @app.get("/api/backtests/{job_id}/report")
     def get_report(job_id: str) -> Response:
@@ -1198,6 +1248,8 @@ def create_app(settings: WebSettings) -> Any:
             return error(404, "job_not_found", str(caught))
         except ReportUnavailableError as caught:
             return error(409, "report_unavailable", str(caught))
+        except QuineError as caught:
+            return owner_refusal(caught)
 
     @app.get("/api/backtests/{job_id}/trade-analytics")
     def get_trade_analytics(job_id: str) -> object:
@@ -1207,6 +1259,8 @@ def create_app(settings: WebSettings) -> Any:
             return error(404, "job_not_found", str(caught))
         except ReportUnavailableError as caught:
             return error(409, "report_unavailable", str(caught))
+        except QuineError as caught:
+            return owner_refusal(caught)
 
     @app.get("/api/backtests/{job_id}/artifacts/{name}")
     def get_artifact(job_id: str, name: str) -> Response:
@@ -1223,6 +1277,8 @@ def create_app(settings: WebSettings) -> Any:
             return error(404, "artifact_not_found", str(caught))
         except ReportUnavailableError as caught:
             return error(409, "report_unavailable", str(caught))
+        except QuineError as caught:
+            return owner_refusal(caught)
 
     from fastapi import Query
 
@@ -1402,7 +1458,14 @@ def create_app(settings: WebSettings) -> Any:
     # unchanged. Nothing here is a second engine or a second scheduler: the
     # experiment path reuses the research task, its request id and its dispatch.
 
-    def strategy_refusal(caught: UserStrategyError | OSError) -> JSONResponse:
+    strategy_failures = (UserStrategyError, OSError, QuineError)
+
+    def strategy_refusal(caught: Exception) -> JSONResponse:
+        # The core's own answer keeps its own code: a stop it refused because the
+        # run already committed, an intent it never received, or a core that is not
+        # reachable are different facts, and none of them is answered from a cache.
+        if isinstance(caught, QuineError):
+            return owner_refusal(caught)
         if isinstance(caught, UserStrategyNotFoundError):
             return error(404, "user_strategy_not_found", str(caught))
         if isinstance(caught, OSError):
@@ -1552,7 +1615,17 @@ def create_app(settings: WebSettings) -> Any:
                 approved_budget=request.approved_budget.model_dump(),
             )
             return strategy.document()
-        except (UserStrategyError, OSError) as caught:
+        except strategy_failures as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/experiments/{launch_intent_id}/cancel")
+    def cancel_user_strategy_experiment(user_strategy_id: str, launch_intent_id: str) -> object:
+        """Ask the run's owner to stop it; the owner decides what that means."""
+        try:
+            return user_strategy_service.cancel_experiment(
+                user_strategy_id, launch_intent_id=launch_intent_id
+            ).document()
+        except strategy_failures as caught:
             return strategy_refusal(caught)
 
     @app.get("/{full_path:path}")

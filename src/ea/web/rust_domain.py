@@ -387,8 +387,21 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
     _require(type(raw_path) is str, "invalid_request", "scenario_path is required")
     path = Path(cast(str, raw_path))
     _require(path.is_absolute(), "invalid_request", "scenario_path must be absolute")
+    # One explicit local strategy root, when this workspace has one, is the same
+    # root the Web service loads this scenario through: a scenario whose strategy
+    # source is resolved from it must freeze the same effective scenario here.
+    raw_strategy_root = request.get("strategy_root")
+    strategy_root: Path | None = None
+    if raw_strategy_root is not None:
+        _require(
+            type(raw_strategy_root) is str and bool(raw_strategy_root),
+            "invalid_request",
+            "strategy_root must be one absolute directory",
+        )
+        strategy_root = Path(cast(str, raw_strategy_root))
+        _require(strategy_root.is_absolute(), "invalid_request", "strategy_root must be absolute")
     try:
-        source = load_backtest_scenario(path)
+        source = load_backtest_scenario(path, strategy_root=strategy_root)
     except (BacktestScenarioError, OSError, ValueError) as error:
         raise DomainRefusal("invalid_request", f"scenario is not readable: {error}") from None
     # One explicitly registered local research input replaces only the data

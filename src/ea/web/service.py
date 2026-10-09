@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import yaml
@@ -536,6 +536,13 @@ class JobRecord:
     # declared availability policy and source assertion. Additive and absent for
     # a registered input, which has no published version to name.
     dataset_version: dict[str, object] | None = None
+    #: Which owner holds this run. Absent for a run this workspace stores itself;
+    #: an owner name means the record is a read-only projection of another owner
+    #: and nothing here may publish, overwrite or rerun it.
+    owner: str | None = None
+    #: Where one owner's published artifacts live, when they are not this
+    #: workspace's own report root. Never persisted: it belongs to the projection.
+    artifacts_dir: Path | None = None
 
     def document(self, *, presentation: bool = False) -> dict[str, object]:
         document: dict[str, object] = {
@@ -608,6 +615,20 @@ class JobRecord:
             )
             document["strategy_descriptor"] = entry.descriptor.document()
         return document
+
+
+class ExternalJobOwner(Protocol):
+    """Another owner's runs, projected read-only into this workspace's vocabulary.
+
+    A workspace stores the jobs it accepted. An experiment owner that keeps its
+    own runs elsewhere — the Rust quine core — is read through this seam, so the
+    existing run, report, path and comparison views can read an owner-registered
+    success without this workspace publishing a second record of it.
+    """
+
+    def job(self, job_id: str) -> JobRecord | None: ...
+
+    def stop_job(self, job_id: str) -> JobRecord | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -916,6 +937,7 @@ class WebService:
         *,
         strategy_root: Path | None = None,
         data_root: Path | None = None,
+        external: ExternalJobOwner | None = None,
     ) -> None:
         resolved_scenarios = _directory(scenario_root, label="scenario root", create=False)
         try:
@@ -992,6 +1014,10 @@ class WebService:
         self._batches: dict[str, BatchRecord] = {}
         self._holdouts: dict[str, HoldoutRecord] = {}
         self._active: str | None = None
+        #: Another owner's runs, read only: a job this workspace does not store is
+        #: looked up there, and a stop for one is forwarded to its owner. This
+        #: workspace keeps no record of it either way.
+        self._external = external
         # The live handle of every worker this controller spawned. Cancellation
         # signals one of these and nothing else, so a stale durable record can
         # never make this process kill an unrelated one.
@@ -1056,8 +1082,18 @@ class WebService:
         job is ``stopping`` and the supervising thread records ``stopped`` once
         the process group is gone. A job that already reached a terminal state is
         returned unchanged, so a cancellation that arrives after a committed
-        result never rewrites that result.
+        result never rewrites that result. A run another owner registered is
+        stopped through that owner, which answers with its own record; this
+        workspace writes nothing for it either way.
         """
+        record = self.get_job(job_id)
+        if record.owner is not None:
+            if self._external is None:
+                raise JobNotFoundError("job was not found in this workspace")
+            stopped = self._external.stop_job(job_id)
+            if stopped is None:
+                raise JobNotFoundError("job was not found in this workspace")
+            return stopped
         with self._lock:
             record = self.get_job(job_id)
             if record.status not in _LIVE_JOB_STATES or self._writes_frozen(job_id):
@@ -1402,6 +1438,23 @@ class WebService:
                 reverse=True,
             )
             return [self._presented(record).document(presentation=True) for record in records]
+
+    def registered_scenario_file(self, scenario_id: str) -> Path:
+        """The resolved file of one registered scenario, and nothing else.
+
+        It exists so a caller that must render this scenario's frozen input through
+        another process can name the same file this service loads, under the same
+        registration and path rules. It reads no scenario content and creates
+        nothing; loading the file is still the loader's own authority.
+        """
+        if not isinstance(scenario_id, str):
+            raise ScenarioNotFoundError("scenario is not registered")
+        if self._is_local_scenario(scenario_id):
+            path = self.local_strategy.scenario_path()
+            if path is None:
+                raise ScenarioNotFoundError("no trusted local strategy package is registered")
+            return path
+        return self.registry._path(scenario_id)
 
     def _bind_dataset(
         self, scenario: LoadedBacktestScenario, dataset_id: str | None
@@ -1844,7 +1897,30 @@ class WebService:
             try:
                 return self._presented(self._jobs[job_id])
             except KeyError:
-                raise JobNotFoundError("job was not found in this workspace") from None
+                pass
+        # A run this workspace does not store may be owned by another owner. Only a
+        # read-only projection of the owner's own record is returned here — never a
+        # record written into this workspace's index, and never a cached answer: an
+        # owner that cannot be reached raises instead.
+        if self._external is None:
+            raise JobNotFoundError("job was not found in this workspace")
+        projected = self._external.job(job_id)
+        if projected is None:
+            raise JobNotFoundError("job was not found in this workspace")
+        return projected
+
+    def _artifact_root(self, record: JobRecord) -> Path:
+        """Where one record's published artifacts are read from.
+
+        A run this workspace ran has its own report root; a run another owner
+        registered is read from that owner's own publication, which is the only
+        copy of it and the one its digest was registered against.
+        """
+        return (
+            record.artifacts_dir
+            if record.artifacts_dir is not None
+            else self.reports_dir / record.job_id
+        )
 
     def _presented(self, record: JobRecord) -> JobRecord:
         """One job as a reader may see it, including a state nothing can prove.
@@ -3020,7 +3096,7 @@ class WebService:
         record = self.get_job(job_id)
         if record.status != "succeeded" or record.report_sha256 is None:
             raise ReportUnavailableError("verified report is not available for this job")
-        path = self.reports_dir / job_id / "report.json"
+        path = self._artifact_root(record) / "report.json"
         try:
             payload = path.read_bytes()
         except OSError:
@@ -3055,6 +3131,7 @@ class WebService:
         if name == "report.json":
             return report_payload
         record = self.get_job(job_id)
+        root = self._artifact_root(record)
         if name == "equity-path.json":
             if (
                 record.schema
@@ -3063,7 +3140,7 @@ class WebService:
             ):
                 raise ReportUnavailableError("Path analysis unavailable for this legacy run.")
             try:
-                payload = read_regular(self.reports_dir / job_id / name, self.reports_dir / job_id)
+                payload = read_regular(root / name, root)
                 document = json.loads(payload)
                 report = json.loads(report_payload)
                 if (
@@ -3081,7 +3158,7 @@ class WebService:
                 raise ReportUnavailableError("verified path analysis is unavailable") from None
         if record.summary_sha256 is None:
             raise ReportUnavailableError("verified summary is not available for this job")
-        path = self.reports_dir / job_id / name
+        path = root / name
         try:
             if not path.is_file() or path.is_symlink():
                 raise OSError

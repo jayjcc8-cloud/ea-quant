@@ -217,6 +217,17 @@ export type UserStrategyExperimentStatus =
   | 'failed'
   | 'unknown'
   | 'interrupted_before_dispatch'
+  // The states of an experiment the Rust core owns. `confirmed`, `running` and
+  // `stopping` are the core's own progress; `unconfirmed` means the record exists
+  // here but the core never answered it; `cancelled` is a stop the core accepted.
+  | 'confirmed'
+  | 'running'
+  | 'stopping'
+  | 'cancelled'
+  | 'unconfirmed'
+
+/** One host-verified economic reading of a core-registered report. */
+export type UserStrategyExperimentFact = { path: string; value: string | number | null }
 
 /**
  * The immutable request one launch intent froze: the draft revision, the exact
@@ -255,6 +266,22 @@ export type UserStrategyExperiment = {
   status: UserStrategyExperimentStatus
   message?: string | null
   created_at: string
+  /**
+   * Which owner holds this run. Absent means the original in-process owner; `quine`
+   * means the Rust core, and then the fields below are rebuildable read projections
+   * of that owner's own record — never a second authority.
+   */
+  owner?: 'quine' | null
+  /** The core's own last bounded progress phase while the run is live. */
+  phase?: string | null
+  /** Whether the core registered a success *and* its official bytes are readable. */
+  report_ready?: boolean
+  report_sha256?: string | null
+  /** The host-verified readings of the registered report, exactly as stated. */
+  facts?: UserStrategyExperimentFact[] | null
+  report_schema?: string | null
+  attempt_id?: string | null
+  frozen_sha256?: string | null
 }
 
 export type UserStrategy = {
@@ -304,6 +331,8 @@ export type UserStrategyPreview = {
   latency: unknown
   criterion: ReportCriterion | null
   budget: { max_model_calls: number; max_backtests: number }
+  /** Which owner a confirmation would reach: `quine` when the Rust core owns it. */
+  owner?: 'quine' | null
 }
 
 export type ApprovedBudget = { max_model_calls: number; max_backtests: number }
@@ -435,4 +464,13 @@ export const userStrategiesApi = {
       approved_budget: ApprovedBudget
     },
   ) => write<UserStrategy>(`${base(userStrategyId)}/experiments`, input),
+  /**
+   * Ask the run's owner to stop one confirmed experiment. Only the owner decides
+   * what that means; this returns the strategy, not a claim that the run stopped.
+   */
+  cancelExperiment: (userStrategyId: string, launchIntentId: string) =>
+    write<UserStrategy>(
+      `${base(userStrategyId)}/experiments/${encodeURIComponent(launchIntentId)}/cancel`,
+      {},
+    ),
 }

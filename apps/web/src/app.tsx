@@ -295,6 +295,12 @@ export type ApiAdapter = {
       approved_budget: UserStrategyApprovedBudget
     },
   ): Promise<UserStrategy>
+  /** Ask the run's owner to stop one confirmed experiment. Absent means this
+   * workspace cannot ask for a stop from here. */
+  cancelUserStrategyExperiment?(
+    userStrategyId: string,
+    launchIntentId: string,
+  ): Promise<UserStrategy>
 }
 
 async function loadTradeAnalytics(api: ApiAdapter, job: BacktestJob): Promise<TradeAnalytics | null> {
@@ -399,6 +405,8 @@ const browserApi: ApiAdapter = {
     userStrategiesApi.previewExperiment(userStrategyId),
   launchUserStrategyExperiment: (userStrategyId, input) =>
     userStrategiesApi.launchExperiment(userStrategyId, input),
+  cancelUserStrategyExperiment: (userStrategyId, launchIntentId) =>
+    userStrategiesApi.cancelExperiment(userStrategyId, launchIntentId),
 }
 
 async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath | null> {

@@ -31,6 +31,7 @@ import tempfile
 import threading
 import uuid
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
@@ -44,6 +45,14 @@ from ea.web.llm import (
     ModelRoute,
     ToolDefinition,
     create_model_port,
+)
+from ea.web.quine import (
+    CONFIRMATION_SCHEMA,
+    QuineBridge,
+    QuineError,
+    QuineFrozen,
+    QuineRefused,
+    payload_digest,
 )
 from ea.web.report_claims import (
     FIELD_SPECS_BY_PATH,
@@ -98,6 +107,9 @@ _MAX_TOKENS = 1200
 #: One approval is exactly one call; a hidden second call is never spent.
 _CALL_APPROVAL = 1
 _DEFAULT_BUDGET = {"max_model_calls": 10, "max_backtests": 5}
+#: The one owner marker an experiment carries when the Rust core owns it. A record
+#: without it keeps the original in-process owner, so no experiment ever has two.
+_QUINE_OWNER = "quine"
 #: The host-verified report readings a conversation may state as fact. These are
 #: read from this strategy's own frozen run through the verified-report authority;
 #: nothing else about a run is ever stated.
@@ -247,10 +259,9 @@ def _bounded(value: object, field: str, maximum: int, *, required: bool = True) 
 
 
 def _digest(payload: object) -> str:
-    import hashlib
-
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()
+    # One canonical rule for this workspace's identities, shared with the bridge
+    # that reads a confirmation payload back out of the owner's frozen bytes.
+    return payload_digest(payload)
 
 
 def _entry(items: tuple[dict[str, Any], ...], key: str, value: str) -> dict[str, Any] | None:
@@ -539,12 +550,18 @@ class UserStrategyService:
         settings: RadianSettings,
         *,
         budget: dict[str, int] | None = None,
+        quine: QuineBridge | None = None,
     ):
         self._store = store
         self._research = research
         self._service = service
         self._settings = settings
         self._budget = dict(budget) if budget is not None else None
+        #: The Rust core that owns experiments in this isolated candidate
+        #: workspace. When it is configured it owns every new experiment this
+        #: service confirms, and the in-process research owner is never reached
+        #: for one; when it is not, the original owner path is unchanged.
+        self._quine = quine
         self._locks: dict[str, threading.Lock] = {}
         self._provider: ModelPort | None = None
         #: Calls this process is inside right now. A durable call that is in
@@ -919,6 +936,10 @@ class UserStrategyService:
         return self._store.get(_identifier(user_strategy_id, "user_strategy_id"))
 
     def list(self) -> Strategies:
+        # A core-owned run is listed from its owner too: a row can never present a
+        # state the core cannot be asked about, and no terminal claim is cached.
+        if self._quine is not None:
+            return self.reconcile_all()
         return self._store.list()
 
     # -- one explicit binding ------------------------------------------------
@@ -2530,6 +2551,9 @@ class UserStrategyService:
             "latency": execution.get("latency"),
             "criterion": draft.criterion,
             "budget": self._workspace_budget(),
+            # Which owner a confirmation would reach, so the panel can show the
+            # confirmed-run semantics of the owner that would really run it.
+            "owner": None if self._quine is None else _QUINE_OWNER,
         }
 
     def launch_experiment(
@@ -2553,6 +2577,11 @@ class UserStrategyService:
         requested = _requested_budget(approved_budget)
         with self._lock(identity):
             strategy = self._store.get(identity)
+            if self._quine is not None:
+                # A confirmation this workspace no longer holds is recovered from
+                # its owner before a new one is considered, so the same intent
+                # resolves to the run it already confirmed rather than to a second.
+                strategy = self._restore_quine(strategy)
             existing = _entry(strategy.experiments, "launch_intent_id", intent)
             if existing is not None:
                 # The same intent resolves to the experiment it confirmed: the whole
@@ -2567,6 +2596,12 @@ class UserStrategyService:
                     raise UserStrategyConflictError(
                         "this launch intent is already bound to a different confirmation"
                     )
+                # A confirmation the core owns is answered from the core, never from
+                # this record: asking about the same intent again only re-reads the
+                # owner, so a lost receipt is resolved by a query and never by a
+                # second confirmation.
+                if existing.get("owner") == _QUINE_OWNER:
+                    return self._refresh_quine(strategy, identity, intent)
                 return strategy
             if base_revision != strategy.draft.revision:
                 raise UserStrategyStaleError(
@@ -2575,6 +2610,8 @@ class UserStrategyService:
             budget = self._approval(approved_budget, model_calls=0, backtests=1)
             if len(strategy.experiments) >= _MAX_EXPERIMENTS:
                 raise UserStrategyStateError("this strategy has reached its experiment limit")
+            if self._quine is not None:
+                return self._launch_isolated(strategy, identity, intent, preview, budget)
             # Nothing can be launched while nothing is bound: this refuses before the
             # admitted input is derived and before any child, reservation or job.
             draft = _executable(strategy)
@@ -2719,6 +2756,377 @@ class UserStrategyService:
         self._store.save(next_strategy)
         return next_strategy
 
+    # -- the Rust core owns the run (isolated candidate workspace) -----------
+
+    def _freeze_for_core(
+        self,
+        draft: StrategyDraft,
+        admitted: dict[str, Any],
+        extras: dict[str, Any] | None = None,
+    ) -> QuineFrozen:
+        """The frozen input one confirmation carries, rendered by the domain adapter.
+
+        The envelope is built from the same registered scenario file and the same
+        parameters the preview admitted, and it must reproduce the admitted input's
+        own snapshot and identity. A disagreement is refused here, before anything
+        durable exists and before the core is reached: the confirmation would
+        otherwise freeze a surface the user never saw.
+        """
+        assert self._quine is not None
+        try:
+            request: dict[str, Any] = {
+                "scenario_path": str(self._service.registered_scenario_file(draft.scenario_id)),
+                "parameters": self._parameters(draft),
+            }
+            if draft.dataset_id is not None:
+                if self._service.datasets is None:
+                    raise UserStrategyStateError(
+                        "this draft runs on a registered research input, which this workspace "
+                        "does not configure a data root for"
+                    )
+                request["dataset_id"] = draft.dataset_id
+                request["data_root"] = str(self._service.datasets.root)
+            strategy_root = self._service.registry.strategy_root
+            if strategy_root is not None:
+                request["strategy_root"] = str(strategy_root)
+        except UserStrategyStateError:
+            raise
+        except (OSError, ValueError) as error:
+            raise UserStrategyStateError(
+                f"the draft's registered scenario cannot be frozen: {error}"
+            ) from None
+        return self._quine.freeze(
+            request,
+            input_sha256=cast(str, admitted.get("input_sha256")),
+            input_identity=admitted.get("input_identity"),
+            extras=extras,
+        )
+
+    def _launch_isolated(
+        self,
+        strategy: UserStrategy,
+        identity: str,
+        intent: str,
+        preview: str,
+        budget: dict[str, int],
+    ) -> UserStrategy:
+        """Confirm one previewed input under the lock, with the core as the only owner.
+
+        The lock is held across the whole confirmation, the durable record is written
+        before the core is reached, and the outcome is always the core's own: a
+        refused confirmation is reported as refused, a lost reply is only ever
+        queried, and no local record is allowed to claim a run the core did not make.
+        """
+        assert self._quine is not None
+        draft = _executable(strategy)
+        # The admitted input is re-derived here, before anything durable exists, and
+        # the frozen input the core would run is held to it: a confirmation of an
+        # input the engine no longer admits is refused instead of frozen.
+        admitted = self._admitted_request(draft)
+        if self._preview_identity(draft, admitted) != preview:
+            raise UserStrategyStaleError(
+                "the data, costs or registered scenario behind this experiment "
+                "changed since it was previewed; preview it again and confirm the new one"
+            )
+        source = self._source_identity(admitted)
+        normalized = self._normalized(admitted)
+        payload = {
+            "draft_revision": draft.revision,
+            "strategy_id": draft.strategy_id,
+            "venue": draft.venue,
+            "symbol": draft.symbol,
+            "scenario_id": draft.scenario_id,
+            "dataset_id": source.get("dataset_id"),
+            "source_sha256": source.get("source_sha256"),
+            "initial_cash": draft.initial_cash,
+            "parameters": dict(draft.parameters),
+            "criterion": draft.criterion,
+            "record_count": source.get("record_count"),
+            "data": normalized.get("data"),
+            "input_identity": admitted.get("input_identity"),
+            "input_sha256": admitted.get("input_sha256"),
+            "snapshot": admitted.get("snapshot"),
+            "preview_identity": preview,
+            "normalized": normalized,
+            "approved_budget": budget,
+            "frozen_at": _now(),
+        }
+        # The confirmation's own metadata is frozen inside the admitted input, so
+        # the owner retains exactly what this confirmation was made of: a lost
+        # projection is rebuilt from the owner's bytes rather than remembered here.
+        frozen = self._freeze_for_core(
+            draft,
+            admitted,
+            {
+                "confirmation": {
+                    "schema": CONFIRMATION_SCHEMA,
+                    "payload": payload,
+                    "payload_sha256": _digest(payload),
+                }
+            },
+        )
+        record = {
+            "launch_intent_id": intent,
+            "request_id": str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"ea.user-strategy/{identity}/{intent}")
+            ),
+            "payload_sha256": _digest(payload),
+            "payload": payload,
+            # The one marker that says which owner this experiment belongs to. A
+            # record without it keeps the original in-process owner untouched.
+            "owner": _QUINE_OWNER,
+            "task_id": None,
+            "job_id": None,
+            "status": "pending",
+            "message": None,
+            "created_at": _now(),
+        }
+        pending = replace(strategy, updated_at=_now(), experiments=(*strategy.experiments, record))
+        self._store.save(pending)
+        try:
+            receipt = self._quine.confirm(
+                strategy_id=identity,
+                intent_id=intent,
+                draft_revision=draft.revision,
+                preview_identity=preview,
+                max_model_calls=budget["max_model_calls"],
+                frozen=frozen,
+            )
+        except QuineRefused as refusal:
+            # The core answered and refused: no run exists and nothing was charged.
+            # A refusal that names an already-accepted cancellation is that
+            # cancellation, not a failure of this run.
+            if refusal.code == "cancelled_before_confirm":
+                return self._settle_quine(
+                    pending,
+                    intent,
+                    {
+                        "status": "cancelled",
+                        "job_id": None,
+                        "attempt_id": None,
+                        "frozen_sha256": None,
+                        "phase": None,
+                        "report_ready": False,
+                        "report_sha256": None,
+                        "facts": None,
+                        "report_schema": None,
+                        "path_schema": None,
+                        "message": (
+                            "the core refused this confirmation because the run was "
+                            "cancelled before it was confirmed; nothing was created"
+                        ),
+                    },
+                )
+            return self._settle_quine(
+                pending,
+                intent,
+                {
+                    "status": "failed",
+                    "job_id": None,
+                    "attempt_id": None,
+                    "frozen_sha256": None,
+                    "phase": None,
+                    "report_ready": False,
+                    "report_sha256": None,
+                    "facts": None,
+                    "report_schema": None,
+                    "path_schema": None,
+                    "message": f"the core refused this confirmation ({refusal.code}): "
+                    f"{refusal.message}",
+                },
+            )
+        projection = self._quine.projection(
+            payload, receipt.experiment, receipt.barrier, receipt_observed=receipt.observed
+        )
+        return self._settle_quine(pending, intent, projection)
+
+    def _settle_quine(
+        self, strategy: UserStrategy, intent: str, projection: dict[str, Any]
+    ) -> UserStrategy:
+        """Write one core-derived projection onto a record and publish the strategy."""
+        next_strategy = replace(
+            strategy,
+            updated_at=_now(),
+            experiments=tuple(
+                {**item, **projection} if item.get("launch_intent_id") == intent else item
+                for item in strategy.experiments
+            ),
+        )
+        self._store.save(next_strategy)
+        return next_strategy
+
+    def _quine_unreachable(self, record: dict[str, Any]) -> dict[str, Any]:
+        """One core-owned record the core cannot be asked about right now.
+
+        The status a cached projection happened to hold is never served as this
+        run's state: a result that cannot be read from its owner is unknown here.
+        """
+        return {
+            **record,
+            "status": "unknown",
+            "phase": None,
+            "report_ready": False,
+            "report_sha256": None,
+            "facts": None,
+            "message": (
+                "the core that owns this experiment could not be reached, so its state "
+                "cannot be read here; nothing was re-sent and no cached result is served"
+            ),
+        }
+
+    def _reconciled_quine(self, identity: str, record: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild one core-owned record's projection from the core itself."""
+        if self._quine is None:
+            return {
+                **record,
+                "status": "unknown",
+                "phase": None,
+                "report_ready": False,
+                "report_sha256": None,
+                "facts": None,
+                "message": (
+                    "this experiment is owned by a quine core, and no core is configured "
+                    "for this workspace, so its state cannot be read here"
+                ),
+            }
+        intent = record.get("launch_intent_id")
+        if not isinstance(intent, str) or not intent:
+            return self._quine_unreachable(record)
+        payload = record.get("payload")
+        try:
+            experiment, barrier = self._quine.query(identity, intent)
+        except QuineError:
+            return self._quine_unreachable(record)
+        return {
+            **record,
+            **self._quine.projection(
+                cast(dict[str, Any], payload if isinstance(payload, dict) else {}),
+                experiment,
+                barrier,
+                receipt_observed=True,
+            ),
+        }
+
+    def _restore_quine(self, strategy: UserStrategy) -> UserStrategy:
+        """Discover the confirmations this strategy's owner holds and keep them.
+
+        The owner's list is the authority for which confirmations exist: a record
+        this workspace lost entirely — a wiped projection, a rebuilt workspace — is
+        reconstructed from the owner's own frozen bytes, and one it never held is
+        added. Nothing is invented, dispatched or re-run: a record whose frozen
+        bytes cannot reproduce the confirmation it claims to be is left out, and a
+        local record the owner does not know about is kept exactly as it is, so a
+        confirmation whose receipt was never observed is never re-sent.
+        """
+        if self._quine is None:
+            return strategy
+        identity = strategy.user_strategy_id
+        try:
+            owned = self._quine.experiments()
+        except QuineError:
+            # The core cannot be asked right now. Reads report that per record; no
+            # local record is added, changed or removed on a failed read.
+            return strategy
+        known = {item.get("launch_intent_id") for item in strategy.experiments}
+        restored: Documents = []
+        for experiment in owned:
+            if experiment.get("strategy_id") != identity:
+                continue
+            intent = experiment.get("intent_id")
+            if not isinstance(intent, str) or intent in known:
+                continue
+            record = self._record_from_core(identity, experiment, intent)
+            if record is not None:
+                restored.append(record)
+                known.add(intent)
+        if not restored:
+            return strategy
+        return replace(
+            strategy,
+            experiments=tuple(
+                sorted(
+                    (*strategy.experiments, *restored),
+                    key=lambda item: str(item.get("created_at") or ""),
+                )
+            ),
+        )
+
+    def _record_from_core(
+        self, identity: str, experiment: dict[str, Any], intent: str
+    ) -> dict[str, Any] | None:
+        """One record rebuilt from the confirmation the owner retained, or ``None``."""
+        assert self._quine is not None
+        payload = self._quine.payload_of(experiment)
+        if payload is None:
+            return None
+        created_at = experiment.get("created_at")
+        return {
+            "launch_intent_id": intent,
+            "request_id": str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"ea.user-strategy/{identity}/{intent}")
+            ),
+            "payload_sha256": _digest(payload),
+            "payload": payload,
+            "owner": _QUINE_OWNER,
+            "task_id": None,
+            "created_at": (
+                datetime.fromtimestamp(int(created_at), UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                if isinstance(created_at, int)
+                else _now()
+            ),
+            **self._quine.projection(payload, experiment, None, receipt_observed=True),
+        }
+
+    def _refresh_quine(self, strategy: UserStrategy, identity: str, intent: str) -> UserStrategy:
+        """Re-read one core-owned record and publish it only if it moved."""
+        record = _entry(strategy.experiments, "launch_intent_id", intent)
+        if record is None:
+            raise UserStrategyNotFoundError("no experiment matches this launch intent")
+        settled = self._reconciled_quine(identity, record)
+        if settled == record:
+            return strategy
+        return replace(
+            strategy,
+            experiments=tuple(
+                settled if item.get("launch_intent_id") == intent else item
+                for item in strategy.experiments
+            ),
+        )
+
+    def cancel_experiment(
+        self, user_strategy_id: object, *, launch_intent_id: object
+    ) -> UserStrategy:
+        """Ask the core to stop one of its own runs. It decides what that means.
+
+        The request is forwarded and never interpreted here: an accepted stop is the
+        core's own state, the record that follows is the core's own record, and a
+        core that refuses a late cancel is reported with its own refusal.
+
+        The stop reaches the core even when this workspace holds no record of that
+        confirmation yet. The barrier that protects a confirmation which has not
+        arrived is the core's own, and a missing local projection is not a reason to
+        refuse a stop the user really asked for.
+        """
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        intent = _identifier(launch_intent_id, "launch_intent_id")
+        with self._lock(identity):
+            strategy = self._store.get(identity)
+            if self._quine is None:
+                raise UserStrategyStateError(
+                    "no experiment core owns this workspace's runs, so there is nothing "
+                    "to stop here"
+                )
+            record = _entry(strategy.experiments, "launch_intent_id", intent)
+            if record is not None and record.get("owner") != _QUINE_OWNER:
+                raise UserStrategyNotFoundError(
+                    "no core-owned experiment matches this launch intent"
+                )
+            self._quine.cancel(identity, intent)
+            restored = self._restore_quine(strategy)
+            if record is None:
+                return restored
+            return self._refresh_quine(restored, identity, intent)
+
     def reconcile(self, user_strategy_id: object) -> UserStrategy:
         """Classify interrupted experiments and calls; dispatch and send nothing.
 
@@ -2730,20 +3138,30 @@ class UserStrategyService:
         identity = _identifier(user_strategy_id, "user_strategy_id")
         with self._lock(identity):
             strategy = self._store.get(identity)
-            changed = False
+            # The owner is asked which confirmations exist before anything is
+            # classified, so a projection this workspace lost is rebuilt rather
+            # than mistaken for one that never happened.
+            restored = self._restore_quine(strategy)
+            changed = restored != strategy
             experiments: Documents = []
-            for record in strategy.experiments:
-                settled = self._reconciled(record)
+            for record in restored.experiments:
+                # A core-owned record is read back from its owner, never from the
+                # projection this process happened to write last.
+                settled = (
+                    self._reconciled_quine(identity, record)
+                    if record.get("owner") == _QUINE_OWNER
+                    else self._reconciled(record)
+                )
                 changed = changed or settled != record
                 experiments.append(settled)
             calls: Documents = []
-            for call in strategy.calls:
-                settled_call = self._reconciled_call(strategy.user_strategy_id, call)
+            for call in restored.calls:
+                settled_call = self._reconciled_call(identity, call)
                 changed = changed or settled_call != call
                 calls.append(settled_call)
             if not changed:
-                return strategy
-            next_strategy = replace(strategy, experiments=tuple(experiments), calls=tuple(calls))
+                return restored
+            next_strategy = replace(restored, experiments=tuple(experiments), calls=tuple(calls))
             self._store.save(next_strategy)
             return next_strategy
 
