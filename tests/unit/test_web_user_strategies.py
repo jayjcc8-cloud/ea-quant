@@ -1197,6 +1197,303 @@ def test_reject_revise_and_undo_keep_the_draft_and_history_honest(
     assert len(strategies.get(strategy_id).changes) == 2
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "provider_error",
+        "provider_timeout",
+        "text_only",
+        "invalid_replacement",
+        "empty_replacement",
+    ],
+)
+def test_a_revise_without_a_replacement_never_supersedes_the_candidate(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """The candidate is superseded only by the replacement that actually arrives.
+
+    A refinement reserves its call and reaches the provider, and the provider then
+    fails, times out, answers in plain text, or answers with a change this workspace
+    refuses whole. None of those is a replacement, so the original proposal has to be
+    exactly as it was: open, on its own revision, and applicable. That is only true
+    while the supersede is written in the same durable record as a valid new
+    proposal, which is why none of these outcomes may consume the candidate first.
+    """
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    _strategy, first = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-1")
+
+    if case == "provider_error":
+        provider.responses.append(ModelProviderError("the provider refused this request"))
+    elif case == "provider_timeout":
+        provider.responses.append(TimeoutError("the provider did not answer in time"))
+    elif case == "text_only":
+        provider.responses.append(_response([], text="I would rather explain this instead."))
+    elif case == "invalid_replacement":
+        provider.responses.append(
+            _change(
+                [{"path": "not.a.registered.path", "value": "1", "reason": "no"}], call_id="call-2"
+            )
+        )
+    else:
+        provider.responses.append(_change([], call_id="call-2"))
+
+    revised = strategies.revise_proposal(
+        strategy_id,
+        proposal_id=first["proposal_id"],
+        call_id="call-2",
+        text="Refine the proposed change",
+        approved_budget=dict(CALL_BUDGET),
+    )
+
+    assert revised.draft.revision == 1
+    assert [item["proposal_id"] for item in revised.proposals] == [first["proposal_id"]]
+    held = _durable(tmp_path, strategy_id)
+    assert held.proposals[-1]["status"] == "open"
+    assert held.proposals[-1]["base_revision"] == 1
+    # The candidate is still a candidate: it applies to the draft it was made on.
+    applied = strategies.apply_proposal(
+        strategy_id, proposal_id=first["proposal_id"], operation_id="op-apply"
+    )
+    assert applied.draft.revision == 2
+    assert isinstance(applied.draft, StrategyDraft)
+    assert applied.draft.parameters["target_quantity"] == "3"
+
+
+def test_an_ordinary_turn_supersedes_nothing(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a refinement replaces the candidate it named; an ordinary turn never does.
+
+    A plain explanation and a brand-new proposal are both ordinary messages, and
+    neither carries a revise action. The candidate already open therefore stays open
+    and applicable even though the conversation moved on.
+    """
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    _strategy, first = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-1")
+
+    provider.responses.append(_response([], text="This draft holds a fixed target size."))
+    strategies.send_message(
+        strategy_id,
+        call_id="call-2",
+        base_revision=1,
+        text="What does this draft do?",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    _strategy, second = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-3")
+
+    held = strategies.get(strategy_id)
+    assert [item["proposal_id"] for item in held.proposals] == [
+        first["proposal_id"],
+        second["proposal_id"],
+    ]
+    assert [item["status"] for item in held.proposals] == ["open", "open"]
+    applied = strategies.apply_proposal(
+        strategy_id, proposal_id=first["proposal_id"], operation_id="op-apply"
+    )
+    assert applied.draft.revision == 2
+
+
+def test_a_valid_refinement_supersedes_only_the_proposal_it_named(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One refinement replaces exactly its own candidate, in its own durable write.
+
+    With two candidates open, refining one leaves the other open and applicable: the
+    supersede names the proposal the originating call's own request named, and the
+    replacement is written together with it.
+    """
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    _strategy, first = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-1")
+    _strategy, second = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-2")
+
+    provider.responses.append(_change(TWO_FIELDS, call_id="call-3"))
+    revised = strategies.revise_proposal(
+        strategy_id,
+        proposal_id=second["proposal_id"],
+        call_id="call-3",
+        text="Refine the proposed change",
+        approved_budget=dict(CALL_BUDGET),
+    )
+
+    statuses = {item["proposal_id"]: item["status"] for item in revised.proposals}
+    assert statuses[first["proposal_id"]] == "open"
+    assert statuses[second["proposal_id"]] == "superseded"
+    replacement = revised.proposals[-1]
+    assert replacement["status"] == "open"
+    assert replacement["base_revision"] == 1
+    # The replacement is the one that applies, and the untouched candidate still can.
+    applied = strategies.apply_proposal(
+        strategy_id, proposal_id=replacement["proposal_id"], operation_id="op-apply"
+    )
+    assert applied.draft.revision == 2
+
+
+def test_a_refinement_whose_settlement_save_fails_keeps_the_candidate_open(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supersede is durable only with the replacement it belongs to.
+
+    The store publishes by writing a temporary file and replacing the record, so a
+    save that fails before the replacement leaves the previous record exactly as it
+    was. When that failing save is the one that would have settled the refinement,
+    the original candidate is still open on disk and the call is still dispatched,
+    which is precisely what recovery classifies: it is never silently re-sent.
+    """
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    _strategy, first = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-1")
+    provider.responses.append(_change(TWO_FIELDS, call_id="call-2"))
+
+    real_save = UserStrategyStore.save
+
+    def failing_save(self: UserStrategyStore, item: Any) -> None:
+        settled = any(
+            entry.get("call_id") == "call-2"
+            and entry.get("status") not in {"pending", "dispatched"}
+            for entry in item.calls
+        )
+        if settled:
+            raise OSError("the durable write did not complete")
+        real_save(self, item)
+
+    monkeypatch.setattr(UserStrategyStore, "save", failing_save)
+    with pytest.raises(OSError):
+        strategies.revise_proposal(
+            strategy_id,
+            proposal_id=first["proposal_id"],
+            call_id="call-2",
+            text="Refine the proposed change",
+            approved_budget=dict(CALL_BUDGET),
+        )
+
+    held = _durable(tmp_path, strategy_id)
+    assert held.proposals[-1]["status"] == "open"
+    assert held.calls[-1]["status"] == "dispatched"
+    assert held.draft.revision == 1
+    # The interrupted refinement is never re-sent on its own: the next turn is refused
+    # until recovery has classified the call that stayed dispatched.
+    with pytest.raises(UserStrategyStateError):
+        strategies.send_message(
+            strategy_id,
+            call_id="call-3",
+            base_revision=1,
+            text="Are you there?",
+            approved_budget=dict(CALL_BUDGET),
+        )
+    assert len(provider.calls) == 2
+    monkeypatch.undo()
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("operation", ["apply", "reject", "undo"])
+def test_a_refinement_serializes_queued_operations_without_overwriting_their_changes(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, replacement: bool, operation: str
+) -> None:
+    """A late success or failure cannot write over a queued user decision."""
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy_id = strategy.user_strategy_id
+    strategy, first = _propose(strategies, provider, strategy, TWO_FIELDS, call_id="call-1")
+    if operation == "undo":
+        strategy = strategies.apply_proposal(
+            strategy_id, proposal_id=first["proposal_id"], operation_id="prior-apply"
+        )
+        strategy, first = _propose(
+            strategies, provider, strategy, TWO_FIELDS, call_id="second-proposal", base_revision=2
+        )
+    revision = strategy.draft.revision
+    reply = _change(TWO_FIELDS, call_id="call-2") if replacement else TimeoutError("fixture")
+    blocked = RoutedBlockingProvider([reply])
+    cast(Any, strategies)._provider = blocked
+    failures: list[BaseException] = []
+    outcomes: list[BaseException] = []
+    completed: list[Any] = []
+    started = threading.Event()
+
+    def refine() -> None:
+        try:
+            strategies.revise_proposal(
+                strategy_id,
+                proposal_id=first["proposal_id"],
+                call_id="call-2",
+                text="Refine the proposed change",
+                approved_budget=dict(CALL_BUDGET),
+            )
+        except BaseException as error:  # noqa: BLE001 — asserted in the parent thread
+            failures.append(error)
+
+    def decide() -> None:
+        started.set()
+        try:
+            if operation == "apply":
+                result = strategies.apply_proposal(
+                    strategy_id, proposal_id=first["proposal_id"], operation_id="op-apply"
+                )
+            elif operation == "reject":
+                result = strategies.reject_proposal(strategy_id, proposal_id=first["proposal_id"])
+            else:
+                result = strategies.undo(
+                    strategy_id,
+                    operation_id="op-undo",
+                    head_revision=revision,
+                    target_operation_id="prior-apply",
+                )
+            completed.append(result)
+        except BaseException as error:  # noqa: BLE001 — asserted in the parent thread
+            outcomes.append(error)
+
+    refiner = threading.Thread(target=refine)
+    decider = threading.Thread(target=decide)
+    refiner.start()
+    try:
+        assert blocked.invoked.wait(5)
+        decider.start()
+        assert started.wait(5)
+        decider.join(0.1)
+        assert decider.is_alive() and completed == [] and outcomes == []
+        # During dispatch the original is still available, never prematurely retired.
+        assert strategies.get(strategy_id).proposals[-1]["status"] == "open"
+    finally:
+        blocked.release.set()
+        refiner.join(5)
+        if decider.ident is not None:
+            decider.join(5)
+    assert not refiner.is_alive() and not decider.is_alive()
+    assert failures == [] and len(blocked.calls) == 1
+    held = _durable(tmp_path, strategy_id)
+    statuses = {item["proposal_id"]: item["status"] for item in held.proposals}
+    if operation == "apply" and replacement:
+        assert completed == []
+        assert len(outcomes) == 1 and isinstance(outcomes[0], UserStrategyStaleError)
+        assert held.draft.revision == revision
+        assert statuses[first["proposal_id"]] == "superseded"
+    else:
+        assert outcomes == [] and len(completed) == 1
+        assert held == completed[0]
+        if operation == "apply":
+            assert held.draft.revision == revision + 1
+            assert statuses[first["proposal_id"]] == "applied"
+        elif operation == "reject":
+            assert held.draft.revision == revision
+            assert statuses[first["proposal_id"]] == "rejected"
+        else:
+            assert held.draft.revision == revision + 1
+            assert held.changes[-1]["kind"] == "undo"
+            candidate = held.proposals[-1]
+            assert candidate["base_revision"] == revision
+            with pytest.raises(UserStrategyStaleError):
+                strategies.apply_proposal(
+                    strategy_id, proposal_id=candidate["proposal_id"], operation_id="late-apply"
+                )
+
+
 # --- the registered contract the model is given --------------------------------
 
 

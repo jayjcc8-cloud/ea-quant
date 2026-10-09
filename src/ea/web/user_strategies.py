@@ -1313,7 +1313,6 @@ class UserStrategyService:
         approved_budget: Any,
         action: str = "message",
         proposal_id: str | None = None,
-        before: Any = None,
         evidence_job_ids: Any = None,
         expected_evidence: Documents | None = None,
     ) -> UserStrategy:
@@ -1414,12 +1413,11 @@ class UserStrategyService:
             # as. It is a record of what was explained, never a new authority over
             # the draft, the runs or the budget.
             record["evidence"] = evidence
-        pending = before(strategy) if before is not None else strategy
         pending = replace(
-            pending,
+            strategy,
             updated_at=now,
             messages=(
-                *pending.messages,
+                *strategy.messages,
                 {
                     "message_id": str(uuid.uuid4()),
                     "role": "user",
@@ -1431,7 +1429,7 @@ class UserStrategyService:
                     "proposal_id": proposal_id,
                 },
             ),
-            calls=(*pending.calls, record),
+            calls=(*strategy.calls, record),
         )
         # One durable write: the user's own message, the approved budget and the
         # reservation exist before the provider is reached.
@@ -1496,8 +1494,23 @@ class UserStrategyService:
         proposals = strategy.proposals
         if items:
             proposal_id = str(uuid.uuid4())
+            # A refinement replaces the one open candidate its own originating call
+            # named, and nothing else. The supersede is written in the same durable
+            # record as the valid new proposal below, so an answer that proposed
+            # nothing — a provider failure, a refusal, or plain text — never reaches
+            # here and leaves that candidate exactly as it was. Every entry is rebuilt
+            # rather than mutated, so the strategy being read is never edited in place.
+            target = self._revise_target(strategy, call)
+            retained = proposals[-_MAX_PROPOSALS:]
+            if target is not None:
+                retained = tuple(
+                    {**item, "status": "superseded"}
+                    if item.get("proposal_id") == target and item.get("status") == "open"
+                    else item
+                    for item in retained
+                )
             proposals = (
-                *proposals[-_MAX_PROPOSALS:],
+                *retained,
                 {
                     "proposal_id": proposal_id,
                     "call_id": call,
@@ -1805,6 +1818,21 @@ class UserStrategyService:
         if type(evidence) is not list or not evidence:
             return None
         return cast(Documents, evidence)
+
+    @staticmethod
+    def _revise_target(strategy: UserStrategy, call: str) -> str | None:
+        """The proposal one retained call was asked to refine, or ``None``.
+
+        Read from the call's own recorded request, which is exactly what it was
+        admitted as: only a call whose action was ``revise`` names a proposal to
+        replace, so an ordinary message supersedes nothing.
+        """
+        record = _entry(strategy.calls, "call_id", call)
+        request = None if record is None else record.get("request")
+        if not isinstance(request, dict) or request.get("action") != "revise":
+            return None
+        target = request.get("proposal_id")
+        return target if isinstance(target, str) else None
 
     @staticmethod
     def _same_evidence(recorded: Documents, verified: Documents) -> bool:
@@ -2475,17 +2503,6 @@ class UserStrategyService:
                     "an applied change is revised by proposing again, not by revising it"
                 )
 
-            def supersede(current: UserStrategy) -> UserStrategy:
-                return replace(
-                    current,
-                    proposals=tuple(
-                        {**item, "status": "superseded"}
-                        if item.get("proposal_id") == target and item.get("status") == "open"
-                        else item
-                        for item in current.proposals
-                    ),
-                )
-
             # The runs this proposal was made over are read from its own originating
             # call, and that retained pair — not today's draft, not the caller's own
             # ids and not the conversation text — is what the refinement inherits.
@@ -2506,7 +2523,6 @@ class UserStrategyService:
                     None if origin is None else [record["job_id"] for record in origin]
                 ),
                 expected_evidence=origin,
-                before=supersede,
             )
 
     # -- applying, rejecting, revising, undoing -----------------------------
