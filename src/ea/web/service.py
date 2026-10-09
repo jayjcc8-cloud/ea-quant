@@ -621,6 +621,12 @@ class _Intent:
     """
 
     outcome: str
+    #: Whether this attempt's compute is positively confirmed to be over: the
+    #: owned process group was shown gone, or no compute was ever spawned for
+    #: it. This is a fact about execution, kept apart from whether the task was
+    #: cancelled: a cancellation may only be recorded as a confirmed stop when
+    #: this holds, and an unproven attempt never upgrades to one.
+    compute_ended: bool = False
     engine_run_id: str | None = None
     error_code: str | None = None
     message: str | None = None
@@ -1176,6 +1182,10 @@ class WebService:
             attempt_id=cast(str, record.attempt_id),
             scenario_path=scenario.scenario_path,
             scenario_sha256=sha256(frozen).hexdigest(),
+            # The identity of the scenario this job actually admitted: the one the
+            # user's parameters were applied to, not the registered source it was
+            # derived from, so a legitimate override is never mistaken for drift.
+            scenario_identity_sha256=scenario.scenario_sha256.value,
             research_input_bytes=scenario.research_input_bytes,
             package_path=package_path,
             package_sha256=package_sha256,
@@ -2526,11 +2536,14 @@ class WebService:
         if admitted is None:
             # A cancellation was already accepted for this job. It settles as
             # stopped here, without ever spawning compute.
-            self._finalize(job_id, _Intent(outcome="stopped"))
+            self._finalize(job_id, _Intent(outcome="stopped", compute_ended=True))
             return
         try:
             intent = self._execute(job_id, admitted, scenario)
         except (BacktestScenarioError, InputChangedError):
+            # Unproven by default. Only `_execute` knows where the spawn boundary
+            # is, so it is the only place allowed to report that a failure cannot
+            # have started compute; anything escaping it stays unconfirmed.
             intent = _Intent(
                 outcome="failed",
                 error_code="input_changed",
@@ -2561,32 +2574,62 @@ class WebService:
             return running
 
     def _execute(self, job_id: str, record: JobRecord, scenario: LoadedBacktestScenario) -> _Intent:
-        if record.attempt_id is None:
-            raise RuntimeError("accepted Web job has no reserved attempt identity")
-        self._check_dataset(scenario)
-        if _binds_local_strategy(record.plugin_binding):
-            # Immediately before the engine is reached, the frozen binding and the
-            # current trust are re-checked: a revocation between admission and this
-            # moment refuses the run instead of starting it. It cannot interrupt
-            # Python that has already begun, in this process or in the worker.
-            self._local_catalog(record.plugin_binding)
-        control = self._worker_control(job_id)
-        worker.write_request(control, self._worker_request(job_id, record, scenario))
+        try:
+            if record.attempt_id is None:
+                raise RuntimeError("accepted Web job has no reserved attempt identity")
+            self._check_dataset(scenario)
+            if _binds_local_strategy(record.plugin_binding):
+                # Immediately before the engine is reached, the frozen binding and the
+                # current trust are re-checked: a revocation between admission and this
+                # moment refuses the run instead of starting it. It cannot interrupt
+                # Python that has already begun, in this process or in the worker.
+                self._local_catalog(record.plugin_binding)
+            control = self._worker_control(job_id)
+            worker.write_request(control, self._worker_request(job_id, record, scenario))
+        except (BacktestScenarioError, InputChangedError):
+            # Nothing up to here can start compute, so a failure now is an attempt
+            # that never began.
+            return _Intent(
+                outcome="failed",
+                compute_ended=True,
+                error_code="input_changed",
+                message="scenario input changed; validate it again",
+            )
+        except Exception:
+            return _Intent(
+                outcome="failed",
+                compute_ended=True,
+                error_code="web.internal_failure",
+                message="the local backtest failed unexpectedly",
+            )
         if self._stop_requested(job_id):
             # The cancellation landed after admission but before the spawn: no
             # compute is started for it, and the request already written is only
             # staging that the commit gate never serves.
-            return _Intent(outcome="stopped")
-        process = self._spawn_worker(control)
-        with self._lock:
-            self._runs[job_id] = process
+            return _Intent(outcome="stopped", compute_ended=True)
+        # From the spawn call onwards compute may exist, so nothing that fails here
+        # is ever reported as proof that none was started: that call can hand back
+        # a live child and still raise, leaving a handle this controller never
+        # registered. Such a child is still bounded — the liveness channel it
+        # inherited closes with this process — but it is not a confirmed stop.
+        process: worker.WorkerProcess | None = None
         try:
-            outcome = self._supervise(job_id, process)
-        finally:
+            process = self._spawn_worker(control)
             with self._lock:
-                self._runs.pop(job_id, None)
-            process.close()
-        return self._settle(job_id, record, outcome, control)
+                self._runs[job_id] = process
+            outcome = self._supervise(job_id, process)
+            return self._settle(job_id, record, outcome, control)
+        except Exception:
+            return _Intent(
+                outcome="failed",
+                error_code="web.internal_failure",
+                message="the local backtest failed unexpectedly",
+            )
+        finally:
+            if process is not None:
+                with self._lock:
+                    self._runs.pop(job_id, None)
+                process.close()
 
     def _supervise(self, job_id: str, process: worker.WorkerProcess) -> str:
         """Wait for the owned process tree, escalating a stop within one bound.
@@ -2654,7 +2697,8 @@ class WebService:
                 message="the run was told to stop but its process group is not confirmed gone",
             )
         if outcome == "stopped":
-            return _Intent(outcome="stopped")
+            # A stop the supervisor confirmed: the owned group is gone.
+            return _Intent(outcome="stopped", compute_ended=True)
         if outcome == "abandoned":
             # No stop was accepted, yet the owned group could not be shown to be
             # gone. Nothing of this attempt is published: a result may only be
@@ -2664,14 +2708,20 @@ class WebService:
                 error_code="worker_group_unconfirmed",
                 message="the run's process group could not be confirmed stopped",
             )
+        # Every branch below is reached only after the supervisor confirmed the
+        # owned group is gone, so the attempt's compute is over.
         result = worker.read_result(control)
         if not self._result_is_this_attempt(result, job_id, record):
             return _Intent(
                 outcome="failed",
+                compute_ended=True,
                 error_code="web.internal_failure",
                 message=self._worker_failure_message(control),
             )
-        return self._settled_intent(cast(dict[str, Any], result), record, control)
+        return replace(
+            self._settled_intent(cast(dict[str, Any], result), record, control),
+            compute_ended=True,
+        )
 
     def _settled_intent(self, result: dict[str, Any], record: JobRecord, control: Path) -> _Intent:
         attempt_id = cast(str, record.attempt_id)
@@ -2780,11 +2830,10 @@ class WebService:
                 self._closing and current.status in _LIVE_JOB_STATES
             )
             if stopping:
-                if intent.outcome == "unconfirmed":
-                    # The stop is accepted, not confirmed: the job stays stopping
-                    # and its staging is kept, never served.
-                    settled = replace(current, error_code=intent.error_code, message=intent.message)
-                else:
+                if intent.compute_ended:
+                    # A stop is recorded as confirmed only against proof that the
+                    # attempt's compute is over — the owned group shown gone, or
+                    # compute that was never spawned.
                     settled = replace(
                         current,
                         status="stopped",
@@ -2793,6 +2842,18 @@ class WebService:
                         equity_path_sha256=None,
                         error_code=None,
                         message="the run was stopped before it published a result",
+                    )
+                else:
+                    # The stop is accepted, not confirmed: nothing proved this
+                    # attempt's compute had ended, so the job stays stopping and
+                    # its staging is kept, never served. An unproven attempt is
+                    # never upgraded to a confirmed stop, by a cancellation or by
+                    # shutdown.
+                    settled = replace(
+                        current,
+                        status="stopping",
+                        error_code=intent.error_code,
+                        message=intent.message,
                     )
             elif current.status != "running":
                 return current

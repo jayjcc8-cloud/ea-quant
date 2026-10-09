@@ -62,11 +62,11 @@ from ea.product import (
     BacktestScenarioError,
     LoadedBacktestScenario,
     generate_backtest_report,
-    load_backtest_scenario,
     run_backtest_scenario,
 )
 from ea.product.equity_path import generate_equity_path_analysis
 from ea.product.reporting import _fsync_directory, _write_report_file
+from ea.product.scenario import load_backtest_scenario_bytes
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import read_regular, validate_package
 
@@ -128,14 +128,24 @@ def build_request(
     attempt_id: str,
     scenario_path: Path,
     scenario_sha256: str,
+    scenario_identity_sha256: str,
     research_input_bytes: bytes | None,
     package_path: Path | None,
     package_sha256: str | None,
 ) -> dict[str, Any]:
-    """One frozen-input request. Paths and hashes only; no payloads."""
+    """One frozen-input request. Paths and hashes only; no payloads.
+
+    ``scenario_sha256`` is the digest of the frozen file's bytes and
+    ``scenario_identity_sha256`` is the canonical identity of the *effective*
+    scenario those bytes hold — the admitted scenario after the user's
+    parameters were applied. A worker checks both: the first that it read the
+    frozen bytes, the second that what it parsed is the scenario this job
+    admitted rather than merely something that hashed correctly.
+    """
     scenario: dict[str, Any] = {
         "path": str(scenario_path),
         "sha256": scenario_sha256,
+        "identity_sha256": scenario_identity_sha256,
     }
     if research_input_bytes is not None:
         scenario["research_input"] = json.loads(research_input_bytes)
@@ -702,7 +712,15 @@ def _run_hook(
 
 
 def _load_frozen_scenario(request: dict[str, Any]) -> LoadedBacktestScenario:
-    """Reload the controller's frozen input and re-verify its own identity."""
+    """Reload the controller's frozen input from the bytes it was verified as.
+
+    The verified payload is what is parsed, through the same strict parser every
+    other load uses: the file is never opened a second time, so a replacement
+    landing between the check and the parse cannot become the run's input. The
+    reconstructed scenario is then held to the identity this job admitted, so
+    whatever the parse produced must be the scenario the user's parameters were
+    applied to.
+    """
     scenario_reference = request.get("scenario")
     if type(scenario_reference) is not dict:
         raise WorkerError("worker request names no scenario")
@@ -710,6 +728,9 @@ def _load_frozen_scenario(request: dict[str, Any]) -> LoadedBacktestScenario:
     expected = scenario_reference.get("sha256")
     if type(expected) is not str:
         raise WorkerError("worker request names no scenario digest")
+    admitted = scenario_reference.get("identity_sha256")
+    if type(admitted) is not str:
+        raise WorkerError("worker request names no admitted scenario identity")
     payload = read_regular(path, path.parent)
     if _digest(payload) != expected:
         raise WorkerError("frozen scenario changed before the worker read it")
@@ -724,7 +745,9 @@ def _load_frozen_scenario(request: dict[str, Any]) -> LoadedBacktestScenario:
             read_regular(package_path, package_path.parent), expected_sha256=package_sha256
         )
     catalog = ResearchStrategyCatalogV1(() if package is None else (package,))
-    scenario = load_backtest_scenario(path, catalog=catalog)
+    scenario = load_backtest_scenario_bytes(payload, scenario_path=path, catalog=catalog)
+    if scenario.scenario_sha256.value != admitted:
+        raise WorkerError("the parsed scenario is not the one this job admitted")
     evidence = scenario_reference.get("research_input")
     if evidence is not None:
         expected_evidence = scenario_reference.get("research_input_sha256")

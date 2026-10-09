@@ -385,13 +385,19 @@ def test_no_verified_group_is_an_unconfirmed_group_and_never_a_confirmed_stop(
 
 
 def _wait_supervisor_idle(service: WebService, bound: float = STOP_BOUND + 20.0) -> None:
+    """Wait until the supervising thread has released the active-job slot.
+
+    The worker handle is dropped before the commit gate runs, so the released
+    active slot — not an empty handle table — is the barrier that is ordered
+    after the final write.
+    """
     deadline = time.monotonic() + bound
     while time.monotonic() < deadline:
         with service._lock:
-            if not service._runs:
+            if service._active is None:
                 return
         time.sleep(0.02)
-    raise AssertionError("the supervisor never finished")
+    raise AssertionError("the supervisor never released its active slot")
 
 
 def test_a_store_failure_whose_reread_also_fails_freezes_the_record(

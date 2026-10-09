@@ -394,11 +394,8 @@ def _resolve_file(path: Path, *, label: str) -> Path:
     return resolved
 
 
-def _load_document(path: Path) -> dict[str, Any]:
-    try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        raise BacktestScenarioError("scenario file cannot be read") from None
+def _parse_scenario_text(content: str) -> dict[str, Any]:
+    """The one strict YAML parse every scenario load goes through."""
     try:
         document = yaml.load(content, Loader=_UniqueKeySafeLoader)
     except (yaml.YAMLError, ValueError, RecursionError) as error:
@@ -410,6 +407,14 @@ def _load_document(path: Path) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise BacktestScenarioError("scenario root must be a mapping")
     return document
+
+
+def _load_document(path: Path) -> dict[str, Any]:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise BacktestScenarioError("scenario file cannot be read") from None
+    return _parse_scenario_text(content)
 
 
 def _utc(value: str, *, field: str) -> datetime:
@@ -548,6 +553,36 @@ def load_backtest_scenario(
         raise BacktestScenarioError("scenario path must be a pathlib.Path")
     scenario_path = _resolve_file(path, label="scenario path")
     document = _load_document(scenario_path)
+    return _load_scenario_document(
+        scenario_path, document, strategy_root=strategy_root, catalog=catalog
+    )
+
+
+def load_backtest_scenario_bytes(
+    payload: bytes,
+    *,
+    scenario_path: Path,
+    strategy_root: Path | None = None,
+    catalog: ResearchStrategyCatalogV1 | None = None,
+) -> LoadedBacktestScenario:
+    """Load, capture, and cross-validate one scenario from these exact bytes.
+
+    A caller that has already read and verified a scenario's bytes uses this so
+    that the document it validated is the document that is parsed: nothing is
+    re-opened, so no content can be substituted for the verified bytes between
+    the check and the parse. ``scenario_path`` names the file the bytes came
+    from — it resolves the document's data path and becomes the loaded
+    scenario's own path — and is never read here.
+    """
+    if not isinstance(payload, bytes):
+        raise BacktestScenarioError("scenario payload must be bytes")
+    if not isinstance(scenario_path, Path):
+        raise BacktestScenarioError("scenario path must be a pathlib.Path")
+    try:
+        content = payload.decode("utf-8")
+    except UnicodeError:
+        raise BacktestScenarioError("scenario file cannot be read") from None
+    document = _parse_scenario_text(content)
     return _load_scenario_document(
         scenario_path, document, strategy_root=strategy_root, catalog=catalog
     )

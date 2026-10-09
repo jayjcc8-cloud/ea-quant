@@ -10,17 +10,67 @@ failing attempt settles through the same gate using the current job state.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from time import monotonic, sleep
 from typing import Any, cast
 
 import pytest
 
+from ea.web import worker
 from ea.web.service import JobRecord, ReportUnavailableError, WebService
 from unit.test_web_api import _settings
 
 REQUEST_ID = "request-worker-commit-0001"
+
+
+def _wait_committed(service: WebService, bound: float = 60.0) -> None:
+    """Wait until the supervising thread has released the active-job slot.
+
+    That slot is released after the commit gate has run, so it is the in-process
+    signal ordered after the final write. The live worker handle is dropped
+    before the gate is reached, so it cannot stand in for this barrier.
+    """
+    deadline = monotonic() + bound
+    while monotonic() < deadline:
+        with service._lock:
+            if service._active is None:
+                return
+        sleep(0.02)
+    raise AssertionError("the supervisor never released its active slot")
+
+
+def _unverifiable_group(service: WebService) -> list[Any]:
+    """Spawn for real, then hold the handle with no captured group identity."""
+    spawned: list[Any] = []
+    real_spawn = service._spawn_worker
+
+    def without_identity(control: Path) -> Any:
+        process = replace(real_spawn(control), process_group=None)
+        spawned.append(process)
+        return process
+
+    service._spawn_worker = without_identity  # type: ignore[method-assign]
+    return spawned
+
+
+#: A trusted local test worker that computes until something stops it.
+_BLOCKING_HOOK = """
+import time
+
+
+def hook(*, scenario, control, request, worker):
+    (control / "computing.marker").write_text("computing", encoding="ascii")
+    while True:
+        time.sleep(0.05)
+"""
+
+
+def _blocking_hook(tmp_path: Path) -> str:
+    path = tmp_path / "commit-blocking-hook.py"
+    path.write_text(_BLOCKING_HOOK, encoding="utf-8")
+    return f"{path}:hook"
 
 
 def _service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[WebService, list[Path]]:
@@ -181,7 +231,13 @@ def test_stop_after_commit_never_rewrites_a_succeeded_job(
 def test_failed_attempt_settles_through_the_same_gate_as_stopped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An exception is arbitrated against current state, never an old record."""
+    """An exception is arbitrated against current state, never an old record.
+
+    The failure is raised where the controller cannot place it relative to the
+    dispatch boundary, so it proves nothing about compute having ended: the
+    accepted stop stays the job's state, unconfirmed, and the late failure never
+    becomes the outcome the job is reported with.
+    """
     service, launches = _service(tmp_path, monkeypatch)
     entered, release = Event(), Event()
 
@@ -196,12 +252,69 @@ def test_failed_attempt_settles_through_the_same_gate_as_stopped(
         assert entered.wait(30)
         assert service.stop_job(accepted.job_id).status == "stopping"
         release.set()
-        final = _terminal(service, accepted.job_id)
-        assert final.status == "stopped", "an accepted stop outranks a late failure"
-        assert final.error_code is None
+        _wait_committed(service)
+        final = service.get_job(accepted.job_id)
+        assert final.status == "stopping", final.status
+        assert final.report_sha256 is None and final.engine_run_id is None
         assert launches == []
     finally:
         release.set()
+        service.stop()
+
+
+def test_a_dispatch_that_starts_compute_then_fails_is_never_a_confirmed_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spawn that raises after starting a child is not proof that none started.
+
+    The spawn call is the one thing that starts compute, so a failure raised by
+    that call leaves it unknown whether a child exists — and no execution fact
+    shows any group has gone. A cancellation accepted while the controller holds
+    no handle for the attempt must therefore stay unconfirmed rather than being
+    recorded as a confirmed stop.
+    """
+    settings = _settings(tmp_path)
+    service = WebService(settings.scenario_root, settings.workspace)
+    service._test_hook = _blocking_hook(tmp_path)
+    service.start()
+    real_spawn = service._spawn_worker
+    live: list[Any] = []
+    entered, release = Event(), Event()
+
+    def spawn_then_fail(control: Path) -> Any:
+        process = real_spawn(control)
+        live.append(process)
+        entered.set()
+        assert release.wait(60), "the test never released the spawning dispatch"
+        raise OSError("the dispatch started a child and then failed")
+
+    monkeypatch.setattr(service, "_spawn_worker", spawn_then_fail)
+    try:
+        accepted = _submit(service, "request-spawn-then-fail-0001")
+        assert entered.wait(60), "the spawn never started"
+        # The child is running from this controller's point of view, yet no
+        # handle has been registered for it.
+        with service._lock:
+            assert service._runs == {}
+        assert live and live[0].stopped() is False
+
+        assert service.stop_job(accepted.job_id).status == "stopping"
+        release.set()
+        _wait_committed(service)
+
+        final = service.get_job(accepted.job_id)
+        assert final.status not in {"stopped", "succeeded"}, final.status
+        assert final.report_sha256 is None and final.engine_run_id is None
+        assert not (service.reports_dir / accepted.job_id).exists()
+        # Nothing proved this child's group is gone, so nothing may say it stopped.
+        assert live and live[0].stopped() is False
+    finally:
+        release.set()
+        # End the captured handle through its own verified group, then reap it.
+        for process in live:
+            process.kill()
+            assert process.wait(15), "the test worker outlived its cleanup"
+            process.close()
         service.stop()
 
 
@@ -231,3 +344,83 @@ def test_repeated_dispatch_and_repeated_stop_keep_one_attempt_and_one_outcome(
     finally:
         release.set()
         service.stop()
+
+
+def test_a_late_cancellation_never_upgrades_an_unconfirmed_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a confirmed group disappearance, or never-spawned compute, permits stopped.
+
+    The supervisor could not show that the owned group was gone, so the attempt
+    settled as unconfirmed. A cancellation accepted while that verdict is on its
+    way to the commit gate must not turn it into a confirmed stop: the group was
+    never shown to be gone, and reporting ``stopped`` would claim compute had
+    ended when nothing proved it had.
+    """
+    monkeypatch.setattr(worker, "KILL_GRACE_SECONDS", 0.05)
+    service, _launches = _service(tmp_path, monkeypatch)
+    spawned = _unverifiable_group(service)
+    real_settle = service._settle
+    ready, release = Event(), Event()
+
+    def held_settle(*args: Any, **kwargs: Any) -> Any:
+        intent = real_settle(*args, **kwargs)
+        ready.set()
+        assert release.wait(60), "the test never released the commit gate"
+        return intent
+
+    monkeypatch.setattr(service, "_settle", held_settle)
+    try:
+        accepted = _submit(service, "request-late-unknown-stop-0001")
+        assert ready.wait(60), "the supervisor never reached its verdict"
+        assert service.stop_job(accepted.job_id).status == "stopping"
+        release.set()
+        _wait_committed(service)
+        final = service.get_job(accepted.job_id)
+        assert spawned and spawned[0].stopped() is False
+        assert final.status == "stopping", final.status
+        assert final.error_code == "worker_group_unconfirmed"
+        assert final.report_sha256 is None and final.engine_run_id is None
+        assert list(service.runs_dir.iterdir()) == []
+        assert not (service.reports_dir / accepted.job_id).exists()
+    finally:
+        release.set()
+        service.stop()
+
+
+def test_shutdown_never_upgrades_an_unconfirmed_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shutdown is a stop verdict too, and it is held to the same proof."""
+    monkeypatch.setattr(worker, "KILL_GRACE_SECONDS", 0.05)
+    service, _launches = _service(tmp_path, monkeypatch)
+    spawned = _unverifiable_group(service)
+    real_settle = service._settle
+    ready, release = Event(), Event()
+
+    def held_settle(*args: Any, **kwargs: Any) -> Any:
+        intent = real_settle(*args, **kwargs)
+        ready.set()
+        assert release.wait(60), "the test never released the commit gate"
+        return intent
+
+    monkeypatch.setattr(service, "_settle", held_settle)
+    try:
+        accepted = _submit(service, "request-shutdown-unknown-stop-0001")
+        assert ready.wait(60), "the supervisor never reached its verdict"
+        stopper = Thread(target=service.stop, daemon=True)
+        stopper.start()
+        deadline = monotonic() + 30
+        while not service._closing and monotonic() < deadline:
+            sleep(0.01)
+        assert service._closing, "shutdown never began"
+        release.set()
+        stopper.join(60)
+        assert not stopper.is_alive()
+        final = service.get_job(accepted.job_id)
+        assert spawned and spawned[0].stopped() is False
+        assert final.status == "stopping", final.status
+        assert final.error_code == "worker_group_unconfirmed"
+        assert final.report_sha256 is None
+    finally:
+        release.set()

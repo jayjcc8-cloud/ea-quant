@@ -1364,6 +1364,9 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   interrupted: 'interrupted',
 }
 
+/** The job states a bound run has not left yet; reading continues while it is in one. */
+const LIVE_JOB_STATUSES: readonly string[] = ['accepted', 'running', 'stopping']
+
 function ResearchJob({ api, jobId, job, holdouts }: { api: ApiAdapter; jobId: string; job: BacktestJob | null; holdouts: ChronologicalHoldout[] }) {
   if (!job) return <li className="job-card"><small>{jobId} · persisted job record unavailable</small></li>
   const holdoutForJob = holdouts.filter(item => item.source_job_id === job.job_id)
@@ -1907,33 +1910,34 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   }, [api])
 
   const jobKey = task?.jobs.join(',') ?? ''
-  // A bound run is live while it is accepted, running, or waiting for a stop to be
-  // confirmed; the page keeps reading those so `stopping` becomes the real
-  // `stopped`/`failed` the controller records, without polling a terminal run.
-  const liveJobKey = Object.values(jobs)
-    .filter(item => item !== null && ['accepted', 'running', 'stopping'].includes(item.status))
-    .map(item => `${item!.job_id}:${item!.status}`)
-    .sort()
-    .join(',')
   // Each read of the bound runs is bound to the read it started in, so an answer
   // that lands after a newer one was dispatched is discarded rather than allowed
-  // to overwrite it. `jobEpoch` moves only on one explicit refresh, so this stays
-  // one read per identity and one more per explicit ask instead of per render.
+  // to overwrite it. `jobEpoch` moves once per explicit refresh and, while a
+  // bound run is still live, once per *completed* read: an unchanged status is
+  // not an outcome, so a run that keeps answering `stopping` keeps being read
+  // until the controller records a terminal state. A terminal read, an unmount,
+  // and a superseded read all schedule nothing.
   useEffect(() => {
     if (!jobKey) return
     const at = ++jobRead.current
     let active = true
+    let timer: number | undefined
     Promise.all(jobKey.split(',').map(async jobId => {
       try { return [jobId, await api.getBacktest(jobId)] as const } catch { return [jobId, null] as const }
-    })).then(entries => { if (active && at === jobRead.current) setJobs(Object.fromEntries(entries)) })
-    return () => { active = false }
+    })).then(entries => {
+      if (!active || at !== jobRead.current) return
+      const next = Object.fromEntries(entries)
+      setJobs(next)
+      const live = Object.values(next).some(
+        item => item !== null && LIVE_JOB_STATUSES.includes(item.status),
+      )
+      if (live) timer = window.setTimeout(() => setJobEpoch(value => value + 1), 400)
+    })
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
   }, [api, jobKey, task?.status, jobEpoch])
-
-  useEffect(() => {
-    if (!liveJobKey) return
-    const timer = window.setTimeout(() => setJobEpoch(value => value + 1), 400)
-    return () => window.clearTimeout(timer)
-  }, [liveJobKey])
 
   useEffect(() => {
     if (!jobKey || !api.listHoldouts) return

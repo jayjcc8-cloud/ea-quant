@@ -177,3 +177,81 @@ describe('the research page while a bound run stops', () => {
     expect(api.calls.reports).toBe(0)
   })
 })
+
+describe('polling a run that is stopping', () => {
+  /** One bound run whose status comes from a scripted sequence of reads. */
+  function stoppingHost(statuses: BacktestJob['status'][], onRead?: () => void) {
+    const reads: string[] = []
+    const api = adapter({
+      getResearchTask: async () => BOUND_TASK,
+      listResearchTasks: async () => [BOUND_TASK],
+      getBacktest: async () => {
+        onRead?.()
+        const status = statuses[Math.min(reads.length, statuses.length - 1)]
+        reads.push(status)
+        return job({ status, engine_run_id: status === 'stopped' ? 'run-1' : null })
+      },
+    })
+    return { api, reads }
+  }
+
+  it("keeps reading a stopping run until the controller reports a terminal state", async () => {
+    // Two identical `stopping` answers still schedule the next read: an unchanged
+    // status is not an outcome, and the run is only settled when it is terminal.
+    const { api, reads } = stoppingHost(['stopping', 'stopping', 'stopped'])
+    window.history.pushState({}, '', '/research/task-1')
+    render(<App api={api} />)
+
+    await waitFor(
+      () => expect(pageText()).toContain('stopped · no result was published'),
+      { timeout: 5000 },
+    )
+    expect(reads.length).toBeGreaterThanOrEqual(3)
+    expect(api.calls.reports).toBe(0)
+  })
+
+  it('never leaves a second read in flight while one is still unanswered', async () => {
+    let inFlight = 0
+    let peak = 0
+    let calls = 0
+    const pending: Array<() => void> = []
+    const api = adapter({
+      getResearchTask: async () => BOUND_TASK,
+      listResearchTasks: async () => [BOUND_TASK],
+      getBacktest: () => {
+        calls += 1
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        return new Promise(resolve => {
+          pending.push(() => {
+            inFlight -= 1
+            resolve(job({ status: 'stopping' }))
+          })
+        })
+      },
+    })
+    window.history.pushState({}, '', '/research/task-1')
+    const view = render(<App api={api} />)
+
+    await waitFor(() => expect(calls).toBe(1))
+    // Hold the answer past the poll interval: nothing may start a second read.
+    await new Promise(resolve => setTimeout(resolve, 600))
+    expect(calls).toBe(1)
+    pending[0]?.()
+    await waitFor(() => expect(calls).toBe(2), { timeout: 5000 })
+    expect(peak).toBe(1)
+    view.unmount()
+  })
+
+  it('stops reading once the page is unmounted', async () => {
+    const { api, reads } = stoppingHost(['stopping'])
+    window.history.pushState({}, '', '/research/task-1')
+    const view = render(<App api={api} />)
+
+    await waitFor(() => expect(reads.length).toBeGreaterThanOrEqual(1))
+    view.unmount()
+    const settled = reads.length
+    await new Promise(resolve => setTimeout(resolve, 900))
+    expect(reads.length).toBe(settled)
+  })
+})
