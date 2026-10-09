@@ -420,7 +420,17 @@ class QuineBridge:
     # -- reads ---------------------------------------------------------------
 
     def frozen_document(self, experiment: dict[str, Any]) -> dict[str, Any] | None:
-        """The retained frozen input of one record, held to its own digest."""
+        """The retained frozen input of one record, held to its own digest.
+
+        The bytes are also re-verified as a frozen input in their own right — the
+        snapshot against its digest, the frozen scenario and strategy artifact
+        against theirs, and the released dataset version against the capability
+        binding it was confirmed under — so a record whose retained identity does
+        not reproduce itself is read as having no frozen input rather than being
+        projected as a run of something this workspace cannot name.
+        """
+        from ea.web import rust_domain
+
         encoded = experiment.get("frozen_canonical")
         claimed = experiment.get("frozen_sha256")
         if type(encoded) is not str or type(claimed) is not str:
@@ -435,7 +445,13 @@ class QuineBridge:
             envelope = json.loads(frozen)
         except ValueError:
             return None
-        return cast(dict[str, Any], envelope) if type(envelope) is dict else None
+        if type(envelope) is not dict:
+            return None
+        try:
+            rust_domain._decode_envelope(cast(dict[str, Any], envelope))  # noqa: SLF001
+        except rust_domain.DomainRefusal:
+            return None
+        return cast(dict[str, Any], envelope)
 
     def payload_of(self, experiment: dict[str, Any]) -> dict[str, Any] | None:
         """The confirmation payload one record retained, or ``None`` if it is not one.

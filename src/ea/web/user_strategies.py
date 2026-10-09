@@ -651,9 +651,7 @@ class UserStrategyService:
 
     # -- scenario facts -----------------------------------------------------
 
-    def _scenario_document(
-        self, scenario_id: str, dataset_id: str | None = None
-    ) -> dict[str, Any]:
+    def _scenario_document(self, scenario_id: str, dataset_id: str | None = None) -> dict[str, Any]:
         """One registered scenario's own facts, under the data it will really run on.
 
         The dataset binding is part of the request, not an afterthought: a
@@ -662,16 +660,15 @@ class UserStrategyService:
         reading them from the scenario's default data would describe a different
         run than the one a confirmation would start.
         """
+        # Only a draft that really selected a dataset names one, so a scenario with
+        # no selection keeps the exact call it always made.
         try:
-            return cast(
-                dict[str, Any],
-                self._service.validate_scenario(
-                    scenario_id,
-                    # Only a draft that really selected a dataset names one, so a
-                    # scenario with no selection keeps the exact call it always made.
-                    **({} if dataset_id is None else {"dataset_id": dataset_id}),
-                ),
+            document = (
+                self._service.validate_scenario(scenario_id)
+                if dataset_id is None
+                else self._service.validate_scenario(scenario_id, dataset_id=dataset_id)
             )
+            return cast(dict[str, Any], document)
         except Exception as error:  # noqa: BLE001 — an unusable start is refused, not guessed
             raise UserStrategyStateError(
                 f"{scenario_id} is not a currently registered, valid scenario: {error}"
@@ -1229,7 +1226,9 @@ class UserStrategyService:
             parameters = dict(draft.parameters)
             normalized = summary.get("parameters")
             if isinstance(normalized, dict):
-                parameters = {name: normalized.get(name, value) for name, value in parameters.items()}
+                parameters = {
+                    name: normalized.get(name, value) for name, value in parameters.items()
+                }
             revised = replace(
                 draft,
                 revision=draft.revision + 1,

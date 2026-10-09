@@ -296,9 +296,7 @@ def _decode_envelope(value: object) -> tuple[dict[str, Any], bytes, bytes | None
     return envelope, frozen, package
 
 
-def _verify_version_binding(
-    envelope: dict[str, Any], snapshot: dict[str, Any]
-) -> None:
+def _verify_version_binding(envelope: dict[str, Any], snapshot: dict[str, Any]) -> None:
     """Hold one envelope's version evidence and binding to each other.
 
     These two facts are what make a confirmation about a *version* of a local
@@ -720,8 +718,7 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
             ) from None
         dataset_version = _published_version(uploads, cast(str, dataset_id))
         _require(
-            dataset_version is None
-            or _bound_data_matches(request.get("binding"), dataset_version),
+            dataset_version is None or _bound_data_matches(request.get("binding"), dataset_version),
             "binding_invalid",
             "the selected dataset version is not the capability binding this input carries",
         )
@@ -753,7 +750,10 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
 
 def _dataset_catalog(
     request: dict[str, Any],
-) -> tuple[LocalResearchDatasetCatalogV1 | LocalResearchDatasetRegistryV1, ControlledUploadStoreV1 | None]:
+) -> tuple[
+    LocalResearchDatasetCatalogV1 | LocalResearchDatasetRegistryV1,
+    ControlledUploadStoreV1 | None,
+]:
     """The dataset entrances this workspace really has, and nothing else.
 
     A Web workspace has two: its registered read-only root, when one is

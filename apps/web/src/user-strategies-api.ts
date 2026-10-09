@@ -175,7 +175,7 @@ export type UserStrategyProposal = {
 /** One applied, undone or bound revision, exactly as it was written. */
 export type UserStrategyChange = {
   operation_id: string
-  kind: 'apply' | 'undo' | 'bind'
+  kind: 'apply' | 'undo' | 'bind' | 'select-dataset'
   proposal_id: string | null
   target_operation_id: string | null
   from_revision: number
@@ -188,6 +188,8 @@ export type UserStrategyChange = {
   at: string
   /** A binding names the scenario it bound; no other kind of change carries one. */
   scenario_id?: string | null
+  /** A dataset selection names the dataset it selected, and nothing else does. */
+  dataset_id?: string | null
   criterion?: ReportCriterion | null
 }
 
@@ -209,6 +211,25 @@ export type UserStrategyBinding = {
   from_revision: number
   to_revision: number
   bound_at: string
+}
+
+/**
+ * The one most recent explicit dataset selection this strategy was formed by, kept
+ * on the record itself for the same reason the binding is: replaying the same
+ * operation still resolves to itself after the change ledger has moved on.
+ */
+export type UserStrategyDataset = {
+  operation_id: string
+  request: {
+    action: 'select-dataset'
+    base_revision: number
+    dataset_id: string
+  }
+  request_sha256: string
+  dataset_id: string
+  from_revision: number
+  to_revision: number
+  selected_at: string
 }
 
 export type UserStrategyExperimentStatus =
@@ -301,6 +322,8 @@ export type UserStrategy = {
   experiments: UserStrategyExperiment[]
   /** The one immutable binding that formed this strategy, if it has one. */
   binding?: UserStrategyBinding | null
+  /** The most recent explicit dataset selection, if the user made one. */
+  dataset?: UserStrategyDataset | null
 }
 
 /**
@@ -404,6 +427,18 @@ export const userStrategiesApi = {
       criterion?: UserStrategyCriterionInput | null
     },
   ) => write<UserStrategy>(`${base(userStrategyId)}/bind-scenario`, input),
+  /**
+   * One explicit choice of one local dataset for one executable draft. The client
+   * sends only the catalog identity it was shown: not a path and not a digest. The
+   * host resolves it through its own registered root and controlled upload store,
+   * binds the published version it finds there, validates the whole resulting
+   * draft against that data, and advances the revision once — which is what makes
+   * an experiment previewed before this selection no longer confirmable.
+   */
+  selectDataset: (
+    userStrategyId: string,
+    input: { operation_id: string; base_revision: number; dataset_id: string },
+  ) => write<UserStrategy>(`${base(userStrategyId)}/select-dataset`, input),
   /**
    * One approved turn. `evidence_job_ids` is absent for an ordinary conversation;
    * with it, the turn is grounded in one or two of this strategy's own frozen runs

@@ -256,6 +256,12 @@ export type ApiAdapter = {
       criterion?: { field: string; expectation: string } | null
     },
   ): Promise<UserStrategy>
+  /** One explicit dataset choice for one executable draft. The client names only
+   * a catalog identity: the host resolves and binds the version it finds. */
+  selectUserStrategyDataset?(
+    userStrategyId: string,
+    input: { operation_id: string; base_revision: number; dataset_id: string },
+  ): Promise<UserStrategy>
   sendUserStrategyMessage?(
     userStrategyId: string,
     input: {
@@ -391,6 +397,8 @@ const browserApi: ApiAdapter = {
   getUserStrategy: userStrategyId => userStrategiesApi.get(userStrategyId),
   bindUserStrategyScenario: (userStrategyId, input) =>
     userStrategiesApi.bindScenario(userStrategyId, input),
+  selectUserStrategyDataset: (userStrategyId, input) =>
+    userStrategiesApi.selectDataset(userStrategyId, input),
   sendUserStrategyMessage: (userStrategyId, input) =>
     userStrategiesApi.sendMessage(userStrategyId, input),
   applyUserStrategyProposal: (userStrategyId, proposalId, input) =>

@@ -15,6 +15,7 @@ import { App, type ApiAdapter } from './app'
 import {
   UserStrategyRequestError,
   type UserStrategy,
+  type UserStrategyDraft,
   type UserStrategyExperiment,
 } from './user-strategies-api'
 
@@ -332,5 +333,93 @@ describe('core-owned experiments', () => {
     expect(within(panel).getByText(/结果未知/)).toBeTruthy()
     expect(within(panel).getByText(/the core could not prove how this run ended/)).toBeTruthy()
     expect(within(panel).queryByRole('link', { name: '打开运行以查看它的状态和报告' })).toBeNull()
+  }, 20_000)
+})
+
+describe('one explicit dataset selection', () => {
+  it('offers only usable catalog identities and applies the revision the host returns', async () => {
+    const user = userEvent.setup()
+    const chosen: { operation_id: string; base_revision: number; dataset_id: string }[] = []
+    const { api } = scripted({})
+    const revised = strategy([])
+    const selecting: ApiAdapter = {
+      ...api,
+      listDatasets: async () => [
+        {
+          dataset_id: 'registered.csv',
+          valid: true,
+          origin: 'registered',
+          venue: 'XNAS',
+          symbol: 'AAPL',
+          record_count: 4,
+        },
+        // An entry the host lists as unusable is not offered as a choice: this
+        // panel never turns a broken dataset into a selectable one.
+        { dataset_id: 'broken.csv', valid: false },
+      ],
+      selectUserStrategyDataset: async (_id, input) => {
+        chosen.push(input)
+        const head = revised.draft as UserStrategyDraft
+        return {
+          ...revised,
+          draft: {
+            ...head,
+            revision: 2,
+            dataset_id: 'registered.csv',
+            source_sha256: 'e'.repeat(64),
+          },
+          dataset: {
+            operation_id: input.operation_id,
+            request: { action: 'select-dataset', base_revision: input.base_revision, dataset_id: input.dataset_id },
+            request_sha256: 'f'.repeat(64),
+            dataset_id: input.dataset_id,
+            from_revision: 1,
+            to_revision: 2,
+            selected_at: '2026-10-06T10:05:00.000000Z',
+          },
+        }
+      },
+    }
+    detail(selecting)
+
+    const panel = await screen.findByRole('region', { name: '选择数据集' })
+    const picker = await within(panel).findByLabelText('数据集')
+    const options = within(picker).getAllByRole('option').map(option => option.textContent ?? '')
+    expect(options.some(text => text.includes('registered.csv'))).toBe(true)
+    expect(options.some(text => text.includes('broken.csv'))).toBe(false)
+
+    await user.selectOptions(picker, 'registered.csv')
+    await user.click(within(panel).getByRole('button', { name: '选择这个数据集' }))
+
+    await waitFor(() => expect(chosen.length).toBe(1))
+    // The client sends the catalog identity it was shown, against the revision it
+    // was reading: not a path and not a digest of its own.
+    expect(chosen[0].dataset_id).toBe('registered.csv')
+    expect(chosen[0].base_revision).toBe(1)
+    expect(chosen[0].operation_id).toContain('us-1')
+    // The revision the host returned is the one on screen afterwards.
+    await waitFor(() => expect(screen.getAllByText(/registered\.csv/).length).toBeGreaterThan(0))
+  }, 20_000)
+
+  it('keeps the host refusal visible and writes no selection', async () => {
+    const user = userEvent.setup()
+    let attempts = 0
+    const { api } = scripted({})
+    const failing: ApiAdapter = {
+      ...api,
+      listDatasets: async () => [{ dataset_id: 'registered.csv', valid: true, origin: 'registered' }],
+      selectUserStrategyDataset: async () => {
+        attempts += 1
+        throw new UserStrategyRequestError('stale_base_revision', '草稿修订已前进')
+      },
+    }
+    detail(failing)
+
+    const panel = await screen.findByRole('region', { name: '选择数据集' })
+    await user.selectOptions(await within(panel).findByLabelText('数据集'), 'registered.csv')
+    await user.click(within(panel).getByRole('button', { name: '选择这个数据集' }))
+
+    await waitFor(() => expect(attempts).toBe(1))
+    await waitFor(() => expect(screen.getAllByText(/草稿修订已前进/).length).toBeGreaterThan(0))
   }, 20_000)
 })

@@ -129,7 +129,9 @@ def _build_core() -> Path:
             timeout=900,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        raise AssertionError(f"the Rust toolchain is present but could not be run: {error}") from None
+        raise AssertionError(
+            f"the Rust toolchain is present but could not be run: {error}"
+        ) from None
     if built.returncode != 0 or not CORE_BINARY.is_file():
         detail = built.stderr.decode("utf-8", errors="replace")[-4000:]
         raise AssertionError(f"quine-core could not be built from this checkout:\n{detail}")
@@ -1407,3 +1409,216 @@ def test_holdout_over_a_core_owned_run_is_refused_before_any_python_effect(
         # and its official report is still readable.
         assert bridge.experiments() == held
         assert client.get(f"/api/backtests/{source}").json()["report_ready"] is True
+
+
+# --- one explicitly selected, uploaded dataset -------------------------------
+
+
+def _publish_upload(service: WebService, rows: int) -> tuple[str, bytes]:
+    """Publish one synthetic strict-profile capture, and name what was published."""
+    from ea.web.uploads import AVAILABILITY_PROVIDED
+    from unit.test_web_uploads import _capture
+
+    content = _capture(rows)
+    manifest = service.uploads.publish(content, availability_policy=AVAILABILITY_PROVIDED)
+    return str(manifest["dataset_id"]), content
+
+
+def _catalog_binding(service: WebService, tmp_path: Path, dataset_id: str) -> dict[str, Any]:
+    """The exact capability binding this host's own catalog resolves for one dataset."""
+    research = ResearchOrchestrator(
+        ResearchStore(tmp_path / "workspace"), service, _settings(tmp_path)
+    )
+    binding = research.catalog_binding(dataset_id=dataset_id)
+    assert binding is not None
+    return binding.document()
+
+
+def _upload_snapshot(
+    service: WebService, tmp_path: Path, dataset_id: str, *, binding: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    from ea.web import rust_domain
+
+    attached = _catalog_binding(service, tmp_path, dataset_id) if binding is None else binding
+    return rust_domain.run(
+        "snapshot",
+        {
+            "scenario_path": str(service.registered_scenario_file(SCENARIO)),
+            "dataset_id": dataset_id,
+            "workspace_root": str(service.uploads.root.parent),
+            "binding": attached,
+        },
+    )
+
+
+def test_an_uploaded_dataset_is_bound_to_its_published_version_and_captured_privately(
+    tmp_path: Path,
+) -> None:
+    """The confirmation names a released version, and the run freezes its own copy."""
+    from ea.web import rust_domain
+    from unit.test_web_uploads import _capture
+
+    service = WebService(_scenario_root(tmp_path), tmp_path / "workspace")
+    service.start()
+    _STARTED.append(service)
+    dataset_id, content = _publish_upload(service, 8)
+
+    snapshot = _upload_snapshot(service, tmp_path, dataset_id)
+    assert snapshot["status"] == "ok", snapshot
+    envelope = snapshot["result"]["frozen"]
+    # The published version is bound into the frozen input, and it is the version
+    # whose bytes the confirmation admitted rather than a claim carried alongside.
+    version = envelope["dataset_version"]
+    assert version["dataset_id"] == dataset_id
+    assert version["capture_sha256"] == envelope["research_input"]["source_sha256"]
+    assert envelope["plugin_binding"]["components"][0]["plugin_id"] == (
+        f"ea.builtin.data.{dataset_id}"
+    )
+
+    target = tmp_path / "capture.data"
+    frozen = rust_domain.run("freeze", {"frozen": envelope, "capture_path": str(target)})
+    assert frozen["status"] == "ok", frozen
+    capture = frozen["result"]["data_capture"]
+    assert Path(capture["path"]) == target
+    assert target.read_bytes() == content
+    # What is materialized reads from the private snapshot, not from the store.
+    materialized = json.loads(bytes.fromhex(frozen["result"]["scenario_file"]))
+    assert materialized["data"]["path"] == str(target)
+    assert (
+        frozen["result"]["scenario_file_sha256"]
+        == sha256(bytes.fromhex(frozen["result"]["scenario_file"])).hexdigest()
+    )
+
+    # A binding that names another dataset's capability is refused whole, and a
+    # selection that carries no released version is refused rather than guessed.
+    other_id, _content = _publish_upload(service, 4)
+    mismatched = _upload_snapshot(
+        service, tmp_path, dataset_id, binding=_catalog_binding(service, tmp_path, other_id)
+    )
+    assert mismatched["status"] == "refused" and mismatched["code"] == "binding_invalid"
+    unbound = rust_domain.run(
+        "snapshot",
+        {
+            "scenario_path": str(service.registered_scenario_file(SCENARIO)),
+            "dataset_id": dataset_id,
+            "workspace_root": str(service.uploads.root.parent),
+        },
+    )
+    assert unbound["status"] == "refused" and unbound["code"] == "binding_invalid"
+
+    # A retained version whose digest no longer reproduces is refused rather than
+    # read as the run's input: the binding is verified, not carried on trust.
+    tampered = dict(envelope)
+    tampered["dataset_version_sha256"] = "0" * 64
+    corrupt = rust_domain.run(
+        "freeze", {"frozen": tampered, "capture_path": str(tmp_path / "fourth.data")}
+    )
+    assert corrupt["status"] == "refused" and corrupt["code"] == "digest_mismatch"
+    assert not (tmp_path / "fourth.data").exists()
+
+    # A source that is not the confirmed one is refused before anything is
+    # materialized. Changed bytes inside the admitted window are refused outright.
+    source_path, _dataset = service.uploads.load(dataset_id)
+    source_path.write_bytes(content.replace(b"100.5", b"101.5"))
+    drift = rust_domain.run(
+        "freeze", {"frozen": envelope, "capture_path": str(tmp_path / "second.data")}
+    )
+    assert drift["status"] == "refused"
+    assert not (tmp_path / "second.data").exists()
+    # And so is a source whose *selected fingerprint* is unchanged: one extra bar
+    # outside the replay window leaves the selected bars identical while the bytes
+    # are no longer the confirmed ones, and the admitted evidence names the bytes.
+    source_path.write_bytes(_capture(9))
+    later = rust_domain.run(
+        "freeze", {"frozen": envelope, "capture_path": str(tmp_path / "third.data")}
+    )
+    assert later["status"] == "refused"
+    assert later["code"] in {"identity_mismatch", "input_changed"}
+    assert not (tmp_path / "third.data").exists()
+
+
+def test_a_registered_input_needs_no_version_and_still_resolves(tmp_path: Path) -> None:
+    """A plain registered scenario, and a registered dataset, are unchanged."""
+    from ea.web import rust_domain
+    from unit.test_web_uploads import _capture
+
+    service = WebService(_scenario_root(tmp_path), tmp_path / "workspace")
+    service.start()
+    _STARTED.append(service)
+
+    # The scenario's own data, with nothing selected: no version, no capability
+    # binding, no research input — exactly the input this path always admitted.
+    plain = rust_domain.run(
+        "snapshot", {"scenario_path": str(service.registered_scenario_file(SCENARIO))}
+    )
+    assert plain["status"] == "ok", plain
+    envelope = plain["result"]["frozen"]
+    assert envelope["dataset_version"] is None
+    assert envelope["dataset_version_sha256"] is None
+    assert envelope["plugin_binding"] is None
+    assert envelope["research_input"] is None
+
+    # One explicitly selected registered dataset resolves through a data root
+    # alone — this workspace has no upload store in that request — and it carries
+    # evidence without claiming a released version it never published.
+    data_root = tmp_path / "registered"
+    data_root.mkdir()
+    (data_root / "full.csv").write_bytes(_capture(6))
+    selected = rust_domain.run(
+        "snapshot",
+        {
+            "scenario_path": str(service.registered_scenario_file(SCENARIO)),
+            "dataset_id": "full.csv",
+            "data_root": str(data_root),
+        },
+    )
+    assert selected["status"] == "ok", selected
+    registered = selected["result"]["frozen"]
+    assert registered["dataset_version"] is None
+    assert registered["plugin_binding"] is None
+    assert registered["research_input"]["dataset_id"] == "full.csv"
+
+
+def test_a_confirmed_experiment_runs_from_an_uploaded_dataset_and_outlives_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One uploaded selection, confirmed through the core, outliving its own upload."""
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    stack = _stack(tmp_path, core.socket)
+    counts = _no_python_owner(monkeypatch)
+    service = stack.service
+    dataset_id, content = _publish_upload(service, 8)
+
+    strategy = _create(stack.strategies)
+    identity = strategy.user_strategy_id
+    selected = stack.strategies.select_dataset(
+        identity, operation_id="select-1", base_revision=1, dataset_id=dataset_id
+    )
+    assert selected.draft.revision == 2
+
+    launched = _launch(stack.strategies, identity)
+    assert _row(launched, "li-1")["status"] in {"confirmed", "running", "created"}
+    settled = _wait(stack.strategies, identity)
+    assert settled["status"] == "created", settled["message"]
+    assert settled["report_ready"] is True
+    assert counts == {"children": 0, "owners": 0}
+
+    job_id = cast(str, settled["job_id"])
+    projected = service.get_job(job_id)
+    assert projected.status == "succeeded" and projected.report_sha256
+    # The core ran from its own private snapshot of the confirmed bytes, not from
+    # the uploaded store, and that snapshot is exactly what was published.
+    capture = core.workspace / "inputs" / f"{job_id}.data"
+    assert capture.is_file() and capture.read_bytes() == content
+
+    # The published upload is removed whole. The frozen experiment, its official
+    # report and its admitted identities are unchanged: nothing about this run was
+    # ever read from the upload again.
+    before = service.artifact(job_id, "report.json")
+    for name in ("raw", "captures", "versions"):
+        for path in (service.uploads.root / name).iterdir():
+            path.unlink()
+    assert service.get_job(job_id).status == "succeeded"
+    assert service.artifact(job_id, "report.json") == before
+    assert _row(stack.strategies.reconcile(identity), "li-1")["status"] == "created"

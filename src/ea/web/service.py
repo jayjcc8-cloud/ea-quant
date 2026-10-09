@@ -1513,9 +1513,7 @@ class WebService:
             return
         dataset_id = input_identity.get("dataset_id")
         if type(dataset_id) is not str or data.plugin_id != f"ea.builtin.data.{dataset_id}":
-            raise InputChangedError(
-                "the bound data capability does not name this input's dataset"
-            )
+            raise InputChangedError("the bound data capability does not name this input's dataset")
 
     def _require_upload_binding(
         self, input_identity: dict[str, object], plugin_binding: dict[str, object] | None

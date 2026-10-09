@@ -224,8 +224,14 @@ const revisionChip = (draft: UserStrategyDraftDocument) =>
   isIntentDraft(draft) ? `v${draft.revision} 意图` : `v${draft.revision} 草稿`
 
 /** One durable change's kind, in the user's words. */
-const changeLabel = (kind: 'apply' | 'undo' | 'bind') =>
-  kind === 'apply' ? '应用' : kind === 'undo' ? '撤销' : '绑定场景'
+const changeLabel = (kind: 'apply' | 'undo' | 'bind' | 'select-dataset') =>
+  kind === 'apply'
+    ? '应用'
+    : kind === 'undo'
+      ? '撤销'
+      : kind === 'bind'
+        ? '绑定场景'
+        : '选择数据集'
 
 /** The criterion exactly as the report names it: schema, path, expectation. */
 const criterionLine = (criterion: ReportCriterion | null) =>
@@ -552,6 +558,7 @@ function RevisionsSection({ strategy }: { strategy: UserStrategy }) {
               <span className="muted">{`修订 ${item.from_revision} → ${item.to_revision} · ${item.at}`}</span>
             </p>
             {item.scenario_id && <p className="muted">{`绑定的场景：${item.scenario_id}`}</p>}
+            {item.dataset_id && <p className="muted">{`选择的数据集：${item.dataset_id}`}</p>}
             {item.applied_paths.length > 0 && <ul className="path-list">
               {item.applied_paths.map(path => <li key={path}>{path}</li>)}
             </ul>}
@@ -920,6 +927,136 @@ function BindScenario({ api, strategy, scenarios, changed, failed }: {
   </section>
 }
 
+/** One catalog dataset this panel may offer, exactly as the host lists it. */
+type SelectableDataset = {
+  dataset_id: string
+  valid: boolean
+  origin?: 'registered' | 'upload'
+  venue?: string
+  symbol?: string
+  record_count?: number
+  replay_start_utc?: string
+  replay_end_utc?: string
+}
+
+/**
+ * One explicit dataset choice for the draft on screen.
+ *
+ * The user picks an identity from the workspace's own dataset catalog — never a
+ * path and never a digest — and the host resolves that identity through its
+ * registered read-only root and its controlled upload store, binds the published
+ * version it finds there, and validates the whole resulting draft against that
+ * data before it writes anything. Choosing again is a new revision, and that is
+ * what makes a preview taken before the choice no longer confirmable: a
+ * confirmation carries the admitted input's own identity back, so a stale one is
+ * refused instead of silently run. This panel writes no field itself, calls no
+ * model and starts no run.
+ */
+function SelectDataset({ api, strategy, changed, failed }: {
+  api: ApiAdapter
+  strategy: UserStrategy
+  changed: (strategy: UserStrategy) => void
+  failed: (message: string) => void
+}) {
+  const list = api.listDatasets
+  // A workspace that serves no dataset catalog has nothing to offer, which is a
+  // state this panel starts in rather than one it writes from inside an effect.
+  const [items, setItems] = useState<SelectableDataset[] | null>(list ? null : [])
+  const [selected, setSelected] = useState('')
+  const [busy, setBusy] = useState(false)
+  const attempts = useRef(0)
+  const draft = strategy.draft
+  const current = isIntentDraft(draft) ? null : draft.dataset_id
+  const revision = draft.revision
+
+  useEffect(() => {
+    if (!list) return
+    let active = true
+    list()
+      .then(value => { if (active) setItems(value.filter(item => item.valid)) })
+      .catch(() => { if (active) setItems([]) })
+    return () => { active = false }
+  }, [list])
+
+  const usable = items ?? []
+  const candidate = usable.find(item => item.dataset_id === selected) ?? null
+
+  const choose = async () => {
+    if (!candidate) {
+      failed('请先选择一个数据集：没有被选中的数据集就不会被绑定。')
+      return
+    }
+    const selectDataset = api.selectUserStrategyDataset
+    if (!selectDataset) {
+      failed('这个工作区不提供数据集选择。')
+      return
+    }
+    setBusy(true)
+    failed('')
+    const attempt = attempts.current
+    try {
+      // One explicit choice, one operation id: a retry of this click replays the
+      // revision it already produced instead of selecting a second time.
+      const updated = await selectDataset(strategy.user_strategy_id, {
+        operation_id: `dataset-${strategy.user_strategy_id}-${revision}-${attempt}`.slice(0, 64),
+        base_revision: revision,
+        dataset_id: candidate.dataset_id,
+      })
+      attempts.current += 1
+      setSelected('')
+      changed(updated)
+    } catch (error) {
+      failed(explain(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <section aria-label="选择数据集" className="strategy-panel">
+    <header className="panel-head">
+      <h2>选择数据集</h2>
+      <span className="chip">草稿数据</span>
+    </header>
+    <p className="muted">
+      这里为当前草稿明确选择一个数据集。你选中的是这个工作区目录里的一个身份，不是路径、
+      也不是摘要：宿主用它自己的已注册只读根目录与受控上传存储解析这个身份，绑定它找到的
+      那个已发布版本，并让真实后端按这份数据校验整份草稿，然后才写下新的修订。
+    </p>
+    <div className="field">
+      <label htmlFor="select-dataset">数据集</label>
+      <select id="select-dataset" value={selected} disabled={busy}
+        onChange={event => { setSelected(event.target.value); failed('') }}>
+        <option value="">选择一个数据集</option>
+        {usable.map(item => <option key={item.dataset_id} value={item.dataset_id}>
+          {`${item.dataset_id} · ${item.origin === 'upload' ? '已上传版本' : '已注册'}`
+            + (item.venue && item.symbol ? ` · ${item.venue}:${item.symbol}` : '')}
+        </option>)}
+      </select>
+      {items === null
+        ? <small>正在读取数据集目录……</small>
+        : usable.length === 0
+          && <small>当前没有可用的数据集，因此现在没有可以选择的数据来源。</small>}
+    </div>
+    {candidate && <dl className="summary-list">
+      <div><dt>来源</dt><dd>{candidate.origin === 'upload' ? '已上传版本' : '已注册文件'}</dd></div>
+      {candidate.venue && candidate.symbol
+        && <div><dt>标的</dt><dd>{`${candidate.venue}:${candidate.symbol}`}</dd></div>}
+      {candidate.record_count !== undefined
+        && <div><dt>记录数</dt><dd>{candidate.record_count}</dd></div>}
+    </dl>}
+    <p className="muted">
+      {current
+        ? `当前草稿的数据来源：${current}。再次选择会写下新的修订；在那之前预览过的实验不再可确认。`
+        : '当前草稿使用它已注册场景自己的数据来源；选择一次之后，草稿会改用你选中的数据集。'}
+    </p>
+    <div className="actions">
+      <button type="button" className="primary" onClick={choose}
+        disabled={busy || !candidate}>选择这个数据集</button>
+    </div>
+    <p className="muted">选择不会调用模型，也不会启动任何运行。</p>
+  </section>
+}
+
 /**
  * The next step of the selected strategy, in one compact strip: the most recent
  * revision that was actually frozen and the real state of the job it dispatched,
@@ -988,6 +1125,10 @@ function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
     {isIntentDraft(strategy.draft) && <BindScenario
       api={api} strategy={strategy} scenarios={scenarios}
       changed={changed} failed={failed} />}
+    {/* The data a draft runs on is an explicit choice of its own, made once the
+        scenario is bound and before anything is previewed. */}
+    {!isIntentDraft(strategy.draft) && <SelectDataset
+      api={api} strategy={strategy} changed={changed} failed={failed} />}
     <NextStep api={api} strategy={strategy} openExperiments={() => setTab('experiments')} />
     <DetailTabs active={tab} select={setTab} idBase={idBase} />
     <div className="strategy-tabpanel" role="tabpanel" id={`${idBase}-panel-${tab}`}

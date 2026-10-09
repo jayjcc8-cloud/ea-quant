@@ -5366,3 +5366,112 @@ def test_a_selected_report_that_states_no_matching_source_is_refused_rather_than
     assert durable.experiments == before.experiments
     assert len(provider.calls) == baseline
     assert len(service.list_jobs()) == 2
+
+
+# --- one explicitly selected dataset ----------------------------------------
+
+
+def _upload(service: WebService, rows: int) -> str:
+    """Publish one synthetic strict-profile capture through the real upload store."""
+    from ea.web.uploads import AVAILABILITY_PROVIDED
+    from unit.test_web_uploads import _capture
+
+    manifest = service.uploads.publish(_capture(rows), availability_policy=AVAILABILITY_PROVIDED)
+    return str(manifest["dataset_id"])
+
+
+def _contract(strategies: UserStrategyService, strategy: Any, path: str) -> dict[str, Any]:
+    """One registered field contract, read from the draft's own data selection."""
+    draft = cast(StrategyDraft, strategy.draft)
+    for entry in strategies._registered_paths(draft):  # noqa: SLF001
+        if entry.path == path:
+            return {"kind": entry.kind, "maximum": entry.maximum, "current": entry.current}
+    raise AssertionError(f"{path} is not a registered path of this draft")
+
+
+def test_selecting_an_uploaded_dataset_is_one_revision_and_replays_as_itself(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One explicit selection: one revision, one durable request, one replay."""
+    strategies, _research, service, _provider = _stack(tmp_path, monkeypatch)
+    created = _create(strategies)
+    identity = created.user_strategy_id
+    dataset = _upload(service, 8)
+
+    selected = strategies.select_dataset(
+        identity, operation_id="select-1", base_revision=1, dataset_id=dataset
+    )
+    draft = cast(StrategyDraft, selected.draft)
+    assert draft.revision == 2
+    assert draft.dataset_id == dataset
+    assert draft.source_sha256
+    assert selected.dataset is not None and selected.dataset["operation_id"] == "select-1"
+    assert [item["kind"] for item in selected.changes] == ["select-dataset"]
+
+    # The same operation is answered by the record it already produced, across a
+    # fresh read of the durable document: it is never a second revision.
+    durable = _durable(tmp_path, identity)
+    replayed = strategies.select_dataset(
+        identity, operation_id="select-1", base_revision=1, dataset_id=dataset
+    )
+    assert replayed.draft == durable.draft
+    assert len(replayed.changes) == 1
+
+    # The same operation bound to a different request is a conflict, and a second
+    # selection from the revision the caller read before is stale.
+    with pytest.raises(UserStrategyConflictError):
+        strategies.select_dataset(
+            identity, operation_id="select-1", base_revision=1, dataset_id="other.csv"
+        )
+    with pytest.raises(UserStrategyStaleError):
+        strategies.select_dataset(
+            identity, operation_id="select-2", base_revision=1, dataset_id=dataset
+        )
+    # A dataset this workspace cannot bind a run to is refused before any write.
+    with pytest.raises(UserStrategyStateError):
+        strategies.select_dataset(
+            identity, operation_id="select-3", base_revision=2, dataset_id="absent.csv"
+        )
+    assert _durable(tmp_path, identity).changes == durable.changes
+
+
+def test_the_selected_dataset_bounds_what_a_candidate_may_change(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model's own field contract follows the data the draft really runs on."""
+    from ea.web.user_strategies import _PROPOSE_TOOL_NAME
+
+    strategies, _research, service, _provider = _stack(tmp_path, monkeypatch)
+    created = _create(strategies)
+    identity = created.user_strategy_id
+    path = "parameters.entry_delay_bars"
+    before = _contract(strategies, _durable(tmp_path, identity), path)
+
+    # A longer capture admits a later entry bar than the registered scenario's own
+    # four bars do, so the same field is bounded differently once it is selected.
+    dataset = _upload(service, 8)
+    selected = strategies.select_dataset(
+        identity, operation_id="select-1", base_revision=1, dataset_id=dataset
+    )
+    after = _contract(strategies, selected, path)
+    assert isinstance(after["maximum"], int) and isinstance(before["maximum"], int)
+    assert after["maximum"] > before["maximum"]
+
+    def propose(value: int) -> tuple[list[dict[str, Any]], str | None]:
+        response = _response(
+            [
+                {
+                    "id": "call-1",
+                    "name": _PROPOSE_TOOL_NAME,
+                    "input": {"items": [{"path": path, "value": value, "reason": "next bar"}]},
+                }
+            ]
+        )
+        return strategies._diff(_durable(tmp_path, identity), response)  # noqa: SLF001
+
+    # A value inside the selected data's bound is a readable typed diff; a value
+    # beyond it is refused whole, against the data rather than against the default.
+    within, reason = propose(cast(int, after["maximum"]))
+    assert reason is None and within and within[0]["after"] == after["maximum"]
+    beyond, refused = propose(cast(int, after["maximum"]) + 1)
+    assert beyond == [] and refused
