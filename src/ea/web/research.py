@@ -19,7 +19,7 @@ import os
 import re
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -1601,8 +1601,8 @@ class ResearchOrchestrator:
             note = None
             if task.jobs:
                 note = (
-                    "Already started backtests keep their own terminal states; "
-                    "cancelling is not a rollback."
+                    "Every run this task started is being stopped, and a run that "
+                    "already committed keeps its own result. Cancelling is not a rollback."
                 )
             elif task.backtest_reservation is not None:
                 note = (
@@ -1730,10 +1730,22 @@ class ResearchOrchestrator:
             job = data["record"]
             if job.job_id not in task.jobs:
                 raise TaskStateError("job is not bound to this task")
-            if job.status in {"accepted", "running"}:
+            if job.status in {"accepted", "running", "stopping"}:
+                # A stop that is accepted but not confirmed is not an outcome: the
+                # run is still this task's live attempt until its owner says
+                # otherwise.
                 changes = {"status": "running", "error": None}
             elif job.status == "succeeded":
                 changes = {"status": "succeeded", "error": None}
+            elif job.status == "stopped":
+                changes = {
+                    "status": "failed",
+                    "error": {
+                        "step": "backtest",
+                        "code": "stopped",
+                        "message": str(job.message or "the started run was stopped"),
+                    },
+                }
             else:
                 changes = {
                     "status": "failed",
@@ -2131,6 +2143,27 @@ class ResearchOrchestrator:
         self._transition(task_id, generation, "job_found", record=record)
         return self._transition(task_id, generation, "job_state", record=record, finish=True)
 
+    def _legacy_dispatch_gate(self, task_id: str) -> Callable[[], None]:
+        """The publication gate for a legacy submission: affirm, or refuse.
+
+        A legacy task records its dispatch before the job boundary, so an
+        interruption there must keep staying unknown — this gate is not a proof
+        of dispatch. What it stops is the one thing that record cannot express: a
+        cancellation accepted in that same window publishing a fresh run anyway.
+        It runs inside the service's own publication path, before the first
+        durable job record and before any compute is submitted, and it takes the
+        task lock only in the order the service already uses.
+        """
+
+        def gate() -> None:
+            with self._task_lock(task_id):
+                if self._store.get(task_id).status == "cancelled":
+                    raise WebBoundaryError(
+                        "the reserved backtest is no longer this operation's to dispatch"
+                    )
+
+        return gate
+
     def _dispatch_reserved_backtest(self, task_id: str, generation: int) -> None:
         """The publication gate for an owned child: affirm, or refuse to publish.
 
@@ -2379,7 +2412,7 @@ class ResearchOrchestrator:
                         )
                     ),
                     before_publish=(
-                        None
+                        self._legacy_dispatch_gate(task_id)
                         if expected is None
                         else partial(self._dispatch_reserved_backtest, task_id, generation)
                     ),
@@ -3273,7 +3306,43 @@ class ResearchOrchestrator:
         return self._start_backtest(task_id, generation)
 
     def cancel(self, task_id: str) -> ResearchTask:
-        return self._transition(task_id, None, "cancel")
+        """Close the task, then ask the controller to stop the compute it owns.
+
+        The transition is the whole of the task-side authority: once it commits,
+        the task is cancelled and no further dispatch or conclusion is accepted
+        for it. Stopping the run is a separate request to the job's own owner,
+        made after the task lock is released, so a cancellation never invokes the
+        service while holding it.
+        """
+        task = self._transition(task_id, None, "cancel")
+        self._stop_bound_jobs(task)
+        return task
+
+    def _stop_bound_jobs(self, task: ResearchTask) -> None:
+        """Ask the job owner to stop every run this task still has live.
+
+        The task projection is not the authority on which job exists: a run
+        accepted inside the dispatch window may already own the task's request
+        identity before any job id was bound to the record, so the request id is
+        reconciled too. Stopping is a request to the controller, which decides
+        from its own job state: a run that already committed a result is left
+        exactly as it is.
+        """
+        candidates = set(task.jobs)
+        if task.request_id is not None:
+            try:
+                record = self._service.lookup_job_by_request_id(task.request_id)
+            except JobNotFoundError:
+                record = None
+            if record is not None:
+                candidates.add(record.job_id)
+        for job_id in sorted(candidates):
+            try:
+                self._service.stop_job(job_id)
+            except (JobNotFoundError, WebBoundaryError, OSError):
+                # The task is durably cancelled either way; a stop that could not
+                # be recorded leaves the job to its own supervised outcome.
+                continue
 
     # -- one user strategy's frozen experiment ------------------------------
 

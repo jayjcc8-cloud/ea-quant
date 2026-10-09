@@ -238,18 +238,29 @@ def test_known_ohlcv_path(
 
 
 def test_path_failure_does_not_publish_partial_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_hook: Callable[[str, str], str]
 ) -> None:
     from fastapi.testclient import TestClient
 
-    import ea.web.service as service
     from ea.web.app import create_app
-    from unit.test_web_api import WRITE_HEADERS, _settings, _validate, _wait
+    from ea.web.service import WebService
+    from unit.test_web_api import WRITE_HEADERS, _hook_launcher, _settings, _validate, _wait
 
-    def fail(*args: object) -> None:
+    # The equity path is now built inside the attempt's worker process, so the
+    # injected failure is installed there through the documented worker hook.
+    # What the test asserts is unchanged: a path that cannot be produced leaves
+    # no report, no equity-path artifact and no ready report.
+    hook = worker_hook(
+        "path-failure",
+        """
+def hook(*, scenario, control, request, worker):
+    def fail(*args, **kwargs):
         raise ValueError("path invariant")
 
-    monkeypatch.setattr(service, "generate_equity_path_analysis", fail)
+    worker.generate_equity_path_analysis = fail
+""",
+    )
+    monkeypatch.setattr(WebService, "_spawn_worker", _hook_launcher(hook))
     settings = _settings(tmp_path)
     with TestClient(create_app(settings), base_url="http://127.0.0.1:8765") as client:
         v = _validate(client, "bounded-long.yaml")

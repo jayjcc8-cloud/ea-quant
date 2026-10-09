@@ -9,6 +9,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -33,16 +34,12 @@ from ea.plugin.local_strategy import (
 from ea.plugin.manifest import ManifestError
 from ea.plugin.selection import BINDING_SCHEMA, PluginBindingV1
 from ea.product import (
-    BacktestRunFailure,
     BacktestScenarioError,
     LoadedBacktestScenario,
-    generate_backtest_report,
     load_backtest_scenario,
     parameterize_backtest_scenario,
-    run_backtest_scenario,
 )
-from ea.product.equity_path import generate_equity_path_analysis
-from ea.product.reporting import _fsync_directory, _write_report_file
+from ea.product.reporting import _fsync_directory
 from ea.product.scenario import (
     parameterize_strategy_scenario,
     rebind_research_dataset,
@@ -53,7 +50,7 @@ from ea.product.trade_analytics import trade_analytics
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import StrategyPackage, inspect_package, read_regular, validate_package
 from ea.strategy.registry import project_parameters
-from ea.web import candidates
+from ea.web import candidates, worker
 from ea.web.datasets import LocalResearchDatasetRegistryV1
 from ea.web.holdout import HoldoutRecord, compatible, decode_holdout, require_chronology
 from ea.web.local_packages import LOCAL_SCENARIO_ID, LocalStrategyStoreV1
@@ -67,7 +64,13 @@ from ea.web.uploads import (
 )
 
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-_JOB_STATES = frozenset({"accepted", "running", "succeeded", "failed", "interrupted"})
+#: ``accepted``/``running`` are live; ``stopping`` is a cancellation the
+#: controller has accepted but not yet confirmed, and ``stopped`` is the
+#: confirmed stop. A restart reads every non-terminal state as ``interrupted``.
+_JOB_STATES = frozenset(
+    {"accepted", "running", "stopping", "stopped", "succeeded", "failed", "interrupted"}
+)
+_LIVE_JOB_STATES = frozenset({"accepted", "running", "stopping"})
 _ARTIFACTS = frozenset({"report.json", "summary.txt", "equity-path.json"})
 _MAX_SCENARIO_BYTES = 64 * 1024
 _INPUT_DIGEST_DOMAIN = b"ea.local-web-input.v1\0"
@@ -608,6 +611,27 @@ class JobRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class _Intent:
+    """What one supervisor concluded about an attempt, before it is durable.
+
+    This is a request to the commit gate, never job state: `_finalize` reloads
+    the current record and arbitrates this against a cancellation that may have
+    been accepted in the meantime. Only the paths named here are ever promoted,
+    and only when that arbitration allows it.
+    """
+
+    outcome: str
+    engine_run_id: str | None = None
+    error_code: str | None = None
+    message: str | None = None
+    report_sha256: str | None = None
+    summary_sha256: str | None = None
+    equity_path_sha256: str | None = None
+    attempt_staging: Path | None = None
+    report_staging: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BatchRecord:
     batch_id: str
     created_at: str
@@ -920,6 +944,13 @@ class WebService:
         self.inputs_dir = _directory(self.workspace / "inputs", label="input store", create=True)
         self.runs_dir = _directory(self.workspace / "runs", label="attempt root", create=True)
         self.reports_dir = _directory(self.workspace / "reports", label="report root", create=True)
+        # Staging for the per-attempt worker processes. It is never served: an
+        # attempt or report reaches the roots above only through one controller
+        # promotion, so an interrupted run leaves nothing an official read can
+        # mistake for evidence.
+        self.worker_dir = _directory(
+            self.workspace / ".worker", label="worker control root", create=True
+        )
         for directory, label in (
             (self.jobs_dir, "job index"),
             (self.candidates_dir, "candidates"),
@@ -927,6 +958,7 @@ class WebService:
             (self.inputs_dir, "input store"),
             (self.runs_dir, "attempt root"),
             (self.reports_dir, "report root"),
+            (self.worker_dir, "worker control root"),
         ):
             if not _contained(directory, self.workspace):
                 raise WebBoundaryError(f"{label} resolves outside workspace")
@@ -954,6 +986,20 @@ class WebService:
         self._batches: dict[str, BatchRecord] = {}
         self._holdouts: dict[str, HoldoutRecord] = {}
         self._active: str | None = None
+        # The live handle of every worker this controller spawned. Cancellation
+        # signals one of these and nothing else, so a stale durable record can
+        # never make this process kill an unrelated one.
+        self._runs: dict[str, worker.WorkerProcess] = {}
+        # Test-only seam: one hook module the worker runs immediately before the
+        # engine reads market data. The product never sets it.
+        self._test_hook: str | None = None
+        # Set once shutdown starts: no job admitted after this point may start
+        # compute, and no new job may be admitted at all.
+        self._closing = False
+        # Jobs whose record could not be re-read after an unconfirmed write. This
+        # process stops writing them rather than risk overwriting a state the
+        # durable file may already hold; it is a memory-only gate, not a store.
+        self._uncertain: set[str] = set()
 
     def start(self) -> None:
         self._lease.acquire()
@@ -966,9 +1012,177 @@ class WebService:
             raise
 
     def stop(self) -> None:
+        self._stop_live_workers()
         self._executor.shutdown(wait=True, cancel_futures=False)
         self._lease.release()
         self.local_strategy.close()
+
+    def _stop_live_workers(self) -> None:
+        """Stop every admitted attempt this controller still owns, within a bound.
+
+        Shutdown covers the whole admitted set, not only the jobs that already
+        registered a live handle: a job that was accepted but has not started,
+        one queued behind a batch member, and one between admission and its
+        handle registration are all marked ``stopping`` first. That durable mark
+        is what makes those threads refuse to spawn compute, and what keeps a
+        result landing in the same window from being published as a success.
+        """
+        with self._lock:
+            self._closing = True
+            stopping = [
+                job_id
+                for job_id, record in self._jobs.items()
+                if record.status in _LIVE_JOB_STATES and not self._writes_frozen(job_id)
+            ]
+            for job_id in stopping:
+                self._store(replace(self._jobs[job_id], status="stopping"))
+            live = sorted(self._runs)
+        for job_id in live:
+            with self._lock:
+                process = self._runs.get(job_id)
+            if process is not None:
+                process.request_stop()
+
+    def stop_job(self, job_id: str) -> JobRecord:
+        """Accept a cancellation request for one live job.
+
+        The returned record is the *accepted* request, not a confirmed stop: the
+        job is ``stopping`` and the supervising thread records ``stopped`` once
+        the process group is gone. A job that already reached a terminal state is
+        returned unchanged, so a cancellation that arrives after a committed
+        result never rewrites that result.
+        """
+        with self._lock:
+            record = self.get_job(job_id)
+            if record.status not in _LIVE_JOB_STATES or self._writes_frozen(job_id):
+                return record
+            stopping = replace(
+                record,
+                status="stopping",
+                error_code=None,
+                message="the run is stopping; no result of it will be published",
+            )
+            self._store_adopting(stopping)
+            process = self._runs.get(job_id)
+        if process is not None:
+            process.request_stop()
+        return stopping
+
+    def _store_adopting(self, record: JobRecord) -> None:
+        """Write one job record, adopting whatever the durable file says.
+
+        A write can replace the durable record and still raise on the directory
+        barrier that follows it. Leaving the old in-memory state in place there
+        would let a later cancellation or failure overwrite a success that is
+        already committed on disk, so the durable record wins: it is re-read and
+        adopted before the failure is reported. When even that read fails the
+        job is frozen instead, so no later write can overwrite whatever the
+        unconfirmed write may have committed.
+        """
+        try:
+            self._store(record)
+        except Exception:
+            self._adopt_durable_job(record.job_id)
+            raise
+
+    def _adopt_durable_job(self, job_id: str) -> None:
+        """Take the durable record as truth after an unconfirmed write.
+
+        If it cannot be read back, nothing here can say what is durable, so the
+        job is frozen: this process stops writing that job's record rather than
+        letting a stale in-memory state overwrite a success the failed write may
+        already have committed. The durable file stays the only authority, and a
+        restart re-reads it as usual.
+        """
+        path = self._job_path(job_id)
+        try:
+            adopted = _decode_job(read_regular(path, path.parent))
+        except (OSError, ValueError):
+            self._uncertain.add(job_id)
+            return
+        if adopted.job_id != job_id:
+            self._uncertain.add(job_id)
+            return
+        self._jobs[job_id] = adopted
+        self._requests[adopted.request_id] = job_id
+
+    def _stop_requested(self, job_id: str) -> bool:
+        """Whether this attempt must stop rather than be published.
+
+        A cancellation is a durable ``stopping`` mark. Shutdown is the same
+        verdict held in memory, so it still stops and suppresses publication for
+        every admitted job even if that mark's write did not confirm durability.
+        """
+        with self._lock:
+            record = self._jobs[job_id]
+            return record.status == "stopping" or (
+                self._closing and record.status in _LIVE_JOB_STATES
+            )
+
+    def _writes_frozen(self, job_id: str) -> bool:
+        """Whether this process may no longer write one job's record.
+
+        True after a write whose durability could not be confirmed and whose
+        durable record could not be read back. The job keeps the state it has in
+        memory for reads, and every later write to it is refused rather than
+        allowed to overwrite a possibly committed success.
+        """
+        return job_id in self._uncertain
+
+    def _worker_control(self, job_id: str) -> Path:
+        """The staging/rendezvous directory of one attempt."""
+        path = self.worker_dir / job_id
+        path.mkdir(mode=0o700, exist_ok=True)
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            raise WebBoundaryError("worker control directory is unavailable") from None
+        if resolved != path or not _contained(resolved, self.worker_dir):
+            raise WebBoundaryError("worker control directory resolves outside the workspace")
+        return resolved
+
+    def _discard_worker_staging(self, job_id: str) -> None:
+        """Remove one attempt's staging; it is never authoritative evidence."""
+        shutil.rmtree(self.worker_dir / job_id, ignore_errors=True)
+
+    def _worker_request(
+        self, job_id: str, record: JobRecord, scenario: LoadedBacktestScenario
+    ) -> dict[str, object]:
+        """The versioned frozen-input request for one attempt.
+
+        The expected digests come from the *admitted* scenario and the frozen
+        research evidence this attempt was accepted with, never from a fresh read
+        of the workspace: a file that drifted between admission and this moment
+        must not become the new expectation for itself. Both frozen files are
+        compared against those admitted identities here, so drift before the
+        request is refused before any compute starts, and the digests carried in
+        the request refuse drift after it.
+        """
+        frozen = self._frozen_scenario_bytes(scenario)
+        if scenario.scenario_path != self.inputs_dir / f"{job_id}.json":
+            raise WebBoundaryError("frozen scenario identity conflicts with the accepted job")
+        if read_regular(scenario.scenario_path, self.inputs_dir) != frozen:
+            raise InputChangedError("frozen scenario changed before dispatch")
+        package = scenario.strategy_package
+        package_path: Path | None = None
+        package_sha256: str | None = None
+        if package is not None:
+            package_path = self.inputs_dir / f"{job_id}.eastrategy"
+            if read_regular(package_path, self.inputs_dir) != package.artifact_bytes:
+                raise InputChangedError("frozen strategy artifact changed before dispatch")
+            package_sha256 = package.identity.artifact_sha256
+        return worker.build_request(
+            job_id=job_id,
+            attempt_id=cast(str, record.attempt_id),
+            scenario_path=scenario.scenario_path,
+            scenario_sha256=sha256(frozen).hexdigest(),
+            research_input_bytes=scenario.research_input_bytes,
+            package_path=package_path,
+            package_sha256=package_sha256,
+        )
+
+    def _spawn_worker(self, control: Path) -> worker.WorkerProcess:
+        return worker.spawn(control, test_hook=self._test_hook)
 
     def _job_path(self, job_id: str) -> Path:
         bundle = self.jobs_dir / job_id
@@ -976,6 +1190,18 @@ class WebService:
 
     def _batch_path(self, batch_id: str) -> Path:
         return self.batches_dir / f"{batch_id}.json"
+
+    def _frozen_scenario_bytes(self, scenario: LoadedBacktestScenario) -> bytes:
+        """The exact bytes one attempt's frozen scenario file holds.
+
+        This is the admitted scenario's own canonical document, so what is
+        written at admission and what is expected at dispatch are built by one
+        function and cannot drift apart.
+        """
+        document = json.loads(scenario.canonical_bytes)
+        document.pop("canonicalization")
+        document["data"]["path"] = str(scenario.data_path)
+        return _canonical_json(document)
 
     def _materialize_scenario(
         self,
@@ -989,9 +1215,7 @@ class WebService:
                 handle.flush()
                 os.fsync(handle.fileno())
             package_path.chmod(0o444)
-        document = json.loads(scenario.canonical_bytes)
-        document.pop("canonicalization")
-        document["data"]["path"] = str(scenario.data_path)
+        payload = self._frozen_scenario_bytes(scenario)
         path = self.inputs_dir / f"{job_id}.json"
         descriptor: int | None = None
         try:
@@ -1002,7 +1226,7 @@ class WebService:
             )
             with os.fdopen(descriptor, "wb", closefd=True) as handle:
                 descriptor = None
-                handle.write(_canonical_json(document))
+                handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
             directory_descriptor = os.open(self.inputs_dir, os.O_RDONLY | os.O_DIRECTORY)
@@ -1096,7 +1320,11 @@ class WebService:
                 raise WebBoundaryError("workspace job index conflicts")
             if record.request_id in self._requests:
                 raise WebBoundaryError("workspace request index conflicts")
-            if record.status in {"accepted", "running"}:
+            if record.status in _LIVE_JOB_STATES:
+                # No live handle survived the restart, so a job that was accepted,
+                # running or waiting to confirm a stop is interrupted: its staging
+                # is abandoned, nothing is re-dispatched, and no partial promotion
+                # is ever read as an official report.
                 record = replace(
                     record,
                     status="interrupted",
@@ -1104,6 +1332,7 @@ class WebService:
                     message="local service stopped before completion; the job was not rerun",
                 )
                 self._write(record)
+                self._discard_worker_staging(record.job_id)
             if record.input_snapshot_bytes is not None:
                 strategy = json.loads(record.input_snapshot_bytes)["scenario"]["strategy"]
                 if "source" in strategy:
@@ -1162,7 +1391,7 @@ class WebService:
                 ),
                 reverse=True,
             )
-            return [record.document(presentation=True) for record in records]
+            return [self._presented(record).document(presentation=True) for record in records]
 
     def _bind_dataset(
         self, scenario: LoadedBacktestScenario, dataset_id: str | None
@@ -1603,9 +1832,30 @@ class WebService:
     def get_job(self, job_id: str) -> JobRecord:
         with self._lock:
             try:
-                return self._jobs[job_id]
+                return self._presented(self._jobs[job_id])
             except KeyError:
                 raise JobNotFoundError("job was not found in this workspace") from None
+
+    def _presented(self, record: JobRecord) -> JobRecord:
+        """One job as a reader may see it, including a state nothing can prove.
+
+        A job whose record could not be confirmed durable is reported as
+        interrupted with its own code instead of being presented as running
+        forever: the local service no longer writes that record, so it cannot
+        honestly claim the run is still under way. This is a read projection only
+        — the durable file stays the single authority and a restart re-reads it.
+        """
+        if record.job_id not in self._uncertain or record.status not in _LIVE_JOB_STATES:
+            return record
+        return replace(
+            record,
+            status="interrupted",
+            error_code="job_state_uncertain",
+            message=(
+                "this job's durable record could not be confirmed after an unconfirmed "
+                "write; the service no longer writes it, and a restart re-reads it"
+            ),
+        )
 
     def lookup_job_by_request_id(self, request_id: str) -> JobRecord:
         """Read the job already bound to one idempotency key; create nothing.
@@ -1905,7 +2155,7 @@ class WebService:
                 ):
                     raise RequestConflictError("request_id is already bound to different input")
                 return existing, False
-            if self._active is not None:
+            if self._active is not None or self._closing:
                 raise ServiceBusyError("one local backtest is already active")
             job_id = str(uuid4())
             attempt_id = RunId(str(uuid4()))
@@ -1945,7 +2195,7 @@ class WebService:
         with self._lock:
             if not 2 <= len(runs) <= 10:
                 raise BacktestScenarioError("batch run count must be between 2 and 10")
-            if self._active is not None:
+            if self._active is not None or self._closing:
                 raise ServiceBusyError("one local backtest or batch is already active")
             # A batch carries no capability binding at all, so an uploaded input
             # has nothing to freeze its provenance: this path is refused before any
@@ -2180,7 +2430,7 @@ class WebService:
     ) -> dict[str, str]:
         with self._lock:
             prepared = self._prepare_holdout(source_job_id, scenario_id, dataset_id, source_sha256)
-            if self._active is not None:
+            if self._active is not None or self._closing:
                 raise ServiceBusyError("one local backtest or batch is already active")
             job_id = str(uuid4())
             relation = HoldoutRecord(str(uuid4()), _created_at(), source_job_id, job_id)
@@ -2258,108 +2508,390 @@ class WebService:
         *,
         release_active: bool = True,
     ) -> None:
-        with self._lock:
-            record = replace(self._jobs[job_id], status="running")
-            self._store(record)
+        """Supervise one attempt and hand one intent to the commit gate.
+
+        Nothing here persists a terminal result. Admission and finalization are
+        each one locked operation on the current job record, so a cancellation
+        request can only be ordered against them, never lost between them.
+        """
         try:
-            if record.attempt_id is None:
-                raise RuntimeError("accepted Web job has no reserved attempt identity")
-            self._check_dataset(scenario)
-            if _binds_local_strategy(record.plugin_binding):
-                # Immediately before the engine is reached, the frozen binding and
-                # the current trust are re-checked: a revocation between admission
-                # and this moment refuses the run instead of starting it. It cannot
-                # interrupt Python that has already begun.
-                self._local_catalog(record.plugin_binding)
-            result = run_backtest_scenario(
-                scenario,
-                self.runs_dir,
-                run_id=RunId(record.attempt_id),
-            )
-            run_id = result.output_directory.name
-            if run_id != record.attempt_id:
-                raise RuntimeError("engine attempt identity conflicts with accepted Web job")
-            record = replace(record, engine_run_id=run_id)
+            self._run_attempt(job_id, scenario)
+        finally:
             with self._lock:
-                self._store(record)
-            try:
-                report_dir = self.reports_dir / job_id
-                with tempfile.TemporaryDirectory(
-                    prefix=".path-pending-", dir=self.reports_dir
-                ) as temporary:
-                    staged = Path(temporary) / "artifacts"
-                    generated = generate_backtest_report(result.output_directory, staged)
-                    analysis = generate_equity_path_analysis(
-                        result.output_directory, generated.report
-                    )
-                    path_payload = analysis.canonical_bytes
-                    _write_report_file(staged / "equity-path.json", path_payload)
-                    _fsync_directory(staged)
-                    os.rename(staged, report_dir)
-                    _fsync_directory(self.reports_dir)
-                payload = generated.report.canonical_bytes
-                summary_payload = generated.report.summary_bytes
-                document = json.loads(payload)
-                if (
-                    type(document) is not dict
-                    or document.get("schema")
-                    != (_REPORT_SCHEMAS.get(record.schema, "ea.backtest-report.v1"))
-                    or document.get("run_id") != run_id
-                ):
-                    raise ReportUnavailableError("generated report identity conflicts")
-            except Exception:
-                completed = replace(
-                    record,
-                    status="failed",
-                    report_sha256=None,
-                    summary_sha256=None,
-                    error_code="report_failed",
-                    message="the engine succeeded but the formal report was unavailable",
-                )
-            else:
-                completed = replace(
-                    record,
-                    status="succeeded",
-                    report_sha256=sha256(payload).hexdigest(),
-                    summary_sha256=sha256(summary_payload).hexdigest(),
-                    equity_path_sha256=sha256(path_payload).hexdigest(),
-                    error_code=None,
-                    message=None,
-                )
-        except BacktestRunFailure as error:
-            if error.output_directory.name != record.attempt_id:
-                completed = replace(
-                    record,
-                    status="failed",
-                    error_code="web.internal_failure",
-                    message="the local backtest failed unexpectedly",
-                )
-            else:
-                completed = replace(
-                    record,
-                    status="failed",
-                    engine_run_id=error.output_directory.name,
-                    error_code=error.code.value,
-                    message=str(error),
-                )
+                if release_active and self._active == job_id:
+                    self._active = None
+
+    def _run_attempt(self, job_id: str, scenario: LoadedBacktestScenario) -> None:
+        admitted = self._admit(job_id)
+        if admitted is None:
+            # A cancellation was already accepted for this job. It settles as
+            # stopped here, without ever spawning compute.
+            self._finalize(job_id, _Intent(outcome="stopped"))
+            return
+        try:
+            intent = self._execute(job_id, admitted, scenario)
         except (BacktestScenarioError, InputChangedError):
-            completed = replace(
-                record,
-                status="failed",
+            intent = _Intent(
+                outcome="failed",
                 error_code="input_changed",
                 message="scenario input changed; validate it again",
             )
         except Exception:
-            completed = replace(
-                record,
-                status="failed",
+            intent = _Intent(
+                outcome="failed",
                 error_code="web.internal_failure",
                 message="the local backtest failed unexpectedly",
             )
+        self._finalize(job_id, intent)
+
+    def _admit(self, job_id: str) -> JobRecord | None:
+        """Take an accepted job as this thread's running attempt, or refuse.
+
+        A job that is no longer ``accepted`` has already been settled or had its
+        cancellation accepted, so this attempt must not start: returning ``None``
+        keeps a stop that landed before this thread ran from being overwritten by
+        an unconditional ``running`` write.
+        """
         with self._lock:
-            self._store(completed)
-            if release_active and self._active == job_id:
-                self._active = None
+            current = self._jobs[job_id]
+            if current.status != "accepted" or self._closing or self._writes_frozen(job_id):
+                return None
+            running = replace(current, status="running")
+            self._store_adopting(running)
+            return running
+
+    def _execute(self, job_id: str, record: JobRecord, scenario: LoadedBacktestScenario) -> _Intent:
+        if record.attempt_id is None:
+            raise RuntimeError("accepted Web job has no reserved attempt identity")
+        self._check_dataset(scenario)
+        if _binds_local_strategy(record.plugin_binding):
+            # Immediately before the engine is reached, the frozen binding and the
+            # current trust are re-checked: a revocation between admission and this
+            # moment refuses the run instead of starting it. It cannot interrupt
+            # Python that has already begun, in this process or in the worker.
+            self._local_catalog(record.plugin_binding)
+        control = self._worker_control(job_id)
+        worker.write_request(control, self._worker_request(job_id, record, scenario))
+        if self._stop_requested(job_id):
+            # The cancellation landed after admission but before the spawn: no
+            # compute is started for it, and the request already written is only
+            # staging that the commit gate never serves.
+            return _Intent(outcome="stopped")
+        process = self._spawn_worker(control)
+        with self._lock:
+            self._runs[job_id] = process
+        try:
+            outcome = self._supervise(job_id, process)
+        finally:
+            with self._lock:
+                self._runs.pop(job_id, None)
+            process.close()
+        return self._settle(job_id, record, outcome, control)
+
+    def _supervise(self, job_id: str, process: worker.WorkerProcess) -> str:
+        """Wait for the owned process tree, escalating a stop within one bound.
+
+        Four outcomes, and only the first two are terminal:
+
+        ``committed``
+            no stop was accepted and the whole owned group is gone;
+        ``stopped``
+            a stop was accepted and the whole owned group is confirmed gone;
+        ``unconfirmed``
+            a stop was accepted but the group outlived SIGKILL, so the job stays
+            ``stopping``: an unconfirmed stop is never reported as stopped;
+        ``abandoned``
+            no stop was accepted, yet the group outlived SIGKILL after the
+            leader exited. Nothing of that attempt is published, because its
+            compute could not be shown to have ended.
+
+        The escalation is TERM, then one wait of ``STOP_GRACE_SECONDS``, then
+        KILL, then one wait of ``KILL_GRACE_SECONDS``: the promised bound is
+        those two waits and no second grace wait is added elsewhere.
+        """
+        stop_accepted = False
+        term_sent = False
+        kill_sent = False
+        term_deadline = 0.0
+        kill_deadline = 0.0
+        while not process.stopped():
+            now = time.monotonic()
+            if self._stop_requested(job_id):
+                stop_accepted = True
+            if not term_sent and (stop_accepted or process.leader_reaped()):
+                term_sent = True
+                if stop_accepted:
+                    process.request_stop()
+                    term_deadline = now + worker.STOP_GRACE_SECONDS
+                else:
+                    # The leader is finished but something it started is not: no
+                    # compute may outlive its attempt, and nothing asked that
+                    # leftover group to linger, so it is killed outright.
+                    process.kill()
+                    kill_sent = True
+                    kill_deadline = now + worker.KILL_GRACE_SECONDS
+            elif term_sent and not kill_sent and now >= term_deadline:
+                process.kill()
+                kill_sent = True
+                kill_deadline = now + worker.KILL_GRACE_SECONDS
+            elif kill_sent and now >= kill_deadline:
+                return "unconfirmed" if stop_accepted else "abandoned"
+            process.wait(worker.REAP_SECONDS)
+        return "stopped" if stop_accepted else "committed"
+
+    def _settle(self, job_id: str, record: JobRecord, outcome: str, control: Path) -> _Intent:
+        """Verify what the worker staged and describe the outcome it earns.
+
+        Nothing here is durable and nothing here is promoted: the returned intent
+        is arbitrated against the *current* job — and its artifacts published —
+        only inside `_finalize`. That is what keeps the window between "this
+        attempt has a verified result" and "this attempt is committed" cancellable.
+        """
+        if outcome == "unconfirmed":
+            return _Intent(
+                outcome="unconfirmed",
+                error_code="worker_stop_unconfirmed",
+                message="the run was told to stop but its process group is not confirmed gone",
+            )
+        if outcome == "stopped":
+            return _Intent(outcome="stopped")
+        if outcome == "abandoned":
+            # No stop was accepted, yet the owned group could not be shown to be
+            # gone. Nothing of this attempt is published: a result may only be
+            # committed once its compute is confirmed to have ended.
+            return _Intent(
+                outcome="failed",
+                error_code="worker_group_unconfirmed",
+                message="the run's process group could not be confirmed stopped",
+            )
+        result = worker.read_result(control)
+        if not self._result_is_this_attempt(result, job_id, record):
+            return _Intent(
+                outcome="failed",
+                error_code="web.internal_failure",
+                message=self._worker_failure_message(control),
+            )
+        return self._settled_intent(cast(dict[str, Any], result), record, control)
+
+    def _settled_intent(self, result: dict[str, Any], record: JobRecord, control: Path) -> _Intent:
+        attempt_id = cast(str, record.attempt_id)
+        if result["status"] == "failed":
+            code = result.get("code")
+            staged_attempt = self._staged_attempt(control, attempt_id, result)
+            if code == "report_failed" and staged_attempt is not None:
+                return _Intent(
+                    outcome="failed",
+                    engine_run_id=attempt_id,
+                    error_code="report_failed",
+                    message="the engine succeeded but the formal report was unavailable",
+                    attempt_staging=staged_attempt,
+                )
+            if code in worker.CLASSIFIED_FAILURES:
+                return _Intent(
+                    outcome="failed",
+                    error_code=cast(str, code),
+                    message=(
+                        "scenario input changed; validate it again"
+                        if code == "input_changed"
+                        else "the local backtest failed unexpectedly"
+                    ),
+                    attempt_staging=staged_attempt,
+                )
+            if result.get("engine_run_id") == attempt_id:
+                return _Intent(
+                    outcome="failed",
+                    engine_run_id=attempt_id,
+                    error_code=cast(str, code),
+                    message=cast("str | None", result.get("message")),
+                    attempt_staging=staged_attempt,
+                )
+            return _Intent(
+                outcome="failed",
+                error_code="web.internal_failure",
+                message="the local backtest failed unexpectedly",
+            )
+        verified = self._verified_staging(control, result, record)
+        if verified is None:
+            return _Intent(
+                outcome="failed",
+                error_code="web.internal_failure",
+                message="the local backtest failed unexpectedly",
+            )
+        attempt_staging, report_staging, digests = verified
+        return _Intent(
+            outcome="succeeded",
+            engine_run_id=attempt_id,
+            report_sha256=digests["report.json"],
+            summary_sha256=digests["summary.txt"],
+            equity_path_sha256=digests["equity-path.json"],
+            attempt_staging=attempt_staging,
+            report_staging=report_staging,
+        )
+
+    def _staged_attempt(
+        self, control: Path, attempt_id: str, result: dict[str, Any]
+    ) -> Path | None:
+        """The staged attempt directory, when the worker says it produced one."""
+        if not result.get("attempt_staged"):
+            return None
+        try:
+            return worker.staged_path(control, f"{worker.RUNS_NAME}/{attempt_id}")
+        except worker.WorkerError:
+            return None
+
+    @staticmethod
+    def _result_is_this_attempt(
+        result: dict[str, Any] | None, job_id: str, record: JobRecord
+    ) -> bool:
+        return bool(
+            result is not None
+            and result.get("job_id") == job_id
+            and result.get("attempt_id") == record.attempt_id
+            and result.get("status") in {"succeeded", "failed"}
+        )
+
+    @staticmethod
+    def _worker_failure_message(control: Path) -> str:
+        phase = worker.last_phase(control)
+        if phase is None:
+            return "the local backtest failed unexpectedly"
+        return f"the local backtest failed unexpectedly (last worker phase: {phase})"
+
+    def _finalize(self, job_id: str, intent: _Intent) -> JobRecord:
+        """The one commit gate: arbitrate the current job, then publish.
+
+        The current record is reloaded under the lock, the accepted cancellation
+        and the finished attempt are ordered here, every promotion happens here,
+        and the durable job record is written here — one operation, one lock, one
+        writer. A job that already reached a terminal state is returned
+        unchanged, which is why a committed success survives a later stop.
+        """
+        with self._lock:
+            current = self._jobs[job_id]
+            if self._writes_frozen(job_id):
+                # A previous write to this job could not be confirmed durable and
+                # its record could not be re-read, so nothing here may write over
+                # the state that failed write may already have committed.
+                return current
+            # Shutdown is a stop verdict held in memory, so a job whose
+            # ``stopping`` mark did not confirm durability is still arbitrated as
+            # stopped rather than published.
+            stopping = current.status == "stopping" or (
+                self._closing and current.status in _LIVE_JOB_STATES
+            )
+            if stopping:
+                if intent.outcome == "unconfirmed":
+                    # The stop is accepted, not confirmed: the job stays stopping
+                    # and its staging is kept, never served.
+                    settled = replace(current, error_code=intent.error_code, message=intent.message)
+                else:
+                    settled = replace(
+                        current,
+                        status="stopped",
+                        report_sha256=None,
+                        summary_sha256=None,
+                        equity_path_sha256=None,
+                        error_code=None,
+                        message="the run was stopped before it published a result",
+                    )
+            elif current.status != "running":
+                return current
+            elif intent.outcome == "unconfirmed":
+                settled = replace(
+                    current,
+                    status="stopping",
+                    error_code=intent.error_code,
+                    message=intent.message,
+                )
+            else:
+                settled = self._publish(current, job_id, intent)
+            self._store_adopting(settled)
+            if settled.status in {"succeeded", "failed"}:
+                # Everything worth keeping is now published; a cancellation keeps
+                # its staging as diagnostics, and never serves it.
+                self._discard_worker_staging(job_id)
+            return settled
+
+    def _publish(self, current: JobRecord, job_id: str, intent: _Intent) -> JobRecord:
+        """Promote this attempt's staged artifacts and describe the job they make.
+
+        Called only from `_finalize`, under its lock, and only for a job that is
+        still running: a promotion failure becomes a failed job rather than a
+        published half-attempt.
+        """
+        try:
+            if intent.attempt_staging is not None:
+                self._promote(intent.attempt_staging, self.runs_dir, current.attempt_id)
+            if intent.report_staging is not None:
+                os.rename(intent.report_staging, self.reports_dir / job_id)
+                _fsync_directory(self.reports_dir)
+        except Exception:
+            return replace(
+                current,
+                status="failed",
+                report_sha256=None,
+                summary_sha256=None,
+                equity_path_sha256=None,
+                error_code="web.internal_failure",
+                message="the local backtest failed unexpectedly",
+            )
+        return replace(
+            current,
+            status="succeeded" if intent.outcome == "succeeded" else "failed",
+            engine_run_id=intent.engine_run_id,
+            report_sha256=intent.report_sha256,
+            summary_sha256=intent.summary_sha256,
+            equity_path_sha256=intent.equity_path_sha256,
+            error_code=intent.error_code,
+            message=intent.message,
+        )
+
+    def _promote(self, staged: Path, root: Path, name: str | None) -> None:
+        """One atomic rename of a staged path into its served root."""
+        if name is None:
+            raise WebBoundaryError("published identity is missing")
+        target = root / name
+        if target.exists():
+            raise WebBoundaryError("published identity already exists")
+        os.rename(staged, target)
+        _fsync_directory(root)
+
+    def _verified_staging(
+        self, control: Path, result: dict[str, Any], record: JobRecord
+    ) -> tuple[Path, Path, dict[str, str]] | None:
+        """The staged attempt and report, only when every identity checks out.
+
+        Each staged artifact is re-hashed and the report is re-read here, so a
+        torn, replaced or misaddressed staging directory is refused instead of
+        promoted. The report schema is checked against the job record that
+        admitted this attempt, never against what the worker claims it produced.
+        """
+        attempt_id = cast(str, record.attempt_id)
+        try:
+            if result.get("engine_run_id") != attempt_id:
+                return None
+            attempt = worker.staged_path(control, result.get("attempt_relative"))
+            report = worker.staged_path(control, result.get("report_relative"))
+            claimed = result.get("artifacts")
+            if type(claimed) is not dict or set(claimed) != set(worker.ARTIFACTS):
+                return None
+            digests: dict[str, str] = {}
+            for name in worker.ARTIFACTS:
+                payload = read_regular(report / name, report)
+                digest = sha256(payload).hexdigest()
+                if claimed.get(name) != digest:
+                    return None
+                digests[name] = digest
+            document = json.loads(read_regular(report / "report.json", report))
+        except (OSError, ValueError, worker.WorkerError):
+            return None
+        if (
+            type(document) is not dict
+            or document.get("schema") != _REPORT_SCHEMAS.get(record.schema, "ea.backtest-report.v1")
+            or document.get("run_id") != attempt_id
+        ):
+            return None
+        return attempt, report, digests
 
     def _candidate_projection(self, validation_id: str) -> dict[str, Any]:
         from ea.web.candidate_evidence import CandidateEvidenceReader

@@ -1353,11 +1353,22 @@ function OfflineHistoryPanel({ api }: { api: ApiAdapter }) {
   </div>
 }
 
+/** The job's own lifecycle wording, so a stop reads as what it is. */
+const JOB_STATUS_LABELS: Record<string, string> = {
+  accepted: 'queued',
+  running: 'running',
+  stopping: 'stopping · stop accepted, not yet confirmed',
+  stopped: 'stopped · no result was published',
+  succeeded: 'succeeded',
+  failed: 'failed',
+  interrupted: 'interrupted',
+}
+
 function ResearchJob({ api, jobId, job, holdouts }: { api: ApiAdapter; jobId: string; job: BacktestJob | null; holdouts: ChronologicalHoldout[] }) {
   if (!job) return <li className="job-card"><small>{jobId} · persisted job record unavailable</small></li>
   const holdoutForJob = holdouts.filter(item => item.source_job_id === job.job_id)
   return <li className="job-card">
-    <div className="job-card-title"><Link to={`/backtests/${job.job_id}`}><strong>{job.job_id}</strong></Link><span className={`status status-${job.status}`}>{job.status}</span></div>
+    <div className="job-card-title"><Link to={`/backtests/${job.job_id}`}><strong>{job.job_id}</strong></Link><span className={`status status-${job.status}`}>{JOB_STATUS_LABELS[job.status] ?? job.status}</span></div>
     <small>Engine run {job.engine_run_id ?? 'not available'} · {job.scenario_id}{job.error_code ? ` · ${job.error_code}` : ''}</small>
     {job.message && <small>{job.message}</small>}
     {job.input_identity.record_count <= 6 && <small>Small sample · {job.input_identity.record_count} records. Workflow validation only; no robustness claim.</small>}
@@ -1896,6 +1907,14 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
   }, [api])
 
   const jobKey = task?.jobs.join(',') ?? ''
+  // A bound run is live while it is accepted, running, or waiting for a stop to be
+  // confirmed; the page keeps reading those so `stopping` becomes the real
+  // `stopped`/`failed` the controller records, without polling a terminal run.
+  const liveJobKey = Object.values(jobs)
+    .filter(item => item !== null && ['accepted', 'running', 'stopping'].includes(item.status))
+    .map(item => `${item!.job_id}:${item!.status}`)
+    .sort()
+    .join(',')
   // Each read of the bound runs is bound to the read it started in, so an answer
   // that lands after a newer one was dispatched is discarded rather than allowed
   // to overwrite it. `jobEpoch` moves only on one explicit refresh, so this stays
@@ -1909,6 +1928,12 @@ export function ResearchTaskDetail({ api, taskId }: { api: ApiAdapter; taskId: s
     })).then(entries => { if (active && at === jobRead.current) setJobs(Object.fromEntries(entries)) })
     return () => { active = false }
   }, [api, jobKey, task?.status, jobEpoch])
+
+  useEffect(() => {
+    if (!liveJobKey) return
+    const timer = window.setTimeout(() => setJobEpoch(value => value + 1), 400)
+    return () => window.clearTimeout(timer)
+  }, [liveJobKey])
 
   useEffect(() => {
     if (!jobKey || !api.listHoldouts) return

@@ -29,9 +29,7 @@ from fastapi.testclient import TestClient
 from ea.core import CanonicalDecimal, ReplayWindow
 from ea.core.commission import commission_policy_identity
 from ea.data import decode_phase1_ohlcv_csv
-from ea.product.backtest import run_backtest_scenario as engine_run_backtest_scenario
 from ea.strategy.rules import DEFAULT_RULE
-from ea.web import service as service_module
 from ea.web.app import create_app
 from ea.web.llm import (
     ModelCapabilities,
@@ -174,20 +172,21 @@ def _children(tmp_path: Any) -> list[Any]:
 def _forbid_engine_runs(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """Count real engine runs: a refused submission must reach the engine zero times.
 
-    The engine boundary is the module global the service actually calls, patched
-    on the service module itself — the same boundary every service in this process
-    uses, so the count covers a second workspace opened later in the same test as
-    well. The real function is taken from the module that defines it rather than
-    from a re-export.
+    An admitted run now reaches the engine through one worker process, so the
+    boundary that proves "no engine run happened" is the controller's own spawn
+    step, patched on the service class itself — the same boundary every service in
+    this process uses, including a second workspace opened later in the same test.
+    A worker is spawned only to run the engine, so a count of zero is the same
+    fact the old module-global patch asserted.
     """
     runs = {"count": 0}
-    real = engine_run_backtest_scenario
+    real = WebService._spawn_worker
 
-    def counted(*args: Any, **kwargs: Any) -> Any:
+    def counted(self: WebService, control: Any) -> Any:
         runs["count"] += 1
-        return real(*args, **kwargs)
+        return real(self, control)
 
-    monkeypatch.setattr(service_module, "run_backtest_scenario", counted)
+    monkeypatch.setattr(WebService, "_spawn_worker", counted)
     return runs
 
 

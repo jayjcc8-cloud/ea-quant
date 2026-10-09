@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import time
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -15,9 +16,6 @@ import yaml
 from fastapi.testclient import TestClient
 
 import ea.web.service as web_service
-from ea.core import RunId
-from ea.product import LoadedBacktestScenario
-from ea.product import run_backtest_scenario as run_product_backtest
 from ea.web.app import WebSettings, create_app
 from ea.web.service import WebBoundaryError, WebService
 from unit.test_backtest_report import _priced_scenario
@@ -83,10 +81,26 @@ def _wait(client: TestClient, job_id: str) -> dict[str, Any]:
         response = client.get(f"/api/backtests/{job_id}")
         assert response.status_code == 200, response.text
         job = cast(dict[str, Any], response.json())
-        if job["status"] not in {"accepted", "running"}:
+        if job["status"] not in {"accepted", "running", "stopping"}:
             return job
         time.sleep(0.01)
     raise AssertionError(f"job {job_id} did not finish")
+
+
+def _hook_launcher(hook: str) -> Any:
+    """Spawn every worker of one service with a test hook installed.
+
+    The engine runs in an isolated child process, so a test cannot monkeypatch
+    inside it. This replaces the service's own launcher so each spawned worker
+    loads the named hook before the engine reads market data.
+
+    Patching the class also reaches the service `create_app` builds internally.
+    """
+
+    def launch(self: WebService, control: Path) -> Any:
+        return web_service.worker.spawn(control, test_hook=hook)
+
+    return launch
 
 
 def _batch_request(
@@ -205,18 +219,22 @@ def test_batch_api_accepts_ten_distinct_parameter_combinations(tmp_path: Path) -
 def test_batch_api_isolates_success_and_failed_member(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    worker_hook: Callable[[str, str], str],
 ) -> None:
-    def fail_delayed_member(
-        scenario: LoadedBacktestScenario,
-        output_root: Path,
-        *,
-        run_id: RunId,
-    ) -> Any:
-        if scenario.entry_delay_bars == 2:
-            raise RuntimeError("injected member failure")
-        return run_product_backtest(scenario, output_root, run_id=run_id)
-
-    monkeypatch.setattr(web_service, "run_backtest_scenario", fail_delayed_member)
+    # The engine now runs in an isolated worker process, so the injected failure
+    # is installed inside that process through the documented worker hook rather
+    # than by patching the controller's module. What the test asserts — one
+    # member's business failure never fails or replaces its sibling — is
+    # unchanged.
+    hook = worker_hook(
+        "member-failure",
+        """
+def hook(*, scenario, control, request, worker):
+    if scenario.entry_delay_bars == 2:
+        raise RuntimeError("injected member failure")
+""",
+    )
+    monkeypatch.setattr(WebService, "_spawn_worker", _hook_launcher(hook))
     settings = _settings(tmp_path)
     with TestClient(create_app(settings), base_url=ORIGIN) as client:
         validated = _validate(client, "bounded-long.yaml")
@@ -1048,14 +1066,24 @@ def test_service_rejects_overlapping_input_and_workspace_roots(tmp_path: Path) -
 
 
 def test_reporter_failure_retains_successful_engine_run_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_hook: Callable[[str, str], str]
 ) -> None:
     settings = _settings(tmp_path)
-
-    def fail_report(_run_dir: Path, _output_dir: Path) -> object:
+    # The reporter now runs inside the attempt's worker process, so the injected
+    # failure is installed there through the documented worker hook. What the
+    # test asserts is unchanged: a report that cannot be produced leaves the
+    # engine's own attempt evidence published and no report behind.
+    hook = worker_hook(
+        "reporter-failure",
+        """
+def hook(*, scenario, control, request, worker):
+    def fail_report(_run_dir, _output_dir):
         raise RuntimeError("reporter diagnostic must not escape")
 
-    monkeypatch.setattr("ea.web.service.generate_backtest_report", fail_report)
+    worker.generate_backtest_report = fail_report
+""",
+    )
+    monkeypatch.setattr(WebService, "_spawn_worker", _hook_launcher(hook))
     with TestClient(create_app(settings), base_url=ORIGIN) as client:
         validated = _validate(client, "flat.yaml")
         response = client.post(
@@ -1160,18 +1188,29 @@ def test_restart_marks_inflight_job_interrupted_without_rerun(tmp_path: Path) ->
 def test_restart_retains_reserved_attempt_identity_after_real_engine_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A crash after the engine ran leaves an interrupted job, never a report.
+
+    The attempt is computed in an isolated worker, so the durable attempt
+    identity is what a restart must preserve: the reserved attempt id stays on
+    the interrupted record, the worker's own staged output is real evidence that
+    the engine ran, nothing of it is promoted into the served roots, and the
+    attempt is never re-dispatched. The pause is placed at the controller's
+    commit boundary — the exact window between "the engine produced an attempt"
+    and "the controller published it" — because that is where the old seam sat
+    inside the engine call.
+    """
     settings = _settings(tmp_path)
-    engine_finished = Event()
-    release_worker = Event()
-
-    def pause_after_engine(*args: object, **kwargs: object) -> object:
-        result = run_product_backtest(*args, **kwargs)  # type: ignore[arg-type]
-        engine_finished.set()
-        assert release_worker.wait(10)
-        return result
-
-    monkeypatch.setattr(web_service, "run_backtest_scenario", pause_after_engine)
+    at_commit = Event()
+    release_commit = Event()
     service = WebService(settings.scenario_root, settings.workspace)
+    real_settle = service._settle
+
+    def pause_before_commit(*args: Any, **kwargs: Any) -> Any:
+        at_commit.set()
+        assert release_commit.wait(30)
+        return real_settle(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_settle", pause_before_commit)
     service.start()
     recovered: WebService | None = None
     try:
@@ -1182,14 +1221,16 @@ def test_restart_retains_reserved_attempt_identity_after_real_engine_output(
             request_id="request-interrupted-attempt-0002",
         )
         assert created is True
-        assert engine_finished.wait(10)
+        assert at_commit.wait(30)
 
         persisted = service.get_job(accepted.job_id)
         assert persisted.status == "running"
         assert persisted.attempt_id is not None
         assert persisted.engine_run_id is None
-        attempt = settings.workspace / "runs" / persisted.attempt_id
-        assert (attempt / "result.json").is_file()
+        # The engine really ran: its attempt is staged, and it is not served.
+        staged = settings.workspace / ".worker" / accepted.job_id / "runs" / persisted.attempt_id
+        assert (staged / "result.json").is_file()
+        assert list((settings.workspace / "runs").iterdir()) == []
 
         recovered_workspace = tmp_path / "recovered-workspace"
         shutil.copytree(settings.workspace, recovered_workspace)
@@ -1202,10 +1243,10 @@ def test_restart_retains_reserved_attempt_identity_after_real_engine_output(
         assert interrupted.engine_run_id is None
         assert interrupted.report_sha256 is None
         assert interrupted.summary_sha256 is None
-        assert len(list((recovered_workspace / "runs").iterdir())) == 1
+        assert list((recovered_workspace / "runs").iterdir()) == []
         assert not (recovered_workspace / "reports" / accepted.job_id).exists()
     finally:
         if recovered is not None:
             recovered.stop()
-        release_worker.set()
+        release_commit.set()
         service.stop()

@@ -137,6 +137,11 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 .status { flex-shrink: 0; padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .025em; text-transform: uppercase; }
 .status-succeeded { border-color: var(--accent); color: var(--positive); }
 .status-failed, .status-interrupted { border-color: var(--danger-line); color: var(--danger); }
+/* A requested stop is not an outcome: it reads as in-progress until the controller
+   confirms the run's own process tree is gone. */
+.status-stopping { border-color: var(--amber-line); color: var(--amber); }
+.status-stopped { border-color: var(--danger-line); color: var(--danger); }
+.status-accepted, .status-running { border-color: var(--accent-line); color: var(--accent); }
 .status-drafting, .status-awaiting_confirmation, .status-confirmed { border-color: var(--accent-line); color: var(--accent); }
 .status-cancelled, .status-unsupported { border-color: var(--amber-line); color: var(--amber); }
 table { width: 100%; margin-top: 20px; border-collapse: collapse; color: var(--ink); font-size: 14px; }

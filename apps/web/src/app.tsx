@@ -102,7 +102,7 @@ export type JobDatasetVersion = {
 }
 export type BacktestJob = {
   schema: string; job_id: string; request_id: string; scenario_id: string; input_identity: InputIdentity
-  status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'interrupted'; engine_run_id: string | null
+  status: 'accepted' | 'running' | 'stopping' | 'stopped' | 'succeeded' | 'failed' | 'interrupted'; engine_run_id: string | null
   report_sha256: string | null; summary_sha256: string | null; error_code: string | null; message: string | null; report_ready: boolean
   equity_path_sha256?: string | null
   parameters?: ParameterMap; strategy_descriptor?: StrategyDescriptor
@@ -200,6 +200,12 @@ export type ApiAdapter = {
   getBatch(batchId: string): Promise<ExperimentBatch>
   listBacktests(): Promise<BacktestJob[]>
   getBacktest(jobId: string): Promise<BacktestJob>
+  /**
+   * Ask the controller to stop one live run. The answer is the job's own record,
+   * so a live run reads back as `stopping` and only its supervisor records the
+   * confirmed `stopped`; a run that already finished is returned unchanged.
+   */
+  stopBacktest?(jobId: string): Promise<BacktestJob>
   getTradeAnalytics?(jobId: string): Promise<TradeAnalytics>
   getReport(jobId: string): Promise<BacktestReport>
   getEquityPath(jobId: string): Promise<EquityPath>
@@ -344,6 +350,11 @@ const browserApi: ApiAdapter = {
   getBatch(batchId) { return apiRequest(`/api/batches/${encodeURIComponent(batchId)}`) },
   async listBacktests() { return (await apiRequest<{ jobs: BacktestJob[] }>('/api/backtests')).jobs },
   getBacktest(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}`) },
+  stopBacktest(jobId) {
+    return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/stop`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({}),
+    })
+  },
   getTradeAnalytics(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/trade-analytics`) },
   getReport(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/report`) },
   getEquityPath(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/artifacts/equity-path.json`) },
@@ -1286,6 +1297,9 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   const [disconnected, setDisconnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [associationRefresh, setAssociationRefresh] = useState(0)
+  // One in-flight stop request, so the control cannot be asked twice while the
+  // controller is still accepting or confirming the first one.
+  const [stopping, setStopping] = useState(false)
   const refreshGeneration = useRef(0)
 
   const refresh = useCallback(async () => {
@@ -1324,7 +1338,11 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
     let active = true; let timer: number | undefined
     const poll = async () => {
       const status = await refresh()
-      if (active && (status === 'accepted' || status === 'running')) timer = window.setTimeout(poll, 150)
+      // `stopping` is an accepted request, not an outcome: the page keeps reading
+      // until the controller confirms `stopped` (or the run finishes first).
+      if (active && (status === 'accepted' || status === 'running' || status === 'stopping')) {
+        timer = window.setTimeout(poll, 150)
+      }
     }
     void poll()
     return () => { active = false; refreshGeneration.current += 1; if (timer !== undefined) window.clearTimeout(timer) }
@@ -1351,12 +1369,30 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   }
   const strategy = report?.source?.strategy.id ?? report?.scenario?.strategy_id
   const instrument = report?.source?.instrument ?? report?.scenario?.instrument
+  const stop = async () => {
+    if (!api.stopBacktest || stopping) return
+    setStopping(true)
+    setError(null)
+    try {
+      setJob(await api.stopBacktest(jobId))
+    } catch (caught) {
+      // A refused stop is reported beside the control that made it, and the page
+      // re-reads the job rather than assuming what the refusal left behind.
+      if (caught instanceof Error) setError(caught.message)
+      void refresh()
+    } finally {
+      setStopping(false)
+    }
+  }
+  // Only a live run offers a stop; the controller answers a terminal job with its
+  // own unchanged record, so the control disappears with the state.
+  const stoppable = job.status === 'accepted' || job.status === 'running' || job.status === 'stopping'
   return <div className="report-page">
     <PageTitle title="正式报告" subtitle={`${job.scenario_id} · 离线回测正式报告`} status={job.status} />
     {disconnected && <section className="notice error">Local service is unreachable · loaded job status may be historical</section>}
     {error && <section className="notice error">{error}</section>}
     {job.message && <section className="notice error"><strong>{job.error_code}</strong> · {job.message}</section>}
-    <div className="result-toolbar"><Link to="/backtests">回测列表</Link><button onClick={() => { setAssociationRefresh(value => value + 1); void refresh() }}>刷新</button></div>
+    <div className="result-toolbar"><Link to="/backtests">回测列表</Link><button onClick={() => { setAssociationRefresh(value => value + 1); void refresh() }}>刷新</button>{api.stopBacktest && stoppable && <button className="danger stop-run" disabled={stopping} onClick={() => void stop()}>停止运行</button>}</div>
     {/* Keyed on the job and on the explicit refresh: another route — or a refresh —
         mounts a fresh association that starts out reading, instead of carrying this
         job's strategy across. The read below is independent of the report's own
@@ -1389,11 +1425,13 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
         </details>
       </section>
     </> : <section className="panel"><p className="muted">{
-      job.status === 'failed' || job.status === 'interrupted'
+      job.status === 'failed' || job.status === 'interrupted' || job.status === 'stopped'
         ? 'No success report is available.'
         : job.status === 'succeeded'
           ? error ? 'No current verified report is available.' : 'Loading the formal report.'
-          : 'The installed engine is running. This page will refresh automatically.'
+          : job.status === 'stopping'
+            ? 'This run is stopping. No result of it will be published, and its staged files are never served as a report.'
+            : 'The installed engine is running in its own worker process. This page will refresh automatically.'
     }</p></section>}
     {/* The technical identity is outside the report branch on purpose: the job and
         engine a page is about are known from the route and the job record, so they
@@ -1539,7 +1577,7 @@ function HoldoutDetail({ api, validationId }: { api: ApiAdapter; validationId: s
         const next = await Promise.all([holdoutRun(api, relation.source_job_id), holdoutRun(api, relation.holdout_job_id)])
         if (!active) return
         setRuns(next); setError('')
-        if (next.some(run => ['accepted', 'running'].includes(run.job.status))) timer = window.setTimeout(() => { void refresh() }, 500)
+        if (next.some(run => ['accepted', 'running', 'stopping'].includes(run.job.status))) timer = window.setTimeout(() => { void refresh() }, 500)
       } catch (caught) { if (active) { setRuns([]); setError(String(caught)) } }
     }
     void refresh()

@@ -1174,6 +1174,22 @@ def create_app(settings: WebSettings) -> Any:
         except JobNotFoundError as caught:
             return error(404, "job_not_found", str(caught))
 
+    @app.post("/api/backtests/{job_id}/stop")
+    def stop_backtest(job_id: str) -> object:
+        """Accept a stop request for one live run and report its record.
+
+        The answer is the controller's own job state, not a promise: a live run
+        becomes ``stopping`` and only its supervisor records the confirmed
+        ``stopped``; a run that already reached a terminal state is returned
+        unchanged.
+        """
+        try:
+            return service.stop_job(job_id).document(presentation=True)
+        except JobNotFoundError as caught:
+            return error(404, "job_not_found", str(caught))
+        except (OSError, WebBoundaryError) as caught:
+            return error(409, "stop_rejected", str(caught))
+
     @app.get("/api/backtests/{job_id}/report")
     def get_report(job_id: str) -> Response:
         try:

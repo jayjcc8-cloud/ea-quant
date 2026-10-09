@@ -129,6 +129,8 @@ const EXPERIMENT_STATUS_LABELS: Record<UserStrategyExperiment['status'], string>
 const JOB_STATUS_LABELS: Record<BacktestJob['status'], string> = {
   accepted: '已受理',
   running: '运行中',
+  stopping: '正在停止',
+  stopped: '已停止',
   succeeded: '成功',
   failed: '失败',
   interrupted: '已中断',

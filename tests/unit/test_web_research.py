@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import replace
 from typing import Any, cast
 from uuid import uuid4
@@ -25,7 +26,7 @@ from ea.web.research import (
     TaskReservation,
     TaskStateError,
 )
-from ea.web.service import JobNotFoundError, ServiceBusyError, WebService
+from ea.web.service import JobNotFoundError, ReportUnavailableError, ServiceBusyError, WebService
 from ea.web.settings import RadianSettings
 
 pytestmark = pytest.mark.filterwarnings(
@@ -1543,15 +1544,26 @@ def test_crash_after_job_creation_reconciles_the_same_job_without_refunding(
 
 
 def test_failed_job_is_a_safe_view_and_retry_boundary(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, worker_hook: Any
 ) -> None:
     """A real job that failed is reported as failed and is never silently rerun."""
-    import ea.web.service as web_service
+    from unit.test_web_api import _hook_launcher
 
-    def fail_engine(*args: Any, **kwargs: Any) -> Any:
+    # The engine runs in an isolated worker process now, so the injected failure
+    # is installed there through the documented worker hook. What the test
+    # asserts is unchanged: a failed economic attempt is a safe view and its own
+    # retry boundary, and is never re-funded or silently re-run.
+    hook = worker_hook(
+        "engine-failure",
+        """
+def hook(*, scenario, control, request, worker):
+    def fail_engine(*args, **kwargs):
         raise OSError("simulated engine failure inside the real backtest attempt")
 
-    monkeypatch.setattr(web_service, "run_backtest_scenario", fail_engine)
+    worker.run_backtest_scenario = fail_engine
+""",
+    )
+    monkeypatch.setattr(WebService, "_spawn_worker", _hook_launcher(hook))
     orchestrator, service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
     catalog = orchestrator._catalog()  # noqa: SLF001
     strategy = catalog[0]["strategy_id"]
@@ -1566,8 +1578,15 @@ def test_failed_job_is_a_safe_view_and_retry_boundary(
     bound = orchestrator.confirm(task.task_id)
     assert bound.status in {"running", "succeeded", "failed"}
     job_id = bound.jobs[0]
-    if bound.status == "running":
+    # The attempt is computed out of process now, so its terminal state is read
+    # after it settles rather than assumed to be synchronous with confirmation.
+    # What is asserted about that state is unchanged.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         bound = orchestrator.refresh(task.task_id)
+        if bound.status not in {"running", "confirmed", "drafting"}:
+            break
+        time.sleep(0.02)
     record = service.get_job(job_id)
     assert record.status == "failed"
     assert bound.status == "failed"
@@ -1660,9 +1679,28 @@ def test_cancel_stops_orchestration_without_rolling_back_a_started_job(
     cancelled = orchestrator.cancel(task.task_id)
     assert cancelled.status == "cancelled"
     assert cancelled.cancel_note is not None
-    # The started backtest keeps its own state; cancel is not a rollback.
-    job = service.get_job(bound.jobs[0])
-    assert job.status in {"accepted", "running", "succeeded", "failed"}
+    # The started backtest keeps its own record. Cancelling stops the compute the
+    # controller owns; it never rewrites, removes, refunds or fabricates a result
+    # for that run, so the run is either still stopping, confirmed stopped, or the
+    # result it committed before the cancellation arrived.
+    job_id = bound.jobs[0]
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        job = service.get_job(job_id)
+        if job.status in {"stopped", "succeeded", "failed", "interrupted"}:
+            break
+        time.sleep(0.02)
+    assert job.status in {"stopping", "stopped", "succeeded", "failed", "interrupted"}
+    if job.status == "stopped":
+        # A stopped run published nothing, and nothing of it is served.
+        assert job.report_sha256 is None and job.engine_run_id is None
+        assert list(service.runs_dir.iterdir()) == []
+        assert not (service.reports_dir / job_id).exists()
+        with pytest.raises(ReportUnavailableError):
+            service.report(job_id)
+    else:
+        # Only a genuinely committed run may carry a verified official report.
+        assert job.status != "succeeded" or service.report(job_id)
     after_cancel = orchestrator.refresh(task.task_id)
     assert after_cancel.status == "cancelled"
     assert after_cancel.jobs == bound.jobs
@@ -1670,6 +1708,7 @@ def test_cancel_stops_orchestration_without_rolling_back_a_started_job(
     with pytest.raises(TaskStateError):
         orchestrator.retry(task.task_id)
     assert len(provider.calls) == calls_after
+    service.stop()
 
 
 # --- admission and finalisation windows (R2/R3 barriers) ----------------------
