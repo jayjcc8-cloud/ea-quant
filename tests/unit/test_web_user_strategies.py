@@ -2879,6 +2879,88 @@ def _never_called(**kwargs: Any) -> Any:
 # --- the HTTP surface ---------------------------------------------------------
 
 
+def test_http_select_dataset_route_is_one_bounded_draft_mutation(tmp_path: Any) -> None:
+    """The route publishes a catalog identity, and only the identity."""
+    from ea.web.uploads import AVAILABILITY_PROVIDED
+    from unit.test_web_uploads import _capture
+
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        published = client.post(
+            "/api/datasets/upload",
+            headers=WRITE_HEADERS,
+            json={
+                "content": _capture(8).decode("utf-8"),
+                "file_name": "vendor-bars.csv",
+                "availability_policy": AVAILABILITY_PROVIDED,
+            },
+        )
+        assert published.status_code == 201, published.text
+        dataset_id = str(published.json()["dataset_id"])
+
+        created = client.post(
+            "/api/user-strategies",
+            headers=WRITE_HEADERS,
+            json={
+                "name": "Upload run",
+                "intent": "Select one uploaded dataset",
+                "scenario_id": SCENARIO,
+            },
+        )
+        assert created.status_code == 201, created.text
+        identity = str(created.json()["user_strategy_id"])
+        route = f"/api/user-strategies/{identity}/select-dataset"
+
+        chosen = client.post(
+            route,
+            headers=WRITE_HEADERS,
+            json={"operation_id": "select-1", "base_revision": 1, "dataset_id": dataset_id},
+        )
+        assert chosen.status_code == 200, chosen.text
+        body = cast(dict[str, Any], chosen.json())
+        assert body["draft"]["revision"] == 2
+        assert body["draft"]["dataset_id"] == dataset_id
+        assert body["draft"]["source_sha256"]
+        assert body["changes"][-1]["kind"] == "select-dataset"
+        assert body["dataset"]["operation_id"] == "select-1"
+
+        # The same operation replays as itself; a selection from the revision the
+        # caller read before is stale; a dataset the host cannot bind is refused.
+        replay = client.post(
+            route,
+            headers=WRITE_HEADERS,
+            json={"operation_id": "select-1", "base_revision": 1, "dataset_id": dataset_id},
+        )
+        assert replay.status_code == 200 and replay.json()["draft"]["revision"] == 2
+        stale = client.post(
+            route,
+            headers=WRITE_HEADERS,
+            json={"operation_id": "select-2", "base_revision": 1, "dataset_id": dataset_id},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "stale_base_revision"
+        unknown = client.post(
+            route,
+            headers=WRITE_HEADERS,
+            json={"operation_id": "select-3", "base_revision": 2, "dataset_id": "absent.csv"},
+        )
+        assert unknown.status_code == 422
+        assert unknown.json()["error"]["code"] == "user_strategy_invalid"
+        # A body that names a path instead of an identity is not this contract.
+        assert (
+            client.post(
+                route,
+                headers=WRITE_HEADERS,
+                json={
+                    "operation_id": "select-4",
+                    "base_revision": 2,
+                    "dataset_id": "/etc/passwd",
+                },
+            ).status_code
+            == 422
+        )
+
+
 def test_http_routes_bound_identities_and_keep_the_frozen_child_read_only(
     tmp_path: Any,
 ) -> None:
