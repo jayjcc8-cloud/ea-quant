@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ea.core.encoding import canonical_json_bytes
+from ea.data.historical import HistoricalMarketDataError
 from ea.product import (
     BacktestScenarioError,
     LoadedBacktestScenario,
@@ -51,9 +52,10 @@ from ea.product import (
     load_backtest_scenario,
 )
 from ea.product.equity_path import generate_equity_path_analysis
-from ea.product.scenario import load_backtest_scenario_bytes
+from ea.product.scenario import load_backtest_scenario_bytes, rebind_research_dataset
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import read_regular, validate_package
+from ea.web.datasets import LocalResearchDatasetRegistryV1
 
 DOMAIN_SCHEMA = "ea.quine-domain.v1"
 FROZEN_SCHEMA = "ea.quine-frozen-input.v1"
@@ -116,6 +118,22 @@ def _package_bytes(scenario: LoadedBacktestScenario) -> tuple[bytes | None, str 
     return package.artifact_bytes, package.identity.artifact_sha256
 
 
+def _research_evidence(snapshot: dict[str, Any]) -> tuple[Any, str | None, str | None]:
+    """The exact canonical research evidence one admitted snapshot carries.
+
+    A registered research input is carried as the snapshot's own
+    ``research_input`` value together with the digest of its canonical bytes,
+    so a worker re-parses and re-digests exactly the evidence this confirmation
+    admitted — including the dataset binding, the source digest and the replay
+    window — rather than a default scenario's.
+    """
+    value = snapshot.get("research_input")
+    if value is None:
+        return None, None, None
+    canonical = canonical_json_bytes(value)
+    return value, _digest(canonical), canonical.hex()
+
+
 def _frozen_envelope(
     scenario_id: str,
     source: LoadedBacktestScenario,
@@ -128,6 +146,7 @@ def _frozen_envelope(
     frozen = _frozen_scenario_bytes(parameterized)
     package_bytes, package_sha256 = _package_bytes(parameterized)
     job_schema = _job_schema(parameterized)
+    research, research_sha256, research_canonical = _research_evidence(snapshot)
     envelope: dict[str, Any] = {
         "schema": FROZEN_SCHEMA,
         "scenario_id": scenario_id,
@@ -138,6 +157,9 @@ def _frozen_envelope(
         "scenario_file_sha256": _digest(frozen),
         "package_file": None if package_bytes is None else package_bytes.hex(),
         "package_sha256": package_sha256,
+        "research_input": research,
+        "research_input_sha256": research_sha256,
+        "research_input_canonical": research_canonical,
         "job_schema": job_schema,
         "report_schema": _REPORT_SCHEMAS.get(job_schema, "ea.backtest-report.v1"),
         "path_schema": _PATH_SCHEMAS.get(job_schema, "ea.backtest-equity-path.v1"),
@@ -195,6 +217,47 @@ def _decode_envelope(value: object) -> tuple[dict[str, Any], bytes, bytes | None
             "digest_mismatch",
             "the frozen strategy artifact does not reproduce its own digest",
         )
+    # The retained research evidence is bound three ways at once: its own
+    # canonical bytes must reproduce the digest it is carried with, it must be
+    # exactly the value the snapshot admitted, and the snapshot is what the
+    # admitted identity was derived from.
+    research = envelope.get("research_input")
+    research_canonical = envelope.get("research_input_canonical")
+    research_sha256 = envelope.get("research_input_sha256")
+    snapshot_research = readable.get("research_input")
+    if research is None:
+        _require(
+            research_canonical is None and research_sha256 is None and snapshot_research is None,
+            "identity_mismatch",
+            "the frozen input carries research evidence its snapshot did not admit",
+        )
+    else:
+        _require(
+            type(research_canonical) is str and type(research_sha256) is str,
+            "invalid_request",
+            "the frozen research evidence carries no canonical bytes or digest",
+        )
+        try:
+            evidence = bytes.fromhex(cast(str, research_canonical))
+        except ValueError:
+            raise DomainRefusal(
+                "invalid_request", "the frozen research evidence is not bytes"
+            ) from None
+        _require(
+            _digest(evidence) == research_sha256,
+            "digest_mismatch",
+            "the frozen research evidence does not reproduce its own digest",
+        )
+        _require(
+            evidence == canonical_json_bytes(research),
+            "identity_mismatch",
+            "the frozen research evidence is not the value it is carried as",
+        )
+        _require(
+            snapshot_research == research,
+            "identity_mismatch",
+            "the frozen research evidence is not the one the snapshot admitted",
+        )
     return envelope, frozen, package
 
 
@@ -221,12 +284,22 @@ def _verified_scenario(
         raise DomainRefusal(
             "invalid_request", "the frozen scenario file is not the scenario it claims"
         ) from None
+    snapshot = cast(dict[str, Any], envelope["snapshot"])
+    # The admitted research evidence belongs to the scenario before any identity
+    # is derived from it: the identity of a registered research input is not the
+    # identity of the same scenario without its dataset binding.
+    research = snapshot.get("research_input")
+    if research is not None:
+        scenario = _with_research_input(scenario, cast(dict[str, Any], research))
+        # The admitted identity derives its dataset binding from this evidence,
+        # so agreeing with itself proves nothing: the evidence is held to the
+        # dataset that was actually loaded from the source just read.
+        _require_evidence_matches_source(cast(dict[str, Any], research), scenario)
     _require(
         scenario.scenario_sha256.value == envelope.get("scenario_identity_sha256"),
         "identity_mismatch",
         "the frozen scenario file is not the scenario this input admitted",
     )
-    snapshot = cast(dict[str, Any], envelope["snapshot"])
     _require(
         _scenario_identity(scenario) == snapshot.get("identity"),
         "identity_mismatch",
@@ -259,9 +332,6 @@ def _verified_scenario(
         "identity_mismatch",
         "the frozen scenario file does not materialize the snapshot this input admitted",
     )
-    research = snapshot.get("research_input")
-    if research is not None:
-        return _with_research_input(scenario, cast(dict[str, Any], research))
     return scenario
 
 
@@ -271,6 +341,40 @@ def _with_research_input(
     from dataclasses import replace
 
     return replace(scenario, research_input_bytes=canonical_json_bytes(research))
+
+
+def _require_evidence_matches_source(
+    evidence: dict[str, Any], scenario: LoadedBacktestScenario
+) -> None:
+    """Hold one admitted research evidence to the source actually loaded.
+
+    ``_scenario_identity`` reads the dataset binding out of this same evidence,
+    so comparing the admitted identity with itself cannot prove the source at
+    all. These are the facts the loaded dataset really measured: the digest of
+    the source bytes read for this load, the selected fingerprint, the record
+    count and the replay window. A source whose selected fingerprint is
+    unchanged but whose bytes are not the confirmed ones is refused here.
+    """
+    dataset = scenario.dataset
+    window = dataset.replay_window
+    _require(
+        evidence.get("source_sha256") == dataset.source_bytes_sha256.value,
+        "identity_mismatch",
+        "the research evidence is not the source bytes this input was read from",
+    )
+    _require(
+        evidence.get("data_sha256") == dataset.selection.fingerprint.sha256.value
+        and evidence.get("record_count") == dataset.selection.fingerprint.record_count,
+        "identity_mismatch",
+        "the research evidence is not the selected data this input admitted",
+    )
+    _require(
+        evidence.get("replay_start_utc") == window.start_inclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        and evidence.get("replay_end_utc")
+        == window.end_exclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "identity_mismatch",
+        "the research evidence does not state the replay window this input admitted",
+    )
 
 
 # --- modes ------------------------------------------------------------------
@@ -287,6 +391,36 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
         source = load_backtest_scenario(path)
     except (BacktestScenarioError, OSError, ValueError) as error:
         raise DomainRefusal("invalid_request", f"scenario is not readable: {error}") from None
+    # One explicitly registered local research input replaces only the data
+    # binding, through the existing dataset registry and the existing rebinding
+    # validation, so the admitted snapshot carries that input's own evidence.
+    dataset_id = request.get("dataset_id")
+    if dataset_id is not None:
+        _require(
+            type(dataset_id) is str and bool(dataset_id),
+            "invalid_request",
+            "dataset_id must be one registered input name",
+        )
+        raw_root = request.get("data_root")
+        _require(
+            type(raw_root) is str and bool(raw_root),
+            "invalid_request",
+            "a registered research input requires an explicit data_root",
+        )
+        try:
+            data_path, dataset = LocalResearchDatasetRegistryV1(Path(cast(str, raw_root))).load(
+                cast(str, dataset_id)
+            )
+            source = rebind_research_dataset(
+                source,
+                data_path=data_path,
+                dataset=dataset,
+                dataset_id=cast(str, dataset_id),
+            )
+        except (HistoricalMarketDataError, OSError, ValueError) as error:
+            raise DomainRefusal(
+                "invalid_request", f"the registered research input is unusable: {error}"
+            ) from None
     scenario_id = path.name
     source_identity = _scenario_identity(source)
     parameters = request.get("parameters")
@@ -314,6 +448,12 @@ def _mode_freeze(request: dict[str, Any]) -> dict[str, Any]:
         "package_file": envelope["package_file"],
         "package_sha256": envelope["package_sha256"],
         "scenario_identity_sha256": envelope["scenario_identity_sha256"],
+        # The exact verified research evidence a worker must re-read and
+        # re-digest, or the fact that this input carries none. An envelope
+        # written before these optional fields existed simply has none.
+        "research_input": envelope.get("research_input"),
+        "research_input_sha256": envelope.get("research_input_sha256"),
+        "research_input_canonical": envelope.get("research_input_canonical"),
         "job_schema": envelope["job_schema"],
         "report_schema": envelope["report_schema"],
         "path_schema": envelope["path_schema"],
@@ -412,15 +552,31 @@ def _mode_validate(request: dict[str, Any]) -> dict[str, Any]:
 def _report_source_matches(
     report: dict[str, Any], scenario: LoadedBacktestScenario, envelope: dict[str, Any]
 ) -> bool:
-    """Whether the report states exactly the scenario and data this input admitted."""
+    """Whether the report states exactly the source and data this input admitted.
+
+    The engine's own manifest recorded the digest of the source bytes it read at
+    execution. That reading is held to the admitted source — the confirmed
+    research evidence's source digest when this input is a registered one, and
+    the digest of the source actually loaded for this frozen input otherwise —
+    so a run of a *different* full source cannot be registered merely because
+    its selected fingerprint still matches.
+    """
     source = report.get("source")
     if type(source) is not dict:
         return False
     if source.get("scenario_sha256") != envelope.get("scenario_identity_sha256"):
         return False
     data = source.get("data")
-    fingerprint = data.get("fingerprint") if type(data) is dict else None
+    if type(data) is not dict:
+        return False
+    fingerprint = data.get("fingerprint")
     if type(fingerprint) is not dict:
+        return False
+    research = envelope.get("research_input")
+    admitted_source = (
+        research.get("source_sha256") if type(research) is dict else None
+    ) or scenario.dataset.source_bytes_sha256.value
+    if data.get("source_file_sha256") != admitted_source:
         return False
     snapshot = cast(dict[str, Any], envelope["snapshot"])
     identity = snapshot.get("identity")

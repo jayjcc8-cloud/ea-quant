@@ -756,6 +756,26 @@ def _load_frozen_scenario(request: dict[str, Any]) -> LoadedBacktestScenario:
         encoded = canonical_json_bytes(evidence)
         if _digest(encoded) != expected_evidence:
             raise WorkerError("frozen research input evidence conflicts")
+        # The evidence this worker was handed must be evidence *about the source
+        # it just read*. Its own digest only proves the document is intact, so
+        # the loaded dataset's real source digest, selected fingerprint, record
+        # count and replay window are what the evidence is held to — a source
+        # whose selected fingerprint is unchanged but whose bytes are not the
+        # confirmed ones is refused before the engine is reached.
+        if type(evidence) is not dict:
+            raise WorkerError("frozen research input evidence is not one mapping")
+        dataset = scenario.dataset
+        window = dataset.replay_window
+        if (
+            evidence.get("source_sha256") != dataset.source_bytes_sha256.value
+            or evidence.get("data_sha256") != dataset.selection.fingerprint.sha256.value
+            or evidence.get("record_count") != dataset.selection.fingerprint.record_count
+            or evidence.get("replay_start_utc")
+            != window.start_inclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            or evidence.get("replay_end_utc")
+            != window.end_exclusive.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        ):
+            raise WorkerError("the research input evidence is not this job's source")
         scenario = replace(scenario, research_input_bytes=encoded)
     return scenario
 

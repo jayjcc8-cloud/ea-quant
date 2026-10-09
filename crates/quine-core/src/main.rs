@@ -57,6 +57,10 @@ fn serve(arguments: &[String]) {
     }
     config.crash_before_commit = flags.present("test-crash-before-commit");
     config.tamper_before_read = flags.present("test-tamper-before-read");
+    config.faults.fail_running_state = flags.present("test-fail-running-state");
+    config.faults.lose_running_state_receipt = flags.present("test-lose-running-state-receipt");
+    config.faults.fail_abort_reread = flags.present("test-fail-abort-reread");
+    config.faults.hold_after_spawn = flags.present("test-hold-after-spawn");
 
     let mut core = match Core::open(config) {
         Ok(core) => core,

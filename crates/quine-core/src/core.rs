@@ -37,6 +37,19 @@ pub const INPUT_CHANGED: &str = "input_changed";
 /// How long one bounded supervision step may sleep while idle.
 const IDLE_TICK: Duration = Duration::from_millis(3);
 
+#[derive(Debug, Clone, Default)]
+pub struct CoreFaults {
+    /// Test-only: fail the durable running-state write after a real spawn.
+    pub fail_running_state: bool,
+    /// Test-only: let the running-state write commit, then lose its receipt.
+    pub lose_running_state_receipt: bool,
+    /// Test-only: fail the durable re-read an aborted run needs to settle.
+    pub fail_abort_reread: bool,
+    /// Test-only: hold the spawn-to-running-state window open until the release
+    /// file appears, so that window can be witnessed instead of raced.
+    pub hold_after_spawn: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
     pub workspace: PathBuf,
@@ -55,6 +68,8 @@ pub struct CoreConfig {
     /// Test-only: alter the staged bytes after validation proved them, so the
     /// published-bytes check is reproducible.
     pub tamper_before_read: bool,
+    /// Test-only: narrow injected failures of the running-state boundary.
+    pub faults: CoreFaults,
 }
 
 impl CoreConfig {
@@ -68,6 +83,7 @@ impl CoreConfig {
             commit_delay: Duration::ZERO,
             crash_before_commit: false,
             tamper_before_read: false,
+            faults: CoreFaults::default(),
         }
     }
 }
@@ -101,6 +117,11 @@ struct Run {
     control: PathBuf,
     /// A cancellation this core has accepted for this attempt.
     stop: bool,
+    /// The running-state receipt failed after a real spawn: the group is
+    /// supervised to a proven stop, and nothing is ever registered for it.
+    aborted: bool,
+    /// Test-only: the spawn-to-running-state window is held open.
+    holding: bool,
     phase: Phase,
 }
 
@@ -111,6 +132,8 @@ enum Action {
     Settle,
     Unknown,
     Commit,
+    /// Finish the held spawn window by recording the running state.
+    Release,
 }
 
 pub struct Core {
@@ -312,6 +335,8 @@ impl Core {
             frozen,
             control,
             stop: false,
+            aborted: false,
+            holding: false,
             phase: Phase::Idle,
         };
         let key = run_key(strategy_id, intent_id);
@@ -349,13 +374,36 @@ impl Core {
     fn tick(&mut self) {
         let keys: Vec<String> = self.runs.keys().cloned().collect();
         for key in keys {
-            let stop = self.runs.get(&key).map(|run| run.stop).unwrap_or(false);
+            let (stop, aborted, holding) = match self.runs.get(&key) {
+                Some(run) => (run.stop, run.aborted, run.holding),
+                None => continue,
+            };
+            // An aborted run is driven to a proven stop as well, and its
+            // supervision is never dropped while that is unproven.
+            let stop_requested = stop || aborted;
+            let released = holding && self.release_requested();
             let action = match self.runs.get_mut(&key) {
                 Some(run) => match &mut run.phase {
                     Phase::Idle => Action::None,
+                    Phase::Worker { guard } if holding => match guard.poll(stop_requested) {
+                        GuardState::Running => {
+                            if released {
+                                Action::Release
+                            } else {
+                                Action::None
+                            }
+                        }
+                        // The group died inside the held window: the running
+                        // state was never recorded for it, so nothing may be
+                        // registered from whatever it left behind.
+                        _ => {
+                            run.aborted = true;
+                            Action::Settle
+                        }
+                    },
                     Phase::Freeze { guard, .. }
                     | Phase::Worker { guard }
-                    | Phase::Validate { guard, .. } => match guard.poll(stop) {
+                    | Phase::Validate { guard, .. } => match guard.poll(stop_requested) {
                         GuardState::Running => Action::None,
                         GuardState::Stopped => Action::Settle,
                         GuardState::Unconfirmed | GuardState::Abandoned => Action::Unknown,
@@ -377,14 +425,42 @@ impl Core {
                 Action::Settle => self.settle(&key),
                 Action::Unknown => self.mark_unknown(&key),
                 Action::Commit => self.commit_validated(&key),
+                Action::Release => self.finish_hold(&key),
+            }
+        }
+    }
+
+    /// Test-only: whether the held spawn window has been released.
+    fn release_requested(&self) -> bool {
+        self.config.workspace.join("hold-release").is_file()
+    }
+
+    /// Finish a held spawn window: record the running state, or abort.
+    fn finish_hold(&mut self, key: &str) {
+        if let Some(run) = self.runs.get_mut(key) {
+            run.holding = false;
+        }
+        let (strategy_id, intent_id) = split_key(key);
+        if self.start_running_state(&strategy_id, &intent_id).is_err() {
+            if let Some(run) = self.runs.get_mut(key) {
+                run.aborted = true;
             }
         }
     }
 
     fn settle(&mut self, key: &str) {
-        let stop = self.runs.get(key).map(|run| run.stop).unwrap_or(false);
+        let (stop, aborted) = match self.runs.get(key) {
+            Some(run) => (run.stop, run.aborted),
+            None => return,
+        };
         if stop {
             self.settle_cancelled(key);
+            return;
+        }
+        if aborted {
+            // The group is proven gone, but this attempt's running-state receipt
+            // never was: it is never settled as a failure and never published.
+            self.settle_aborted(key);
             return;
         }
         let phase = match self.runs.get_mut(key) {
@@ -425,7 +501,7 @@ impl Core {
 
     /// Write the frozen files, then spawn the existing worker directly.
     fn materialize_and_spawn(&mut self, key: &str, frozen_result: Value) -> Result<(), QuineError> {
-        let (run_dir, argv) = {
+        let (control, argv) = {
             let run = match self.runs.get(key) {
                 Some(run) => run,
                 None => return Ok(()),
@@ -444,18 +520,41 @@ impl Core {
                 }
                 _ => None,
             };
+            let mut scenario = json!({
+                "path": scenario_path.display().to_string(),
+                "sha256": frozen_result
+                    .get("scenario_file_sha256")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "identity_sha256": frozen_result
+                    .get("scenario_identity_sha256")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            });
+            // A confirmed registered research input is carried whole: the
+            // admitted evidence value itself plus the digest of its canonical
+            // bytes, which is exactly what the worker re-reads and re-digests.
+            if let Some(research) = frozen_result
+                .get("research_input")
+                .filter(|value| !value.is_null())
+            {
+                let digest = frozen_result
+                    .get("research_input_sha256")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        QuineError::new(
+                            INPUT_CHANGED,
+                            "the frozen research evidence carries no digest",
+                        )
+                    })?;
+                scenario["research_input"] = research.clone();
+                scenario["research_input_sha256"] = json!(digest);
+            }
             let request = json!({
                 "schema": REQUEST_SCHEMA,
                 "job_id": run.job_id,
                 "attempt_id": run.attempt_id,
-                "scenario": {
-                    "path": scenario_path.display().to_string(),
-                    "sha256": frozen_result.get("scenario_file_sha256").cloned().unwrap_or(Value::Null),
-                    "identity_sha256": frozen_result
-                        .get("scenario_identity_sha256")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                },
+                "scenario": scenario,
                 "package": package_path.as_ref().map(|path| json!({
                     "path": path.display().to_string(),
                     "sha256": frozen_result.get("package_sha256").cloned().unwrap_or(Value::Null),
@@ -480,18 +579,57 @@ impl Core {
             )?;
             (run.control.clone(), argv)
         };
-        let _ = run_dir;
+        let _ = control;
         let guard = ChildGuard::spawn(&argv, None, true).map_err(|error| {
             QuineError::new(INPUT_CHANGED, format!("the worker did not start: {error}"))
         })?;
-        // Record that this attempt's compute actually started, at the fence the
-        // dispatch produced.
-        let (strategy_id, intent_id) = split_key(key);
-        let context = self.store.attempt_current(&strategy_id, &intent_id)?;
-        self.store
-            .mark_running(&strategy_id, &intent_id, context.revision)?;
+        // The live child is retained before anything else can fail: from here on
+        // the owned group stays supervised even if the durable record cannot be
+        // written, so a failure below can never release the slot while physical
+        // exit is unproven.
         if let Some(run) = self.runs.get_mut(key) {
             run.phase = Phase::Worker { guard };
+        }
+        let (strategy_id, intent_id) = split_key(key);
+        if self.config.faults.hold_after_spawn {
+            // Test-only: keep the spawn-to-running-state window open so it can be
+            // witnessed. The group is supervised exactly as usual throughout.
+            if let Some(run) = self.runs.get_mut(key) {
+                run.holding = true;
+            }
+            return Ok(());
+        }
+        if self.start_running_state(&strategy_id, &intent_id).is_err() {
+            // The running-state write, or its receipt, is uncertain. Fail closed:
+            // keep supervising, drive the group to a proven stop, and register
+            // nothing for this attempt — not a success, not a settled failure.
+            if let Some(run) = self.runs.get_mut(key) {
+                run.aborted = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record that this attempt's compute actually started, at the fence the
+    /// dispatch produced.
+    fn start_running_state(&self, strategy_id: &str, intent_id: &str) -> Result<(), QuineError> {
+        if self.config.faults.fail_running_state {
+            return Err(QuineError::new(
+                "internal",
+                "injected running-state write failure",
+            ));
+        }
+        let context = self.store.attempt_current(strategy_id, intent_id)?;
+        self.store
+            .mark_running(strategy_id, intent_id, context.revision)
+            .map(|_| ())?;
+        if self.config.faults.lose_running_state_receipt {
+            // The write committed, but this core never observed its receipt: the
+            // record may say anything and nothing may be assumed from it.
+            return Err(QuineError::new(
+                "internal",
+                "injected lost running-state receipt",
+            ));
         }
         Ok(())
     }
@@ -748,6 +886,30 @@ impl Core {
         }
     }
 
+    /// A run whose running-state receipt failed, with the whole group proven
+    /// gone. Nothing is registered for it and the slot is never released on an
+    /// unproven group or an unreadable record.
+    fn settle_aborted(&mut self, key: &str) {
+        let (strategy_id, intent_id) = split_key(key);
+        if self.config.faults.fail_abort_reread {
+            // A durable re-read this core cannot perform proves nothing, so the
+            // attempt is neither settled nor released and the owned group stays
+            // supervised.
+            return;
+        }
+        match self.store.attempt_context(&strategy_id, &intent_id) {
+            Ok(Some(context)) => {
+                let _ = self
+                    .store
+                    .mark_unknown(&strategy_id, &intent_id, context.revision);
+            }
+            _ => return,
+        }
+        if let Some(run) = self.runs.get_mut(key) {
+            run.phase = Phase::Idle;
+        }
+    }
+
     /// A group that could not be shown gone keeps the slot and stays unknown.
     fn mark_unknown(&mut self, key: &str) {
         let (strategy_id, intent_id) = split_key(key);
@@ -756,8 +918,11 @@ impl Core {
                 .store
                 .mark_unknown(&strategy_id, &intent_id, context.revision);
         }
-        if let Some(run) = self.runs.get_mut(key) {
-            run.phase = Phase::Idle;
+        let retains = self.runs.get(key).map(|run| run.aborted).unwrap_or(false);
+        if !retains {
+            if let Some(run) = self.runs.get_mut(key) {
+                run.phase = Phase::Idle;
+            }
         }
     }
 

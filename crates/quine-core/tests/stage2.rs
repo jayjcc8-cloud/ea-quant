@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use quine_core::canonical::canonical_json_bytes;
 use quine_core::protocol::{
     Budget, CancelParams, ConfirmParams, Envelope, Experiment, FrozenInput, QueryParams,
     ReplyEnvelope, Request, PROTOCOL_VERSION,
@@ -62,6 +63,21 @@ const PRICES: &str = "schema_version,venue,symbol,interval_start,interval_end,ad
 const SLOW_HOOK: &str =
     "import time\n\n\ndef hook(*, scenario, control, request, worker):\n    time.sleep(120)\n";
 
+/// A worker-side hook that records its own real process identity and starts a
+/// child that shares its process group, then keeps computing.
+const GROUP_HOOK: &str = "import json\nimport os\nimport subprocess\nimport sys\nimport time\n\n\ndef hook(*, scenario, control, request, worker):\n    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n    with open(os.path.join(str(control), 'group.json'), 'w') as handle:\n        json.dump({'pid': os.getpid(), 'pgid': os.getpgrp(), 'child': child.pid}, handle)\n        handle.flush()\n    time.sleep(300)\n";
+
+/// A registered local research input with its own economics.
+const RESEARCH_PRICES: &str = "schema_version,venue,symbol,interval_start,interval_end,adjustment,open,high,low,close,volume,source,source_sequence,revision,available_at
+1,XNAS,AAPL,2026-01-02T09:31:00.000000Z,2026-01-02T09:32:00.000000Z,raw,100.5,122.0,100.0,121.5,12.0,fixture.raw,2,0,2026-01-02T09:32:00.000000Z
+1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100.0,101.0,99.0,100.5,10.0,fixture.raw,0,0,2026-01-02T09:31:00.000000Z
+1,XNAS,AAPL,2026-01-02T09:30:00.000000Z,2026-01-02T09:31:00.000000Z,raw,100.0,101.5,99.0,101.0,11.0,fixture.raw,1,1,2026-01-02T09:31:30.000000Z
+1,XNAS,AAPL,2026-01-02T09:32:00.000000Z,2026-01-02T09:33:00.000000Z,raw,128.0,131.0,127.0,130.0,9.0,fixture.raw,3,0,2026-01-02T09:33:00.000000Z
+";
+
+/// The parameter override this run is confirmed with.
+const RESEARCH_PARAMETERS: &str = r#"{"initial_cash":"25000.5","strategy_parameters":{"target_quantity":"3","entry_delay_bars":1}}"#;
+
 fn python() -> PathBuf {
     // The venv path itself must be used, not its resolved base interpreter: the
     // isolated interpreter is the one whose own site-packages holds `ea`.
@@ -96,17 +112,17 @@ fn scenario_root(root: &Path) -> PathBuf {
 
 /// Freeze one admitted input by asking the stateless adapter for it, exactly as
 /// the Python Web service would render it.
-fn frozen_input(scenarios: &Path, parameters: Option<Value>) -> Value {
+fn snapshot_result(scenarios: &Path, request: &Value) -> Value {
     let adapter = scenarios.join("adapter");
     std::fs::create_dir_all(&adapter).unwrap();
     let request_path = adapter.join("request.json");
     let reply_path = adapter.join("reply.json");
     let scenario_path = scenarios.join("bounded-long.yaml");
     assert!(scenario_path.is_file(), "the fixture scenario is missing");
-    let mut request = json!({"scenario_path": scenario_path.display().to_string()});
-    if let Some(parameters) = parameters {
-        request["parameters"] = parameters;
-    }
+    let mut request = request.clone();
+    request["scenario_path"] = json!(scenario_path.display().to_string());
+    // Each invocation owns its own reply document.
+    let _ = std::fs::remove_file(&reply_path);
     std::fs::write(&request_path, serde_json::to_vec(&request).unwrap()).unwrap();
     let status = Command::new(python())
         .args(["-I", "-B", "-m", "ea.web.rust_domain", "snapshot"])
@@ -118,7 +134,137 @@ fn frozen_input(scenarios: &Path, parameters: Option<Value>) -> Value {
     let reply: Value =
         serde_json::from_slice(&std::fs::read(&reply_path).unwrap()).expect("adapter reply");
     assert_eq!(reply["status"], "ok", "{reply}");
-    reply["result"]["frozen"].clone()
+    reply["result"].clone()
+}
+
+fn frozen_input(scenarios: &Path, parameters: Option<Value>) -> Value {
+    let mut request = json!({});
+    if let Some(parameters) = parameters {
+        request["parameters"] = parameters;
+    }
+    snapshot_result(scenarios, &request)["frozen"].clone()
+}
+
+/// Freeze one admitted input over an explicitly registered local research input,
+/// with the parameter override this run is confirmed at.
+fn research_frozen_input(root: &Path) -> Value {
+    let scenarios = scenario_root(root);
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("full.csv"), RESEARCH_PRICES).unwrap();
+    snapshot_result(
+        &scenarios,
+        &json!({
+            "data_root": data.display().to_string(),
+            "dataset_id": "full.csv",
+            "parameters": serde_json::from_str::<Value>(RESEARCH_PARAMETERS).unwrap(),
+        }),
+    )["frozen"]
+        .clone()
+}
+
+/// Probe one process identity without signalling it: `None` only when it exists.
+fn process_probe(pid: i32) -> Option<i32> {
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return None;
+    }
+    std::io::Error::last_os_error().raw_os_error()
+}
+
+/// Probe one process group without signalling it, returning the raw answer.
+fn group_probe(pgid: i32) -> Option<i32> {
+    if unsafe { libc::killpg(pgid, 0) } == 0 {
+        return None;
+    }
+    std::io::Error::last_os_error().raw_os_error()
+}
+
+/// Guarantees the owned worker group is gone even when an assertion fails.
+struct GroupCleanup {
+    pgid: i32,
+}
+
+impl GroupCleanup {
+    fn armed(pgid: i32) -> GroupCleanup {
+        GroupCleanup { pgid }
+    }
+
+    /// Once absence is proven there is nothing left to clean up, and the old
+    /// group id must never be signalled again.
+    fn disarm(mut self) {
+        self.pgid = 0;
+    }
+}
+
+impl Drop for GroupCleanup {
+    fn drop(&mut self) {
+        if self.pgid > 1 {
+            unsafe {
+                libc::killpg(self.pgid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// The real process identity a worker-side hook witnessed about itself.
+struct WitnessedGroup {
+    pid: i32,
+    pgid: i32,
+    child: i32,
+}
+
+/// Read the identity a worker-side hook recorded, proving the group is real and
+/// alive right now: the leader, its own child and the captured group are all
+/// present before anything is killed.
+fn witness_group(workspace: &Path, job_id: &str) -> WitnessedGroup {
+    let recorded = workspace.join("control").join(job_id).join("group.json");
+    wait_for_path(&recorded);
+    let document: Value = serde_json::from_slice(&std::fs::read(&recorded).unwrap()).unwrap();
+    let witness = WitnessedGroup {
+        pid: document["pid"].as_i64().expect("a recorded pid") as i32,
+        pgid: document["pgid"].as_i64().expect("a recorded pgid") as i32,
+        child: document["child"].as_i64().expect("a recorded child pid") as i32,
+    };
+    assert_eq!(
+        witness.pgid, witness.pid,
+        "the worker must lead its own captured group"
+    );
+    assert_eq!(
+        process_probe(witness.pid),
+        None,
+        "the worker must be present when it is witnessed"
+    );
+    assert_eq!(
+        process_probe(witness.child),
+        None,
+        "the worker's own child must be present when it is witnessed"
+    );
+    assert_eq!(
+        group_probe(witness.pgid),
+        None,
+        "the captured group must exist when it is witnessed"
+    );
+    witness
+}
+
+/// Physical absence: the captured group, the worker and its own child must each
+/// answer exactly `ESRCH`. Any other answer — including a transient EPERM — is
+/// not absence and is polled within the bound rather than accepted.
+fn wait_group_absence(witness: &WitnessedGroup, bound: Duration) {
+    let deadline = Instant::now() + bound;
+    loop {
+        let group = group_probe(witness.pgid);
+        let worker = process_probe(witness.pid);
+        let child = process_probe(witness.child);
+        if group == Some(libc::ESRCH) && worker == Some(libc::ESRCH) && child == Some(libc::ESRCH) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the owned group is not proven absent: group={group:?} worker={worker:?} child={child:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 struct Client {
@@ -484,26 +630,32 @@ fn crash_between_publication_and_registration_recovers_fail_closed() {
 }
 
 #[test]
-fn killing_the_core_takes_the_worker_group_with_it() {
+fn killing_the_core_takes_the_whole_worker_group_with_it() {
     let root = temp_dir("parent-death");
     let frozen = frozen_input(&scenario_root(&root), None);
-    let hook = root.join("slow-hook.py");
-    std::fs::write(&hook, SLOW_HOOK).unwrap();
+    let hook = root.join("group-hook.py");
+    std::fs::write(&hook, GROUP_HOOK).unwrap();
     let hook_reference = format!("{}:hook", hook.display());
     let python = python();
     let mut core = CoreProcess::start(&root, &python, &["--test-hook", hook_reference.as_str()]);
     let first = confirmed(&core.client.confirm(params("intent-1", 1, &frozen)));
     wait_for_status(&mut core.client, "intent-1", &["running"]);
 
-    // The worker's own group is recorded through the inherited liveness pipe, so
-    // an abrupt core death ends the compute rather than orphaning it.
-    let events = root
-        .join("control")
-        .join(&first.job_id)
-        .join("events.jsonl");
-    wait_for_path(&events);
+    // The hook has really run: it recorded its own pid and group, and the child
+    // it started shares that group. All three are present before anything dies.
+    let witness = witness_group(&root, &first.job_id);
+    let cleanup = GroupCleanup::armed(witness.pgid);
+
+    // Only the owned Rust core is killed; the worker learns its owner is gone
+    // through the inherited liveness channel.
     core.child.kill().unwrap();
     core.child.wait().unwrap();
+
+    // Physical proof: the captured group, the worker and its own child must each
+    // answer exactly ESRCH within the bound. A transient EPERM is polled, never
+    // accepted as absence.
+    wait_group_absence(&witness, Duration::from_secs(30));
+    cleanup.disarm();
 
     let mut restarted = CoreProcess::start(&root, &python, &[]);
     let queried = wait_for_status(&mut restarted.client, "intent-1", &["unknown"]);
@@ -515,6 +667,296 @@ fn killing_the_core_takes_the_worker_group_with_it() {
     assert!(!second.ok);
     assert_eq!(second.error.unwrap().code, "eligibility_held");
 
+    restarted.kill();
+}
+
+#[test]
+fn a_registered_research_input_runs_on_its_own_evidence() {
+    let root = temp_dir("research-input");
+    let frozen = research_frozen_input(&root);
+    let snapshot = &frozen["snapshot"];
+    assert_eq!(snapshot["schema"], "ea.local-web-input.v2");
+    let evidence = snapshot["research_input"].clone();
+    assert_eq!(evidence["dataset_id"], "full.csv");
+    assert_eq!(frozen["research_input"], evidence);
+    assert_eq!(snapshot["identity"]["dataset_id"], "full.csv");
+    let canonical = canonical_json_bytes(&evidence).unwrap();
+    assert_eq!(
+        frozen["research_input_sha256"],
+        json!(sha256_hex(&canonical)),
+        "the carried digest must be the one of the evidence's canonical bytes"
+    );
+    assert_eq!(
+        frozen["research_input_canonical"],
+        json!(hex_encode(&canonical))
+    );
+    // A different confirmation of the *same* scenario without the dataset
+    // binding is a different admitted identity.
+    let plain = frozen_input(&scenario_root(&root), None);
+    assert_ne!(
+        frozen["scenario_identity_sha256"],
+        plain["scenario_identity_sha256"]
+    );
+
+    let python = python();
+    let mut core = CoreProcess::start(&root, &python, &[]);
+    let first = confirmed(&core.client.confirm(params("intent-1", 1, &frozen)));
+    let queried = wait_for_status(&mut core.client, "intent-1", &["succeeded"]);
+    let experiment: Experiment = serde_json::from_value(queried["experiment"].clone()).unwrap();
+    let official = experiment.result.clone().expect("an official result");
+    let facts: Vec<Value> = serde_json::from_value(official["facts"].clone()).unwrap();
+    let mut readings = std::collections::BTreeMap::new();
+    for fact in &facts {
+        readings.insert(
+            fact["path"].as_str().unwrap().to_string(),
+            fact["value"].clone(),
+        );
+    }
+    // The engine's own readings of this registered input at three units, one bar
+    // after entry, from the overridden funding of 25000.5.
+    assert_eq!(
+        readings["economics.counts.orders"],
+        json!(1),
+        "{readings:?}"
+    );
+    assert_eq!(readings["economics.counts.fills"], json!(1), "{readings:?}");
+    assert_eq!(
+        readings["economics.net_pnl.amount"],
+        json!("25.5"),
+        "{readings:?}"
+    );
+    assert_eq!(
+        readings["economics.fees.amount"],
+        json!("0"),
+        "{readings:?}"
+    );
+    assert_eq!(
+        readings["economics.total_return.value"],
+        json!("0.001019979600407992"),
+        "{readings:?}"
+    );
+    assert_eq!(official["run_id"], json!(first.attempt_id), "{official}");
+
+    // The request the core wrote carries the whole admitted evidence, and the
+    // worker that consumed it verified exactly that digest.
+    let request: Value = serde_json::from_slice(
+        &std::fs::read(
+            root.join("control")
+                .join(&first.job_id)
+                .join("request.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request["scenario"]["research_input"], evidence);
+    assert_eq!(
+        request["scenario"]["research_input_sha256"],
+        frozen["research_input_sha256"]
+    );
+    for name in ARTIFACTS {
+        let published = root.join("official").join(&first.job_id).join(name);
+        assert!(published.is_file(), "the official {name} was not published");
+    }
+
+    core.kill();
+}
+
+#[test]
+fn a_source_drift_that_keeps_the_selected_fingerprint_never_reaches_the_engine() {
+    let root = temp_dir("research-source-drift");
+    let frozen = research_frozen_input(&root);
+    // A byte-only variation of the registered source: it parses to exactly the
+    // same selected rows, so the fingerprint, the record count and the scenario
+    // identity are unchanged while the source bytes are not the confirmed ones.
+    let source = root.join("data").join("full.csv");
+    let raw = std::fs::read(&source).unwrap();
+    let mut drifted = Vec::with_capacity(raw.len() + 8);
+    for byte in &raw {
+        if *byte == b'\n' {
+            drifted.push(b'\r');
+        }
+        drifted.push(*byte);
+    }
+    assert_ne!(drifted, raw);
+    std::fs::write(&source, &drifted).unwrap();
+
+    let python = python();
+    let mut core = CoreProcess::start(&root, &python, &[]);
+    let first = confirmed(&core.client.confirm(params("intent-1", 1, &frozen)));
+    let queried = wait_for_status(&mut core.client, "intent-1", &["failed"]);
+    let experiment: Experiment = serde_json::from_value(queried["experiment"].clone()).unwrap();
+    assert_eq!(
+        experiment.result.unwrap()["code"],
+        json!("identity_mismatch"),
+        "a source that is not the confirmed one must never be admitted"
+    );
+    assert!(!root.join("official").join(&first.job_id).exists());
+    core.kill();
+}
+
+#[test]
+fn research_evidence_that_is_not_the_snapshots_is_refused_before_any_worker() {
+    let root = temp_dir("research-drift");
+    let mut frozen = research_frozen_input(&root);
+    // Self-consistent replacement: the altered evidence reproduces its own
+    // canonical bytes and digest, and only the snapshot disagrees with it.
+    let replaced = {
+        let mut value = frozen["research_input"].clone();
+        value["dataset_id"] = json!("other.csv");
+        value
+    };
+    frozen["research_input"] = replaced.clone();
+    frozen["research_input_canonical"] =
+        json!(hex_encode(&canonical_json_bytes(&replaced).unwrap()));
+    let python = python();
+    let mut core = CoreProcess::start(&root, &python, &[]);
+    let reply = core.client.confirm(params("intent-1", 1, &frozen));
+    assert!(reply.ok, "{:?}", reply.error);
+    let queried = wait_for_status(&mut core.client, "intent-1", &["failed"]);
+    let experiment: Experiment = serde_json::from_value(queried["experiment"].clone()).unwrap();
+    let result = experiment.result.unwrap();
+    assert!(
+        result["code"] == json!("digest_mismatch") || result["code"] == json!("identity_mismatch"),
+        "{result}"
+    );
+    assert!(!root.join("official").join(&experiment.job_id).exists());
+    core.kill();
+}
+
+#[test]
+fn a_failed_running_state_write_never_registers_a_result_or_frees_the_slot() {
+    let root = temp_dir("running-state");
+    let frozen = frozen_input(&scenario_root(&root), None);
+    let hook = root.join("group-hook.py");
+    std::fs::write(&hook, GROUP_HOOK).unwrap();
+    let hook_reference = format!("{}:hook", hook.display());
+    let python = python();
+    let mut core = CoreProcess::start(
+        &root,
+        &python,
+        &[
+            "--test-hook",
+            hook_reference.as_str(),
+            "--test-fail-running-state",
+            "--test-hold-after-spawn",
+        ],
+    );
+    let first = confirmed(&core.client.confirm(params("intent-1", 1, &frozen)));
+
+    // The window is real: a live worker and its own live child exist between the
+    // spawn and the running-state write that never confirms.
+    let witness = witness_group(&root, &first.job_id);
+    let cleanup = GroupCleanup::armed(witness.pgid);
+
+    // While that group is alive and the running state was never recorded,
+    // nothing may be registered and the slot may not be released.
+    let held = core.client.query("strategy-a", "intent-1");
+    assert_eq!(held["experiment"]["status"], json!("dispatched"), "{held}");
+    assert_eq!(held["experiment"]["result"], Value::Null, "{held}");
+    assert_eq!(
+        held["experiment"]["dispatch_eligible"],
+        json!(false),
+        "{held}"
+    );
+
+    // Release the window: the running-state write fails, and the owned group is
+    // driven to a proven stop before anything is settled.
+    std::fs::write(root.join("hold-release"), b"release").unwrap();
+    wait_group_absence(&witness, Duration::from_secs(30));
+    cleanup.disarm();
+
+    let settled = wait_for_status(&mut core.client, "intent-1", &["unknown"]);
+    let experiment: Experiment = serde_json::from_value(settled["experiment"].clone()).unwrap();
+    assert!(
+        experiment.result.is_none(),
+        "an unproven run registered a terminal result"
+    );
+    assert!(
+        !experiment.dispatch_eligible,
+        "an unproven run freed the slot"
+    );
+    assert!(!root.join("official").join(&first.job_id).exists());
+
+    // No automatic re-run or re-admission.
+    let second = core.client.confirm(params("intent-2", 1, &frozen));
+    assert!(!second.ok);
+    assert_eq!(second.error.unwrap().code, "eligibility_held");
+    core.kill();
+
+    // A restart re-reads the durable record and still holds the slot.
+    let mut restarted = CoreProcess::start(&root, &python, &[]);
+    let after = wait_for_status(&mut restarted.client, "intent-1", &["unknown"]);
+    let experiment: Experiment = serde_json::from_value(after["experiment"].clone()).unwrap();
+    assert!(experiment.result.is_none());
+    assert!(!experiment.dispatch_eligible);
+    restarted.kill();
+}
+
+#[test]
+fn a_lost_running_state_receipt_retains_supervision_and_registers_nothing() {
+    let root = temp_dir("running-state-lost-receipt");
+    let frozen = frozen_input(&scenario_root(&root), None);
+    let hook = root.join("group-hook.py");
+    std::fs::write(&hook, GROUP_HOOK).unwrap();
+    let hook_reference = format!("{}:hook", hook.display());
+    let python = python();
+    let mut core = CoreProcess::start(
+        &root,
+        &python,
+        &[
+            "--test-hook",
+            hook_reference.as_str(),
+            // The write commits, its receipt is lost, and the durable re-read
+            // that could reconcile it fails.
+            "--test-lose-running-state-receipt",
+            "--test-hold-after-spawn",
+            "--test-fail-abort-reread",
+        ],
+    );
+    let first = confirmed(&core.client.confirm(params("intent-1", 1, &frozen)));
+
+    let witness = witness_group(&root, &first.job_id);
+    let cleanup = GroupCleanup::armed(witness.pgid);
+    let held = core.client.query("strategy-a", "intent-1");
+    assert_eq!(held["experiment"]["result"], Value::Null, "{held}");
+    assert_eq!(
+        held["experiment"]["dispatch_eligible"],
+        json!(false),
+        "{held}"
+    );
+
+    std::fs::write(root.join("hold-release"), b"release").unwrap();
+    wait_group_absence(&witness, Duration::from_secs(30));
+    cleanup.disarm();
+
+    // The group is proven gone, but the running state was never observed and
+    // the durable re-read failed: nothing is settled, nothing is published, and
+    // the slot stays held.
+    let queried = core.client.query("strategy-a", "intent-1");
+    assert_eq!(queried["experiment"]["result"], Value::Null, "{queried}");
+    assert_eq!(
+        queried["experiment"]["dispatch_eligible"],
+        json!(false),
+        "{queried}"
+    );
+    let status = queried["experiment"]["status"].as_str().unwrap_or("");
+    assert!(
+        status == "running" || status == "dispatched",
+        "an unobserved receipt settled the attempt as {status}"
+    );
+    assert!(!root.join("official").join(&first.job_id).exists());
+
+    let second = core.client.confirm(params("intent-2", 1, &frozen));
+    assert!(!second.ok);
+    assert_eq!(second.error.unwrap().code, "eligibility_held");
+    core.kill();
+
+    // A restart reconciles the unproven attempt honestly and keeps the slot.
+    let mut restarted = CoreProcess::start(&root, &python, &[]);
+    let after = wait_for_status(&mut restarted.client, "intent-1", &["unknown"]);
+    let experiment: Experiment = serde_json::from_value(after["experiment"].clone()).unwrap();
+    assert!(experiment.result.is_none());
+    assert!(!experiment.dispatch_eligible);
     restarted.kill();
 }
 
