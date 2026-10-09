@@ -137,9 +137,7 @@ def _build_core() -> Path:
             timeout=900,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        raise AssertionError(
-            f"the Rust toolchain {command!r} could not be run: {error}"
-        ) from None
+        raise AssertionError(f"the Rust toolchain {command!r} could not be run: {error}") from None
     if built.returncode != 0 or not CORE_BINARY.is_file():
         detail = built.stderr.decode("utf-8", errors="replace")[-4000:]
         raise AssertionError(f"quine-core could not be built from this checkout:\n{detail}")
@@ -173,9 +171,7 @@ def test_a_toolchain_that_cannot_build_this_crate_fails_with_its_own_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A toolchain that is present and fails is reported as that build failure."""
-    monkeypatch.setattr(
-        sys.modules[__name__], "_cargo", lambda: (sys.executable, dict(os.environ))
-    )
+    monkeypatch.setattr(sys.modules[__name__], "_cargo", lambda: (sys.executable, dict(os.environ)))
     with pytest.raises(AssertionError, match="could not be built from this checkout"):
         _build_core()
 
