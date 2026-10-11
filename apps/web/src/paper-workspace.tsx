@@ -2,22 +2,19 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import type { Candidate } from './candidates'
 import { PaperApiError, paperApi, type PaperApi, type PaperInstance, type PaperPreparation, type PaperRequest } from './paper-api'
-import type { PaperEvents, PaperHealth, PaperOverview } from './radian-api'
+import { observationTime, paperObservation, paperStateLabels } from './paper-observation'
+import { PaperRuntimeStatus } from './paper-runtime-status'
+import type { PaperEvents, PaperOverview } from './radian-api'
 import { PaperStatus } from './paper-status'
 import './paper-workspace.css'
 
 const PENDING = 'quine.local-paper.pending.v1'
+const OFFLINE = '连接中断：保留上次观测，当前进程与停止状态未知。'
 const label = (value: unknown) => value === undefined || value === null || value === '' ? '未提供' : String(value)
-const time = (value?: string | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '未提供'
-const states: Record<string, string> = { starting: '正在启动', running: '运行中', stopping: '正在停止', stopped: '已停止', failed: '运行失败', unknown: '状态未知', stop_requested: '已请求停止 · 尚未确认', start_failed: '启动失败 · 未创建实例' }
 const blockers: Record<string, string> = {
   explicit_research_acceptance_required: '需先完成人工研究决定',
   unsupported_paper_profile_requires_action_v2_v4_v5: '当前策略不支持持续模拟，需使用已有 Action V2 / V4 或 V5 候选',
   recorded_implementation_required: '此证据属于另一代码版本，请使用相同版本或重新研究验证',
-}
-function health(overview?: PaperOverview): PaperHealth | null {
-  const value = overview?.health
-  return value && !('available' in value) && value.run_id === overview?.run_id ? value : null
 }
 function pendingRequest(): PaperRequest | null {
   try { return JSON.parse(sessionStorage.getItem(PENDING) ?? 'null') as PaperRequest | null } catch { return null }
@@ -49,9 +46,10 @@ export function PaperWorkspace({ api = paperApi }: { api?: PaperApi }) {
   const mounted = useRef(true)
   const row = instances.find(item => item.run_id === selected) ?? instances[0]
   const events = eventResult?.run_id === row?.run_id ? eventResult : null
-  const overview = row?.overview
-  const observedHealth = health(overview)
-  const fresh = !disconnected && overview?.lease_held === true && observedHealth?.process_alive === true && observedHealth.projection_stale === false
+  const observation = row ? paperObservation(row, disconnected) : null
+  const overview = observation?.overview
+  const observedHealth = observation?.health
+  const fresh = observation?.current === true
   const active = instances.some(item => !item.terminal_confirmed)
   const updatePending = (value: PaperRequest | null) => {
     if (value) sessionStorage.setItem(PENDING, JSON.stringify(value)); else sessionStorage.removeItem(PENDING)
@@ -68,7 +66,7 @@ export function PaperWorkspace({ api = paperApi }: { api?: PaperApi }) {
         setSelected(retained.request_id); updatePending(null); setConfigure(false)
       }
     } catch {
-      if (mounted.current && epoch.current === token) { setDisconnected(true); setError('连接中断：保留上次观测，当前进程与停止状态未知。') }
+      if (mounted.current && epoch.current === token) setDisconnected(true)
     }
   }, [api])
   useEffect(() => {
@@ -132,19 +130,19 @@ export function PaperWorkspace({ api = paperApi }: { api?: PaperApi }) {
   return <div className="paper-workspace">
     <div className="paper-main">
       <header className="paper-heading"><div><p className="paper-eyebrow">运行工作区</p><h1>{row?.request.name ?? '开启本地模拟'}</h1><div className="paper-meta"><span className="paper-mode">本地模拟 · 无真实资金</span>{row?.strategy && <span>固定版本 v{row.strategy.version}</span>}{row && <Link to={`/backtests/${row.source_job_id}`}>查看来源研究 ↗</Link>}<span>仅应用打开期间运行</span></div></div><div className="paper-actions"><button onClick={() => { setError(''); void refresh() }}>刷新状态</button><button disabled={active || !!pending || busy || disconnected} onClick={() => setConfigure(value => !value)}>配置新实例</button>{row && !row.terminal_confirmed && <button className="paper-stop" disabled={busy || disconnected} onClick={() => void stop()}>{row.stop_requested ? '再次请求并查询停止' : '停止运行'}</button>}</div></header>
+      {disconnected && <p role="alert" className="notice error">{OFFLINE}</p>}
       {error && <p role="alert" className="notice error">{error}</p>}
       {pending && <div className="paper-unknown" role="status"><strong>启动结果尚未确认</strong><p>保留同一请求身份；不会自动重发，也不会新建第二个实例。</p><button onClick={() => void queryPending()}>查询原启动请求</button></div>}
-      {!!instances.length && <label className="paper-history">运行实例<select aria-label="运行实例" value={row?.run_id ?? ''} onChange={event => { setSelected(event.target.value); setTab('overview') }}>{instances.map(item => <option key={item.run_id} value={item.run_id}>{item.request.name} · {states[item.state] ?? '状态未知'} · {time(item.created_at)}</option>)}</select></label>}
+      {!!instances.length && <label className="paper-history">运行实例<select aria-label="运行实例" value={row?.run_id ?? ''} onChange={event => { setSelected(event.target.value); setTab('overview') }}>{instances.map(item => <option key={item.run_id} value={item.run_id}>{item.request.name} · {paperStateLabels[item.state] ?? '状态未知'} · {observationTime(item.created_at)}</option>)}</select></label>}
       {(configure || !instances.length) && !pending && <section className="paper-setup" aria-label="本地模拟配置"><header><h2>从研究候选开始</h2><Link to="/candidates">查看候选与人工决定 ↗</Link></header><p>先完成成功来源研究和后续时间窗验证，再人工接受候选。启动始终需要单独确认。</p><label>选择研究候选<select aria-label="选择研究候选" disabled={busy || active} value={candidateId} onChange={event => { setCandidateId(event.target.value); setConfirmed(false); setError('') }}><option value="">请选择已保存的候选</option>{candidates.map(item => <option key={item.candidate_id} value={item.candidate_id}>{item.projection?.strategy.id ?? '证据不可用'} · {item.status} · {item.candidate_id.slice(0, 8)}</option>)}</select></label>{!candidates.length && <p>还没有候选。<Link to="/strategies">返回研究</Link>，完成 source 与 holdout 后创建候选。</p>}
         {preparation && <><div className="paper-fixed"><h3>固定研究配置</h3><dl><div><dt>策略版本</dt><dd>{preparation.configuration.strategy.id} v{preparation.configuration.strategy.version ?? 1}</dd></div><div><dt>模拟标的</dt><dd>{preparation.configuration.instrument.venue}:{preparation.configuration.instrument.symbol}</dd></div><div><dt>初始模拟资金</dt><dd>{preparation.configuration.funding.initial_cash} {preparation.configuration.funding.currency}</dd></div><div><dt>来源报告</dt><dd><Link to={`/backtests/${preparation.source_job_id}`}>打开正式研究报告 ↗</Link></dd></div></dl><details><summary>策略参数、成本与风险配置</summary><pre>{JSON.stringify({ parameters: preparation.configuration.strategy.parameters, execution: preparation.configuration.execution, risk: preparation.configuration.risk }, null, 2)}</pre></details></div>{!preparation.eligible && <p role="alert">{preparation.blockers.map(item => blockers[item] ?? item).join('；')}</p>}{preparation.small_sample_warning && <p className="paper-caution">证据为短样本，仅可验证流程，不代表策略稳健性。</p>}<div className="paper-fields"><label>实例名<input value={name} maxLength={80} onChange={event => setName(event.target.value)} /></label><label>生成价格序列<input value={prices} onChange={event => setPrices(event.target.value)} placeholder="例如 100, 101, 99" /><small>本机循环生成，非外部实时行情</small></label><label>行情间隔（秒）<input type="number" min="0.01" max="10" step="0.01" value={interval} onChange={event => setInterval(event.target.value)} /></label></div><label className="paper-confirm"><input type="checkbox" checked={confirmed} disabled={!preparation.eligible || active} onChange={event => setConfirmed(event.target.checked)} />我确认以以上固定版本与生成行情启动本地模拟；停止不代表平仓。</label><button className="paper-primary" disabled={busy || active || !confirmed || !preparation.eligible || !preparation.start_available || disconnected} onClick={() => void start()}>确认启动本地模拟</button></>}
       </section>}
       {row && <>
-        <section className={`paper-status-strip ${fresh && row.state === 'running' ? 'is-fresh' : ''}`} aria-label="运行观测"><div><span className="paper-status-dot" /><strong>{disconnected ? '断连 · 状态未知' : states[row.state] ?? '状态未知'}</strong></div><div><span>真实进程 / 租约</span><strong>{disconnected ? '未知' : overview?.available ? overview.lease_held ? '占用中' : '已释放' : '未确认'}</strong></div><div><span>策略心跳</span><strong>{fresh ? label(observedHealth?.strategy_heartbeat_state) : '历史 / 未确认'}</strong></div><div><span>行情 freshness</span><strong>{fresh ? label(observedHealth?.market_state) : '历史 / 未确认'}</strong></div></section>
-        <div className="paper-times"><span>状态发布：{time(overview?.updated_at)}</span><span>本次观测：{time(row.observed_at)}</span><span>估值时点：{time(overview?.valuation_time)}</span></div>
+        {observation && <PaperRuntimeStatus observation={observation} />}
         <nav className="paper-tabs" aria-label="运行视图">{([['overview', '概览'], ['position', '持仓与成交'], ['events', '事件']] as const).map(([key, title]) => <button key={key} aria-pressed={tab === key} onClick={() => setTab(key)}>{title}</button>)}</nav>
-        {tab === 'overview' && <><section className="paper-account"><header><h2>账户权益（模拟）</h2><span>{disconnected || !fresh ? '保留历史观测' : '已确认经济状态'}</span></header><div className="paper-equity">{label(overview?.equity)} <small>{label(overview?.currency)}</small></div><p>权益来自已确认的现金与持仓估值。当前接口未提供历史权益序列。</p><div className="paper-metrics"><div><span>可用现金</span><strong>{label(overview?.cash)}</strong></div><div><span>持仓数量</span><strong>{label(overview?.position)}</strong></div><div><span>已确认成交</span><strong>{label(overview?.fills)}</strong></div><div><span>本地对账</span><strong>{label(observedHealth?.reconciliation_state ?? overview?.reconciliation)}</strong></div></div></section><section className="paper-facts"><h2>当前持仓</h2><Position overview={overview} /><p>均价、已实现 / 浮动盈亏与费用拆分未提供。</p></section></>}
+        {tab === 'overview' && <><section className="paper-account"><header><h2>账户权益（模拟）</h2><span>{fresh ? '读取时经济快照' : '历史经济快照'}</span></header><div className="paper-times"><span>状态发布（经济快照）：{observationTime(overview?.updated_at)}</span><span>估值时点：{observationTime(overview?.valuation_time)}</span></div><div className="paper-equity">{label(overview?.equity)} <small>{label(overview?.currency)}</small></div><p>权益来自已确认的现金与持仓估值。当前接口未提供历史权益序列。</p><div className="paper-metrics"><div><span>可用现金</span><strong>{label(overview?.cash)}</strong></div><div><span>持仓数量</span><strong>{label(overview?.position)}</strong></div><div><span>已确认成交</span><strong>{label(overview?.fills)}</strong></div><div><span>本地对账</span><strong>{label(observedHealth?.reconciliation_state ?? overview?.reconciliation)}</strong></div></div></section><section className="paper-facts"><h2>当前持仓</h2><Position overview={overview} /><p>均价、已实现 / 浮动盈亏与费用拆分未提供。</p></section></>}
         {tab === 'position' && <section className="paper-facts"><h2>持仓与成交事实</h2><Position overview={overview} /><dl><div><dt>已确认成交数</dt><dd>{label(overview?.fills)}</dd></div><div><dt>观察到的成交数</dt><dd>{label(overview?.observed_fills)}</dd></div><div><dt>订单数</dt><dd>{label(overview?.orders)}</dd></div><div><dt>账本序号</dt><dd>{label(overview?.ledger_sequence)}</dd></div></dl><p>当前投影未提供逐笔成交价格、均价与盈亏拆分。可查看已有事件；事件日志不替代账本。</p></section>}
-        {tab === 'events' && <section className="paper-facts"><h2>运行事件</h2>{events?.available ? <ul className="paper-event-list">{events.events?.slice().reverse().map((event, index) => <li key={index}><time>{time(typeof event.timestamp === 'string' ? event.timestamp : null)}</time><strong>{label(event.event)}</strong><span>{event.outcome ? String(event.outcome) : ''}</span></li>)}</ul> : <p>{events ? '事件不可用，未当作空记录。' : '正在读取事件…'}</p>}</section>}
+        {tab === 'events' && <section className="paper-facts"><h2>运行事件</h2>{events?.available ? <ul className="paper-event-list">{events.events?.slice().reverse().map((event, index) => <li key={index}><time>{observationTime(typeof event.timestamp === 'string' ? event.timestamp : null)}</time><strong>{label(event.event)}</strong><span>{event.outcome ? String(event.outcome) : ''}</span></li>)}</ul> : <p>{events ? '事件不可用，未当作空记录。' : '正在读取事件…'}</p>}</section>}
         <footer className="paper-footnote"><span>{row.terminal_confirmed ? '终态与租约释放已确认；保留原实例历史。' : '停止请求不等于停止确认；未确认时禁止启动另一实例。'}</span><span>停止仅截断新决策并排空已发出事实，不平仓。</span>{row.detail && <details><summary>运行诊断</summary><p>{row.detail}</p></details>}</footer>
       </>}
     </div>
