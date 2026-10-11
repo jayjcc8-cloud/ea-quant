@@ -494,3 +494,45 @@ table.strategy-table {
 .strategy-chat .chat-suggestions button { min-height: 32px; font-size: 12px; text-align: left; }
 .strategy-chat-empty { padding-bottom: 14px; }
 .strategy-chat-empty > p { padding: 0 14px; }
+
+/* The manual draft editor. It is one flat block of the tab it is opened in: fine
+   rules, no card, no shadow, no settings screen. Two fields to a row while the
+   window is wide and one below the phone width, so a long registered path or a
+   wide value never widens the page. Every colour here is one the workspace
+   already defines, so the dark palette arrives through the same tokens. */
+.draft-editor { padding: 16px; min-width: 0; }
+.draft-editor-title { margin: 0 0 6px; font-size: 15px; font-weight: 650; }
+.draft-editor-revision { margin: 0 0 12px; }
+.draft-editor-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; margin: 0; }
+.draft-editor-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.draft-editor-field label { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.draft-editor-path { color: var(--q-ink); font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+.draft-editor-kind { color: var(--q-ink-soft); font-size: 11.5px; font-weight: 600; }
+/* The one field control: it fills its own column and stops there, so a narrow
+   window keeps the page itself from going sideways. */
+.draft-editor-input { width: 100%; box-sizing: border-box; min-width: 0; font-variant-numeric: tabular-nums; }
+.draft-editor-input:focus-visible { outline: 2px solid var(--q-red); outline-offset: 1px; }
+/* A field the host does not allow stays readable and says why it cannot move. */
+.draft-editor-input[readonly] { border-style: dashed; background: var(--q-surface-soft); color: var(--q-ink-soft); }
+.draft-editor-bound { margin: 0; font-size: 11.5px; overflow-wrap: anywhere; }
+.draft-editor-contract { margin-top: 12px; }
+.draft-editor-contract p { margin: 6px 0 0; }
+.draft-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+/* The one declared action of this block, in the workspace's teal. */
+.draft-editor-actions .primary {
+  border-color: var(--q-primary); background: var(--q-primary); color: var(--q-primary-ink); font-weight: 600;
+}
+.draft-editor-actions .primary:hover:not(:disabled) {
+  border-color: var(--q-primary-strong); background: var(--q-primary-strong); color: var(--q-primary-ink);
+}
+/* A save that cannot run yet reads as an ordinary disabled control rather than
+   keeping the filled teal of an available action. */
+.draft-editor-actions .primary:disabled {
+  border-color: var(--q-field-line); background: var(--q-surface-soft); color: var(--q-ink-soft);
+}
+
+@media (max-width: 640px) {
+  .draft-editor { padding: 14px 16px; }
+  .draft-editor-fields { grid-template-columns: minmax(0, 1fr); }
+  .draft-editor-actions button { flex: 1 1 auto; }
+}

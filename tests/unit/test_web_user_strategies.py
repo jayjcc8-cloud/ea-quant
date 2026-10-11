@@ -5891,3 +5891,159 @@ def test_a_conversation_states_the_selected_version_the_host_verified(
     # model context: the block is identity and shape only.
     assert str(service.uploads.root) not in opening
     assert "100.5" not in opening
+
+
+def test_manual_save_contract_revision_and_replay(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    identity = strategy.user_strategy_id
+    contract = strategies.draft_contract(identity)
+    assert contract["draft_revision"] == 1
+    fields = {field["path"]: field for field in contract["fields"]}
+    assert fields["parameters.entry_delay_bars"]["json_type"] == "integer"
+    assert fields["parameters.target_quantity"]["json_type"] == "string"
+    assert fields["initial_cash"]["editable"] is True
+    before = strategies.preview_experiment(identity)
+    request = dict(
+        operation_id="manual-1",
+        expected_revision=1,
+        values={"parameters.entry_delay_bars": 1, "initial_cash": "12000"},
+    )
+    saved = strategies.save_draft(identity, **request)
+    assert saved.draft.revision == 2
+    assert saved.history[-1] == strategy.draft
+    assert saved.changes[-1]["kind"] == "manual"
+    assert saved.experiments == strategy.experiments
+    assert strategies.save_draft(identity, **request) == saved
+    with pytest.raises(UserStrategyConflictError):
+        strategies.save_draft(identity, **{**request, "values": {"initial_cash": "13000"}})
+    with pytest.raises(UserStrategyStaleError):
+        strategies.save_draft(identity, **{**request, "operation_id": "manual-2"})
+    with pytest.raises(UserStrategyStaleError):
+        strategies.launch_experiment(
+            identity,
+            launch_intent_id="old-preview",
+            base_revision=1,
+            preview_identity=before["preview_identity"],
+            approved_budget=RUN_BUDGET,
+        )
+    assert strategies.preview_experiment(identity)["preview_identity"] != before["preview_identity"]
+    assert provider.calls == []
+    assert _children(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"parameters.target_quantity": "2.5", "parameters.entry_delay_bars": 1},
+        {"parameters.entry_delay_bars": True},
+        {"parameters.target_quantity": 3},
+        {"initial_cash": "-1"},
+        {"symbol": "NEW"},
+        {"parameters.unregistered": 1},
+        {},
+    ],
+)
+def test_manual_save_validates_whole_draft_without_partial_write(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, values: dict[str, Any]
+) -> None:
+    strategies, _research, _service, _provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    with pytest.raises(UserStrategyStateError):
+        strategies.save_draft(
+            strategy.user_strategy_id,
+            operation_id="manual-invalid",
+            expected_revision=1,
+            values=values,
+        )
+    assert _durable(tmp_path, strategy.user_strategy_id) == strategy
+
+
+def test_manual_save_compares_revision_inside_lock(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    strategies, _research, _service, _provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    identity = strategy.user_strategy_id
+    # An in-flight model operation owns this exact lock. Manual writes fail promptly.
+    with strategies._lock(identity), pytest.raises(UserStrategyStateError, match="busy"):
+        strategies.save_draft(
+            identity, operation_id="held", expected_revision=1, values={"initial_cash": "11000"}
+        )
+    strategies.save_draft(
+        identity, operation_id="first", expected_revision=1, values={"initial_cash": "11000"}
+    )
+    with pytest.raises(UserStrategyStaleError):
+        strategies.save_draft(
+            identity, operation_id="late", expected_revision=1, values={"initial_cash": "12000"}
+        )
+    assert _durable(tmp_path, identity).draft.initial_cash == "11000"
+
+
+def test_http_manual_save_strict_contract(tmp_path: Any) -> None:
+    with TestClient(create_app(_settings(tmp_path)), base_url=ORIGIN) as client:
+        created = client.post(
+            "/api/user-strategies",
+            headers=WRITE_HEADERS,
+            json={"name": "Manual", "intent": "Edit locally", "scenario_id": SCENARIO},
+        )
+        identity = created.json()["user_strategy_id"]
+        route = f"/api/user-strategies/{identity}/draft"
+        assert client.get(route + "/contract").status_code == 200
+        request = {
+            "operation_id": "manual-http",
+            "expected_revision": 1,
+            "values": {"initial_cash": "15000"},
+        }
+        assert (
+            client.post(
+                route, headers=WRITE_HEADERS, json={**request, "expected_revision": True}
+            ).status_code
+            == 422
+        )
+        saved = client.post(route, headers=WRITE_HEADERS, json=request)
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["draft"]["revision"] == 2
+        assert client.post(route, headers=WRITE_HEADERS, json=request).status_code == 200
+        stale = client.post(route, headers=WRITE_HEADERS, json={**request, "operation_id": "late"})
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "stale_base_revision"
+
+
+def test_manual_save_keeps_frozen_history_and_stales_ai_apply_and_undo(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
+    strategy = _create(strategies)
+    strategy, proposal = _propose(strategies, provider, strategy, TWO_FIELDS)
+    identity = strategy.user_strategy_id
+    applied = strategies.apply_proposal(
+        identity, proposal_id=proposal["proposal_id"], operation_id="apply-before-manual"
+    )
+    # An existing frozen experiment is a retained document, never rebuilt by editing.
+    frozen = {
+        "launch_intent_id": "frozen-history",
+        "payload": {"draft_revision": 1, "parameters": dict(strategy.draft.parameters)},
+    }
+    strategies._store.save(replace(applied, experiments=(frozen,)))
+    edited = strategies.save_draft(
+        identity,
+        operation_id="manual-after-ai",
+        expected_revision=2,
+        values={"initial_cash": "15000"},
+    )
+    assert edited.experiments == (frozen,)
+    assert edited.history[-1] == applied.draft
+    with pytest.raises(UserStrategyStaleError):
+        strategies.undo(
+            identity,
+            operation_id="old-undo",
+            head_revision=2,
+            target_operation_id="apply-before-manual",
+        )
+    with pytest.raises(UserStrategyStaleError):
+        strategies.apply_proposal(
+            identity, proposal_id=proposal["proposal_id"], operation_id="old-apply"
+        )

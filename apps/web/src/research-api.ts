@@ -677,6 +677,7 @@ export class ResearchRequestError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly status?: number,
   ) {
     super(message)
   }
@@ -692,6 +693,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ResearchRequestError(
       detail?.code ?? 'request_failed',
       detail?.message ?? 'Research request failed',
+      response.status,
     )
   }
   return payload as T

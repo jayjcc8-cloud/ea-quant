@@ -21,6 +21,19 @@ import type { ReportCriterion } from './research-api'
  * record written before intents existed carries no `kind` at all, so the
  * discriminator is optional here and absent means executable.
  */
+export type DraftContract = {
+  draft_revision: number
+  scenario_id: string
+  source: string
+  fields: { path: string; kind: string; json_type: string; current: string | number;
+    minimum: string | number | null; maximum: string | number | null; editable: boolean }[]
+}
+export type SaveDraftRequest = {
+  operation_id: string
+  expected_revision: number
+  values: Record<string, string | number>
+}
+
 export type UserStrategyDraft = {
   kind?: 'strategy'
   revision: number
@@ -175,7 +188,7 @@ export type UserStrategyProposal = {
 /** One applied, undone or bound revision, exactly as it was written. */
 export type UserStrategyChange = {
   operation_id: string
-  kind: 'apply' | 'undo' | 'bind' | 'select-dataset'
+  kind: 'apply' | 'undo' | 'bind' | 'select-dataset' | 'manual'
   proposal_id: string | null
   target_operation_id: string | null
   from_revision: number
@@ -435,6 +448,8 @@ export const userStrategiesApi = {
    * draft against that data, and advances the revision once — which is what makes
    * an experiment previewed before this selection no longer confirmable.
    */
+  draftContract: (id: string) => apiRequest<DraftContract>(`${base(id)}/draft/contract`),
+  saveDraft: (id: string, input: SaveDraftRequest) => write<UserStrategy>(`${base(id)}/draft`, input),
   selectDataset: (
     userStrategyId: string,
     input: { operation_id: string; base_revision: number; dataset_id: string },

@@ -1,3 +1,4 @@
+import { importTarget, ResearchUploadBinding, type ImportTarget } from './research-upload-binding'
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ChronologicalHoldout, ScenarioSummary } from './app'
@@ -840,26 +841,60 @@ function base64Of(bytes: ArrayBuffer): string {
  * preview of the exact declaration on screen, so the digest the preview reports is
  * the digest the sealed version carries.
  */
-function DataUploadPanel({ api }: { api: ApiAdapter }) {
-  const [content, setContent] = useState('')
-  const [fileBase64, setFileBase64] = useState<string | null>(null)
-  const [fileName, setFileName] = useState('')
-  const [mode, setMode] = useState<'strict' | 'explicit-mapping'>('strict')
-  const [mappingText, setMappingText] = useState('')
-  const [timeText, setTimeText] = useState('')
-  const [policy, setPolicy] = useState('')
-  const [latency, setLatency] = useState('0')
-  const [sourceReference, setSourceReference] = useState('')
-  const [licenseReference, setLicenseReference] = useState('')
+function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: ImportTarget | null }) {
+  const cacheKey = `quine.csv-input.${target?.id ?? 'unscoped'}.${target?.revision ?? 0}`
+  const [cached] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem(cacheKey) ?? '{}') as Record<string, unknown> }
+    catch { return {} as Record<string, unknown> }
+  })
+  const cachedText = (key: string, fallback = '') => typeof cached[key] === 'string' ? cached[key] as string : fallback
+  const alive = useRef(false)
+  const inFlight = useRef(false)
+  const fileRead = useRef(0)
+  const [fileBusy, setFileBusy] = useState(false)
+  const [unknownPublish, setUnknownPublish] = useState(cached.unknownPublish === true)
+  const [bufferError, setBufferError] = useState(false)
+  useEffect(() => { alive.current = true; return () => { alive.current = false; fileRead.current += 1 } }, [])
+  const [content, setContent] = useState(cachedText('content'))
+  const [fileBase64, setFileBase64] = useState<string | null>(cachedText('fileBase64') || null)
+  const [fileName, setFileName] = useState(cachedText('fileName'))
+  const [mode, setMode] = useState<'strict' | 'explicit-mapping'>(cached.mode === 'explicit-mapping' ? 'explicit-mapping' : 'strict')
+  const [mappingText, setMappingText] = useState(cachedText('mappingText'))
+  const [timeText, setTimeText] = useState(cachedText('timeText'))
+  const [policy, setPolicy] = useState(cachedText('policy'))
+  const [latency, setLatency] = useState(cachedText('latency', '0'))
+  const [sourceReference, setSourceReference] = useState(cachedText('sourceReference'))
+  const [licenseReference, setLicenseReference] = useState(cachedText('licenseReference'))
   const [preview, setPreview] = useState<UploadPreviewResponse | null>(null)
   const [previewedFor, setPreviewedFor] = useState<string | null>(null)
-  const [published, setPublished] = useState<UploadVersion | null>(null)
+  const [published, setPublished] = useState<UploadVersion | null>(() => cached.published && typeof cached.published === 'object' && 'dataset_id' in cached.published ? cached.published as UploadVersion : null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<'preview' | 'publish' | null>(null)
   // Which of the two editors writes the one declaration. The guided controls are
   // the first-use path; the JSON fields are chosen explicitly.
-  const [declarationEditor, setDeclarationEditor] = useState<'guided' | 'advanced'>('guided')
+  const [declarationEditor, setDeclarationEditor] = useState<'guided' | 'advanced'>(cached.declarationEditor === 'advanced' ? 'advanced' : 'guided')
   const previewUpload = api.previewUpload
+
+  useEffect(() => {
+    let failed = false
+    try {
+      sessionStorage.setItem(cacheKey, JSON.stringify({ content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, published, unknownPublish }))
+    } catch { failed = true }
+    let active = true
+    void Promise.resolve().then(() => { if (active) setBufferError(failed) })
+    return () => { active = false }
+  }, [cacheKey, content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, published, unknownPublish])
+  useEffect(() => {
+    if (!bufferError) return
+    const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    const leave = (event: MouseEvent) => {
+      if ((event.target as Element).closest?.('a[href]') && !window.confirm('CSV 输入超过本地缓冲容量，离开将丢失输入。放弃并离开？')) {
+        event.preventDefault(); event.stopPropagation()
+      }
+    }
+    window.addEventListener('beforeunload', unload); document.addEventListener('click', leave, true)
+    return () => { window.removeEventListener('beforeunload', unload); document.removeEventListener('click', leave, true) }
+  }, [bufferError])
 
   const mapped = mode === 'explicit-mapping'
   // The declaration on screen, read back as choices for the guided controls. The
@@ -912,9 +947,9 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
   }
 
   const run = async (kind: 'preview' | 'publish') => {
-    if (busy || tooLarge) return
+    if (inFlight.current || fileBusy || tooLarge || (kind === 'publish' && unknownPublish)) return
     if (!fileBase64 && !content) return
-    setBusy(kind); setError(null)
+    inFlight.current = true; setBusy(kind); setError(null)
     try {
       const declaration = mapped ? declarationOf() : undefined
       if (mapped && declaration === null) return
@@ -930,6 +965,7 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
         const verified = fileBase64 !== null && api.previewUploadFile
           ? await api.previewUploadFile(fileBase64, declaration as UploadDeclaration, fileName || undefined)
           : await previewUpload(content, fileName || undefined, declaration ?? undefined)
+        if (!alive.current) return
         setPreview(verified); setPreviewedFor(signature)
         return
       }
@@ -939,6 +975,9 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
         setError(mappedBlocked ?? 'Preview this declaration and correct it before publishing.')
         return
       }
+      // Persist uncertainty before dispatch; refresh never grants an automatic retry.
+      setUnknownPublish(true)
+      sessionStorage.setItem(cacheKey, JSON.stringify({ content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, unknownPublish: true }))
       const version = await api.publishUpload({
         ...(fileBase64 !== null ? { content_base64: fileBase64 } : { content }),
         ...(fileName ? { file_name: fileName } : {}),
@@ -948,9 +987,13 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
         availability_policy: policy,
         ...(policy === AVAILABILITY_SIMULATED ? { latency_seconds: Number(latency) } : {}),
       })
-      setPreview(null); setPreviewedFor(null); setPublished(version)
-    } catch (caught) { setError(messageOf(caught, 'The host refused this upload.')) }
-    finally { setBusy(null) }
+      if (!alive.current) return
+      setUnknownPublish(false); setPreview(null); setPreviewedFor(null); setPublished(version)
+    } catch (caught) {
+      if (!alive.current) return
+      if (caught instanceof ResearchRequestError && ([400, 413, 422].includes(caught.status ?? 0) || ['upload_invalid', 'invalid_upload', 'invalid_request', 'upload_refused'].includes(caught.code))) setUnknownPublish(false)
+      setError(messageOf(caught, 'Upload outcome unknown. Inputs retained; inspect the dataset catalog before another publication.'))
+    } finally { inFlight.current = false; if (alive.current) setBusy(null) }
   }
 
   if (!previewUpload && !api.publishUpload) return null
@@ -959,6 +1002,9 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
   const columns = strictPreview ? (strictPreview.header.length ? strictPreview.header : Object.keys(strictPreview.rows[0] ?? {}).filter(name => name !== 'record_number')) : []
   const mappedColumns = mappedPreview?.preview ? Object.keys(mappedPreview.preview.rows[0] ?? {}).filter(name => name !== 'record_number') : []
   return <div className="upload-panel">
+    {target && <p className="muted">导入完成后可用于指定研究；发布不会自动绑定。<Link to={target.returnTo}>取消导入并返回当前研究</Link></p>}
+    {bufferError && <p role="alert">CSV 输入无法完整缓冲，离开前请完成发布或保留原文件。</p>}
+    {unknownPublish && <p role="alert">发布结果尚未确认，不会自动重发。输入已保留，请在数据目录核对已发布版本。</p>}
     <p className="muted">An uploaded file is decoded by the same strict Phase 1 OHLCV decoder the read-only registered root uses, and published as one immutable version. Either the file already has that fixed 15-column UTC interval profile, or you declare, field by field, how your own columns and timestamps become it. Nothing is inferred from the data in either case.</p>
     <label htmlFor="upload-mode">Upload mode</label>
     <select id="upload-mode" value={mode} disabled={busy !== null} onChange={event => { setMode(event.target.value === 'explicit-mapping' ? 'explicit-mapping' : 'strict'); reset() }}>
@@ -969,18 +1015,22 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
     <input id="upload-file" type="file" accept=".csv,text/csv" disabled={busy !== null} onChange={event => {
       const file = event.target.files?.[0]
       if (!file) return
-      setFileName(file.name); reset()
+      const ticket = ++fileRead.current
+      setFileBusy(true)
       void file.arrayBuffer().then(bytes => {
         // The file's own bytes are what a publication sends; the text below is
         // only a readable view of them, and editing it replaces that payload.
+        if (!alive.current || ticket !== fileRead.current) return
+        setFileName(file.name); reset()
         setFileBase64(base64Of(bytes))
         setContent(new TextDecoder().decode(bytes))
-      }).catch(() => setError('The selected file could not be read in this browser.'))
+      }).catch(() => { if (alive.current && ticket === fileRead.current) setError('The selected file could not be read in this browser. Previous inputs retained.') }).finally(() => { if (alive.current && ticket === fileRead.current) setFileBusy(false) })
     }} />
+    {fileBusy && <p role="status">正在读取所选文件，原输入保留至读取完成。</p>}
     {fileBase64 !== null && <p className="muted">This file is sent as its own bytes (base64), not as re-encoded text: a byte-order mark, a CRLF ending or a non-ASCII column stays exactly as the file has it.</p>}
     <label htmlFor="upload-content">{fileBase64 !== null ? 'CSV content (a readable view; editing it sends this text instead)' : 'CSV content'}</label>
     <textarea id="upload-content" rows={6} spellCheck={false} value={content} disabled={busy !== null}
-      onChange={event => { setContent(event.target.value); setFileBase64(null); reset() }} />
+      onChange={event => { fileRead.current += 1; setFileBusy(false); setContent(event.target.value); setFileBase64(null); reset() }} />
     {tooLarge && <p className="notice error">This content is above the {MAX_UPLOAD_CHARACTERS}-character ceiling this host accepts; it would be refused before anything is parsed.</p>}
     {mapped && <>
       {/* One declaration, an explicit choice of how to write it. The guided
@@ -1030,8 +1080,8 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
     </div>
     <p className="muted">There is no default policy: an upload that does not state how the capture became available is refused rather than recorded as if you had asserted it. Neither policy is ever reported as verified point-in-time availability, and the source and licence strings are your assertion, not a legal verification.</p>
     <div className="actions">
-      <button type="button" disabled={busy !== null || (!content && fileBase64 === null) || tooLarge || !previewUpload} onClick={() => { void run('preview') }}>{busy === 'preview' ? 'Previewing…' : 'Preview sample'}</button>
-      <button type="button" className="primary" disabled={busy !== null || (!content && fileBase64 === null) || tooLarge || !policy || !api.publishUpload || (mapped && !mappedVerified)} onClick={() => { void run('publish') }}>{busy === 'publish' ? 'Publishing…' : 'Publish version'}</button>
+      <button type="button" disabled={fileBusy || busy !== null || (!content && fileBase64 === null) || tooLarge || !previewUpload} onClick={() => { void run('preview') }}>{busy === 'preview' ? 'Previewing…' : 'Preview sample'}</button>
+      <button type="button" className="primary" disabled={fileBusy || unknownPublish || busy !== null || (!content && fileBase64 === null) || tooLarge || !policy || !api.publishUpload || (mapped && !mappedVerified)} onClick={() => { void run('publish') }}>{busy === 'publish' ? 'Publishing…' : 'Publish version'}</button>
     </div>
     {mappedBlocked && <p className="muted">{mappedBlocked}</p>}
     {error && <p className="notice error">{error}</p>}
@@ -1084,7 +1134,14 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
       </details>}
     </section>}
     {published && <section className="upload-version" aria-label="Published dataset version">
+      <h3>已发布 · {published.record_count} 条记录</h3>
       <dl className="summary-list">
+        <div><dt>时间范围（UTC）</dt><dd>{published.quality?.bar_start_utc ?? '未记录'} → {published.quality?.bar_end_utc ?? '未记录'}</dd></div>
+        <div><dt>粒度</dt><dd>{published.quality?.bar_durations_seconds?.join(' / ') ?? '未记录'} 秒</dd></div>
+        <div><dt>质量限制</dt><dd>{published.quality?.bar_count ?? '未记录'} 根行情 · {published.quality?.revision_count ?? '未记录'} 条修订 · 间隔缺口 {published.quality?.observed_gap_count ?? '未记录'} · 非已验证的时间点可用性</dd></div>
+      </dl>
+      <ResearchUploadBinding key={`${cacheKey}.${published.dataset_id}`} api={api} target={target} datasetId={published.dataset_id} />
+      <details className="provenance"><summary>版本身份、文件哈希与声明</summary><dl className="summary-list">
         <div><dt>Dataset version</dt><dd>{published.dataset_id} · v{published.version} · {published.published_at}</dd></div>
         <div><dt>Instrument / records</dt><dd>{published.instrument.venue}:{published.instrument.symbol} · {published.record_count}</dd></div>
         <div><dt>Availability policy</dt><dd>{published.availability_policy.id} · {published.availability_policy.evidence} · point-in-time verified: {String(published.availability_policy.pit_verified)}</dd></div>
@@ -1095,7 +1152,7 @@ function DataUploadPanel({ api }: { api: ApiAdapter }) {
         {published.mapping_evidence_sha256 && <div><dt>Mapping evidence SHA-256</dt><dd>{published.mapping_evidence_sha256} · the declaration is sealed with the version and re-derived on every read</dd></div>}
         <div><dt>Version manifest SHA-256</dt><dd>{published.manifest_sha256}</dd></div>
       </dl>
-      <p className="muted">This version is now one entry in the dataset catalog. It is usable as research data only when you explicitly select its Data capability: that selection is what freezes the version's evidence for a run, and a direct backtest or batch over an uploaded version carries no such binding and is refused before anything is prepared. Research binds the canonical capture digest; an edited manifest fails that binding before any run is dispatched, and the retained raw bytes only ever identify where the version came from.</p>
+      </details>
       {published.limitations.length > 0 && <ul className="assumption-list">{published.limitations.map(item => <li key={item}>{item}</li>)}</ul>}
     </section>}
   </div>
@@ -2208,6 +2265,8 @@ export function ResearchSettings({ api }: { api: ApiAdapter }) {
 
 /** The existing explicit import controls, reached without creating a legacy task. */
 export function DataWorkspace({ api }: { api: ApiAdapter }) {
+  const location = useLocation()
+  const target = importTarget(location.search)
   const [datasets, setDatasets] = useState<Awaited<ReturnType<NonNullable<ApiAdapter['listDatasets']>>> | null>(null)
   const [error, setError] = useState('')
   useEffect(() => {
@@ -2226,8 +2285,8 @@ export function DataWorkspace({ api }: { api: ApiAdapter }) {
       {datasets && datasets.length > 0 && <div className="table-scroll"><table><thead><tr><th>数据版本</th><th>标的</th><th>记录</th><th>状态</th></tr></thead>
         <tbody>{datasets.map(item => <tr key={item.dataset_id}><td>{item.dataset_id}</td><td>{item.symbol ? `${item.venue ?? ''}:${item.symbol}` : '未记录'}</td><td>{item.record_count ?? '未记录'}</td><td>{item.valid ? '可读取' : item.message ?? '不可用'}</td></tr>)}</tbody></table></div>}
     </section>
-    <p><Link to="/strategies">返回研究</Link></p>
-    <details id="data-upload" className="panel" open><summary>导入 CSV 数据</summary><DataUploadPanel api={api} /></details>
+    <p><Link to={target?.returnTo ?? "/strategies"}>{target ? "返回当前研究" : "返回研究"}</Link></p>
+    <details id="data-upload" className="panel" open><summary>导入 CSV 数据</summary><DataUploadPanel key={`${target?.id ?? "unscoped"}.${target?.revision ?? 0}`} api={api} target={target} /></details>
     <details className="panel"><summary>历史数据导入</summary><OfflineHistoryPanel api={api} /></details>
   </>
 }

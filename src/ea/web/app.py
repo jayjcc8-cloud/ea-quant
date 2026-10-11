@@ -329,6 +329,13 @@ class UserStrategySelectDatasetRequest(BaseModel):
     dataset_id: str = Field(min_length=1, max_length=128)
 
 
+class UserStrategySaveDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    expected_revision: int = Field(ge=1, le=1000000)
+    values: dict[str, str | int] = Field(min_length=1, max_length=64)
+
+
 class UserStrategyMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     call_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
@@ -1640,6 +1647,27 @@ def create_app(settings: WebSettings) -> Any:
             )
             return strategy.document()
         except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    @app.get("/api/user-strategies/{user_strategy_id}/draft/contract")
+    def user_strategy_draft_contract(user_strategy_id: str) -> object:
+        try:
+            return user_strategy_service.draft_contract(user_strategy_id)
+        except strategy_failures as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/draft")
+    def save_user_strategy_draft(
+        user_strategy_id: str, request: UserStrategySaveDraftRequest
+    ) -> object:
+        try:
+            return user_strategy_service.save_draft(
+                user_strategy_id,
+                operation_id=request.operation_id,
+                expected_revision=request.expected_revision,
+                values=request.values,
+            ).document()
+        except strategy_failures as caught:
             return strategy_refusal(caught)
 
     @app.post("/api/user-strategies/{user_strategy_id}/messages")

@@ -1,3 +1,4 @@
+import { DraftEditor } from './draft-editor'
 /**
  * QUINE: one durable user strategy, the AI work the user approved, and its frozen runs.
  *
@@ -227,8 +228,8 @@ const revisionChip = (draft: UserStrategyDraftDocument) =>
   isIntentDraft(draft) ? `v${draft.revision} 意图` : `v${draft.revision} 草稿`
 
 /** One durable change's kind, in the user's words. */
-const changeLabel = (kind: 'apply' | 'undo' | 'bind' | 'select-dataset') =>
-  kind === 'apply'
+const changeLabel = (kind: 'apply' | 'undo' | 'bind' | 'select-dataset' | 'manual') =>
+  kind === 'manual' ? '手工保存' : kind === 'apply'
     ? '应用'
     : kind === 'undo'
       ? '撤销'
@@ -287,13 +288,26 @@ const windowLine = (preview: UserStrategyPreview) => {
  * One cost assumption exactly as the scenario declares it. A scenario that
  * declares none says so; nothing is filled in, guessed or priced here.
  */
-const factLine = (value: unknown) => {
+const factLine = (value: unknown): string => {
   if (value === null || value === undefined) return '该场景未声明'
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
-    return entries.length ? entries.map(([key, item]) => `${key} ${String(item)}`).join(', ') : '声明为空'
+    return entries.length ? entries.map(([key, item]) => `${key} ${factLine(item)}`).join(', ') : '声明为空'
   }
   return String(value)
+}
+
+const assumptionSummary = (name: string, value: unknown): string => {
+  if (!value || typeof value !== 'object') return factLine(value)
+  const block = value as Record<string, unknown>
+  if (name === 'data') {
+    const fingerprint = block.fingerprint as Record<string, unknown> | undefined
+    return `${String(block.start_utc ?? '起点未记录')} → ${String(block.end_utc ?? '终点未记录')} · ${String(fingerprint?.record_count ?? block.record_count ?? '未记录')} 条记录`
+  }
+  const labels: Record<string, string> = name === 'risk'
+    ? { max_notional: '最大名义金额', max_order_quantity: '最大委托数量', max_position_quantity: '最大持仓数量' }
+    : { policy: '撮合策略', commission: '手续费', slippage: '滑点', latency: '执行延迟' }
+  return Object.entries(block).map(([key, item]) => `${labels[key] ?? key} ${factLine(item)}`).join(' · ')
 }
 
 const costLine = (preview: UserStrategyPreview) =>
@@ -508,7 +522,6 @@ function IntentSection({ strategy }: { strategy: UserStrategy }) {
             : `修订 ${latest.payload.draft_revision} · ${EXPERIMENT_STATUS_LABELS[latest.status]}`}
         </p>
       : <p className="muted">还没有确认过的实验。实验在「实验」里预览并确认，一次确认只允许一次运行。</p>}
-    <p className="muted">保存只写下想法；一次批准只允许一次模型调用；一次确认只允许一次实验。</p>
   </section>
 }
 
@@ -770,8 +783,9 @@ export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: 
       </p>
       <details className="provenance report-assumptions">
         <summary>数据与假设</summary>
-        <dl className="summary-list">{Object.entries(experiment?.payload.normalized ?? {}).map(([name, value]) =>
-          <div key={name}><dt>{name}</dt><dd>{factLine(value)}</dd></div>)}</dl>
+        <dl className="summary-list">{Object.entries(experiment?.payload.normalized ?? {}).filter(([name]) => ['data', 'execution', 'risk'].includes(name)).map(([name, value]) =>
+          <div key={name}><dt>{{ data: '数据', execution: '成本与执行', risk: '风险限制' }[name]}</dt><dd>{assumptionSummary(name, value)}</dd></div>)}</dl>
+        <details><summary>完整来源与身份</summary><pre>{JSON.stringify(experiment?.payload.normalized ?? {}, null, 2)}</pre></details>
         <p className="muted">{sample} · 参数：{Object.entries(experiment?.payload.parameters ?? {}).map(([key, value]) => `${key}: ${value}`).join(' · ')}</p>
       </details>
       <details className="provenance report-trades"><summary>成交与完整报告</summary>
@@ -971,6 +985,8 @@ function SelectDataset({ api, strategy, changed, failed }: {
   changed: (strategy: UserStrategy) => void
   failed: (message: string) => void
 }) {
+  const location = useLocation()
+  const importSearch = new URLSearchParams({ research: strategy.user_strategy_id, revision: String(strategy.draft.revision), return: location.pathname + location.search })
   const list = api.listDatasets
   // A workspace that serves no dataset catalog has nothing to offer, which is a
   // state this panel starts in rather than one it writes from inside an effect.
@@ -978,6 +994,11 @@ function SelectDataset({ api, strategy, changed, failed }: {
   const [selected, setSelected] = useState('')
   const [busy, setBusy] = useState(false)
   const attempts = useRef(0)
+  const inFlight = useRef(false)
+  const visit = useRef(0)
+  const pendingKey = `quine.dataset-selection.${strategy.user_strategy_id}.${strategy.draft.revision}`
+  const [unknown, setUnknown] = useState(() => sessionStorage.getItem(pendingKey) !== null)
+  useEffect(() => { visit.current += 1; return () => { visit.current += 1 } }, [strategy.user_strategy_id, strategy.draft.revision])
   const draft = strategy.draft
   const current = isIntentDraft(draft) ? null : draft.dataset_id
   const revision = draft.revision
@@ -995,6 +1016,8 @@ function SelectDataset({ api, strategy, changed, failed }: {
   const candidate = usable.find(item => item.dataset_id === selected) ?? null
 
   const choose = async () => {
+    if (inFlight.current || unknown) return
+    const ticket = visit.current
     if (!candidate) {
       failed('请先选择一个数据集：没有被选中的数据集就不会被绑定。')
       return
@@ -1004,36 +1027,43 @@ function SelectDataset({ api, strategy, changed, failed }: {
       failed('这个工作区不提供数据集选择。')
       return
     }
+    inFlight.current = true
     setBusy(true)
     failed('')
     const attempt = attempts.current
+    const operation = `dataset-${crypto.randomUUID()}`
     try {
       // One explicit choice, one operation id: a retry of this click replays the
       // revision it already produced instead of selecting a second time.
+      sessionStorage.setItem(pendingKey, operation)
       const updated = await selectDataset(strategy.user_strategy_id, {
-        operation_id: `dataset-${strategy.user_strategy_id}-${revision}-${attempt}`.slice(0, 64),
+        operation_id: operation,
         base_revision: revision,
         dataset_id: candidate.dataset_id,
       })
-      attempts.current += 1
+      sessionStorage.removeItem(pendingKey)
+      if (ticket !== visit.current) return
+      attempts.current = attempt + 1
       setSelected('')
       changed(updated)
     } catch (error) {
+      if (ticket !== visit.current) return
+      if (error instanceof UserStrategyRequestError && ['stale_base_revision', 'operation_conflict', 'user_strategy_invalid'].includes(error.code)) sessionStorage.removeItem(pendingKey)
+      else setUnknown(true)
       failed(explain(error))
     } finally {
-      setBusy(false)
+      inFlight.current = false
+      if (ticket === visit.current) setBusy(false)
     }
   }
 
   return <section aria-label="选择数据集" className="strategy-panel">
     <header className="panel-head">
-      <h2>选择数据集</h2>
+      <h2>选择数据集</h2><Link to={`/data?${importSearch}#data-upload`}>导入 CSV 用于此研究</Link>
       <span className="chip">草稿数据</span>
     </header>
     <p className="muted">
-      这里为当前草稿明确选择一个数据集。你选中的是这个工作区目录里的一个身份，不是路径、
-      也不是摘要：宿主用它自己的已注册只读根目录与受控上传存储解析这个身份，绑定它找到的
-      那个已发布版本，并让真实后端按这份数据校验整份草稿，然后才写下新的修订。
+      选择已发布版本，后端兼容性校验通过后生成新修订。
     </p>
     <div className="field">
       <label htmlFor="select-dataset">数据集</label>
@@ -1064,8 +1094,9 @@ function SelectDataset({ api, strategy, changed, failed }: {
     </p>
     <div className="actions">
       <button type="button" className="primary" onClick={choose}
-        disabled={busy || !candidate}>选择这个数据集</button>
+        disabled={busy || unknown || !candidate}>选择这个数据集</button>
     </div>
+    {unknown && <p role="alert">选择结果未知，请重新加载研究核对当前数据。不会自动重发。</p>}
     <p className="muted">选择不会调用模型，也不会启动任何运行。</p>
   </section>
 }
@@ -1152,7 +1183,7 @@ function StrategyDetail({ api, strategy, scenarios, catalogReady, changed, faile
         <IntentSection strategy={strategy} />
         {isIntentDraft(strategy.draft) ? <BindScenario api={api} strategy={strategy} scenarios={scenarios}
           catalogReady={catalogReady} changed={changed} failed={failed} />
-          : <><RulesSection draft={strategy.draft} /><SelectDataset api={api} strategy={strategy} changed={changed} failed={failed} /></>}
+          : <><DraftEditor key={strategy.user_strategy_id} api={api} strategy={strategy} changed={changed} /><details className="provenance"><summary>场景规则与来源</summary><RulesSection draft={strategy.draft} /></details><SelectDataset api={api} strategy={strategy} changed={changed} failed={failed} /></>}
         <details className="provenance"><summary>修订记录</summary><RevisionsSection strategy={strategy} /></details>
       </>}
       {tab === 'experiments' && <>
@@ -1626,9 +1657,14 @@ function ProposalPanel({ api, strategy, proposal, changed }: {
       </li>)}
     </ul>
     <p className="muted">
-      应用会用整份已校验的草稿写出一个新修订：选中的字段如果无法同时成立，就什么都不会应用。
-      未勾选的字段留在旧建议里。应用只改变草稿——它不调用模型，也不启动回测；下一步是在「实验」里预览这次草稿并确认一次运行。
+      保存为新修订后，需在「实验」里预览并确认运行。
     </p>
+    {open && actionError && <p role="alert" className="notice error">{actionError}</p>}
+    {open && <div className="actions">
+      <button type="button" className="primary" onClick={apply} disabled={busy}>应用所选</button>
+      <button type="button" onClick={reject} disabled={busy}>拒绝建议</button>
+      {canUndo && <button type="button" onClick={undo} disabled={busy}>撤销最近一次修改</button>}
+    </div>}
     {open && <details className="provenance revise-disclosure">
       <summary>要求一个不同的修改（需要一次新的批准）</summary>
       <div className="revise">
@@ -1686,12 +1722,7 @@ function ProposalPanel({ api, strategy, proposal, changed }: {
           {origin}
           {callEvidence}
           {changeDetail}
-          {actionAlert}
-          <div className="actions">
-            <button type="button" className="primary" onClick={apply} disabled={busy}>应用所选</button>
-            <button type="button" onClick={reject} disabled={busy}>拒绝建议</button>
-            {canUndo && undoButton}
-          </div>
+
         </>
       // A closed one is history: one native disclosure, collapsed until the reader
       // opens it, holds the origin and its UUID, the status it was recorded with,
@@ -2402,7 +2433,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
         {model?.error && <p className={api.settingsStatus ? "notice error" : "muted"} role={api.settingsStatus ? "alert" : undefined}>{model.error}</p>}
         <div className="preparation-row"><strong>{!catalog ? '正在读取场景目录…'
           : catalog.error ? '场景目录读取失败' : usableCount ? `${usableCount} 个可用场景` : '尚无可用场景'}</strong>
-          <Link to="/data">导入 CSV 数据</Link></div>
+          <Link to={current ? `/data?${new URLSearchParams({ research: current.user_strategy_id, revision: String(current.draft.revision), return: location.pathname + location.search })}#data-upload` : "/data"}>导入 CSV 数据</Link></div>
         {catalog?.error && <p className="notice error" role="alert">{catalog.error}</p>}
         {catalog && !catalog.error && usableCount === 0 && <details className="disclosure">
           <summary>准备场景与数据</summary>

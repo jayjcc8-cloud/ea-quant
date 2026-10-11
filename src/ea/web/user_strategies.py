@@ -1164,6 +1164,101 @@ class UserStrategyService:
         finally:
             lock.release()
 
+    def draft_contract(self, user_strategy_id: object) -> dict[str, Any]:
+        """Expose only this draft's existing registered editing contract."""
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        with self._lock(identity):
+            draft = _executable(self._store.get(identity))
+            return {
+                "draft_revision": draft.revision,
+                "scenario_id": draft.scenario_id,
+                "fields": [
+                    {
+                        "path": field.path,
+                        "kind": field.kind,
+                        "json_type": field.json_type,
+                        "current": field.current,
+                        "minimum": field.minimum,
+                        "maximum": field.maximum,
+                        "editable": field.editable,
+                    }
+                    for field in self._registered_paths(draft)
+                ],
+                "source": "registered scenario contract; validated against the selected dataset",
+            }
+
+    def save_draft(
+        self,
+        user_strategy_id: object,
+        *,
+        operation_id: object,
+        expected_revision: object,
+        values: Any,
+    ) -> UserStrategy:
+        """Save a bounded manual edit through the same whole-draft revision path.
+
+        The expected revision is compared after acquiring the existing strategy
+        lock. An uncertain client must read the record, never blindly resubmit.
+        Exact operation replay uses the existing change ledger; an aged-out
+        request still cannot write twice because its revision is stale.
+        """
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        operation = _identifier(operation_id, "operation_id")
+        if type(expected_revision) is not int:
+            raise UserStrategyStateError("expected_revision must be an integer")
+        if type(values) is not dict or not values or len(values) > 64:
+            raise UserStrategyStateError("select between 1 and 64 registered fields")
+        if any(type(path) is not str or _PATH.fullmatch(path) is None for path in values):
+            raise UserStrategyStateError("only registered parameters and initial_cash are editable")
+        request_digest = _digest({"expected_revision": expected_revision, "values": values})
+        lock = self._lock(identity)
+        if not lock.acquire(blocking=False):
+            raise UserStrategyStateError("this strategy is busy; no manual edit was saved")
+        try:
+            strategy = self._store.get(identity)
+            draft = _executable(strategy)
+            prior = _entry(strategy.changes, "operation_id", operation)
+            if prior is not None:
+                if prior.get("kind") != "manual" or prior.get("request_sha256") != request_digest:
+                    raise UserStrategyConflictError("operation_id is already bound to another edit")
+                return strategy
+            if expected_revision != draft.revision:
+                raise UserStrategyStaleError("the draft revision moved on; reload before saving")
+            if self._unresolved_call(strategy) is not None:
+                raise UserStrategyStateError("an earlier call is unresolved; reload before saving")
+            contracts = self._contracts(self._draft_document(draft))
+            overrides: dict[str, Any] = {}
+            items: Documents = []
+            for path, raw in values.items():
+                value, problem = self._typed(contracts, path, raw, draft)
+                if problem is not None:
+                    raise UserStrategyStateError(problem)
+                overrides[path] = value
+                items.append(
+                    {
+                        "path": path,
+                        "before": self._current(draft, path),
+                        "after": value,
+                        "reason": "Manual edit",
+                        "proposer": "user",
+                    }
+                )
+            return self._revise_draft(
+                strategy,
+                overrides=overrides,
+                operation=operation,
+                kind="manual",
+                proposal_id=None,
+                target_operation=None,
+                items=items,
+                applied_paths=list(overrides),
+                stale_paths=[],
+                proposer="user",
+                request_sha256=request_digest,
+            )
+        finally:
+            lock.release()
+
     # -- one explicit dataset selection --------------------------------------
 
     def select_dataset(
@@ -2754,6 +2849,7 @@ class UserStrategyService:
         applied_paths: Paths,
         stale_paths: Paths,
         proposer: str,
+        request_sha256: str | None = None,
     ) -> UserStrategy:
         """Validate the complete resulting draft, then write exactly one revision."""
         draft = _executable(strategy)
@@ -2806,6 +2902,8 @@ class UserStrategyService:
             "proposer": proposer,
             "at": now,
         }
+        if request_sha256 is not None:
+            change["request_sha256"] = request_sha256
         proposals = strategy.proposals
         if kind == "apply" and proposal_id is not None:
             proposals = tuple(

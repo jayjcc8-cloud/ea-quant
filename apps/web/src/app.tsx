@@ -1,3 +1,4 @@
+import type { DraftContract, SaveDraftRequest } from './user-strategies-api'
 import type { DesktopStatus } from './desktop-settings'
 import { EventValidation } from './events'
 import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
@@ -250,6 +251,8 @@ export type ApiAdapter = {
     criterion?: { field: string; expectation: string } | null
   }): Promise<UserStrategy>
   getUserStrategy?(userStrategyId: string): Promise<UserStrategy>
+  userStrategyDraftContract?(id: string): Promise<DraftContract>
+  saveUserStrategyDraft?(id: string, input: SaveDraftRequest): Promise<UserStrategy>
   bindUserStrategyScenario?(
     userStrategyId: string,
     input: {
@@ -402,6 +405,8 @@ const browserApi: ApiAdapter = {
   getUserStrategy: userStrategyId => userStrategiesApi.get(userStrategyId),
   bindUserStrategyScenario: (userStrategyId, input) =>
     userStrategiesApi.bindScenario(userStrategyId, input),
+  userStrategyDraftContract: id => userStrategiesApi.draftContract(id),
+  saveUserStrategyDraft: (id, input) => userStrategiesApi.saveDraft(id, input),
   selectUserStrategyDataset: (userStrategyId, input) =>
     userStrategiesApi.selectDataset(userStrategyId, input),
   sendUserStrategyMessage: (userStrategyId, input) =>
