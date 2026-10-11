@@ -59,7 +59,7 @@
   overflow-x: hidden;
 }
 
-.paper-main { display: grid; gap: 14px; min-width: 0; }
+.paper-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
 
 /* Heading: the instance name, what it is, and the three controls on the right. */
 .paper-heading {
@@ -524,3 +524,6 @@
 
 .paper-workspace .paper-account .paper-times { margin: 4px 0 8px; }
 .paper-workspace .paper-runtime-details > summary:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: 2px; border-radius: 3px; }
+
+.paper-workspace .paper-runtime-details > summary::before { content: "›"; display: inline-block; margin-right: 7px; font-size: 16px; line-height: 1; }
+.paper-workspace .paper-runtime-details[open] > summary::before { transform: rotate(90deg); }
