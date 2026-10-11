@@ -4,52 +4,56 @@
    rule they corrected — and the three breakpoints at the end only re-flow what
    the rules above lay out.
 
-   Reading tiers: page heading 32, section heading 20, body 15, auxiliary 13,
-   metric figure 28. Desktop: 32px page edge, 20px card padding, 24px gaps, a
-   1200px content column and a 760px measure for prose. Below 768px: one column,
-   16px edge, 44px targets. */
+   Reading tiers: title 24, section heading 20, body 14, auxiliary 12–13, metric
+   figure 28 — every figure set in tabular numerals. One light palette: a #F6F8FA
+   shell, white surfaces, #E3E8EE lines, #17212F text and the single #007F8B
+   accent that also fills the primary action; the dark theme below restates it
+   with an analogue teal. Desktop: a 216px navigation, 32px page edge, 20px card
+   padding, 24px gaps, a 1200px content column and a 760px measure for prose — a
+   page that carries the strategy workspace takes the whole width instead. Below
+   768px: one column, 16px edge, 44px targets. */
 
 :root {
-  --ink: #26282c;
-  --ink-strong: #202124;
-  --muted: #6d7177;
-  --line: #e2e3e0;
-  --line-soft: #e5e6e2;
-  --accent: #4263db;
+  --ink: #17212f;
+  --ink-strong: #101a28;
+  --muted: #5a6672;
+  --line: #e3e8ee;
+  --line-soft: #edf1f5;
+  --accent: #007f8b;
   --amber: #876625;
   --surface: #ffffff;
-  --shell: #fafaf8;
-  --soft: #f3f3f0;
+  --shell: #f6f8fa;
+  --soft: #f1f4f8;
   /* The colours the shared surfaces already used, named so that the dark theme
      below can restate each of them once instead of at every call site. */
   --accent-ink: #ffffff;
-  --accent-line: #cdd7ee;
+  --accent-line: #bfe0e4;
   --amber-line: #dfd2b4;
-  --positive: #3a6254;
+  --positive: #2c6b57;
   --danger: #9c3540;
   --danger-soft: #fff5f5;
   --danger-line: #e4bfc3;
-  --notice: #f2f5fb;
-  --notice-line: #d9dfec;
-  --field-line: #d5d8dc;
+  --notice: #eff7f8;
+  --notice-line: #cfe4e7;
+  --field-line: #d3dae2;
   color: var(--ink);
   background: var(--shell);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.6;
   font-synthesis: none;
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; color: var(--ink); background: var(--shell); font-size: 15px; line-height: 1.6; }
+body { margin: 0; min-width: 320px; color: var(--ink); background: var(--shell); font-size: 14px; line-height: 1.6; }
 a { color: inherit; text-decoration: none; }
 a:hover { color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 h1, h2, h3, p, dl, dd, dt, ul, ol { margin: 0; }
-h1 { color: var(--ink-strong); font-size: clamp(24px, 3vw, 32px); font-weight: 600; letter-spacing: -.03em; }
+h1 { color: var(--ink-strong); font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
 h2 { color: var(--ink); font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
 h3 { color: var(--ink); font-size: 16px; font-weight: 600; }
-p { font-size: 15px; line-height: 1.65; }
+p { font-size: 14px; line-height: 1.65; }
 /* Prose keeps a readable measure inside a card that is wider than it. */
 .panel > p, .panel p.muted, .panel .assumption-list, .panel > ul, .research-spec p, .disclosure-body > p { max-width: 760px; }
 
@@ -71,6 +75,10 @@ nav a.active { color: var(--ink-strong); background: var(--line-soft); }
 main { min-width: 0; }
 .topbar { display: flex; justify-content: space-between; align-items: center; min-height: 55px; padding: 0 32px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px; }
 .content { max-width: 1200px; margin: 0 auto; padding: 32px; }
+/* The strategy workspace is two columns of real work — a table, a detail card and
+   a conversation — so it takes the whole width the shell gives it instead of a
+   prose measure, and keeps its own one 20px edge. */
+.content:has(.strategy-workspace) { max-width: none; padding: 20px; }
 .page-title { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 24px; }
 .page-title p { margin-top: 7px; color: var(--muted); font-size: 13px; }
 .mock-badge { margin-top: 4px; padding: 5px 8px; border: 1px solid var(--accent); color: var(--positive); font-size: 13px; font-weight: 800; letter-spacing: .1em; }
@@ -98,7 +106,7 @@ button:hover, .downloads a:hover { border-color: var(--accent); }
 button:disabled { cursor: not-allowed; opacity: .45; }
 button.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
 label { display: block; margin: 8px 0; color: var(--muted); font-size: 13px; font-weight: 650; }
-select, input, textarea { width: 100%; min-height: 44px; padding: 11px 12px; border: 1px solid var(--field-line); border-radius: 6px; color: var(--ink); background: var(--surface); font: inherit; font-size: 15px; }
+select, input, textarea { width: 100%; min-height: 44px; padding: 11px 12px; border: 1px solid var(--field-line); border-radius: 6px; color: var(--ink); background: var(--surface); font: inherit; font-size: 14px; }
 textarea { min-height: 76px; resize: vertical; }
 input[readonly] { color: var(--muted); background: var(--surface); }
 input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
@@ -113,7 +121,7 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 .downloads a { color: var(--accent); }
 .validated { display: grid; gap: 5px; margin-top: 18px; padding: 13px; border: 1px solid #2e695b; border-radius: 6px; background: #112b27; color: #9be8cc; }
 .validated span, .validated small { color: #82a99d; font-size: 13px; }
-.notice { margin-bottom: 16px; padding: 14px; border: 1px solid var(--notice-line); border-radius: 6px; background: var(--notice); font-size: 15px; }
+.notice { margin-bottom: 16px; padding: 14px; border: 1px solid var(--notice-line); border-radius: 6px; background: var(--notice); font-size: 14px; }
 .notice.error { border-color: var(--danger-line); color: var(--danger); background: var(--danger-soft); }
 .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
 
@@ -121,12 +129,12 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 .summary-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; margin: 18px 0 0; }
 .summary-list div { min-width: 0; }
 .summary-list dt { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
-.summary-list dd { margin: 5px 0 0; color: var(--ink); font-size: 15px; overflow-wrap: anywhere; }
+.summary-list dd { margin: 5px 0 0; color: var(--ink); font-size: 14px; overflow-wrap: anywhere; }
 .job-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .job-card { display: grid; gap: 7px; padding: 18px 0; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; }
 .job-card:last-child { border-bottom: 0; }
 .job-card-title { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-.job-list strong { font-size: 15px; font-weight: 600; line-height: 1.55; }
+.job-list strong { font-size: 14px; font-weight: 600; line-height: 1.55; }
 .job-list small, .job-list time { color: var(--muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .job-idea { color: var(--ink); }
 .job-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 3px; }
@@ -147,6 +155,10 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 table { width: 100%; margin-top: 20px; border-collapse: collapse; color: var(--ink); font-size: 14px; }
 th { padding: 0 5px 9px; color: var(--muted); font-weight: 600; text-align: left; }
 td { padding: 9px 5px; border-top: 1px solid var(--line-soft); }
+/* Every figure is read against the figure above and below it, so the numeric
+   surfaces are set in tabular figures and their columns line up. */
+table, .metric-card strong, .summary-list dd, .position-stat strong,
+.allocation-ring strong, time { font-variant-numeric: tabular-nums; }
 
 /* Markets overview and the backtest workspaces */
 .overview-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 24px; }
@@ -170,11 +182,11 @@ td { padding: 9px 5px; border-top: 1px solid var(--line-soft); }
 .position-stat strong { color: var(--ink-strong); font-size: 40px; line-height: 1; }
 .position-stat span { margin-top: 7px; color: var(--muted); font-size: 13px; }
 .position-stat em { margin-top: 16px; color: var(--muted); font-size: 13px; font-style: normal; }
-.health-row { margin: 28px 0; color: var(--ink); font-size: 15px; }
+.health-row { margin: 28px 0; color: var(--ink); font-size: 14px; }
 .environment { display: flex; flex-wrap: wrap; gap: 50px; margin: 0; }
 .environment div { display: grid; gap: 4px; }
 .environment dt { color: var(--muted); font-size: 13px; }
-.environment dd { margin: 0; color: var(--ink); font-size: 15px; font-weight: 650; }
+.environment dd { margin: 0; color: var(--ink); font-size: 14px; font-weight: 650; }
 .backtest-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr); gap: 24px; }
 .control-panel, .jobs-panel, .identity-panel { min-height: 0; }
 .compare-button { margin-top: 14px; }
@@ -182,7 +194,7 @@ td { padding: 9px 5px; border-top: 1px solid var(--line-soft); }
 .comparison-panel { min-width: 0; min-height: 0; margin-bottom: 24px; overflow-x: auto; }
 .comparison-panel th { text-align: left; }
 .comparison-panel tr.changed td:last-child { color: var(--amber); }
-.no-report { margin-top: 16px; color: var(--danger); font-size: 15px; }
+.no-report { margin-top: 16px; color: var(--danger); font-size: 14px; }
 .analysis-summary { min-height: 0; margin-bottom: 24px; }
 .analysis-summary .summary-list { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .analysis-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px; }
@@ -209,7 +221,7 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
 .research-context .disclosure { margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; }
 .research-spec h3 { margin: 18px 0 6px; font-size: 16px; }
 .research-spec h3:first-child { margin-top: 0; }
-.assumption-list { padding-left: 18px; color: var(--ink); font-size: 15px; line-height: 1.6; }
+.assumption-list { padding-left: 18px; color: var(--ink); font-size: 14px; line-height: 1.6; }
 .assumption-list li { margin-bottom: 4px; }
 
 /* The leading outcome of a task: host strings only, one report entry. */
@@ -226,7 +238,7 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
 /* Optional host-verified surfaces: capabilities, upload, declarations. */
 .disclosure { margin-top: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
 .disclosure > summary { display: flex; flex-wrap: wrap; gap: 4px 9px; align-items: baseline; min-height: 44px; padding: 13px 16px; cursor: pointer; color: var(--ink); font-size: 13px; }
-.disclosure > summary strong { font-size: 15px; font-weight: 650; }
+.disclosure > summary strong { font-size: 14px; font-weight: 650; }
 .disclosure > summary h2 { font-size: 20px; }
 .disclosure > summary span { color: var(--muted); font-size: 13px; font-weight: 400; }
 .disclosure-body { padding: 0 16px 16px; }
@@ -299,7 +311,6 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
   .content { padding: 16px; }
   .page-title { flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
   .page-title p { font-size: 13px; }
-  h1 { font-size: 26px; }
   h2 { font-size: 19px; }
   .metric-card { min-height: 0; padding: 16px; }
   .metric-card strong { font-size: 26px; }
@@ -320,29 +331,32 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
 }
 
 /* QUINE shell.
-   The working-name shell: a narrow, light sidebar with a restrained black Q mark,
-   compact icon navigation, and a thin toolbar. These tokens are additive — the
-   legacy research, backtest, holdout and candidate pages keep --accent and every
-   surface they already had; only the sidebar, the brand and the toolbar change. */
+   The working-name shell: a narrow, light sidebar with a restrained Q mark,
+   compact icon navigation, and a thin toolbar. The token names below are the ones
+   this shell has always used — including the legacy `red` family, which now
+   carries the palette's one teal accent, so every surface that already read those
+   names follows the palette without a second set of names beside them. */
 :root {
-  --quine-ink: #1f2023;
-  --quine-ink-soft: #6b6f76;
-  --quine-line: #e6e6e3;
-  --quine-line-soft: #efefec;
+  --quine-ink: #17212f;
+  --quine-ink-soft: #5a6672;
+  --quine-line: #e3e8ee;
+  --quine-line-soft: #edf1f5;
   --quine-surface: #ffffff;
-  --quine-surface-soft: #fafaf9;
-  --quine-red: #cf3f2c;
-  --quine-red-soft: #fdeeeb;
-  --quine-red-line: #f2c8c0;
+  --quine-surface-soft: #f6f8fa;
+  --quine-red: #007f8b;
+  --quine-red-soft: #e6f4f5;
+  --quine-red-line: #bfe0e4;
   /* A filled control and the text on it, kept as a pair: the shell's one primary
-     action is a graphite button in light mode and an inverted one in dark mode,
-     so its label can never end up the colour of its own background. */
-  --quine-primary: #1f2023;
+     action is a teal button whose label can never end up the colour of its own
+     background. `strong` is the same button under the pointer — a deeper teal in
+     either theme, so the label stays legible on it. */
+  --quine-primary: #007f8b;
+  --quine-primary-strong: #00646e;
   --quine-primary-ink: #ffffff;
-  --quine-red-ink: #a4301f;
-  --quine-positive-soft: #eef6f0;
-  --quine-positive-line: #bfd7c6;
-  --quine-positive-ink: #2c6a41;
+  --quine-red-ink: #00646e;
+  --quine-positive-soft: #eaf6f0;
+  --quine-positive-line: #bfdccd;
+  --quine-positive-ink: #1f6b52;
 }
 
 /* Dark theme. `data-theme` is written on the root element by the appearance
@@ -356,20 +370,20 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
   --muted: #a3a7ae;
   --line: #34373c;
   --line-soft: #2d3035;
-  --accent: #93aaff;
+  --accent: #5fc9d6;
   --amber: #dcb469;
   --surface: #1b1d21;
   --shell: #131518;
   --soft: #202327;
-  --accent-ink: #10131c;
-  --accent-line: #39466e;
+  --accent-ink: #04262c;
+  --accent-line: #245c64;
   --amber-line: #5e4a22;
   --positive: #86d3b2;
   --danger: #ff9d9d;
   --danger-soft: #2c1a1c;
   --danger-line: #5b3036;
-  --notice: #1b2129;
-  --notice-line: #333c4b;
+  --notice: #142026;
+  --notice-line: #294750;
   --field-line: #3a3e44;
 
   --quine-ink: #e7e8e5;
@@ -378,12 +392,13 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
   --quine-line-soft: #2d3035;
   --quine-surface: #1b1d21;
   --quine-surface-soft: #202327;
-  --quine-red: #ff7a5e;
-  --quine-red-soft: #3b1e18;
-  --quine-red-line: #5d3024;
-  --quine-primary: #e9eae7;
-  --quine-primary-ink: #17191c;
-  --quine-red-ink: #ffb2a0;
+  --quine-red: #5fc9d6;
+  --quine-red-soft: #14343a;
+  --quine-red-line: #245c64;
+  --quine-primary: #007f8b;
+  --quine-primary-strong: #00727d;
+  --quine-primary-ink: #ffffff;
+  --quine-red-ink: #8fe0e9;
   --quine-positive-soft: #1d2a23;
   --quine-positive-line: #37543f;
   --quine-positive-ink: #8fd6ab;
@@ -397,14 +412,14 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
   width: 22px; height: 22px; background: none; clip-path: none; color: var(--quine-ink);
 }
 .brand span { color: var(--quine-ink); font-size: 17px; font-weight: 750; letter-spacing: .08em; }
-.workspace { margin: 22px 8px 12px; color: var(--quine-ink-soft); font-size: 11px; letter-spacing: .1em; }
+.workspace { margin: 22px 8px 12px; color: var(--quine-ink-soft); font-size: 12px; letter-spacing: .1em; }
 
 .sidebar nav { gap: 1px; }
 .sidebar nav a { gap: 9px; padding: 9px 9px; border-radius: 7px; color: var(--quine-ink-soft); font-size: 14px; }
 .sidebar nav a:hover { color: var(--quine-ink); background: var(--quine-surface-soft); }
 .sidebar nav a.active { color: var(--quine-ink); background: var(--quine-red-soft); box-shadow: inset 2px 0 0 var(--quine-red); font-weight: 650; }
 .nav-icon { flex-shrink: 0; }
-.nav-group { margin: 16px 9px 5px; color: var(--quine-ink-soft); font-size: 11px; font-weight: 700; letter-spacing: .1em; }
+.nav-group { margin: 16px 9px 5px; color: var(--quine-ink-soft); font-size: 12px; font-weight: 700; letter-spacing: .1em; }
 .sidebar nav a.nav-child { padding-left: 34px; font-size: 13px; }
 .sidebar-bottom { margin-top: auto; display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--quine-line); }
 .sidebar .sidebar-footer { margin: 0; padding: 0 9px; border: 0; color: var(--quine-ink-soft); font-size: 12px; }
@@ -480,7 +495,9 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
   :root[data-density="compact"] .research-context .panel { padding: 12px 14px; }
   :root[data-density="compact"] .strategy-workspace { gap: 14px; }
   :root[data-density="compact"] .strategy-column { gap: 10px; }
-  :root[data-density="compact"] .strategy-panel { padding: 12px; }
+  /* The conversation card pads its own rows rather than itself, so it is the one
+     panel density never re-pads: its scroller and composer must stay flush. */
+  :root[data-density="compact"] .strategy-panel:not(.strategy-chat) { padding: 12px; }
   :root[data-density="compact"] .strategy-table thead th { padding: 6px 12px; }
   :root[data-density="compact"] .strategy-table tbody th,
   :root[data-density="compact"] .strategy-table td { padding: 7px 12px; }

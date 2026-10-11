@@ -22,11 +22,14 @@
  * never be about two different runs. Nothing here computes a metric the engine did
  * not write.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { MultiRoundTripExecution, RoundTripExecution } from './app'
+import { CandidateCreate } from './candidates'
+import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import type { ApiAdapter, BacktestJob, BacktestReport, ScenarioSummary } from './app'
 import type { ModelConfigurationStatus, ReportCriterion } from './research-api'
-import { EquityCurve, pathPercent, type EquityPath } from './equity-path'
+import { EquityCurve, type EquityPath } from './equity-path'
 import { exactDelta } from './decimal'
 import { evidenceAddress, readEvidenceSelection, selectableRuns, selectedRuns } from './evidence-selection'
 import {
@@ -42,7 +45,7 @@ import {
   type UserStrategyProposal,
   type UserStrategyProposalStatus,
 } from './user-strategies-api'
-import { StrategyEvidenceResearch } from './user-strategy-research'
+import { StrategyEvidenceResearch, useRunRead } from './user-strategy-research'
 
 /**
  * The allowlisted criterion fields, in the report's own paths. This list is
@@ -453,15 +456,12 @@ function DraftFacts({ draft }: { draft: UserStrategyDraftDocument }) {
   </section>
 }
 
-type TabKey = 'intent' | 'rules' | 'experiments' | 'evidence' | 'revisions' | 'candidates'
+type TabKey = 'strategy' | 'experiments' | 'compare'
 
 const DETAIL_TABS: { key: TabKey; label: string }[] = [
-  { key: 'intent', label: '意图' },
-  { key: 'rules', label: '规则与假设' },
+  { key: 'strategy', label: '策略' },
   { key: 'experiments', label: '实验' },
-  { key: 'evidence', label: '证据' },
-  { key: 'revisions', label: '修订' },
-  { key: 'candidates', label: '候选' },
+  { key: 'compare', label: '比较' },
 ]
 
 function DetailTabs({ active, select, idBase }: {
@@ -476,7 +476,7 @@ function DetailTabs({ active, select, idBase }: {
         : event.key === 'Home' ? 0
           : event.key === 'End' ? DETAIL_TABS.length - 1
             : -1
-    if (next < 0) return
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return
     event.preventDefault()
     const key = DETAIL_TABS[(next + DETAIL_TABS.length) % DETAIL_TABS.length].key
     select(key)
@@ -583,21 +583,12 @@ function RevisionsSection({ strategy }: { strategy: UserStrategy }) {
   </section>
 }
 
-function CandidatesSection({ strategy }: { strategy: UserStrategy }) {
-  const hasRun = strategy.experiments.some(item => item.status === 'created')
-  return <section aria-label="候选" className="strategy-panel">
-    <h2>候选</h2>
-    <p className="muted">候选与决策在既有页面上完成：一次运行的结果可以在那里被提升为候选，并记录你的决定。</p>
-    <p><Link to="/candidates">打开候选页面</Link></p>
-    {!hasRun && <p className="muted">这条策略还没有冻结运行，因此还没有可提升的证据。</p>}
-  </section>
-}
 
 type EvidenceState =
   | { kind: 'empty' }
   | { kind: 'loading' }
   | { kind: 'unavailable'; note: string }
-  | { kind: 'ready'; job: BacktestJob; report: BacktestReport; path: EquityPath | null; pathNote: string | null }
+  | { kind: 'ready'; job: BacktestJob; report: BacktestReport; path: EquityPath | null; pathNote: string | null; analytics: TradeAnalytics | null }
 
 /** The report's own figures, printed as the report wrote them. */
 function EvidenceMetrics({ report }: { report: BacktestReport }) {
@@ -626,7 +617,7 @@ function EvidenceMetrics({ report }: { report: BacktestReport }) {
  * run id is the run it was read for; a missing, refused or mismatched report is
  * said out loud rather than replaced by a figure this page would have to invent.
  */
-function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStrategy }) {
+export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStrategy }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const runs = useMemo(() => selectableRuns(strategy), [strategy])
   // This card and the research panel below are two views of one selection, so both
@@ -656,6 +647,7 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
     const load = async () => {
       const job = await api.getBacktest(jobId)
       if (!active) return
+      if (job.job_id !== jobId) throw new Error('读取到的任务与所选实验不一致')
       if (job.status !== 'succeeded' || !job.report_ready) {
         setLoaded({
           key: jobId,
@@ -688,8 +680,14 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
       } catch {
         pathNote = '该运行没有可读的权益曲线。'
       }
+      let analytics: TradeAnalytics | null = null
+      try {
+        const value = await api.getTradeAnalytics?.(jobId)
+        if (value?.schema === 'ea.trade-analytics.v1' && value.run_id === job.engine_run_id
+          && value.report_sha256 === job.report_sha256) analytics = value
+      } catch { /* Unavailable stays absent. */ }
       if (!active) return
-      setLoaded({ key: jobId, state: { kind: 'ready', job, report, path, pathNote } })
+      setLoaded({ key: jobId, state: { kind: 'ready', job, report, path, pathNote, analytics } })
     }
     load().catch(error => {
       if (active) setLoaded({ key: jobId, state: { kind: 'unavailable', note: explain(error) } })
@@ -744,7 +742,7 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
     </header>
     {invalid && <p className="notice error">
       地址里的证据选择无法核对，这里不显示任何运行或报告。
-      {!isIntentDraft(strategy.draft) && '可在下方「证据对比」里清除这个选择后重新选择。'}
+      <button type="button" onClick={() => setSearchParams(evidenceAddress(searchParams, null, null), { replace: true })}>清除无效的证据选择</button>
     </p>}
     {!invalid && state.kind === 'empty' && <p className="muted">
       还没有冻结运行。在「实验」里确认一次实验之后，这里会显示那次运行自己的正式报告——只有运行成功，报告才存在。
@@ -752,11 +750,17 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
     {!invalid && state.kind === 'loading' && <p className="muted">正在读取该运行的状态与正式报告……</p>}
     {!invalid && state.kind === 'unavailable' && <p className="notice error">{state.note}</p>}
     {!invalid && state.kind === 'ready' && <>
+      <p className="muted">{state.job.input_snapshot?.scenario.data
+        ? `${state.job.input_snapshot.scenario.data.start_utc} → ${state.job.input_snapshot.scenario.data.end_utc} · UTC`
+        : '数据窗口未记录'} · 冻结修订 {frozenRevision ?? '未记录'}</p>
       <p className="evidence-origin">
         <span className="chip">事实 · 引擎</span>
         <span className="muted">{`正式报告由引擎产出，不是模型输出 · 运行状态 ${state.job.status}`}</span>
       </p>
       <EvidenceMetrics report={state.report} />
+      {state.path
+        ? <div className="evidence-curve"><EquityCurve analysis={state.path} /></div>
+        : <p className="muted">{state.pathNote ?? '该运行没有可读的权益曲线。'}</p>}
       {/* The limits stand beside the figures they qualify: one window and one frozen
           revision, and only the sample size the run's own job recorded. What is
           claimed is what this run cannot do on its own, not an inventory of things
@@ -764,21 +768,28 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
       <p className="muted evidence-limits">
         {`${frozenCriterion} · ${sample}。这是一次单窗口的冻结运行：成功只表示执行完成，不能证明研究有效或稳健。同一数据上的重复运行和行情条数不等于独立验证样本。`}
       </p>
-      <div className="actions">
-        <Link className="button-link" to={`/backtests/${encodeURIComponent(state.job.job_id)}`}>打开运行页面</Link>
-      </div>
-      {/* The curve and its drawdown are one disclosure of their own, so the
-          research panel below is reachable sooner; every point stays in it. */}
-      <details className="provenance evidence-curve-disclosure">
-        <summary>权益曲线与回撤</summary>
-        {state.path
-          ? <div className="evidence-curve"><EquityCurve analysis={state.path} /></div>
-          : <p className="muted">{state.pathNote ?? '该运行没有可读的权益曲线。'}</p>}
+      <details className="provenance report-assumptions">
+        <summary>数据与假设</summary>
+        <dl className="summary-list">{Object.entries(experiment?.payload.normalized ?? {}).map(([name, value]) =>
+          <div key={name}><dt>{name}</dt><dd>{factLine(value)}</dd></div>)}</dl>
+        <p className="muted">{sample} · 参数：{Object.entries(experiment?.payload.parameters ?? {}).map(([key, value]) => `${key}: ${value}`).join(' · ')}</p>
+      </details>
+      <details className="provenance report-trades"><summary>成交与完整报告</summary>
         <dl className="summary-list">
-          <div><dt>最大回撤（曲线）</dt><dd>{state.path
-            ? `${state.path.max_drawdown.amount} ${state.path.currency} / ${pathPercent(state.path.max_drawdown.ratio)}`
-            : '不可用'}</dd></div>
+          <div><dt>期末现金</dt><dd>{state.report.economics.ending_cash.map(item => `${item.amount} ${item.currency ?? state.report.economics.currency ?? '币种未记录'}`).join(' · ')}</dd></div>
+          <div><dt>期末头寸</dt><dd>{state.report.economics.ending_positions.map(item => `${item.venue}:${item.symbol} ${item.quantity}`).join(' · ') || '无'}</dd></div>
+          {state.report.schema === 'ea.backtest-report.v3' ? <MultiRoundTripExecution economics={state.report.economics} />
+            : state.report.schema === 'ea.backtest-report.v2' ? <RoundTripExecution economics={state.report.economics} />
+            : <><div><dt>订单</dt><dd>{state.report.economics.execution.order ? `${state.report.economics.execution.order.side} ${state.report.economics.execution.order.quantity}` : '无'}</dd></div>
+                <div><dt>成交</dt><dd>{state.report.economics.execution.fill ? `${state.report.economics.execution.fill.quantity} @ ${state.report.economics.execution.fill.price}` : '无'}</dd></div></>}
         </dl>
+        <TradeAnalyticsPanel analytics={state.analytics} />
+        <div className="artifact-links"><a href={api.artifactUrl(state.job.job_id, 'report.json')}>下载正式报告</a><Link to={`/backtests/${encodeURIComponent(state.job.job_id)}`}>独立报告链接</Link></div>
+      </details>
+      <details className="provenance"><summary>留出验证与候选</summary>
+        <p className="muted">使用本实验的冻结输入开展独立验证，再记录候选决定。</p>
+        <Link to={`/holdouts/new/${encodeURIComponent(state.job.job_id)}`}>创建本实验的留出验证</Link>
+        <CandidateCreate key={state.job.job_id} api={api} jobId={state.job.job_id} />
       </details>
       <details className="provenance">
         <summary>技术细节与来源</summary>
@@ -1088,7 +1099,7 @@ function NextStep({ api, strategy, openExperiments }: {
         ? <>
             {`v${latest.payload.draft_revision}`}
             {jobId
-              ? <> · <JobStatusCell key={jobId} api={api} jobId={jobId} /></>
+              ? <> · <JobStatusCell key={jobId} api={api} jobId={jobId} strategyId={strategy.user_strategy_id} /></>
               : ` · ${EXPERIMENT_STATUS_LABELS[latest.status]}`}
           </>
         : isIntentDraft(draft) ? '尚未绑定场景' : '还没有冻结运行'}</dd></div>
@@ -1110,49 +1121,49 @@ function StrategyDetail({ api, strategy, scenarios, catalogReady, changed, faile
   failed: (message: string) => void
 }) {
   const hasRun = strategy.experiments.some(item => item.status === 'created')
-  // The detail opens on the evidence of a frozen run when there is one, and on the
-  // intent when there is not: an honest empty state rather than a hidden form.
-  const [tab, setTab] = useState<TabKey>(hasRun ? 'evidence' : 'intent')
+  const [params, setParams] = useSearchParams()
+  const requested = params.get('tab')
+  const tab: TabKey = requested === 'strategy' || requested === 'experiments' || requested === 'compare'
+    ? requested : params.has('evidence_b') ? 'compare' : hasRun ? 'experiments' : 'strategy'
+  const selectTab = (next: TabKey) => {
+    const search = new URLSearchParams(params)
+    search.set('tab', next)
+    setParams(search)
+  }
   const idBase = `detail-${strategy.user_strategy_id}`
-  // The strategy and the conversation are two columns on a wide screen and two
-  // stacked blocks on a narrow one, where the jump links are the way between them.
-  // Both targets are focusable, so a fragment jump really moves the reader there.
+  const pending = strategy.proposals.filter(item => item.status === 'open').length
   return <section className="strategy-detail" id="strategy-detail" tabIndex={-1} aria-label="策略详情">
     <header className="strategy-title">
-      <h2>{strategy.name}</h2>
+      <h1>{strategy.name}</h1>
       <span className="chip chip-draft">{revisionChip(strategy.draft)}</span>
-      <a className="jump-link jump-to-ai" href="#strategy-ai-column">跳到 AI 协作</a>
-      <Link className="strategy-open" to="/strategies">返回策略列表</Link>
+      <a className="jump-link jump-to-ai" href="#strategy-message">讨论这个研究</a>
+      <Link className="strategy-open" to="/strategies">返回研究列表</Link>
     </header>
-    <DraftFacts draft={strategy.draft} />
-    {isIntentDraft(strategy.draft) && <BindScenario
-      api={api} strategy={strategy} scenarios={scenarios} catalogReady={catalogReady}
-      changed={changed} failed={failed} />}
-    {/* The data a draft runs on is an explicit choice of its own, made once the
-        scenario is bound and before anything is previewed. */}
-    {!isIntentDraft(strategy.draft) && <SelectDataset
-      api={api} strategy={strategy} changed={changed} failed={failed} />}
-    <NextStep api={api} strategy={strategy} openExperiments={() => setTab('experiments')} />
-    <DetailTabs active={tab} select={setTab} idBase={idBase} />
+    <p className="research-context">{isIntentDraft(strategy.draft) ? '尚未绑定场景' : `${strategy.draft.venue}:${strategy.draft.symbol} · ${strategy.draft.scenario_id}`} · 历史回测</p>
+    <div className="research-status-line">
+      <NextStep api={api} strategy={strategy} openExperiments={() => selectTab('experiments')} />
+      <a className={`pending-changes${pending ? ' has-pending' : ''}`} href="#strategy-ai-column">{pending ? `待处理：${pending} 项策略修改` : '暂无待处理修改'}</a>
+    </div>
+    <DetailTabs active={tab} select={selectTab} idBase={idBase} />
     <div className="strategy-tabpanel" role="tabpanel" id={`${idBase}-panel-${tab}`}
       aria-labelledby={`${idBase}-tab-${tab}`} tabIndex={0}>
-      {tab === 'intent' && <IntentSection strategy={strategy} />}
-      {tab === 'rules' && <RulesSection draft={strategy.draft} />}
-      {tab === 'experiments' && <ExperimentPanel
-        // One panel per strategy and revision: a revision that moves on while a
-        // preview or a launch is in flight mounts the next revision its own panel
-        // instead of carrying the old one's consent, phase or pending answer over.
-        key={`${strategy.user_strategy_id}-${strategy.draft.revision}`}
-        api={api} strategy={strategy} changed={changed} failed={failed} />}
-      {tab === 'evidence' && <>
-        <EvidenceSection api={api} strategy={strategy} />
-        {/* An intent has no frozen run, so there is nothing to select and nothing
-            to explain: the panel is not shown until a scenario is bound. */}
-        {!isIntentDraft(strategy.draft) && <StrategyEvidenceResearch
-          api={api} strategy={strategy} changed={changed} failed={failed} />}
+      {tab === 'strategy' && <>
+        <DraftFacts draft={strategy.draft} />
+        <IntentSection strategy={strategy} />
+        {isIntentDraft(strategy.draft) ? <BindScenario api={api} strategy={strategy} scenarios={scenarios}
+          catalogReady={catalogReady} changed={changed} failed={failed} />
+          : <><RulesSection draft={strategy.draft} /><SelectDataset api={api} strategy={strategy} changed={changed} failed={failed} /></>}
+        <details className="provenance"><summary>修订记录</summary><RevisionsSection strategy={strategy} /></details>
       </>}
-      {tab === 'revisions' && <RevisionsSection strategy={strategy} />}
-      {tab === 'candidates' && <CandidatesSection strategy={strategy} />}
+      {tab === 'experiments' && <>
+        <EvidenceSection api={api} strategy={strategy} />
+        <details className="experiment-controls" open={!hasRun || undefined}>
+          <summary>新实验与运行记录</summary>
+          <ExperimentPanel key={`${strategy.user_strategy_id}-${strategy.draft.revision}`}
+            api={api} strategy={strategy} changed={changed} failed={failed} />
+        </details>
+      </>}
+      {tab === 'compare' && <StrategyEvidenceResearch api={api} strategy={strategy} changed={changed} failed={failed} />}
     </div>
   </section>
 }
@@ -1193,15 +1204,10 @@ function CallEvidence({ call }: { call: UserStrategyCall | undefined }) {
  * The header names the strategy the conversation belongs to and switches between
  * the real strategies of this workspace.
  *
- * What the reader meets first is the composer: the message, the one explicit
- * approval and the ask, then the two states that qualify them — an unbound idea and
- * an unresolved call. Only after that comes the current turn: the latest recorded
- * call, its own status and refusal, the prompt it was made with, and the answer
- * that belongs to that call. An answer of an earlier call is never shown as if it
- * replied to the latest one — a refusal or an unknown outcome says so, and the
- * earlier conversation stays whole in its own labelled, bounded, keyboard-scroll
- * history disclosure. Nothing the user acts on — the proposal, the approval, the
- * composer — is inside that scroller, and the DOM order is the keyboard order.
+ * The current turn and proposal share one conversation scroller. The composer
+ * stays below it and always names the selected draft and frozen A/B evidence.
+ * A refused or unknown call never borrows an older answer. The previous turns
+ * remain inspectable, and a new route visit requires its own approval.
  */
 function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSendBlock }: {
   api: ApiAdapter
@@ -1214,8 +1220,31 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
   proposalSlot?: ReactNode
 }) {
   const navigate = useNavigate()
+  const location = useLocation()
+  const [params] = useSearchParams()
+  const runs = useMemo(() => selectableRuns(strategy), [strategy])
+  const selection = useMemo(() => readEvidenceSelection(params, runs), [params, runs])
+  const { a, b } = selectedRuns(selection, runs)
+  const aState = useRunRead(api, a?.job_id ?? null)
+  const bState = useRunRead(api, b?.job_id ?? null)
+  const evidenceReady = selection.kind !== 'invalid' && (!a || aState?.kind === 'ready') && (!b || bState?.kind === 'ready')
+  const requestKey = `${strategy.user_strategy_id}|${strategy.draft.revision}|${a?.job_id ?? ''}|${b?.job_id ?? ''}`
+  const at = `${location.key}|${requestKey}`
+  const [visit, setVisit] = useState({ at, id: 0 })
+  const visitKey = `${visit.at === at ? visit.id : visit.id + 1}|${at}`
+  const shown = useRef(visitKey)
+  const mounted = useRef(false)
+  const inFlight = useRef(false)
+  useLayoutEffect(() => { shown.current = visitKey })
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   const [message, setMessage] = useState('')
-  const [approved, setApproved] = useState(false)
+  const [approvedAt, setApprovedAt] = useState<string | null>(null)
+  const approved = approvedAt === visitKey
+  const setApproved = (value: boolean) => setApprovedAt(value ? visitKey : null)
+  if (visit.at !== at) {
+    setVisit({ at, id: visit.id + 1 })
+    setApprovedAt(null)
+  }
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const latest = strategy.calls.at(-1)
@@ -1235,6 +1264,7 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
   const ask = async () => {
     // UI readiness is only a sending precondition; the backend still owns the
     // actual configuration, approval and provider execution checks.
+    if (inFlight.current || unresolved || !evidenceReady) return
     if (modelSendBlock !== null) {
       setNote(modelSendBlock)
       return
@@ -1248,6 +1278,9 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
       setNote('这个工作区不提供模型协作。')
       return
     }
+    inFlight.current = true
+    const sentAt = visitKey
+    const mine = () => mounted.current && shown.current === sentAt
     setBusy(true)
     setNote('')
     try {
@@ -1256,20 +1289,23 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
         base_revision: strategy.draft.revision,
         text: message.trim(),
         approved_budget: CALL_APPROVAL,
+        ...(a ? { evidence_job_ids: [a.job_id!, ...(b ? [b.job_id!] : [])] } : {}),
       })
+      if (!mine() || updated.user_strategy_id !== strategy.user_strategy_id) return
       changed(updated)
       setMessage('')
       setApproved(false)
     } catch (error) {
-      setNote(explain(error))
+      if (mine()) setNote(explain(error))
     } finally {
-      setBusy(false)
+      inFlight.current = false
+      if (mounted.current) setBusy(false)
     }
   }
 
   return <section aria-label="AI 协作" className="strategy-panel strategy-chat">
     <header className="chat-head">
-      <h2>AI 协作</h2>
+      <h2><span aria-hidden="true">✦ </span>AI 研究助手</h2>
       {strategies.length > 0 && <label className="inline-field">共同编辑
         <select aria-label="当前策略" value={strategy.user_strategy_id}
           onChange={event => navigate(`/strategies/${encodeURIComponent(event.target.value)}`)}>
@@ -1279,36 +1315,21 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
         </select>
       </label>}
     </header>
-    {/* The composer is the one thing the reader acts with, so it comes first: the
-        message, the one explicit approval and the ask are met before the long answer
-        they belong to and before the proposal. The DOM order is the visual and
-        keyboard order, so the tab sequence follows the same usable path. */}
-    <div className="composer">
-      <div className="field">
-        <label htmlFor="strategy-message">消息</label>
-        <textarea id="strategy-message" rows={3} value={message} maxLength={4000}
-          placeholder="描述你想验证的问题…"
-          onChange={event => setMessage(event.target.value)} />
+    <p className="ai-context" aria-label="AI 当前上下文">{strategy.name} · 草稿 v{strategy.draft.revision}
+      {selection.kind === 'invalid' ? ' · 证据选择无效，不能发送' : a
+        ? ` · A：修订 ${a.payload.draft_revision}${b ? ` / B：修订 ${b.payload.draft_revision}` : ''}`
+        : ' · 当前草稿，尚无实验报告'}
+    </p>
+    {!evidenceReady && <p className="notice" role="status">所选证据尚未就绪，请检查实验或比较标签。</p>}
+    <div className="chat-body">
+    {!latest && <div className="chat-empty-guidance">
+      <p>从当前草稿和所选实验开始讨论。</p>
+      <p className="muted">先选一个问题，也可以直接输入。发送前需要批准一次模型调用。</p>
+      <div className="chat-suggestions">
+        <button type="button" onClick={() => setMessage(a ? '请解读当前所选实验的结果、成本和局限。' : '请帮我明确当前策略想要验证的假设。')}>{a ? '解读所选实验' : '明确研究假设'}</button>
+        <button type="button" onClick={() => setMessage(b ? '请比较当前 A/B 实验，指出差异、风险和仍缺少的证据。' : '当前研究还缺少哪些风险和成本证据？')}>{b ? '比较 A/B 证据' : '检查风险与成本'}</button>
       </div>
-      <label className="check" htmlFor="strategy-approve">
-        <input id="strategy-approve" type="checkbox" checked={approved}
-          onChange={event => { setApproved(event.target.checked); setNote('') }} />
-        批准一次模型调用
-      </label>
-      <div className="composer-actions">
-        <p className="muted">{isIntentDraft(strategy.draft)
-          ? '一次批准只允许一次调用，这一次调用只用来澄清这个想法：它不提出字段修改，也不启动回测。'
-          : '本次批准仅针对当前修订调用模型一次，解释或提出修改；不应用提案，也不运行回测。'}</p>
-        <button type="button" className="primary" onClick={ask} disabled={busy || !message.trim() || modelSendBlock !== null}>询问模型</button>
-      </div>
-      {modelSendBlock !== null && <p className="notice" role="status">
-        {modelSendBlock} <Link to="/settings">检查模型设置</Link>，完成后点击上方「重新检查」再发送。
-      </p>}
-      {note && <p role="alert" className="notice error">{note}</p>}
-    </div>
-    {/* The two states that qualify the composer sit with it rather than at the far
-        end of the column: an unbound idea and an unresolved call are both about what
-        can be asked next. */}
+    </div>}
     {isIntentDraft(strategy.draft) && <p className="notice">
       这条策略还没有绑定场景：这次对话只能澄清这个想法，模型不会提出任何字段修改，也不会运行任何东西。
       绑定场景之后，它的建议才会变成可以应用的修改。
@@ -1329,10 +1350,8 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
       </details>}
       {answer
         ? <div className="turn-answer">
-            {/* The answer is the longest thing on this page, so it is the bounded
-                surface: it scrolls on its own, by keyboard as well as by pointer,
-                its first lines are what the reader meets, and the whole text stays
-                in it. The inference label and the revision belong outside it. */}
+            {/* The full answer shares the conversation scroller. The composer
+                remains outside it, while keyboard users can focus this answer. */}
             <div className="answer-scroll" role="group" aria-label="本轮回答" tabIndex={0}>
               <p>{answer.text}</p>
             </div>
@@ -1371,8 +1390,7 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
         single collapsed line. */}
     {proposalSlot}
     {earlier.length > 0 &&
-      // The earlier conversation is a bounded surface of its own: it scrolls by
-      // keyboard as well as by pointer, and every earlier message stays in it.
+      // Earlier messages stay inspectable inside the shared conversation scroller.
       <details className="provenance turn-history">
         <summary>{`更早的对话（${earlier.length}）`}</summary>
         <div className="message-scroll" role="group" aria-label="对话记录" tabIndex={0}>
@@ -1388,6 +1406,31 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
           </ol>
         </div>
       </details>}
+    </div>
+    <div className="composer">
+      <div className="field">
+        <label htmlFor="strategy-message">消息</label>
+        <textarea id="strategy-message" rows={3} value={message} maxLength={4000}
+          placeholder="描述你想验证的问题…"
+          onChange={event => setMessage(event.target.value)} />
+      </div>
+      <label className="check" htmlFor="strategy-approve">
+        <input id="strategy-approve" type="checkbox" checked={approved}
+          onChange={event => { setApproved(event.target.checked); setNote('') }} />
+        批准一次模型调用
+      </label>
+      <div className="composer-actions">
+        <p className="muted">{isIntentDraft(strategy.draft)
+          ? '一次模型调用 · 澄清当前想法。'
+          : '一次模型调用 · 不应用修改，不启动实验。'}</p>
+        <button type="button" className="primary" onClick={ask} disabled={busy || unresolved || !approved || !message.trim() || modelSendBlock !== null || !evidenceReady}>询问模型</button>
+      </div>
+      {modelSendBlock !== null && <p className="notice" role="status">
+        {modelSendBlock} <Link to="/settings">检查模型设置</Link>，完成后在<a href="#research-preparation">研究准备</a>中重新检查。
+      </p>}
+      {note && <p role="alert" className="notice error">{note}</p>}
+    </div>
+
   </section>
 }
 
@@ -1398,7 +1441,7 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
  */
 function EmptyChat({ note, live = false }: { note?: string; live?: boolean }) {
   return <section aria-label="AI 协作" className="strategy-panel strategy-chat strategy-chat-empty">
-    <header className="chat-head"><h2>AI 协作</h2></header>
+    <header className="chat-head"><h2><span aria-hidden="true">✦ </span>AI 研究助手</h2></header>
     {note
       ? <p className="muted" role={live ? 'status' : undefined} aria-live={live ? 'polite' : undefined}>{note}</p>
       : <>
@@ -1706,6 +1749,7 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
   changed: (strategy: UserStrategy) => void
   failed: (message: string) => void
 }) {
+  const hasRun = strategy.experiments.some(item => item.status === 'created')
   const [preview, setPreview] = useState<UserStrategyPreview | null>(null)
   const [phase, setPhase] = useState<'idle' | 'reading' | 'launching'>('idle')
   // Every local operation is numbered against this panel instance: the preview read
@@ -1729,7 +1773,6 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
   // confirmable; the host's own full-preview gate is unchanged.
   const live = preview && preview.draft_revision === strategy.draft.revision ? preview : null
   const cancellable = phase === 'reading' || preview !== null
-  const hasRun = strategy.experiments.some(item => item.status === 'created')
   // Every run an owner holds, and whether one of them can still move on its own.
   const owned = strategy.experiments.filter(item => item.owner === 'quine')
   const activeRun = owned.find(item => LIVE_EXPERIMENT_STATUSES.includes(item.status)) ?? null
@@ -1963,20 +2006,20 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
           : <p>{`实验 ${item.launch_intent_id} 来自修订 ${item.payload.draft_revision} — ${EXPERIMENT_STATUS_LABELS[item.status]}`}</p>}
         {/* What the owner itself is doing, read back from its record: the phase it
             recorded, the attempt it named and the frozen input it retained. */}
-        {item.owner === 'quine' && <p className="muted">
+        {item.owner === 'quine' && <details className="provenance"><summary>运行诊断</summary><p className="muted">
           {`所有者 quine 核心`
             + (item.phase ? ` · 阶段 ${item.phase}` : '')
             + ` · 输入 ${item.payload.input_sha256?.slice(0, 16) ?? '未记录'}`
             + ` · 冻结 ${item.frozen_sha256?.slice(0, 16) ?? '未记录'}`
             + ` · 运行 ${item.attempt_id?.slice(0, 8) ?? '未记录'}`}
-        </p>}
+        </p></details>}
         {/* The run's own page: the owner's registered result is read through the
             same run, report, path and analytics views every other run uses, so a
             core-owned success keeps the mature report and comparison, not a
             second, thinner reading of it. */}
         {item.status === 'created' && item.job_id &&
-          <Link to={`/backtests/${encodeURIComponent(item.job_id)}`}>
-            打开运行以查看它的状态和报告
+          <Link to={`/strategies/${encodeURIComponent(strategy.user_strategy_id)}?tab=experiments&evidence_a=${encodeURIComponent(item.job_id)}`}>
+            查看这次实验报告
           </Link>}
         {/* One explicit stop request. It asks the owner; the owner's own record is
             what says whether the run stopped. */}
@@ -1996,14 +2039,10 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
       </li>)}
     </ul>}
     <p className="muted">
-      运行和它的状态在回测页面上，报告只在运行成功之后才存在——启动运行不等于有报告。
+      正式报告在实验完成后显示。一次运行只是一个冻结的结果，不是已经完成的研究。
       已确认的实验会保留它冻结的那个修订，即使草稿继续前进。
     </p>
-    {hasRun && <p className="muted">
-      一次运行只是一个冻结的结果，不是已经完成的研究：留出验证、下一个问题和结论属于
-      <Link to="/holdouts">留出验证</Link> 和
-      <Link to="/research"> 研究</Link> 页面。
-    </p>}
+
   </section>
 }
 
@@ -2015,7 +2054,7 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
  * for is refused rather than shown as this row's run. A job this page cannot read
  * says so and still links to the run's own page.
  */
-function JobStatusCell({ api, jobId }: { api: ApiAdapter; jobId: string }) {
+function JobStatusCell({ api, jobId, strategyId }: { api: ApiAdapter; jobId: string; strategyId?: string }) {
   type JobRead =
     | { kind: 'reading' }
     | { kind: 'ready'; job: BacktestJob }
@@ -2039,7 +2078,7 @@ function JobStatusCell({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   }, [api, jobId])
 
   if (state.kind === 'reading') return <span className="table-muted">正在读取运行状态…</span>
-  const link = <Link to={`/backtests/${encodeURIComponent(jobId)}`}>
+  const link = <Link to={strategyId ? `/strategies/${encodeURIComponent(strategyId)}?tab=experiments&evidence_a=${encodeURIComponent(jobId)}` : `/backtests/${encodeURIComponent(jobId)}`}>
     {state.kind === 'ready'
       ? `${JOB_STATUS_LABELS[state.job.status]}${state.job.status === 'succeeded'
           ? state.job.report_ready ? ' · 报告可读' : ' · 报告不可读'
@@ -2094,7 +2133,7 @@ function StrategyTable({ api, strategies, selectedId }: {
                   // A created run has a real run page, whatever owner registered it:
                   // its state is read from that run itself, never from the record.
                   : latest.status === 'created' && latest.job_id
-                    ? <JobStatusCell key={latest.job_id} api={api} jobId={latest.job_id} />
+                    ? <JobStatusCell key={latest.job_id} api={api} jobId={latest.job_id} strategyId={item.user_strategy_id} />
                     : <span className="table-muted">{EXPERIMENT_STATUS_LABELS[latest.status]}</span>}</td>
               </tr>
             })}
@@ -2303,8 +2342,8 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
 
   return <div className="strategy-workspace">
     <div className="strategy-column">
-      <header className="strategy-heading">
-        <h1>策略</h1>
+      {!userStrategyId && <header className="strategy-heading">
+        <h1>研究</h1>
         {listState === 'ready' && <span className="strategy-count">{`${strategies.length} 个策略`}</span>}
         {/* The control follows the routed id, not what has been read: a selected
             strategy whose read is still in flight or has failed is still a selected
@@ -2324,36 +2363,21 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
               }}>
               <span aria-hidden="true">+</span>新建策略
             </button>}
-      </header>
-      <p className="strategy-subtitle">每个想法一份草稿。在你确认之前，这里不会运行任何东西。</p>
-      <section className="strategy-panel first-use-preparation" aria-label="开始研究">
-        <header className="panel-head"><h2>开始研究</h2>
-          <button type="button" disabled={!catalog || !model} onClick={() => setCheck(value => value + 1)}>重新检查</button>
-        </header>
-        <p className="muted">先保存想法，再绑定场景与数据。AI 提出修改，由你应用；实验须预览后确认。</p>
-        <div className="preparation-row"><strong>{!model ? '正在读取模型配置…'
-          : model.error ? '模型状态未知' : model.value?.configured ? '模型已配置 · 连接未验证' : '模型未配置'}</strong>
-          <Link to="/settings">配置模型</Link></div>
-        {model?.error && <p className={api.settingsStatus ? "notice error" : "muted"} role={api.settingsStatus ? "alert" : undefined}>{model.error}</p>}
-        <div className="preparation-row"><strong>{!catalog ? '正在读取场景目录…'
-          : catalog.error ? '场景目录读取失败' : usableCount ? `${usableCount} 个可用场景` : '尚无可用场景'}</strong>
-          <Link to="/research#data-upload">导入 CSV 数据</Link></div>
-        {catalog?.error && <p className="notice error" role="alert">{catalog.error}</p>}
-        {catalog && !catalog.error && usableCount === 0 && <details className="disclosure">
-          <summary>准备场景与数据</summary>
-          <p>场景定义策略、标的、资金及数据。请把有效场景 YAML 和它引用的数据放入本地服务配置的 <code>--scenario-root</code> 目录，保持相对数据路径正确；需要改变目录时，以同一工作区重启服务，再重新检查。已保存的想法会保留。</p>
-          <p>CSV 导入只发布数据版本，不创建场景。当前版本仍需通过本地服务准备场景；安装应用内的目录配置尚未提供。</p>
-        </details>}
-        <p className="muted preparation-note">缺少配置也可保存想法。配置可用不代表模型连通；场景可用不代表草稿已可运行，以实验预览为准。</p>
-      </section>
-      {listState === 'reading'
+      </header>}
+      {!userStrategyId && <p className="strategy-subtitle">保存想法，验证实验，与 AI 一起读懂证据。</p>}
+
+      {!userStrategyId && (listState === 'reading'
         ? <p className="muted" role="status" aria-live="polite">正在读取策略…</p>
-        : listState === 'ready' && <StrategyTable api={api} strategies={strategies} selectedId={userStrategyId} />}
+        : listState === 'ready' && <StrategyTable api={api} strategies={strategies} selectedId={userStrategyId} />)}
       {listNote && <p role="alert" className="notice error">{listNote}</p>}
       {/* The collection route offers a way back into the work that moved last; it
           is a link the reader chooses, not a redirect. */}
       {!userStrategyId && listState === 'ready' && strategies.length > 0 &&
         <Continuation strategies={strategies} />}
+      {!userStrategyId && <details className="provenance"><summary>历史记录</summary><div className="actions">
+        <Link to="/research">旧研究任务</Link><Link to="/backtests">独立回测</Link><Link to="/holdouts">留出记录</Link><Link to="/candidates">候选记录</Link>
+      </div></details>}
+      {userStrategyId && <div className="workspace-breadcrumb"><Link to="/strategies">所有研究</Link><Link to="/strategies" state={{ createStrategy: true }}>新建策略</Link></div>}
       {showCreate && <CreateStrategy api={api} created={created} value={createDraft} update={setCreateDraft} />}
       {detailNote && detailNote.id === userStrategyId &&
         <p role="alert" className="notice error">{detailNote.text}</p>}
@@ -2365,6 +2389,28 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
           api={api} strategy={current} scenarios={scenarios} catalogReady={catalog !== null && catalog.error === null} changed={changed}
           failed={failedFor(current.user_strategy_id)} />
       </>}
+      <details id="research-preparation" className="strategy-panel first-use-preparation" open={(!current || modelSendBlock !== null || usableCount === 0) || undefined}>
+        <summary>研究准备{modelSendBlock === null && usableCount > 0 ? " · 已就绪" : " · 有待完成"}</summary>
+        <section aria-label="开始研究">
+        <header className="panel-head"><h2>开始研究</h2>
+          <button type="button" disabled={!catalog || !model} onClick={() => setCheck(value => value + 1)}>重新检查</button>
+        </header>
+        <p className="muted">先保存想法，再绑定场景与数据。AI 提出修改，由你应用；实验须预览后确认。</p>
+        <div className="preparation-row"><strong>{!model ? '正在读取模型配置…'
+          : model.error ? '模型状态未知' : model.value?.configured ? '模型已配置 · 连接未验证' : '模型未配置'}</strong>
+          <Link to="/settings">配置模型</Link></div>
+        {model?.error && <p className={api.settingsStatus ? "notice error" : "muted"} role={api.settingsStatus ? "alert" : undefined}>{model.error}</p>}
+        <div className="preparation-row"><strong>{!catalog ? '正在读取场景目录…'
+          : catalog.error ? '场景目录读取失败' : usableCount ? `${usableCount} 个可用场景` : '尚无可用场景'}</strong>
+          <Link to="/data">导入 CSV 数据</Link></div>
+        {catalog?.error && <p className="notice error" role="alert">{catalog.error}</p>}
+        {catalog && !catalog.error && usableCount === 0 && <details className="disclosure">
+          <summary>准备场景与数据</summary>
+          <p>场景定义策略、标的、资金及数据。请把有效场景 YAML 和它引用的数据放入本地服务配置的 <code>--scenario-root</code> 目录，保持相对数据路径正确；需要改变目录时，以同一工作区重启服务，再重新检查。已保存的想法会保留。</p>
+          <p>CSV 导入只发布数据版本，不创建场景。当前版本仍需通过本地服务准备场景；安装应用内的目录配置尚未提供。</p>
+        </details>}
+        <p className="muted preparation-note">缺少配置也可保存想法。配置可用不代表模型连通；场景可用不代表草稿已可运行，以实验预览为准。</p>
+      </section></details>
     </div>
     <aside className="strategy-ai" id="strategy-ai-column" tabIndex={-1}>
       {current && <a className="jump-link jump-to-details" href="#strategy-detail">返回策略详情</a>}

@@ -51,7 +51,7 @@ describe('first-use preparation and recovery', () => {
     const prep = within(await screen.findByRole('region', { name: '开始研究' }))
     await prep.findByText('模型未配置')
     await prep.findByText('尚无可用场景')
-    expect(prep.getByRole('link', { name: '导入 CSV 数据' }).getAttribute('href')).toBe('/research#data-upload')
+    expect(prep.getByRole('link', { name: '导入 CSV 数据' }).getAttribute('href')).toBe('/data')
     await user.type(await screen.findByLabelText('意图'), 'Compare an entry delay')
     await user.click(screen.getByRole('button', { name: '保存想法' }))
     expect(await screen.findByRole('heading', { name: idea.name })).toBeTruthy()
@@ -132,7 +132,7 @@ describe('first-use preparation and recovery', () => {
     const disclosure = document.getElementById('data-upload') as HTMLDetailsElement
     expect(disclosure?.open).toBe(true)
     expect(screen.getByLabelText('CSV content')).toBeTruthy()
-    await user.click(screen.getByRole('link', { name: '返回策略' }))
+    await user.click(screen.getByRole('link', { name: '返回研究' }))
     expect(await screen.findByRole('link', { name: idea.name })).toBeTruthy()
   })
 
@@ -181,7 +181,7 @@ describe('model send readiness blocker', () => {
     await user.click(screen.getByRole('button', { name: '重新检查' }))
     await screen.findByText('模型已配置 · 连接未验证')
     const button = screen.getByRole('button', { name: '询问模型' }) as HTMLButtonElement
-    expect(button.disabled).toBe(false)
+    expect(button.disabled).toBe(true)
     await user.click(button)
     expect(send).not.toHaveBeenCalled()
     await user.click(screen.getByLabelText('批准一次模型调用'))

@@ -262,6 +262,7 @@ function scripted(script: Script = {}) {
     getHoldout: async () => { throw new Error('unused') },
     listHoldouts: async () => [],
     listScenarios: async () => [scenario],
+    settingsStatus: async () => ({ schema: 'radian.settings-status.v1', configured: true, settings_file: '/fixture/settings.json', provider: 'fixture', model: 'fixture', base_url: null, api_key_env: null }),
     validateScenario: async () => { throw new Error('unused') },
     createBacktest: async () => { throw new Error('unused') },
     createBatch: async () => { throw new Error('unused') },
@@ -331,7 +332,7 @@ function detailAt(api: ApiAdapter, search: string) {
 
 /** The evidence tab of the open strategy, and this panel inside it. */
 async function openResearch(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: '证据' }))
+  await user.click(await screen.findByRole('tab', { name: '比较' }))
   const region = await screen.findByRole('region', { name: '证据对比' })
   return within(region)
 }
@@ -393,8 +394,7 @@ describe('user strategy evidence comparison', () => {
     expect(region.queryByText(/策略实现/)).toBeNull()
     expect(region.getByText(/这里也不排名、不选优/)).toBeTruthy()
     expect(region.queryByText(/获胜|胜出|推荐/)).toBeNull()
-    expect(region.getByRole('link', { name: '在既有比较页面打开这两次运行' }).getAttribute('href'))
-      .toBe(`/backtests/compare/${LATEST_JOB}/${EARLIER_JOB}`)
+    expect(new URLSearchParams(window.location.search).get('evidence_b')).toBe(EARLIER_JOB)
     // The identity of what would be explained is visible without asking anything.
     expect(region.getByText(/修订 2 · 确认 li-2 · 运行 job-2/)).toBeTruthy()
     expect(region.getByText(/修订 1 · 确认 li-1 · 运行 job-1/)).toBeTruthy()
@@ -667,7 +667,7 @@ describe('user strategy evidence comparison', () => {
     // Nothing of it reaches the page: not the document it carries, not a refusal.
     // The strategy that is open is still the one that was open.
     handover.respond(stale)
-    await user.click(screen.getByRole('tab', { name: '证据' }))
+    await user.click(screen.getByRole('tab', { name: '比较' }))
     const reopened = within(await screen.findByRole('region', { name: '证据对比' }))
     expect(reopened.getByLabelText('运行 A')).toBeTruthy()
     expect(screen.queryByText('STALE ANSWER')).toBeNull()
@@ -723,7 +723,7 @@ describe('evidence address continuity', () => {
     expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-2')
     expect(region.getByText(/修订 1 · 确认 li-1 · 运行 job-1/)).toBeTruthy()
     expect(region.getByText(/修订 2 · 确认 li-2 · 运行 job-2/)).toBeTruthy()
-    expect(region.getByRole('link', { name: '在既有比较页面打开这两次运行' }).getAttribute('href'))
+    expect(region.getByRole('link', { name: '独立比较链接' }).getAttribute('href'))
       .toBe('/backtests/compare/job-1/job-2')
     // Opening a link is a read: nothing is asked and nothing runs.
     expect(calls.ask).toBe(0)
@@ -742,7 +742,7 @@ describe('evidence address continuity', () => {
     // Leaving the tab and coming back mounts the panel again from scratch: what it
     // shows is read from the address, not kept in a hidden copy of the last render.
     await user.click(screen.getByRole('tab', { name: '实验' }))
-    await user.click(screen.getByRole('tab', { name: '证据' }))
+    await user.click(screen.getByRole('tab', { name: '比较' }))
     const reopened = within(await screen.findByRole('region', { name: '证据对比' }))
     expect((reopened.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
     expect((reopened.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-1')
@@ -764,21 +764,21 @@ describe('evidence address continuity', () => {
     // no B at all.
     expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
     expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
-    expect(window.location.search).toBe('')
+    expect(new URLSearchParams(window.location.search).has('evidence_a')).toBe(false)
 
     await user.selectOptions(region.getByLabelText('运行 B'), 'li-1')
-    await waitFor(() => expect(window.location.search).toBe('?evidence_a=job-2&evidence_b=job-1'))
+    await waitFor(() => expect(window.location.search).toBe('?tab=compare&evidence_a=job-2&evidence_b=job-1'))
 
     // The address changes under the panel — another link, or the browser's own back
     // and forward — and what is shown is what the address says, at once.
     window.history.pushState(
-      { ...window.history.state, key: 'continuity-a' }, '', '/strategies/us-1?evidence_a=job-1')
+      { ...window.history.state, key: 'continuity-a' }, '', '/strategies/us-1?tab=compare&evidence_a=job-1')
     window.dispatchEvent(new PopStateEvent('popstate'))
     await waitFor(() => expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1'))
     expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
 
     window.history.pushState(
-      { ...window.history.state, key: 'continuity-b' }, '', '/strategies/us-1')
+      { ...window.history.state, key: 'continuity-b' }, '', '/strategies/us-1?tab=compare')
     window.dispatchEvent(new PopStateEvent('popstate'))
     await waitFor(() => expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2'))
     expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
@@ -796,7 +796,7 @@ describe('evidence address continuity', () => {
     window.history.pushState(
       { ...window.history.state, key: 'continuity-approval' },
       '',
-      '/strategies/us-1?evidence_a=job-1&evidence_b=job-2',
+      '/strategies/us-1?tab=compare&evidence_a=job-1&evidence_b=job-2',
     )
     window.dispatchEvent(new PopStateEvent('popstate'))
     await waitFor(() => expect(disabled(region.getByRole('button', { name: '解释所选证据' }))).toBe(true))
@@ -833,7 +833,7 @@ describe('evidence address continuity', () => {
       // The explicit recovery clears the address and returns the panel to its plain
       // default — the latest run as A, no B — where the user selects again.
       await user.click(region.getByRole('button', { name: '清除无效的证据选择' }))
-      await waitFor(() => expect(window.location.search).toBe(''))
+      await waitFor(() => expect(new URLSearchParams(window.location.search).has('evidence_a')).toBe(false))
       expect(region.queryByRole('alert')).toBeNull()
       expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-2')
       expect((region.getByLabelText('运行 B') as HTMLSelectElement).value).toBe('')
@@ -947,7 +947,7 @@ describe('evidence address continuity', () => {
     window.history.pushState(
       { ...window.history.state, key: 'continuity-departed' },
       '',
-      '/strategies/us-1?evidence_a=job-2',
+      '/strategies/us-1?tab=compare&evidence_a=job-2',
     )
     window.dispatchEvent(new PopStateEvent('popstate'))
     // The visit the user arrives at is usable at once: it is not held by a request it
@@ -959,7 +959,7 @@ describe('evidence address continuity', () => {
 
     // Back to the address — and the history key — the departed request was sent from.
     // Arriving there again is a new visit, not a return to that request's ownership.
-    window.history.pushState(visit, '', '/strategies/us-1?evidence_a=job-1')
+    window.history.pushState(visit, '', '/strategies/us-1?tab=compare&evidence_a=job-1')
     window.dispatchEvent(new PopStateEvent('popstate'))
     await waitFor(() => expect((region.getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1'))
     expect(disabled(region.getByLabelText('运行 A'))).toBe(false)
@@ -982,4 +982,124 @@ describe('evidence address continuity', () => {
     expect(calls.ask).toBe(1)
     expect(calls.launch).toBe(0)
   })
+})
+
+
+describe('research workspace batch 1', () => {
+  it('opens the report beside AI, with three durable tabs and scoped navigation', async () => {
+    const user = userEvent.setup()
+    const { api } = scripted()
+    detail(api)
+    const experimentTab = await screen.findByRole('tab', { name: '实验' })
+    expect(experimentTab.getAttribute('aria-selected')).toBe('true')
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['策略', '实验', '比较'])
+    expect(await screen.findByRole('heading', { name: '运行 A · 正式报告' })).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'AI 协作' })).toBeTruthy()
+    expect(within(screen.getByRole('navigation', { name: '主导航' })).getAllByRole('link').map(a => a.textContent)).toEqual(['研究', '运行', '数据'])
+    await user.click(screen.getByRole('tab', { name: '比较' }))
+    expect(new URLSearchParams(window.location.search).get('tab')).toBe('compare')
+    cleanup()
+    render(<App api={api} />)
+    expect((await screen.findByRole('tab', { name: '比较' })).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('sends the composer question with exactly the selected A/B and one approval', async () => {
+    const user = userEvent.setup()
+    const { api, sent, calls } = scripted({ ask: async () => strategy() })
+    api.settingsStatus = async () => ({ configured: true } as Awaited<ReturnType<NonNullable<ApiAdapter['settingsStatus']>>>)
+    detailAt(api, '?tab=compare&evidence_a=job-1&evidence_b=job-2')
+    await screen.findByLabelText('消息')
+    const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
+    await user.type(chat.getByLabelText('消息'), '比较这两次实验的成本')
+    await user.click(chat.getByLabelText('批准一次模型调用'))
+    await waitFor(() => expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(false))
+    await user.dblClick(chat.getByRole('button', { name: '询问模型' }))
+    expect(calls.ask).toBe(1)
+    expect(sent[0].evidenceJobIds).toEqual(['job-1', 'job-2'])
+    expect(sent[0].approvedBudget).toEqual({ max_model_calls: 1, max_backtests: 0 })
+  })
+})
+
+
+describe('research composer visit ownership', () => {
+  it('drops an old completion after leaving and returning to the same selected pair', async () => {
+    const user = userEvent.setup()
+    let complete: ((value: UserStrategy) => void) | undefined
+    const response = new Promise<UserStrategy>(resolve => { complete = resolve })
+    const { api, calls, sent } = scripted({ ask: async () => response })
+    detailAt(api, '?tab=compare&evidence_a=job-1&evidence_b=job-2')
+    await screen.findByLabelText('消息')
+    const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
+    await user.type(chat.getByLabelText('消息'), 'Explain this pair')
+    await user.click(chat.getByLabelText('批准一次模型调用'))
+    await waitFor(() => expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(false))
+    const originalState = window.history.state
+    await user.click(chat.getByRole('button', { name: '询问模型' }))
+    expect(calls.ask).toBe(1)
+    const originalUrl = window.location.href
+    act(() => {
+      window.history.pushState({ ...originalState, key: 'different-pair' }, '', '/strategies/us-1?tab=compare&evidence_a=job-2&evidence_b=job-1')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect((chat.getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
+    expect(chat.getByLabelText('AI 当前上下文').textContent).toContain('A：修订 2 / B：修订 1')
+    act(() => {
+      window.history.pushState(originalState, '', originalUrl)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    await act(async () => { complete!(strategy({ name: 'Obsolete completion' })); await response })
+    expect(screen.queryByRole('heading', { name: 'Obsolete completion' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Bold entry' })).toBeTruthy()
+    expect((chat.getByLabelText('消息') as HTMLTextAreaElement).value).toBe('Explain this pair')
+    expect((chat.getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
+    expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(true)
+    expect(sent[0].evidenceJobIds).toEqual(['job-1', 'job-2'])
+    expect(calls.ask).toBe(1)
+  })
+
+  it.each(['unreadable', 'wrong-identity'])('blocks the composer while selected evidence is %s', async mode => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted({ backtest: async id => {
+      if (mode === 'unreadable') throw new Error('Report unavailable')
+      return job(id, { job_id: 'different-job' })
+    } })
+    detailAt(api, '?tab=experiments&evidence_a=job-1')
+    await screen.findByLabelText('消息')
+    const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
+    await user.type(chat.getByLabelText('消息'), 'Explain this report')
+    await user.click(chat.getByLabelText('批准一次模型调用'))
+    expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(true)
+    expect(chat.getByText('所选证据尚未就绪，请检查实验或比较标签。')).toBeTruthy()
+    expect(calls.ask).toBe(0)
+  })
+
+  it('prefills a question without sending or approving it', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = scripted()
+    detail(api)
+    await screen.findByLabelText('消息')
+    const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
+    await user.click(chat.getByRole('button', { name: '解读所选实验' }))
+    expect((chat.getByLabelText('消息') as HTMLTextAreaElement).value).toContain('当前所选实验')
+    expect((chat.getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
+    expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(true)
+    expect(calls.ask).toBe(0)
+  })
+})
+
+
+it('does not show trade analytics belonging to another report in the inline report', async () => {
+  const user = userEvent.setup()
+  const { api } = scripted()
+  api.getTradeAnalytics = async () => ({
+    schema: 'ea.trade-analytics.v1', run_id: 'other-run', report_sha256: 'wrong-report', currency: 'USD',
+    closed_trades: 91, wins: 91, losses: 0, breakeven: 0, win_rate: '1', average_win: '999',
+    average_loss: null, payoff_ratio: null, average_holding_seconds: '60', has_open_position: false, trades: [],
+  })
+  detail(api)
+  await screen.findByRole('heading', { name: '运行 A · 正式报告' })
+  await user.click(await screen.findByText('成交与完整报告'))
+  const analytics = within(screen.getByRole('region', { name: 'Trade analytics' }))
+  expect(analytics.getByText('Complete-trade analytics unavailable for this report.')).toBeTruthy()
+  expect(analytics.queryByText('999 USD')).toBeNull()
 })

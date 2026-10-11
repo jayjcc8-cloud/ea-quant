@@ -2,7 +2,7 @@ import type { DesktopStatus } from './desktop-settings'
 import { EventValidation } from './events'
 import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
-import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings } from './research'
+import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings, DataWorkspace, ExtensionWorkspace } from './research'
 import { StrategiesWorkspace } from './user-strategies'
 import { PaperStatus } from './paper-status'
 import { ResourcesPage } from './resources'
@@ -155,7 +155,7 @@ type MultiRoundTripEconomics = Omit<RoundTripEconomics, 'position_outcome' | 'en
     entry_fill_id: { owner_sequence: number }; exit_fill_id: { owner_sequence: number } }[]
   open_position: { quantity: string; entry_fee: string; last_valuation: string; gross_unrealized_pnl: string } | null
 }
-function MultiRoundTripExecution({ economics }: { economics: MultiRoundTripEconomics }) {
+export function MultiRoundTripExecution({ economics }: { economics: MultiRoundTripEconomics }) {
   return <>
     <div><dt>Position outcome</dt><dd>{economics.position_outcome}</dd></div>
     <div><dt>Completed round trips</dt><dd>{economics.completed_round_trips}</dd></div>
@@ -171,7 +171,7 @@ function MultiRoundTripExecution({ economics }: { economics: MultiRoundTripEcono
   </>
 }
 
-function RoundTripExecution({ economics }: { economics: RoundTripEconomics }) {
+export function RoundTripExecution({ economics }: { economics: RoundTripEconomics }) {
   return <>
     <div><dt>Position outcome</dt><dd>{economics.position_outcome}</dd></div>
     <div><dt>Position state</dt><dd>{economics.position_state}</dd></div>
@@ -491,6 +491,8 @@ function QuineMark() {
 /** The compact outline glyphs the sidebar navigation uses. */
 const NAV_ICONS = {
   strategies: 'M4 4h16v16H4zM8 8h8M8 12h8M8 16h5',
+  data: 'M4 6c0-4 16-4 16 0s-16 4-16 0v12c0 4 16 4 16 0V6M4 12c0 4 16 4 16 0',
+  extensions: 'M4 4h6v4h4V4h6v6h-4v4h4v6h-6v-4h-4v4H4v-6h4v-4H4z',
   runs: 'M7 4.5 19 12 7 19.5z',
   backtests: 'M4 20V10M10 20V4M16 20v-7M22 20H2',
   settings: 'M12 9.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2ZM12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6',
@@ -506,28 +508,17 @@ function Shell({ api }: { api: ApiAdapter }) {
   return <div className="app-shell">
     <aside className="sidebar">
       <Link className="brand" to="/strategies"><QuineMark /><span>QUINE</span></Link>
-      <p className="workspace">工作名 · 本地研究环境</p>
+      <p className="workspace">本地 AI 量化研究</p>
       {/* Every link is a real route. Capabilities this workspace does not serve —
           external accounts, live or paper connectivity — are stated as unavailable
           in the footer instead of being offered as navigation. */}
       <nav aria-label="主导航">
-        {/* The first three stay the top-level destinations, 策略 first: 模拟观测 is the
-            read-only local simulation snapshot, 回测实验 the research backtests, and
-            they must not be read as one another. */}
-        <NavLink to="/strategies"><NavIcon name="strategies" />策略</NavLink>
-        <NavLink to="/runs"><NavIcon name="runs" />模拟观测</NavLink>
-        <NavLink to="/backtests"><NavIcon name="backtests" />回测实验</NavLink>
-        {/* Research and its validation surfaces share one plain group label; the
-            resource directory keeps its own. */}
-        <p className="nav-group">研究与验证</p>
-        <NavLink className="nav-child" to="/research">研究任务</NavLink>
-        <NavLink className="nav-child" to="/holdouts">留出验证</NavLink>
-        <NavLink className="nav-child" to="/candidates">候选</NavLink>
-        <NavLink className="nav-child" to="/events">事件校验</NavLink>
-        <p className="nav-group">资源</p>
-        <NavLink className="nav-child" to="/resources">资源中心</NavLink>
+        <NavLink to="/strategies"><NavIcon name="strategies" />研究</NavLink>
+        <NavLink to="/runs"><NavIcon name="runs" />运行</NavLink>
+        <NavLink to="/data"><NavIcon name="data" />数据</NavLink>
       </nav>
       <div className="sidebar-bottom">
+        <NavLink className="nav-settings" to="/extensions"><NavIcon name="extensions" />扩展</NavLink>
         <NavLink className="nav-settings" to="/settings"><NavIcon name="settings" />设置</NavLink>
         <div className="sidebar-footer"><span className="status-dot" />仅本地回环 · 未连接实盘</div>
       </div>
@@ -542,6 +533,8 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
         <Route path="/settings" element={<ResearchSettings api={api} />} />
         <Route path="/research" element={<ResearchTasks api={api} />} />
+        <Route path="/data" element={<DataWorkspace api={api} />} />
+        <Route path="/extensions" element={<><ExtensionWorkspace api={api} /><ResourcesPage api={api} /></>} />
         <Route path="/resources" element={<ResourcesPage api={api} />} />
         <Route path="/events" element={<EventValidation />} />
         <Route path="/research/:taskId" element={<ResearchTaskDetailRoute api={api} />} />

@@ -12,6 +12,10 @@
  */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useEffect, useState } from 'react'
+import { BrowserRouter } from 'react-router-dom'
+import { EvidenceSection } from './user-strategies'
+import { StrategyEvidenceResearch } from './user-strategy-research'
 import { afterEach, describe, expect, it } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type ScenarioSummary } from './app'
 import {
@@ -403,7 +407,12 @@ function detail(api: ApiAdapter, id = 'us-1') {
 
 /** The detail sections live behind the workspace's own tabs. */
 async function openSection(user: ReturnType<typeof userEvent.setup>, name: string) {
-  await user.click(await screen.findByRole('tab', { name }))
+  await user.click(await screen.findByRole('tab', { name: name === '实验' ? '实验' : '策略' }))
+  if (name === '修订') await user.click(screen.getByText('修订记录'))
+  if (name === '实验') {
+    const disclosure = screen.getByText('新实验与运行记录').closest('details')!
+    if (!disclosure.open) await user.click(screen.getByText('新实验与运行记录'))
+  }
   return screen.findByRole('region', { name })
 }
 
@@ -449,7 +458,7 @@ describe('user strategy workspace', () => {
     window.history.pushState({}, '', '/strategies')
     render(<App api={api} />)
 
-    expect(await screen.findByRole('heading', { name: '策略' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '研究' })).toBeTruthy()
     expect(await screen.findByText('还没有策略。')).toBeTruthy()
     // The AI column is present before anything is selected, and it says what it
     // will hold rather than pretending to hold a conversation.
@@ -555,7 +564,7 @@ describe('user strategy workspace', () => {
     detail(api)
 
     expect(await screen.findByRole('heading', { name: 'Bold entry' })).toBeTruthy()
-    const panel = await screen.findByRole('region', { name: '绑定场景' })
+    let panel = await screen.findByRole('region', { name: '绑定场景' })
 
     // An unbound strategy offers no experiment at all, and says why: there is no
     // draft it could preview or run.
@@ -567,7 +576,7 @@ describe('user strategy workspace', () => {
     // The conversation is available, and it is honest about what it can do.
     const chat = screen.getByRole('region', { name: 'AI 协作' })
     expect(chat.textContent).toMatch(/这次对话只能澄清这个想法/)
-    expect(within(chat).getByText(/这一次调用只用来澄清这个想法/)).toBeTruthy()
+    expect(within(chat).getByText(/澄清当前想法/)).toBeTruthy()
     await user.type(within(chat).getByLabelText('消息'), 'What is missing from this idea?')
     await user.click(within(chat).getByLabelText('批准一次模型调用'))
     await user.click(within(chat).getByRole('button', { name: '询问模型' }))
@@ -580,6 +589,8 @@ describe('user strategy workspace', () => {
     expect(screen.queryByRole('region', { name: '建议修改' })).toBeNull()
     expect(calls.apply).toBe(0)
 
+    await user.click(screen.getByRole('tab', { name: '策略' }))
+    panel = screen.getByRole('region', { name: '绑定场景' })
     // Nothing is preselected, and the registered scenario is named by its exact id
     // beside that scenario's own summary so two similar choices stay told apart.
     const select = within(panel).getByLabelText('场景') as HTMLSelectElement
@@ -639,7 +650,7 @@ describe('user strategy workspace', () => {
     await user.type(within(chat).getByLabelText('消息'), 'What does my draft do?')
     await user.click(within(chat).getByRole('button', { name: '询问模型' }))
 
-    expect(await screen.findByRole('alert')).toHaveProperty('textContent', '在询问模型之前，需要先批准一次模型调用。')
+    expect((within(chat).getByRole('button', { name: '询问模型' }) as HTMLButtonElement).disabled).toBe(true)
     expect(calls.ask).toBe(0)
     expect(asked).toEqual([])
 
@@ -653,7 +664,7 @@ describe('user strategy workspace', () => {
     expect(within(chat).getByText('模型推断 — 不是正式证据。')).toBeTruthy()
     expect(within(chat).getByText('输入 11 tokens · 输出 7 tokens')).toBeTruthy()
     // Approval is one call, not a price: nothing here is written as money.
-    expect(within(chat).getByText(/本次批准仅针对当前修订调用模型一次/)).toBeTruthy()
+    expect(within(chat).getByText(/一次模型调用 · 不应用修改，不启动实验/)).toBeTruthy()
     expect(chat.textContent).not.toMatch(/\$\s?\d/)
     expect(screen.queryByRole('region', { name: '建议修改' })).toBeNull()
   })
@@ -727,7 +738,7 @@ describe('user strategy workspace', () => {
     const refusal = await screen.findByRole('alert')
     expect(refusal.textContent).toContain('草稿修订已前进，这次修改没有被应用。')
     expect(refusal.textContent).toContain('the draft revision moved on')
-    expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 1')).toBeTruthy()
+    expect(screen.getByText('v1 草稿')).toBeTruthy()
     expect(within(panel).getByText('待处理')).toBeTruthy()
 
     await user.click(within(panel).getByRole('button', { name: '拒绝建议' }))
@@ -738,7 +749,7 @@ describe('user strategy workspace', () => {
       const settled = screen.getByRole('region', { name: '建议修改' })
       expect(within(settled).getByText('已拒绝')).toBeTruthy()
     })
-    expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 1')).toBeTruthy()
+    expect(screen.getByText('v1 草稿')).toBeTruthy()
   })
 
   it('asks for a different change only with its own fresh approval', async () => {
@@ -803,7 +814,7 @@ describe('user strategy workspace', () => {
     fireEvent.click(within(panel).getByText(/的修改与来源/))
     expect((within(panel).getByRole('button', { name: '撤销最近一次修改' }) as HTMLButtonElement).disabled).toBe(true)
     expect(calls.undo).toBe(0)
-    expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 3')).toBeTruthy()
+    expect(screen.getByText('v3 草稿')).toBeTruthy()
   })
 
   it('shows an applied-and-then-undone change as undone, without rewriting the proposal', async () => {
@@ -888,7 +899,7 @@ describe('user strategy workspace', () => {
     expect(await screen.findByText('4 条记录 · aaaaaaaa')).toBeTruthy()
     expect(calls.preview).toBe(1)
 
-    await user.click(screen.getByRole('link', { name: 'Quiet entry' }))
+    await user.selectOptions(screen.getByLabelText('当前策略'), 'us-2')
 
     expect(await screen.findByRole('heading', { name: 'Quiet entry' })).toBeTruthy()
     const draft = screen.getByRole('region', { name: '草稿' })
@@ -915,13 +926,14 @@ describe('user strategy workspace', () => {
     detail(api, 'us-1')
 
     // The first strategy's own read has not answered yet; navigation does not wait.
+    await user.click(screen.getByRole('link', { name: '所有研究' }))
     await user.click(await screen.findByRole('link', { name: 'Quiet entry' }))
     expect(await screen.findByRole('heading', { name: 'Quiet entry' })).toBeTruthy()
 
     // Its slow answer arrives after the route moved on, and it is not rendered as
     // if it were the strategy that is open.
     late.resolve(strategy())
-    await waitFor(() => expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 3')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('v3 草稿')).toBeTruthy())
     expect(screen.getByRole('heading', { name: 'Quiet entry' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Bold entry' })).toBeNull()
     expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
@@ -951,7 +963,7 @@ describe('user strategy workspace', () => {
 
     expect(calls.preview).toBe(0)
     expect(calls.launch).toBe(0)
-    expect(within(panel).queryByRole('link', { name: '打开运行以查看它的状态和报告' })).toBeNull()
+    expect(within(panel).queryByRole('link', { name: '查看这次实验报告' })).toBeNull()
     // The confirmation is the one control that spends a run, and it is inert until
     // there is an admitted preview to confirm.
     const confirm = () => within(panel).getByRole('button', { name: '确认并运行一次' }) as HTMLButtonElement
@@ -985,14 +997,14 @@ describe('user strategy workspace', () => {
       approved: { max_model_calls: 0, max_backtests: 1 },
     }])
     const entry = within(panel).getByText('已从修订 1 启动实验 li-1').closest('li')!
-    expect(within(entry).getByRole('link', { name: '打开运行以查看它的状态和报告' }).getAttribute('href')).toBe('/backtests/job-1')
+    expect(within(entry).getByRole('link', { name: '查看这次实验报告' }).getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
     // Nothing here claims an outcome: the run and its report live on the backtest page.
     expect(entry.textContent).not.toMatch(/profit|net pnl|guarantee/i)
     // One started run is not a finished piece of research, and this page says where
     // the rest of it belongs.
     expect(panel.textContent).toMatch(/一次运行只是一个冻结的结果，不是已经完成的研究/)
-    expect(within(panel).getByRole('link', { name: '留出验证' }).getAttribute('href')).toBe('/holdouts')
-    expect(within(panel).getByRole('link', { name: '研究' }).getAttribute('href')).toBe('/research')
+    expect(within(panel).queryByRole('link', { name: '留出验证' })).toBeNull()
+    expect(within(panel).queryByRole('link', { name: '研究' })).toBeNull()
   })
 
   it('reports the cost assumptions and the data window the scenario declares, and invents neither', async () => {
@@ -1210,7 +1222,7 @@ describe('user strategy workspace', () => {
     const proposals = await screen.findByRole('region', { name: '建议修改' })
     await user.click(within(proposals).getByRole('button', { name: '应用所选' }))
     expect(calls.apply).toBe(1)
-    expect(await screen.findByText('草稿修订 2')).toBeTruthy()
+    expect(await screen.findByText('v2 草稿')).toBeTruthy()
     const advanced = screen.getByRole('region', { name: '实验' })
     expect(within(advanced).queryByText(/正在等待宿主回答/)).toBeNull()
     expect((within(advanced).getByRole('button', { name: '预览实验' }) as HTMLButtonElement).disabled).toBe(false)
@@ -1230,7 +1242,7 @@ describe('user strategy workspace', () => {
       }))
     })
 
-    expect(screen.getByRole('region', { name: '草稿' }).textContent).toContain('草稿修订 2')
+    expect(screen.getByText('v2 草稿')).toBeTruthy()
     expect(within(screen.getByRole('region', { name: '实验' })).queryByText('已从修订 1 启动实验 li-1')).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
     expect(calls.launch).toBe(1)
@@ -1251,7 +1263,7 @@ describe('user strategy workspace', () => {
 
     // The user leaves while the launch is still in flight, and comes back before the
     // answer arrives: that answer belongs to the panel that was left.
-    await user.click(screen.getByRole('link', { name: '返回策略列表' }))
+    await user.click(screen.getByRole('link', { name: '返回研究列表' }))
     await user.click(await screen.findByRole('link', { name: 'Bold entry' }))
     expect(await screen.findByRole('region', { name: '草稿' })).toBeTruthy()
 
@@ -1302,9 +1314,9 @@ describe('user strategy workspace', () => {
     const panel = await openSection(user, '实验')
 
     // The draft has moved to revision 3; each frozen run stays on its own revision.
-    expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 3')).toBeTruthy()
+    expect(screen.getByText('v3 草稿')).toBeTruthy()
     expect(within(panel).getByText('已从修订 1 启动实验 li-1')).toBeTruthy()
-    expect(within(panel).getByRole('link', { name: '打开运行以查看它的状态和报告' }).getAttribute('href')).toBe('/backtests/job-1')
+    expect(within(panel).getByRole('link', { name: '查看这次实验报告' }).getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
     expect(within(panel).getByText('实验 li-2 来自修订 2 — 结果未知')).toBeTruthy()
     expect(panel.textContent).toMatch(/中断之前可能已经派发了一次运行/)
     expect(panel.textContent).toMatch(/The provider was reached but no outcome was observed./)
@@ -1313,6 +1325,7 @@ describe('user strategy workspace', () => {
     // The table carries the same frozen fact on the strategy's own row: the
     // revision its latest run froze, and the state of that launch — not a claim
     // that a started run succeeded.
+    await user.click(screen.getByRole('link', { name: '返回研究列表' }))
     const table = within(screen.getByRole('navigation', { name: '策略列表' }))
     expect(table.getByText('冻结 v2')).toBeTruthy()
     expect(table.getByText('结果未知')).toBeTruthy()
@@ -1375,7 +1388,7 @@ describe('user strategy workspace', () => {
     expect(calls.create).toBe(0)
 
     // Coming back to the list offers the same half-written idea again.
-    await user.click(screen.getByRole('link', { name: '返回策略列表' }))
+    await user.click(screen.getByRole('link', { name: '返回研究列表' }))
     const back = await screen.findByRole('region', { name: '新建策略' })
     expect((within(back).getByLabelText('意图') as HTMLTextAreaElement).value).toBe('A quieter entry')
     expect(calls.create).toBe(0)
@@ -1540,14 +1553,16 @@ describe('user strategy workspace', () => {
     api.getBacktest = async () => runJob
     detail(api)
 
+    if (window.location.pathname !== '/strategies') await userEvent.setup().click(await screen.findByRole('link', { name: '返回研究列表' }))
     const table = within(await screen.findByRole('navigation', { name: '策略列表' }))
     // The row carries the job's own state, and not the record it was created from.
     const runLink = await table.findByRole('link', { name: '运行中' })
-    expect(runLink.getAttribute('href')).toBe('/backtests/job-1')
+    expect(runLink.getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
     expect(table.queryByText('运行已创建')).toBeNull()
     expect(table.queryByText('运行已启动')).toBeNull()
     expect(table.queryByText(/成功/)).toBeNull()
 
+    await user.click(table.getByRole('link', { name: 'Bold entry' }))
     const intent = await openSection(user, '意图')
     expect(within(intent).getByText('修订 1 · 运行已创建')).toBeTruthy()
   })
@@ -1559,14 +1574,14 @@ describe('user strategy workspace', () => {
 
     // The detail no longer links to the page it is already on.
     expect(screen.queryByRole('link', { name: '打开策略' })).toBeNull()
-    expect(screen.getByRole('link', { name: '返回策略列表' }).getAttribute('href')).toBe('/strategies')
+    expect(screen.getByRole('link', { name: '返回研究列表' }).getAttribute('href')).toBe('/strategies')
 
     // Both jumps are real anchors to real, focusable targets. They are read as
     // text rather than by role because the stacked layout, not this test, decides
     // whether they are on screen.
-    const toAi = screen.getByText('跳到 AI 协作')
+    const toAi = screen.getByText('讨论这个研究')
     expect(toAi.tagName).toBe('A')
-    expect(toAi.getAttribute('href')).toBe('#strategy-ai-column')
+    expect(toAi.getAttribute('href')).toBe('#strategy-message')
     const column = document.getElementById('strategy-ai-column')!
     expect(column.getAttribute('tabindex')).toBe('-1')
     expect(column.contains(screen.getByRole('region', { name: 'AI 协作' }))).toBe(true)
@@ -1658,9 +1673,10 @@ describe('user strategy workspace', () => {
     const read = scripted({ strategies: [frozen], current: () => frozen })
     read.api.getBacktest = async () => runJob
     detail(read.api)
+    if (window.location.pathname !== '/strategies') await userEvent.setup().click(await screen.findByRole('link', { name: '返回研究列表' }))
     const table = within(await screen.findByRole('navigation', { name: '策略列表' }))
     const link = await table.findByRole('link', { name: '运行中' })
-    expect(link.getAttribute('href')).toBe('/backtests/job-1')
+    expect(link.getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
     expect(table.queryByText(/成功/)).toBeNull()
 
     cleanup()
@@ -1671,6 +1687,7 @@ describe('user strategy workspace', () => {
     const other = scripted({ strategies: [frozen], current: () => frozen })
     other.api.getBacktest = async () => ({ ...runJob, job_id: 'job-2' })
     detail(other.api)
+    await userEvent.setup().click(await screen.findByRole('link', { name: '返回研究列表' }))
     const mismatch = within(await screen.findByRole('navigation', { name: '策略列表' }))
     expect(await mismatch.findByText(/读取到的任务与这条运行不一致/)).toBeTruthy()
 
@@ -1679,9 +1696,10 @@ describe('user strategy workspace', () => {
     const failed = scripted({ strategies: [frozen], current: () => frozen })
     failed.api.getBacktest = async () => { throw new Error('offline') }
     detail(failed.api)
+    await userEvent.setup().click(await screen.findByRole('link', { name: '返回研究列表' }))
     const fallback = within(await screen.findByRole('navigation', { name: '策略列表' }))
     expect(await fallback.findByText(/运行状态不可读/)).toBeTruthy()
-    expect(fallback.getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/backtests/job-1')
+    expect(fallback.getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
   })
 
   it('opens the experiment tab from the next step, and runs nothing', async () => {
@@ -1779,9 +1797,9 @@ describe('maturity round 1', () => {
     // The usable action sequence is the DOM order, established by
     // compareDocumentPosition rather than read off a class name: the composer comes
     // before both the answer it belongs to and the closed proposal beside it.
-    expect(precedes(composer, turn)).toBe(true)
-    expect(precedes(composer, proposalPanel)).toBe(true)
-    expect(precedes(turn, composer)).toBe(false)
+    expect(precedes(composer, turn)).toBe(false)
+    expect(precedes(composer, proposalPanel)).toBe(false)
+    expect(precedes(turn, composer)).toBe(true)
 
     // The whole latest answer stays accessible, in its own bounded surface.
     const answer = within(turn).getByRole('group', { name: '本轮回答' })
@@ -1905,7 +1923,7 @@ describe('maturity round 1', () => {
     detail(unreadable.api)
     const unreadableStrip = await screen.findByRole('region', { name: '下一步' })
     expect(await within(unreadableStrip).findByText(/运行状态不可读/)).toBeTruthy()
-    expect(within(unreadableStrip).getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/backtests/job-1')
+    expect(within(unreadableStrip).getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
     expect(unreadableStrip.textContent).not.toMatch(/成功/)
   })
 
@@ -1922,7 +1940,7 @@ describe('maturity round 1', () => {
     expect(within(strip).queryByText('当前草稿')).toBeNull()
     expect(within(strip).queryByText('v1 草稿')).toBeNull()
     expect(strip.textContent).not.toMatch(/草稿修订 1/)
-    expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 1')).toBeTruthy()
+    expect(screen.getByText('v1 草稿')).toBeTruthy()
 
     cleanup()
     // The way back to the last strategy names the frozen revision, not a dispatch
@@ -1989,7 +2007,7 @@ describe('proposal action feedback', () => {
     expect(within(panel).getByText('之前 2')).toBeTruthy()
     expect(within(panel).getByText('之后 3')).toBeTruthy()
     expect(within(panel).getByText('待处理')).toBeTruthy()
-    expect(within(screen.getByRole('region', { name: '草稿' })).getByText('草稿修订 1')).toBeTruthy()
+    expect(screen.getByText('v1 草稿')).toBeTruthy()
   })
 
   it('clears a refused apply when the reader decides the proposal instead', async () => {
@@ -2134,10 +2152,26 @@ describe('shared evidence selection', () => {
     return { api, calls }
   }
 
+  // Exercise the two existing evidence readers together so all original shared
+  // URL/identity assertions remain intact. The App's actual tab navigation is
+  // separately tested in research workspace batch 1.
+  function EvidenceViews({ api }: { api: ApiAdapter }) {
+    const [current, setCurrent] = useState<UserStrategy | null>(null)
+    useEffect(() => {
+      let active = true
+      api.getUserStrategy!('us-1').then(value => { if (active) setCurrent(value) })
+      return () => { active = false }
+    }, [api])
+    return <BrowserRouter>{current && <>
+      <EvidenceSection api={api} strategy={current} />
+      <StrategyEvidenceResearch api={api} strategy={current} changed={setCurrent} failed={() => undefined} />
+    </>}</BrowserRouter>
+  }
+
   /** Opening the workspace at an address, the way a return link leaves one behind. */
   function openedAt(api: ApiAdapter, search: string) {
     window.history.pushState({}, '', `/strategies/us-1${search}`)
-    render(<App api={api} />)
+    render(<EvidenceViews api={api} />)
   }
 
   it('opens the run the address names, on the card and in the research panel', async () => {
@@ -2151,7 +2185,7 @@ describe('shared evidence selection', () => {
     // The card is the older run's own report: its figures and its job, never the
     // latest run's.
     expect(await within(card).findByText('20.25 USD')).toBeTruthy()
-    expect(within(card).getByText('10020.25 USD')).toBeTruthy()
+    expect(within(card).getByText('10020.25 USD', { selector: '.evidence-metrics dd' })).toBeTruthy()
     expect(within(card).queryByText('5.75 USD')).toBeNull()
     expect(within(card).getByText(OLD_JOB)).toBeTruthy()
     // The card keeps its convenient selector, and that selector is A — the same
@@ -2180,7 +2214,7 @@ describe('shared evidence selection', () => {
     // A fresh load over the same address reads the same run: nothing here is
     // remembered from the visit before.
     cleanup()
-    render(<App api={api} />)
+    render(<EvidenceViews api={api} />)
     card = await screen.findByRole('region', { name: '证据' })
     research = await screen.findByRole('region', { name: '证据对比' })
     expect(await within(card).findByText('20.25 USD')).toBeTruthy()
@@ -2242,7 +2276,7 @@ describe('shared evidence selection', () => {
     const research = await screen.findByRole('region', { name: '证据对比' })
     await within(card).findByText('20.25 USD')
     expect((within(research).getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-3')
-    expect(within(research).getByRole('link', { name: '在既有比较页面打开这两次运行' }).getAttribute('href'))
+    expect(within(research).getByRole('link', { name: '独立比较链接' }).getAttribute('href'))
       .toBe(`/backtests/compare/${OLD_JOB}/${LAST_JOB}`)
 
     // An approval given for exactly this pair, with nothing asked yet.

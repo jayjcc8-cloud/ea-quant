@@ -295,8 +295,8 @@ describe('core-owned experiments', () => {
     // The run keeps the mature view: the experiment panel links to the run's own
     // page, which reads the owner's registered report, path and analytics through
     // the same APIs every other run uses — never a second, thinner reading here.
-    const link = await screen.findByRole('link', { name: '打开运行以查看它的状态和报告' })
-    expect(link.getAttribute('href')).toBe(`/backtests/${ownedRun().job_id}`)
+    const link = await screen.findByRole('link', { name: '查看这次实验报告' })
+    expect(link.getAttribute('href')).toBe(`/strategies/us-1?tab=experiments&evidence_a=${ownedRun().job_id}`)
     expect(screen.queryByRole('region', { name: '两次运行的事实对比' })).toBeNull()
   }, 20_000)
 
@@ -310,8 +310,8 @@ describe('core-owned experiments', () => {
 
     // The run page is still the place that says what is readable: the panel does
     // not fabricate a result, and it does not hide the run either.
-    const link = await screen.findByRole('link', { name: '打开运行以查看它的状态和报告' })
-    expect(link.getAttribute('href')).toBe(`/backtests/${ownedRun().job_id}`)
+    const link = await screen.findByRole('link', { name: '查看这次实验报告' })
+    expect(link.getAttribute('href')).toBe(`/strategies/us-1?tab=experiments&evidence_a=${ownedRun().job_id}`)
   }, 20_000)
 
   it('says an unresolved run is unresolved rather than showing a result', async () => {
@@ -332,7 +332,7 @@ describe('core-owned experiments', () => {
     const panel = await screen.findByRole('region', { name: '实验' })
     expect(within(panel).getByText(/结果未知/)).toBeTruthy()
     expect(within(panel).getByText(/the core could not prove how this run ended/)).toBeTruthy()
-    expect(within(panel).queryByRole('link', { name: '打开运行以查看它的状态和报告' })).toBeNull()
+    expect(within(panel).queryByRole('link', { name: '查看这次实验报告' })).toBeNull()
   }, 20_000)
 })
 

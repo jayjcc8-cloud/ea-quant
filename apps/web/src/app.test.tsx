@@ -808,7 +808,8 @@ it('shows backend path evidence and sampled equity curve without replacing termi
   expect(document.getElementById(curve.getAttribute('aria-describedby')!)?.textContent)
     .toContain('Equity in USD over the displayed observations')
   expect(screen.getByText('30 USD')).toBeTruthy()
-  expect(screen.getByText(/0.3%/)).toBeTruthy()
+  expect(screen.getByText('0.3% / 0.003')).toBeTruthy()
+  expect(screen.getByText('最大回撤 30 USD · 0.3%')).toBeTruthy()
   expect(screen.getByText(/sampled display/)).toBeTruthy()
   expect(screen.getByText('10017 USD')).toBeTruthy()
 })
@@ -991,25 +992,26 @@ it('removes candidate decision controls when fresh evidence rejects a decision',
 })
 
 describe('QUINE shell navigation', () => {
-  it('offers 模拟观测 and 回测实验 as two independent destinations without moving the backtest routes', async () => {
+  it('offers research, runtime and data while keeping historical backtest routes', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/backtests')
     render(<App api={adapter()} />)
     const nav = within(screen.getByRole('navigation', { name: '主导航' }))
-    expect(nav.getByRole('link', { name: '模拟观测' }).getAttribute('href')).toBe('/runs')
-    expect(nav.getByRole('link', { name: '回测实验' }).getAttribute('href')).toBe('/backtests')
+    expect(nav.getByRole('link', { name: '运行' }).getAttribute('href')).toBe('/runs')
+    expect(nav.getByRole('link', { name: '研究' }).getAttribute('href')).toBe('/strategies')
 
     // The resource center is one more destination under its own plain group label,
     // and every research and validation child keeps its own route.
-    expect(nav.getByRole('link', { name: '资源中心' }).getAttribute('href')).toBe('/resources')
-    for (const [label, href] of [['研究任务', '/research'], ['留出验证', '/holdouts'], ['候选', '/candidates'], ['事件校验', '/events']] as const) {
-      expect(nav.getByRole('link', { name: label }).getAttribute('href')).toBe(href)
+    expect(nav.getByRole('link', { name: '数据' }).getAttribute('href')).toBe('/data')
+    for (const label of ['研究任务', '留出验证', '候选', '事件校验']) {
+      expect(nav.queryByRole('link', { name: label })).toBeNull()
     }
+    expect(screen.getByRole('link', { name: '扩展' }).getAttribute('href')).toBe('/extensions')
 
     // The backtest destination keeps every route it already had.
-    await user.click(nav.getByRole('link', { name: '回测实验' }))
-    expect(window.location.pathname).toBe('/backtests')
-    expect(await screen.findByRole('heading', { name: 'Offline Backtests' })).toBeTruthy()
+    await user.click(nav.getByRole('link', { name: '研究' }))
+    expect(window.location.pathname).toBe('/strategies')
+    expect(await screen.findByRole('heading', { name: '研究' })).toBeTruthy()
 
     cleanup()
     window.history.pushState({}, '', '/backtests/job-1')

@@ -36,20 +36,25 @@ export function EquityCurve({ analysis }: { analysis: EquityPath }) {
   // points and every extrema/drawdown fact are unchanged; the description below
   // carries the same context the axis labels did.
   const descriptionId = useId()
+  const gradientId = useId()
   return <section className="panel equity-path"><header><h2>Equity Curve</h2><span>{analysis.currency}</span></header>
     <div className="curve-axis"><span>High {high} {analysis.currency}</span><span>Low {low} {analysis.currency}</span></div>
     <svg viewBox="0 0 750 260" role="img" aria-label="Equity curve" aria-describedby={descriptionId}>
       <title>Equity through admitted market observations</title>
       <path d="M70 25V215H725" fill="none" stroke="currentColor" opacity="0.3" />
-      <polyline points={coordinates} fill="none" stroke="#4f8cff" strokeWidth="2" />
+      <defs><linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--accent)" stopOpacity=".18" /><stop offset="100%" stopColor="var(--accent)" stopOpacity=".02" /></linearGradient></defs>
+      {[30, 75, 120, 165, 210].map(y => <line key={y} x1="70" x2="720" y1={y} y2={y} stroke="currentColor" opacity=".12" />)}
+      <polygon points={`70,215 ${coordinates} 720,215`} fill={`url(#${gradientId})`} />
+      <polyline points={coordinates} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
     </svg>
     <div className="curve-axis"><span>First {shortTime(first?.time)}</span><span>Last {shortTime(last?.time)}</span></div>
-    <p className="muted" id={descriptionId}>Equity in {analysis.currency} over the displayed observations: first {first?.time ?? 'not recorded'} at {first?.equity ?? 'not recorded'}, last {last?.time ?? 'not recorded'} at {last?.equity ?? 'not recorded'}, lowest {low}, highest {high}. {points.length < analysis.point_count ? `${points.length} sampled display points from ${analysis.point_count} observations.` : `${analysis.point_count} equity observations.`} Maximum drawdown uses every observation, including initial funding.</p>
+    <details className="provenance"><summary>曲线数据与回撤明细</summary><p className="muted" id={descriptionId}>Equity in {analysis.currency} over the displayed observations: first {first?.time ?? 'not recorded'} at {first?.equity ?? 'not recorded'}, last {last?.time ?? 'not recorded'} at {last?.equity ?? 'not recorded'}, lowest {low}, highest {high}. {points.length < analysis.point_count ? `${points.length} sampled display points from ${analysis.point_count} observations.` : `${analysis.point_count} equity observations.`} Maximum drawdown uses every observation, including initial funding.</p>
     <h3>Maximum Drawdown</h3><dl className="summary-list">
       <div><dt>Amount</dt><dd>{dd.amount} {analysis.currency}</dd></div>
       <div><dt>Percentage / ratio</dt><dd>{pathPercent(dd.ratio)} / {dd.ratio}</dd></div>
       <div><dt>Peak → trough (UTC)</dt><dd>{dd.peak_time} → {dd.trough_time}</dd></div>
       <div><dt>Peak equity → trough equity</dt><dd>{dd.peak_equity} → {dd.trough_equity} {analysis.currency}</dd></div>
-    </dl>
+    </dl></details>
+    <p className="curve-drawdown">最大回撤 {dd.amount} {analysis.currency} · {pathPercent(dd.ratio)}</p>
   </section>
 }

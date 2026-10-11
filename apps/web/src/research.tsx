@@ -2204,3 +2204,40 @@ export function ResearchSettings({ api }: { api: ApiAdapter }) {
     <DesktopSettings api={api} onSaved={() => setCheck(value => value + 1)} />
     <ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} /></>
 }
+
+
+/** The existing explicit import controls, reached without creating a legacy task. */
+export function DataWorkspace({ api }: { api: ApiAdapter }) {
+  const [datasets, setDatasets] = useState<Awaited<ReturnType<NonNullable<ApiAdapter['listDatasets']>>> | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true
+    api.listDatasets?.().then(items => { if (active) setDatasets(items) })
+      .catch(() => { if (active) setError('数据目录读取失败，请刷新重试。') })
+    return () => { active = false }
+  }, [api])
+  return <>
+    <PageHeading title="数据" subtitle="本地数据版本与导入。发布后，在具体研究中选择数据。" />
+    <section className="panel" aria-label="数据目录"><h2>数据目录</h2>
+      {error && <p role="alert" className="notice error">{error}</p>}
+      {!api.listDatasets && <p>此工作区未接入数据目录。</p>}
+      {api.listDatasets && !datasets && !error && <p role="status">正在读取数据…</p>}
+      {datasets?.length === 0 && <p>暂无独立数据版本。已有场景仍使用其注册数据。</p>}
+      {datasets && datasets.length > 0 && <div className="table-scroll"><table><thead><tr><th>数据版本</th><th>标的</th><th>记录</th><th>状态</th></tr></thead>
+        <tbody>{datasets.map(item => <tr key={item.dataset_id}><td>{item.dataset_id}</td><td>{item.symbol ? `${item.venue ?? ''}:${item.symbol}` : '未记录'}</td><td>{item.record_count ?? '未记录'}</td><td>{item.valid ? '可读取' : item.message ?? '不可用'}</td></tr>)}</tbody></table></div>}
+    </section>
+    <p><Link to="/strategies">返回研究</Link></p>
+    <details id="data-upload" className="panel" open><summary>导入 CSV 数据</summary><DataUploadPanel api={api} /></details>
+    <details className="panel"><summary>历史数据导入</summary><OfflineHistoryPanel api={api} /></details>
+  </>
+}
+
+/** Declarations and validation retain their original, explicit effects. */
+export function ExtensionWorkspace({ api }: { api: ApiAdapter }) {
+  return <section className="panel" aria-label="扩展工具"><h1>扩展</h1>
+    <p className="muted">管理本地能力与校验工具。</p>
+    <div className="actions"><Link to="/events">事件校验</Link></div>
+    {api.listDeclarations && <details><summary>资源声明</summary><DeclarationCatalogPanel api={api} /></details>}
+    {(api.localStrategySlot || api.inspectLocalStrategy) && <details><summary>本地策略包</summary><LocalStrategyPanel api={api} /></details>}
+  </section>
+}

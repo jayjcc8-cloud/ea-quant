@@ -77,7 +77,7 @@ type RunState =
  * flight — and a report whose run id is not the job's own engine run is reported
  * as unavailable rather than shown as a result.
  */
-function useRunRead(api: ApiAdapter, jobId: string | null): RunState | null {
+export function useRunRead(api: ApiAdapter, jobId: string | null): RunState | null {
   const [loaded, setLoaded] = useState<{ key: string; state: RunState } | null>(null)
 
   useEffect(() => {
@@ -86,6 +86,7 @@ function useRunRead(api: ApiAdapter, jobId: string | null): RunState | null {
     const load = async () => {
       const job = await api.getBacktest(jobId)
       if (!active) return
+      if (job.job_id !== jobId) throw new Error('读取到的任务与所选实验不一致')
       if (job.status !== 'succeeded' || !job.report_ready) {
         setLoaded({
           key: jobId,
@@ -475,8 +476,7 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
       <span className="chip">冻结运行</span>
     </header>
     <p className="muted">
-      这里选择要解释的冻结运行：A 默认是最近一次运行，B 可以留空。选中的运行会随请求一起发送，
-      宿主会先逐条核对它们确实是这条策略自己的、可读的冻结运行，然后这次对话只被这些运行的事实支撑。
+      选择本研究的两次实验。右侧 AI 同步使用所选证据；差值为 B − A。
     </p>
     {selection.kind === 'invalid'
       ? <>
@@ -587,12 +587,11 @@ export function StrategyEvidenceResearch({ api, strategy, changed, failed }: {
                   {`这两次运行在${comparability.map(block => block.label).join('、')}上不同，因此它们的差异首先是一个可比性问题：`
                     + '这些差别让「哪一次更好」无法从这两次运行读出来，这里也不排名、不选优。'}
                 </p>}
-            {aRun?.job_id && bRun.job_id && <p>
-              <Link className="button-link"
-                to={`/backtests/compare/${encodeURIComponent(aRun.job_id)}/${encodeURIComponent(bRun.job_id)}`}>
-                在既有比较页面打开这两次运行
-              </Link>
-            </p>}
+
+            {aRun?.job_id && bRun.job_id && <details className="provenance"><summary>历史深链接</summary>
+              <Link to={`/backtests/compare/${encodeURIComponent(aRun.job_id)}/${encodeURIComponent(bRun.job_id)}`}>独立比较链接</Link>
+            </details>}
+
           </div>}
 
           <details className="provenance">
