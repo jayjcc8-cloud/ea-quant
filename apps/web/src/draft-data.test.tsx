@@ -147,3 +147,21 @@ it('pending or failed file read cannot publish previous bytes under a new filena
   expect((screen.getByLabelText('CSV content') as HTMLTextAreaElement).value).toBe('retained input')
   expect(publish).not.toHaveBeenCalled()
 })
+
+it('a CSV larger than the browser buffer can still publish with a small pending marker', async () => {
+  const original = Storage.prototype.setItem
+  const storage = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+    if (key.startsWith('quine.csv-input.') && value.length > 100) throw new DOMException('quota', 'QuotaExceededError')
+    original.call(this, key, value)
+  })
+  try {
+    const version = { dataset_id: 'large-version', version: 1, source: {}, availability_policy: {}, instrument: {}, quality: {}, record_count: 8, limitations: [] } as unknown as UploadVersion
+    const publish = vi.fn(async () => ({ ...version, datasets: [] }))
+    render(<BrowserRouter><DataWorkspace api={makeApi({ previewUpload: vi.fn(), publishUpload: publish })} /></BrowserRouter>)
+    fireEvent.change(screen.getByLabelText('CSV content'), { target: { value: 'large fixture '.repeat(20) } })
+    fireEvent.change(screen.getByLabelText('Availability policy'), { target: { value: 'ea.availability.provided-in-capture.v1' } })
+    fireEvent.click(screen.getByText('Publish version'))
+    await screen.findByText('已发布 · 8 条记录')
+    expect(publish).toHaveBeenCalledTimes(1)
+  } finally { storage.mockRestore() }
+})

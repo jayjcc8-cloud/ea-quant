@@ -852,7 +852,11 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
   const inFlight = useRef(false)
   const fileRead = useRef(0)
   const [fileBusy, setFileBusy] = useState(false)
-  const [unknownPublish, setUnknownPublish] = useState(cached.unknownPublish === true)
+  const publicationKey = `${cacheKey}.publication`
+  const [unknownPublish, setUnknownPublish] = useState(() => {
+    try { return cached.unknownPublish === true || sessionStorage.getItem(publicationKey) === 'unknown' }
+    catch { return cached.unknownPublish === true }
+  })
   const [bufferError, setBufferError] = useState(false)
   useEffect(() => { alive.current = true; return () => { alive.current = false; fileRead.current += 1 } }, [])
   const [content, setContent] = useState(cachedText('content'))
@@ -977,7 +981,8 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
       }
       // Persist uncertainty before dispatch; refresh never grants an automatic retry.
       setUnknownPublish(true)
-      sessionStorage.setItem(cacheKey, JSON.stringify({ content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, unknownPublish: true }))
+      // Outcome identity must fit even when the CSV itself exceeds browser storage.
+      sessionStorage.setItem(publicationKey, 'unknown')
       const version = await api.publishUpload({
         ...(fileBase64 !== null ? { content_base64: fileBase64 } : { content }),
         ...(fileName ? { file_name: fileName } : {}),
@@ -987,11 +992,14 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
         availability_policy: policy,
         ...(policy === AVAILABILITY_SIMULATED ? { latency_seconds: Number(latency) } : {}),
       })
+      sessionStorage.removeItem(publicationKey)
       if (!alive.current) return
       setUnknownPublish(false); setPreview(null); setPreviewedFor(null); setPublished(version)
     } catch (caught) {
       if (!alive.current) return
-      if (caught instanceof ResearchRequestError && ([400, 413, 422].includes(caught.status ?? 0) || ['upload_invalid', 'invalid_upload', 'invalid_request', 'upload_refused'].includes(caught.code))) setUnknownPublish(false)
+      if (caught instanceof ResearchRequestError && ([400, 413, 422].includes(caught.status ?? 0) || ['upload_invalid', 'invalid_upload', 'invalid_request', 'upload_refused'].includes(caught.code))) {
+        sessionStorage.removeItem(publicationKey); setUnknownPublish(false)
+      }
       setError(messageOf(caught, 'Upload outcome unknown. Inputs retained; inspect the dataset catalog before another publication.'))
     } finally { inFlight.current = false; if (alive.current) setBusy(null) }
   }
