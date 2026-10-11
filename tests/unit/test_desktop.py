@@ -139,3 +139,69 @@ def test_default_workspace_failure_is_not_retried(
     with pytest.raises(PermissionError, match="default_unavailable"):
         asyncio.run(desktop.session(tmp_path / "a", tmp_path / "bundle"))
     assert calls == [tmp_path / "a"]
+
+
+def test_web_owner_conflict_is_an_embedded_startup_failure(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+    import fcntl
+
+    import uvicorn
+
+    from ea.desktop import serve_web
+    from ea.web.app import create_app
+    from unit.test_web_radian import _settings
+
+    settings = _settings(tmp_path)
+    settings.workspace.mkdir()
+    lock = settings.workspace / "service.lock"
+    lock.touch(mode=0o600)
+    server = uvicorn.Server(uvicorn.Config(create_app(settings), lifespan="on"))
+
+    async def run() -> None:
+        finished = asyncio.Event()
+        # Crucial: the exception must be translated INSIDE the detached task,
+        # before SystemExit can interrupt asyncio.run and bypass its caller.
+        task = asyncio.create_task(serve_web(server, [], finished))
+        with pytest.raises(RuntimeError, match="web_startup_failed"):
+            await task
+        assert not finished.is_set()
+        assert not server.started
+
+    with lock.open("rb") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        asyncio.run(run())
+
+
+def test_selected_and_default_log_failures_stop_after_one_recovery(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    import ea.desktop as desktop
+    from ea.desktop_settings import DesktopSettings
+
+    runtime = tmp_path / "bundle"
+    (runtime / "samples").mkdir(parents=True)
+    for name in ("synthetic-bounded-long.yaml", "prices.csv"):
+        (runtime / "samples" / name).write_text("fixture")
+    anchor, target = tmp_path / "a", tmp_path / "b"
+    for root in (anchor, target):
+        prepare_root(root, runtime)
+        install_samples(root, runtime)
+        (root / "logs/core.log").write_text("unchanged")
+        (root / "logs/core.log").chmod(0o400)
+    store = DesktopSettings(anchor, anchor, runtime)
+    store.update({"next_workspace": str(target)})
+    before = store.path.read_bytes()
+    try:
+        with pytest.raises(PermissionError):
+            asyncio.run(desktop.session(anchor, runtime))
+        assert store.path.read_bytes() == before
+        for root in (anchor, target):
+            assert (root / "logs/core.log").read_text() == "unchanged"
+            assert (root / "logs/core.log").stat().st_mode & 0o777 == 0o400
+    finally:
+        for root in (anchor, target):
+            (root / "logs/core.log").chmod(0o600)

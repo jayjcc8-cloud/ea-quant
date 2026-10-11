@@ -17,7 +17,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from uvicorn import Server
 
 
 def prepare_root(root: Path, runtime: Path) -> None:
@@ -60,6 +63,29 @@ def emit(document: dict[str, Any]) -> None:
         # A crashed desktop cannot receive diagnostics; still reap our core.
         with open(os.devnull, "w") as sink:
             os.dup2(sink.fileno(), sys.stdout.fileno())
+
+
+async def serve_web(
+    server: Server, sockets: list[socket.socket], startup_finished: asyncio.Event
+) -> None:
+    """Embed the server's CLI exit contract inside the task, before asyncio sees it.
+
+    Ordinary exceptions are session failures and normal return is shutdown. A
+    nonzero process exit during server startup means startup failure, also an
+    ordinary exception here. Normal exits, cancellation, interrupts and signals
+    retain their control-flow semantics; never catch BaseException wholesale.
+    """
+    try:
+        await server.serve(sockets=sockets)
+    except SystemExit as error:
+        if server.started or server.should_exit or error.code in (None, 0):
+            startup_finished.set()
+            raise
+        raise RuntimeError("web_startup_failed") from None
+    finally:
+        # Close the readiness race even if the server exits before our poll runs.
+        if server.started or server.should_exit:
+            startup_finished.set()
 
 
 async def session(root: Path, runtime: Path) -> None:
@@ -187,15 +213,22 @@ async def workspace_session(
                                 timeout_graceful_shutdown=5,
                             )
                         )
-                        task = asyncio.create_task(server.serve(sockets=[listener]))
                         loop = asyncio.get_running_loop()
                         parent_gone = asyncio.Event()
-                        loop.add_reader(sys.stdin.fileno(), parent_gone.set)
+
+                        def parent_closed() -> None:
+                            startup_finished.set()
+                            parent_gone.set()
+                            server.should_exit = True
+
+                        loop.add_reader(sys.stdin.fileno(), parent_closed)
+                        task = asyncio.create_task(serve_web(server, [listener], startup_finished))
                         try:
                             while not server.started:
                                 if task.done():
                                     await task
-                                    raise RuntimeError("web_exited_before_ready")
+                                    startup_finished.set()
+                                    return  # A normal server return is shutdown, not a failure.
                                 if parent_gone.is_set():
                                     startup_finished.set()
                                     server.should_exit = True

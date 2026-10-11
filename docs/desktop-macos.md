@@ -46,7 +46,9 @@ notice. The existing Settings screen can cancel the pending selection or select 
 The failed selection remains recorded until the user changes it; neither data nor permissions are
 changed for recovery. A failure after readiness, or an uncertain shutdown, remains fatal and never
 silently switches workspaces. Recovery makes only one attempt; it never migrates or deletes old
-data. Cancel pending selection keeps the current root.
+data. The embedded Web task translates nonzero framework startup exits into the same session
+failure path before they can terminate the event loop; normal return, normal exit, cancellation and
+signals retain shutdown semantics. Cancel pending selection keeps the current root.
 There is no multi-workspace manager or native directory-picker permission.
 
 `desktop-preferences.json` in the original default/override root stores the next workspace and the
