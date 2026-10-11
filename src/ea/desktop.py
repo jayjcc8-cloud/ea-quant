@@ -86,10 +86,28 @@ async def session(root: Path, runtime: Path) -> None:
                 desktop.startup_error = (
                     "所选工作区不可用或被占用；已保留并打开默认工作区。请在设置中重新选择。"
                 )
-        await workspace_session(desktop.root, runtime, desktop)
+        startup_finished = asyncio.Event()
+        try:
+            await workspace_session(desktop.root, runtime, desktop, startup_finished)
+        except Exception as error:
+            # Only a selected workspace that never became usable may fall back.
+            # workspace_session has already unwound its locks/children here. Once
+            # ready, closing, or cleanup-uncertain, preserve the existing fatal path.
+            if desktop.root == anchor or startup_finished.is_set():
+                raise
+            emit({"status": "workspace_startup_failed", "code": type(error).__name__})
+            desktop.root = anchor
+            desktop.startup_error = (
+                "所选工作区启动失败；已打开默认工作区，原数据和目录权限保持不变。"
+                "请在设置中取消待切换，或选择其他可用工作区。"
+            )
+            # One recovery attempt only; never retry or replay work in the failed target.
+            await workspace_session(anchor, runtime, desktop, asyncio.Event())
 
 
-async def workspace_session(root: Path, runtime: Path, desktop: Any) -> None:
+async def workspace_session(
+    root: Path, runtime: Path, desktop: Any, startup_finished: asyncio.Event
+) -> None:
     import uvicorn
 
     from ea.web.app import WebSettings, create_app
@@ -179,9 +197,11 @@ async def workspace_session(root: Path, runtime: Path, desktop: Any) -> None:
                                     await task
                                     raise RuntimeError("web_exited_before_ready")
                                 if parent_gone.is_set():
+                                    startup_finished.set()
                                     server.should_exit = True
                                     return
                                 await asyncio.sleep(0.05)
+                            startup_finished.set()
                             emit(
                                 {
                                     "status": "ready",
@@ -201,17 +221,22 @@ async def workspace_session(root: Path, runtime: Path, desktop: Any) -> None:
                             try:
                                 await asyncio.wait_for(task, timeout=12)
                             except TimeoutError:
+                                startup_finished.set()  # Do not recover from uncertain cleanup.
                                 raise RuntimeError("web_shutdown_timeout") from None
                 finally:
                     # Closing core's parent pipe triggers its existing owner-loss path.
                     # We do not synthesize cancellation or claim worker completion.
-                    if core.stdin is not None:
-                        core.stdin.close()
                     try:
-                        core.wait(timeout=8)
-                    except subprocess.TimeoutExpired:
-                        core.kill()
-                        core.wait(timeout=5)
+                        if core.stdin is not None:
+                            core.stdin.close()
+                        try:
+                            core.wait(timeout=8)
+                        except subprocess.TimeoutExpired:
+                            core.kill()
+                            core.wait(timeout=5)
+                    except BaseException:
+                        startup_finished.set()  # Failed reap must not start another session.
+                        raise
                     emit(
                         {
                             "status": "closed",

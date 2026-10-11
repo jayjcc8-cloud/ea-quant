@@ -40,8 +40,13 @@ acceptance; the ordinary app uses the default above. Settings displays the curre
 an explicit absolute path to an existing empty directory or an existing QUINE workspace. Save
 records a next-launch selection only. Wait for active work to finish, quit, then reopen; interrupted
 work retains the owner's unknown/recovery semantics. The application rechecks the target and its
-exclusive lock at startup. An unavailable target returns to the default workspace with a visible
-notice; it never migrates or deletes old data. Cancel pending selection keeps the current root.
+exclusive lock at startup. An unavailable target, including a failure before its Web service is
+ready (for example an unwritable log), returns to the default workspace after cleanup with a visible
+notice. The existing Settings screen can cancel the pending selection or select another directory.
+The failed selection remains recorded until the user changes it; neither data nor permissions are
+changed for recovery. A failure after readiness, or an uncertain shutdown, remains fatal and never
+silently switches workspaces. Recovery makes only one attempt; it never migrates or deletes old
+data. Cancel pending selection keeps the current root.
 There is no multi-workspace manager or native directory-picker permission.
 
 `desktop-preferences.json` in the original default/override root stores the next workspace and the
