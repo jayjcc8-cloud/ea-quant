@@ -124,9 +124,13 @@ def _binding(
     return result
 
 
-def inspect_candidate_binding(workspace: Path, candidate_id: str) -> AcceptedCandidateBinding:
+def inspect_candidate_binding(
+    workspace: Path, candidate_id: str, *, reader: CandidateEvidenceReader | None = None
+) -> AcceptedCandidateBinding:
     """Freshly verify ACCEPTED evidence and frozen bytes without executing strategy code."""
-    reader = CandidateEvidenceReader(workspace)
+    reader = CandidateEvidenceReader(workspace) if reader is None else reader
+    if reader.workspace != workspace:
+        raise ValueError("candidate reader workspace conflicts")
     record = reader.record(candidate_id)
     if record["status"] != "ACCEPTED":
         raise ValueError("candidate must have an explicit ACCEPTED research decision")
@@ -136,7 +140,7 @@ def inspect_candidate_binding(workspace: Path, candidate_id: str) -> AcceptedCan
         raise ValueError("candidate source changed during inspection")
     artifact = None
     if record["projection"]["strategy"]["implementation"]["kind"] == "local":
-        artifact = reader.read(reader.inputs_dir / f"{source_id}.eastrategy")
+        artifact = reader.artifact(source_id)
         if (
             sha256(artifact).hexdigest()
             != record["projection"]["strategy"]["implementation"]["artifact_sha256"]

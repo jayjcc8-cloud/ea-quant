@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ea.product.reporting import BacktestReportV1
 from ea.product.round_trip_report import BacktestReportV2, BacktestReportV3
@@ -18,15 +18,20 @@ from ea.strategy.registry import project_parameters
 from ea.web import candidates
 from ea.web.holdout import compatible, decode_holdout, require_chronology
 
+if TYPE_CHECKING:
+    from ea.web.quine import QuineBridge
+
 
 class CandidateEvidenceReader:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, *, quine: QuineBridge | None = None) -> None:
         if (
             not workspace.is_absolute()
             or not workspace.is_dir()
             or workspace.resolve(strict=True) != workspace
         ):
             raise ValueError("candidate workspace must be an existing resolved directory")
+        self.quine = quine
+        self._owned: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         self.workspace = workspace
         self.jobs_dir = workspace / "jobs"
         self.inputs_dir = workspace / "inputs"
@@ -42,12 +47,16 @@ class CandidateEvidenceReader:
     def read(self, path: Path) -> bytes:
         if path in self._bytes:
             return self._bytes[path]
-        if not path.is_relative_to(self.workspace):
+        roots = [self.workspace]
+        if self.quine is not None:
+            roots.append(self.quine.workspace)
+        root = next((root for root in roots if path.is_relative_to(root)), None)
+        if root is None:
             raise ValueError("candidate evidence is outside workspace")
         for parent in (path, *path.parents):
             if parent.is_symlink():
                 raise ValueError("candidate evidence path is not regular")
-            if parent == self.workspace:
+            if parent == root:
                 break
         payload = read_regular(path, path.parent)
         self._bytes[path] = payload
@@ -59,7 +68,13 @@ class CandidateEvidenceReader:
             return self._jobs[job_id]
         from ea.web.service import _decode_job
 
-        job = _decode_job(self.read(self._job_path(job_id)))
+        if self.quine is None:
+            job = _decode_job(self.read(self._job_path(job_id)))
+            artifact_root = self.reports_dir / job_id
+        else:
+            experiment, _ = self.owned(job_id)
+            job = self.quine.job_record(experiment)
+            artifact_root = self.quine.workspace / "official" / job_id
         if (
             job.job_id != job_id
             or job.status != "succeeded"
@@ -78,7 +93,7 @@ class CandidateEvidenceReader:
         ).hexdigest()
         if scenario_sha != identity["scenario_sha256"]:
             raise ValueError("candidate scenario identity conflicts")
-        report_bytes = self.read(self.reports_dir / job_id / "report.json")
+        report_bytes = self.read(artifact_root / "report.json")
         version = {"ea.local-web-job.v3": 1, "ea.local-web-job.v4": 2, "ea.local-web-job.v5": 3}[
             job.schema
         ]
@@ -86,7 +101,7 @@ class CandidateEvidenceReader:
             report_bytes, b"\n"
         )
         report = json.loads(report_bytes)
-        path_bytes = self.read(self.reports_dir / job_id / "equity-path.json")
+        path_bytes = self.read(artifact_root / "equity-path.json")
         path = json.loads(path_bytes)
         candidates.validate_path(path, report, version)
         source = report["source"]
@@ -126,7 +141,7 @@ class CandidateEvidenceReader:
             "distribution": source["distribution"],
         }
         if "source" in strategy:
-            package = self.read(self.inputs_dir / f"{job_id}.eastrategy")
+            package = self.artifact(job_id)
             if sha256(package).hexdigest() != strategy["source"]["artifact_sha256"]:
                 raise ValueError("candidate frozen package identity conflicts")
             implementation.update(
@@ -159,10 +174,63 @@ class CandidateEvidenceReader:
         self._jobs[job_id] = result
         return result
 
+    def owned(self, job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        candidates._uuid(job_id)
+        if job_id not in self._owned:
+            assert self.quine is not None
+            experiment = self.quine.job_experiment(job_id)
+            if experiment is None or experiment.get("status") != "succeeded":
+                raise ValueError("candidate requires a succeeded owner record")
+            envelope = self.quine.frozen_document(experiment)
+            if envelope is None or not isinstance(experiment.get("result"), dict):
+                raise ValueError("candidate owner input/result is unavailable")
+            candidates._uuid(experiment["attempt_id"])
+            result = experiment["result"]
+            if (
+                result.get("schema") != "ea.quine-official-result.v1"
+                or result.get("job_id") != job_id
+                or result.get("attempt_id") != experiment["attempt_id"]
+                or result.get("run_id") != experiment["attempt_id"]
+                or result.get("report_schema") != envelope.get("report_schema")
+                or result.get("path_schema") != envelope.get("path_schema")
+            ):
+                raise ValueError("candidate owner result identity conflicts")
+            self._owned[job_id] = (experiment, envelope)
+        return self._owned[job_id]
+
+    def artifact(self, job_id: str) -> bytes:
+        if self.quine is None:
+            return self.read(self.inputs_dir / f"{job_id}.eastrategy")
+        _, envelope = self.owned(job_id)
+        encoded = envelope.get("package_file")
+        if type(encoded) is not str:
+            raise ValueError("candidate frozen package is unavailable")
+        return bytes.fromhex(encoded)
+
     def projection(self, validation_id: str, holdout_job_id: str) -> dict[str, Any]:
         candidates._uuid(validation_id)
         candidates._uuid(holdout_job_id)
-        payload = self.read(self.jobs_dir / holdout_job_id / "holdout.json")
+        if self.quine is None:
+            payload = self.read(self.jobs_dir / holdout_job_id / "holdout.json")
+        else:
+            from ea.core.encoding import canonical_json_bytes
+            from ea.web.quine import QuineHoldouts
+
+            experiment, envelope = self.owned(holdout_job_id)
+            # Relation projection uses the owner's retained frozen metadata. No legacy
+            # job/relationship files are manufactured to satisfy admission.
+            relation = QuineHoldouts(self.quine, None, None)._relation(experiment)
+            if relation is None:
+                raise ValueError("candidate requires an owner-held chronological holdout")
+            source_record, _ = self.owned(relation["source_job_id"])
+            metadata = envelope["holdout"]
+            if (
+                metadata["source_frozen_sha256"] != source_record["frozen_sha256"]
+                or metadata["source_result_sha256"]
+                != sha256(canonical_json_bytes(source_record["result"])).hexdigest()
+            ):
+                raise ValueError("candidate holdout source pin conflicts")
+            payload = candidates.canonical(relation)
         current = decode_holdout(payload)
         if (
             current.validation_id != validation_id

@@ -20,6 +20,12 @@ fn main() {
     });
     let setup_session = session.clone();
     let app = tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window.app_handle().exit(0);
+            }
+        })
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "quit-session" {
                 app.exit(0);
@@ -128,6 +134,10 @@ fn main() {
                         for line in BufReader::new(output).lines().map_while(Result::ok) {
                             let _ = writeln!(log, "{line}");
                             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                                if value["status"] == "close_blocked" {
+                                    state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    let _ = window.eval("window.alert('本地模拟停止尚未确认。QUINE 保持打开，请查看运行状态后重试退出。')");
+                                }
                                 if value["status"] == "ready" {
                                     if let Some(url) = value["url"]
                                         .as_str()
@@ -169,36 +179,57 @@ fn main() {
                 let state = session.clone();
                 let handle = handle.clone();
                 std::thread::spawn(move || {
-                    let mut exit_code = 0;
-                    if let Some(mut child) = state.child.lock().unwrap().take() {
-                        drop(child.stdin.take());
-                        let deadline = Instant::now() + Duration::from_secs(25);
-                        loop {
-                            match child.try_wait() {
-                                Ok(Some(status)) => {
-                                    exit_code = status.code().unwrap_or(1);
-                                    break;
-                                }
-                                _ if Instant::now() < deadline => {
-                                    std::thread::sleep(Duration::from_millis(50))
-                                }
-                                _ => {
-                                    // This kills only our unreaped direct child; the core observes EOF.
-                                    let _ = child.kill();
-                                    let _ = child.wait();
-                                    exit_code = 1;
-                                    break;
+                    // A normal quit is a cooperative request, not parent loss.
+                    // Keep the pipe and window until the backend confirms shutdown.
+                    let has_child = {
+                        let mut owned = state.child.lock().unwrap();
+                        if let Some(child) = owned.as_mut() {
+                            if let Some(input) = child.stdin.as_mut() {
+                                let _ = input.write_all(b"shutdown\n");
+                                let _ = input.flush();
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !has_child {
+                        // Backend spawn never happened: this window owns no attempt.
+                        state.finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                        handle.exit(0);
+                        return;
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    loop {
+                        let result = state.child.lock().unwrap().as_mut().and_then(|child| child.try_wait().ok().flatten());
+                        if let Some(status) = result {
+                            let exit_code = status.code().unwrap_or(1);
+                            if let Some(log) = state.log.lock().unwrap().as_mut() {
+                                let _ = writeln!(log, "desktop_backend_reaped: exit={exit_code}");
+                            }
+                            if exit_code == 0 {
+                                state.finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                                handle.exit(0);
+                            } else {
+                                state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
+                                if let Some(window) = handle.get_webview_window("main") {
+                                    let _ = window.eval("window.alert('后端已退出，但本地模拟终态未获确认。请保留工作区证据，重新打开后查看原实例；不会自动续跑。')");
                                 }
                             }
+                            break;
                         }
+                        if !state.exiting.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        if Instant::now() >= deadline {
+                            state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
+                            if let Some(window) = handle.get_webview_window("main") {
+                                let _ = window.eval("window.alert('退出超时：本地模拟停止尚未确认。窗口保持打开，不会强制结束或另开实例。')");
+                            }
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
                     }
-                    if let Some(log) = state.log.lock().unwrap().as_mut() {
-                        let _ = writeln!(log, "desktop_backend_reaped: exit={exit_code}");
-                    }
-                    state
-                        .finished
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    handle.exit(exit_code);
                 });
             }
         }

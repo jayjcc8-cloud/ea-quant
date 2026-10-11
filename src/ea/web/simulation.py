@@ -9,8 +9,10 @@ from ea.product.offline_demo import _package_code_digest
 from ea.web.candidate_evidence import CandidateEvidenceReader
 
 
-def prepare_simulation(workspace: Path, candidate_id: str) -> dict[str, Any]:
-    reader = CandidateEvidenceReader(workspace)
+def prepare_simulation(
+    workspace: Path, candidate_id: str, *, reader: CandidateEvidenceReader | None = None
+) -> dict[str, Any]:
+    reader = CandidateEvidenceReader(workspace) if reader is None else reader
     record = reader.record(candidate_id)
     projection = record["projection"]
     _, _, scenario = reader.job(projection["source"]["job_id"])
@@ -25,7 +27,7 @@ def prepare_simulation(workspace: Path, candidate_id: str) -> dict[str, Any]:
     ] != {"name": "ea-quant", "version": __version__}:
         blockers.append("recorded_implementation_required")
     binding = (
-        inspect_candidate_binding(workspace, candidate_id).document()
+        inspect_candidate_binding(workspace, candidate_id, reader=reader).document()
         if record["status"] == "ACCEPTED"
         else None
     )

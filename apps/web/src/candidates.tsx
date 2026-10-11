@@ -12,7 +12,7 @@ export type Candidate = {
 
 export type SimulationPreparation = {
   eligible: boolean; blockers: string[]; fingerprint: string; scenario_version: number
-  execution_authorized: false; start_available: false; runtime_state: 'not_started'
+  execution_authorized: false; start_available: boolean; runtime_state: 'not_started'
   binding: Record<string, unknown> | null; required_action: string; stop_semantics: string
   small_sample_warning: boolean
 }
@@ -35,7 +35,7 @@ function SimulationReadiness({ api, candidateId, status }: { api: ApiAdapter; ca
       {preparation.binding && <details><summary>Verified accepted binding</summary><pre>{JSON.stringify(preparation.binding, null, 2)}</pre></details>}
       {preparation.small_sample_warning && <p className="notice">Six or fewer records: workflow validation only. This is insufficient for automatic economic approval.</p>}
       <p>{preparation.required_action}</p><p>{preparation.stop_semantics}</p>
-      <button disabled>Start local simulation unavailable in this entry</button>
+      {preparation.start_available && preparation.eligible ? <Link to={`/runs?candidate=${encodeURIComponent(candidateId)}`}>检查配置并启动本地模拟</Link> : <p>此入口不可启动，或候选配置不支持本地模拟。</p>}
     </>}
   </section>
 }

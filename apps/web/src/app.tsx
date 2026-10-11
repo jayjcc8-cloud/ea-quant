@@ -5,7 +5,7 @@ import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } fr
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
 import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings, DataWorkspace, ExtensionWorkspace } from './research'
 import { StrategiesWorkspace } from './user-strategies'
-import { PaperStatus } from './paper-status'
+import { PaperWorkspace } from './paper-workspace'
 import { ResourcesPage } from './resources'
 import {
   userStrategiesApi,
@@ -528,11 +528,11 @@ function Shell({ api }: { api: ApiAdapter }) {
         <div className="sidebar-footer"><span className="status-dot" />仅本地回环 · 未连接实盘</div>
       </div>
     </aside>
-    <main><header className="topbar"><span>本地研究</span><span>离线回测 · 不下单</span></header><div className="content">
+    <main><header className="topbar"><span>本地量化工作台</span><span>研究与本地模拟 · 无真实资金</span></header><div className="content">
       <Routes>
         <Route path="/strategies" element={<StrategiesWorkspace api={api} />} />
         <Route path="/strategies/:userStrategyId" element={<StrategiesWorkspace api={api} />} />
-        <Route path="/runs" element={<PaperStatus />} />
+        <Route path="/runs" element={<PaperWorkspace />} />
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktestsRoute api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />

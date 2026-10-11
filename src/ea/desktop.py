@@ -137,7 +137,8 @@ async def workspace_session(
     import uvicorn
 
     from ea.web.app import WebSettings, create_app
-    from ea.web.quine import QuineClient
+    from ea.web.paper_desktop import DesktopPaper
+    from ea.web.quine import QuineBridge, QuineClient
 
     os.umask(0o077)
     prepare_root(root, runtime)
@@ -191,6 +192,12 @@ async def workspace_session(
                         listener.listen(128)
                         listener.setblocking(False)
                         port = listener.getsockname()[1]
+                        paper = DesktopPaper(
+                            root / "paper",
+                            root / "workspace",
+                            quine=QuineBridge(ipc, workspace=root / "core"),
+                        )
+                        paper.open()
                         application = create_app(
                             WebSettings(
                                 scenario_root=root / "scenarios",
@@ -200,6 +207,8 @@ async def workspace_session(
                                 quine_socket=ipc,
                                 quine_workspace=root / "core",
                                 desktop_settings=desktop,
+                                runtime_root=paper.runs,
+                                desktop_paper=paper,
                             )
                         )
                         server = uvicorn.Server(
@@ -216,12 +225,46 @@ async def workspace_session(
                         loop = asyncio.get_running_loop()
                         parent_gone = asyncio.Event()
 
-                        def parent_closed() -> None:
-                            startup_finished.set()
-                            parent_gone.set()
-                            server.should_exit = True
+                        stopping_paper = False
 
-                        loop.add_reader(sys.stdin.fileno(), parent_closed)
+                        async def request_exit(parent_lost: bool) -> None:
+                            nonlocal stopping_paper
+                            if stopping_paper:
+                                return
+                            stopping_paper = True
+                            try:
+                                confirmed = await asyncio.to_thread(paper.shutdown)
+                                if confirmed:
+                                    parent_gone.set()
+                                    server.should_exit = True
+                                else:
+                                    emit(
+                                        {
+                                            "status": "close_blocked",
+                                            "code": "paper_stop_unconfirmed",
+                                        }
+                                    )
+                                    if parent_lost:
+                                        # Keep ownership while an inherited pipe/lease could
+                                        # still belong to the original attempt. No new app can
+                                        # silently acquire this workspace and run it again.
+                                        emit(
+                                            {
+                                                "status": "unknown",
+                                                "code": "parent_lost_stop_unconfirmed",
+                                            }
+                                        )
+                            finally:
+                                stopping_paper = False
+
+                        def parent_message() -> None:
+                            startup_finished.set()
+                            message = os.read(sys.stdin.fileno(), 4096)
+                            if not message:
+                                loop.remove_reader(sys.stdin.fileno())
+                            asyncio.create_task(request_exit(not message))
+
+                        loop.add_reader(sys.stdin.fileno(), parent_message)
                         task = asyncio.create_task(serve_web(server, [listener], startup_finished))
                         try:
                             while not server.started:
@@ -250,6 +293,11 @@ async def workspace_session(
                                 await asyncio.sleep(0.1)
                         finally:
                             loop.remove_reader(sys.stdin.fileno())
+                            confirmed = await asyncio.to_thread(paper.shutdown)
+                            if not confirmed:
+                                startup_finished.set()
+                                raise RuntimeError("paper_stop_unconfirmed")
+                            paper.close()
                             server.should_exit = True
                             try:
                                 await asyncio.wait_for(task, timeout=12)

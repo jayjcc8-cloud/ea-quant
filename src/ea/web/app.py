@@ -412,6 +412,7 @@ class WebSettings:
     # Desktop uses a short private socket separately from the durable owner store.
     quine_workspace: Path | None = None
     desktop_settings: Any = None
+    desktop_paper: Any = None
 
     @property
     def trusted_origin(self) -> str:
@@ -857,7 +858,11 @@ def create_app(settings: WebSettings) -> Any:
         from ea.web.simulation import prepare_simulation
 
         try:
-            return prepare_simulation(service.workspace, candidate_id)
+            if settings.desktop_paper is not None:
+                return settings.desktop_paper.prepare(candidate_id)
+            return prepare_simulation(
+                service.workspace, candidate_id, reader=service.candidate_reader()
+            )
         except (ValueError, OSError):
             return error(
                 409,
@@ -1367,6 +1372,55 @@ def create_app(settings: WebSettings) -> Any:
         except (WebBoundaryError, ValueError, OSError) as caught:
             return error(500, "workspace_overview_unavailable", str(caught))
 
+    @app.get("/api/paper/instances")
+    def paper_instances() -> object:
+        if settings.desktop_paper is None:
+            return {"available": False, "reason": "desktop_session_required", "instances": []}
+        try:
+            return {"available": True, "instances": settings.desktop_paper.list()}
+        except (OSError, ValueError, RuntimeError) as caught:
+            return error(409, "paper_unavailable", str(caught))
+
+    @app.get("/api/paper/instances/{request_id}")
+    def paper_instance(request_id: str) -> object:
+        if settings.desktop_paper is None:
+            return error(
+                409, "desktop_session_required", "Start local simulation in the desktop app."
+            )
+        try:
+            return settings.desktop_paper.get(request_id)
+        except FileNotFoundError:
+            return error(404, "paper_request_not_found", "This request has no saved receipt.")
+        except (OSError, ValueError, RuntimeError) as caught:
+            return error(409, "paper_unavailable", str(caught))
+
+    @app.post("/api/paper/instances", status_code=202)
+    async def start_paper_instance(request: Request) -> object:
+        if settings.desktop_paper is None:
+            return error(
+                409, "desktop_session_required", "Start local simulation in the desktop app."
+            )
+        try:
+            body = await _bounded_document(request, 8192)
+            if type(body) is not dict:
+                return malformed()
+            return settings.desktop_paper.start(body)
+        except _RequestTooLarge:
+            return too_large("local simulation")
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError) as caught:
+            return error(409, "paper_start_unconfirmed", str(caught))
+
+    @app.post("/api/paper/instances/{request_id}/stop")
+    def stop_paper_instance(request_id: str) -> object:
+        if settings.desktop_paper is None:
+            return error(
+                409, "desktop_session_required", "No desktop-owned instance is configured."
+            )
+        try:
+            return settings.desktop_paper.stop(request_id)
+        except (OSError, ValueError, RuntimeError) as caught:
+            return error(409, "paper_stop_unconfirmed", str(caught))
+
     @app.get("/api/paper/overview")
     def paper_overview_route(run_id: str | None = None) -> object:
         try:
@@ -1420,6 +1474,17 @@ def create_app(settings: WebSettings) -> Any:
             body = json.loads(raw)
             if not isinstance(body, dict):
                 raise ValueError("设置格式无效。")
+            if (
+                "next_workspace" in body
+                and body["next_workspace"] != str(settings.desktop_settings.root)
+                and settings.desktop_paper is not None
+                and not settings.desktop_paper.shutdown()
+            ):
+                return error(
+                    409,
+                    "paper_stop_unconfirmed",
+                    "本地模拟停止尚未确认；工作区未切换，请查看运行状态。",
+                )
             return settings.desktop_settings.update(body)
         except (ValueError, OSError):
             # Never echo parser, filesystem, or validation detail containing input/keys.

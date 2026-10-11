@@ -73,10 +73,16 @@ _PAPER_STATUS_KEYS = (
 
 def _newest_run_dir(runtime_root: Path, run_id: str | None = None) -> Path | None:
     if run_id is not None:
+        if Path(run_id).name != run_id or run_id in {".", ".."}:
+            raise ValueError("run identity must be one directory name")
         candidate = runtime_root / run_id
+        if candidate.is_symlink() or candidate.resolve().parent != runtime_root.resolve():
+            raise ValueError("run directory is outside configured runtime")
         return candidate if candidate.is_dir() else None
     try:
-        children = [child for child in runtime_root.iterdir() if child.is_dir()]
+        children = [
+            child for child in runtime_root.iterdir() if child.is_dir() and not child.is_symlink()
+        ]
     except OSError:
         return None
     if not children:

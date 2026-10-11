@@ -819,6 +819,10 @@ class QuineJobReader:
     def __init__(self, bridge: QuineBridge):
         self._bridge = bridge
 
+    @property
+    def bridge(self) -> QuineBridge:
+        return self._bridge
+
     def job(self, job_id: str) -> Any:
         """One core-owned run as a job record, or ``None`` when the core owns none."""
         experiment = self._bridge.job_experiment(job_id)

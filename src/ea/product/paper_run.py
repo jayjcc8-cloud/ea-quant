@@ -65,6 +65,7 @@ from ea.risk.kill_switch import (
 )
 from ea.risk.operational_safety import canonical_operational_safety_limits_bytes
 from ea.strategy.catalog import ResearchStrategyCatalogV1
+from ea.web.candidate_evidence import CandidateEvidenceReader
 
 
 def _canonical(document: object) -> bytes:
@@ -114,6 +115,9 @@ def run_local_paper(
     run_id: RunId | None = None,
     on_ready: Callable[[Path], None] | None = None,
     crash_after: AuditRecordKind | None = None,
+    evidence_reader: CandidateEvidenceReader | None = None,
+    parent_stop: Callable[[], bool] | None = None,
+    expected_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Explicitly start one fresh local simulation; no recovery or external transport."""
     if (
@@ -132,7 +136,11 @@ def run_local_paper(
     if attempt.exists() or attempt.is_symlink():
         raise ValueError("Paper requires a fresh attempt; existing state cannot resume")
     # One trust-boundary read retains immutable Candidate bytes all the way to execution.
-    accepted = inspect_candidate_binding(workspace.expanduser().resolve(strict=True), candidate_id)
+    accepted = inspect_candidate_binding(
+        workspace.expanduser().resolve(strict=True), candidate_id, reader=evidence_reader
+    )
+    if expected_fingerprint is not None and accepted.fingerprint != expected_fingerprint:
+        raise ValueError("Paper candidate differs from confirmed startup identity")
     path = scenario_path.expanduser().resolve(strict=True)
     document = _preflight(path, accepted)
     if document["schema_version"] not in (4, 5):
@@ -207,7 +215,11 @@ def run_local_paper(
 
     def should_stop() -> bool:
         assert writer is not None
-        return stopping.is_set() or writer.stop_requested()
+        return (
+            stopping.is_set()
+            or (parent_stop is not None and parent_stop())
+            or writer.stop_requested()
+        )
 
     def stream_stop_requested() -> bool:
         """Independent capacity gate consulted immediately before each market.
@@ -219,7 +231,7 @@ def run_local_paper(
         """
         nonlocal capacity_exhausted
         assert writer is not None
-        if stopping.is_set() or writer.stop_requested():
+        if should_stop():
             return True
         if capacity_exhausted:
             return True

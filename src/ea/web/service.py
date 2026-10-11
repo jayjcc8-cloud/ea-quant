@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 import yaml
@@ -61,6 +61,10 @@ from ea.web.uploads import (
     ControlledUploadStoreV1,
     LocalResearchDatasetCatalogV1,
 )
+
+if TYPE_CHECKING:
+    from ea.web.candidate_evidence import CandidateEvidenceReader
+
 
 _SCENARIO_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 #: ``accepted``/``running`` are live; ``stopping`` is a cancellation the
@@ -3113,13 +3117,16 @@ class WebService:
             return None
         return attempt, report, digests
 
-    def _candidate_projection(self, validation_id: str) -> dict[str, Any]:
+    def candidate_reader(self) -> CandidateEvidenceReader:
         from ea.web.candidate_evidence import CandidateEvidenceReader
+        from ea.web.quine import QuineJobReader
 
+        quine = self._external.bridge if isinstance(self._external, QuineJobReader) else None
+        return CandidateEvidenceReader(self.workspace, quine=quine)
+
+    def _candidate_projection(self, validation_id: str) -> dict[str, Any]:
         relation = self.get_holdout(validation_id)
-        return CandidateEvidenceReader(self.workspace).projection(
-            validation_id, relation["holdout_job_id"]
-        )
+        return self.candidate_reader().projection(validation_id, relation["holdout_job_id"])
 
     def _write_candidate(self, record: dict[str, Any]) -> None:
         payload = candidates.canonical(record)
@@ -3148,10 +3155,8 @@ class WebService:
             return record
 
     def get_candidate(self, candidate_id: str) -> dict[str, Any]:
-        from ea.web.candidate_evidence import CandidateEvidenceReader
-
         with self._lock:
-            return CandidateEvidenceReader(self.workspace).record(candidate_id)
+            return self.candidate_reader().record(candidate_id)
 
     def decide_candidate(self, candidate_id: str, outcome: str, reason: str) -> dict[str, Any]:
         with self._lock:
