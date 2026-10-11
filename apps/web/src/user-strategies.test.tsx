@@ -705,10 +705,14 @@ describe('user strategy workspace', () => {
     expect(within(panel).getByText('A wider sample size.')).toBeTruthy()
     expect(within(panel).getByText('Skip the first bar.')).toBeTruthy()
     expect(within(panel).getAllByText(/提议者：model/)).toHaveLength(2)
-    // Applying is a draft change, and the panel says what the next step after it is.
-    expect(panel.textContent).toMatch(/应用只改变草稿/)
-    expect(panel.textContent).toMatch(/在「实验」里预览这次草稿并确认一次运行/)
+    // Applying is a draft change, and the one notice beside the fields says what
+    // the next step after it is: a saved revision still has to be previewed and
+    // confirmed in 实验.
+    expect(panel.textContent).toMatch(/保存为新修订后，需在「实验」里预览并确认运行。/)
+    // Reading the proposal starts nothing: no application, no preview, no run.
     expect(calls.apply).toBe(0)
+    expect(calls.preview).toBe(0)
+    expect(calls.launch).toBe(0)
 
     // Asking the model is not applying, and a recorded non-answer stays honest.
     const chat = screen.getByRole('region', { name: 'AI 协作' })
@@ -732,6 +736,10 @@ describe('user strategy workspace', () => {
     expect(calls.apply).toBe(1)
     // One click, one intent: the selection and the operation id this click made.
     expect(applied).toEqual([{ proposalId: 'prop-1', operationId: 'op-prop-1-1-0', paths: ['parameters.target_quantity'] }])
+    // Applying writes a draft revision and starts nothing: a run still needs its
+    // own preview and its own confirmation.
+    expect(calls.preview).toBe(0)
+    expect(calls.launch).toBe(0)
 
     // A refused apply is reported with the host's own message, never shown as applied.
     await user.click(within(panel).getByRole('button', { name: '应用所选' }))
@@ -750,6 +758,10 @@ describe('user strategy workspace', () => {
       expect(within(settled).getByText('已拒绝')).toBeTruthy()
     })
     expect(screen.getByText('v1 草稿')).toBeTruthy()
+    // Rejecting is a decision on the draft and nothing more: still no preview and
+    // no run behind either click.
+    expect(calls.preview).toBe(0)
+    expect(calls.launch).toBe(0)
   })
 
   it('asks for a different change only with its own fresh approval', async () => {
@@ -1530,7 +1542,11 @@ describe('user strategy workspace', () => {
     expect(closedPanel.textContent).toMatch(/由模型提出，已应用/)
     expect(closedPanel.textContent).not.toMatch(/等待你决定/)
     expect(within(closedPanel).getByLabelText('parameters.target_quantity')).toBeTruthy()
-    expect(closedPanel.textContent).toMatch(/应用会用整份已校验的草稿写出一个新修订/)
+    // The one current notice about what an application is and what still has to
+    // happen after it, and reading a closed record runs nothing.
+    expect(closedPanel.textContent).toMatch(/保存为新修订后，需在「实验」里预览并确认运行。/)
+    expect(applied.calls.preview).toBe(0)
+    expect(applied.calls.launch).toBe(0)
     // The whole record is one collapsed disclosure, so its controls are read after
     // opening it — and they are still there, inert.
     fireEvent.click(within(closedPanel).getByText(/的修改与来源/))

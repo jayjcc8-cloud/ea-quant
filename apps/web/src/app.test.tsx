@@ -5,6 +5,18 @@ import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type Input
 import type { Candidate } from './candidates'
 import type { UserStrategy, UserStrategyDraft, UserStrategyExperiment } from './user-strategies-api'
 
+/** The preparation panel, once its own read has answered: the section is on screen
+ * before its facts are, so every check is made against the loaded panel. */
+const preparationPanel = async () => {
+  const panel = within(await screen.findByRole('region', { name: 'Local simulation preparation' }))
+  await waitFor(() => expect(panel.getByText(/Separate explicit bounded local Paper start/)).toBeTruthy())
+  return panel
+}
+
+/** Every enabled control in a region, which is what could start something there. */
+const enabledControls = (region: Awaited<ReturnType<typeof preparationPanel>>) =>
+  region.queryAllByRole('button').filter(button => !(button as HTMLButtonElement).disabled)
+
 it('shows local simulation preparation blockers without authorizing a start', async () => {
   window.history.pushState({}, '', '/candidates/candidate-1')
   render(<App api={adapter({
@@ -17,11 +29,55 @@ it('shows local simulation preparation blockers without authorizing a start', as
       stop_semantics: 'Stop does not liquidate.', small_sample_warning: true,
     }),
   })} />)
-  expect((await screen.findByText('Blocked for local Paper startup.')).textContent).toContain('Blocked')
-  expect(screen.getByText('unsupported paper profile requires action v2 v4 v5')).toBeTruthy()
-  expect(screen.getByText(/workflow validation only/)).toBeTruthy()
-  expect((screen.getByRole('button', { name: 'Start local simulation unavailable in this entry' }) as HTMLButtonElement).disabled).toBe(true)
+
+  const preparation = await preparationPanel()
+  expect(preparation.getByText('Blocked for local Paper startup.').textContent).toContain('Blocked')
+  expect(preparation.getByText('unsupported paper profile requires action v2 v4 v5')).toBeTruthy()
+  expect(preparation.getByText('explicit research acceptance required')).toBeTruthy()
+  expect(preparation.getByText(/workflow validation only/)).toBeTruthy()
+  // A blocked preparation offers no start action at all here: no link into the run
+  // page, and no enabled control that could stand in for one.
+  expect(preparation.queryAllByRole('link').filter(link => (link.getAttribute('href') ?? '').startsWith('/runs'))).toEqual([])
+  expect(enabledControls(preparation)).toEqual([])
 })
+
+it.each([[true, true], [true, false], [false, true], [false, false]])(
+  'offers a local run start only when preparation is eligible=%s and start is available=%s',
+  async (eligible, startAvailable) => {
+    window.history.pushState({}, '', '/candidates/candidate-1')
+    render(<App api={adapter({
+      getCandidate: async () => evaluatedCandidate(),
+      prepareSimulation: async () => ({
+        eligible, blockers: eligible ? [] : ['unsupported_paper_profile_requires_action_v2_v4_v5'],
+        fingerprint: 'bound-fixture', scenario_version: 2, binding: null,
+        execution_authorized: false, start_available: startAvailable, runtime_state: 'not_started',
+        required_action: 'Separate explicit bounded local Paper start; acceptance is not authorization.',
+        stop_semantics: 'Stop does not liquidate.', small_sample_warning: true,
+      }),
+    })} />)
+
+    const preparation = await preparationPanel()
+    // The small-sample warning survives every combination: being eligible is not
+    // evidence, and neither is being startable.
+    expect(preparation.getByText(/workflow validation only/)).toBeTruthy()
+    const start = preparation.queryByRole('link', { name: '检查配置并启动本地模拟' })
+    if (eligible && startAvailable) {
+      expect(preparation.getByText('Profile eligible; separate startup authorization required.')).toBeTruthy()
+      // Preparation is navigation, never authorization: the only action offered is a
+      // link into the run page, which still previews and confirms for itself, and
+      // nothing here is started by rendering the panel.
+      expect(start?.tagName).toBe('A')
+      expect(start?.getAttribute('href')).toBe('/runs?candidate=candidate-1')
+      expect(preparation.queryAllByRole('button')).toEqual([])
+    } else {
+      expect(start).toBeNull()
+      expect(preparation.getByText('此入口不可启动，或候选配置不支持本地模拟。')).toBeTruthy()
+      expect(preparation.getByText(eligible
+        ? 'Profile eligible; separate startup authorization required.'
+        : 'Blocked for local Paper startup.')).toBeTruthy()
+      expect(enabledControls(preparation)).toEqual([])
+    }
+  })
 
 const identity = { scenario_sha256: 'a'.repeat(64), data_sha256: 'b'.repeat(64), record_count: 4 }
 const scenarios = [

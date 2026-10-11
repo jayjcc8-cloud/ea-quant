@@ -91,8 +91,10 @@ function host(answers: MappedPreview[] = [MAPPED_PREVIEW_OK]) {
   return { api, calls }
 }
 
+/** The data workspace, which is where the upload controls this file describes are
+ * reached from the shell. */
 function workspace(api: ApiAdapter) {
-  window.history.pushState({}, '', '/research')
+  window.history.pushState({}, '', '/data')
   render(<App api={api} />)
 }
 
@@ -184,8 +186,24 @@ function declareSyntheticMapping() {
 const publishButton = () => screen.getByRole('button', { name: 'Publish version' }) as HTMLButtonElement
 const previewButton = () => screen.getByRole('button', { name: 'Preview sample' }) as HTMLButtonElement
 
+/**
+ * The upload surface keeps the draft it is holding in this workspace's session
+ * storage, so the bytes one test selected are still on screen in the next one —
+ * and a selected file renames the content control, and its preview authorizes a
+ * publication. Clearing exactly those keys is what makes each test below start
+ * from the panel the user really starts from; nothing else is touched.
+ */
+function clearUploadDraft() {
+  const owned = Array.from(
+    { length: sessionStorage.length },
+    (_, index) => sessionStorage.key(index) ?? '',
+  ).filter(key => key.startsWith('quine.csv-'))
+  for (const key of owned) sessionStorage.removeItem(key)
+}
+
 afterEach(() => {
   cleanup()
+  clearUploadDraft()
   window.history.pushState({}, '', '/backtests')
 })
 

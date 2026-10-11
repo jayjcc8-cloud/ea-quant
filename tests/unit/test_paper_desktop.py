@@ -151,13 +151,13 @@ def test_failed_or_uncertain_stop_never_releases_the_start_gate(tmp_path: Path) 
         assert other.get(request["request_id"])["state"] == "unknown"
     finally:
         # The test has proved and reaped this exact dead child; preserve all evidence.
-        child = manager._children.get(request["request_id"])
-        if child is not None:
-            if child.poll() is None:
-                child.kill()
-                child.wait(timeout=5)
-            if child.stdin is not None and not child.stdin.closed:
-                child.stdin.close()
+        cleanup_child = manager._children.get(request["request_id"])
+        if cleanup_child is not None:
+            if cleanup_child.poll() is None:
+                cleanup_child.kill()
+                cleanup_child.wait(timeout=5)
+            if cleanup_child.stdin is not None and not cleanup_child.stdin.closed:
+                cleanup_child.stdin.close()
         manager._lock.close()
 
 

@@ -186,6 +186,7 @@ afterEach(() => {
   cleanup()
   stopped.length = 0
   launched.length = 0
+  clearPendingSelections()
   window.history.pushState({}, '', '/backtests')
 })
 
@@ -336,10 +337,34 @@ describe('core-owned experiments', () => {
   }, 20_000)
 })
 
+/**
+ * The operation id one dataset selection makes: this click's own lower-case
+ * UUIDv4. It identifies the operation, so no strategy identity is inside it.
+ */
+const DATASET_OPERATION_ID = /^dataset-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+/** The one kind of catalog entry this panel may offer. */
+const USABLE_DATASET = { dataset_id: 'registered.csv', valid: true, origin: 'registered' as const }
+
+/** The strategy document a host returns once it has bound one catalog identity. */
+function boundToDataset(datasetId: string): UserStrategy {
+  const head = strategy([]).draft as UserStrategyDraft
+  return { ...strategy([]), draft: { ...head, revision: 2, dataset_id: datasetId, source_sha256: 'e'.repeat(64) } }
+}
+
+/** The panel's own pending-selection keys, cleared so no test answers another's. */
+function clearPendingSelections() {
+  const owned = Array.from(
+    { length: sessionStorage.length },
+    (_, index) => sessionStorage.key(index) ?? '',
+  ).filter(key => key.startsWith('quine.dataset-selection.'))
+  for (const key of owned) sessionStorage.removeItem(key)
+}
+
 describe('one explicit dataset selection', () => {
   it('offers only usable catalog identities and applies the revision the host returns', async () => {
     const user = userEvent.setup()
-    const chosen: { operation_id: string; base_revision: number; dataset_id: string }[] = []
+    const chosen: { id: string; operation_id: string; base_revision: number; dataset_id: string }[] = []
     const { api } = scripted({})
     const revised = strategy([])
     const selecting: ApiAdapter = {
@@ -357,8 +382,8 @@ describe('one explicit dataset selection', () => {
         // panel never turns a broken dataset into a selectable one.
         { dataset_id: 'broken.csv', valid: false },
       ],
-      selectUserStrategyDataset: async (_id, input) => {
-        chosen.push(input)
+      selectUserStrategyDataset: async (id, input) => {
+        chosen.push({ id, ...input })
         const head = revised.draft as UserStrategyDraft
         return {
           ...revised,
@@ -392,13 +417,20 @@ describe('one explicit dataset selection', () => {
     await user.click(within(panel).getByRole('button', { name: '选择这个数据集' }))
 
     await waitFor(() => expect(chosen.length).toBe(1))
+    // One explicit choice, one call, addressed to the open strategy: the strategy
+    // identity is that argument and never part of the operation id.
+    expect(chosen).toHaveLength(1)
+    expect(chosen[0].id).toBe('us-1')
     // The client sends the catalog identity it was shown, against the revision it
     // was reading: not a path and not a digest of its own.
     expect(chosen[0].dataset_id).toBe('registered.csv')
     expect(chosen[0].base_revision).toBe(1)
-    expect(chosen[0].operation_id).toContain('us-1')
-    // The revision the host returned is the one on screen afterwards.
-    await waitFor(() => expect(screen.getAllByText(/registered\.csv/).length).toBeGreaterThan(0))
+    expect(chosen[0].operation_id).toMatch(DATASET_OPERATION_ID)
+    // The revision the host returned is the one on screen afterwards, standing on
+    // the dataset the host bound at the digest the host wrote.
+    expect(await screen.findByText('v2 草稿')).toBeTruthy()
+    const returned = screen.getByRole('region', { name: '策略详情' })
+    expect(within(returned).getByText(/registered\.csv · e{12}/)).toBeTruthy()
   }, 20_000)
 
   it('keeps the host refusal visible and writes no selection', async () => {
@@ -422,4 +454,122 @@ describe('one explicit dataset selection', () => {
     await waitFor(() => expect(attempts).toBe(1))
     await waitFor(() => expect(screen.getAllByText(/草稿修订已前进/).length).toBeGreaterThan(0))
   }, 20_000)
+
+  it('keeps one unresolved selection to one click and one stored operation id', async () => {
+    const user = userEvent.setup()
+    const pending = deferred<UserStrategy>()
+    const attempts: { id: string; operation_id: string; base_revision: number; dataset_id: string }[] = []
+    const { api } = scripted({})
+    detail({
+      ...api,
+      listDatasets: async () => [USABLE_DATASET],
+      selectUserStrategyDataset: async (id, input) => { attempts.push({ id, ...input }); return pending.promise },
+    })
+
+    const panel = await screen.findByRole('region', { name: '选择数据集' })
+    await user.selectOptions(await within(panel).findByLabelText('数据集'), 'registered.csv')
+    const choose = () => within(panel).getByRole('button', { name: '选择这个数据集' }) as HTMLButtonElement
+    await user.click(choose())
+
+    // The first answer has not arrived, so the control is inert: a second click is
+    // not a second selection.
+    await waitFor(() => expect(attempts.length).toBe(1))
+    expect(choose().disabled).toBe(true)
+    await user.click(choose())
+    expect(attempts.length).toBe(1)
+
+    // The intent this click stored is the one in flight, under this strategy and
+    // this reading of the draft, and it is this click's own operation id.
+    expect(sessionStorage.getItem('quine.dataset-selection.us-1.1')).toBe(attempts[0].operation_id)
+    expect(attempts[0].operation_id).toMatch(DATASET_OPERATION_ID)
+    expect(attempts[0].id).toBe('us-1')
+    expect(attempts[0].dataset_id).toBe('registered.csv')
+    expect(attempts[0].base_revision).toBe(1)
+
+    pending.resolve(strategy([]))
+    // The answer settles the one intent that was in flight, and sends nothing more.
+    await waitFor(() => expect(sessionStorage.getItem('quine.dataset-selection.us-1.1')).toBeNull())
+    expect(attempts.length).toBe(1)
+  })
+
+  it('never resends an unresolved selection, on another click or after a remount', async () => {
+    const user = userEvent.setup()
+    const attempts: { id: string; operation_id: string; base_revision: number; dataset_id: string }[] = []
+    const { api } = scripted({})
+    const unreachable: ApiAdapter = {
+      ...api,
+      listDatasets: async () => [USABLE_DATASET],
+      // The request left and nothing came back. That is not a refusal, so the
+      // outcome stays unknown and the client may not decide the host wrote nothing.
+      selectUserStrategyDataset: async (id, input) => {
+        attempts.push({ id, ...input })
+        throw new Error('the connection dropped before the host answered')
+      },
+    }
+    detail(unreachable)
+
+    const panel = await screen.findByRole('region', { name: '选择数据集' })
+    await user.selectOptions(await within(panel).findByLabelText('数据集'), 'registered.csv')
+    await user.click(within(panel).getByRole('button', { name: '选择这个数据集' }))
+
+    await waitFor(() => expect(attempts.length).toBe(1))
+    expect(await within(panel).findByText(/选择结果未知/)).toBeTruthy()
+    expect(sessionStorage.getItem('quine.dataset-selection.us-1.1')).toBe(attempts[0].operation_id)
+    // The unresolved intent is still pending, so another click sends nothing.
+    await user.click(within(panel).getByRole('button', { name: '选择这个数据集' }))
+    expect(attempts.length).toBe(1)
+
+    // Reloading the strategy brings that same intent back unresolved, and the panel
+    // still sends nothing by itself.
+    cleanup()
+    detail(unreachable)
+    const reloaded = await screen.findByRole('region', { name: '选择数据集' })
+    expect(await within(reloaded).findByText(/不会自动重发/)).toBeTruthy()
+    expect((within(reloaded).getByRole('button', { name: '选择这个数据集' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(attempts.length).toBe(1)
+  })
+
+  it('permits one new explicit attempt after a recorded refusal, on a fresh operation id', async () => {
+    const user = userEvent.setup()
+    const attempts: { id: string; operation_id: string; base_revision: number; dataset_id: string }[] = []
+    const { api } = scripted({})
+    const refusing: ApiAdapter = {
+      ...api,
+      listDatasets: async () => [USABLE_DATASET],
+      selectUserStrategyDataset: async (id, input) => {
+        attempts.push({ id, ...input })
+        // A refusal the client can classify: the host wrote nothing, so this same
+        // choice may be made again — explicitly, with an operation id of its own.
+        if (attempts.length === 1) throw new UserStrategyRequestError('stale_base_revision', '草稿修订已前进')
+        return boundToDataset(input.dataset_id)
+      },
+    }
+    detail(refusing)
+
+    const panel = await screen.findByRole('region', { name: '选择数据集' })
+    await user.selectOptions(await within(panel).findByLabelText('数据集'), 'registered.csv')
+    const choose = () => within(panel).getByRole('button', { name: '选择这个数据集' }) as HTMLButtonElement
+    await user.click(choose())
+
+    await waitFor(() => expect(attempts.length).toBe(1))
+    expect((await screen.findAllByText(/草稿修订已前进/)).length).toBeGreaterThan(0)
+    // A classified refusal leaves nothing pending, and the choice is still the
+    // user's: the way to try again is another click.
+    expect(sessionStorage.getItem('quine.dataset-selection.us-1.1')).toBeNull()
+    expect(choose().disabled).toBe(false)
+    expect(attempts.length).toBe(1)
+
+    await user.click(choose())
+    await waitFor(() => expect(attempts.length).toBe(2))
+    // A fresh operation id for the new attempt, and the same binding: this
+    // strategy, this dataset, this reading of the draft.
+    expect(attempts[1].operation_id).not.toBe(attempts[0].operation_id)
+    expect(attempts[1].operation_id).toMatch(DATASET_OPERATION_ID)
+    expect(attempts.map(item => [item.id, item.dataset_id, item.base_revision]))
+      .toEqual([['us-1', 'registered.csv', 1], ['us-1', 'registered.csv', 1]])
+    // The revision the host returned is the one on screen afterwards.
+    expect(await screen.findByText('v2 草稿')).toBeTruthy()
+    const returned = screen.getByRole('region', { name: '策略详情' })
+    expect(within(returned).getByText(/registered\.csv · e{12}/)).toBeTruthy()
+  })
 })
