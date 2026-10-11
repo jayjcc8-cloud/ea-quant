@@ -1203,11 +1203,13 @@ function CallEvidence({ call }: { call: UserStrategyCall | undefined }) {
  * history disclosure. Nothing the user acts on — the proposal, the approval, the
  * composer — is inside that scroller, and the DOM order is the keyboard order.
  */
-function ChatPanel({ api, strategy, strategies, changed, proposalSlot }: {
+function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSendBlock }: {
   api: ApiAdapter
   strategy: UserStrategy
   strategies: UserStrategy[]
   changed: (strategy: UserStrategy) => void
+  /** Null only after the current settings read reports configured=true. */
+  modelSendBlock: string | null
   /** The current proposal, mounted after the turn it belongs to and before history. */
   proposalSlot?: ReactNode
 }) {
@@ -1231,6 +1233,12 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot }: {
     : strategy.messages
 
   const ask = async () => {
+    // UI readiness is only a sending precondition; the backend still owns the
+    // actual configuration, approval and provider execution checks.
+    if (modelSendBlock !== null) {
+      setNote(modelSendBlock)
+      return
+    }
     if (!approved) {
       setNote('在询问模型之前，需要先批准一次模型调用。')
       return
@@ -1291,8 +1299,11 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot }: {
         <p className="muted">{isIntentDraft(strategy.draft)
           ? '一次批准只允许一次调用，这一次调用只用来澄清这个想法：它不提出字段修改，也不启动回测。'
           : '本次批准仅针对当前修订调用模型一次，解释或提出修改；不应用提案，也不运行回测。'}</p>
-        <button type="button" className="primary" onClick={ask} disabled={busy || !message.trim()}>询问模型</button>
+        <button type="button" className="primary" onClick={ask} disabled={busy || !message.trim() || modelSendBlock !== null}>询问模型</button>
       </div>
+      {modelSendBlock !== null && <p className="notice" role="status">
+        {modelSendBlock} <Link to="/settings">检查模型设置</Link>，完成后点击上方「重新检查」再发送。
+      </p>}
       {note && <p role="alert" className="notice error">{note}</p>}
     </div>
     {/* The two states that qualify the composer sit with it rather than at the far
@@ -2133,6 +2144,9 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   // flight, neither old readiness nor old bind choices are offered as current.
   const catalog = catalogRead?.api === api && catalogRead.check === check ? catalogRead : null
   const model = modelRead?.api === api && modelRead.check === check ? modelRead : null
+  const modelSendBlock = !model ? '正在读取模型配置，暂不能发送。'
+    : model.error ? '模型配置状态未知，暂不能发送。'
+      : model.value?.configured !== true ? '模型尚未配置就绪，暂不能发送。' : null
   const scenarios = catalog?.error === null ? catalog.items : []
   const usableCount = scenarios.filter(item => item.valid && item.summary && item.scenario_id).length
   const [detail, setDetail] = useState<{ id: string; value: UserStrategy } | null>(null)
@@ -2357,7 +2371,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
       {current
         ? <ChatPanel
             key={`${current.user_strategy_id}-${current.draft.revision}`}
-            api={api} strategy={current} strategies={strategies} changed={changed}
+            api={api} strategy={current} strategies={strategies} changed={changed} modelSendBlock={modelSendBlock}
             // The proposal sits in the AI column between the conversation and the
             // composer: explanation, then the current change, then the way to ask
             // again. It is keyed per proposal and revision, so no stale selection,

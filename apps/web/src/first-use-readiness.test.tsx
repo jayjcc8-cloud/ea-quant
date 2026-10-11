@@ -145,3 +145,74 @@ describe('first-use preparation and recovery', () => {
     await waitFor(() => expect(screen.getByText('fixture-model')).toBeTruthy())
   })
 })
+
+
+describe('model send readiness blocker', () => {
+  it.each(['unconfigured', 'error', 'unavailable', 'loading'] as const)('blocks %s readiness even with a message and approval', async state => {
+    const user = userEvent.setup()
+    const pending = deferred<ModelConfigurationStatus>()
+    const settingsStatus = state === 'unavailable' ? undefined
+      : state === 'loading' ? () => pending.promise
+        : state === 'error' ? async () => { throw new Error('fixture status failed') }
+          : async () => absent
+    const { api, ask } = host({ listUserStrategies: async () => [idea], settingsStatus })
+    open(api, '/strategies/first-idea')
+    await user.type(await screen.findByLabelText('消息'), 'Keep my question')
+    await user.click(screen.getByLabelText('批准一次模型调用'))
+    const send = screen.getByRole('button', { name: '询问模型' }) as HTMLButtonElement
+    expect(send.disabled).toBe(true)
+    await user.click(send)
+    expect(ask).not.toHaveBeenCalled()
+    const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
+    expect(chat.getByRole('link', { name: '检查模型设置' })).toBeTruthy()
+    expect((screen.getByLabelText('消息') as HTMLTextAreaElement).value).toBe('Keep my question')
+  })
+
+  it('recovers to ready with retained input, still requires approval, then sends once', async () => {
+    const user = userEvent.setup()
+    let configured = false
+    const send = vi.fn(async () => idea)
+    const { api } = host({ listUserStrategies: async () => [idea],
+      settingsStatus: async () => configured ? ready : absent, sendUserStrategyMessage: send })
+    open(api, '/strategies/first-idea')
+    await user.type(await screen.findByLabelText('消息'), 'Keep my question')
+    expect((screen.getByRole('button', { name: '询问模型' }) as HTMLButtonElement).disabled).toBe(true)
+    configured = true
+    await user.click(screen.getByRole('button', { name: '重新检查' }))
+    await screen.findByText('模型已配置 · 连接未验证')
+    const button = screen.getByRole('button', { name: '询问模型' }) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    await user.click(button)
+    expect(send).not.toHaveBeenCalled()
+    await user.click(screen.getByLabelText('批准一次模型调用'))
+    await user.click(button)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]).toEqual(['first-idea', expect.objectContaining({ text: 'Keep my question', base_revision: 1 })])
+  })
+
+  it('blocks a previously ready composer throughout recheck and after a failed status read', async () => {
+    const user = userEvent.setup()
+    const pending = deferred<ModelConfigurationStatus>()
+    let reads = 0
+    const { api, ask } = host({ listUserStrategies: async () => [idea], settingsStatus: async () => {
+      reads += 1
+      if (reads === 1) return ready
+      if (reads === 2) return pending.promise
+      throw new Error('fixture status failed')
+    } })
+    open(api, '/strategies/first-idea')
+    await user.type(await screen.findByLabelText('消息'), 'Question after a status change')
+    await user.click(screen.getByLabelText('批准一次模型调用'))
+    const button = screen.getByRole('button', { name: '询问模型' }) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    await user.click(screen.getByRole('button', { name: '重新检查' }))
+    expect(button.disabled).toBe(true)
+    await act(async () => pending.resolve(ready))
+    expect(button.disabled).toBe(false)
+    await user.click(screen.getByRole('button', { name: '重新检查' }))
+    await screen.findByText('模型状态未知')
+    expect(button.disabled).toBe(true)
+    await user.click(button)
+    expect(ask).not.toHaveBeenCalled()
+  })
+})

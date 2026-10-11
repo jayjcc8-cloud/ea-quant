@@ -281,6 +281,12 @@ function scripted(script: Script = {}) {
     createHoldout: async () => { throw new Error('unused') },
     getHoldout: async () => { throw new Error('unused') },
     listHoldouts: async () => [],
+    // Chat interaction fixtures represent an explicitly configured local model.
+    // Missing/error/pending configuration is covered by first-use-readiness.
+    settingsStatus: async () => ({
+      schema: 'radian.settings-status.v1', settings_file: '/fixture/settings.json',
+      configured: true, provider: 'fixture', model: 'fixture-model', base_url: null, api_key_env: null,
+    }),
     listScenarios: async () => [scenario],
     validateScenario: async () => { throw new Error('unused') },
     createBacktest: async () => { throw new Error('unused') },
