@@ -44,6 +44,7 @@ from ea.plugin.local_strategy import (
     LOCAL_STRATEGY_WARNING,
     LocalStrategyCapabilityV1,
     LocalStrategyGrantV1,
+    activate_local_strategy,
     inspect_local_strategy,
     select_local_strategy,
 )
@@ -55,6 +56,8 @@ from ea.plugin.manifest import (
     compute_artifact_digest,
     decode_manifest,
 )
+from ea.plugin.selection import PluginBindingV1
+from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import MAX_ARTIFACT_BYTES
 from ea.web.uploads import UploadError, _open_child_directory, _open_workspace
 
@@ -419,6 +422,48 @@ class LocalStrategyStoreV1:
             return None
         return select_local_strategy(current, grant=self.grant()).document()
 
+    def catalog(
+        self, plugin_binding: dict[str, object] | None = None, *, payload: bytes | None = None
+    ) -> ResearchStrategyCatalogV1:
+        """Activate this slot's exact current grant over retained or frozen bytes.
+
+        Activation is static. The caller can load/execute only after this check;
+        a frozen payload never substitutes a newer slot implementation.
+        """
+        capability = self.capability()
+        if capability is None:
+            raise ManifestError(
+                "grant_required",
+                "this workspace has no currently trusted local strategy package",
+            )
+        grant = self.grant()
+        current = select_local_strategy(capability, grant=grant)
+        if plugin_binding is not None:
+            # A caller's binding carries every layer its recipe selected; only the
+            # strategy component names this slot. That component must be exactly the
+            # one this slot's current grant selects, and activation then runs over
+            # the strategy-only binding: this host's one-entry catalog is the only
+            # thing that can vouch for this capability, and the other layers keep
+            # the verification their own catalogs and the frozen binding give them.
+            frozen = PluginBindingV1.decode(plugin_binding)
+            selected = frozen.component("strategy")
+            expected = current.component("strategy")
+            if selected is None or expected is None or selected.document() != expected.document():
+                raise ManifestError(
+                    "binding_drift",
+                    "the frozen binding does not select the local strategy this slot "
+                    "currently grants",
+                )
+        retained = self.retained()
+        if retained is None:
+            raise ManifestError("slot_invalid", "the local strategy slot is unreadable")
+        return activate_local_strategy(
+            current,
+            retained[0] if payload is None else payload,
+            catalog=capability.catalog(),
+            grant=grant,
+        )
+
     def scenario_path(self) -> Path | None:
         """The retained scenario path, only while the slot it belongs to is current.
 
@@ -617,3 +662,24 @@ __all__ = [
     "LocalStrategyStoreV1",
     "sealed_manifest",
 ]
+
+
+def bound_local_catalog(
+    workspace: object, binding: object, payload: bytes | None = None
+) -> ResearchStrategyCatalogV1 | None:
+    """Recheck a local binding at each process boundary before loading its code."""
+    decoded = None if binding is None else PluginBindingV1.decode(binding)
+    strategy = None if decoded is None else decoded.component("strategy")
+    local = strategy is not None and strategy.entrypoint == LOCAL_STRATEGY_ENTRYPOINT
+    if not local and workspace is None:
+        return None
+    if not local or type(workspace) is not str or not Path(workspace).is_absolute():
+        raise ManifestError(
+            "local_strategy_unbound", "a local strategy needs its bound workspace trust slot"
+        )
+    store = LocalStrategyStoreV1(Path(workspace))
+    try:
+        assert decoded is not None
+        return store.catalog(decoded.document(), payload=payload)
+    finally:
+        store.close()

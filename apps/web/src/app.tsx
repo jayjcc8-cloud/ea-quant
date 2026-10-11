@@ -194,7 +194,7 @@ export type ApiAdapter = {
   createHoldout(request: { source_job_id: string; scenario_id: string; input_identity?: InputIdentity; dataset_id?: string; source_sha256?: string }): Promise<ChronologicalHoldout>
   getHoldout(validationId: string): Promise<ChronologicalHoldout>
   listHoldouts(): Promise<ChronologicalHoldout[]>
-  listScenarios(): Promise<ScenarioSummary[]>
+  listScenarios(includeLocal?: boolean): Promise<ScenarioSummary[]>
   validateScenario(scenarioId: string, parameters: BacktestParameters, dataset?: DatasetReference): Promise<ScenarioSummary>
   createBacktest(request: { scenario_id: string; input_identity: InputIdentity; parameters: BacktestParameters; request_id: string }): Promise<BacktestJob>
   createBatch(request: BatchRequest): Promise<ExperimentBatch>
@@ -346,7 +346,7 @@ const browserApi: ApiAdapter = {
   createHoldout(request) { return apiRequest('/api/holdouts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request) }) },
   getHoldout(id) { return apiRequest(`/api/holdouts/${encodeURIComponent(id)}`) },
   async listHoldouts() { return (await apiRequest<{ holdouts: ChronologicalHoldout[] }>('/api/holdouts')).holdouts },
-  async listScenarios() { return (await apiRequest<{ scenarios: ScenarioSummary[] }>('/api/scenarios')).scenarios },
+  async listScenarios(includeLocal = false) { return (await apiRequest<{ scenarios: ScenarioSummary[] }>(includeLocal ? '/api/scenarios?include_local=true' : '/api/scenarios')).scenarios },
   validateScenario(scenarioId, parameters, dataset) {
     return apiRequest(`/api/scenarios/${encodeURIComponent(scenarioId)}/validate`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ parameters, ...dataset }),

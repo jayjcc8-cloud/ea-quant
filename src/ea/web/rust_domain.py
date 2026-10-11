@@ -80,6 +80,12 @@ from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import read_regular, validate_package
 from ea.strategy.registry import project_parameters
 from ea.web.datasets import LocalResearchDatasetRegistryV1
+from ea.web.local_packages import (
+    LOCAL_SCENARIO_ID,
+    SCENARIO_NAME,
+    SLOT_DIRECTORY,
+    bound_local_catalog,
+)
 from ea.web.uploads import (
     ControlledUploadStoreV1,
     LocalResearchDatasetCatalogV1,
@@ -465,8 +471,12 @@ def _verified_scenario(
     """
     from ea.web.service import _scenario_identity
 
-    catalog = None
-    if package is not None:
+    catalog = bound_local_catalog(
+        envelope.get("local_strategy_workspace"), envelope.get("plugin_binding"), package
+    )
+    if catalog is not None:
+        _require(package is not None, "invalid_request", "the frozen local package is missing")
+    elif package is not None:
         claimed = envelope.get("package_sha256")
         _require(type(claimed) is str, "invalid_request", "the strategy artifact digest is missing")
         catalog = ResearchStrategyCatalogV1(
@@ -799,8 +809,16 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
         )
         strategy_root = Path(cast(str, raw_strategy_root))
         _require(strategy_root.is_absolute(), "invalid_request", "strategy_root must be absolute")
+    local_workspace = request.get("local_strategy_workspace")
     try:
-        source = load_backtest_scenario(path, strategy_root=strategy_root)
+        strategy_catalog = bound_local_catalog(local_workspace, request.get("binding"))
+        if strategy_catalog is not None:
+            _require(
+                path == Path(cast(str, local_workspace)) / SLOT_DIRECTORY / SCENARIO_NAME,
+                "invalid_request",
+                "the local scenario must come from its bound slot",
+            )
+        source = load_backtest_scenario(path, strategy_root=strategy_root, catalog=strategy_catalog)
     except (BacktestScenarioError, OSError, ValueError) as error:
         raise DomainRefusal("invalid_request", f"scenario is not readable: {error}") from None
     # One explicitly selected local research input replaces only the data
@@ -843,7 +861,7 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
             "binding_invalid",
             "the selected dataset version is not the capability binding this input carries",
         )
-    scenario_id = path.name
+    scenario_id = LOCAL_SCENARIO_ID if local_workspace is not None else path.name
     source_identity = _scenario_identity(source)
     parameters = request.get("parameters")
     if parameters is None:
@@ -867,6 +885,8 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
         dataset_version=dataset_version,
         dataset_catalog=dataset_catalog,
     )
+    if local_workspace is not None:
+        envelope["local_strategy_workspace"] = local_workspace
     return {"frozen": envelope, "input_sha256": input_sha256, "input_identity": source_identity}
 
 
@@ -1184,8 +1204,12 @@ def _holdout_target(request: dict[str, Any]) -> _HoldoutTarget:
             "binding_invalid",
             "the selected dataset version is not the capability binding this input carries",
         )
-    strategy_catalog = ResearchStrategyCatalogV1(())
-    if package is not None:
+    strategy_catalog = bound_local_catalog(
+        envelope.get("local_strategy_workspace"), envelope.get("plugin_binding"), package
+    )
+    if strategy_catalog is not None:
+        _require(package is not None, "invalid_request", "the frozen local package is missing")
+    elif package is not None:
         claimed = envelope.get("package_sha256")
         _require(type(claimed) is str, "invalid_request", "the strategy artifact digest is missing")
         try:
@@ -1196,6 +1220,8 @@ def _holdout_target(request: dict[str, Any]) -> _HoldoutTarget:
             raise DomainRefusal(
                 "invalid_request", f"the frozen strategy artifact is unreadable: {error}"
             ) from None
+    else:
+        strategy_catalog = ResearchStrategyCatalogV1(())
     try:
         loaded = load_backtest_scenario_bytes(
             canonical_json_bytes(document),
@@ -1261,6 +1287,9 @@ def _mode_rebind(request: dict[str, Any]) -> dict[str, Any]:
         dataset_version=target.dataset_version,
         dataset_catalog=target.dataset_catalog,
     )
+    source_envelope = cast(dict[str, Any], request["source"])
+    if source_envelope.get("local_strategy_workspace") is not None:
+        envelope["local_strategy_workspace"] = source_envelope["local_strategy_workspace"]
     return {
         "frozen": envelope,
         "input_sha256": input_sha256,
@@ -1308,6 +1337,7 @@ def _mode_freeze(request: dict[str, Any]) -> dict[str, Any]:
         "research_input_canonical": envelope.get("research_input_canonical"),
         "dataset_version": envelope.get("dataset_version"),
         "dataset_version_sha256": envelope.get("dataset_version_sha256"),
+        "local_strategy_workspace": envelope.get("local_strategy_workspace"),
         "plugin_binding": envelope.get("plugin_binding"),
         "plugin_binding_sha256": envelope.get("plugin_binding_sha256"),
         "data_capture": capture,
@@ -1493,7 +1523,7 @@ def run(mode: str, payload: object) -> dict[str, Any]:
         return _refused(mode, "invalid_request", "domain request is not one document")
     try:
         result = handler(cast(dict[str, Any], payload))
-    except DomainRefusal as refusal:
+    except (DomainRefusal, ManifestError) as refusal:
         return _refused(mode, refusal.code, refusal.message)
     except Exception:  # noqa: BLE001 — an unreadable request is refused, never guessed
         return _refused(mode, "internal", "the domain adapter could not complete this request")

@@ -69,6 +69,7 @@ from ea.product.reporting import _fsync_directory, _write_report_file
 from ea.product.scenario import load_backtest_scenario_bytes
 from ea.strategy.catalog import ResearchStrategyCatalogV1
 from ea.strategy.package import read_regular, validate_package
+from ea.web.local_packages import bound_local_catalog
 
 REQUEST_SCHEMA = "ea.research-worker.request.v1"
 EVENT_SCHEMA = "ea.research-worker.event.v1"
@@ -749,15 +750,25 @@ def _load_frozen_scenario(request: dict[str, Any]) -> LoadedBacktestScenario:
         raise WorkerError("frozen scenario changed before the worker read it")
     package_reference = request.get("package")
     package = None
+    package_bytes = None
     if type(package_reference) is dict:
         package_path = _absolute(package_reference.get("path"))
         package_sha256 = package_reference.get("sha256")
         if type(package_sha256) is not str:
             raise WorkerError("worker request names no strategy artifact digest")
-        package = validate_package(
-            read_regular(package_path, package_path.parent), expected_sha256=package_sha256
-        )
-    catalog = ResearchStrategyCatalogV1(() if package is None else (package,))
+        package_bytes = read_regular(package_path, package_path.parent)
+        if _digest(package_bytes) != package_sha256:
+            raise WorkerError("frozen strategy artifact changed before the worker read it")
+    catalog = bound_local_catalog(
+        request.get("local_strategy_workspace"), request.get("plugin_binding"), package_bytes
+    )
+    if catalog is not None:
+        if package_bytes is None:
+            raise WorkerError("the frozen local strategy artifact is missing")
+    else:
+        if package_bytes is not None:
+            package = validate_package(package_bytes)
+        catalog = ResearchStrategyCatalogV1(() if package is None else (package,))
     # The controller's private snapshot of this run's confirmed source replaces
     # the scenario file's own declared data path. It was captured by the input
     # check and is held here to its own digest, so the engine computes from the

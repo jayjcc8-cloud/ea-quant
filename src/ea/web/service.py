@@ -28,8 +28,6 @@ from ea.plugin.declarative import DeclarationStoreV1
 from ea.plugin.local_strategy import (
     LOCAL_STRATEGY_ENTRYPOINT,
     LocalStrategyCapabilityV1,
-    activate_local_strategy,
-    select_local_strategy,
 )
 from ea.plugin.manifest import ManifestError
 from ea.plugin.selection import BINDING_SCHEMA, PluginBindingV1
@@ -1627,6 +1625,15 @@ class WebService:
                 "symbol": instrument.get("symbol"),
             },
             "initial_cash": funding.get("initial_cash"),
+            "summary": {
+                "strategy_id": descriptor.get("strategy_id"),
+                "strategy_version": descriptor.get("strategy_version"),
+                "venue": instrument.get("venue"),
+                "symbol": instrument.get("symbol"),
+                "initial_cash": funding.get("initial_cash"),
+                "record_count": (data.get("fingerprint") or {}).get("record_count"),
+                "parameters": _default_parameters(descriptor),
+            },
             "parameters": [
                 {
                     "name": parameter.get("name"),
@@ -1784,36 +1791,7 @@ class WebService:
         current grant selects, so a slot replaced since a job was accepted refuses
         that job instead of running the new package.
         """
-        capability = self.local_strategy.capability()
-        if capability is None:
-            raise ManifestError(
-                "grant_required",
-                "this workspace has no currently trusted local strategy package",
-            )
-        grant = self.local_strategy.grant()
-        current = select_local_strategy(capability, grant=grant)
-        if plugin_binding is not None:
-            # A caller's binding carries every layer its recipe selected; only the
-            # strategy component names this slot. That component must be exactly the
-            # one this slot's current grant selects, and activation then runs over
-            # the strategy-only binding: this host's one-entry catalog is the only
-            # thing that can vouch for this capability, and the other layers keep
-            # the verification their own catalogs and the frozen binding give them.
-            frozen = PluginBindingV1.decode(plugin_binding)
-            selected = frozen.component("strategy")
-            expected = current.component("strategy")
-            if selected is None or expected is None or selected.document() != expected.document():
-                raise ManifestError(
-                    "binding_drift",
-                    "the frozen binding does not select the local strategy this slot "
-                    "currently grants",
-                )
-        retained = self.local_strategy.retained()
-        if retained is None:
-            raise ManifestError("slot_invalid", "the local strategy slot is unreadable")
-        return activate_local_strategy(
-            current, retained[0], catalog=capability.catalog(), grant=grant
-        )
+        return self.local_strategy.catalog(plugin_binding)
 
     def _load_scenario(self, scenario_id: str) -> LoadedBacktestScenario:
         """Load one registered scenario, or the current workspace-local slot."""

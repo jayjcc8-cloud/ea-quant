@@ -2196,7 +2196,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
     const readCatalog = async () => {
       try {
         if (!api.listScenarios) throw new Error('本客户端无法读取场景目录。')
-        const items = await api.listScenarios()
+        const items = await api.listScenarios(true)
         if (active) setCatalogRead({ api, check, items, error: null })
       } catch (error) {
         if (active) setCatalogRead({ api, check, items: [], error: explain(error) })

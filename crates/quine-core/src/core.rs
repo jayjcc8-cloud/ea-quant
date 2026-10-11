@@ -542,6 +542,9 @@ impl Core {
                 Some(Value::String(encoded)) => {
                     let path = inputs.join(format!("{}.eastrategy", run.job_id));
                     write_once(&path, &decode_hex(encoded)?)?;
+                    let mut permissions = std::fs::metadata(&path)?.permissions();
+                    permissions.set_readonly(true);
+                    std::fs::set_permissions(&path, permissions)?;
                     Some(path)
                 }
                 _ => None,
@@ -592,6 +595,10 @@ impl Core {
                     "path": path.display().to_string(),
                     "sha256": digest,
                 })),
+                // Recheck the same trust slot in the worker before package Python
+                // is loaded; materialization never turns a past grant into authority.
+                "local_strategy_workspace": frozen_result.get("local_strategy_workspace"),
+                "plugin_binding": frozen_result.get("plugin_binding"),
                 "staging": {"runs": "runs", "reports": "reports"},
             });
             let mut argv = vec![

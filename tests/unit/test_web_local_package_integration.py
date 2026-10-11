@@ -614,3 +614,34 @@ def test_a_mapped_version_and_a_trusted_local_strategy_run_the_real_engine(
         assert dataset_id in report
     finally:
         service.stop()
+
+
+def test_strategy_binding_catalog_lists_the_trusted_slot_statically(tmp_path: Path) -> None:
+    sentinel = tmp_path / FORBIDDEN_LOG
+    payload = _package(sentinel)
+    with TestClient(create_app(_settings(tmp_path))) as client:
+        grant = _grant_request(payload)
+        grant.pop("payload")
+        grant["content_base64"] = base64.b64encode(payload).decode("ascii")
+        registered = client.post(
+            "/api/plugins/local-strategy/register", headers=WRITE_HEADERS, json=grant
+        )
+        assert registered.status_code == 201, registered.text
+        assert not sentinel.exists()
+        # The ordinary direct-run catalog stays unchanged; only the strategy
+        # binding form asks for the trusted virtual scenario.
+        ordinary = client.get("/api/scenarios", headers=WRITE_HEADERS).json()["scenarios"]
+        assert LOCAL_SCENARIO_ID not in [item["scenario_id"] for item in ordinary]
+        entries = client.get("/api/scenarios?include_local=true", headers=WRITE_HEADERS).json()[
+            "scenarios"
+        ]
+        local = next(item for item in entries if item["scenario_id"] == LOCAL_SCENARIO_ID)
+        assert local["summary"]["strategy_id"] == STRATEGY_ID
+        assert local["summary"]["record_count"] == 4
+        assert not sentinel.exists()
+        client.post("/api/plugins/local-strategy/revoke", headers=WRITE_HEADERS)
+        entries = client.get("/api/scenarios?include_local=true", headers=WRITE_HEADERS).json()[
+            "scenarios"
+        ]
+        assert LOCAL_SCENARIO_ID not in [item["scenario_id"] for item in entries]
+        assert not sentinel.exists()

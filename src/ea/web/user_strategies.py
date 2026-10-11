@@ -310,6 +310,7 @@ class StrategyDraft:
     initial_cash: str
     parameters: dict[str, Any]
     criterion: dict[str, Any] | None = None
+    strategy_binding: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         return {
@@ -323,6 +324,9 @@ class StrategyDraft:
             "initial_cash": self.initial_cash,
             "parameters": dict(self.parameters),
             "criterion": self.criterion,
+            **(
+                {} if self.strategy_binding is None else {"strategy_binding": self.strategy_binding}
+            ),
         }
 
     @staticmethod
@@ -341,6 +345,7 @@ class StrategyDraft:
             initial_cash=str(document["initial_cash"]),
             parameters=dict(document.get("parameters") or {}),
             criterion=None if criterion is None else validate_criterion(criterion),
+            strategy_binding=document.get("strategy_binding"),
         )
 
 
@@ -681,6 +686,7 @@ class UserStrategyService:
         keeps the exact call it always made, so a scenario's own default remains the
         description only for the drafts that never chose anything else.
         """
+        self._require_draft_strategy(draft)
         if draft.dataset_id is None:
             return self._scenario_document(draft.scenario_id)
         return self._scenario_document(draft.scenario_id, draft.dataset_id)
@@ -780,6 +786,7 @@ class UserStrategyService:
         dataset_id: str | None = None,
     ) -> dict[str, Any]:
         """The whole resulting spec, validated by the real backend. Nothing else."""
+        self._require_draft_strategy(draft)
         selected = draft.dataset_id if dataset_id is None else dataset_id
         try:
             return cast(
@@ -810,6 +817,20 @@ class UserStrategyService:
             "strategy_source": None,
         }
 
+    def _require_draft_strategy(self, draft: StrategyDraft) -> None:
+        """Refuse a replaced local identity statically, before any parameter callback."""
+        if draft.scenario_id != LOCAL_SCENARIO_ID:
+            return
+        try:
+            current = self._service.local_strategy_binding()
+        except (OSError, ValueError) as error:
+            raise UserStrategyStateError(str(error)) from None
+        if current is None or draft.strategy_binding is None or current != draft.strategy_binding:
+            raise UserStrategyStateError(
+                "the draft's trusted local strategy identity is unavailable or changed; "
+                "inspect and trust the package, then create a new strategy binding"
+            )
+
     def _binding_for(self, draft: StrategyDraft) -> dict[str, Any] | None:
         """The capability binding this draft's input runs under, from this host.
 
@@ -820,6 +841,7 @@ class UserStrategyService:
         digest a caller could have certified. An input that needs a binding it
         cannot be given is refused here, before anything is previewed or confirmed.
         """
+        self._require_draft_strategy(draft)
         uploaded = type(draft.dataset_id) is str and self._service.uploads.has(draft.dataset_id)
         local = draft.scenario_id == LOCAL_SCENARIO_ID
         if not uploaded and not local:
@@ -932,6 +954,9 @@ class UserStrategyService:
         and a later binding both come through here — so what a binding produces is
         the same draft this owner has always written and not a variant of it.
         """
+        strategy_binding = (
+            self._service.local_strategy_binding() if scenario == LOCAL_SCENARIO_ID else None
+        )
         document = self._scenario_document(scenario)
         summary = cast(dict[str, Any], document.get("summary") or {})
         parameters = {
@@ -955,6 +980,7 @@ class UserStrategyService:
             initial_cash=str(summary.get("initial_cash") or ""),
             parameters=parameters,
             criterion=criterion,
+            strategy_binding=strategy_binding,
         )
         if not draft.strategy_id or not draft.initial_cash:
             raise UserStrategyStateError("the registered scenario has no executable strategy")
@@ -3090,6 +3116,8 @@ class UserStrategyService:
                 # bytes, so what the core retains names the implementations and the
                 # dataset version the confirmation was actually made about.
                 request["binding"] = binding
+            if draft.scenario_id == LOCAL_SCENARIO_ID:
+                request["local_strategy_workspace"] = str(self._service.workspace)
             strategy_root = self._service.registry.strategy_root
             if strategy_root is not None:
                 request["strategy_root"] = str(strategy_root)

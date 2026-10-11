@@ -1113,9 +1113,16 @@ def create_app(settings: WebSettings) -> Any:
             return error(409, "revocation_failed", str(caught))
 
     @app.get("/api/scenarios")
-    def list_scenarios() -> object:
+    def list_scenarios(include_local: bool = False) -> object:
         try:
-            return {"scenarios": service.registry.list()}
+            scenarios = service.registry.list()
+            if include_local:
+                # Only the strategy binding UI requests the trusted virtual slot.
+                # Its directory facts are static; listing must not run Python.
+                local = service.local_strategy_facts()
+                if local is not None:
+                    scenarios.append(local)
+            return {"scenarios": scenarios}
         except WebBoundaryError as caught:
             return error(500, "scenario_root_unavailable", str(caught))
 

@@ -1623,3 +1623,139 @@ def test_a_confirmed_experiment_runs_from_an_uploaded_dataset_and_outlives_it(
     assert service.get_job(job_id).status == "succeeded"
     assert service.artifact(job_id, "report.json") == before
     assert _row(stack.strategies.reconcile(identity), "li-1")["status"] == "created"
+
+
+def test_trusted_local_package_runs_from_capture_and_reopens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ea.web.local_packages import LOCAL_SCENARIO_ID
+    from unit.test_web_local_package_integration import _grant_request, _package
+
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    stack = _stack(tmp_path, core.socket)
+    counts = _no_python_owner(monkeypatch)
+    sentinel = tmp_path / "strategy-executed"
+    payload = _package(sentinel)
+    stack.service.register_local_strategy(**_grant_request(payload))
+    assert not sentinel.exists()
+    strategy = stack.strategies.create(
+        name="Trusted capture",
+        intent="Run the exact trusted package",
+        scenario_id=LOCAL_SCENARIO_ID,
+    )
+    _launch(stack.strategies, strategy.user_strategy_id)
+    settled = _wait(stack.strategies, strategy.user_strategy_id)
+    assert settled["status"] == "created", settled.get("message")
+    assert sentinel.exists()
+    assert counts == {"children": 0, "owners": 0}
+    job_id = settled["job_id"]
+    captured = core.workspace / "inputs" / f"{job_id}.eastrategy"
+    assert captured.read_bytes() == payload
+    assert captured.stat().st_mode & 0o222 == 0
+    report = stack.service.report(job_id)
+    assert sha256(payload).hexdigest().encode() in report
+    stack.service.stop()
+    sentinel.unlink()
+    reopened = _stack(tmp_path, core.socket)
+    assert reopened.service.report(job_id) == report
+    assert not sentinel.exists()  # Reopening history inspects bytes without importing Python.
+
+
+@pytest.mark.parametrize("change", ["revoke", "replace", "reregister"])
+def test_local_package_trust_drift_refuses_confirmation_without_execution(
+    tmp_path: Path, change: str
+) -> None:
+    from ea.web.local_packages import LOCAL_SCENARIO_ID
+    from unit.test_web_local_package_integration import _grant_request, _package
+
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    stack = _stack(tmp_path, core.socket)
+    sentinel = tmp_path / "strategy-executed"
+    stack.service.register_local_strategy(**_grant_request(_package(sentinel)))
+    strategy = stack.strategies.create(
+        name="Trust drift", intent="Refuse changed trust", scenario_id=LOCAL_SCENARIO_ID
+    )
+    preview = stack.strategies.preview_experiment(strategy.user_strategy_id)
+    sentinel.unlink(missing_ok=True)
+    if change == "revoke":
+        stack.service.revoke_local_strategy()
+    elif change == "replace":
+        stack.service.local_strategy.root.joinpath("package.eastrategy").write_bytes(
+            _package(tmp_path / "replacement-executed")
+        )
+    else:
+        stack.service.register_local_strategy(
+            **_grant_request(_package(tmp_path / "replacement-executed"))
+        )
+    with pytest.raises(ValueError):
+        stack.strategies.launch_experiment(
+            strategy.user_strategy_id,
+            launch_intent_id="drift",
+            base_revision=preview["draft_revision"],
+            preview_identity=preview["preview_identity"],
+            approved_budget=dict(RUN_BUDGET),
+        )
+    assert not sentinel.exists()
+    assert not (tmp_path / "replacement-executed").exists()
+    assert list((core.workspace / "inputs").glob("*.eastrategy")) == []
+
+
+@pytest.mark.parametrize("boundary", ["freeze", "worker"])
+@pytest.mark.parametrize("change", ["revoke", "replace"])
+def test_frozen_local_package_rechecks_trust_before_loading_code(
+    tmp_path: Path, boundary: str, change: str
+) -> None:
+    from ea.plugin.manifest import ManifestError
+    from ea.web import rust_domain, worker
+    from ea.web.local_packages import LOCAL_SCENARIO_ID
+    from unit.test_web_local_package_integration import _grant_request, _package
+
+    # No core is needed for this precisely controlled pre-load interleaving.
+    stack = _stack(tmp_path, tmp_path / "absent.sock")
+    sentinel = tmp_path / "strategy-executed"
+    package = _package(sentinel)
+    stack.service.register_local_strategy(**_grant_request(package))
+    reply = rust_domain.run(
+        "snapshot",
+        {
+            "scenario_path": str(stack.service.registered_scenario_file(LOCAL_SCENARIO_ID)),
+            "local_strategy_workspace": str(stack.workspace),
+            "binding": stack.service.local_strategy_binding(),
+        },
+    )
+    assert reply["status"] == "ok", reply
+    frozen = reply["result"]["frozen"]
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_bytes(bytes.fromhex(frozen["scenario_file"]))
+    package_path = tmp_path / "frozen.eastrategy"
+    package_path.write_bytes(package)
+    sentinel.unlink(missing_ok=True)
+    if change == "revoke":
+        stack.service.revoke_local_strategy()
+    else:
+        # Even another explicitly trusted package cannot upgrade a frozen binding.
+        stack.service.register_local_strategy(
+            **_grant_request(_package(tmp_path / "replacement-executed"))
+        )
+    if boundary == "freeze":
+        refused = rust_domain.run("freeze", {"frozen": frozen})
+        assert refused["status"] == "refused", refused
+        assert refused["code"] in {"grant_required", "binding_drift"}
+    else:
+        with pytest.raises(ManifestError):
+            worker._load_frozen_scenario(
+                {
+                    "scenario": {
+                        "path": str(scenario_path),
+                        "sha256": frozen["scenario_file_sha256"],
+                        "identity_sha256": frozen["scenario_identity_sha256"],
+                    },
+                    "package": {"path": str(package_path), "sha256": frozen["package_sha256"]},
+                    "local_strategy_workspace": str(stack.workspace),
+                    "plugin_binding": frozen["plugin_binding"],
+                }
+            )
+    assert not sentinel.exists()
+    assert not (tmp_path / "replacement-executed").exists()
