@@ -281,7 +281,7 @@ function ModelConfigurationPanel({ status, error }: { status: ModelConfiguration
     <header><h2>模型提供方</h2><span>{status.configured ? '已配置' : '配置不可用'}</span></header>
     <p className={status.configured ? 'muted' : 'notice error'}>{status.configured
       ? '起草会把想法发送给已配置的提供方；不使用任何默认提供方。'
-      : `研究无法起草规范：${status.configuration_error ?? '模型提供方未配置'}。请在后端配置文件里配置；本页不会回退到默认提供方。`}</p>
+      : `研究无法起草规范：${status.configuration_error ?? '模型提供方未配置'}。请在设置中配置模型；本页不会回退到默认提供方。`}</p>
     <dl className="summary-list">
       <div><dt>是否已配置</dt><dd>{status.configuration_present === undefined ? '未知' : status.configuration_present ? '是' : '否'}</dd></div>
       <div><dt>凭据是否可用</dt><dd>{status.credential_available === undefined ? '未知' : status.credential_available ? '是' : '否'}</dd></div>
@@ -293,7 +293,7 @@ function ModelConfigurationPanel({ status, error }: { status: ModelConfiguration
     </dl>
     <p className="muted">配置可用不代表连接或协议兼容性已验证。</p>
     <details className="disclosure"><summary>如何配置模型</summary>
-      <p>由你在本机创建或编辑上方路径的 JSON 配置文件；桌面版可直接使用下方设置表单保存；此状态面板不发送模型请求。</p>
+      <p>桌面版请使用设置页的「模型连接」表单。其他本地服务可编辑上方路径的 JSON 配置文件；此状态面板不发送模型请求。</p>
       <pre>{JSON.stringify({ schema: 'radian.settings.v1', model: {
         provider: 'deepseek', model: 'YOUR_MODEL_ID', api_key_env: 'QUINE_MODEL_API_KEY', api_key: null, base_url: null,
       } }, null, 2)}</pre>
@@ -2201,6 +2201,6 @@ export function ResearchSettings({ api }: { api: ApiAdapter }) {
   }, [api, check])
   return <><PageHeading title="设置" subtitle="当前模型配置、本地外观与本地研究限制。" />
     <div className="actions"><button type="button" disabled={!currentRead} onClick={() => setCheck(value => value + 1)}>重新检查模型配置</button><Link to="/strategies">返回策略</Link></div>
-    <ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} />
-    <DesktopSettings api={api} onSaved={() => setCheck(value => value + 1)} /></>
+    <DesktopSettings api={api} onSaved={() => setCheck(value => value + 1)} />
+    <ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} /></>
 }
