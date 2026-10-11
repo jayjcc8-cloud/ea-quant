@@ -298,6 +298,7 @@ class DesktopPaper:
             self._publish(receipt, record)
             command = [
                 sys.executable,
+                "-B",  # Keep the signed installed bundle read-only in this child too.
                 "-m",
                 "ea.web.paper_worker",
                 "--root",
