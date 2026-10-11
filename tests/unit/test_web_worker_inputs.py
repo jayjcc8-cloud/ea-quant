@@ -163,17 +163,19 @@ def test_worker_economics_equal_the_direct_engine_path(
         service.stop()
 
 
-def test_the_request_binds_the_admitted_scenario_identity(tmp_path: Path) -> None:
+def test_the_request_binds_the_admitted_scenario_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The expected digest is the admitted document's, and it is checkable."""
     service, scenario_id = _service(tmp_path, _zero_fee)
     captured: dict[str, Any] = {}
     real_spawn = service._spawn_worker
 
-    def capture(control: Path) -> Any:
+    def capture(control: Path) -> worker.WorkerProcess:
         captured["request"] = json.loads((control / "request.json").read_bytes())
         return real_spawn(control)
 
-    service._spawn_worker = capture
+    monkeypatch.setattr(service, "_spawn_worker", capture)
     try:
         record = _submit(service, scenario_id, "request-worker-inputs-0002")
         assert _terminal(service, record.job_id).status == "succeeded"
@@ -194,7 +196,9 @@ def test_the_request_binds_the_admitted_scenario_identity(tmp_path: Path) -> Non
         service.stop()
 
 
-def test_a_chosen_cash_override_is_the_admitted_identity_not_source_drift(tmp_path: Path) -> None:
+def test_a_chosen_cash_override_is_the_admitted_identity_not_source_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A parameter the user chose is the admitted scenario, not a changed source.
 
     ``create_job`` holds the registered source identity separately from the
@@ -207,11 +211,11 @@ def test_a_chosen_cash_override_is_the_admitted_identity_not_source_drift(tmp_pa
     captured: dict[str, Any] = {}
     real_spawn = service._spawn_worker
 
-    def capture(control: Path) -> Any:
+    def capture(control: Path) -> worker.WorkerProcess:
         captured["request"] = json.loads((control / "request.json").read_bytes())
         return real_spawn(control)
 
-    service._spawn_worker = capture
+    monkeypatch.setattr(service, "_spawn_worker", capture)
     try:
         source_identity = cast(
             dict[str, Any], service.validate_scenario(scenario_id)["input_identity"]

@@ -50,6 +50,7 @@ from ea.web.research import ResearchOrchestrator, ResearchStore
 from ea.web.service import ReportUnavailableError, WebService
 from ea.web.settings import RadianSettings
 from ea.web.user_strategies import (
+    StrategyDraft,
     UserStrategyConflictError,
     UserStrategyService,
     UserStrategyStore,
@@ -389,7 +390,9 @@ def test_confirmed_experiment_runs_through_the_core_and_publishes_its_report(
     assert settled["status"] == "created", settled["message"]
     assert settled["report_ready"] is True
     assert settled["frozen_sha256"] and settled["attempt_id"]
-    facts = {item["path"]: item["value"] for item in cast(list, settled["facts"])}
+    facts = {
+        item["path"]: item["value"] for item in cast(list[dict[str, object]], settled["facts"])
+    }
     assert set(FACT_PATHS) <= set(facts)
     # The migrated path reached no Python research owner and spawned no worker of
     # this service: the run, its supervision and its result are the core's own.
@@ -735,6 +738,7 @@ def test_a_wiped_projection_never_binds_todays_altered_draft(tmp_path: Path) -> 
     store = UserStrategyStore(stack.workspace)
     durable = store.get(identity)
     # The record is gone and the draft moves on under the same revision history.
+    assert isinstance(durable.draft, StrategyDraft)
     altered = replace(
         durable,
         experiments=(),

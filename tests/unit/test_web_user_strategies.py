@@ -5850,9 +5850,9 @@ def test_the_selected_dataset_bounds_what_a_candidate_may_change(
 
     # A value inside the selected data's bound is a readable typed diff; a value
     # beyond it is refused whole, against the data rather than against the default.
-    within, reason = propose(cast(int, after["maximum"]))
+    within, reason = propose(after["maximum"])
     assert reason is None and within and within[0]["after"] == after["maximum"]
-    beyond, refused = propose(cast(int, after["maximum"]) + 1)
+    beyond, refused = propose(after["maximum"] + 1)
     assert beyond == [] and refused
 
 
@@ -5882,7 +5882,9 @@ def test_a_conversation_states_the_selected_version_the_host_verified(
     # dataset it was admitted as, the source digest it was admitted under, and the
     # evidence digest this workspace re-derives for that published version now.
     assert dataset in opening
-    assert cast(str, selected.draft.source_sha256) in opening
+    assert isinstance(selected.draft, StrategyDraft)
+    assert isinstance(selected.draft.source_sha256, str)
+    assert selected.draft.source_sha256 in opening
     assert cast(str, service.dataset_catalog.version_evidence_digest(dataset)) in opening
     assert "entry_delay_bars" in opening
     # The capture's rows, its path and this workspace's roots are not part of any

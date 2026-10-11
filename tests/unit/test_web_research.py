@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
@@ -26,7 +28,14 @@ from ea.web.research import (
     TaskReservation,
     TaskStateError,
 )
-from ea.web.service import JobNotFoundError, ReportUnavailableError, ServiceBusyError, WebService
+from ea.web.service import (
+    JobNotFoundError,
+    JobRecord,
+    ReportUnavailableError,
+    ServiceBusyError,
+    WebService,
+    _Intent,
+)
 from ea.web.settings import RadianSettings
 
 pytestmark = pytest.mark.filterwarnings(
@@ -1482,65 +1491,91 @@ def test_crash_after_job_creation_reconciles_the_same_job_without_refunding(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     orchestrator, service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
-    catalog = orchestrator._catalog()  # noqa: SLF001
-    strategy = catalog[0]["strategy_id"]
-    provider.responses.append(
-        _response(
-            [{"id": "call-1", "name": "propose_spec", "input": _propose_call(strategy, catalog)}]
+    finalized = threading.Event()
+    real_finalize = service._finalize
+
+    def observe_finalization(job_id: str, intent: _Intent) -> JobRecord:
+        record = real_finalize(job_id, intent)
+        finalized.set()
+        return record
+
+    monkeypatch.setattr(service, "_finalize", observe_finalization)
+    try:
+        catalog = orchestrator._catalog()  # noqa: SLF001
+        strategy = catalog[0]["strategy_id"]
+        provider.responses.append(
+            _response(
+                [
+                    {
+                        "id": "call-1",
+                        "name": "propose_spec",
+                        "input": _propose_call(strategy, catalog),
+                    }
+                ]
+            )
         )
-    )
-    task = orchestrator.create("Crash between job creation and binding")
-    store = orchestrator._store  # noqa: SLF001
-    real_save = store.save
-    real_create = service.create_job
-    guard = {"crash": False}
+        task = orchestrator.create("Crash between job creation and binding")
+        store = orchestrator._store  # noqa: SLF001
+        real_save = store.save
+        real_create = service.create_job
+        guard = {"crash": False}
 
-    def crash_before_binding(**kwargs: Any) -> Any:
-        created = real_create(**kwargs)
-        # The real job and its attempt are durable; the task binding is not.
-        guard["crash"] = True
-        return created
+        def crash_before_binding(**kwargs: Any) -> Any:
+            created = real_create(**kwargs)
+            # The real job and its attempt are durable; the task binding is not.
+            guard["crash"] = True
+            return created
 
-    def crash_after_job(task_to_save: ResearchTask) -> None:
-        if guard["crash"]:
-            raise ResearchTaskError("simulated crash before the task binding")
-        real_save(task_to_save)
+        def crash_after_job(task_to_save: ResearchTask) -> None:
+            if guard["crash"]:
+                raise ResearchTaskError("simulated crash before the task binding")
+            real_save(task_to_save)
 
-    monkeypatch.setattr(service, "create_job", crash_before_binding)
-    monkeypatch.setattr(store, "save", crash_after_job)
-    with pytest.raises(ResearchTaskError):
-        orchestrator.confirm(task.task_id)
-    monkeypatch.setattr(store, "save", real_save)
+        monkeypatch.setattr(service, "create_job", crash_before_binding)
+        monkeypatch.setattr(store, "save", crash_after_job)
+        with pytest.raises(ResearchTaskError):
+            orchestrator.confirm(task.task_id)
+        monkeypatch.setattr(store, "save", real_save)
 
-    interrupted = store.get(task.task_id)
-    assert interrupted.request_id == task.request_id
-    assert interrupted.backtest_reservation is not None
-    assert interrupted.usage["backtests"] == 1
-    # The durable reservation exists, but no job is bound to the task yet.
-    assert interrupted.jobs == ()
-    assert len(service.list_jobs()) == 1
-    original = service.list_jobs()[0]
-    original_job_id = str(original["job_id"])
-    original_attempt_id = str(original["attempt_id"])
-    service.stop()
+        interrupted = store.get(task.task_id)
+        assert interrupted.request_id == task.request_id
+        assert interrupted.backtest_reservation is not None
+        assert interrupted.usage["backtests"] == 1
+        # The durable reservation exists, but no job is bound to the task yet.
+        assert interrupted.jobs == ()
+        assert len(service.list_jobs()) == 1
+        original = service.list_jobs()[0]
+        original_job_id = str(original["job_id"])
+        original_attempt_id = str(original["attempt_id"])
+        # This case recovers a committed job whose task binding was lost. Shutdown
+        # stops unfinished workers, so observe the durable commit before stopping.
+        assert finalized.wait(10), "the controller did not finalize the original job"
+        assert service.get_job(original_job_id).status == "succeeded"
+        original_report = service.report(original_job_id)
+    finally:
+        service.stop()
 
     # New process image over the same workspace, as a restart does.
     orchestrator, recovered_service, recovered_provider = _recovered_orchestrator(
         tmp_path, monkeypatch
     )
-    bound = orchestrator.refresh(task.task_id)
-    assert bound.status == "succeeded"
-    assert bound.usage["backtests"] == 1
-    assert bound.backtest_reservation is None
-    assert len(bound.jobs) == 1
-    assert len(recovered_service.list_jobs()) == 1
-    job = recovered_service.get_job(bound.jobs[0])
-    assert job.request_id == task.request_id
-    # The original job and its attempt id are re-bound, never re-created.
-    assert job.job_id == original_job_id
-    assert job.attempt_id == original_attempt_id
-    # No automatic provider dispatch or new economic work on restart.
-    assert recovered_provider.calls == []
+    try:
+        bound = orchestrator.refresh(task.task_id)
+        assert bound.status == "succeeded"
+        assert bound.usage["backtests"] == 1
+        assert bound.backtest_reservation is None
+        assert len(bound.jobs) == 1
+        assert len(recovered_service.list_jobs()) == 1
+        job = recovered_service.get_job(bound.jobs[0])
+        assert job.request_id == task.request_id
+        # The original job, attempt and verified report are re-bound, never recreated.
+        assert job.job_id == original_job_id
+        assert job.attempt_id == original_attempt_id
+        assert recovered_service.report(job.job_id) == original_report
+        # No automatic provider dispatch or new economic work on restart.
+        assert recovered_provider.calls == []
+    finally:
+        recovered_service.stop()
 
 
 def test_failed_job_is_a_safe_view_and_retry_boundary(
@@ -1608,57 +1643,98 @@ def hook(*, scenario, control, request, worker):
 
 
 def test_interrupted_job_is_classified_and_never_rerun(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A job the service interrupted on restart is reported, not re-funded."""
     orchestrator, service, provider = _fake_orchestrator(tmp_path, monkeypatch, [])
-    catalog = orchestrator._catalog()  # noqa: SLF001
-    strategy = catalog[0]["strategy_id"]
-    provider.responses.append(
-        _response(
-            [{"id": "call-1", "name": "propose_spec", "input": _propose_call(strategy, catalog)}]
-        )
-    )
-    task = orchestrator.create("Interrupted run")
-    bound = orchestrator.confirm(task.task_id)
-    assert bound.jobs
-    job_id = bound.jobs[0]
-    service.stop()
+    at_commit = threading.Event()
+    release_commit = threading.Event()
+    real_settle = service._settle
 
-    job_path = tmp_path / "workspace" / "jobs" / f"{job_id}.json"
-    raw = job_path.read_bytes()
-    assert raw.count(b'"status":"succeeded"') == 1
-    # An accepted-but-unfinished job, exactly as a hard restart leaves it on
-    # disk: a same-length byte edit keeps the canonical payload intact.
-    job_path.write_bytes(raw.replace(b'"status":"succeeded"', b'"status":"running"'))
+    def pause_before_commit(job_id: str, record: JobRecord, outcome: str, control: Path) -> _Intent:
+        at_commit.set()
+        assert release_commit.wait(10), "test did not release the commit boundary"
+        return real_settle(job_id, record, outcome, control)
 
-    orchestrator, recovered_service, provider = _recovered_orchestrator(tmp_path, monkeypatch)
-    # The restarted service keeps the attempt and marks it interrupted.
-    assert recovered_service.get_job(job_id).status == "interrupted"
-    classified = orchestrator.refresh(task.task_id)
-    assert classified.status == "failed"
-    assert classified.error is not None and classified.error["code"] == "interrupted"
-    assert classified.usage["backtests"] == 1
-    assert provider.calls == []
-
-    calls_before = list(provider.calls)
-    jobs_before = recovered_service.list_jobs()
-    # Retrying an interrupted economic attempt never re-funds or re-runs it: the
-    # retry either re-derives the same interrupted job or is refused.
+    monkeypatch.setattr(service, "_settle", pause_before_commit)
     try:
-        retried = orchestrator.retry(task.task_id)
-    except TaskStateError:
-        retried = None
-    if retried is not None:
-        assert retried.status == "failed"
-        assert retried.error is not None and retried.error["code"] == "interrupted"
-    final = orchestrator.refresh(task.task_id)
-    assert final.status == "failed"
-    assert final.error is not None and final.error["code"] == "interrupted"
-    assert final.usage["backtests"] == 1
-    assert final.jobs == (job_id,)
-    assert recovered_service.list_jobs() == jobs_before
-    assert provider.calls == calls_before
+        catalog = orchestrator._catalog()  # noqa: SLF001
+        strategy = catalog[0]["strategy_id"]
+        provider.responses.append(
+            _response(
+                [
+                    {
+                        "id": "call-1",
+                        "name": "propose_spec",
+                        "input": _propose_call(strategy, catalog),
+                    }
+                ]
+            )
+        )
+        task = orchestrator.create("Interrupted run")
+        bound = orchestrator.confirm(task.task_id)
+        assert bound.jobs
+        job_id = bound.jobs[0]
+        assert at_commit.wait(10), "the worker did not reach the commit boundary"
+        original = service.get_job(job_id)
+        assert original.status == "running"
+        assert original.attempt_id is not None
+        staged = service.worker_dir / job_id / "runs" / original.attempt_id
+        assert (staged / "result.json").is_file()
+        assert list(service.runs_dir.iterdir()) == []
+        assert list(service.reports_dir.iterdir()) == []
+        # Capture the real unfinished state before shutdown can stop it. Recovery
+        # reads this crash image; no successful record is rewritten to fake a crash.
+        restart_root = tmp_path / "restart"
+        restart_root.mkdir()
+        shutil.copytree(tmp_path / "workspace", restart_root / "workspace")
+    finally:
+        release_commit.set()
+        service.stop()
+
+    def forbid_spawn(self: WebService, control: Path) -> None:
+        raise AssertionError("recovery must never dispatch the interrupted attempt")
+
+    monkeypatch.setattr(WebService, "_spawn_worker", forbid_spawn)
+    orchestrator, recovered_service, provider = _recovered_orchestrator(restart_root, monkeypatch)
+    try:
+        # The restarted service keeps the attempt and marks it interrupted.
+        recovered = recovered_service.get_job(job_id)
+        assert recovered.status == "interrupted"
+        assert recovered.attempt_id == original.attempt_id
+        assert recovered.request_id == task.request_id
+        assert recovered.engine_run_id is None
+        assert recovered.report_sha256 is None
+        assert list(recovered_service.runs_dir.iterdir()) == []
+        assert list(recovered_service.reports_dir.iterdir()) == []
+        with pytest.raises(ReportUnavailableError):
+            recovered_service.report(job_id)
+        classified = orchestrator.refresh(task.task_id)
+        assert classified.status == "failed"
+        assert classified.error is not None and classified.error["code"] == "interrupted"
+        assert classified.usage["backtests"] == 1
+        assert provider.calls == []
+
+        calls_before = list(provider.calls)
+        jobs_before = recovered_service.list_jobs()
+        # Retrying an interrupted economic attempt never re-funds or re-runs it:
+        # the retry either re-derives the same interrupted job or is refused.
+        try:
+            retried = orchestrator.retry(task.task_id)
+        except TaskStateError:
+            retried = None
+        if retried is not None:
+            assert retried.status == "failed"
+            assert retried.error is not None and retried.error["code"] == "interrupted"
+        final = orchestrator.refresh(task.task_id)
+        assert final.status == "failed"
+        assert final.error is not None and final.error["code"] == "interrupted"
+        assert final.usage["backtests"] == 1
+        assert final.jobs == (job_id,)
+        assert recovered_service.list_jobs() == jobs_before
+        assert provider.calls == calls_before
+    finally:
+        recovered_service.stop()
 
 
 def test_cancel_stops_orchestration_without_rolling_back_a_started_job(

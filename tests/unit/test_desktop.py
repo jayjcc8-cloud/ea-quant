@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ea.desktop import install_samples, prepare_root
+from ea.desktop_settings import DesktopSettings
 
 
 def test_desktop_upgrade_preserves_user_scenes_and_settings(tmp_path: Path) -> None:
@@ -50,7 +51,6 @@ def test_selected_workspace_log_failure_recovers_without_changing_target(
     import asyncio
 
     import ea.desktop as desktop
-    from ea.desktop_settings import DesktopSettings
 
     runtime = tmp_path / "bundle"
     (runtime / "samples").mkdir(parents=True)
@@ -71,12 +71,15 @@ def test_selected_workspace_log_failure_recovers_without_changing_target(
     original = desktop.workspace_session
     calls = []
 
-    async def attempt(root, runtime, settings, startup_finished):
+    async def attempt(
+        root: Path, runtime: Path, settings: DesktopSettings, startup_finished: asyncio.Event
+    ) -> None:
         calls.append(root)
         if root == target:
             await original(root, runtime, settings, startup_finished)
         else:
             assert settings.root == anchor
+            assert settings.startup_error is not None
             assert "启动失败" in settings.startup_error
             assert settings.status()["next_workspace"] == str(target)
             settings.update({"next_workspace": str(anchor)})  # The existing UI cancel is usable.
@@ -102,7 +105,6 @@ def test_started_or_closing_workspace_failure_never_falls_back(
     import asyncio
 
     import ea.desktop as desktop
-    from ea.desktop_settings import DesktopSettings
 
     anchor, target, runtime = tmp_path / "a", tmp_path / "b", tmp_path / "bundle"
     prepare_root(anchor, runtime)
@@ -110,7 +112,9 @@ def test_started_or_closing_workspace_failure_never_falls_back(
     DesktopSettings(anchor, anchor, runtime).update({"next_workspace": str(target)})
     calls = []
 
-    async def fail(root, runtime, settings, startup_finished):
+    async def fail(
+        root: Path, runtime: Path, settings: DesktopSettings, startup_finished: asyncio.Event
+    ) -> None:
         calls.append(root)
         if ready or closing:
             startup_finished.set()
@@ -131,7 +135,9 @@ def test_default_workspace_failure_is_not_retried(
 
     calls = []
 
-    async def fail(root, runtime, settings, startup_finished):
+    async def fail(
+        root: Path, runtime: Path, settings: DesktopSettings, startup_finished: asyncio.Event
+    ) -> None:
         calls.append(root)
         raise PermissionError("default_unavailable")
 
@@ -180,7 +186,6 @@ def test_selected_and_default_log_failures_stop_after_one_recovery(
     import asyncio
 
     import ea.desktop as desktop
-    from ea.desktop_settings import DesktopSettings
 
     runtime = tmp_path / "bundle"
     (runtime / "samples").mkdir(parents=True)

@@ -16,6 +16,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 import ea.web.service as web_service
+from ea.web import worker
 from ea.web.app import WebSettings, create_app
 from ea.web.service import WebBoundaryError, WebService
 from unit.test_backtest_report import _priced_scenario
@@ -87,7 +88,7 @@ def _wait(client: TestClient, job_id: str) -> dict[str, Any]:
     raise AssertionError(f"job {job_id} did not finish")
 
 
-def _hook_launcher(hook: str) -> Any:
+def _hook_launcher(hook: str) -> Callable[[WebService, Path], worker.WorkerProcess]:
     """Spawn every worker of one service with a test hook installed.
 
     The engine runs in an isolated child process, so a test cannot monkeypatch
@@ -97,8 +98,8 @@ def _hook_launcher(hook: str) -> Any:
     Patching the class also reaches the service `create_app` builds internally.
     """
 
-    def launch(self: WebService, control: Path) -> Any:
-        return web_service.worker.spawn(control, test_hook=hook)
+    def launch(self: WebService, control: Path) -> worker.WorkerProcess:
+        return worker.spawn(control, test_hook=hook)
 
     return launch
 

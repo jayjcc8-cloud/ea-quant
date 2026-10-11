@@ -23,6 +23,7 @@ from typing import Any, cast
 import pytest
 
 import ea.web.service as service_module
+from ea.strategy.package import read_regular
 from ea.web import worker
 from ea.web.service import ReportUnavailableError, WebService
 from unit.test_web_api import _scenario_root, _settings
@@ -413,7 +414,7 @@ def test_a_store_failure_whose_reread_also_fails_freezes_the_record(
     """
     service = _service(tmp_path)
     real_write = service._write
-    real_read = service_module.read_regular
+    real_read = read_regular
     failed = {"once": False}
     stopped = False
     try:
