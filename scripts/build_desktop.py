@@ -105,7 +105,10 @@ def main() -> None:
     run("install_name_tool", "-id", "@rpath/libpython3.12.dylib", dylib)
     run("npm", "ci", cwd=ROOT / "apps/web")
     run("npm", "run", "build", cwd=ROOT / "apps/web")
-    shutil.copytree(ROOT / "apps/web/dist", RUNTIME / "ui", dirs_exist_ok=True)
+    # This directory contains generated UI only; do not retain hashed assets from older builds.
+    if (RUNTIME / "ui").exists():
+        shutil.rmtree(RUNTIME / "ui")
+    shutil.copytree(ROOT / "apps/web/dist", RUNTIME / "ui")
     (RUNTIME / "samples").mkdir(exist_ok=True)
     shutil.copyfile(
         ROOT / "examples/web-scenarios/bounded-long.yaml",
