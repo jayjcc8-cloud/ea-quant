@@ -29,6 +29,19 @@ fn main() {
 
 fn serve(arguments: &[String]) {
     let flags = Flags::parse(arguments);
+    if flags.present("parent-stdin") {
+        // Desktop-owned liveness pipe. Owner loss uses the same recovery semantics
+        // as a crashed core; no terminal/cancellation state is fabricated here.
+        std::thread::spawn(|| {
+            let mut byte = [0u8; 1];
+            loop {
+                match std::io::Read::read(&mut std::io::stdin(), &mut byte) {
+                    Ok(0) | Err(_) => std::process::exit(70),
+                    Ok(_) => {}
+                }
+            }
+        });
+    }
     let workspace = match flags.value("workspace") {
         Some(value) => PathBuf::from(value),
         None => {

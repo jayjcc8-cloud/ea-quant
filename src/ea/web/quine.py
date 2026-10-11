@@ -17,9 +17,9 @@ Two deliberate behaviours live here rather than in the caller:
   the admitted snapshot, checked against the digest the Web service already
   published for that input, so what the core freezes is what the preview showed.
 
-The official artifacts are read from the core's own workspace — the directory the
-private socket lives in — and each read is held to the digest the core registered
-for it.
+The official artifacts are read from the core's own workspace (by default the
+private socket directory; explicitly separate for the desktop short socket).
+Each read is held to the digest the core registered for it.
 """
 
 from __future__ import annotations
@@ -271,11 +271,12 @@ class QuineBridge:
         confirm_timeout: float = 10.0,
         query_timeout: float = 5.0,
         client: QuineClient | None = None,
+        workspace: Path | None = None,
     ):
         self.socket_path = Path(socket_path)
-        #: The core's own workspace: the socket lives in it, and the official
-        #: artifacts it publishes are read from it. Nothing else is ever read here.
-        self.workspace = self.socket_path.parent
+        #: The durable core workspace, separately supplied for a short desktop socket.
+        #: Only owner-registered artifacts are read here.
+        self.workspace = workspace if workspace is not None else self.socket_path.parent
         self._client = (
             client if client is not None else QuineClient(self.socket_path, timeout=confirm_timeout)
         )

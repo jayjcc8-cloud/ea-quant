@@ -401,6 +401,8 @@ class WebSettings:
     #: isolated candidate workspace: new experiments are confirmed through the
     #: core, and there is no fallback to the in-process owner when it is unreachable.
     quine_socket: Path | None = None
+    # Desktop uses a short private socket separately from the durable owner store.
+    quine_workspace: Path | None = None
 
     @property
     def trusted_origin(self) -> str:
@@ -453,16 +455,22 @@ def create_app(settings: WebSettings) -> Any:
     if settings.alerts_stream is not None and not settings.alerts_stream.is_absolute():
         raise WebBoundaryError("alerts stream must be an absolute path")
     quine_socket: Path | None = None
+    core_workspace: Path | None = None
+    if settings.quine_workspace is not None and settings.quine_socket is None:
+        raise WebBoundaryError("quine workspace requires its owner socket")
     if settings.quine_socket is not None:
         # The isolated candidate mode is explicit and fail-closed: the socket is
-        # resolved here, and the core's own workspace — the directory the socket
-        # lives in — must be a real directory separate from every Web root, because
+        # resolved here, and the core's own durable workspace must be a real
+        # directory separate from every Web root (desktop uses a short socket), because
         # the runs it owns are read from there and never copied into this workspace.
         candidate = settings.quine_socket
         if not candidate.is_absolute():
             raise WebBoundaryError("quine socket must be an absolute path")
         quine_socket = candidate.resolve(strict=False)
-        core_workspace = quine_socket.parent
+        core_workspace = settings.quine_workspace or quine_socket.parent
+        if not core_workspace.is_absolute():
+            raise WebBoundaryError("quine workspace must be an absolute path")
+        core_workspace = core_workspace.resolve(strict=False)
         if not core_workspace.is_dir():
             raise WebBoundaryError("quine core workspace is unavailable")
         if roots_overlap(core_workspace, scenario_root, workspace_root, ui_root):
@@ -476,7 +484,7 @@ def create_app(settings: WebSettings) -> Any:
     )
 
     quine_bridge: QuineBridge | None = (
-        QuineBridge(quine_socket) if quine_socket is not None else None
+        QuineBridge(quine_socket, workspace=core_workspace) if quine_socket is not None else None
     )
     # The core's own runs are read through the same job vocabulary this workspace
     # already serves, so the existing run, report, path, analytics and comparison
