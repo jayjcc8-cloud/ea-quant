@@ -1,3 +1,4 @@
+import type { DesktopStatus } from './desktop-settings'
 /**
  * RADIAN workspace read contract.
  *
@@ -172,8 +173,8 @@ class ApiFailure extends Error {
   }
 }
 
-async function apiRequest<T>(path: string): Promise<T> {
-  const response = await fetch(path)
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init ? { ...init, headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' } } : undefined)
   const payload = await response.json()
   if (!response.ok) {
     const detail = payload?.error
@@ -189,5 +190,7 @@ export const radianApi = {
   paperEvents: (runId?: string, limit = 100) =>
     apiRequest<PaperEvents>(`/api/paper/events?limit=${limit}${runId ? `&run_id=${encodeURIComponent(runId)}` : ''}`),
   search: (query: string) => apiRequest<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}`),
+  desktopSettings: () => apiRequest<DesktopStatus>('/api/desktop/settings'),
+  saveDesktopSettings: (body: object) => apiRequest<DesktopStatus>('/api/desktop/settings', { method: 'POST', body: JSON.stringify(body) }),
   settingsStatus: () => apiRequest<SettingsStatus>('/api/settings/status'),
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -403,6 +404,7 @@ class WebSettings:
     quine_socket: Path | None = None
     # Desktop uses a short private socket separately from the durable owner store.
     quine_workspace: Path | None = None
+    desktop_settings: Any = None
 
     @property
     def trusted_origin(self) -> str:
@@ -1381,6 +1383,38 @@ def create_app(settings: WebSettings) -> Any:
             return RadianSettings(RadianSettings.default_path()).status()
         except ValueError as caught:
             return error(500, "settings_unavailable", str(caught))
+
+    @app.get("/api/desktop/settings")
+    def desktop_settings_status() -> object:
+        if settings.desktop_settings is None:
+            return error(404, "desktop_only", "Desktop settings are unavailable")
+        try:
+            return settings.desktop_settings.status()
+        except (ValueError, OSError):
+            return error(409, "settings_unavailable", "设置不可读或权限不安全；原文件未改变。")
+
+    @app.post("/api/desktop/settings")
+    async def desktop_settings_save(request: Request) -> object:
+        if settings.desktop_settings is None:
+            return error(404, "desktop_only", "Desktop settings are unavailable")
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 16384:
+                return error(413, "settings_too_large", "设置内容过长。")
+        try:
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise ValueError("设置格式无效。")
+            return settings.desktop_settings.update(body)
+        except (ValueError, OSError):
+            # Never echo parser, filesystem, or validation detail containing input/keys.
+            return error(
+                409,
+                "settings_not_saved",
+                "未保存。请检查格式、目录占用和权限；"
+                "更改提供方/端点需重新输入或清除凭据。原设置保留。",
+            )
 
     @app.post("/api/research/tasks", status_code=201)
     def create_research_task(request: ResearchTaskRequest) -> object:

@@ -1,7 +1,7 @@
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ChronologicalHoldout, ScenarioSummary } from './app'
-import { AppearanceSettings } from './appearance-settings'
+import { DesktopSettings } from './desktop-settings'
 import { GuidedMappingFields, readGuidedDeclaration } from './csv-mapping-form'
 import { pathPercent } from './equity-path'
 import {
@@ -293,7 +293,7 @@ function ModelConfigurationPanel({ status, error }: { status: ModelConfiguration
     </dl>
     <p className="muted">配置可用不代表连接或协议兼容性已验证。</p>
     <details className="disclosure"><summary>如何配置模型</summary>
-      <p>由你在本机创建或编辑上方路径的 JSON 配置文件；本页只读取状态，不保存凭据、不发送模型请求。</p>
+      <p>由你在本机创建或编辑上方路径的 JSON 配置文件；桌面版可直接使用下方设置表单保存；此状态面板不发送模型请求。</p>
       <pre>{JSON.stringify({ schema: 'radian.settings.v1', model: {
         provider: 'deepseek', model: 'YOUR_MODEL_ID', api_key_env: 'QUINE_MODEL_API_KEY', api_key: null, base_url: null,
       } }, null, 2)}</pre>
@@ -2202,5 +2202,5 @@ export function ResearchSettings({ api }: { api: ApiAdapter }) {
   return <><PageHeading title="设置" subtitle="当前模型配置、本地外观与本地研究限制。" />
     <div className="actions"><button type="button" disabled={!currentRead} onClick={() => setCheck(value => value + 1)}>重新检查模型配置</button><Link to="/strategies">返回策略</Link></div>
     <ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} />
-    <AppearanceSettings /></>
+    <DesktopSettings api={api} onSaved={() => setCheck(value => value + 1)} /></>
 }

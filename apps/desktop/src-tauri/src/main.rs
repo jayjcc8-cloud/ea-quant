@@ -85,11 +85,15 @@ fn main() {
                 window.navigate("tauri://localhost/error.html".parse()?)?;
                 return Ok(());
             }
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::create_dir_all(&root)?;
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
-            std::fs::create_dir_all(root.join("logs"))?;
-            std::fs::set_permissions(root.join("logs"), std::fs::Permissions::from_mode(0o700))?;
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&root)?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(root.join("logs"))?;
             let log = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)

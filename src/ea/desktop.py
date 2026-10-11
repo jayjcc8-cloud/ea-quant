@@ -31,7 +31,6 @@ def prepare_root(root: Path, runtime: Path) -> None:
     ):
         raise ValueError("data_root_must_be_separate_from_bundle")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(root, 0o700)
     for name in ("core", "workspace", "scenarios", "logs"):
         path = root / name
         if path.is_symlink():
@@ -64,6 +63,33 @@ def emit(document: dict[str, Any]) -> None:
 
 
 async def session(root: Path, runtime: Path) -> None:
+    from ea.desktop_settings import DesktopSettings, validate_workspace
+
+    anchor = root
+    prepare_root(anchor, runtime)
+    desktop = DesktopSettings(anchor, anchor, runtime)
+    # Serialize selection for one app profile as well as locking the selected workspace.
+    with (anchor / "selection.lock").open("a+b") as selection_lock:
+        try:
+            fcntl.flock(selection_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("desktop_already_running") from None
+        requested = desktop.preferences().get("next_workspace", str(anchor))
+        if requested != str(anchor):
+            try:
+                chosen = Path(requested)
+                validate_workspace(chosen, runtime)
+                if chosen in anchor.parents or anchor in chosen.parents:
+                    raise ValueError("工作区不能相互嵌套。")
+                desktop.root = chosen
+            except (ValueError, OSError):
+                desktop.startup_error = (
+                    "所选工作区不可用或被占用；已保留并打开默认工作区。请在设置中重新选择。"
+                )
+        await workspace_session(desktop.root, runtime, desktop)
+
+
+async def workspace_session(root: Path, runtime: Path, desktop: Any) -> None:
     import uvicorn
 
     from ea.web.app import WebSettings, create_app
@@ -129,6 +155,7 @@ async def session(root: Path, runtime: Path) -> None:
                                 port=port,
                                 quine_socket=ipc,
                                 quine_workspace=root / "core",
+                                desktop_settings=desktop,
                             )
                         )
                         server = uvicorn.Server(

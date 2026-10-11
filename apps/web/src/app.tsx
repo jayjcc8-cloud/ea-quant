@@ -1,3 +1,4 @@
+import type { DesktopStatus } from './desktop-settings'
 import { EventValidation } from './events'
 import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
@@ -210,6 +211,8 @@ export type ApiAdapter = {
   getReport(jobId: string): Promise<BacktestReport>
   getEquityPath(jobId: string): Promise<EquityPath>
   artifactUrl(jobId: string, name: 'report.json' | 'summary.txt' | 'equity-path.json'): string
+  desktopSettings?(): Promise<DesktopStatus>
+  saveDesktopSettings?(body: object): Promise<DesktopStatus>
   settingsStatus?(): Promise<ModelConfigurationStatus>
   listResearchTasks?(): Promise<ResearchTask[]>
   createResearchTask?(idea: string, selection?: PluginSelection): Promise<ResearchTask>
@@ -371,6 +374,8 @@ const browserApi: ApiAdapter = {
   getReport(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/report`) },
   getEquityPath(jobId) { return apiRequest(`/api/backtests/${encodeURIComponent(jobId)}/artifacts/equity-path.json`) },
   artifactUrl(jobId, name) { return `/api/backtests/${encodeURIComponent(jobId)}/artifacts/${name}` },
+  desktopSettings: () => radianApi.desktopSettings(),
+  saveDesktopSettings: body => radianApi.saveDesktopSettings(body),
   settingsStatus: () => radianApi.settingsStatus(),
   listResearchTasks: () => researchApi.listTasks(),
   createResearchTask: (idea, selection) => researchApi.createTask(idea, selection),

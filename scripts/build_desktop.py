@@ -6,6 +6,7 @@ The explicit allowlist below is the entire runtime payload, never a checkout cop
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import platform
@@ -23,6 +24,12 @@ def run(*args: str | Path, cwd: Path = ROOT) -> None:
 
 
 def main() -> None:
+    global OUT, RUNTIME
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, default=OUT)
+    args = parser.parse_args()
+    OUT = args.output.resolve()
+    RUNTIME = OUT / "runtime"
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise SystemExit("This slice supports building on macOS arm64 only.")
     OUT.mkdir(parents=True, exist_ok=True)

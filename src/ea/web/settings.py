@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -61,27 +62,7 @@ class RadianSettings:
     def save(self, document: dict[str, Any]) -> None:
         """Atomically replace the stored document after validation."""
         _validate(document)
-        payload = (
-            json.dumps(
-                document,
-                ensure_ascii=True,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            + b"\n"
-        )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor: int | None = None
-        try:
-            descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            written = os.write(descriptor, payload)
-            if written != len(payload):
-                raise RadianSettingsError("settings write made no complete progress")
-            os.fsync(descriptor)
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
+        atomic_private_json(self.path, document)
 
     def status(self) -> dict[str, Any]:
         """Project the model configuration without exposing any secret.
@@ -192,3 +173,23 @@ def _budget(document: object, key: str, default: int) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= _MAX_RESEARCH_BOUND:
         return value
     return default
+
+
+def atomic_private_json(path: Path, document: dict[str, Any]) -> None:
+    """Complete private write then atomic replacement; failed writes preserve the old file."""
+    payload = (
+        json.dumps(document, ensure_ascii=True, allow_nan=False, sort_keys=True).encode() + b"\n"
+    )
+    if len(payload) > _MAX_BYTES or path.is_symlink():
+        raise RadianSettingsError("settings destination or size is invalid")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".settings-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
