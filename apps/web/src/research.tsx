@@ -199,8 +199,8 @@ function valuesOf(selection: PluginSelection | null | undefined): Partial<Record
   return values
 }
 
-function Disclosure({ title, subtitle, className, children }: { title: string; subtitle?: string; className?: string; children: ReactNode }) {
-  return <details className={className ? `disclosure ${className}` : 'disclosure'}>
+function Disclosure({ title, subtitle, className, children, id, open }: { title: string; subtitle?: string; className?: string; children: ReactNode; id?: string; open?: boolean }) {
+  return <details id={id} open={open} className={className ? `disclosure ${className}` : 'disclosure'}>
     <summary><strong>{title}</strong>{subtitle && <span>{subtitle}</span>}</summary>
     <div className="disclosure-body">{children}</div>
   </details>
@@ -288,13 +288,22 @@ function ModelConfigurationPanel({ status, error }: { status: ModelConfiguration
       <div><dt>提供方</dt><dd>{status.provider ?? '未配置'}</dd></div>
       <div><dt>模型</dt><dd>{status.model ?? '未配置'}</dd></div>
       <div><dt>端点</dt><dd>{status.endpoint ?? '未配置'}</dd></div>
+      <div><dt>配置文件</dt><dd>{status.settings_file}</dd></div>
       <div><dt>真实请求校验</dt><dd>本页未发送验证请求；成功调用请查看策略中的调用记录</dd></div>
     </dl>
     <p className="muted">配置可用不代表连接或协议兼容性已验证。</p>
+    <details className="disclosure"><summary>如何配置模型</summary>
+      <p>由你在本机创建或编辑上方路径的 JSON 配置文件；本页只读取状态，不保存凭据、不发送模型请求。</p>
+      <pre>{JSON.stringify({ schema: 'radian.settings.v1', model: {
+        provider: 'deepseek', model: 'YOUR_MODEL_ID', api_key_env: 'QUINE_MODEL_API_KEY', api_key: null, base_url: null,
+      } }, null, 2)}</pre>
+      <p>这是待填写的示例，不是当前配置。提供方可填 <code>anthropic</code>、<code>deepseek</code> 或 <code>openai-chat-completions-compatible</code>；模型填写该提供方的模型 ID。自定义 <code>base_url</code> 必须兼容所选协议。</p>
+      <p><code>api_key_env</code> 只填写环境变量名称。请在本机私下将密钥提供给后端进程环境，不要填进想法或对话。若更改进程环境，需以同一工作区重启本地服务；仅修改配置文件后可直接重新检查。保存的策略仍在原工作区。</p>
+      <p>检查配置不会验证密钥或产生调用费用。回到策略后，只有明确批准询问才会调用模型。</p>
+    </details>
     <details className="disclosure"><summary>协议、能力声明与配置文件</summary>
       <dl className="summary-list">
         <div><dt>协议</dt><dd>{status.protocol ?? '未配置'}</dd></div>
-        <div><dt>配置文件</dt><dd>{status.settings_file}</dd></div>
         <div><dt>必需能力</dt><dd>{(status.required_capabilities ?? []).map(name => `${name} · ${missing.includes(name) ? '缺失' : '已声明'}`).join(' · ') || '未配置'}</dd></div>
         <div><dt>工具调用</dt><dd>{capability('tool_use', '已声明', '缺失')}</dd></div>
         <div><dt>结构化输出</dt><dd>{capability('structured_output', '已声明', '未声明')}</dd></div>
@@ -1410,6 +1419,9 @@ function preparedExperiment(state: unknown): { sourceTaskId: string; idea: strin
 export function ResearchTasks({ api }: { api: ApiAdapter }) {
   const navigate = useNavigate()
   const location = useLocation()
+  useEffect(() => {
+    if (location.hash === '#data-upload') document.getElementById('data-upload')?.scrollIntoView?.()
+  }, [location.hash])
   // Read once, when this route is mounted. This fills a form the user then edits,
   // so it is not state this page keeps or re-applies: a later render, a refresh
   // or a return to this route does not put the idea back.
@@ -1512,7 +1524,8 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
     {advancedOffered && <section className="panel advanced-panel" aria-label="Data, declarations and local packages">
       <header><h2>Data, declarations and local packages</h2><span>Advanced · nothing is selected or run from here</span></header>
       <p className="muted">These controls change what this workspace can research with. Opening one applies nothing: every version published, declaration registered and package trusted below is a separate explicit decision, and each panel states its own effect before its action.</p>
-      {(api.previewUpload || api.publishUpload) && <Disclosure title="Controlled data upload" subtitle="Preview, then publish one version">
+      {(api.previewUpload || api.publishUpload) && <Disclosure id="data-upload" open={location.hash === '#data-upload' ? true : undefined} title="Controlled data upload" subtitle="Preview, then publish one version">
+        <p>发布后返回策略，在已绑定场景的策略中选择数据版本。导入不会创建场景，也不会运行实验。 <Link to="/strategies">返回策略</Link></p>
         <DataUploadPanel api={api} />
       </Disclosure>}
       {offlineOffered && <Disclosure title="Offline historical import" subtitle="Pasted historical response; no network is used">
@@ -2167,15 +2180,27 @@ function PageHeading({ title, subtitle, status }: { title: string; subtitle?: st
 }
 
 export function ResearchSettings({ api }: { api: ApiAdapter }) {
-  const [status, setStatus] = useState<ModelConfigurationStatus | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [check, setCheck] = useState(0)
+  const [read, setRead] = useState<{
+    api: ApiAdapter; check: number; status: ModelConfigurationStatus | null; error: string | null
+  } | null>(null)
+  const currentRead = read?.api === api && read.check === check ? read : null
   useEffect(() => {
     let current = true
-    if (!api.settingsStatus) return
-    void api.settingsStatus().then(value => { if (current) setStatus(value) }).catch(caught => { if (current) setError(messageOf(caught, 'Configuration status unavailable')) })
+    const load = async () => {
+      try {
+        if (!api.settingsStatus) throw new Error('本客户端无法读取模型配置状态。')
+        const status = await api.settingsStatus()
+        if (current) setRead({ api, check, status, error: null })
+      } catch (caught) {
+        if (current) setRead({ api, check, status: null, error: messageOf(caught, 'Configuration status unavailable') })
+      }
+    }
+    void load()
     return () => { current = false }
-  }, [api])
-  // The model connection and configuration lead this page, so what AI research
-  // would draft with is inspectable before the local appearance controls.
-  return <><PageHeading title="设置" subtitle="当前模型配置、本地外观与本地研究限制。" /><ModelConfigurationPanel status={status} error={api.settingsStatus ? error : '本客户端无法读取模型配置状态。'} /><AppearanceSettings /></>
+  }, [api, check])
+  return <><PageHeading title="设置" subtitle="当前模型配置、本地外观与本地研究限制。" />
+    <div className="actions"><button type="button" disabled={!currentRead} onClick={() => setCheck(value => value + 1)}>重新检查模型配置</button><Link to="/strategies">返回策略</Link></div>
+    <ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} />
+    <AppearanceSettings /></>
 }

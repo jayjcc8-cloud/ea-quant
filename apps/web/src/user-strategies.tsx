@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ScenarioSummary } from './app'
-import type { ReportCriterion } from './research-api'
+import type { ModelConfigurationStatus, ReportCriterion } from './research-api'
 import { EquityCurve, pathPercent, type EquityPath } from './equity-path'
 import { exactDelta } from './decimal'
 import { evidenceAddress, readEvidenceSelection, selectableRuns, selectedRuns } from './evidence-selection'
@@ -762,7 +762,7 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
           claimed is what this run cannot do on its own, not an inventory of things
           this page did not read. */}
       <p className="muted evidence-limits">
-        {`${frozenCriterion} · ${sample}。这是一次单窗口的冻结运行：单窗口的结果本身无法证明稳健性，还需要更多验证。`}
+        {`${frozenCriterion} · ${sample}。这是一次单窗口的冻结运行：成功只表示执行完成，不能证明研究有效或稳健。同一数据上的重复运行和行情条数不等于独立验证样本。`}
       </p>
       <div className="actions">
         <Link className="button-link" to={`/backtests/${encodeURIComponent(state.job.job_id)}`}>打开运行页面</Link>
@@ -811,10 +811,11 @@ function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStr
  * default. Binding is one revision of the same strategy and cannot be undone, so
  * the panel says so before the click, not after it.
  */
-function BindScenario({ api, strategy, scenarios, changed, failed }: {
+function BindScenario({ api, strategy, scenarios, catalogReady, changed, failed }: {
   api: ApiAdapter
   strategy: UserStrategy
   scenarios: ScenarioSummary[]
+  catalogReady: boolean
   changed: (strategy: UserStrategy) => void
   failed: (message: string) => void
 }) {
@@ -887,7 +888,8 @@ function BindScenario({ api, strategy, scenarios, changed, failed }: {
           {`${item.scenario_id} · ${item.summary?.strategy_id} · ${item.summary?.venue}:${item.summary?.symbol}`}
         </option>)}
       </select>
-      {!usable.length && <small>当前没有可用的有效注册场景，因此现在没有可以绑定的东西。</small>}
+      {!catalogReady && <small>场景目录尚未读到，请在上方重新检查。</small>}
+      {catalogReady && !usable.length && <small>当前没有可用的有效注册场景。请按上方「准备场景与数据」完成配置，再重新检查。</small>}
     </div>
     {candidate?.summary && <dl className="summary-list">
       <div><dt>策略标识</dt><dd>{candidate.summary.strategy_id}</dd></div>
@@ -1099,10 +1101,11 @@ function NextStep({ api, strategy, openExperiments }: {
 }
 
 /** A section of the selected strategy: the tab bar and the section it opens. */
-function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
+function StrategyDetail({ api, strategy, scenarios, catalogReady, changed, failed }: {
   api: ApiAdapter
   strategy: UserStrategy
   scenarios: ScenarioSummary[]
+  catalogReady: boolean
   changed: (strategy: UserStrategy) => void
   failed: (message: string) => void
 }) {
@@ -1123,7 +1126,7 @@ function StrategyDetail({ api, strategy, scenarios, changed, failed }: {
     </header>
     <DraftFacts draft={strategy.draft} />
     {isIntentDraft(strategy.draft) && <BindScenario
-      api={api} strategy={strategy} scenarios={scenarios}
+      api={api} strategy={strategy} scenarios={scenarios} catalogReady={catalogReady}
       changed={changed} failed={failed} />}
     {/* The data a draft runs on is an explicit choice of its own, made once the
         scenario is bound and before anything is previewed. */}
@@ -2119,7 +2122,19 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   const navigate = useNavigate()
   const location = useLocation()
   const [strategies, setStrategies] = useState<UserStrategy[]>([])
-  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([])
+  const [check, setCheck] = useState(0)
+  const [catalogRead, setCatalogRead] = useState<{
+    api: ApiAdapter; check: number; items: ScenarioSummary[]; error: string | null
+  } | null>(null)
+  const [modelRead, setModelRead] = useState<{
+    api: ApiAdapter; check: number; value: ModelConfigurationStatus | null; error: string | null
+  } | null>(null)
+  // Tag each independent read with its adapter and request. While a new read is in
+  // flight, neither old readiness nor old bind choices are offered as current.
+  const catalog = catalogRead?.api === api && catalogRead.check === check ? catalogRead : null
+  const model = modelRead?.api === api && modelRead.check === check ? modelRead : null
+  const scenarios = catalog?.error === null ? catalog.items : []
+  const usableCount = scenarios.filter(item => item.valid && item.summary && item.scenario_id).length
   const [detail, setDetail] = useState<{ id: string; value: UserStrategy } | null>(null)
   // The list read is a state of its own: until it answers, an empty array is not an
   // empty workspace, and the count, the empty claim and the create form wait for it.
@@ -2164,9 +2179,28 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
 
   useEffect(() => {
     let active = true
-    api.listScenarios?.().then(items => { if (active) setScenarios(items) }).catch(() => { if (active) setScenarios([]) })
+    const readCatalog = async () => {
+      try {
+        if (!api.listScenarios) throw new Error('本客户端无法读取场景目录。')
+        const items = await api.listScenarios()
+        if (active) setCatalogRead({ api, check, items, error: null })
+      } catch (error) {
+        if (active) setCatalogRead({ api, check, items: [], error: explain(error) })
+      }
+    }
+    const readModel = async () => {
+      try {
+        if (!api.settingsStatus) throw new Error('本客户端无法读取模型配置状态。')
+        const value = await api.settingsStatus()
+        if (active) setModelRead({ api, check, value, error: null })
+      } catch (error) {
+        if (active) setModelRead({ api, check, value: null, error: explain(error) })
+      }
+    }
+    void readCatalog()
+    void readModel()
     return () => { active = false }
-  }, [api])
+  }, [api, check])
 
   useEffect(() => {
     if (!userStrategyId) return
@@ -2278,6 +2312,26 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
             </button>}
       </header>
       <p className="strategy-subtitle">每个想法一份草稿。在你确认之前，这里不会运行任何东西。</p>
+      <section className="strategy-panel first-use-preparation" aria-label="开始研究">
+        <header className="panel-head"><h2>开始研究</h2>
+          <button type="button" disabled={!catalog || !model} onClick={() => setCheck(value => value + 1)}>重新检查</button>
+        </header>
+        <p className="muted">先保存想法，再绑定场景与数据。AI 提出修改，由你应用；实验须预览后确认。</p>
+        <div className="preparation-row"><strong>{!model ? '正在读取模型配置…'
+          : model.error ? '模型状态未知' : model.value?.configured ? '模型已配置 · 连接未验证' : '模型未配置'}</strong>
+          <Link to="/settings">配置模型</Link></div>
+        {model?.error && <p className={api.settingsStatus ? "notice error" : "muted"} role={api.settingsStatus ? "alert" : undefined}>{model.error}</p>}
+        <div className="preparation-row"><strong>{!catalog ? '正在读取场景目录…'
+          : catalog.error ? '场景目录读取失败' : usableCount ? `${usableCount} 个可用场景` : '尚无可用场景'}</strong>
+          <Link to="/research#data-upload">导入 CSV 数据</Link></div>
+        {catalog?.error && <p className="notice error" role="alert">{catalog.error}</p>}
+        {catalog && !catalog.error && usableCount === 0 && <details className="disclosure">
+          <summary>准备场景与数据</summary>
+          <p>场景定义策略、标的、资金及数据。请把有效场景 YAML 和它引用的数据放入本地服务配置的 <code>--scenario-root</code> 目录，保持相对数据路径正确；需要改变目录时，以同一工作区重启服务，再重新检查。已保存的想法会保留。</p>
+          <p>CSV 导入只发布数据版本，不创建场景。当前版本仍需通过本地服务准备场景；安装应用内的目录配置尚未提供。</p>
+        </details>}
+        <p className="muted preparation-note">缺少配置也可保存想法。配置可用不代表模型连通；场景可用不代表草稿已可运行，以实验预览为准。</p>
+      </section>
       {listState === 'reading'
         ? <p className="muted" role="status" aria-live="polite">正在读取策略…</p>
         : listState === 'ready' && <StrategyTable api={api} strategies={strategies} selectedId={userStrategyId} />}
@@ -2294,7 +2348,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
         {actionNote && <p role="alert" className="notice error">{actionNote}</p>}
         <StrategyDetail
           key={current.user_strategy_id}
-          api={api} strategy={current} scenarios={scenarios} changed={changed}
+          api={api} strategy={current} scenarios={scenarios} catalogReady={catalog !== null && catalog.error === null} changed={changed}
           failed={failedFor(current.user_strategy_id)} />
       </>}
     </div>

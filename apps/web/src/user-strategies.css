@@ -392,3 +392,8 @@ table.strategy-table {
   :root[data-density="compact"] .strategy-workspace .message-scroll { max-height: min(22vh, 200px); }
   :root[data-density="compact"] .strategy-workspace .answer-scroll { max-height: min(22vh, 200px); }
 }
+
+/* Preparation is a small read-only checkpoint beside the existing AI column. */
+.first-use-preparation { margin-bottom: 16px; }
+.first-use-preparation .preparation-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
+.first-use-preparation .preparation-note { font-size: 12px; margin-bottom: 0; }
