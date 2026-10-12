@@ -811,3 +811,39 @@ def test_http_stream_and_reload_preserve_the_separate_confirmation(
         assert state["pending"]["phase"] == "awaiting_confirmation"
         assert state["preview"]["draft_revision"] == 2
         assert client.get(f"/api/user-strategies/{identity}").json()["experiments"] == []
+
+
+def test_usage_trailer_settles_and_replays_without_a_new_budget_reservation(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, _started: list[WebService]
+) -> None:
+    from ea.web import llm
+    from unit.test_web_model_stream import openai_body, store, transport
+
+    network = transport(
+        monkeypatch,
+        openai_body(
+            text="one settled answer",
+            usage={"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+        ),
+    )
+    provider = llm.create_model_port(
+        store(tmp_path / "provider", "openai-chat-completions-compatible")
+    )
+    strategies = _stack(tmp_path, monkeypatch, _started, provider, budget=WIDE_BUDGET)
+    created = _create(strategies)
+    request = dict(
+        call_id="usage-turn", base_revision=1, text="a question", approved_budget=dict(WIDE_BUDGET)
+    )
+    events = _events(strategies.conversation_turn(created.user_strategy_id, **request))
+    assert events[-1]["kind"] == "done"
+    settled = strategies.get(created.user_strategy_id)
+    call = settled.calls[-1]
+    assert call["status"] == "observed" and call["usage_available"]
+    assert (call["input_tokens"], call["output_tokens"]) == (9, 2)
+    assert settled.messages[-1]["text"] == "one settled answer"
+    assert _store(tmp_path).model_call_usage()["reserved_model_calls"] == 1
+    again = _events(strategies.conversation_turn(created.user_strategy_id, **request))
+    assert _kinds(again) == ["state", "done"]
+    assert strategies.get(created.user_strategy_id) == settled
+    assert len(network.requests) == 1
+    assert _store(tmp_path).model_call_usage()["reserved_model_calls"] == 1

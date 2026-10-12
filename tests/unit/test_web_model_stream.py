@@ -194,9 +194,10 @@ def openai_body(
                 )
             )
     final: dict[str, Any] = {"choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}
-    if usage is not None:
-        final["usage"] = usage
+    final["usage"] = None
     events.append(("", final))
+    if usage is not None:
+        events.append(("", {"choices": [], "usage": usage}))
     chunks = frames(*events)
     if done:
         chunks.append("data: [DONE]\n\n")
@@ -331,6 +332,80 @@ def test_openai_text_deltas_and_usage_stream(
     assert str(network.requests[0].url) == "http://fixture.invalid/api/chat/completions"
     assert network.sent()["stream"] is True
     assert network.sent()["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.parametrize("with_tool", [False, True])
+def test_openai_usage_trailer_settles_once_after_the_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_tool: bool
+) -> None:
+    network = transport(
+        monkeypatch,
+        openai_body(
+            text="ok",
+            calls=[("call-one", "lookup", ['{"symbol":"AAPL"}'])] if with_tool else None,
+            finish_reason="tool_calls" if with_tool else "stop",
+            usage={"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+        ),
+    )
+    port = llm.create_model_port(store(tmp_path, "openai-chat-completions-compatible"))
+    stream = port.stream(system="", messages=[llm.ModelMessage("user", "idea")])
+    assert next(stream).text == "ok"
+    assert len(network.pulled) == 1
+    final = list(stream)
+    assert [event.kind for event in final] == ["response"]
+    response = final[0].response
+    assert response is not None and response.text == "ok" and response.usage_available
+    assert (response.input_tokens, response.output_tokens) == (9, 2)
+    assert response.stop_reason == ("tool_calls" if with_tool else "stop")
+    assert response.tool_calls == (
+        (llm.ToolCall("call-one", "lookup", {"symbol": "AAPL"}),) if with_tool else ()
+    )
+    assert len(network.requests) == 1
+    assert network.closed == ["body", "client"]
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        {},
+        {"prompt_tokens": 9},
+        {"prompt_tokens": -1, "completion_tokens": 2},
+        {"prompt_tokens": True, "completion_tokens": 2},
+        {"prompt_tokens": 9, "completion_tokens": "2"},
+    ],
+)
+def test_openai_malformed_usage_trailer_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, usage: Any
+) -> None:
+    chunks = openai_body(text="ok", done=False)
+    chunks += frames(("", {"choices": [], "usage": usage}))
+    chunks.append("data: [DONE]\n\n")
+    transport(monkeypatch, chunks)
+    port = llm.create_model_port(store(tmp_path, "openai-chat-completions-compatible"))
+    stream = port.stream(system="", messages=[llm.ModelMessage("user", "idea")])
+    assert next(stream).text == "ok"
+    with pytest.raises(llm.ModelProviderError):
+        list(stream)
+
+
+@pytest.mark.parametrize("finish", [None, "length"])
+def test_openai_usage_trailer_never_substitutes_for_a_successful_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str | None
+) -> None:
+    transport(
+        monkeypatch,
+        openai_body(
+            text="partial",
+            finish_reason=finish,
+            usage={"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+        ),
+    )
+    port = llm.create_model_port(store(tmp_path, "openai-chat-completions-compatible"))
+    stream = port.stream(system="", messages=[llm.ModelMessage("user", "idea")])
+    assert next(stream).text == "partial"
+    with pytest.raises(llm.ModelProviderError):
+        list(stream)
 
 
 def test_openai_split_tool_arguments_aggregate_by_index(

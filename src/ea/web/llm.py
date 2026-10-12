@@ -804,6 +804,16 @@ class OpenAIChatCompletionsCompatibleProvider(_Provider):
         choices = event.get("choices")
         if choices is None:
             return
+        if choices == []:
+            # include_usage ends with a usage-only chunk after the choice finish.
+            # It updates that response's accounting, never its termination state.
+            prompt = _usage_value(event, "prompt_tokens")
+            completion = _usage_value(event, "completion_tokens")
+            if not state.terminal or prompt is None or completion is None:
+                raise ModelProviderError("model provider returned an invalid usage trailer")
+            state.input_tokens = prompt
+            state.output_tokens = completion
+            return
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
             raise ModelProviderError("model provider response must have one choice")
         choice = choices[0]
