@@ -715,8 +715,8 @@ describe('user strategy workspace', () => {
     expect(within(panel).getAllByText(/提议者：model/)).toHaveLength(2)
     // Applying is a draft change, and the one notice beside the fields says what
     // the next step after it is: a saved revision still has to be previewed and
-    // confirmed in 实验.
-    expect(panel.textContent).toMatch(/保存为新修订后，需在「实验」里预览并确认运行。/)
+    // confirmed separately.
+    expect(panel.textContent).toMatch(/保存仅生成新修订；仍需单独检查实验预览并确认运行。/)
     // Reading the proposal starts nothing: no application, no preview, no run.
     expect(calls.apply).toBe(0)
     expect(calls.preview).toBe(0)
@@ -1555,7 +1555,7 @@ describe('user strategy workspace', () => {
     expect(within(closedPanel).getByLabelText('parameters.target_quantity')).toBeTruthy()
     // The one current notice about what an application is and what still has to
     // happen after it, and reading a closed record runs nothing.
-    expect(closedPanel.textContent).toMatch(/保存为新修订后，需在「实验」里预览并确认运行。/)
+    expect(closedPanel.textContent).toMatch(/保存仅生成新修订；仍需单独检查实验预览并确认运行。/)
     expect(applied.calls.preview).toBe(0)
     expect(applied.calls.launch).toBe(0)
     // The whole record is one collapsed disclosure, so its controls are read after
