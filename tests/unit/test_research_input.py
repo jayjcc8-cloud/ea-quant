@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
@@ -365,11 +366,10 @@ def test_batch_members_execute_one_captured_dataset(
 
 
 def test_engine_entry_rejects_representation_change_after_web_check(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_hook: Callable[[str, str], str]
 ) -> None:
     import time
 
-    import ea.web.service as service_module
     from ea.web.service import WebService
 
     root = _scenario_root(tmp_path)
@@ -378,14 +378,22 @@ def test_engine_entry_rejects_representation_change_after_web_check(
     data.mkdir()
     path = data / "research.csv"
     path.write_bytes(base.data_path.read_bytes())
-    from ea.product import run_backtest_scenario as original
-
-    def change_then_run(scenario: Any, *args: Any, **kwargs: Any) -> Any:
-        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
-        return original(scenario, *args, **kwargs)
-
-    monkeypatch.setattr(service_module, "run_backtest_scenario", change_then_run)
+    # The engine entry now lives in the attempt's worker process, so the drift is
+    # injected there through the documented worker hook: it rewrites the market
+    # data after the worker loaded the frozen scenario and immediately before the
+    # engine reads it. What the test asserts is unchanged: the accepted input's
+    # raw provenance is re-verified at that entry and a changed representation
+    # never becomes a successful job.
+    hook = worker_hook(
+        "representation-drift",
+        """
+def hook(*, scenario, control, request, worker):
+    path = scenario.data_path
+    path.write_bytes(path.read_bytes().replace(b"\\n", b"\\r\\n"))
+""",
+    )
     service = WebService(root, tmp_path / "workspace", data_root=data)
+    service._test_hook = hook
     service.start()
     try:
         identity = service.validate_scenario("bounded-long.yaml", dataset_id=path.name)[
@@ -396,9 +404,9 @@ def test_engine_entry_rejects_representation_change_after_web_check(
             input_identity=cast(dict[str, object], identity),
             request_id="engine-entry-race",
         )
-        for _ in range(200):
+        for _ in range(600):
             job = service.get_job(accepted.job_id)
-            if job.status not in {"accepted", "running"}:
+            if job.status not in {"accepted", "running", "stopping"}:
                 break
             time.sleep(0.02)
         assert job.status == "failed", "changed raw provenance must never become a successful job"

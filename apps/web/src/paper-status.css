@@ -1,0 +1,207 @@
+/*
+ * QUINE 运行 page — a compact read-only observation surface.
+ * Warm white surfaces, graphite text, terracotta only as an accent.
+ * Everything is grid/min-width:0 so 1400px and 420px both stay inside the page.
+ */
+
+.paper-status {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  color: var(--quine-ink, var(--ink, #1f2023));
+}
+
+.paper-status-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.paper-status-head h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+
+.paper-status-head p { margin: 6px 0 0; max-width: 64ch; }
+
+.paper-status-model {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--quine-line, var(--line, #e6e6e3));
+  border-left: 3px solid var(--quine-red, var(--accent, #cf3f2c));
+  border-radius: 6px;
+  background: var(--quine-surface-soft, var(--surface, #fafaf9));
+  font-size: 13px;
+}
+
+.paper-status-model a {
+  color: var(--quine-red, var(--accent, #cf3f2c));
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.paper-status-model a:hover { text-decoration: underline; }
+.paper-status-model span { color: var(--quine-ink-soft, var(--muted, #6b6f76)); }
+
+/* The page reads once on mount and once per manual refresh — say so, visibly. */
+.paper-snapshot-notice {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--quine-line, var(--line, #e6e6e3));
+  border-radius: 6px;
+  background: var(--quine-surface-soft, var(--surface, #fafaf9));
+  color: var(--quine-ink-soft, var(--muted, #6b6f76));
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* Panels: two columns when there is room, one column when there is not. */
+.paper-panels {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr));
+  min-width: 0;
+}
+
+.paper-panel {
+  min-width: 0;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--quine-line, var(--line, #e6e6e3));
+  border-radius: 8px;
+  background: var(--quine-surface, var(--surface, #ffffff));
+}
+
+.paper-panel h2 {
+  margin: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--quine-line-soft, var(--line-soft, #efefec));
+  color: var(--quine-ink-soft, var(--muted, #6b6f76));
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.paper-panel .summary-list { margin-top: 12px; gap: 10px 20px; }
+.paper-panel .summary-list dd { color: var(--quine-ink, var(--ink, #1f2023)); font-size: 14px; }
+.paper-panel p { font-size: 13px; line-height: 1.6; }
+.paper-panel p.muted { margin: 10px 0 0; }
+
+/* The events log reads better full width when the two-column layout is active. */
+@media (min-width: 900px) {
+  .paper-panel-wide { grid-column: 1 / -1; }
+}
+
+.paper-unavailable { margin: 0; font-size: 15px; line-height: 1.7; }
+.paper-unavailable code {
+  padding: 2px 6px;
+  border: 1px solid var(--quine-line, #e6e6e3);
+  border-radius: 4px;
+  background: var(--quine-surface-soft, #fafaf9);
+  color: var(--quine-ink-soft, #6b6f76);
+  font-size: 13px;
+}
+
+.paper-reason-codes {
+  margin: 10px 0 0;
+  color: var(--quine-ink-soft, var(--muted, #6b6f76));
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.paper-stale {
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--quine-red-line, #f2c8c0);
+  border-radius: 6px;
+  background: var(--quine-red-soft, #fdeeeb);
+  color: #8d3325;
+  font-size: 13px;
+}
+
+.paper-permission-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+  margin: 12px 0 0;
+}
+
+.paper-chip {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border: 1px solid var(--quine-line, #e6e6e3);
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.paper-chip-current {
+  border-color: var(--quine-red-line, #f2c8c0);
+  color: #8d3325;
+  background: var(--quine-red-soft, #fdeeeb);
+}
+
+.paper-chip-historical {
+  border-color: #dfd2b4;
+  color: #7a5a1e;
+  background: #fdf7e9;
+}
+
+.paper-chip-unavailable {
+  border-style: dashed;
+  color: var(--quine-ink-soft, #6b6f76);
+  background: var(--quine-surface-soft, #fafaf9);
+}
+
+/* One row per event, bounded so a full returned page cannot stretch the document. */
+.paper-event-scroll {
+  max-height: 22rem;
+  margin-top: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.paper-event-scroll:focus-visible {
+  outline: 2px solid var(--quine-red, var(--accent, #cf3f2c));
+  outline-offset: 2px;
+}
+
+.paper-event-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.paper-event-list li {
+  display: grid;
+  gap: 2px 14px;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.1fr) minmax(0, .8fr) minmax(0, 1.4fr);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--quine-line-soft, #efefec);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.paper-event-list li:last-child { border-bottom: 0; }
+.paper-event-name { font-weight: 650; }
+.paper-event-op { color: var(--quine-ink, #1f2023); }
+.paper-event-outcome { color: var(--quine-ink-soft, #6b6f76); }
+.paper-event-at { color: var(--quine-ink-soft, #6b6f76); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 560px) {
+  .paper-status-head h1 { font-size: 21px; }
+  .paper-panel { padding: 12px 12px 14px; }
+  .paper-event-list li { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+}

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Create and verify the supported local VSCode environment."""
+"""Create and verify the supported local VSCode environment.
+
+By default the development extra is installed, exactly as before. `--web` adds
+the optional Web extra and carries it through the final `ea doctor` too, so the
+environment is verified with the same extras it was installed with.
+"""
 
 from __future__ import annotations
 
+import argparse
 import os
 import shlex
 import shutil
@@ -10,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -75,8 +82,31 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     subprocess.run(command, check=True, cwd=cwd, env=env)
 
 
-def main() -> int:
+def _extras(web: bool) -> list[str]:
+    """The extras every sync and every verification of this environment carries."""
+    names = ("dev", "web") if web else ("dev",)
+    return [part for name in names for part in ("--extra", name)]
+
+
+def _parser() -> argparse.ArgumentParser:
+    """The whole command line: the default environment, or that plus the Web extra."""
+    parser = argparse.ArgumentParser(
+        prog="python3 scripts/bootstrap_local.py",
+        description="Create and verify the supported local environment for this repository.",
+    )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="also install the optional Web extra (FastAPI and Uvicorn) that `ea web serve` "
+        "needs; the final `ea doctor` verification carries the same extras",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     """Synchronize venv and verify imports and entrypoints without source-path bypasses."""
+    options = _parser().parse_args(list(argv) if argv is not None else sys.argv[1:])
+    extras = _extras(bool(options.web))
     uv = find_uv()
     version = project_version()
     if ENVIRONMENT_DIR.is_symlink():
@@ -98,7 +128,7 @@ def main() -> int:
     env.pop("VIRTUAL_ENV", None)
 
     run([uv, "--version"], cwd=PROJECT_ROOT, env=env)
-    run([uv, "sync", "--locked", "--extra", "dev"], cwd=PROJECT_ROOT, env=env)
+    run([uv, "sync", "--locked", *extras], cwd=PROJECT_ROOT, env=env)
 
     scripts_dir = ENVIRONMENT_DIR / ("Scripts" if os.name == "nt" else "bin")
     python = scripts_dir / ("python.exe" if os.name == "nt" else "python")
@@ -113,7 +143,7 @@ def main() -> int:
         )
         run([str(entrypoint), "doctor"], cwd=outside_repository, env=env)
 
-    run([uv, "run", "--locked", "ea", "doctor"], cwd=PROJECT_ROOT, env=env)
+    run([uv, "run", "--locked", *extras, "ea", "doctor"], cwd=PROJECT_ROOT, env=env)
     print(f"Local environment ready: {ENVIRONMENT_DIR}")
     return 0
 

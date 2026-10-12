@@ -314,6 +314,34 @@ def web_serve(
     ] = 8765,
     strategy_root: Annotated[Path | None, typer.Option("--strategy-root")] = None,
     data_root: Annotated[Path | None, typer.Option("--data-root")] = None,
+    runtime_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-root",
+            help="Optional supervised Paper runtime root; enables the read-only operations views.",
+            metavar="DIR",
+        ),
+    ] = None,
+    alerts_stream: Annotated[
+        Path | None,
+        typer.Option(
+            "--alerts-stream",
+            help="Optional durable alert stream file read for the workspace attention list.",
+            metavar="FILE",
+        ),
+    ] = None,
+    quine_socket: Annotated[
+        Path | None,
+        typer.Option(
+            "--quine-socket",
+            help=(
+                "Optional private socket of a running quine core. Setting it makes this an "
+                "isolated candidate workspace: new experiments are confirmed through that "
+                "core, and there is no fallback owner when it cannot be reached."
+            ),
+            metavar="FILE",
+        ),
+    ] = None,
 ) -> None:
     """Serve the real offline Web backtest loop from explicit local roots."""
     try:
@@ -331,6 +359,47 @@ def web_serve(
     ):
         typer.echo("web input error: scenario, workspace, and UI roots must not overlap", err=True)
         raise typer.Exit(code=2)
+    resolved_runtime: Path | None = None
+    if runtime_root is not None:
+        try:
+            resolved_runtime = runtime_root.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            typer.echo("web input error: runtime root cannot be resolved", err=True)
+            raise typer.Exit(code=2) from None
+        if any(
+            resolved_runtime.is_relative_to(root) or root.is_relative_to(resolved_runtime)
+            for root in roots
+        ):
+            typer.echo("web input error: runtime root must not overlap the Web roots", err=True)
+            raise typer.Exit(code=2)
+    resolved_alerts: Path | None = None
+    if alerts_stream is not None:
+        try:
+            resolved_alerts = alerts_stream.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            typer.echo("web input error: alerts stream cannot be resolved", err=True)
+            raise typer.Exit(code=2) from None
+    # The isolated candidate mode is off unless a core socket is named, and it is
+    # never entered by accident: the socket and the core workspace it lives in must
+    # exist before this service starts, because an unreachable core is a refusal
+    # here rather than a silent fallback to the in-process owner.
+    resolved_quine: Path | None = None
+    if quine_socket is not None:
+        try:
+            resolved_quine = quine_socket.expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            typer.echo("web input error: quine core socket is unavailable", err=True)
+            raise typer.Exit(code=2) from None
+        core_workspace = resolved_quine.parent
+        if any(
+            core_workspace.is_relative_to(root) or root.is_relative_to(core_workspace)
+            for root in (*roots, *((resolved_runtime,) if resolved_runtime is not None else ()))
+        ):
+            typer.echo(
+                "web input error: quine core workspace must be separate from the Web roots",
+                err=True,
+            )
+            raise typer.Exit(code=2)
     try:
         from ea.web.app import WebSettings
         from ea.web.server import WebDependencyError, serve_local_web
@@ -343,6 +412,9 @@ def web_serve(
                 port=port,
                 strategy_root=strategy_root,
                 data_root=data_root,
+                runtime_root=resolved_runtime,
+                alerts_stream=resolved_alerts,
+                quine_socket=resolved_quine,
             )
         )
     except WebDependencyError as error:
@@ -963,11 +1035,17 @@ def paper_gate_evaluate(
     """Judge the current runtime against a locked identity, deterministically.
 
     The locked identity is read back, the current one is rebuilt from the same
-    real inputs, the runtime is observed, and WU-2's own `evaluate_gate` produces
-    the verdict: drift is INVALID, a runtime violation is FAIL, and only a clean,
-    unchanged gate is PASS. This command adds no evaluator and writes nothing, so
-    it is equally usable as the pre-freeze readiness check and as the post-hoc
-    re-judgement of a gate that has already run.
+    real inputs, the runtime is observed, and the interval gate's own
+    `evaluate_gate` produces the verdict: drift is INVALID, a runtime violation is
+    FAIL, and PASS requires the whole requested interval to be covered by explicit
+    durable interval evidence.
+
+    This command supplies no interval history, so a healthy, unchanged runtime
+    evaluates INVALID/evidence_gap: one healthy instant can never certify a 72h or
+    7d window, and no invocation of this command can produce a 72h or 7d PASS
+    until trusted durable interval history is connected to it. It adds no
+    evaluator and writes nothing, so it starts no gate, certifies no gate after
+    the fact, and reports no soak result.
 
     Exit code 3 means the verdict is not PASS, or that the observation itself
     could not be taken.

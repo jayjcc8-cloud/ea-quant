@@ -1,0 +1,29 @@
+{
+  "contract": {
+    "version": 1,
+    "contract_id": "historical-trump-2024-yes-no",
+    "question": "Will Donald Trump win the 2024 US Presidential Election?",
+    "rules": "YES if Trump wins, NO otherwise. Published rule uses agreement of AP, Fox News and NBC; absent agreement by 2025-01-20 use inauguration. This offline fixture consumes the venue-published final result rather than re-adjudicating news.",
+    "authority": "curated-official-polymarket-page",
+    "source": "https://polymarket.com/event/presidential-election-winner-2024/will-donald-trump-win-the-2024-us-presidential-election?tid=1724420032971",
+    "source_kind": "official_history",
+    "rules_observed_at": "2026-10-03T11:10:08+00:00",
+    "currency": "USD_SIM",
+    "quantum": "0.01",
+    "face_value": "1",
+    "void_payout": null
+  },
+  "side": "YES",
+  "quantity": 10,
+  "observation": {
+    "contract_id": "historical-trump-2024-yes-no",
+    "authority": "curated-official-polymarket-page",
+    "source": "https://polymarket.com/event/presidential-election-winner-2024/will-donald-trump-win-the-2024-us-presidential-election?tid=1724420032971",
+    "available_at": "2026-10-03T11:10:08+00:00",
+    "status": "resolved",
+    "outcome": "YES",
+    "payout_yes": "1",
+    "payout_no": "0",
+    "evidence": "Retrieved official event page shows Donald Trump: Yes and explicitly states the market has resolved. Exact historical resolution timestamp unavailable; conservative availability is this capture time, not 2024 election day. Source: official page and indexed Rules snippet retrieved 2026-10-03."
+  }
+}

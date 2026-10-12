@@ -1,0 +1,538 @@
+/*
+ * QUINE strategy workspace.
+ *
+ * Scoped to .strategy-workspace so the legacy research, backtest, holdout and
+ * candidate pages keep the shell they already have. The palette is the shell's
+ * one palette: a #F6F8FA page, white surfaces, #E3E8EE lines, #17212F text and a
+ * single #007F8B teal accent that marks the selected row, the current section, a
+ * link and the one declared action on a panel. Every `--q-red*` name below is a
+ * legacy name still carrying that teal — renaming them would only move the change
+ * into every call site. Nothing here is a status colour on its own, because every
+ * state on this page is written out in words as well.
+ *
+ * The desktop layout is two columns: the strategy and its detail on the left, the
+ * conversation pinned beside it on the right. The conversation bounds itself, and
+ * the one thing inside it that scrolls is its body — its composer and every notice
+ * beside the composer stay on screen at every width. Below 1100px the two columns
+ * stack and the jump links appear; there the conversation takes a bound of its own.
+ *
+ * The global stylesheet styles bare `nav`, `table` and `button` elements for the
+ * rest of the shell, so this workspace resets the ones it lays out itself.
+ *
+ * This file also carries names the shell already knows — `.actions`, `.notice`,
+ * `.status`, `.chip`, `.check`, `.panel-head`, `.provenance` and the like. Every
+ * rule that is not already unique to this page is therefore written under
+ * `.strategy-workspace`, so a legacy page that has no `--q-*` token defined keeps
+ * the styling it had; inside the workspace nothing changes but the specificity.
+ */
+
+.strategy-workspace {
+  --q-ink: var(--quine-ink, #17212f);
+  --q-ink-soft: var(--quine-ink-soft, #5a6672);
+  --q-line: var(--quine-line, #e3e8ee);
+  --q-line-soft: var(--quine-line-soft, #edf1f5);
+  --q-surface: var(--quine-surface, #ffffff);
+  --q-surface-soft: var(--quine-surface-soft, #f6f8fa);
+  --q-red: var(--quine-red, #007f8b);
+  --q-red-soft: var(--quine-red-soft, #e6f4f5);
+  --q-red-line: var(--quine-red-line, #bfe0e4);
+  /* Additive names the shell did not have before: the filled primary action, the
+     deeper value it takes under the pointer, and the label that stays legible on
+     both; the teal used for teal *text*; the applied-state green; the border of a
+     field; and the amber a waiting decision is marked with. Each falls back to the
+     light value, so this page keeps its colours on a shell that defines none. */
+  --q-primary: var(--quine-primary, #007f8b);
+  --q-primary-strong: var(--quine-primary-strong, #00646e);
+  --q-primary-ink: var(--quine-primary-ink, #ffffff);
+  --q-red-ink: var(--quine-red-ink, #00646e);
+  --q-positive-soft: var(--quine-positive-soft, #eaf6f0);
+  --q-positive-line: var(--quine-positive-line, #bfdccd);
+  --q-positive-ink: var(--quine-positive-ink, #1f6b52);
+  --q-field-line: var(--field-line, #d3dae2);
+  --q-amber: var(--amber, #876625);
+  display: grid;
+  /* The strategy takes the room; the conversation takes at most a third of it and
+     never more than 384px, so a wide monitor grows the strategy rather than the
+     chat. Below 1100px the two are stacked instead. No local appearance setting
+     decides this width. */
+  grid-template-columns: minmax(0, 1fr) minmax(320px, min(384px, 34%));
+  gap: 20px;
+  align-items: start;
+  color: var(--q-ink);
+}
+
+.strategy-column { display: grid; gap: 14px; min-width: 0; }
+
+/* Heading, count and the one creation action */
+.strategy-heading { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.strategy-heading h1 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -.02em; }
+.strategy-count { color: var(--q-ink-soft); font-size: 14px; }
+.strategy-subtitle { margin: -8px 0 0; color: var(--q-ink-soft); font-size: 13.5px; }
+
+.strategy-workspace .create-cta {
+  display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
+  min-height: 38px; padding: 8px 14px; border: 1px solid var(--q-primary); border-radius: 8px;
+  background: var(--q-primary); color: var(--q-primary-ink); font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.strategy-workspace .create-cta:hover { border-color: var(--q-primary-strong); background: var(--q-primary-strong); color: var(--q-primary-ink); }
+
+/* The strategy table: one compact row per strategy */
+.strategy-list { display: block; padding: 0; }
+/* The legacy shell styles bare `nav a` as a 44px navigation target with a hover
+   pill. The rows carry their own typography, so the row links reset it. */
+.strategy-list a { display: block; min-height: 0; padding: 0; border-radius: 0; }
+.strategy-list a:hover { background: transparent; }
+.strategy-empty { padding: 14px 16px; border: 1px dashed var(--q-line); border-radius: 8px; color: var(--q-ink-soft); font-size: 13.5px; }
+
+table.strategy-table {
+  width: 100%; margin: 0; border: 1px solid var(--q-line); border-radius: 8px;
+  border-collapse: separate; border-spacing: 0; overflow: hidden; background: var(--q-surface); font-size: 13.5px;
+}
+.strategy-table th, .strategy-table td { text-align: left; }
+.strategy-table thead th {
+  padding: 9px 14px; border-bottom: 1px solid var(--q-line); background: var(--q-surface-soft);
+  color: var(--q-ink-soft); font-size: 12px; font-weight: 600; letter-spacing: .02em;
+}
+.strategy-table tbody th { padding: 11px 14px; border-bottom: 1px solid var(--q-line-soft); font-weight: 400; }
+.strategy-table td { padding: 11px 14px; border-top: 0; border-bottom: 1px solid var(--q-line-soft); vertical-align: middle; }
+.strategy-table tbody tr:last-child th, .strategy-table tbody tr:last-child td { border-bottom: 0; }
+.strategy-table tbody tr.selected th, .strategy-table tbody tr.selected td { background: var(--q-red-soft); }
+.strategy-table tbody tr.selected th { box-shadow: inset 3px 0 0 var(--q-red); }
+.strategy-name { display: block; color: var(--q-ink); font-size: 15px; font-weight: 650; }
+.strategy-name:hover, .strategy-name:focus-visible { color: var(--q-red); }
+.strategy-name[aria-current="page"] { color: var(--q-red); }
+.strategy-instrument { display: block; margin-top: 2px; color: var(--q-ink-soft); font-size: 12px; }
+.strategy-evidence { color: var(--q-ink); font-size: 13px; }
+.strategy-workspace .table-muted { color: var(--q-ink-soft); font-size: 13px; }
+/* A link in a row is the one thing on that row that can be followed, so it reads
+   as a link rather than as another cell of plain text. */
+.strategy-table td a { color: var(--q-red); font-weight: 600; }
+.strategy-table td a:hover { color: var(--q-red-ink); text-decoration: underline; }
+
+/* Chips: a labelled state, never the only carrier of meaning */
+.strategy-workspace .chip {
+  display: inline-flex; align-items: center; padding: 2px 8px; border: 1px solid var(--q-line);
+  border-radius: 999px; background: var(--q-surface-soft); color: var(--q-ink); font-size: 12px; font-weight: 600;
+}
+.strategy-workspace .chip-draft, .strategy-workspace .chip-open { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
+.strategy-workspace .chip-applied { border-color: var(--q-positive-line); background: var(--q-positive-soft); color: var(--q-positive-ink); }
+.strategy-workspace .chip-rejected, .strategy-workspace .chip-superseded { color: var(--q-ink-soft); }
+
+/* Creating a strategy: a compact disclosure, not a page */
+.strategy-create {
+  padding: 16px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface-soft);
+}
+.strategy-workspace .create-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; }
+.strategy-workspace .create-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+.strategy-workspace .create-actions .muted { margin: 0; }
+
+.strategy-workspace .field { margin: 10px 0; }
+.strategy-workspace label { color: var(--q-ink-soft); font-size: 12.5px; font-weight: 600; }
+.strategy-workspace select, .strategy-workspace input, .strategy-workspace textarea {
+  min-height: 38px; padding: 8px 10px; border: 1px solid var(--q-field-line); border-radius: 8px;
+  background: var(--q-surface); color: var(--q-ink); font-size: 14px;
+}
+.strategy-workspace input[type="checkbox"] { width: auto; min-height: 0; }
+
+/* The way between the strategy and its conversation. The links belong to the
+   stacked single-column layout, where the two blocks are no longer side by side;
+   they are hidden here and shown by the media query below. Both targets are
+   focusable, so following one really moves the reader and the keyboard.
+   A long id, path or digest wraps inside its own line instead of widening the page. */
+.strategy-workspace .jump-link { display: none; }
+.strategy-detail:focus-visible, .strategy-ai:focus-visible { outline: 2px solid var(--q-red); outline-offset: 2px; }
+.strategy-workspace .strategy-name,
+.strategy-workspace .strategy-instrument,
+.strategy-workspace .summary-list dd,
+.strategy-workspace .path-list li,
+.strategy-workspace .proposal-origin,
+.strategy-workspace .proposal-path,
+.strategy-workspace .draft-facts dd { overflow-wrap: anywhere; }
+
+/* The selected strategy: one white card. Its title, its scope line, its status
+   line and its tabs are separated by fine rules, and the sections below them by
+   one hairline each — no stack of shadowed cards. */
+.strategy-detail { border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface); overflow: hidden; }
+.strategy-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 16px 16px 6px; }
+.strategy-title h1, .strategy-title h2 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -.02em; }
+.strategy-open { margin-left: auto; color: var(--q-ink-soft); font-size: 12.5px; }
+.strategy-open:hover { color: var(--q-red); }
+
+/* What the card is about, in one muted line under its title. The shared
+   `.research-context` class is a container elsewhere, so its box is reset here. */
+.strategy-detail .research-context {
+  display: block; margin: 0; padding: 0 16px 12px; border: 0; border-radius: 0;
+  background: transparent; overflow: visible; color: var(--q-ink-soft); font-size: 12px;
+}
+
+/* One line between that scope and the tabs: where the strategy stands on the
+   left, what is still waiting for a decision on the right. */
+.strategy-workspace .research-status-line {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
+  padding: 0 16px; border-bottom: 1px solid var(--q-line);
+}
+.strategy-workspace .pending-changes { margin-left: auto; color: var(--q-ink-soft); font-size: 12.5px; font-weight: 650; }
+.strategy-workspace .pending-changes.has-pending { color: var(--q-amber); }
+.strategy-workspace .pending-changes:hover { color: var(--q-red); text-decoration: underline; }
+
+/* The way back, above the card: small navigation, not a second heading. */
+.strategy-workspace .workspace-breadcrumb { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--q-ink-soft); font-size: 12px; }
+.strategy-workspace .workspace-breadcrumb a { color: var(--q-ink-soft); }
+.strategy-workspace .workspace-breadcrumb a:hover { color: var(--q-red); text-decoration: underline; }
+
+.strategy-workspace .draft-facts { padding: 10px 16px; background: var(--q-surface-soft); }
+.strategy-workspace .draft-facts dl { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 0; }
+.strategy-workspace .draft-facts div { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.strategy-workspace .draft-facts dt { color: var(--q-ink-soft); font-size: 12px; }
+.strategy-workspace .draft-facts dd { margin: 0; color: var(--q-ink); font-size: 13.5px; overflow-wrap: anywhere; }
+
+/* The strip that says where this strategy stands and what the next step is: the
+   last revision that was really frozen, and one obvious way onward. It is flat —
+   its place and its bottom rule belong to the status line it sits in. */
+.strategy-workspace .next-step {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px;
+  padding: 10px 0; background: transparent;
+}
+.strategy-workspace .next-step dl { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; }
+.strategy-workspace .next-step div { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.strategy-workspace .next-step dt { color: var(--q-ink-soft); font-size: 12px; }
+.strategy-workspace .next-step dd { margin: 0; color: var(--q-ink); font-size: 13px; overflow-wrap: anywhere; }
+.strategy-workspace .next-step button { margin-left: auto; }
+/* The contextual note shares the strip's one row with the frozen status and the
+   action instead of claiming a row of its own: it sizes to its text and lets the
+   row grow around it, so the strip stays compact at desktop width. On a phone the
+   note takes the full row and the action keeps its own full-width row below. */
+.strategy-workspace .next-step p.muted { flex: 1 1 auto; min-width: 0; margin: 0; }
+/* The latest run's state is a link to that run's own page; it reads as one. */
+.strategy-workspace .next-step dd a { color: var(--q-red); font-weight: 600; }
+.strategy-workspace .next-step dd a:hover,
+.strategy-workspace .next-step dd a:focus-visible { color: var(--q-red-ink); text-decoration: underline; }
+
+/* The way back into the most recently updated work, on the collection route. */
+.strategy-workspace .continuation {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
+  padding: 10px 14px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface-soft);
+}
+.strategy-workspace .continuation-link { color: var(--q-ink); font-size: 14px; font-weight: 650; }
+.strategy-workspace .continuation-link:hover, .strategy-workspace .continuation-link:focus-visible { color: var(--q-red); }
+.strategy-workspace .continuation .muted { margin: 0; }
+.strategy-workspace .continuation p.muted { flex: 1 1 100%; }
+
+/* The three tabs are fine rules, not a segmented control: one hairline under the
+   whole bar, one accent underline under the section that is open. */
+.strategy-workspace .detail-tabs { display: flex; flex-wrap: wrap; gap: 0 2px; padding: 0 4px; border-bottom: 1px solid var(--q-line); }
+.strategy-workspace .detail-tabs [role="tab"] {
+  min-height: 40px; padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  background: transparent; color: var(--q-ink-soft); font-size: 13.5px; font-weight: 500;
+}
+.strategy-workspace .detail-tabs [role="tab"]:hover { color: var(--q-ink); background: var(--q-surface-soft); }
+.strategy-workspace .detail-tabs [role="tab"][aria-selected="true"] { color: var(--q-ink); border-bottom-color: var(--q-red); font-weight: 650; }
+.strategy-workspace .detail-tabs [role="tab"][aria-selected="true"]:hover { background: transparent; }
+.strategy-tabpanel { min-width: 0; }
+/* What the tabs open is one white card's worth of sections: a single hairline
+   between them, never a boxed or shadowed card around each one. */
+.strategy-tabpanel > * + * { border-top: 1px solid var(--q-line); }
+.strategy-tabpanel:focus-visible { outline: 2px solid var(--q-red); outline-offset: -2px; }
+
+/* Sections */
+.strategy-panel { padding: 16px; }
+.strategy-panel h2 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+.strategy-panel h3 { font-size: 14px; }
+.strategy-panel p { margin: 6px 0; font-size: 14px; line-height: 1.6; max-width: 82ch; }
+.strategy-panel .muted, .strategy-workspace .muted { color: var(--q-ink-soft); font-size: 12.5px; }
+/* The figures on this page are read against each other — revisions, counts,
+   prices, digests — so the surfaces that carry them use tabular figures. */
+.strategy-workspace .strategy-count, .strategy-workspace .draft-facts dd,
+.strategy-workspace .next-step dd, .strategy-workspace .evidence-metrics dd,
+.strategy-workspace .preview-facts dd, .strategy-workspace time { font-variant-numeric: tabular-nums; }
+.strategy-workspace .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.strategy-workspace .panel-head h2 { margin: 0; }
+.strategy-intent { font-size: 15px; }
+.strategy-workspace .inline-field { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 12.5px; }
+.strategy-workspace .inline-field select { width: auto; min-height: 32px; padding: 4px 8px; font-size: 13px; }
+
+.strategy-workspace .summary-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 22px; margin: 10px 0 0; }
+.strategy-workspace .summary-list dt { color: var(--q-ink-soft); font-size: 12px; text-transform: none; letter-spacing: 0; }
+.strategy-workspace .summary-list dd { margin: 2px 0 0; color: var(--q-ink); font-size: 13.5px; }
+
+.strategy-workspace .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.strategy-workspace button {
+  min-height: 38px; padding: 8px 12px; border: 1px solid var(--q-field-line); border-radius: 8px;
+  background: var(--q-surface); color: var(--q-ink); font-size: 13.5px;
+}
+.strategy-workspace button:hover:not(:disabled) { border-color: var(--q-ink); }
+.strategy-workspace button:disabled { opacity: .45; }
+.strategy-workspace button.primary, .strategy-workspace .button-link {
+  display: inline-flex; align-items: center; min-height: 38px; padding: 8px 14px;
+  border: 1px solid var(--q-primary); border-radius: 8px; background: var(--q-primary); color: var(--q-primary-ink);
+  font-size: 13.5px; font-weight: 600;
+}
+.strategy-workspace button.primary:hover:not(:disabled), .strategy-workspace .button-link:hover { border-color: var(--q-primary-strong); background: var(--q-primary-strong); color: var(--q-primary-ink); }
+
+/* The draft's own sections */
+.strategy-workspace .change-list, .strategy-workspace .path-list, .strategy-workspace .history-list { margin: 8px 0 0; padding: 0; list-style: none; }
+.strategy-workspace .change-list { display: grid; gap: 10px; }
+.strategy-workspace .change-list > li { padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .change-head { display: flex; align-items: center; gap: 8px; margin: 0; flex-wrap: wrap; }
+.strategy-workspace .path-list li { margin: 2px 0; color: var(--q-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.strategy-workspace .history-list li { padding: 6px 0; border-bottom: 1px solid var(--q-line-soft); }
+/* A disclosure is one compact line until it is opened: a short row, a muted label,
+   and the detail the reader asked for inside it. The experiment panel is one of
+   these, with the preview and the one confirmation inside it. */
+.strategy-workspace .provenance { margin-top: 10px; }
+.strategy-workspace .provenance summary { min-height: 28px; padding: 4px 0; color: var(--q-ink-soft); font-size: 12.5px; cursor: pointer; }
+.strategy-workspace .provenance summary:hover { color: var(--q-ink); }
+.strategy-workspace .experiment-controls { padding: 0 16px 16px; }
+.strategy-workspace .experiment-controls > summary { min-height: 28px; padding: 12px 0; color: var(--q-ink); font-size: 13.5px; font-weight: 650; cursor: pointer; }
+
+/* Evidence: the frozen run's real job, report and equity path */
+.strategy-workspace .evidence-origin { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.strategy-workspace .evidence-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px 16px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .evidence-metrics dt { color: var(--q-ink-soft); font-size: 12px; }
+.strategy-workspace .evidence-metrics dd { margin: 3px 0 0; color: var(--q-ink); font-size: 17px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
+/* The limits sit with the figures they qualify, not in a footnote elsewhere. */
+.strategy-workspace .evidence-limits { margin: 0 0 12px; }
+.strategy-workspace .artifact-links { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; }
+.strategy-workspace .artifact-links a { color: var(--q-red); font-size: 12.5px; }
+.strategy-workspace .artifact-links a:hover { color: var(--q-red-ink); text-decoration: underline; }
+.strategy-workspace .evidence-curve { margin-top: 14px; }
+.strategy-workspace .equity-path { padding: 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; margin: 0; }
+.strategy-workspace .equity-path h2 { font-size: 14px; }
+.strategy-workspace .equity-path h3 { margin-top: 10px; font-size: 13px; }
+.strategy-workspace .equity-path svg { width: 100%; height: auto; color: var(--q-ink-soft); }
+.strategy-workspace .equity-path .summary-list { margin-top: 8px; }
+
+/* Proposal review and experiment list */
+.strategy-workspace .proposal-list, .strategy-workspace .experiment-list { display: grid; gap: 10px; margin: 10px 0; padding: 0; list-style: none; }
+.strategy-workspace .proposal-list li, .strategy-workspace .experiment-list li { padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .proposal-list .change { margin: 4px 0 2px 24px; color: var(--q-red); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.strategy-workspace .proposal-list .reason { margin: 0 0 0 24px; color: var(--q-ink-soft); font-size: 13px; }
+.strategy-workspace .proposal-list p { margin: 2px 0 0 24px; }
+.strategy-workspace .proposal-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.strategy-workspace .experiment-list a { color: var(--q-red); font-weight: 600; }
+.strategy-workspace .experiment-list a:hover { color: var(--q-red-ink); text-decoration: underline; }
+.strategy-workspace .experiment-list p { margin: 2px 0; }
+
+.strategy-workspace .check { display: flex; gap: 8px; align-items: center; margin: 8px 0; color: var(--q-ink); font-size: 13px; font-weight: 600; }
+.strategy-workspace .check input { margin: 0; accent-color: var(--q-red); }
+
+.strategy-workspace .preview-facts { display: grid; gap: 6px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .preview-facts > div { display: grid; grid-template-columns: minmax(130px, 190px) minmax(0, 1fr); gap: 10px; }
+.strategy-workspace .preview-facts dt { color: var(--q-ink-soft); font-size: 12.5px; font-weight: 600; }
+.strategy-workspace .preview-facts dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.strategy-workspace .revise { margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--q-line); border-radius: 8px; }
+.strategy-workspace .revise button { margin-top: 4px; }
+/* A proposal that is no longer waiting for a decision is history, and the whole
+   verbose record is one native disclosure: origin, recorded status, reversal, the
+   evidence it was cited under, every field and the controls that can no longer act.
+   It collapses to a single line that already names the effective state, so a long
+   closed proposal never pushes the answer or the next strategy card past the fold.
+   A still-valid Undo is the one exception and stays outside it. */
+.strategy-workspace .proposal-closed { margin-top: 8px; }
+.strategy-workspace .proposal-closed > summary { color: var(--q-ink); font-size: 13px; font-weight: 600; }
+.strategy-workspace .proposal-closed .proposal-list { margin-top: 8px; }
+.strategy-workspace .proposal-closed .proposal-origin { margin: 8px 0 0; }
+.strategy-workspace .proposal-record { margin: 6px 0 0; }
+.strategy-workspace .chip-undo { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
+.strategy-workspace .proposal-undone { margin: 4px 0 0; }
+
+/* The AI column: the conversation of the strategy that is open, and its change.
+   On a desktop it pins under the top of the viewport, with one rule of its own
+   against the strategy column. It never grows past the viewport, and the only
+   thing inside it that scrolls is the conversation body — so the composer, the
+   approval and every notice beside them stay on screen at every width. Below
+   1100px it stops being pinned and takes a bound of its own instead. */
+.strategy-ai {
+  position: sticky; top: 16px; align-self: start; display: flex; flex-direction: column;
+  gap: 12px; min-width: 0; min-height: 0; height: calc(100dvh - 80px); max-height: calc(100dvh - 80px);
+  padding-left: 20px; border-left: 1px solid var(--q-line);
+}
+/* The conversation card is a column: header, scope line, scroller, composer. Only
+   its own card frame is drawn here — nothing clips its children. */
+.strategy-chat {
+  display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding: 0;
+  border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface);
+}
+.strategy-workspace .chat-head {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  padding: 12px 14px; border-bottom: 1px solid var(--q-line-soft);
+}
+.strategy-workspace .chat-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.strategy-workspace .chat-head select { width: auto; max-width: 190px; min-height: 32px; padding: 4px 8px; font-size: 13px; }
+/* What this conversation is grounded in, in one compact row under the header, so
+   the scroller below begins with the conversation itself. */
+.strategy-workspace .strategy-chat .ai-context {
+  flex: 0 0 auto; margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--q-line-soft);
+  color: var(--q-ink-soft); font-size: 12px; overflow-wrap: anywhere;
+}
+/* The one scroller of the card: the current turn, the proposal waiting for a
+   decision and the earlier conversation all live in it, and all of them stay
+   whole in it. */
+.strategy-chat .chat-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px 14px; }
+
+/* The current turn precedes the composer: this call's own status, its answer
+   labelled as inference, and its prompt behind a disclosure. The earlier
+   conversation is a disclosure of its own below, so what the reader acts on — the
+   composer, the approval and the ask — is never inside it. */
+.strategy-workspace .turn { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; }
+.strategy-workspace .turn-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
+.strategy-workspace .turn-head .muted { font-size: 12px; overflow-wrap: anywhere; }
+.strategy-workspace .turn-prompt { margin-top: 6px; }
+.strategy-workspace .turn-answer { margin: 8px 0 0; padding: 8px 10px; border-left: 2px solid var(--q-red); border-radius: 0 8px 8px 0; background: var(--q-surface-soft); }
+.strategy-workspace .turn-answer p { margin: 3px 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The answer is the longest text on this page, and the conversation body is
+   already the one scroller, so the answer is not bounded a second time: it stays
+   whole, with the inference label and the revision below it. It keeps its focus
+   outline because it is a group the keyboard can move to. */
+.strategy-workspace .answer-scroll { padding-right: 4px; }
+.strategy-workspace .answer-scroll:focus-visible { outline: 2px solid var(--q-red); outline-offset: -2px; }
+.strategy-workspace .turn-details { margin-top: 10px; }
+.strategy-workspace .turn-history { margin-top: 12px; }
+/* The composer is the last row of the card and stays outside the scroller above
+   it: the message, the one approval, the ask and their own notices are never
+   behind a scroll, at any width. One rule separates it from the conversation. */
+.strategy-workspace .composer { flex: 0 0 auto; margin: 0; padding: 12px 14px; border-top: 1px solid var(--q-line-soft); }
+.strategy-workspace .composer-actions { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.strategy-workspace .composer-actions .muted { margin: 0; max-width: 22rem; }
+/* The earlier conversation is a labelled group inside the one scroller rather
+   than a second scroller of its own, so a reader moving by keyboard never lands
+   in a nested scroll region. Every earlier message stays in it. */
+.strategy-workspace .message-scroll { margin-top: 12px; padding: 2px; }
+.strategy-workspace .message-scroll:focus-visible { outline: 2px solid var(--q-red); outline-offset: -2px; }
+.strategy-workspace .message-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.strategy-workspace .message { padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
+.strategy-workspace .message p { margin: 3px 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.strategy-workspace .message-role { color: var(--q-ink-soft); font-size: 12px; font-weight: 650; }
+.strategy-workspace .message-model { border-left: 2px solid var(--q-red); }
+.strategy-workspace .call-note { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--q-red); border-radius: 0 8px 8px 0; background: var(--q-red-soft); }
+.strategy-workspace .call-note p { margin: 3px 0; font-size: 12.5px; }
+/* The change waiting for a decision keeps its own box inside the conversation, so
+   it reads as the one thing to act on rather than as more transcript. */
+.strategy-chat .chat-body > .proposal-panel {
+  margin-top: 12px; padding: 12px 14px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface);
+}
+/* The empty column says what it will hold and keeps its natural height: an empty
+   conversation is not stretched to the height of a full one. */
+.strategy-workspace .strategy-chat-empty { display: block; padding: 14px 16px; }
+.strategy-workspace .strategy-chat-empty .chat-head { padding: 0 0 10px; border-bottom: 1px solid var(--q-line-soft); }
+.strategy-chat-empty p { margin-top: 10px; font-size: 13.5px; }
+
+/* Every state is written out in words; this marks the label, not the meaning. */
+.strategy-workspace .status { display: inline-block; padding: 1px 8px; border: 1px solid var(--q-line); border-radius: 999px; background: var(--q-surface); font-size: 12px; font-weight: 650; text-transform: none; letter-spacing: 0; }
+
+.strategy-workspace .notice { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--q-field-line); border-radius: 8px; background: var(--q-surface-soft); font-size: 13px; }
+.strategy-workspace .notice.error { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
+
+/* Preparation is a small read-only checkpoint above the strategy list: a card of
+   its own, one compact disclosure line, and the checks inside it. */
+.strategy-workspace .first-use-preparation {
+  margin-bottom: 16px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface);
+}
+.strategy-workspace .first-use-preparation > summary { min-height: 28px; color: var(--q-ink); font-size: 13.5px; font-weight: 650; cursor: pointer; }
+.strategy-workspace .first-use-preparation .preparation-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
+.strategy-workspace .first-use-preparation .preparation-note { font-size: 12px; margin-bottom: 0; }
+
+/* Narrower columns: the table keeps its density until the phone layout. Below the
+   two-column width the strategy and its conversation are stacked, so the
+   conversation stops being pinned and takes a bound of its own, and the two jump
+   links appear — plain text links, not another control competing with the page. */
+@media (max-width: 1100px) {
+  .strategy-workspace { grid-template-columns: minmax(0, 1fr); }
+  .strategy-ai {
+    position: static; height: min(680px, 85dvh); max-height: min(680px, 85dvh);
+    padding-left: 0; padding-top: 14px; border-left: 0; border-top: 1px solid var(--q-line);
+  }
+  .strategy-workspace .jump-link {
+    display: inline-flex; align-items: center; min-height: 32px; color: var(--q-ink-soft);
+    font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px;
+  }
+  .strategy-workspace .jump-link:hover { color: var(--q-red); }
+}
+
+@media (max-width: 640px) {
+  /* One card per strategy instead of a four-column grid, and a 44px target for
+     every control. */
+  .strategy-count { flex: 1 0 auto; }
+  .strategy-workspace .create-cta { width: auto; }
+  table.strategy-table, .strategy-table tbody, .strategy-table tr, .strategy-table th, .strategy-table td { display: block; width: 100%; }
+  .strategy-table thead { display: none; }
+  .strategy-table tbody tr { padding: 10px 12px; border-bottom: 1px solid var(--q-line-soft); }
+  .strategy-table tbody tr:last-child { border-bottom: 0; }
+  .strategy-table tbody th, .strategy-table td { padding: 3px 0; border: 0; box-shadow: none; }
+  .strategy-table tbody tr.selected th { box-shadow: inset 3px 0 0 var(--q-red); padding-left: 9px; }
+  .strategy-table td[data-label]::before { content: attr(data-label) " "; color: var(--q-ink-soft); font-size: 12px; }
+  .strategy-workspace .create-fields { grid-template-columns: minmax(0, 1fr); }
+  .strategy-workspace .detail-tabs { flex-wrap: wrap; }
+  .strategy-workspace .detail-tabs [role="tab"] { min-height: 44px; }
+  /* `button.primary` and `.button-link` carry more specificity than a bare
+     `button`, so they are named here as well: otherwise the desktop 38px would
+     keep winning on a phone and the composer's own action would stay under 44px. */
+  .strategy-workspace button, .strategy-workspace button.primary,
+  .strategy-workspace .button-link, .strategy-workspace .create-cta { min-height: 44px; }
+  .strategy-workspace .jump-link { min-height: 44px; }
+  .strategy-workspace select, .strategy-workspace input, .strategy-workspace textarea { min-height: 44px; }
+  /* The approval and confirmation labels are tap targets, not just text: the whole
+     label carries the 44px height, so the checkbox itself keeps its own size. */
+  .strategy-workspace .check { min-height: 44px; }
+  /* A disclosure's own line is a tap target too. */
+  .strategy-workspace .provenance summary, .strategy-workspace .experiment-controls > summary,
+  .strategy-workspace .first-use-preparation > summary { min-height: 44px; }
+  .strategy-workspace .summary-list { grid-template-columns: minmax(0, 1fr); }
+  .strategy-workspace .preview-facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  /* A result table wider than a phone scrolls inside its own box: the page itself
+     never goes sideways, and no row or figure is dropped to make it fit. */
+  .strategy-detail table { display: block; max-width: 100%; overflow-x: auto; }
+  /* On a phone the strip stacks and its one action takes the full width, so the
+     composer and the actions below stay reachable without horizontal overflow. */
+  .strategy-workspace .next-step p.muted { flex: 1 1 100%; }
+  .strategy-workspace .next-step button { margin-left: 0; width: 100%; }
+  .strategy-workspace .turn { padding: 10px; }
+  .strategy-tabpanel { padding: 0; }
+}
+
+.strategy-chat .chat-suggestions { display: flex; gap: 8px; flex-wrap: wrap; }
+.strategy-chat .chat-suggestions button { min-height: 32px; font-size: 12px; text-align: left; }
+.strategy-chat-empty { padding-bottom: 14px; }
+.strategy-chat-empty > p { padding: 0 14px; }
+
+/* The manual draft editor. It is one flat block of the tab it is opened in: fine
+   rules, no card, no shadow, no settings screen. Two fields to a row while the
+   window is wide and one below the phone width, so a long registered path or a
+   wide value never widens the page. Every colour here is one the workspace
+   already defines, so the dark palette arrives through the same tokens. */
+.draft-editor { padding: 16px; min-width: 0; }
+.draft-editor-title { margin: 0 0 6px; font-size: 15px; font-weight: 650; }
+.draft-editor-revision { margin: 0 0 12px; }
+.draft-editor-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; margin: 0; }
+.draft-editor-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.draft-editor-field label { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.draft-editor-path { color: var(--q-ink); font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+.draft-editor-kind { color: var(--q-ink-soft); font-size: 11.5px; font-weight: 600; }
+/* The one field control: it fills its own column and stops there, so a narrow
+   window keeps the page itself from going sideways. */
+.draft-editor-input { width: 100%; box-sizing: border-box; min-width: 0; font-variant-numeric: tabular-nums; }
+.draft-editor-input:focus-visible { outline: 2px solid var(--q-red); outline-offset: 1px; }
+/* A field the host does not allow stays readable and says why it cannot move. */
+.draft-editor-input[readonly] { border-style: dashed; background: var(--q-surface-soft); color: var(--q-ink-soft); }
+.draft-editor-bound { margin: 0; font-size: 11.5px; overflow-wrap: anywhere; }
+.draft-editor-contract { margin-top: 12px; }
+.draft-editor-contract p { margin: 6px 0 0; }
+.draft-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+/* The one declared action of this block, in the workspace's teal. */
+.draft-editor-actions .primary {
+  border-color: var(--q-primary); background: var(--q-primary); color: var(--q-primary-ink); font-weight: 600;
+}
+.draft-editor-actions .primary:hover:not(:disabled) {
+  border-color: var(--q-primary-strong); background: var(--q-primary-strong); color: var(--q-primary-ink);
+}
+/* A save that cannot run yet reads as an ordinary disabled control rather than
+   keeping the filled teal of an available action. */
+.draft-editor-actions .primary:disabled {
+  border-color: var(--q-field-line); background: var(--q-surface-soft); color: var(--q-ink-soft);
+}
+
+@media (max-width: 640px) {
+  .draft-editor { padding: 14px 16px; }
+  .draft-editor-fields { grid-template-columns: minmax(0, 1fr); }
+  .draft-editor-actions button { flex: 1 1 auto; }
+}

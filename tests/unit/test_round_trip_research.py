@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,21 @@ from ea.product import generate_backtest_report, load_backtest_scenario, run_bac
 from ea.product.equity_path import generate_equity_path_analysis
 from ea.web.service import WebService
 from unit.test_single_round_trip_v1 import closed_scenario
+
+
+def _await_success(service: Any, job_id: str, bound: float = 60.0) -> Any:
+    """A stopped attempt is not a completed one: wait for the persisted success."""
+    deadline = time.monotonic() + bound
+    while time.monotonic() < deadline:
+        job = service.get_job(job_id)
+        if job.status == "succeeded":
+            return job
+        if job.status not in {"accepted", "running", "stopping"}:
+            raise AssertionError(
+                f"job {job_id} became {job.status!r}: {job.error_code} {job.message}"
+            )
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} did not succeed within {bound}s")
 
 
 def test_v2_path_uses_each_acknowledged_cash_balance(tmp_path: Path) -> None:
@@ -38,7 +54,10 @@ def test_v4_web_runs_and_reopens_persisted_evidence(tmp_path: Path) -> None:
     job, _ = service.create_job(
         scenario_id=path.name, input_identity=summary["input_identity"], request_id="round-trip"
     )
-    service.stop()
+    try:
+        _await_success(service, job.job_id)
+    finally:
+        service.stop()
     record = service.get_job(job.job_id)
     assert record.status == "succeeded"
     assert record.schema == "ea.local-web-job.v4"

@@ -10,6 +10,36 @@ export type Candidate = {
   projection?: { strategy: { id: string; version: number; parameters: Record<string, string | number> }; source: Evidence; holdout: Evidence; relationship: { validation_id: string; sha256: string } }
 }
 
+export type SimulationPreparation = {
+  eligible: boolean; blockers: string[]; fingerprint: string; scenario_version: number
+  execution_authorized: false; start_available: boolean; runtime_state: 'not_started'
+  binding: Record<string, unknown> | null; required_action: string; stop_semantics: string
+  small_sample_warning: boolean
+}
+
+function SimulationReadiness({ api, candidateId, status }: { api: ApiAdapter; candidateId: string; status: string }) {
+  const [preparation, setPreparation] = useState<SimulationPreparation | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true
+    api.prepareSimulation?.(candidateId).then(value => { if (active) { setPreparation(value); setError('') } }).catch(() => { if (active) { setPreparation(null); setError('Preparation error: candidate evidence could not be verified. Reload to retry.') } })
+    return () => { active = false }
+  }, [api, candidateId, status])
+  if (!api.prepareSimulation) return null
+  return <section className="panel" aria-label="Local simulation preparation"><h2>Local simulation preparation</h2>
+    <p>Generated local prices · in-process Paper broker · no external account · Live unavailable.</p>
+    {error && <p role="alert">{error}</p>}
+    {preparation && <><p>{preparation.eligible ? 'Profile eligible; separate startup authorization required.' : 'Blocked for local Paper startup.'}</p>
+      <dl className="summary-list"><div><dt>Runtime</dt><dd>{preparation.runtime_state}</dd></div><div><dt>Scenario version</dt><dd>{preparation.scenario_version}</dd></div><div><dt>Bound fingerprint</dt><dd>{preparation.fingerprint}</dd></div></dl>
+      <ul>{preparation.blockers.map(reason => <li key={reason}>{reason.replaceAll('_', ' ')}</li>)}</ul>
+      {preparation.binding && <details><summary>Verified accepted binding</summary><pre>{JSON.stringify(preparation.binding, null, 2)}</pre></details>}
+      {preparation.small_sample_warning && <p className="notice">Six or fewer records: workflow validation only. This is insufficient for automatic economic approval.</p>}
+      <p>{preparation.required_action}</p><p>{preparation.stop_semantics}</p>
+      {preparation.start_available && preparation.eligible ? <Link to={`/runs?candidate=${encodeURIComponent(candidateId)}`}>检查配置并启动本地模拟</Link> : <p>此入口不可启动，或候选配置不支持本地模拟。</p>}
+    </>}
+  </section>
+}
+
 export function CandidateCreate({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   const navigate = useNavigate()
   const [relations, setRelations] = useState<ChronologicalHoldout[]>([])
@@ -85,6 +115,7 @@ function CandidateDetailContent({ api, candidateId }: { api: ApiAdapter; candida
         {record.status === 'EVALUATED' && <><label htmlFor="candidate-reason">Decision reason</label><textarea id="candidate-reason" maxLength={4096} value={reason} onChange={event => setReason(event.target.value)} /><div className="actions"><button disabled={!reason.trim() || busy} onClick={() => { void decide('ACCEPTED') }}>Accept candidate</button><button disabled={!reason.trim() || busy} onClick={() => { void decide('REJECTED') }}>Reject candidate</button></div></>}
         {record.decision && <><h3>Decision reason</h3><p>{record.decision.reason}</p><time>{record.decision.decided_at}</time></>}
       </section>
+      <SimulationReadiness api={api} candidateId={candidateId} status={record.status} />
       <section className="panel"><h2>Pinned evidence</h2><p><Link to={`/holdouts/${record.projection.relationship.validation_id}`}>Chronological Holdout evaluation</Link></p>
         <div className="compare-identities">{(['source', 'holdout'] as const).map(role => { const evidence = record.projection![role]; return <section key={role}><h3>{role === 'source' ? 'Source run' : 'Holdout run'}</h3><Link to={`/backtests/${evidence.job_id}`}>{evidence.job_id}</Link><dl className="summary-list">{Object.entries(evidence).filter(([key]) => key !== 'job_id').map(([key, value]) => <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</dd></div>)}</dl></section> })}</div>
       </section>

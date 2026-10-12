@@ -228,6 +228,16 @@ def test_round_trip_candidate_binds_nominal_report_and_path_versions(
         "record_count": dataset.selection.fingerprint.record_count,
     }
     (root / "later.yaml").write_text(yaml.safe_dump(target_document))
+    import time
+
+    def await_success(service: WebService, job_id: str) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if service.get_job(job_id).status not in {"queued", "running"}:
+                break
+            time.sleep(0.025)
+        assert service.get_job(job_id).status == "succeeded"
+
     service = WebService(root, tmp_path / "workspace")
     service.start()
     try:
@@ -239,6 +249,7 @@ def test_round_trip_candidate_binds_nominal_report_and_path_versions(
             input_identity=identity,
             request_id="candidate-version-source",
         )
+        await_success(service, source.job_id)
     finally:
         service.stop()
     assert service.get_job(source.job_id).status == "succeeded"
@@ -246,6 +257,7 @@ def test_round_trip_candidate_binds_nominal_report_and_path_versions(
     service.start()
     try:
         relation = service.create_holdout(source_job_id=source.job_id, scenario_id="later.yaml")
+        await_success(service, relation["holdout_job_id"])
     finally:
         service.stop()
     assert service.get_job(relation["holdout_job_id"]).status == "succeeded"

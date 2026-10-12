@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from ea.product.trade_analytics import summarize_trades, trade_analytics
+
+
+def _await_success(service: Any, job_id: str, bound: float = 60.0) -> Any:
+    """A stopped attempt is not a completed one: wait for the persisted success."""
+    deadline = time.monotonic() + bound
+    while time.monotonic() < deadline:
+        job = service.get_job(job_id)
+        if job.status == "succeeded":
+            return job
+        if job.status not in {"accepted", "running", "stopping"}:
+            raise AssertionError(
+                f"job {job_id} became {job.status!r}: {job.error_code} {job.message}"
+            )
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} did not succeed within {bound}s")
 
 
 def test_closed_trade_statistics_exclude_open_position() -> None:
@@ -66,7 +82,10 @@ def test_web_analytics_reopens_without_csv_and_rejects_corruption(tmp_path: Path
     job, _ = service.create_job(
         scenario_id=path.name, input_identity=summary["input_identity"], request_id="analytics"
     )
-    service.stop()
+    try:
+        _await_success(service, job.job_id)
+    finally:
+        service.stop()
     first = service.trade_analytics(job.job_id)
     (path.parent / "prices.csv").unlink()
     reopened = WebService(path.parent, tmp_path / "workspace")

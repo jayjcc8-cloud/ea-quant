@@ -456,3 +456,31 @@ def test_target_fingerprint_rechecked_after_candidate_listing(tmp_path: Path) ->
         target.write_bytes(target.read_bytes().replace(b"110.0", b"109.0"))
         assert _request(client, source).status_code == 422
         assert len(client.get("/api/backtests").json()["jobs"]) == 1
+
+
+def test_a_supplied_holdout_identity_is_enforced(tmp_path: Path) -> None:
+    """A caller stating what it confirmed is held to it; omission stays legacy.
+
+    This workspace's own holdout path keeps its original contract — a request that
+    names no expected input is accepted exactly as before — but a request that does
+    name one is never silently ignored, so a caller written against the newer
+    contract is bound to the input it was shown.
+    """
+    settings = _settings(tmp_path)
+    _target(settings.scenario_root)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        source = _source(client)
+        listed = client.get(f"/api/backtests/{source['job_id']}/holdout-scenarios")
+        offered = listed.json()["scenarios"][0]["input_identity"]
+
+        refused = _request(client, source, input_identity={**offered, "scenario_sha256": "0" * 64})
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["error"]["code"] == "holdout_invalid"
+        assert len(client.get("/api/backtests").json()["jobs"]) == 1
+        assert client.get("/api/holdouts").json()["holdouts"] == []
+
+        accepted = _request(client, source, input_identity=offered)
+        assert accepted.status_code == 202, accepted.text
+        holdout = _wait(client, accepted.json()["holdout_job_id"])
+        assert holdout["status"] == "succeeded"
+        assert holdout["input_snapshot"]["identity"] == offered

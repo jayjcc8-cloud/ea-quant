@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -11,7 +12,8 @@ from ea.core import AuditRecordKind, RunBinding, RunReference, Sha256Digest
 from ea.product import load_backtest_scenario
 from ea.product.market_stream import LocalSimulatedMarketSource, run_local_market_stream
 from ea.product.offline_demo import _DemoAudit
-from ea.product.paper import PaperTradingSession
+from ea.product.paper import PAPER_MARKET_AUDIT_FRAMES, PaperTradingSession
+from ea.risk.operational_safety import OperationalSafetyLimits
 from unit.test_bounded_round_trips_v1 import bounded_scenario
 from unit.test_streaming import RUN_ID, SOURCE, ControlledClock
 
@@ -180,3 +182,142 @@ def test_stop_arriving_during_pre_effect_fsync_prevents_transport(tmp_path: Path
     assert engine.status()["reason"] == "stop_requested"
     assert engine.status()["orders"] == 0
     assert not engine.broker._records
+
+
+def test_every_dispatch_stays_inside_the_checked_four_frame_market_bound(tmp_path: Path) -> None:
+    """The capacity envelope is funded per dispatch, never from an average."""
+    engine, clock = session(tmp_path)
+    durable: dict[int, int] = {}
+    markets: list[int] = []
+    append = engine.audit.append
+    on_market = engine.on_market
+
+    def counting_append(**kwargs: Any) -> Any:
+        audit = cast(_DemoAudit, engine.audit)
+        before = len(audit.records)
+        result = append(**kwargs)
+        sequence = engine.runtime.status().dispatch_sequence
+        durable[sequence] = durable.get(sequence, 0) + len(audit.records) - before
+        return result
+
+    def recording_market(root: Any, sequence: int) -> None:
+        markets.append(sequence)
+        on_market(root, sequence)
+
+    engine.audit.append = counting_append  # type: ignore[method-assign]
+    engine.on_market = recording_market  # type: ignore[method-assign]
+    drive(engine, clock)
+    status = engine.status()
+    assert status["market_events"] == 20
+    assert len(markets) == status["market_events"]
+    assert max(durable.values()) == PAPER_MARKET_AUDIT_FRAMES
+    orders = 2 * engine.max_round_trips
+    assert (
+        sorted(durable[sequence] for sequence in markets)
+        == [1] * (len(markets) - orders) + [PAPER_MARKET_AUDIT_FRAMES] * orders
+    )
+    fact_sequences = [sequence for sequence in durable if sequence not in set(markets)]
+    # Every fact dispatch closes in exactly one budgeted four-frame cascade: the
+    # acknowledgement, the trade itself and the broker query child of that trade.
+    # The query child is economically a duplicate (no Fill and no ledger effect)
+    # yet it is a distinct retained record set, so it still costs its own frames.
+    assert len(fact_sequences) == 3 * orders
+    assert sum(durable[sequence] for sequence in fact_sequences) == (
+        PAPER_MARKET_AUDIT_FRAMES * 3 * orders
+    )
+    assert {durable[sequence] for sequence in fact_sequences} == {PAPER_MARKET_AUDIT_FRAMES}
+    assert status["duplicate_facts"] == orders
+
+
+def _limits(**overrides: Any) -> OperationalSafetyLimits:
+    values: dict[str, Any] = {
+        "max_market_age_seconds": 5.0,
+        "max_daily_loss": Decimal("1000"),
+        "max_total_exposure": Decimal("1000"),
+        "max_open_orders": 2,
+        "max_order_rate": 20,
+        "order_rate_window_seconds": 60.0,
+        "max_price_deviation_bps": 250,
+    }
+    values.update(overrides)
+    return OperationalSafetyLimits(**values)
+
+
+@pytest.mark.parametrize(
+    "limits,verdict,fill_cap",
+    [
+        (_limits(max_total_exposure=Decimal("1")), "deny", 0),
+        (_limits(max_daily_loss=Decimal("0.01")), "halt", 6),
+    ],
+)
+def test_non_allow_safety_markets_stay_inside_the_four_frame_bound(
+    tmp_path: Path,
+    limits: OperationalSafetyLimits,
+    verdict: str,
+    fill_cap: int,
+) -> None:
+    """A denied or halted market is still one budgeted four-frame dispatch."""
+    engine, clock = session(tmp_path, operational_limits=limits)
+    durable: dict[int, int] = {}
+    markets: list[int] = []
+    append = engine.audit.append
+    on_market = engine.on_market
+
+    def counting_append(**kwargs: Any) -> Any:
+        audit = cast(_DemoAudit, engine.audit)
+        before = len(audit.records)
+        result = append(**kwargs)
+        sequence = engine.runtime.status().dispatch_sequence
+        durable[sequence] = durable.get(sequence, 0) + len(audit.records) - before
+        return result
+
+    def recording_market(root: Any, sequence: int) -> None:
+        markets.append(sequence)
+        on_market(root, sequence)
+
+    engine.audit.append = counting_append  # type: ignore[method-assign]
+    engine.on_market = recording_market  # type: ignore[method-assign]
+    drive(engine, clock)
+    status = engine.status()
+    safety = [
+        json.loads(record.canonical_payload)
+        for record in cast(_DemoAudit, engine.audit).records
+        if record.record_kind is AuditRecordKind.PAPER_OPERATIONAL_SAFETY
+    ]
+    # The non-ALLOW branch really ran, and no market or fact dispatch ever
+    # exceeded the four-frame budget. A DENY refuses only that one effect and
+    # keeps streaming, while a HALT engages the authoritative safety halt and
+    # stops the runtime, so its market count is bounded rather than fixed.
+    assert safety and {payload["verdict"] for payload in safety} == {verdict}
+    assert len(markets) == status["market_events"]
+    assert 1 <= status["market_events"] <= 20
+    assert status["risk_halted"] is (verdict == "halt")
+    assert status["fills"] <= fill_cap
+    assert max(durable.values()) <= PAPER_MARKET_AUDIT_FRAMES
+    assert all(durable[sequence] <= PAPER_MARKET_AUDIT_FRAMES for sequence in markets)
+
+
+def test_trade_query_duplicate_reuses_the_trade_fact_without_new_effects(tmp_path: Path) -> None:
+    """A query child carries the trade dedup identity and cannot recurse."""
+    engine, clock = session(tmp_path)
+    drive(engine, clock)
+    dispatches: dict[str, list[dict[str, Any]]] = {}
+    for record in cast(_DemoAudit, engine.audit).records:
+        if record.record_kind is not AuditRecordKind.PAPER_FACT_DISPATCH:
+            continue
+        document = json.loads(record.canonical_payload)
+        dispatches.setdefault(document["ingress"]["fact"]["fact_sha256"], []).append(document)
+    status = engine.status()
+    assert max(len(group) for group in dispatches.values()) == 2
+    revisited = [group for group in dispatches.values() if len(group) == 2]
+    assert len(revisited) == status["fills"] == 6
+    assert status["duplicate_facts"] == len(revisited)
+    assert status["observed_fills"] == status["fills"]
+    assert status["ledger_sequence"] == 7
+    # The child is dispatched once as the identical retained fact, so the ledger
+    # and the retained Fill set hold exactly one effect per order.
+    for group in revisited:
+        first, second = (entry["ingress"]["fact"] for entry in group)
+        assert first["fact_sha256"] == second["fact_sha256"]
+        assert first["dedup_identity"] == second["dedup_identity"]
+        assert group[0]["dispatch_sequence"] != group[1]["dispatch_sequence"]

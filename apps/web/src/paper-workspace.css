@@ -1,0 +1,529 @@
+/*
+ * QUINE local simulation runtime workspace.
+ *
+ * Scoped to .paper-workspace. The palette is the shell's one palette — a #F6F8FA
+ * page, white and light-grey surfaces, #E3E8EE hairline rules, #17212F text and
+ * the single #007F8B teal — read here through the --ink / --surface / --soft /
+ * --line / --accent tokens the shell already restates for the dark theme, so the
+ * dark palette arrives through the same names and nothing in this file hard-codes
+ * a colour that only works in the light theme. The two colours the shell does not
+ * name as tokens for this page are the red of the one irreversible action and the
+ * running green, both taken from the danger and positive tokens.
+ *
+ * Desktop: two columns. The runtime the operator is watching takes the room; the
+ * AI column keeps a fixed ~320px beside it — at a 1360px window, after the 190px
+ * navigation the shell gives a page, that is the width it is designed to land on.
+ * The page scrolls vertically by design: the observation strip, the equality card
+ * and the event log are read by scrolling, and nothing here pins the viewport.
+ *
+ * Every figure on this page is read against the figure beside it — equity, cash,
+ * a position, a price — so the surfaces that carry them are set in tabular
+ * figures, and a long identifier or an unrounded price wraps inside its own cell
+ * rather than widening the page. Nothing in this file draws a chart: the numbers
+ * are the data, and there is no fabricated series behind them.
+ *
+ * The AI column is deliberately not a chat. Its text says what it cannot do, so
+ * it is styled as one quiet card with its own boundary note — there is no
+ * composer, no suggestion chip and no empty message list to imply otherwise.
+ */
+
+.paper-workspace {
+  --paper-ink: var(--ink, #17212f);
+  --paper-ink-strong: var(--ink-strong, #101a28);
+  --paper-ink-soft: var(--muted, #5a6672);
+  --paper-line: var(--line, #e3e8ee);
+  --paper-line-soft: var(--line-soft, #edf1f5);
+  --paper-surface: var(--surface, #ffffff);
+  --paper-surface-soft: var(--soft, #f1f4f8);
+  --paper-accent: var(--accent, #007f8b);
+  --paper-accent-line: var(--accent-line, #bfe0e4);
+  --paper-notice: var(--notice, #eff7f8);
+  --paper-notice-line: var(--notice-line, #cfe4e7);
+  --paper-field-line: var(--field-line, #d3dae2);
+  --paper-positive: var(--positive, #2c6b57);
+  --paper-danger: var(--danger, #9c3540);
+  --paper-danger-soft: var(--danger-soft, #fff5f5);
+  --paper-danger-line: var(--danger-line, #e4bfc3);
+
+  display: grid;
+  /* The observed runtime takes the room; the AI column keeps a fixed 320px it
+     never grows past. The min on the first column is what the window is allowed
+     to reach before the two stack at 1100px. */
+  grid-template-columns: minmax(280px, 1fr) 320px;
+  gap: 20px;
+  align-items: start;
+  min-width: 0;
+  color: var(--paper-ink);
+  /* The page scrolls down, never sideways: a long symbol, currency code or a row
+     of prices wraps inside its own column instead of pushing the viewport wider. */
+  overflow-x: hidden;
+}
+
+.paper-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
+
+/* Heading: the instance name, what it is, and the three controls on the right. */
+.paper-heading {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px 20px; flex-wrap: wrap;
+  padding-bottom: 14px; border-bottom: 1px solid var(--paper-line);
+}
+.paper-heading > div:first-child { min-width: 0; }
+.paper-eyebrow {
+  margin: 0 0 2px; color: var(--paper-ink-soft);
+  font-size: 11.5px; font-weight: 700; letter-spacing: .1em;
+}
+.paper-heading h1 {
+  margin: 0; color: var(--paper-ink-strong);
+  font-size: 24px; font-weight: 650; letter-spacing: -.02em; overflow-wrap: anywhere;
+}
+.paper-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px;
+  margin-top: 8px; color: var(--paper-ink-soft); font-size: 12.5px;
+}
+/* The mode badge is the one thing on this line that is a claim about the run, so
+   it is the one thing that carries a border and the accent's quiet background. */
+.paper-mode {
+  padding: 2px 9px; border: 1px solid var(--paper-accent-line); border-radius: 999px;
+  background: var(--paper-notice); color: var(--paper-accent);
+  font-size: 12px; font-weight: 650;
+}
+.paper-meta a { color: var(--paper-ink-soft); }
+.paper-meta a:hover, .paper-meta a:focus-visible { color: var(--paper-accent); text-decoration: underline; text-underline-offset: 3px; }
+
+.paper-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.paper-workspace button {
+  min-height: 36px; padding: 7px 12px; border: 1px solid var(--paper-field-line);
+  border-radius: 8px; background: var(--paper-surface); color: var(--paper-ink);
+  font: inherit; font-size: 13.5px; cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.paper-workspace button:hover:not(:disabled) { border-color: var(--paper-ink-soft); }
+.paper-workspace button:disabled { cursor: not-allowed; opacity: .45; }
+.paper-workspace button:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: 2px; }
+/* Stopping is the one action here that cannot be undone by starting again, so it
+   is the one red control on the page. */
+.paper-workspace .paper-stop { border-color: var(--paper-danger-line); color: var(--paper-danger); }
+.paper-workspace .paper-stop:hover:not(:disabled) { border-color: var(--paper-danger); background: var(--paper-danger-soft); }
+/* Starting is the page's one primary action, in the shell's teal. */
+.paper-workspace .paper-primary {
+  min-height: 40px; padding: 9px 16px;
+  border-color: var(--paper-accent); background: var(--paper-accent);
+  color: var(--accent-ink, #fff); font-size: 14px; font-weight: 650;
+}
+.paper-workspace .paper-primary:hover:not(:disabled) { border-color: var(--paper-accent); background: var(--paper-accent); opacity: .92; }
+
+/* A stop that was requested but not confirmed: the request is not the outcome, so
+   it stays in the amber the shell uses for a state that is still moving. */
+.paper-workspace .paper-unknown {
+  padding: 14px 16px; border: 1px solid var(--amber-line, #dfd2b4); border-radius: 8px;
+  background: var(--paper-surface-soft); color: var(--paper-ink);
+}
+.paper-workspace .paper-unknown strong { display: block; font-size: 14px; font-weight: 650; }
+.paper-workspace .paper-unknown p { margin-top: 4px; color: var(--paper-ink-soft); font-size: 13px; }
+.paper-workspace .paper-unknown button { margin-top: 10px; }
+
+.paper-workspace .notice {
+  margin: 0; padding: 12px 14px; border: 1px solid var(--paper-notice-line); border-radius: 8px;
+  background: var(--paper-notice); font-size: 13.5px; overflow-wrap: anywhere;
+}
+.paper-workspace .notice.error {
+  border-color: var(--paper-danger-line); background: var(--paper-danger-soft); color: var(--paper-danger);
+}
+
+/* History: which instance the block below is describing. A compact line, not a
+   second heading — it keeps a label and a bounded select on one row. */
+.paper-workspace .paper-history {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0; color: var(--paper-ink-soft); font-size: 12.5px; font-weight: 600;
+}
+.paper-workspace .paper-history select { width: auto; min-width: 0; max-width: 100%; flex: 1 1 320px; }
+
+.paper-workspace select, .paper-workspace input, .paper-workspace textarea {
+  min-height: 38px; padding: 8px 10px; border: 1px solid var(--paper-field-line);
+  border-radius: 8px; background: var(--paper-surface); color: var(--paper-ink);
+  font: inherit; font-size: 14px; font-variant-numeric: tabular-nums;
+}
+.paper-workspace select:focus-visible, .paper-workspace input:focus-visible,
+.paper-workspace textarea:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: 1px; }
+.paper-workspace input[type="checkbox"] {
+  width: auto; min-height: 0; margin: 0; padding: 0;
+  accent-color: var(--paper-accent);
+}
+
+/* Setup: one card, one paragraph of framing, then the fixed configuration the
+   candidate was accepted under, then the three fields. */
+.paper-workspace .paper-setup {
+  padding: 16px; border: 1px solid var(--paper-line); border-radius: 8px;
+  background: var(--paper-surface);
+}
+.paper-workspace .paper-setup > header {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px 16px; flex-wrap: wrap; margin-bottom: 8px;
+}
+.paper-workspace .paper-setup h2 { margin: 0; font-size: 17px; font-weight: 650; }
+.paper-workspace .paper-setup > header a { color: var(--paper-ink-soft); font-size: 12.5px; }
+.paper-workspace .paper-setup > header a:hover,
+.paper-workspace .paper-setup > header a:focus-visible { color: var(--paper-accent); text-decoration: underline; text-underline-offset: 3px; }
+.paper-workspace .paper-setup > p { max-width: 76ch; margin-bottom: 6px; color: var(--paper-ink-soft); font-size: 13px; }
+.paper-workspace .paper-setup > label { margin-top: 10px; }
+.paper-workspace .paper-setup a { color: var(--paper-accent); }
+.paper-workspace .paper-setup a:hover, .paper-workspace .paper-setup a:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+
+.paper-workspace label { display: block; margin: 6px 0; color: var(--paper-ink-soft); font-size: 12.5px; font-weight: 600; }
+.paper-workspace label select, .paper-workspace label input { margin-top: 5px; }
+.paper-workspace small { display: block; margin-top: 4px; color: var(--paper-ink-soft); font-size: 12px; font-weight: 400; line-height: 1.5; }
+
+/* What the candidate froze: a small definition list under one hairline. */
+.paper-workspace .paper-fixed {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--paper-line);
+  min-width: 0;
+}
+.paper-workspace .paper-fixed h3 { margin: 0 0 8px; font-size: 14px; font-weight: 650; }
+.paper-workspace .paper-fixed dl {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 20px; margin: 0;
+}
+.paper-workspace .paper-fixed dl > div { min-width: 0; }
+.paper-workspace .paper-fixed dt { color: var(--paper-ink-soft); font-size: 12px; font-weight: 600; }
+.paper-workspace .paper-fixed dd { margin: 2px 0 0; color: var(--paper-ink); font-size: 13.5px; overflow-wrap: anywhere; }
+.paper-workspace .paper-fixed dd a { color: var(--paper-accent); font-weight: 600; }
+.paper-workspace .paper-fixed dd a:hover,
+.paper-workspace .paper-fixed dd a:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+.paper-workspace .paper-fixed details { margin-top: 10px; }
+.paper-workspace .paper-fixed summary { color: var(--paper-ink-soft); font-size: 12.5px; cursor: pointer; }
+.paper-workspace .paper-fixed summary:hover { color: var(--paper-ink); }
+/* The frozen parameters are one JSON block: monospace, and the one place a wide
+   value is allowed to scroll inside its own box rather than wrap. */
+.paper-workspace .paper-fixed pre {
+  margin: 8px 0 0; padding: 10px 12px; max-width: 100%; overflow-x: auto;
+  border: 1px solid var(--paper-line-soft); border-radius: 8px; background: var(--paper-surface-soft);
+  color: var(--paper-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; line-height: 1.5;
+}
+/* A blocker is the reason this candidate cannot start; a caution only qualifies
+   evidence that is short. They read differently because they act differently. */
+.paper-workspace .paper-setup p[role="alert"] {
+  margin-top: 10px; padding: 10px 12px; border: 1px solid var(--paper-danger-line); border-radius: 8px;
+  background: var(--paper-danger-soft); color: var(--paper-danger); font-size: 13px;
+}
+.paper-workspace .paper-caution {
+  margin-top: 10px; padding: 10px 12px; border: 1px solid var(--amber-line, #dfd2b4); border-radius: 8px;
+  background: var(--paper-surface-soft); color: var(--amber, #876625); font-size: 13px;
+}
+
+/* Three fields to a row while the window is wide; each one keeps its own column
+   so a long generated price list never reaches past it. */
+.paper-workspace .paper-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 16px; margin-top: 4px; }
+.paper-workspace .paper-fields > label { min-width: 0; }
+.paper-workspace .paper-fields input { width: 100%; min-width: 0; }
+
+/* The one confirmation, before a control that starts a real process. */
+.paper-workspace .paper-confirm {
+  display: flex; align-items: flex-start; gap: 9px;
+  margin: 14px 0 0; color: var(--paper-ink); font-size: 13px; font-weight: 500; line-height: 1.55;
+}
+.paper-workspace .paper-confirm input { flex: 0 0 auto; margin-top: 3px; }
+.paper-workspace .paper-primary { margin-top: 12px; }
+
+/* Observation strip: four separate readings of the same run. Process and lease,
+   strategy heartbeat and market freshness are the three things that can be
+   individually unknown, so they are individually separated. */
+.paper-workspace .paper-status-strip {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--paper-line); border-radius: 8px;
+  background: var(--paper-surface); overflow: hidden;
+}
+.paper-workspace .paper-status-strip > div { min-width: 0; padding: 12px 14px; border-left: 1px solid var(--paper-line-soft); }
+.paper-workspace .paper-status-strip > div:first-child { border-left: 0; }
+.paper-workspace .paper-status-strip span { display: block; color: var(--paper-ink-soft); font-size: 12px; font-weight: 600; }
+.paper-workspace .paper-status-strip strong {
+  display: block; margin-top: 3px; color: var(--paper-ink);
+  font-size: 14px; font-weight: 650; overflow-wrap: anywhere;
+}
+.paper-workspace .paper-status-dot {
+  display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%;
+  background: var(--paper-ink-soft); vertical-align: middle;
+}
+.paper-workspace .paper-status-strip > div:first-child { display: flex; align-items: center; }
+.paper-workspace .paper-status-strip > div:first-child strong { margin-top: 0; }
+/* Only a run whose lease is held, whose process is alive and whose projection is
+   not stale marks itself: every other reading on this strip stays the neutral
+   ink-grey, because an unconfirmed state must not read as a healthy one. */
+.paper-workspace .paper-status-strip.is-fresh .paper-status-dot {
+  background: var(--paper-positive);
+  box-shadow: 0 0 0 3px var(--paper-notice);
+}
+
+.paper-workspace .paper-times {
+  display: flex; flex-wrap: wrap; gap: 4px 20px; margin-top: -6px;
+  color: var(--paper-ink-soft); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+
+/* The three views are hairlines, not a segmented control. */
+.paper-workspace .paper-tabs { display: flex; flex-wrap: wrap; gap: 0 2px; border-bottom: 1px solid var(--paper-line); }
+.paper-workspace .paper-tabs button {
+  min-height: 36px; padding: 7px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  background: transparent; color: var(--paper-ink-soft); font-size: 13.5px; font-weight: 500;
+}
+.paper-workspace .paper-tabs button:hover:not(:disabled) { border-color: transparent; background: var(--paper-surface-soft); color: var(--paper-ink); }
+.paper-workspace .paper-tabs button[aria-pressed="true"] { color: var(--paper-ink); border-bottom-color: var(--paper-accent); font-weight: 650; }
+.paper-workspace .paper-tabs button[aria-pressed="true"]:hover { background: transparent; }
+
+/* The account card: one large real equity figure over four flat metrics. It is a
+   number, not a chart — the endpoint publishes no equity series, so nothing here
+   draws a trend that does not exist. */
+.paper-workspace .paper-account {
+  padding: 16px; border: 1px solid var(--paper-line); border-radius: 8px; background: var(--paper-surface);
+}
+.paper-workspace .paper-account > header {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap;
+}
+.paper-workspace .paper-account h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.paper-workspace .paper-account > header span { color: var(--paper-ink-soft); font-size: 12.5px; text-align: right; }
+.paper-workspace .paper-equity {
+  margin: 10px 0 6px; color: var(--paper-ink-strong);
+  font-size: 36px; font-weight: 650; line-height: 1.1; letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.paper-workspace .paper-equity small { display: inline; margin: 0 0 0 8px; color: var(--paper-ink-soft); font-size: 15px; font-weight: 600; }
+.paper-workspace .paper-account > p { max-width: 76ch; color: var(--paper-ink-soft); font-size: 12.5px; }
+
+.paper-workspace .paper-metrics {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 14px; border-top: 1px solid var(--paper-line);
+}
+.paper-workspace .paper-metrics > div { min-width: 0; padding: 12px 14px 2px 0; }
+.paper-workspace .paper-metrics > div + div { padding-left: 14px; border-left: 1px solid var(--paper-line-soft); }
+.paper-workspace .paper-metrics span { display: block; color: var(--paper-ink-soft); font-size: 12px; font-weight: 600; }
+.paper-workspace .paper-metrics strong {
+  display: block; margin-top: 4px; color: var(--paper-ink-strong);
+  font-size: 20px; font-weight: 650; letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+
+/* Position and event facts: one card, one tidy table, one flat definition list. */
+.paper-workspace .paper-facts {
+  padding: 16px; border: 1px solid var(--paper-line); border-radius: 8px; background: var(--paper-surface); min-width: 0;
+}
+.paper-workspace .paper-facts h2 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+.paper-workspace .paper-facts > p { max-width: 76ch; margin-top: 10px; color: var(--paper-ink-soft); font-size: 12.5px; }
+.paper-workspace .paper-facts dl {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px 20px; margin: 14px 0 0;
+}
+.paper-workspace .paper-facts dl > div { min-width: 0; }
+.paper-workspace .paper-facts dt { color: var(--paper-ink-soft); font-size: 12px; font-weight: 600; }
+.paper-workspace .paper-facts dd { margin: 2px 0 0; color: var(--paper-ink); font-size: 14px; overflow-wrap: anywhere; }
+
+/* A row wider than its column scrolls inside this box, never as the page. */
+.paper-workspace .paper-table-wrap { max-width: 100%; overflow-x: auto; }
+.paper-workspace table { width: 100%; margin: 0; border-collapse: collapse; font-size: 13.5px; }
+.paper-workspace th {
+  padding: 8px 12px 8px 0; border-bottom: 1px solid var(--paper-line);
+  color: var(--paper-ink-soft); font-size: 12px; font-weight: 600; text-align: left; white-space: nowrap;
+}
+.paper-workspace td {
+  padding: 10px 12px 10px 0; border-top: 1px solid var(--paper-line-soft);
+  color: var(--paper-ink); font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.paper-workspace tbody tr:first-child td { border-top: 0; }
+.paper-workspace th:last-child, .paper-workspace td:last-child { padding-right: 0; }
+
+/* The event log: when, what, and how it turned out — one row each. */
+.paper-workspace .paper-event-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.paper-workspace .paper-event-list li {
+  display: flex; align-items: baseline; gap: 8px 14px; flex-wrap: wrap;
+  padding: 9px 0; border-top: 1px solid var(--paper-line-soft); min-width: 0;
+}
+.paper-workspace .paper-event-list li:first-child { border-top: 0; }
+.paper-workspace .paper-event-list time {
+  flex: 0 0 auto; color: var(--paper-ink-soft); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.paper-workspace .paper-event-list strong { color: var(--paper-ink); font-size: 13.5px; font-weight: 650; overflow-wrap: anywhere; }
+.paper-workspace .paper-event-list span { color: var(--paper-ink-soft); font-size: 12.5px; overflow-wrap: anywhere; }
+/* An event log that could not be read says so; it is not rendered as an empty one. */
+.paper-workspace .paper-facts > p:only-child { margin-top: 0; }
+
+.paper-workspace .paper-footnote {
+  display: flex; flex-wrap: wrap; gap: 4px 20px; padding-top: 12px;
+  border-top: 1px solid var(--paper-line); color: var(--paper-ink-soft); font-size: 12px;
+}
+.paper-workspace .paper-footnote details { flex: 1 1 100%; }
+.paper-workspace .paper-footnote summary { cursor: pointer; }
+.paper-workspace .paper-footnote p { margin-top: 6px; color: var(--paper-ink); font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* The AI column. It is one card that says plainly what it cannot do yet, one link
+   to the surface that can explain the evidence, and the boundary of this run. No
+   composer and no empty transcript: there is nothing here that pretends to be a
+   conversation the runtime cannot have. */
+.paper-ai {
+  position: sticky; top: 16px; align-self: start;
+  display: flex; flex-direction: column; gap: 12px;
+  min-width: 0; padding-left: 20px; border-left: 1px solid var(--paper-line);
+}
+.paper-ai > header { display: flex; align-items: center; gap: 9px; }
+.paper-ai > header h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.paper-workspace .paper-ai-spark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 7px;
+  background: var(--paper-notice); color: var(--paper-accent); font-size: 13px;
+}
+.paper-ai-context {
+  margin: -6px 0 0; color: var(--paper-ink-soft); font-size: 12px; overflow-wrap: anywhere;
+}
+.paper-workspace .paper-ai-note,
+.paper-workspace .paper-ai-boundary {
+  padding: 14px; border: 1px solid var(--paper-line); border-radius: 8px; background: var(--paper-surface);
+}
+.paper-workspace .paper-ai-note h3 { margin: 0 0 6px; font-size: 13.5px; font-weight: 650; }
+.paper-workspace .paper-ai-note p { color: var(--paper-ink-soft); font-size: 12.5px; line-height: 1.6; }
+.paper-workspace .paper-ai-note p + p { margin-top: 6px; }
+.paper-workspace .paper-ai-note a {
+  display: inline-flex; align-items: center; min-height: 32px; margin-top: 8px;
+  color: var(--paper-accent); font-size: 12.5px; font-weight: 650;
+}
+.paper-workspace .paper-ai-note a:hover,
+.paper-workspace .paper-ai-note a:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+/* The boundary card is the quietest surface in the column: it states a limit, so
+   it takes the page's soft grey rather than another white card. */
+.paper-workspace .paper-ai-boundary { background: var(--paper-surface-soft); }
+.paper-workspace .paper-ai-boundary strong { display: block; color: var(--paper-ink); font-size: 13px; font-weight: 650; }
+.paper-workspace .paper-ai-boundary p { margin-top: 6px; color: var(--paper-ink-soft); font-size: 12.5px; line-height: 1.6; }
+.paper-workspace .paper-ai-boundary p:first-of-type { margin-top: 8px; }
+
+/* Below the two-column width the runtime and the AI column stack: the page then
+   reads top to bottom, so the essential header, strip and actions are what the
+   first screen still holds. */
+@media (max-width: 1100px) {
+  .paper-workspace { grid-template-columns: minmax(0, 1fr); }
+  .paper-ai { position: static; padding-left: 0; padding-top: 14px; border-left: 0; border-top: 1px solid var(--paper-line); }
+}
+
+@media (max-width: 900px) {
+  .paper-workspace .paper-fields { grid-template-columns: minmax(0, 1fr); }
+  .paper-workspace .paper-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* The second row of metrics starts its own hairline rather than hanging off the
+     first cell's left rule. */
+  .paper-workspace .paper-metrics > div:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .paper-workspace .paper-metrics > div:nth-child(n+3) { border-top: 1px solid var(--paper-line-soft); }
+}
+
+@media (max-width: 640px) {
+  /* One column, a 16px edge, and every control back to a 44px target. */
+  .paper-workspace { gap: 14px; padding: 0 16px; }
+  .paper-workspace .paper-heading { gap: 12px; }
+  .paper-workspace .paper-heading h1 { font-size: 21px; }
+  .paper-workspace .paper-actions { margin-left: 0; width: 100%; }
+  .paper-workspace .paper-actions button { flex: 1 1 auto; }
+  .paper-workspace button, .paper-workspace .paper-primary { min-height: 44px; }
+  .paper-workspace select, .paper-workspace input, .paper-workspace textarea { min-height: 44px; }
+  .paper-workspace .paper-tabs button { min-height: 44px; }
+  .paper-workspace .paper-confirm, .paper-workspace .paper-fixed summary,
+  .paper-workspace .paper-footnote summary { min-height: 44px; align-items: center; }
+  .paper-workspace .paper-confirm input { margin-top: 0; }
+  .paper-workspace .paper-setup, .paper-workspace .paper-account, .paper-workspace .paper-facts { padding: 14px; }
+  .paper-workspace .paper-equity { font-size: 30px; }
+  .paper-workspace .paper-history select { flex: 1 1 100%; }
+}
+
+/* A phone is narrower than the four readings on the strip and than two metrics
+   side by side; both fold to two columns, and the price table scrolls inside its
+   own box, so the page itself never goes sideways. */
+@media (max-width: 390px) {
+  .paper-workspace { padding: 0 12px; }
+  .paper-workspace .paper-status-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .paper-workspace .paper-status-strip > div:nth-child(odd) { border-left: 0; }
+  .paper-workspace .paper-status-strip > div:nth-child(n+3) { border-top: 1px solid var(--paper-line-soft); }
+  .paper-workspace .paper-metrics strong { font-size: 18px; }
+  .paper-workspace .paper-equity { font-size: 26px; }
+  .paper-workspace .paper-event-list li { gap: 2px 10px; }
+}
+
+/*
+ * Runtime observation. One compact strip of readings over the reading's own
+ * context, timestamps, blocking reasons and its disclosure. The tone a reading
+ * carries is spent on its 8px icon and nothing else: a whole green row would read
+ * as a cleared order rather than a reading of an operability gate, so no row here
+ * is ever tinted. The names are new and scoped to this block — the older
+ * .paper-status-strip rules above are left untouched.
+ */
+.paper-workspace .paper-runtime-status {
+  min-width: 0; border: 1px solid var(--paper-line); border-radius: 8px;
+  background: var(--paper-surface); overflow: hidden;
+}
+.paper-workspace .paper-runtime-readings { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.paper-workspace .paper-runtime-readings > div { min-width: 0; padding: 11px 14px; border-left: 1px solid var(--paper-line-soft); }
+.paper-workspace .paper-runtime-readings > div:first-child { border-left: 0; }
+.paper-workspace .paper-runtime-label { display: block; color: var(--paper-ink-soft); font-size: 12px; font-weight: 600; }
+.paper-workspace .paper-runtime-value {
+  display: flex; align-items: center; gap: 7px; margin-top: 3px;
+  color: var(--paper-ink); font-size: 14px; font-weight: 650; overflow-wrap: anywhere;
+}
+/* The one mark that says good or blocked, and the neutral dot every other reading
+   keeps — an unconfirmed reading must not borrow either colour. */
+.paper-workspace .paper-runtime-icon {
+  flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--paper-ink-soft);
+}
+.paper-workspace .paper-runtime-value.tone-good .paper-runtime-icon { background: var(--paper-positive); }
+.paper-workspace .paper-runtime-value.tone-blocked .paper-runtime-icon { background: var(--paper-danger); }
+
+.paper-workspace .paper-runtime-body {
+  display: grid; gap: 7px; padding: 11px 14px 12px; border-top: 1px solid var(--paper-line-soft);
+}
+.paper-workspace .paper-runtime-context {
+  max-width: 90ch; color: var(--paper-ink-soft); font-size: 12.5px; line-height: 1.6; overflow-wrap: anywhere;
+}
+.paper-workspace .paper-runtime-times {
+  display: flex; flex-wrap: wrap; gap: 3px 18px;
+  color: var(--paper-ink-soft); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+/* A blocking reason is a statement about this reading, not a second card: it takes
+   a single hairline on its left rather than a panel of its own. */
+.paper-workspace .paper-runtime-reasons { padding-left: 10px; border-left: 2px solid var(--paper-danger-line); }
+.paper-workspace .paper-runtime-reasons ul {
+  margin: 3px 0 0; padding-left: 16px; color: var(--paper-ink); font-size: 12.5px; line-height: 1.6;
+}
+.paper-workspace .paper-runtime-reasons li { overflow-wrap: anywhere; }
+.paper-workspace .paper-runtime-caveat { color: var(--paper-ink-soft); font-size: 12px; line-height: 1.6; }
+.paper-workspace .paper-runtime-details { border-top: 1px solid var(--paper-line-soft); padding-top: 8px; }
+.paper-workspace .paper-runtime-details > summary {
+  display: inline-flex; align-items: center; min-height: 32px;
+  color: var(--paper-ink-soft); font-size: 12.5px; cursor: pointer;
+}
+.paper-workspace .paper-runtime-details > summary:hover { color: var(--paper-ink); }
+.paper-workspace .paper-runtime-note { margin-top: 8px; color: var(--paper-ink-soft); font-size: 12px; line-height: 1.6; }
+.paper-workspace .paper-runtime-details dl {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 9px 20px; margin: 10px 0 0;
+}
+.paper-workspace .paper-runtime-details dl > div { min-width: 0; }
+.paper-workspace .paper-runtime-details dt { color: var(--paper-ink-soft); font-size: 12px; font-weight: 600; }
+/* A guard name or a reason code is longer than its column; it wraps inside its own
+   cell instead of widening the page. */
+.paper-workspace .paper-runtime-details dd { margin: 2px 0 0; color: var(--paper-ink); font-size: 13px; overflow-wrap: anywhere; }
+
+/* The four readings fold to two columns well before the AI column has stacked, so
+   the strip is already a tidy two-by-two at 850px. */
+@media (max-width: 900px) {
+  .paper-workspace .paper-runtime-readings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .paper-workspace .paper-runtime-readings > div:nth-child(odd) { border-left: 0; }
+  .paper-workspace .paper-runtime-readings > div:nth-child(n+3) { border-top: 1px solid var(--paper-line-soft); }
+}
+
+@media (max-width: 640px) {
+  .paper-workspace .paper-runtime-readings > div { padding: 9px 12px; }
+  .paper-workspace .paper-runtime-body { padding: 10px 12px 11px; }
+  .paper-workspace .paper-runtime-details > summary { min-height: 44px; }
+}
+
+/* A 390px phone keeps the two-by-two strip and one diagnostics row per line: the
+   detail list's own labels and values stack rather than wrapping mid-word. */
+@media (max-width: 390px) {
+  .paper-workspace .paper-runtime-readings > div { padding: 9px 10px; }
+  .paper-workspace .paper-runtime-value { font-size: 13px; }
+  .paper-workspace .paper-runtime-details dl { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+}
+
+.paper-workspace .paper-account .paper-times { margin: 4px 0 8px; }
+.paper-workspace .paper-runtime-details > summary:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: 2px; border-radius: 3px; }
+
+.paper-workspace .paper-runtime-details > summary::before { content: "›"; display: inline-block; margin-right: 7px; font-size: 16px; line-height: 1; }
+.paper-workspace .paper-runtime-details[open] > summary::before { transform: rotate(90deg); }

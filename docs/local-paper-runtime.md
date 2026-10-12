@@ -215,9 +215,12 @@ capture path again, and `ea paper backup` still applies every one of its own ref
 
 The M4 release-candidate gates (72h, 7d) are judged by the frozen WU-2 contract:
 `ea.product.paper_evidence.build_paper_snapshot` produces one `PaperSnapshot`,
-`build_gate_identity` one `PaperGateIdentity`, and the pure `evaluate_gate` the verdict. This
-layer adds only the thin operational surface those need on a real host — it adds no second
-evaluator, no timer, no watchdog and no gate state.
+`build_gate_identity` one `PaperGateIdentity`, and the interval aggregation in
+`ea.product.paper_gate_history` turns those plus explicit durable interval evidence into the
+verdict. This layer adds only the thin operational surface those need on a real host — it adds no
+second evaluator, no timer, no watchdog and no gate state — and it does **not** connect the
+interval evidence, so it cannot reach a gate `PASS`; see
+[the interval verdict is not reachable from this layer](#the-interval-verdict-is-not-reachable-from-this-layer).
 
 ```
 ea-runtime snapshot --repo CHECKOUT [--alert-stream PATH]
@@ -269,11 +272,40 @@ now. The 72-hour and 7-day Gates are started by the M4 release-candidate freeze,
 authorization, and exit code 3 means the verdict is not `PASS` or the observation could not be
 taken.
 
-Before that freeze, the minimum a host must show is: the checkout HEAD is observable and is the
-commit being frozen; the pinned config and both rendered LaunchAgents are observable and will not
-move; exactly one supervised writer is intact (`ea-runtime status`, one live writer lease); the
-snapshot command runs; the backup root and the alert stream are readable; and Live remains
-denied, which the snapshot reports when the attempt's own profile is anything but local
+### The interval verdict is not reachable from this layer
+
+The verdict is an **interval** verdict, aggregated only from explicit durable interval evidence
+(`ea.product.paper_gate_history`): the frozen identity, a bounded coverage window, the complete
+attempt inventory, and each attempt's `[begin, end)` association. One healthy instant can never
+stand for 72 hours, no backup is ever discovered automatically, and coverage is a caller claim
+rather than a fact that can be found on disk.
+
+This layer connects none of that. `ea-runtime snapshot` and `ea paper gate evaluate` supply a
+boundary observation and a live identity — never a `PaperIntervalHistory` — so:
+
+| Invocation | Verdict | Reasons | Exit |
+| --- | --- | --- | --- |
+| unchanged identity, unhealthy runtime, no interval history | `FAIL` | each violated hard rule **plus** `evidence_gap` | 3 |
+| healthy, unchanged runtime, no interval history | `INVALID` | `evidence_gap` | 3 |
+| drifted config, LaunchAgent or checkout | `INVALID` | the drift reason alone | 3 |
+
+A healthy host with no interval history therefore reports `INVALID`/`evidence_gap`/exit 3. That is
+the fail-closed answer, not a defect to work around: **no invocation of these commands can produce
+a 72h or 7d `PASS`**, and `ea paper gate evaluate` must not be read as a pre-freeze readiness
+certification, as a soak result, or as a post-hoc certification of a gate that has already run.
+Hand-writing associations or an inventory to obtain a `PASS` would claim coverage that nothing
+observed, and is never a substitute for the missing integration.
+
+Connecting trusted durable interval history to the operator surface is **deferred work (P1)**.
+Evidence ownership, coverage provenance and the association contract require a parent decision and
+are not designed here. Until that work lands, the only honest claims this layer supports about a
+gate are the identity and runtime observations below.
+
+What the layer can still show on a real host before the freeze: the checkout HEAD is observable
+and is the commit being frozen; the pinned config and both rendered LaunchAgents are observable
+and will not move; exactly one supervised writer is intact (`ea-runtime status`, one live writer
+lease); the snapshot command runs; the backup root and the alert stream are readable; and Live
+remains denied, which the snapshot reports when the attempt's own profile is anything but local
 simulated Paper.
 
 ## Boundaries

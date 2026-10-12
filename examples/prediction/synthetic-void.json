@@ -1,0 +1,29 @@
+{
+  "contract": {
+    "version": 1,
+    "contract_id": "synthetic-cancelled-event",
+    "question": "Synthetic: does scheduled event occur?",
+    "rules": "Synthetic local contract: cancellation by the named fixture authority voids both sides; each pre-endowed claim receives 0.40 simulated dollar units. No winner is declared. This is a fixed contractual cancellation payout, not a venue rule or inferred refund of trade cost.",
+    "authority": "synthetic-fixture-authority",
+    "source": "synthetic://cancel-case-v1",
+    "source_kind": "synthetic",
+    "rules_observed_at": "2026-10-03T11:10:08+00:00",
+    "currency": "USD_SIM",
+    "quantum": "0.01",
+    "face_value": "1",
+    "void_payout": "0.4"
+  },
+  "side": "YES",
+  "quantity": 10,
+  "observation": {
+    "contract_id": "synthetic-cancelled-event",
+    "authority": "synthetic-fixture-authority",
+    "source": "synthetic://cancel-case-v1",
+    "available_at": "2026-10-03T11:10:08+00:00",
+    "status": "void",
+    "outcome": null,
+    "payout_yes": "0.4",
+    "payout_no": "0.4",
+    "evidence": "SYNTHETIC: named fixture authority cancels scheduled event. No claim of a real historical void or official venue cancellation source."
+  }
+}

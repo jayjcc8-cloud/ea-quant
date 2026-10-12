@@ -1,0 +1,176 @@
+/* QUINE 资源中心.
+   Everything here is additive and reads the shell's own tokens, so light, dark
+   and compact density arrive from the existing theme and density rules: the
+   surfaces are the warm-white/graphite pair (--quine-surface, --quine-ink), the
+   one accent is the terracotta (--quine-red), and no rule below restates a
+   colour of its own.
+
+   The page is rows, not cards: one identity row per directory entry with its
+   status chips, and the long evidence — digests, entrypoints, effects,
+   identities, associations — folded into a native disclosure that starts
+   closed, so a directory of twenty entries is twenty readable lines instead of
+   twenty screens. Every identifier a host produces is allowed to wrap, so a
+   64-character digest can never widen the document at a phone width. */
+
+.resource-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.resource-toolbar > div:first-child { flex: 1 1 260px; min-width: 0; }
+.resource-toolbar label { margin-top: 0; }
+.resource-toolbar-note { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.resource-toolbar-note .muted { max-width: 420px; }
+
+.resource-section > header { align-items: flex-start; }
+.resource-section-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
+.resource-section-actions .muted { margin: 0; }
+
+/* The five separate facts one model configuration is, plus the current
+   configuration's own presence: what the host can load, what an operator
+   configured, what credential exists, and the two things this page has never
+   observed. Terse rows — a definition list, never a paragraph per field. */
+.resource-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 20px;
+  margin: 0 0 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--quine-line);
+  border-radius: 6px;
+  background: var(--quine-surface-soft);
+}
+
+.resource-facts > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.resource-facts dt { color: var(--quine-ink-soft); font-size: 12px; font-weight: 650; }
+.resource-facts dd { margin: 0; color: var(--quine-ink); font-size: 14px; overflow-wrap: anywhere; }
+
+/* One directory entry: an identity row, then the evidence on request. */
+.resource-entries { list-style: none; margin: 0; padding: 0; }
+.resource-entry { padding: 10px 0; border-top: 1px solid var(--quine-line-soft); }
+.resource-entry:first-child { border-top: 0; }
+
+.resource-entry-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.resource-entry-head strong { color: var(--quine-ink); font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
+.resource-version { color: var(--quine-ink-soft); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+.resource-chip {
+  padding: 1px 8px;
+  border: 1px solid var(--quine-line);
+  border-radius: 999px;
+  color: var(--quine-ink-soft);
+  background: var(--quine-surface-soft);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.resource-chip.is-admissible { border-color: var(--quine-positive-line); color: var(--quine-positive-ink); background: var(--quine-positive-soft); }
+.resource-chip.is-refused { border-color: var(--quine-red-line); color: var(--quine-red-ink); background: var(--quine-red-soft); }
+.resource-chip.is-unfrozen { border-color: var(--quine-red-line); color: var(--quine-red-ink); background: var(--quine-red-soft); }
+
+/* The folded evidence. A native disclosure, so it is reachable and operable by
+   keyboard and by assistive technology without a script of our own. */
+.resource-details { margin-top: 6px; }
+.resource-details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  color: var(--quine-ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.resource-details > summary:hover { color: var(--quine-red-ink); }
+.resource-details[open] > summary { color: var(--quine-ink); }
+.resource-details > summary:focus-visible { outline: 2px solid var(--quine-red); outline-offset: 2px; }
+
+.resource-entry-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 2px 20px;
+  margin: 6px 0 0;
+}
+
+.resource-entry-facts > div { display: flex; gap: 8px; min-width: 0; }
+.resource-entry-facts dt { flex: 0 0 auto; color: var(--quine-ink-soft); font-size: 12px; }
+.resource-entry-facts dd { margin: 0; min-width: 0; color: var(--quine-ink); font-size: 13px; overflow-wrap: anywhere; }
+
+/* The host's own reason an entry is refused, and any other refusal sentence:
+   always visible, never folded away. */
+.resource-refusal {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--quine-red-line);
+  border-radius: 6px;
+  color: var(--quine-red-ink);
+  background: var(--quine-red-soft);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* The five layers, and the button that is the only thing on this page that asks
+   the host anything. */
+.resource-layers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 16px;
+  margin-top: 14px;
+}
+
+.resource-layers > div { min-width: 0; }
+.resource-layers label { margin-top: 0; }
+/* The page's one action is the shell's own primary: graphite on warm white, and
+   the same pair inverted in dark mode. The inherited legacy blue is not this
+   shell's accent, so it is scoped out here rather than restated globally. */
+.resources-page button.primary { border-color: var(--quine-primary); background: var(--quine-primary); color: var(--quine-primary-ink); }
+.resources-page button.primary:hover { border-color: var(--quine-red); }
+/* Also scoped to this page: `.actions` is a shared shell name, and the link
+   styling here must not reach the action rows other pages already render. */
+.resources-page .actions a { display: inline-flex; align-items: center; min-height: 44px; color: var(--quine-ink-soft); font-size: 14px; }
+.resources-page .actions a:hover { color: var(--quine-red-ink); }
+
+.resource-verdict { border-color: var(--quine-red-line); }
+
+.resource-layer-list { list-style: none; display: grid; gap: 4px; margin: 10px 0 0; padding: 0; }
+.resource-layer-list li {
+  padding: 6px 10px;
+  border: 1px solid var(--quine-line);
+  border-radius: 6px;
+  color: var(--quine-ink);
+  background: var(--quine-surface-soft);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* The observable references: which sources were read, then one compact block per
+   reference with its kind, its scenario and its real links in the open, and the
+   rest of its identity one disclosure down. */
+.resource-source-state { list-style: none; display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 12px; padding: 0; }
+.resource-source-state li { font-size: 13px; }
+.resource-source-state li.notice { margin: 0; padding: 8px 12px; }
+
+.resource-references { list-style: none; display: grid; gap: 10px; margin: 0; padding: 0; }
+.resource-reference { padding: 10px 14px; border: 1px solid var(--quine-line); border-radius: 6px; background: var(--quine-surface); }
+.resource-reference-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.resource-reference-head strong { color: var(--quine-ink); font-size: 14px; overflow-wrap: anywhere; }
+.resource-reference .muted { margin-top: 6px; }
+.resource-reference-links { display: flex; flex-wrap: wrap; gap: 14px; margin: 6px 0 0; }
+.resource-reference-links a { display: inline-flex; align-items: center; color: var(--quine-red-ink); font-size: 13px; }
+.resource-reference-links a:hover { text-decoration: underline; }
+
+/* One column, and every control the shell's phone layout already sizes at 44px. */
+@media (max-width: 767px) {
+  .resource-toolbar,
+  .resource-section-actions { align-items: stretch; }
+  .resource-toolbar-note { justify-content: space-between; }
+  .resource-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .resource-entry-facts { grid-template-columns: minmax(0, 1fr); }
+  .resource-entry-facts > div { flex-wrap: wrap; }
+  .resource-layers { grid-template-columns: minmax(0, 1fr); }
+  .resource-source-state { display: grid; }
+  .resource-details > summary { min-height: 44px; }
+  .resource-reference-links a { min-height: 44px; }
+}

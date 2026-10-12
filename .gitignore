@@ -43,3 +43,6 @@ notebooks/.ipynb_checkpoints/
 !.vscode/launch.json
 !.vscode/tasks.json
 !.vscode/extensions.json
+
+# Local desktop build and acceptance artifacts
+.local/desktop/

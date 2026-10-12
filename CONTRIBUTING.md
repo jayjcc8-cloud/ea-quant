@@ -40,6 +40,14 @@ venv/bin/ea doctor
 The bootstrap creates the repository-local `venv/` and performs a locked editable sync. Do not
 create a `.venv -> venv` symlink or bypass build isolation.
 
+For local development and acceptance work, explicitly set the code working directory, runtime
+data root, and absolute artifact root separately; use that artifact root for JSON and screenshots
+regardless of the tool's working directory. Selecting a source directory does not expand sandbox
+write permissions. If the intended output root is not writable, use the supported permission
+request and respect its outcome; do not redirect persistent artifacts to Documents or temporary
+directories as a workaround. Formal research data may remain in an explicitly selected external
+runtime data root; it need not live in the source checkout.
+
 ## Required Checks
 
 The repository-owned verifier is the executable authority:
