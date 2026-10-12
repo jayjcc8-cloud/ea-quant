@@ -583,7 +583,12 @@ describe('user strategy workspace', () => {
 
     await waitFor(() => expect(calls.ask).toBe(1))
     // One approved call against the intent's own revision, and it proposes nothing.
-    expect(asked).toEqual([{ callId: 'call-1', baseRevision: 1, approved: true }])
+    // A turn names itself freshly on every attempt: the identity is the turn's
+    // own, never a count of what came before, which a multi-call turn would move.
+    expect(asked).toHaveLength(1)
+    expect(asked[0].baseRevision).toBe(1)
+    expect(asked[0].approved).toBe(true)
+    expect(asked[0].callId).toMatch(/^turn-[A-Za-z0-9]{8,64}$/)
     expect(await within(chat).findByText('Which costs would this idea have to beat?')).toBeTruthy()
     expect(within(chat).getByText('模型推断 — 不是正式证据。')).toBeTruthy()
     expect(screen.queryByRole('region', { name: '建议修改' })).toBeNull()
@@ -658,7 +663,10 @@ describe('user strategy workspace', () => {
     await user.click(within(chat).getByRole('button', { name: '询问模型' }))
 
     expect(calls.ask).toBe(1)
-    expect(asked).toEqual([{ callId: 'call-1', baseRevision: 1, approved: true }])
+    expect(asked).toHaveLength(1)
+    expect(asked[0].baseRevision).toBe(1)
+    expect(asked[0].approved).toBe(true)
+    expect(asked[0].callId).toMatch(/^turn-[A-Za-z0-9]{8,64}$/)
     expect(await within(chat).findByText('Your draft enters once with a two-unit target.')).toBeTruthy()
     // Prose from the model is inference, never formal evidence, and the usage is measured.
     expect(within(chat).getByText('模型推断 — 不是正式证据。')).toBeTruthy()
@@ -886,7 +894,10 @@ describe('user strategy workspace', () => {
 
     await waitFor(() => expect(calls.ask).toBe(1))
     expect([...new Set(ids)]).toEqual(['us-2'])
-    expect(asked).toEqual([{ callId: 'call-1', baseRevision: 3, approved: true }])
+    expect(asked).toHaveLength(1)
+    expect(asked[0].baseRevision).toBe(3)
+    expect(asked[0].approved).toBe(true)
+    expect(asked[0].callId).toMatch(/^turn-[A-Za-z0-9]{8,64}$/)
     // The AI column names the strategy it belongs to and can only switch to a real
     // strategy of this workspace.
     const context = within(chat).getByLabelText('当前策略') as HTMLSelectElement

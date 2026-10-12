@@ -562,3 +562,27 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
   .compare-page .comparison-panel th:first-child,
   .compare-page .comparison-panel td:first-child { width: 34%; }
 }
+
+/* The conversation graph's live surfaces, inside the existing AI column.
+   A turn that is really running shows the deltas a provider sent and the tools it
+   asked for; the frozen confirmation and the watched run are their own compact
+   cards beside the proposal, never a redesign of the column. */
+.strategy-workspace .strategy-chat .live-answer { border-left-style: dashed; }
+.strategy-workspace .strategy-chat .tool-list { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.strategy-workspace .strategy-chat .tool { padding: 5px 8px; border: 1px solid var(--q-line-soft); border-radius: 6px; font-size: 12.5px; overflow-wrap: anywhere; }
+.strategy-workspace .strategy-chat .tool-running { color: var(--muted); }
+.strategy-workspace .strategy-chat .tool-done { color: var(--ink); }
+.strategy-workspace .strategy-chat .tool-failed { border-color: var(--danger-line); color: var(--danger); background: var(--danger-soft); }
+.strategy-workspace .strategy-chat .conversation-confirmation,
+.strategy-workspace .strategy-chat .conversation-observation { margin: 10px 0 0; }
+.strategy-workspace .strategy-chat .conversation-confirmation .summary-list,
+.strategy-workspace .strategy-chat .conversation-observation .summary-list { grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 12px; }
+.strategy-workspace .strategy-chat .conversation-confirmation p,
+.strategy-workspace .strategy-chat .conversation-observation p { font-size: 13px; }
+
+/* While an explicit run decision is pending, give its frozen facts and actions
+   the space occupied by the disabled composer. The message remains in state. */
+.strategy-workspace .composer-paused > .field,
+.strategy-workspace .composer-paused > .check,
+.strategy-workspace .composer-paused > .composer-actions { display: none; }
+.strategy-workspace .composer-paused > .notice { margin-top: 0; }

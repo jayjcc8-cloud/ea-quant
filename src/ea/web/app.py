@@ -7,7 +7,7 @@ import binascii
 import contextlib
 import json
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -376,6 +376,24 @@ class UserStrategyUndoRequest(BaseModel):
     target_operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
+class UserStrategyResumeRequest(BaseModel):
+    """One explicit decision for the turn this conversation is waiting on.
+
+    Every identity here is the one the pending record already names: the turn, and,
+    depending on what is being decided, the proposal, the revision, the launch
+    intent and the identity of the preview. A decision that names anything else is
+    refused before the graph is reached.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    turn_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    action: Literal["applied", "rejected", "confirm", "declined", "observe"]
+    proposal_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    base_revision: int | None = Field(default=None, ge=1, le=1000000)
+    launch_intent_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    preview_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class UserStrategyLaunchRequest(BaseModel):
     """One explicit confirmation of one already-previewed experiment."""
 
@@ -423,7 +441,7 @@ def create_app(settings: WebSettings) -> Any:
     """Create the optional FastAPI application without importing it eagerly."""
     from fastapi import FastAPI, Request
     from fastapi.exceptions import RequestValidationError
-    from fastapi.responses import FileResponse, JSONResponse, Response
+    from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
     # FastAPI resolves an endpoint's annotations against this module's globals, so the
     # lazily imported Request class has to be nameable there for the endpoints that
@@ -533,6 +551,7 @@ def create_app(settings: WebSettings) -> Any:
     if quine_bridge is not None:
         service.attach_holdout_owner(QuineHoldouts(quine_bridge, service, research_orchestrator))
 
+    from ea.web.conversation import frame as conversation_frame
     from ea.web.user_strategies import (
         UserStrategyBudgetError,
         UserStrategyConflictError,
@@ -1750,6 +1769,80 @@ def create_app(settings: WebSettings) -> Any:
             )
             return strategy.document()
         except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
+    def _conversation_stream(source: Iterator[dict[str, Any]]) -> object:
+        """One SSE response over a conversation turn, validated before it starts.
+
+        The source's own first step is taken here, so every refusal this owner can
+        state up front — an unknown strategy, a bad identity, a budget that is not
+        granted — is answered as this API's ordinary JSON error, and the stream only
+        begins once the turn is really under way. Anything that fails after that is
+        one structured ``error`` event on the stream, so a client always sees why.
+        """
+        try:
+            first = next(source)
+        except StopIteration:
+            first = None
+        except strategy_failures as caught:
+            return strategy_refusal(caught)
+
+        def frames() -> Iterator[str]:
+            try:
+                if first is not None:
+                    yield conversation_frame(first)
+                for item in source:
+                    yield conversation_frame(item)
+            except strategy_failures as caught:
+                yield conversation_frame({"kind": "error", "error": str(caught)})
+            finally:
+                close = getattr(source, "close", None)
+                if close is not None:
+                    close()
+
+        return StreamingResponse(
+            frames(),
+            media_type="text/event-stream",
+            headers={"cache-control": "no-store", "x-accel-buffering": "no"},
+        )
+
+    @app.post("/api/user-strategies/{user_strategy_id}/messages/stream")
+    def stream_user_strategy_message(
+        user_strategy_id: str, request: UserStrategyMessageRequest
+    ) -> object:
+        return _conversation_stream(
+            user_strategy_service.conversation_turn(
+                user_strategy_id,
+                call_id=request.call_id,
+                base_revision=request.base_revision,
+                text=request.text,
+                approved_budget=request.approved_budget.model_dump(),
+                evidence_job_ids=request.evidence_job_ids,
+            )
+        )
+
+    @app.post("/api/user-strategies/{user_strategy_id}/conversation/resume")
+    def resume_user_strategy_conversation(
+        user_strategy_id: str, request: UserStrategyResumeRequest
+    ) -> object:
+        return _conversation_stream(
+            user_strategy_service.conversation_resume(
+                user_strategy_id,
+                turn_id=request.turn_id,
+                action=request.action,
+                proposal_id=request.proposal_id,
+                base_revision=request.base_revision,
+                launch_intent_id=request.launch_intent_id,
+                preview_identity=request.preview_identity,
+            )
+        )
+
+    @app.get("/api/user-strategies/{user_strategy_id}/conversation")
+    def user_strategy_conversation(user_strategy_id: str) -> object:
+        """What this conversation is waiting for, and what it may still spend."""
+        try:
+            return user_strategy_service.conversation_state(user_strategy_id)
+        except strategy_failures as caught:
             return strategy_refusal(caught)
 
     @app.post("/api/user-strategies/{user_strategy_id}/proposals/{proposal_id}/apply")

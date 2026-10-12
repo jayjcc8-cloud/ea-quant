@@ -1509,8 +1509,8 @@ def _contracts(service: WebService) -> dict[str, dict[str, Any]]:
 def _branches(call: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """The proposal-tool branches the provider actually received, keyed by path."""
     tools = cast(list[Any], call["tools"])
-    assert [tool.name for tool in tools] == ["propose_change"]
-    schema = cast(dict[str, Any], tools[0].parameters)
+    assert [tool.name for tool in tools] == ["describe_data", "experiment_status", "propose_change"]
+    schema = cast(dict[str, Any], tools[2].parameters)
     properties = cast(dict[str, Any], schema["properties"])
     array = cast(dict[str, Any], properties["items"])
     # The tool's one property is the array of proposed fields, and the alternatives

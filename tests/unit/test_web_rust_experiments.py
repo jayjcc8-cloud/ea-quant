@@ -1759,3 +1759,102 @@ def test_frozen_local_package_rechecks_trust_before_loading_code(
             )
     assert not sentinel.exists()
     assert not (tmp_path / "replacement-executed").exists()
+
+
+def test_conversation_closes_the_loop_through_the_real_rust_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unit.test_web_conversation import Streaming, _change, _read_tool
+    from unit.test_web_research import _response
+
+    monkeypatch.setattr(sys.modules[__name__], "CORE_ROOT", ROOT / ".local/langgraph/core")
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    stack = _stack(tmp_path, core.socket)
+    provider = Streaming(
+        [
+            _response([], text="Earlier conversation retained."),
+            _read_tool("describe_data", "data-1"),
+            _response([], text="Which quantity should the next experiment use?"),
+            _change("parameters.target_quantity", "3"),
+            _response([], text="The verified report is one scenario, not a profitability claim."),
+            _response([], text="We can investigate the report limitations next."),
+        ]
+    )
+    cast(Any, stack.strategies)._provider = provider
+    created = _create(stack.strategies)
+    identity = created.user_strategy_id
+    stack.strategies._ask(
+        created,
+        call_id="legacy-1",
+        base_revision=1,
+        text="remember this",
+        approved_budget={"max_model_calls": 1, "max_backtests": 0},
+    )
+    before = stack.strategies.get(identity).messages
+    list(
+        stack.strategies.conversation_turn(
+            identity,
+            call_id="read-1",
+            base_revision=1,
+            text="Describe the authorized data and clarify the next change.",
+            approved_budget={"max_model_calls": 2, "max_backtests": 0},
+        )
+    )
+    proposed = list(
+        stack.strategies.conversation_turn(
+            identity,
+            call_id="proposal-1",
+            base_revision=1,
+            text="Use quantity 3",
+            approved_budget={"max_model_calls": 2, "max_backtests": 0},
+        )
+    )
+    assert proposed[-1]["waiting"]["kind"] == "proposal"
+    proposal = proposed[-1]["waiting"]["proposal_id"]
+    stack.strategies.apply_proposal(identity, proposal_id=proposal, operation_id="apply-1")
+    assert stack.strategies.get(identity).experiments == ()
+    preview = list(
+        stack.strategies.conversation_resume(
+            identity, turn_id="proposal-1", action="applied", proposal_id=proposal
+        )
+    )[-1]["waiting"]
+    assert preview["kind"] == "confirmation"
+    confirm = dict(
+        turn_id="proposal-1",
+        action="confirm",
+        launch_intent_id=preview["launch_intent_id"],
+        base_revision=preview["base_revision"],
+        preview_identity=preview["preview_identity"],
+    )
+    events = list(stack.strategies.conversation_resume(identity, **confirm))
+    deadline = time.monotonic() + 30
+    while events[-1]["kind"] == "interrupt" and time.monotonic() < deadline:
+        time.sleep(0.03)
+        events = list(
+            stack.strategies.conversation_resume(identity, turn_id="proposal-1", action="observe")
+        )
+    assert events[-1]["kind"] == "done", events
+    final = stack.strategies.get(identity)
+    assert list(final.messages[: len(before)]) == list(before)
+    assert len(final.experiments) == 1
+    experiment = final.experiments[0]
+    assert experiment["owner"] == "quine"
+    assert experiment["status"] == "created"
+    assert final.calls[-1]["evidence"][0]["job_id"] == experiment["job_id"]
+    assert json.loads(stack.service.report(experiment["job_id"]))["run_id"]
+    assert ResearchStore(stack.workspace).list() == []
+    # Lost client receipt is resolved by the original intent, even after completion.
+    list(stack.strategies.conversation_resume(identity, **confirm))
+    assert len(stack.strategies.get(identity).experiments) == 1
+    list(
+        stack.strategies.conversation_turn(
+            identity,
+            call_id="follow-1",
+            base_revision=2,
+            text="What is still uncertain?",
+            approved_budget={"max_model_calls": 1, "max_backtests": 0},
+        )
+    )
+    assert stack.strategies.get(identity).messages[-1]["text"].endswith("limitations next.")
+    assert len(provider.calls) == 6

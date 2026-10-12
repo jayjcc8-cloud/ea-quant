@@ -125,6 +125,12 @@ export type UserStrategyEvidenceRun = {
  */
 export type UserStrategyCall = {
   call_id: string
+  /**
+   * The turn this call belongs to. The root call of a turn is its own id; a call
+   * the turn made afterwards names the root, so one turn's messages and tools are
+   * grouped by exactly one identity even when the turn spent several calls.
+   */
+  turn_id?: string
   base_revision: number
   status: UserStrategyCallStatus
   route: UserStrategyRoute
@@ -374,6 +380,97 @@ export type UserStrategyPreview = {
 export type ApprovedBudget = { max_model_calls: number; max_backtests: number }
 
 /**
+ * The one decision a running conversation is waiting for, exactly as the host
+ * records it. Each phase names the identities the decision has to carry back, so a
+ * confirmation that names anything else is refused rather than silently resolved.
+ */
+export type UserStrategyConversationPhase =
+  | 'awaiting_proposal'
+  | 'awaiting_confirmation'
+  | 'awaiting_observation'
+
+export type UserStrategyConversationPending = {
+  phase: UserStrategyConversationPhase
+  turn_id: string
+  proposal_id: string | null
+  base_revision: number | null
+  launch_intent_id: string | null
+  preview_identity: string | null
+  job_id: string | null
+  at: string
+}
+
+/**
+ * What one conversation is waiting for and what it may still spend, read from the
+ * host rather than from a checkpoint: a reloaded page restores exactly this.
+ * `remaining_model_calls` counts the workspace's own shared reservation ledger, so
+ * it is the same bound every other conversation in this workspace is held to.
+ */
+export type UserStrategyConversation = {
+  strategy_id: string
+  revision: number
+  pending: UserStrategyConversationPending | null
+  preview: UserStrategyPreview | null
+  open_proposals: string[]
+  budget: {
+    max_model_calls: number
+    reserved_model_calls: number
+    remaining_model_calls: number
+    max_backtests: number
+  }
+}
+
+/** One decision, naming the identities the pending record already holds. */
+export type UserStrategyResumeRequest = {
+  turn_id: string
+  action: 'applied' | 'rejected' | 'confirm' | 'declined' | 'observe'
+  proposal_id?: string | null
+  base_revision?: number | null
+  launch_intent_id?: string | null
+  preview_identity?: string | null
+}
+
+/** What one turn is waiting on, as the interrupt itself states it. */
+export type UserStrategyConversationWaiting =
+  | { kind: 'proposal'; turn_id: string; proposal_id: string; base_revision: number }
+  | {
+      kind: 'confirmation'
+      turn_id: string
+      launch_intent_id: string
+      base_revision: number
+      preview_identity: string
+      preview: UserStrategyPreview
+    }
+  | { kind: 'observation'; turn_id: string; job_id: string; status: string }
+
+/**
+ * One event of a streamed turn, exactly as the host sent it. `text_delta` carries a
+ * delta the provider really sent — never a slice of an answer that arrived whole —
+ * so a client that shows these in order shows the answer as it was written.
+ */
+export type UserStrategyConversationEvent =
+  | { kind: 'text_delta'; call_id?: string; text: string }
+  | { kind: 'tool_start'; tool: string; tool_id: string; call_id?: string }
+  | { kind: 'tool_end'; tool: string; tool_id: string; text: string }
+  | { kind: 'tool_error'; tool: string; tool_id: string; error: string }
+  | {
+      kind: 'state'
+      strategy?: UserStrategy
+      job_id?: string
+      run_status?: string
+      verified?: boolean
+      remaining_model_calls?: number
+    }
+  | { kind: 'error'; error: string; code?: string; kind_reason?: string }
+  | { kind: 'interrupt'; waiting: UserStrategyConversationWaiting; strategy: UserStrategy }
+  | { kind: 'done'; strategy: UserStrategy }
+
+/** The terminal events: a turn either finished or is waiting for a decision. */
+export function endsConversationStream(event: UserStrategyConversationEvent): boolean {
+  return event.kind === 'interrupt' || event.kind === 'done'
+}
+
+/**
  * The criterion the creator states, in the report's own vocabulary: one
  * allowlisted field and the sign expected. The host validates it and the stored
  * result is a complete ReportCriterion.
@@ -410,6 +507,128 @@ const write = <T,>(path: string, body: unknown) =>
 
 const base = (userStrategyId: string) =>
   `/api/user-strategies/${encodeURIComponent(userStrategyId)}`
+
+/**
+ * The JSON of one server-sent frame, or null for a frame that carries no data.
+ *
+ * A frame that cannot be read is refused outright rather than skipped: an event
+ * this client cannot understand is not an event it may quietly drop, and a stream
+ * that is still readable stays readable because the failure names itself.
+ */
+function readFrame(frame: string): UserStrategyConversationEvent | null {
+  const data = frame
+    .split('\n')
+    .filter(line => line.startsWith('data:'))
+    .map(line => line.slice('data:'.length).replace(/^ /, ''))
+    .join('\n')
+  if (!data.trim()) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(data)
+  } catch {
+    throw new UserStrategyRequestError('stream_unreadable', '对话流包含无法解析的事件。')
+  }
+  if (!parsed || typeof parsed !== 'object' || typeof (parsed as { kind?: unknown }).kind !== 'string') {
+    throw new UserStrategyRequestError('stream_unreadable', '对话流包含无法识别的事件。')
+  }
+  return parsed as UserStrategyConversationEvent
+}
+
+/**
+ * The events of one conversation stream, in the order the host sent them.
+ *
+ * The body is decoded incrementally, so a frame split across two reads, a frame
+ * that arrives with others, and a multi-byte character split across a chunk
+ * boundary all read as the events they are. A response that is not the stream, a
+ * frame that cannot be read and a stream that ends without a terminal event are
+ * all refusals — every event already received has been yielded before the refusal
+ * is raised, so a client shows what really arrived and never a completed story.
+ */
+export async function* conversationEvents(
+  response: Response,
+): AsyncGenerator<UserStrategyConversationEvent> {
+  if (!response.ok) {
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
+    }
+    const detail = (payload as { error?: { code?: string; message?: string }; message?: string } | null)
+    const error = (detail?.error ?? detail) as { code?: string; message?: string } | null
+    throw new UserStrategyRequestError(
+      error?.code ?? 'request_failed',
+      error?.message ?? '对话请求失败',
+    )
+  }
+  const body = response.body
+  if (!body) {
+    throw new UserStrategyRequestError('stream_unavailable', '这个工作区没有提供对话流。')
+  }
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let terminal = false
+  const take = (): UserStrategyConversationEvent[] => {
+    const found: UserStrategyConversationEvent[] = []
+    for (;;) {
+      const cut = buffer.indexOf('\n\n')
+      if (cut < 0) return found
+      const frame = buffer.slice(0, cut)
+      buffer = buffer.slice(cut + 2)
+      const event = readFrame(frame)
+      if (event) found.push(event)
+    }
+  }
+  let failure: { code?: string; error: string } | null = null
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n')
+      for (const event of take()) {
+        terminal = terminal || endsConversationStream(event)
+        if (event.kind === 'error') failure = event
+        yield event
+      }
+    }
+    buffer += decoder.decode()
+    for (const event of take()) {
+      terminal = terminal || endsConversationStream(event)
+      if (event.kind === 'error') failure = event
+      yield event
+    }
+    const trailing = readFrame(buffer)
+    if (trailing) {
+      terminal = terminal || endsConversationStream(trailing)
+      if (trailing.kind === 'error') failure = trailing
+      yield trailing
+    }
+    if (!terminal) {
+      throw new UserStrategyRequestError(
+        failure?.code ?? 'stream_incomplete',
+        failure?.error ?? '对话流在结束前中断；已收到的事件都显示在上方。',
+      )
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
+}
+
+async function streamRequest(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { ...writeHeaders, Accept: 'text/event-stream' },
+    body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
+  })
+  return response
+}
 
 export const userStrategiesApi = {
   async list(): Promise<UserStrategy[]> {
@@ -470,6 +689,42 @@ export const userStrategiesApi = {
       evidence_job_ids?: string[]
     },
   ) => write<UserStrategy>(`${base(userStrategyId)}/messages`, input),
+  /**
+   * The same approved turn, streamed. Every event is one the host really produced:
+   * a delta the provider sent, a tool it asked for, the decision the turn is now
+   * waiting for, or its end. Exhausting this stream is what the JSON call above
+   * does too — the stream is simply what a reader can watch while it happens.
+   */
+  streamMessage: (
+    userStrategyId: string,
+    input: {
+      call_id: string
+      base_revision: number
+      text: string
+      approved_budget: ApprovedBudget
+      evidence_job_ids?: string[]
+    },
+    signal?: AbortSignal,
+  ) =>
+    streamRequest(`${base(userStrategyId)}/messages/stream`, input, signal).then(response =>
+      conversationEvents(response),
+    ),
+  /**
+   * One decision the conversation is waiting for. Applying or rejecting a proposal
+   * is done through the proposal's own operation first; this only tells the turn
+   * what was already decided, and it starts no run by itself.
+   */
+  resumeConversation: (
+    userStrategyId: string,
+    input: UserStrategyResumeRequest,
+    signal?: AbortSignal,
+  ) =>
+    streamRequest(`${base(userStrategyId)}/conversation/resume`, input, signal).then(response =>
+      conversationEvents(response),
+    ),
+  /** What this conversation is waiting for, and what it may still spend. */
+  conversation: (userStrategyId: string) =>
+    apiRequest<UserStrategyConversation>(`${base(userStrategyId)}/conversation`),
   applyProposal: (
     userStrategyId: string,
     proposalId: string,
