@@ -97,8 +97,9 @@ jobs:
       github.event_name == 'pull_request' &&
       (needs.classify.outputs.python == 'true' || needs.classify.outputs.ci == 'true')
     runs-on: ubuntu-latest
-    # Hosted pytest reached 96% after 17m; retain time for setup and completion.
-    timeout-minutes: 30
+    # Run 38207836272 reached 98% of pytest after 25m50s (about 20m previously) and then hit the
+    # 30-minute job limit. Allow headroom for hosted setup and execution-time variance.
+    timeout-minutes: 40
     env:
       UV_PROJECT_ENVIRONMENT: venv
     steps:
@@ -150,6 +151,11 @@ jobs:
                   )
           PY
       - name: Verify Python quality
+        # Named progress and a 120s faulthandler stack dump remain visible if pytest stalls.
+        # Add -vv over the verifier's -q and report the 25 slowest durations on completion.
+        env:
+          PYTEST_ADDOPTS: "-vv --durations=25 -o faulthandler_timeout=120"
+          PYTHONUNBUFFERED: "1"
         run: uv run --no-project --python 3.12 python scripts/verify.py --profile quality
 
   frontend:
