@@ -40,11 +40,15 @@ import {
   type ApprovedBudget,
   type UserStrategy,
   type UserStrategyCall,
+  type UserStrategyConversation,
+  type UserStrategyConversationEvent,
+  type UserStrategyConversationPending,
   type UserStrategyDraftDocument,
   type UserStrategyExperiment,
   type UserStrategyPreview,
   type UserStrategyProposal,
   type UserStrategyProposalStatus,
+  type UserStrategyResumeRequest,
 } from './user-strategies-api'
 import { StrategyEvidenceResearch, useRunRead } from './user-strategy-research'
 
@@ -1244,6 +1248,95 @@ function CallEvidence({ call }: { call: UserStrategyCall | undefined }) {
  * A refused or unknown call never borrows an older answer. The previous turns
  * remain inspectable, and a new route visit requires its own approval.
  */
+const TURN_CALL_CEILING = 4
+const OBSERVATION_INTERVAL_MS = 4000
+
+/** What one tool call of the running turn is doing, in the turn's own order. */
+type LiveTool = { id: string; tool: string; state: 'running' | 'done' | 'failed'; detail: string }
+
+const TOOL_LABELS: Record<string, string> = {
+  describe_data: '读取数据说明',
+  experiment_status: '读取实验状态与报告',
+  propose_change: '提出字段修改',
+}
+
+/**
+ * One turn's request identity. A fresh uuid-like name per attempt, so two attempts
+ * are two turns and a retry of one click is one, and never anything derived from
+ * how long the conversation has grown — the turn itself may add calls to it.
+ */
+function newTurnId(): string {
+  const raw = globalThis.crypto?.randomUUID?.()
+  const body = (raw ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`)
+    .replace(/[^A-Za-z0-9]/g, '')
+  return `turn-${body.slice(0, 32)}`
+}
+
+function isAbort(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+/**
+ * The frozen input one confirmation would run, exactly as the host admitted it.
+ *
+ * Nothing here is derived: the revision, the window, the costs and the parameters
+ * are the preview's own fields, and the identity the confirm button carries back is
+ * the one the host froze. The card grants no permission by itself — a run starts
+ * only from the explicit click below, and never from the model call approval.
+ */
+function ConversationConfirmation({ pending, preview, identity, busy, error, confirm, decline }: {
+  pending: UserStrategyConversationPending
+  preview: UserStrategyPreview
+  /** The exact preview identity the host froze, carried back unchanged. */
+  identity: string
+  busy: boolean
+  error: string
+  confirm: () => void
+  decline: () => void
+}) {
+  return <section aria-label="实验确认" className="strategy-panel conversation-confirmation">
+    <header className="panel-head"><h2>确认运行这次实验</h2></header>
+    <p>修改已经应用到这个策略。下面是此刻冻结的输入；只有你按下确认，它才会运行一次回测。</p>
+    <dl className="summary-list">
+      <div><dt>冻结修订</dt><dd>{preview.draft_revision}</dd></div>
+      <div><dt>注册参数</dt><dd>{parameterLine(preview)}</dd></div>
+      <div><dt>数据</dt><dd>{dataLine(preview)}</dd></div>
+      <div><dt>数据窗口</dt><dd>{windowLine(preview)}</dd></div>
+      <div><dt>成本假设</dt><dd>{costLine(preview)}</dd></div>
+    </dl>
+    <p className="muted">{`本次确认消耗 1 次回测；批准过的模型调用不是运行许可。`}</p>
+    <p className="muted">{`确认对象：意图 ${pending.launch_intent_id} · 修订 ${pending.base_revision} · 预览 ${identity.slice(0, 16)}…`}</p>
+    <div className="actions">
+      <button type="button" className="primary" onClick={confirm} disabled={busy}>确认并运行一次回测</button>
+      <button type="button" onClick={decline} disabled={busy}>暂不运行</button>
+    </div>
+    {error && <p role="alert" className="notice error">{error}</p>}
+  </section>
+}
+
+/**
+ * One confirmed run this conversation is watching.
+ *
+ * Reading its status again is the only thing the polite resume does: it queries the
+ * very intent the user confirmed, so a run that is still going is never started
+ * again, and a reply that was lost is never a reason for a second confirmation.
+ */
+function ConversationObservation({ pending, runStatus, busy, error, refresh }: {
+  pending: UserStrategyConversationPending
+  runStatus: string
+  busy: boolean
+  error: string
+  refresh: () => void
+}) {
+  return <section aria-label="实验观察" className="strategy-panel conversation-observation">
+    <header className="panel-head"><h2>实验运行中</h2></header>
+    <p>{`这次对话在等待它自己确认的那次运行：${pending.job_id ?? '尚未登记运行'} · ${JOB_STATUS_LABELS[runStatus as BacktestJob['status']] ?? runStatus}`}</p>
+    <p className="muted">页面会自动查询同一次运行的进度；这不是新的运行，也不会重新批准任何模型调用。</p>
+    <div className="actions"><button type="button" onClick={refresh} disabled={busy}>立即刷新运行状态</button></div>
+    {error && <p role="alert" className="notice error">{error}</p>}
+  </section>
+}
+
 function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSendBlock }: {
   api: ApiAdapter
   strategy: UserStrategy
@@ -1282,56 +1375,286 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
   }
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  // The conversation's own durable state, read from the host: what it is waiting
+  // for and what it may still spend. A reload restores exactly this, so the panel
+  // never depends on having watched the stream that produced it.
+  const [conversation, setConversation] = useState<UserStrategyConversation | null>(null)
+  const [conversationNote, setConversationNote] = useState('')
+  // The turn being watched right now: deltas the provider really sent, and the
+  // tools it really asked for. It is cleared when the turn ends, because the
+  // canonical record is what is shown from then on.
+  const [live, setLive] = useState<{ text: string; tools: LiveTool[] } | null>(null)
+  const [runStatus, setRunStatus] = useState('')
+  const current = useRef<AbortController | null>(null)
+  const decided = useRef<Set<string>>(new Set())
   const latest = strategy.calls.at(-1)
+  // One turn is one root call and every call that names it, so a turn that spent
+  // several model calls shows its own prompt, its own answer and its own history
+  // once, and never borrows a neighbouring turn's.
+  const turnId = latest ? (latest.turn_id ?? latest.call_id) : null
+  const turnCalls = turnId
+    ? strategy.calls.filter(call => (call.turn_id ?? call.call_id) === turnId)
+    : []
+  const turnCallIds = new Set(turnCalls.map(call => call.call_id))
+  const turnMessages = strategy.messages.filter(item => turnCallIds.has(item.call_id))
+  const prompt = turnMessages.filter(item => item.role === 'user').at(-1)
+  const answers = turnMessages.filter(item => item.role === 'model')
+  const answer = answers.at(-1)
+  const earlier = strategy.messages.filter(item => !turnCallIds.has(item.call_id))
+  const root = turnCalls.find(call => call.call_id === turnId) ?? latest
   const unresolved = strategy.calls.some(call =>
     call.status === 'pending' || call.status === 'dispatched')
-  // The turn is the latest call's own messages, matched by its call id: its own
-  // prompt and its own answer, never the earliest thing in the conversation.
-  const turnMessages = latest
-    ? strategy.messages.filter(item => item.call_id === latest.call_id)
-    : []
-  const prompt = turnMessages.filter(item => item.role === 'user').at(-1)
-  const answer = turnMessages.filter(item => item.role === 'model').at(-1)
-  const earlier = latest
-    ? strategy.messages.filter(item => item.call_id !== latest.call_id)
-    : strategy.messages
+  const streaming = Boolean(api.streamUserStrategyMessage)
+
+  // The bound is the workspace's own remaining grant, never a promise this page
+  // made: at most four calls in one turn, and none at all when nothing is left.
+  const remaining = conversation?.budget.remaining_model_calls ?? null
+  const turnBound = remaining === null ? 0 : Math.max(0, Math.min(TURN_CALL_CEILING, remaining))
+  const turnBudget: ApprovedBudget = streaming && remaining !== null
+    ? { max_model_calls: turnBound, max_backtests: 0 }
+    : CALL_APPROVAL
+  const awaitingRunDecision = conversation?.pending?.phase === 'awaiting_confirmation'
+    || conversation?.pending?.phase === 'awaiting_observation'
+  const canSend = (!streaming || turnBound > 0) && !awaitingRunDecision
+
+  // The frozen confirmation this turn is waiting on, exactly as the host recorded
+  // it. All three identities are required: a card that cannot name what it would
+  // run is not shown, and its confirm button can therefore never name a guess.
+  const confirmation = conversation?.pending?.phase === 'awaiting_confirmation'
+    && conversation.preview && conversation.pending.preview_identity
+    ? {
+        pending: conversation.pending,
+        preview: conversation.preview,
+        identity: conversation.pending.preview_identity,
+      }
+    : null
+
+  const active = () => mounted.current && shown.current === visitKey
+
+  const refresh = useCallback(async () => {
+    const read = api.userStrategyConversation
+    if (!read) return
+    try {
+      const value = await read(strategy.user_strategy_id)
+      if (!mounted.current || value.strategy_id !== strategy.user_strategy_id) return
+      setConversation(value)
+      setConversationNote('')
+    } catch (error) {
+      if (mounted.current) setConversationNote(explain(error))
+    }
+  }, [api, strategy.user_strategy_id])
+
+  // Read the waiting decision on mount and whenever this strategy's own record
+  // moves: after an apply the revision changes and this panel remounts, so the
+  // resume below is driven by the durable records and never by a stale click.
+  const readConversation = api.userStrategyConversation
+  useEffect(() => {
+    if (!readConversation) return
+    let open = true
+    readConversation(strategy.user_strategy_id)
+      .then(value => {
+        if (!open || value.strategy_id !== strategy.user_strategy_id) return
+        setConversation(value)
+        setConversationNote('')
+      })
+      .catch(error => { if (open) setConversationNote(explain(error)) })
+    return () => { open = false }
+  }, [readConversation, strategy.user_strategy_id, strategy.updated_at, strategy.draft.revision])
+
+  useEffect(() => () => { current.current?.abort() }, [])
+
+  const apply = (event: UserStrategyConversationEvent) => {
+    if (event.kind === 'text_delta') {
+      setLive(state => ({ text: (state?.text ?? '') + event.text, tools: state?.tools ?? [] }))
+      return
+    }
+    if (event.kind === 'tool_start') {
+      setLive(state => ({
+        text: state?.text ?? '',
+        tools: [...(state?.tools ?? []), { id: event.tool_id, tool: event.tool, state: 'running', detail: '' }],
+      }))
+      return
+    }
+    if (event.kind === 'tool_end' || event.kind === 'tool_error') {
+      const failed = event.kind === 'tool_error'
+      setLive(state => ({
+        text: state?.text ?? '',
+        tools: (state?.tools ?? []).map(item => item.id === event.tool_id
+          ? { ...item, state: failed ? 'failed' : 'done', detail: failed ? event.error : event.text }
+          : item),
+      }))
+      // A tool that failed is reported as a failure; it is never read as success.
+      if (failed) setNote(event.error)
+      return
+    }
+    if (event.kind === 'state') {
+      if (event.strategy?.user_strategy_id === strategy.user_strategy_id) changed(event.strategy)
+      if (event.run_status) setRunStatus(event.run_status)
+      return
+    }
+    if (event.kind === 'error') {
+      setNote(event.error)
+      return
+    }
+    if (event.kind === 'interrupt' || event.kind === 'done') {
+      if (event.strategy.user_strategy_id !== strategy.user_strategy_id) return
+      changed(event.strategy)
+      setLive(null)
+      setRunStatus('')
+      void refresh()
+      return
+    }
+  }
+
+  const runStream = async (
+    source: (signal: AbortSignal) => Promise<AsyncGenerator<UserStrategyConversationEvent>>,
+  ) => {
+    // Observation and explicit clicks share one request slot. A timer must never
+    // abort a model response (the provider may already have charged that call).
+    if (current.current) return
+    const controller = new AbortController()
+    current.current = controller
+    setBusy(true)
+    setNote('')
+    try {
+      const events = await source(controller.signal)
+      for await (const event of events) {
+        if (!active()) return
+        apply(event)
+      }
+    } catch (error) {
+      if (active() && !isAbort(error)) {
+        setNote(explain(error))
+        // The page never guesses what happened: it re-reads the durable record.
+        void refresh()
+        const read = api.getUserStrategy
+        if (read) {
+          try {
+            const value = await read(strategy.user_strategy_id)
+            if (active() && value.user_strategy_id === strategy.user_strategy_id) changed(value)
+          } catch { /* the notice above already says the read failed */ }
+        }
+      }
+    } finally {
+      if (current.current === controller) {
+        current.current = null
+        if (mounted.current) setBusy(false)
+      }
+    }
+  }
+
+  const decide = (input: UserStrategyResumeRequest) => {
+    const resume = api.resumeUserStrategyConversation
+    if (!resume) {
+      setNote('这个工作区不提供对话续跑。')
+      return
+    }
+    void runStream(signal => resume(strategy.user_strategy_id, input, signal))
+  }
+
+  // A decision the user already made is carried to the turn that is waiting for
+  // it, once per turn and once per decision. Applying or rejecting happened through
+  // the proposal's own operation first; this starts nothing by itself.
+  const pendingProposal = conversation?.pending?.phase === 'awaiting_proposal'
+    ? conversation.pending
+    : null
+  const recorded = pendingProposal
+    ? strategy.proposals.find(item => item.proposal_id === pendingProposal.proposal_id)
+    : undefined
+  useEffect(() => {
+    if (!api.resumeUserStrategyConversation || !pendingProposal || !recorded) return
+    if (recorded.status !== 'applied' && recorded.status !== 'rejected') return
+    const key = `${pendingProposal.turn_id}:${recorded.status}`
+    if (decided.current.has(key)) return
+    decided.current.add(key)
+    decide({
+      turn_id: pendingProposal.turn_id,
+      action: recorded.status === 'applied' ? 'applied' : 'rejected',
+      proposal_id: pendingProposal.proposal_id,
+    })
+    // decide is derived from the values above; the guard makes one attempt per turn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api.resumeUserStrategyConversation, pendingProposal?.turn_id, pendingProposal?.proposal_id, recorded?.status])
+
+  // A run this conversation confirmed is watched by asking about the very same
+  // intent, one query at a time, while this strategy stays open.
+  const observationTurn = conversation?.pending?.phase === 'awaiting_observation'
+    ? conversation.pending.turn_id
+    : null
+  useEffect(() => {
+    if (!observationTurn || !api.resumeUserStrategyConversation) return
+    let stopped = false
+    let handle: ReturnType<typeof setTimeout> | null = null
+    const tick = () => {
+      handle = setTimeout(async () => {
+        if (stopped) return
+        await runStream(signal => api.resumeUserStrategyConversation!(
+          strategy.user_strategy_id, { turn_id: observationTurn, action: 'observe' }, signal))
+        if (!stopped) tick()
+      }, OBSERVATION_INTERVAL_MS)
+    }
+    tick()
+    return () => { stopped = true; if (handle) clearTimeout(handle) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [observationTurn, api.resumeUserStrategyConversation, strategy.user_strategy_id])
 
   const ask = async () => {
     // UI readiness is only a sending precondition; the backend still owns the
     // actual configuration, approval and provider execution checks.
-    if (inFlight.current || unresolved || !evidenceReady) return
+    if (inFlight.current || current.current || unresolved || !evidenceReady || awaitingRunDecision) return
     if (modelSendBlock !== null) {
       setNote(modelSendBlock)
       return
     }
     if (!approved) {
-      setNote('在询问模型之前，需要先批准一次模型调用。')
+      setNote('在询问模型之前，需要先批准这次模型调用。')
       return
     }
-    const send = api.sendUserStrategyMessage
-    if (!send) {
-      setNote('这个工作区不提供模型协作。')
-      return
-    }
+    const evidence = a ? { evidence_job_ids: [a.job_id!, ...(b ? [b.job_id!] : [])] } : {}
+    const text = message.trim()
+    const revision = strategy.draft.revision
     inFlight.current = true
-    const sentAt = visitKey
-    const mine = () => mounted.current && shown.current === sentAt
-    setBusy(true)
+    setLive(streaming ? { text: '', tools: [] } : null)
     setNote('')
     try {
-      const updated = await send(strategy.user_strategy_id, {
-        call_id: `call-${strategy.calls.length + 1}`,
-        base_revision: strategy.draft.revision,
-        text: message.trim(),
-        approved_budget: CALL_APPROVAL,
-        ...(a ? { evidence_job_ids: [a.job_id!, ...(b ? [b.job_id!] : [])] } : {}),
-      })
-      if (!mine() || updated.user_strategy_id !== strategy.user_strategy_id) return
-      changed(updated)
-      setMessage('')
-      setApproved(false)
+      if (streaming) {
+        const send = api.streamUserStrategyMessage!
+        if (!canSend) {
+          setNote('这个工作区剩余的模型调用额度为 0，无法开始新的一轮。')
+          return
+        }
+        await runStream(async signal => {
+          const events = await send(strategy.user_strategy_id, {
+            call_id: newTurnId(),
+            base_revision: revision,
+            text,
+            approved_budget: turnBudget,
+            ...evidence,
+          }, signal)
+          return events
+        })
+      } else {
+        const send = api.sendUserStrategyMessage
+        if (!send) {
+          setNote('这个工作区不提供模型协作。')
+          return
+        }
+        const updated = await send(strategy.user_strategy_id, {
+          call_id: newTurnId(),
+          base_revision: revision,
+          text,
+          approved_budget: CALL_APPROVAL,
+          ...evidence,
+        })
+        if (!active() || updated.user_strategy_id !== strategy.user_strategy_id) return
+        changed(updated)
+      }
+      if (active()) {
+        setMessage('')
+        setApproved(false)
+      }
     } catch (error) {
-      if (mine()) setNote(explain(error))
+      if (active()) setNote(explain(error))
     } finally {
       inFlight.current = false
       if (mounted.current) setBusy(false)
@@ -1359,7 +1682,7 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
     <div className="chat-body">
     {!latest && <div className="chat-empty-guidance">
       <p>从当前草稿和所选实验开始讨论。</p>
-      <p className="muted">先选一个问题，也可以直接输入。发送前需要批准一次模型调用。</p>
+      <p className="muted">先选一个问题，也可以直接输入。发送前需要批准这次模型调用。</p>
       <div className="chat-suggestions">
         <button type="button" onClick={() => setMessage(a ? '请解读当前所选实验的结果、成本和局限。' : '请帮我明确当前策略想要验证的假设。')}>{a ? '解读所选实验' : '明确研究假设'}</button>
         <button type="button" onClick={() => setMessage(b ? '请比较当前 A/B 实验，指出差异、风险和仍缺少的证据。' : '当前研究还缺少哪些风险和成本证据？')}>{b ? '比较 A/B 证据' : '检查风险与成本'}</button>
@@ -1372,23 +1695,50 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
     {unresolved && <p className="notice">
       还有一次已记录的调用没有结论。在它落实之前不会再问下一次，因此不会覆盖任何东西。
     </p>}
-    {latest && <section aria-label="当前一轮" className="turn">
+    {(latest || live) && <section aria-label="当前一轮" className="turn">
+      {/* A turn that has not recorded its first call yet is still a turn: it says
+          that it is asking the model rather than showing nothing at all. */}
       <p className="turn-head">
-        <span className={`status status-${latest.status}`}>{CALL_STATUS_LABELS[latest.status]}</span>
-        <span className="muted">{`草稿修订 ${latest.base_revision} · 调用 ${latest.call_id}`}</span>
+        {latest && !live
+          ? <span className={`status status-${latest.status}`}>{CALL_STATUS_LABELS[latest.status]}</span>
+          : <span className="status status-dispatched">正在请求模型</span>}
+        <span className="muted">{root && !live
+          ? `草稿修订 ${root.base_revision}`
+          : `草稿修订 ${strategy.draft.revision} · 本轮刚开始`}</span>
       </p>
+      {!live && turnCalls.length > 1 && <details className="provenance">
+        <summary>{`本轮共 ${turnCalls.length} 次模型调用`}</summary>
+        {turnCalls.map(call => <p key={call.call_id}>{`${call.call_id} · ${CALL_STATUS_LABELS[call.status]} · ${usageLine(call)}`}</p>)}
+      </details>}
       {/* The prompt that produced this turn, kept behind a disclosure so the answer
           is what is read first; the exact instant stays on the time element. */}
-      {prompt && <details className="provenance turn-prompt">
+      {!live && prompt && <details className="provenance turn-prompt">
         <summary>{`本轮问题 · ${utcClock(prompt.at)}`}</summary>
         <p>{prompt.text}</p>
       </details>}
-      {answer
+      {/* While the turn is really running, its own deltas are shown as they arrive.
+          They are never a finished answer cut into pieces: a turn that produced no
+          delta shows none, and the canonical answer replaces this when it lands. */}
+      {live && <div className="turn-answer live-answer" role="status" aria-live="polite">
+        <div className="answer-scroll" role="group" aria-label="正在生成的回答" tabIndex={0}>
+          <p>{live.text || '正在等待模型…'}</p>
+        </div>
+        <p className="muted">模型推断 — 不是正式证据。以上内容正在生成，尚未完成。</p>
+      </div>}
+      {live && live.tools.length > 0 && <ul className="tool-list" aria-label="本轮工具调用">
+        {live.tools.map(item => <li key={item.id} className={`tool tool-${item.state}`}>
+          <strong>{TOOL_LABELS[item.tool] ?? item.tool}</strong>
+          {item.state === 'running' ? ' · 读取中…'
+            : item.state === 'done' ? ' · 已完成'
+              : ` · 失败：${item.detail}`}
+        </li>)}
+      </ul>}
+      {!live && latest && (answer
         ? <div className="turn-answer">
             {/* The full answer shares the conversation scroller. The composer
                 remains outside it, while keyboard users can focus this answer. */}
             <div className="answer-scroll" role="group" aria-label="本轮回答" tabIndex={0}>
-              <p>{answer.text}</p>
+              {answers.map(item => <p key={item.message_id}>{item.text}</p>)}
             </div>
             <p className="muted">模型推断 — 不是正式证据。</p>
             <p className="muted">
@@ -1398,32 +1748,63 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
           </div>
         // A refusal, an unknown outcome or an unconfigured call answers nothing:
         // this turn says so rather than showing an older answer as its own.
-        : <p className="muted">这一轮没有被观测到的模型回答；下面历史里的内容属于更早的调用，不是对它的回答。</p>}
-      {latest.message && <p className="notice">{latest.message}</p>}
-      <CallNextStep call={latest} />
+        : <p className="muted">这一轮没有被观测到的模型回答；下面历史里的内容属于更早的调用，不是对它的回答。</p>)}
+      {latest?.message && <p className="notice">{latest.message}</p>}
+      {latest && <CallNextStep call={latest} />}
       {/* Usage, cost and the route are details of this call; an unavailable cost
           still says so in the summary, so it is never silently dropped. */}
-      <details className="provenance turn-details">
-        <summary>{latest.cost && !latest.cost.available ? '用量、成本与来源 · 成本不可用' : '用量、成本与来源'}</summary>
-        <p className="muted">{usageLine(latest)}</p>
-        {latest.cost
-          ? <p className="muted">{latest.cost.available
-              ? `成本：${latest.cost.amount ?? '金额未记录'}`
-              : `成本不可用：${latest.cost.reason}。`}</p>
+      {!live && root && <details className="provenance turn-details">
+        <summary>{root.cost && !root.cost.available ? '用量、成本与来源 · 成本不可用' : '用量、成本与来源'}</summary>
+        <p className="muted">{usageLine(root)}</p>
+        {root.cost
+          ? <p className="muted">{root.cost.available
+              ? `成本：${root.cost.amount ?? '金额未记录'}`
+              : `成本不可用：${root.cost.reason}。`}</p>
           : <p className="muted">这次调用没有成本记录，因此这里不写任何金额。</p>}
         <dl className="summary-list">
-          <div><dt>提供方</dt><dd>{latest.route.provider ?? '未记录'}</dd></div>
-          <div><dt>模型</dt><dd>{latest.model ?? latest.route.model ?? '未记录'}</dd></div>
-          <div><dt>端点</dt><dd>{latest.route.endpoint ?? '未记录'}</dd></div>
-          <div><dt>本次批准</dt><dd>{`${latest.approved_budget.max_model_calls} 次模型调用 · ${latest.approved_budget.max_backtests} 次回测`}</dd></div>
+          <div><dt>提供方</dt><dd>{root.route.provider ?? '未记录'}</dd></div>
+          <div><dt>模型</dt><dd>{root.model ?? root.route.model ?? '未记录'}</dd></div>
+          <div><dt>端点</dt><dd>{root.route.endpoint ?? '未记录'}</dd></div>
+          <div><dt>本次批准</dt><dd>{`${root.approved_budget.max_model_calls} 次模型调用 · ${root.approved_budget.max_backtests} 次回测`}</dd></div>
         </dl>
-      </details>
-      <CallEvidence call={latest} />
+      </details>}
+      {!live && turnCalls.filter(call => call.evidence?.length).map(call => <CallEvidence key={call.call_id} call={call} />)}
     </section>}
     {/* The current change sits between the answer it follows and the earlier
         conversation: an open one is right there to decide on, a closed one is a
         single collapsed line. */}
     {proposalSlot}
+    {conversation?.pending?.phase === 'awaiting_proposal' && recorded?.status === 'open' &&
+      <p className="notice" role="status">
+        这次对话正在等待你对上面这条建议做出决定：应用或拒绝之后，它才会继续。
+      </p>}
+    {confirmation &&
+      <ConversationConfirmation
+        pending={confirmation.pending}
+        preview={confirmation.preview}
+        identity={confirmation.identity}
+        busy={busy}
+        error={note}
+        // The exact intent, revision and preview the host froze, carried back
+        // unchanged: this click is the only thing that starts a run.
+        confirm={() => decide({
+          turn_id: confirmation.pending.turn_id,
+          action: 'confirm',
+          launch_intent_id: confirmation.pending.launch_intent_id,
+          base_revision: confirmation.pending.base_revision,
+          preview_identity: confirmation.identity,
+        })}
+        decline={() => decide({ turn_id: confirmation.pending.turn_id, action: 'declined' })}
+      />}
+    {conversation?.pending?.phase === 'awaiting_observation' &&
+      <ConversationObservation
+        pending={conversation.pending}
+        runStatus={runStatus}
+        busy={busy}
+        error={note}
+        refresh={() => decide({ turn_id: conversation.pending!.turn_id, action: 'observe' })}
+      />}
+    {conversationNote && <p role="alert" className="notice error">{conversationNote}</p>}
     {earlier.length > 0 &&
       // Earlier messages stay inspectable inside the shared conversation scroller.
       <details className="provenance turn-history">
@@ -1442,28 +1823,35 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
         </div>
       </details>}
     </div>
-    <div className="composer">
+    <div className={`composer${awaitingRunDecision ? ' composer-paused' : ''}`}>
       <div className="field">
         <label htmlFor="strategy-message">消息</label>
-        <textarea id="strategy-message" rows={3} value={message} maxLength={4000}
+        <textarea id="strategy-message" rows={2} value={message} maxLength={4000}
           placeholder="描述你想验证的问题…"
           onChange={event => setMessage(event.target.value)} />
       </div>
       <label className="check" htmlFor="strategy-approve">
         <input id="strategy-approve" type="checkbox" checked={approved}
           onChange={event => { setApproved(event.target.checked); setNote('') }} />
-        批准一次模型调用
+        {streaming ? `批准本轮最多 ${turnBudget.max_model_calls} 次模型调用` : '批准一次模型调用'}
       </label>
       <div className="composer-actions">
-        <p className="muted">{isIntentDraft(strategy.draft)
-          ? '一次模型调用 · 澄清当前想法。'
-          : '一次模型调用 · 不应用修改，不启动实验。'}</p>
-        <button type="button" className="primary" onClick={ask} disabled={busy || unresolved || !approved || !message.trim() || modelSendBlock !== null || !evidenceReady}>询问模型</button>
+        <p className="muted">{streaming ? '仅讨论与提案；运行需单独确认。' : isIntentDraft(strategy.draft)
+          ? `${streaming ? `本轮最多 ${turnBudget.max_model_calls} 次模型调用` : '一次模型调用'} · 澄清当前想法。`
+          : `${streaming ? `本轮最多 ${turnBudget.max_model_calls} 次模型调用` : '一次模型调用'} · 不应用修改，不启动实验。`}</p>
+        {streaming && remaining !== null && <p className="muted" title={`上限 ${conversation?.budget.max_model_calls ?? 0}，已预留 ${conversation?.budget.reserved_model_calls ?? 0}；模型额度不是运行许可。`}>
+          {`工作区剩余模型调用 ${remaining} / ${conversation?.budget.max_model_calls ?? 0} 次`}
+        </p>}
+        <button type="button" className="primary" onClick={ask} disabled={busy || unresolved || !approved || !message.trim() || modelSendBlock !== null || !evidenceReady || !canSend}>询问模型</button>
       </div>
+      {streaming && remaining === 0 && <p className="notice" role="status">
+        这个工作区剩余的模型调用额度为 0，本轮无法发送。
+      </p>}
+      {awaitingRunDecision && <p className="notice" role="status">先确认或暂不运行当前实验；运行完成后可在这里继续追问。</p>}
       {modelSendBlock !== null && <p className="notice" role="status">
         {modelSendBlock} <Link to="/settings">检查模型设置</Link>，完成后在<a href="#research-preparation">研究准备</a>中重新检查。
       </p>}
-      {note && <p role="alert" className="notice error">{note}</p>}
+      {conversation?.pending?.phase !== 'awaiting_confirmation' && note && <p role="alert" className="notice error">{note}</p>}
     </div>
 
   </section>
@@ -1661,7 +2049,7 @@ function ProposalPanel({ api, strategy, proposal, changed }: {
       </li>)}
     </ul>
     <p className="muted">
-      保存为新修订后，需在「实验」里预览并确认运行。
+      保存仅生成新修订；仍需单独检查实验预览并确认运行。
     </p>
     {open && actionError && <p role="alert" className="notice error">{actionError}</p>}
     {open && <div className="actions">

@@ -120,6 +120,29 @@ async function scriptWorkspace(page: Page, strategies: unknown[]) {
       } })
       return
     }
+    if (route.request().method() === 'GET' && rest === `/${id}/conversation`) {
+      // Reading the selected conversation's state, not a refused write: the page
+      // restores what it is waiting for and what it may still spend. The budget
+      // below is an explicitly scripted, unused grant — no provider is configured
+      // and no model is called by this fixture.
+      const document = documents[id] as typeof FIRST
+      await route.fulfill({ json: {
+        strategy_id: document.user_strategy_id,
+        revision: document.draft.revision,
+        pending: null,
+        preview: null,
+        open_proposals: document.proposals
+          .filter(proposal => proposal.status === 'open')
+          .map(proposal => proposal.proposal_id),
+        budget: {
+          max_model_calls: 6,
+          reserved_model_calls: 0,
+          remaining_model_calls: 6,
+          max_backtests: 1,
+        },
+      } })
+      return
+    }
     // Anything that would write: the workspace refuses it, so the refusal is
     // visible on screen. Nothing here is dispatched anywhere.
     await route.fulfill({

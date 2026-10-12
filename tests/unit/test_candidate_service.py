@@ -233,7 +233,7 @@ def test_round_trip_candidate_binds_nominal_report_and_path_versions(
     def await_success(service: WebService, job_id: str) -> None:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if service.get_job(job_id).status not in {"queued", "running"}:
+            if service.get_job(job_id).status not in {"accepted", "running", "stopping"}:
                 break
             time.sleep(0.025)
         assert service.get_job(job_id).status == "succeeded"

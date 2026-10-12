@@ -3,7 +3,7 @@
 This module is a thin owner, not an engine. It reuses the registered scenario catalog
 through :class:`WebService`, the frozen child experiment and its dispatch path through
 :class:`ResearchOrchestrator`, and the workspace's model port through
-:class:`ea.web.llm`. It adds no scheduler, no database, no new financial authority:
+:class:`ea.web.llm`. It adds no scheduler and no new financial authority:
 
 * the engine strategy parameters and ``initial_cash`` are the only fields an AI diff may
   name, and the complete resulting draft is validated by the real backend before it is
@@ -16,9 +16,13 @@ through :class:`WebService`, the frozen child experiment and its dispatch path t
   the same launch intent always resolves to the experiment it confirmed and a changed
   input is refused instead of silently run.
 
-Everything durable lives in one JSON record per strategy under
-``workspace/user-strategies``: messages, calls, proposals, change history and experiment
-references, written with the same atomic-publish discipline the research store uses.
+Everything durable lives under ``workspace/user-strategies``. A strategy starts as one
+JSON record — messages, calls, proposals, change history and experiment references —
+written with the same atomic-publish discipline the research store uses. One strategy at
+a time may be migrated into the workspace's one conversation database, which then holds
+its complete document and the workspace's model-call reservations; that database is a
+storage owner for records this module already owns, never a second authority over the
+draft, the runs or the budget.
 """
 
 from __future__ import annotations
@@ -27,15 +31,36 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import tempfile
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
 
+import langsmith
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
+
+from ea.web.conversation import (
+    DONE,
+    ERROR,
+    INTERRUPT,
+    STATE,
+    TEXT_DELTA,
+    TOOL_END,
+    TOOL_ERROR,
+    TOOL_START,
+    checkpoints,
+    event,
+    thread_config,
+)
 from ea.web.llm import (
     ModelMessage,
     ModelNotConfigured,
@@ -43,6 +68,8 @@ from ea.web.llm import (
     ModelProviderError,
     ModelResponse,
     ModelRoute,
+    StreamingModelPort,
+    ToolCall,
     ToolDefinition,
     create_model_port,
 )
@@ -109,6 +136,36 @@ _MAX_TOKENS = 1200
 #: One approval is exactly one call; a hidden second call is never spent.
 _CALL_APPROVAL = 1
 _DEFAULT_BUDGET = {"max_model_calls": 10, "max_backtests": 5}
+#: The one conversation database per workspace. It is created lazily by the first
+#: migrated write; a workspace that never migrates keeps one JSON record per
+#: strategy and no database at all.
+_CONVERSATION_DB = "conversations.sqlite3"
+#: Wait for a concurrent writer instead of failing immediately. Both this store
+#: and the graph checkpoint saver open the same file, each with its own connection.
+_SQLITE_BUSY_TIMEOUT_MS = 5000
+#: The call statuses that prove a call may have reached the provider, and are
+#: therefore reserved once and never refunded. A call that was never dispatched —
+#: no provider configured, or interrupted before dispatch — proves no network and
+#: is not counted.
+_RESERVED_CALL_STATUSES = frozenset({"pending", "dispatched", "observed", "refused", "unknown"})
+#: Plain validated JSON only: every column below is either an identity or a JSON
+#: document. There is no pickle and no second schema authority.
+_CONVERSATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS strategy_documents (
+    strategy_id TEXT PRIMARY KEY,
+    document TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS model_call_reservations (
+    strategy_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    request TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    PRIMARY KEY (strategy_id, call_id)
+);
+"""
 #: The one owner marker an experiment carries when the Rust core owns it. A record
 #: without it keeps the original in-process owner, so no experiment ever has two.
 _QUINE_OWNER = "quine"
@@ -273,6 +330,96 @@ def _entry(items: tuple[dict[str, Any], ...], key: str, value: str) -> dict[str,
     return None
 
 
+#: The tools a conversation may ask for, and nothing else. Each one reads or proposes
+#: inside this workspace's own authorities: no filesystem, no URL, no code execution,
+#: no live, Paper or broker tool, and no tool a conversation can add.
+_DESCRIBE_DATA_TOOL = "describe_data"
+_EXPERIMENT_STATUS_TOOL = "experiment_status"
+#: The one instruction that turns verified readings into an answer. It grants nothing:
+#: the readings it names are the host's own, and the model is told to state no more.
+_EXPLAIN_INSTRUCTION = (
+    "Now answer the user's own question in plain language, using only the host-verified "
+    "readings above and naming the limitations this workspace states. State nothing that "
+    "is not in those readings, and do not claim any run, statistic or file that is not "
+    "among them."
+)
+#: What a paused conversation is waiting for. The identity fields beside each phase are
+#: the exact business identities a resuming decision has to name.
+_PHASE_PROPOSAL = "awaiting_proposal"
+_PHASE_CONFIRMATION = "awaiting_confirmation"
+_PHASE_OBSERVATION = "awaiting_observation"
+
+
+def _child_call_id(turn_id: str, step: int) -> str:
+    """A further model call of one turn: deterministic, so a replay names the same call."""
+    return f"{turn_id[:40]}-s{step}-{_digest({'turn': turn_id, 'step': step})[:12]}"
+
+
+def _response_document(response: ModelResponse) -> dict[str, Any]:
+    """One response as plain JSON, with its tool identities and arguments kept."""
+    return {
+        "text": response.text,
+        "tool_calls": [
+            {"id": call.id, "name": call.name, "arguments": call.arguments}
+            for call in response.tool_calls
+        ],
+        "stop_reason": response.stop_reason,
+        "model": response.model,
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+    }
+
+
+def _response_from(document: Any) -> ModelResponse | None:
+    """The response a call ledger recorded, or ``None`` when it recorded none."""
+    if type(document) is not dict:
+        return None
+    reason = document.get("stop_reason")
+    if reason not in {"stop", "tool_calls"}:
+        return None
+    raw = document.get("tool_calls") or []
+    if type(raw) is not list or not isinstance(document.get("text"), str):
+        return None
+    calls: list[ToolCall] = []
+    for item in raw:
+        if type(item) is not dict or type(item.get("arguments")) is not dict:
+            return None
+        identifier, name = item.get("id"), item.get("name")
+        if not isinstance(identifier, str) or not isinstance(name, str):
+            return None
+        calls.append(ToolCall(identifier, name, dict(item["arguments"])))
+    return ModelResponse(
+        document["text"],
+        tuple(calls),
+        cast(Any, reason),
+        str(document.get("model") or ""),
+        document.get("input_tokens"),
+        document.get("output_tokens"),
+    )
+
+
+def _canonical_json(payload: object) -> str:
+    """One canonical text for one value, so two requests compare as themselves."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _is_canonical_conversation(legacy: Any, strategy: UserStrategy) -> bool:
+    """The re-encoded document still carries the whole conversation it was read from.
+
+    Every message, call and proposal is compared as it stands — its identity, its
+    place in the order, its role and the call and proposal it belongs to — and the
+    canonical form is proved to decode and re-encode to itself, so what is
+    committed is the record that was read rather than a lossy rewrite of it.
+    """
+    canonical = strategy.document()
+    if UserStrategy.decode(json.loads(_canonical_json(canonical))).document() != canonical:
+        return False
+    return all(
+        canonical[field] == legacy.get(field)
+        for field in ("user_strategy_id", "messages", "calls", "proposals")
+    )
+
+
 def _requested_budget(approved_budget: Any) -> dict[str, int]:
     """The approval exactly as one request states it, without any workspace read.
 
@@ -382,6 +529,25 @@ class IntentDraft:
 Draft = IntentDraft | StrategyDraft
 
 
+@dataclass(frozen=True, slots=True)
+class _AdmittedTurn:
+    """One turn that may reach the provider, with everything it was admitted under.
+
+    It is the result of every check and every durable record a turn needs before it
+    may dispatch: the strategy as it stands with its own pending call and message,
+    the identity of that call, the question being asked and the budget this turn was
+    granted. A turn that has nothing to dispatch — a replayed identity, or a
+    workspace with no provider — is returned as its own strategy instead.
+    """
+
+    strategy: UserStrategy
+    call_id: str
+    message: str
+    base_revision: int
+    approved_budget: dict[str, int]
+    evidence_job_ids: list[str]
+
+
 def _decode_draft(document: Any) -> Draft:
     """One stored draft, discriminated by its own kind.
 
@@ -420,6 +586,12 @@ class UserStrategy:
     #: record, so replaying the same operation across a restart resolves to the
     #: revision it already produced instead of selecting a second time.
     dataset: dict[str, Any] | None = None
+    #: The one decision a conversation is waiting for right now, if it is waiting for
+    #: one: the phase, and the exact business identities that decision names. The
+    #: graph holds this same reference in its own checkpoint, and this record is the
+    #: one a reloaded workspace reads — a checkpoint is never the only copy of a
+    #: decision the user still has to make.
+    conversation_confirmation: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         return {
@@ -438,6 +610,13 @@ class UserStrategy:
             "experiments": [dict(item) for item in self.experiments],
             "binding": None if self.binding is None else dict(self.binding),
             "dataset": None if self.dataset is None else dict(self.dataset),
+            # Absent until a conversation waits for a decision, so every record
+            # written before this field existed stays exactly the record it was.
+            **(
+                {}
+                if self.conversation_confirmation is None
+                else {"conversation_confirmation": dict(self.conversation_confirmation)}
+            ),
         }
 
     @staticmethod
@@ -446,6 +625,7 @@ class UserStrategy:
             raise UserStrategyError("user strategy schema is not supported")
         binding = document.get("binding")
         dataset = document.get("dataset")
+        confirmation = document.get("conversation_confirmation")
         return UserStrategy(
             user_strategy_id=str(document["user_strategy_id"]),
             created_at=str(document["created_at"]),
@@ -461,6 +641,9 @@ class UserStrategy:
             experiments=tuple(dict(item) for item in document.get("experiments") or []),
             binding=None if binding is None else dict(binding),
             dataset=None if dataset is None else dict(dataset),
+            conversation_confirmation=None
+            if not isinstance(confirmation, dict)
+            else dict(confirmation),
         )
 
 
@@ -486,18 +669,268 @@ Strategies = list[UserStrategy]
 Documents = list[dict[str, Any]]
 Paths = list[str]
 History = list[ModelMessage]
+Tools = list[ToolDefinition]
 
 
 class UserStrategyStore:
-    """One JSON record per user strategy, published atomically."""
+    """One durable strategy per identity, from the one authority that owns it.
+
+    A workspace starts as one JSON record per strategy, published atomically.
+    ``migrate_conversation`` imports one record's complete legacy document into the
+    workspace's conversation database exactly once; only a committed row then
+    selects that database as the read and write authority for that strategy, and
+    the JSON record stays behind as the untouched pre-migration source. A strategy
+    that was never migrated keeps its JSON record as its only authority, so no
+    strategy is ever written to two places at once.
+    """
 
     def __init__(self, workspace: Path):
         self._dir = Path(workspace) / "user-strategies"
 
+    @property
+    def conversation_db_path(self) -> Path:
+        """The one conversation database of this workspace, created lazily."""
+        return self._dir / _CONVERSATION_DB
+
     def _path(self, user_strategy_id: str) -> Path:
         return self._dir / f"{user_strategy_id}.json"
 
-    def save(self, strategy: UserStrategy) -> None:
+    # -- the conversation database ------------------------------------------
+
+    @contextmanager
+    def _read(self) -> Iterator[sqlite3.Connection]:
+        """One short-lived read connection, closed by leaving the block."""
+        connection = sqlite3.connect(self.conversation_db_path, timeout=5.0)
+        try:
+            connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+            yield connection
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _write(self) -> Iterator[sqlite3.Connection]:
+        """One immediate transaction, committed only when the body returns."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.conversation_db_path, timeout=5.0, isolation_level=None)
+        try:
+            connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+            connection.executescript(_CONVERSATION_SCHEMA)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
+
+    def _document(self, connection: sqlite3.Connection, identity: str) -> UserStrategy | None:
+        """The committed document of one migrated strategy, or ``None`` if it has none.
+
+        A row this workspace cannot read, or one whose own identity disagrees with
+        the identity it is filed under, is refused outright: the JSON record it was
+        migrated from is a pre-migration source, never a silent fallback.
+        """
+        row = connection.execute(
+            "SELECT document FROM strategy_documents WHERE strategy_id = ?", (identity,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            item = UserStrategy.decode(json.loads(str(row[0])))
+        except (ValueError, TypeError, KeyError) as error:
+            if isinstance(error, UserStrategyError):
+                raise
+            raise UserStrategyError("stored user strategy is unreadable") from None
+        if item.user_strategy_id != identity:
+            raise UserStrategyError("stored user strategy is unreadable")
+        return item
+
+    def _publish(self, connection: sqlite3.Connection, strategy: UserStrategy) -> None:
+        """Write this document and read it back as itself before the commit."""
+        canonical = strategy.document()
+        connection.execute(
+            "INSERT INTO strategy_documents (strategy_id, document, updated_at) "
+            "VALUES (?, ?, ?) ON CONFLICT(strategy_id) DO UPDATE SET "
+            "document = excluded.document, updated_at = excluded.updated_at",
+            (strategy.user_strategy_id, _canonical_json(canonical), canonical["updated_at"]),
+        )
+        stored = connection.execute(
+            "SELECT document FROM strategy_documents WHERE strategy_id = ?",
+            (strategy.user_strategy_id,),
+        ).fetchone()
+        if stored is None or json.loads(str(stored[0])) != canonical:
+            raise UserStrategyError("the conversation was not stored as it was read")
+
+    def _legacy(self, identity: str) -> Any:
+        """This identity's pre-migration JSON document, or ``None`` if it has none."""
+        try:
+            payload = self._path(identity).read_bytes()
+        except OSError:
+            return None
+        try:
+            return json.loads(payload)
+        except ValueError:
+            raise UserStrategyError("stored user strategy is unreadable") from None
+
+    def _seed_reservations(self, connection: sqlite3.Connection, strategy: UserStrategy) -> None:
+        """Reserve every historical call that may already have reached the provider."""
+        for record in strategy.calls:
+            status = record.get("status")
+            if status not in _RESERVED_CALL_STATUSES:
+                continue
+            request = record.get("request")
+            stored = _canonical_json(request if isinstance(request, dict) else {})
+            connection.execute(
+                "INSERT OR IGNORE INTO model_call_reservations "
+                "(strategy_id, call_id, request, payload_sha256, status, reserved_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    strategy.user_strategy_id,
+                    str(record.get("call_id")),
+                    stored,
+                    str(record.get("payload_sha256") or _digest(request)),
+                    str(status),
+                    str(record.get("reserved_at") or strategy.created_at),
+                ),
+            )
+
+    def is_conversation_migrated(self, user_strategy_id: str) -> bool:
+        """Whether this identity is read from the conversation database."""
+        if not isinstance(user_strategy_id, str) or _SAFE_ID.fullmatch(user_strategy_id) is None:
+            return False
+        if not self.conversation_db_path.exists():
+            return False
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM strategy_documents WHERE strategy_id = ?", (user_strategy_id,)
+            ).fetchone()
+        return row is not None
+
+    def migrate_conversation(self, user_strategy_id: str) -> UserStrategy:
+        """Import one legacy conversation once, and never import it twice.
+
+        The complete legacy document — every message, call and proposal with its
+        identity, its order, its role and the relations between them — is decoded,
+        re-encoded and compared before it is written, and the committed row is read
+        back before the transaction ends, so what becomes the authority is the
+        record that was read. Repeating the call is a no-op that returns the
+        committed strategy, and the source is not even read once a row is committed,
+        so an archived JSON that has since been deleted, damaged or rewritten can
+        neither block nor alter the migration; a committed row this workspace cannot
+        read fails closed instead of being replaced. A source whose own identity is
+        not the requested one is refused before publication. Historical calls that
+        may have reached the provider are reserved in the same transaction.
+        """
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        with self._write() as connection:
+            stored = self._document(connection, identity)
+            if stored is not None:
+                # Already migrated. The committed row is the authority, so the
+                # archived JSON is never read again: a source that has since been
+                # deleted, damaged or rewritten cannot block or alter this.
+                return stored
+            legacy = self._legacy(identity)
+            if legacy is None:
+                raise UserStrategyNotFoundError("user strategy was not found")
+            strategy = UserStrategy.decode(legacy)
+            if strategy.user_strategy_id != identity:
+                # One identity's record may never be published under another's.
+                raise UserStrategyError("stored user strategy is unreadable")
+            if not _is_canonical_conversation(legacy, strategy):
+                raise UserStrategyError("the legacy conversation is not readable as itself")
+            self._publish(connection, strategy)
+            self._seed_reservations(connection, strategy)
+        return strategy
+
+    def reserve_model_call(
+        self, strategy: UserStrategy, call_id: str, max_model_calls: int
+    ) -> dict[str, Any]:
+        """Reserve one workspace model call, and publish the strategy, atomically.
+
+        ``strategy`` carries the pending record of this call, so the reservation and
+        that record are committed together or not at all: a call that may reach the
+        provider is never accounted for without being recorded, and never recorded
+        without being accounted for. The ceiling counts every reservation this
+        workspace has ever made — including the ones a migration imported — so a
+        bounded call ledger, a new conversation or a reopened database never resets
+        it. An identity that is already reserved is compared against its stored
+        canonical request: a different request is a conflict, and the same one
+        returns the stored reservation unchanged rather than spending again.
+        """
+        if not self.conversation_db_path.exists():
+            raise UserStrategyStateError(
+                "this conversation has not been migrated to the conversation database"
+            )
+        record = _entry(strategy.calls, "call_id", call_id)
+        if record is None:
+            raise UserStrategyStateError("this call is not part of the strategy")
+        request = record.get("request")
+        canonical = _canonical_json(request if isinstance(request, dict) else {})
+        with self._write() as connection:
+            if self._document(connection, strategy.user_strategy_id) is None:
+                raise UserStrategyStateError(
+                    "this conversation has not been migrated to the conversation database"
+                )
+            stored = connection.execute(
+                "SELECT request, payload_sha256, status, reserved_at "
+                "FROM model_call_reservations WHERE strategy_id = ? AND call_id = ?",
+                (strategy.user_strategy_id, call_id),
+            ).fetchone()
+            if stored is not None:
+                if str(stored[0]) != canonical:
+                    raise UserStrategyConflictError(
+                        "call_id is already bound to a different request"
+                    )
+                return {
+                    "strategy_id": strategy.user_strategy_id,
+                    "call_id": call_id,
+                    "request": request,
+                    "payload_sha256": str(stored[1]),
+                    "status": str(stored[2]),
+                    "reserved_at": str(stored[3]),
+                    "replayed": True,
+                }
+            counted = connection.execute("SELECT COUNT(*) FROM model_call_reservations").fetchone()
+            if counted is None or int(counted[0]) >= max_model_calls:
+                raise UserStrategyBudgetError(
+                    f"this workspace has reached its granted model call budget ({max_model_calls})"
+                )
+            reserved_at = str(record.get("reserved_at") or strategy.updated_at)
+            digest = str(record.get("payload_sha256") or _digest(request))
+            status = str(record.get("status") or "pending")
+            connection.execute(
+                "INSERT INTO model_call_reservations "
+                "(strategy_id, call_id, request, payload_sha256, status, reserved_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (strategy.user_strategy_id, call_id, canonical, digest, status, reserved_at),
+            )
+            self._publish(connection, strategy)
+        return {
+            "strategy_id": strategy.user_strategy_id,
+            "call_id": call_id,
+            "request": request,
+            "payload_sha256": digest,
+            "status": status,
+            "reserved_at": reserved_at,
+            "replayed": False,
+        }
+
+    def model_call_usage(self) -> dict[str, Any]:
+        """Read-only: the model calls this workspace has reserved, and where."""
+        if not self.conversation_db_path.exists():
+            return {"reserved_model_calls": 0, "strategies": {}}
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT strategy_id, COUNT(*) FROM model_call_reservations GROUP BY strategy_id"
+            ).fetchall()
+        counts = {str(row[0]): int(row[1]) for row in rows}
+        return {"reserved_model_calls": sum(counts.values()), "strategies": counts}
+
+    # -- the one authority a strategy has -----------------------------------
+
+    def _save_json(self, strategy: UserStrategy) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(strategy.document(), sort_keys=True, indent=2).encode()
         handle, name = tempfile.mkstemp(dir=self._dir, prefix=".tmp-", suffix=".json")
@@ -517,7 +950,32 @@ class UserStrategyStore:
         finally:
             os.close(directory)
 
+    def _update_conversation(self, strategy: UserStrategy) -> bool:
+        """Write the committed row, or report that this strategy has none."""
+        if not self.conversation_db_path.exists():
+            return False
+        with self._write() as connection:
+            if self._document(connection, strategy.user_strategy_id) is None:
+                return False
+            self._publish(connection, strategy)
+        return True
+
+    def save(self, strategy: UserStrategy) -> None:
+        """Publish this strategy through the one authority that owns it.
+
+        A migrated strategy is written to the conversation database only, in one
+        transaction, and its pre-migration JSON record is left byte for byte as it
+        was. Every other strategy keeps the JSON record as its authority.
+        """
+        if not self._update_conversation(strategy):
+            self._save_json(strategy)
+
     def get(self, user_strategy_id: str) -> UserStrategy:
+        if self.conversation_db_path.exists():
+            with self._read() as connection:
+                migrated = self._document(connection, user_strategy_id)
+            if migrated is not None:
+                return migrated
         try:
             payload = self._path(user_strategy_id).read_bytes()
         except OSError:
@@ -530,27 +988,47 @@ class UserStrategyStore:
             raise UserStrategyError("stored user strategy is unreadable") from None
 
     def list(self) -> Strategies:
-        """Every published strategy, and no unpublished crash leftover.
+        """Every published strategy once each, and no unpublished crash leftover.
 
-        The store publishes one bounded identity name per record, so a temporary
-        file a crashed save left behind is not a strategy: it is never read, and a
-        record whose own identity disagrees with its file name is not shown as one.
+        A migrated strategy is read from its committed row — never from the JSON
+        record it was migrated from, which is not a second copy to fall back on —
+        and a strategy that was never migrated is read from its own JSON record. The
+        store publishes one bounded identity name per record, so a temporary file a
+        crashed save left behind is not a strategy: it is never read, and a record
+        whose own identity disagrees with its name is not shown as one. One
+        unreadable record never hides the rest of the workspace.
         """
-        if not self._dir.is_dir():
-            return []
-        items: Strategies = []
-        for path in sorted(self._dir.glob("*.json")):
-            if _SAFE_ID.fullmatch(path.stem) is None:
-                continue
-            try:
-                item = UserStrategy.decode(json.loads(path.read_bytes()))
-            except (OSError, ValueError, TypeError, KeyError):
-                # One unreadable record never hides the rest of the workspace.
-                continue
-            if item.user_strategy_id != path.stem:
-                continue
-            items.append(item)
-        return items
+        items: dict[str, UserStrategy] = {}
+        migrated: set[str] = set()
+        if self.conversation_db_path.exists():
+            with self._read() as connection:
+                rows = connection.execute(
+                    "SELECT strategy_id, document FROM strategy_documents"
+                ).fetchall()
+            for identity, document in rows:
+                name = str(identity)
+                if _SAFE_ID.fullmatch(name) is None:
+                    continue
+                migrated.add(name)
+                try:
+                    item = UserStrategy.decode(json.loads(str(document)))
+                except (ValueError, TypeError, KeyError):
+                    continue
+                if item.user_strategy_id != name:
+                    continue
+                items[name] = item
+        if self._dir.is_dir():
+            for path in sorted(self._dir.glob("*.json")):
+                if _SAFE_ID.fullmatch(path.stem) is None or path.stem in migrated:
+                    continue
+                try:
+                    item = UserStrategy.decode(json.loads(path.read_bytes()))
+                except (OSError, ValueError, TypeError, KeyError):
+                    continue
+                if item.user_strategy_id != path.stem:
+                    continue
+                items[path.stem] = item
+        return [items[identity] for identity in sorted(items)]
 
 
 class UserStrategyService:
@@ -1401,6 +1879,8 @@ class UserStrategyService:
     # -- approved model calls -----------------------------------------------
 
     def _lock(self, user_strategy_id: str) -> threading.Lock:
+        # A streaming iterator may advance on different HTTP pool threads. The
+        # ordinary lock serializes the strategy without thread-affine ownership.
         with threading.Lock():
             return self._locks.setdefault(user_strategy_id, threading.Lock())
 
@@ -1437,6 +1917,49 @@ class UserStrategyService:
         evidence_job_ids: Any = None,
         expected_evidence: Documents | None = None,
     ) -> UserStrategy:
+        """One admitted turn, answered by the hand-written single-call path.
+
+        The refinement path (a new proposal that replaces a pending suggestion) still
+        asks one question and reads one answer, so it keeps this path exactly as it
+        was. An ordinary conversation turn goes through :meth:`conversation_turn`,
+        which admits the same way and then runs the graph.
+        """
+        admitted = self._admit(
+            strategy,
+            call_id=call_id,
+            base_revision=base_revision,
+            text=text,
+            approved_budget=approved_budget,
+            action=action,
+            proposal_id=proposal_id,
+            evidence_job_ids=evidence_job_ids,
+            expected_evidence=expected_evidence,
+        )
+        if isinstance(admitted, UserStrategy):
+            return admitted
+        return self._observe(
+            admitted.strategy, admitted.call_id, admitted.message, admitted.base_revision
+        )
+
+    def _admit(
+        self,
+        strategy: UserStrategy,
+        *,
+        call_id: object,
+        base_revision: object,
+        text: object,
+        approved_budget: Any,
+        action: str,
+        proposal_id: str | None,
+        evidence_job_ids: Any,
+        expected_evidence: Documents | None,
+    ) -> UserStrategy | _AdmittedTurn:
+        """Every check and every durable record a turn needs before it may dispatch.
+
+        Returns the turn's own new strategy when there is nothing to dispatch — a
+        replayed identity, or a workspace with no provider — and the admitted turn
+        with its call identity, message and budget when a provider may be reached.
+        """
         call = _identifier(call_id, "call_id")
         message = _bounded(text, "message", _MAX_MESSAGE)
         if type(base_revision) is not int:
@@ -1554,10 +2077,28 @@ class UserStrategyService:
         )
         # One durable write: the user's own message, the approved budget and the
         # reservation exist before the provider is reached.
-        self._store.save(pending)
+        self._publish_call(pending, call, dispatch=route is not None)
         if route is None:
             return pending
-        return self._observe(pending, call, message, base_revision)
+        return _AdmittedTurn(pending, call, message, base_revision, budget, list(selection or []))
+
+    def _publish_call(self, strategy: UserStrategy, call: str, *, dispatch: bool) -> None:
+        """Publish one call record through the one authority this strategy has.
+
+        A call that may reach the provider of a migrated conversation is reserved
+        through the conversation database, where the workspace ceiling and this call's
+        record are committed together, so it is counted exactly once for the whole
+        workspace. A call that proves no network — no provider is configured — is
+        never counted, and every other conversation keeps its JSON record as its one
+        authority, where the record is durable before dispatch and the ceiling is the
+        turn's own approval.
+        """
+        if dispatch and self._store.is_conversation_migrated(strategy.user_strategy_id):
+            self._store.reserve_model_call(
+                strategy, call, self._workspace_budget()["max_model_calls"]
+            )
+        else:
+            self._store.save(strategy)
 
     def _observe(
         self, strategy: UserStrategy, call: str, message: str, base_revision: int
@@ -1866,7 +2407,7 @@ class UserStrategyService:
         question being asked, so it is sent exactly once, as the last turn.
         """
         turns: History = []
-        for entry in strategy.messages[:-1][-6:]:
+        for entry in strategy.messages[:-1]:
             role = "user" if entry.get("role") == "user" else "assistant"
             text = str(entry.get("text") or "")
             if text:
@@ -2520,9 +3061,23 @@ class UserStrategyService:
         text: str = "",
         proposals: tuple[dict[str, Any], ...] | None = None,
         proposal_id: str | None = None,
+        record: dict[str, Any] | None = None,
+        message_id: str | None = None,
     ) -> UserStrategy:
-        """One durable write: the observed outcome, then the messages it produced."""
+        """One durable write: the observed outcome, then the messages it produced.
+
+        ``record`` adds caller-owned fields — a turn's own response document, its
+        identity and its place in the loop — beside the outcome, and never over it.
+        A ``message_id`` names the one message this settlement produces, so a
+        settlement that is replayed after a lost process writes that same message
+        again rather than a second copy of it.
+        """
         now = _now()
+        recorded = _entry(strategy.calls, "call_id", call)
+        if recorded is None:
+            # A settlement always names a call this strategy already records; nothing
+            # may be written as the outcome of a call that was never reserved.
+            raise UserStrategyStateError("no call of this strategy has that identity")
         model: str | None = None
         input_tokens: int | None = None
         output_tokens: int | None = None
@@ -2532,7 +3087,8 @@ class UserStrategyService:
                 input_tokens = int(response.input_tokens or 0)
                 output_tokens = int(response.output_tokens or 0)
         settled = {
-            **cast(dict[str, Any], _entry(strategy.calls, "call_id", call)),
+            **recorded,
+            **(record or {}),
             "status": status,
             "message": message,
             "model": model,
@@ -2543,18 +3099,19 @@ class UserStrategyService:
         calls = tuple(settled if item.get("call_id") == call else item for item in strategy.calls)
         messages = strategy.messages
         if text or proposal_id is not None:
+            entry = {
+                "message_id": message_id or str(uuid.uuid4()),
+                "role": "model",
+                "kind": "proposal" if proposal_id is not None else "message",
+                "text": text,
+                "base_revision": settled["base_revision"],
+                "at": now,
+                "call_id": call,
+                "proposal_id": proposal_id,
+            }
             messages = (
-                *messages,
-                {
-                    "message_id": str(uuid.uuid4()),
-                    "role": "model",
-                    "kind": "proposal" if proposal_id is not None else "message",
-                    "text": text,
-                    "base_revision": settled["base_revision"],
-                    "at": now,
-                    "call_id": call,
-                    "proposal_id": proposal_id,
-                },
+                *(item for item in messages if item.get("message_id") != entry["message_id"]),
+                entry,
             )
         next_strategy = replace(
             strategy,
@@ -2586,19 +3143,31 @@ class UserStrategyService:
         states. Nothing here runs anything: explaining evidence and proposing a next
         experiment are model calls, and a run still happens only from the user's own
         separate confirmation of a preview.
+
+        The turn is the conversation graph's: the same admission, reservation and
+        canonical records as ever, with the model loop, the tools and the decisions it
+        waits for run as one bounded graph. This call simply exhausts that stream and
+        returns the durable record it produced, which is what every existing caller
+        already expects.
         """
         identity = _identifier(user_strategy_id, "user_strategy_id")
-        with self._lock(identity):
-            strategy = self._store.get(identity)
-            return self._ask(
-                strategy,
-                call_id=call_id,
-                base_revision=base_revision,
-                text=text,
-                approved_budget=approved_budget,
-                action="message",
-                evidence_job_ids=evidence_job_ids,
-            )
+        for item in self.conversation_turn(
+            identity,
+            call_id=call_id,
+            base_revision=base_revision,
+            text=text,
+            approved_budget=approved_budget,
+            evidence_job_ids=evidence_job_ids,
+        ):
+            if item.get("kind") == ERROR and item.get("code") in {
+                "UserStrategyError",
+                "UserStrategyStateError",
+                "UserStrategyBudgetError",
+                "UserStrategyStaleError",
+                "UserStrategyConflictError",
+            }:
+                raise UserStrategyStateError(str(item.get("error")))
+        return self._store.get(identity)
 
     def revise_proposal(
         self,
@@ -2942,7 +3511,12 @@ class UserStrategyService:
         # A preview of an intent would describe a run that cannot exist, so this
         # refuses before the admitted input is ever derived.
         draft = _executable(strategy)
-        admitted = self._admitted_request(draft)
+        return self._preview_of(strategy, draft, self._admitted_request(draft))
+
+    def _preview_of(
+        self, strategy: UserStrategy, draft: StrategyDraft, admitted: dict[str, Any]
+    ) -> dict[str, Any]:
+        """One admitted input, rendered as the preview a confirmation names."""
         source = self._source_identity(admitted)
         normalized = self._normalized(admitted)
         execution = normalized.get("execution") if isinstance(normalized, dict) else None
@@ -2985,6 +3559,25 @@ class UserStrategyService:
         approved_budget: Any = None,
     ) -> UserStrategy:
         identity = _identifier(user_strategy_id, "user_strategy_id")
+        with self._lock(identity):
+            return self._launch_experiment_locked(
+                identity,
+                launch_intent_id=launch_intent_id,
+                base_revision=base_revision,
+                preview_identity=preview_identity,
+                approved_budget=approved_budget,
+            )
+
+    def _launch_experiment_locked(
+        self,
+        user_strategy_id: object,
+        *,
+        launch_intent_id: object,
+        base_revision: object,
+        preview_identity: object,
+        approved_budget: Any = None,
+    ) -> UserStrategy:
+        identity = _identifier(user_strategy_id, "user_strategy_id")
         intent = _identifier(launch_intent_id, "launch_intent_id")
         preview = _bounded(preview_identity, "preview_identity", 128)
         if _PREVIEW_IDENTITY.fullmatch(preview) is None:
@@ -2994,120 +3587,117 @@ class UserStrategyService:
         if type(base_revision) is not int:
             raise UserStrategyStateError("base_revision must be an integer")
         requested = _requested_budget(approved_budget)
-        with self._lock(identity):
-            strategy = self._store.get(identity)
-            if self._quine is not None:
-                # A confirmation this workspace no longer holds is recovered from
-                # its owner before a new one is considered, so the same intent
-                # resolves to the run it already confirmed rather than to a second.
-                strategy = self._restore_quine(strategy)
-            existing = _entry(strategy.experiments, "launch_intent_id", intent)
-            if existing is not None:
-                # The same intent resolves to the experiment it confirmed: the whole
-                # approved request is compared — revision, previewed input and the
-                # exact budget — and never today's draft or today's workspace.
-                retained = cast(dict[str, Any], existing.get("payload") or {})
-                if (
-                    retained.get("draft_revision") != base_revision
-                    or retained.get("preview_identity") != preview
-                    or retained.get("approved_budget") != requested
-                ):
-                    raise UserStrategyConflictError(
-                        "this launch intent is already bound to a different confirmation"
-                    )
-                # A confirmation the core owns is answered from the core, never from
-                # this record: asking about the same intent again only re-reads the
-                # owner, so a lost receipt is resolved by a query and never by a
-                # second confirmation.
-                if existing.get("owner") == _QUINE_OWNER:
-                    return self._refresh_quine(strategy, identity, intent)
-                return strategy
-            if base_revision != strategy.draft.revision:
-                raise UserStrategyStaleError(
-                    "the draft revision moved on; preview the experiment again"
+        strategy = self._store.get(identity)
+        if self._quine is not None:
+            # A confirmation this workspace no longer holds is recovered from
+            # its owner before a new one is considered, so the same intent
+            # resolves to the run it already confirmed rather than to a second.
+            strategy = self._restore_quine(strategy)
+        existing = _entry(strategy.experiments, "launch_intent_id", intent)
+        if existing is not None:
+            # The same intent resolves to the experiment it confirmed: the whole
+            # approved request is compared — revision, previewed input and the
+            # exact budget — and never today's draft or today's workspace.
+            retained = cast(dict[str, Any], existing.get("payload") or {})
+            if (
+                retained.get("draft_revision") != base_revision
+                or retained.get("preview_identity") != preview
+                or retained.get("approved_budget") != requested
+            ):
+                raise UserStrategyConflictError(
+                    "this launch intent is already bound to a different confirmation"
                 )
-            budget = self._approval(approved_budget, model_calls=0, backtests=1)
-            if len(strategy.experiments) >= _MAX_EXPERIMENTS:
-                raise UserStrategyStateError("this strategy has reached its experiment limit")
-            if self._quine is not None:
-                return self._launch_isolated(strategy, identity, intent, preview, budget)
-            # Nothing can be launched while nothing is bound: this refuses before the
-            # admitted input is derived and before any child, reservation or job.
-            draft = _executable(strategy)
-            # The admitted input is re-derived here, before anything durable exists:
-            # a confirmation made against a preview that no longer describes what
-            # would run is refused, and nothing is created or dispatched.
-            admitted = self._admitted_request(draft)
-            if self._preview_identity(draft, admitted) != preview:
-                raise UserStrategyStaleError(
-                    "the data, costs or registered scenario behind this experiment "
-                    "changed since it was previewed; preview it again and confirm the new one"
-                )
-            source = self._source_identity(admitted)
-            normalized = self._normalized(admitted)
-            payload = {
-                "draft_revision": draft.revision,
-                "strategy_id": draft.strategy_id,
-                "venue": draft.venue,
-                "symbol": draft.symbol,
-                "scenario_id": draft.scenario_id,
-                "dataset_id": source.get("dataset_id"),
-                "source_sha256": source.get("source_sha256"),
-                "initial_cash": draft.initial_cash,
-                "parameters": dict(draft.parameters),
-                "criterion": draft.criterion,
-                "record_count": source.get("record_count"),
-                "data": normalized.get("data"),
-                # The admitted snapshot's own identity and digest, kept so the
-                # confirmed input is still readable after its source disappears,
-                # and the normalized blocks the user saw in the preview.
-                "input_identity": admitted.get("input_identity"),
-                "input_sha256": admitted.get("input_sha256"),
-                # The whole admitted input, exactly as the engine rendered it:
-                # schema, scenario id, source identity, normalized identity, the
-                # full canonical scenario and any research input. The child this
-                # confirmation creates is held to this document, so a later read of
-                # the same scenario can never run in its place.
-                "snapshot": admitted.get("snapshot"),
-                "preview_identity": preview,
-                "normalized": normalized,
-                "approved_budget": budget,
-                "frozen_at": _now(),
-            }
-            record = {
-                "launch_intent_id": intent,
-                "request_id": str(
-                    uuid.uuid5(uuid.NAMESPACE_URL, f"ea.user-strategy/{identity}/{intent}")
-                ),
-                "payload_sha256": _digest(payload),
-                # The immutable payload itself, so the same intent is always compared
-                # to what it froze, never to today's draft or today's settings.
-                "payload": payload,
-                "task_id": None,
-                "job_id": None,
-                "status": "pending",
-                "message": None,
-                "created_at": _now(),
-            }
-            # Durable before any child exists and before any dispatch.
-            pending = replace(
-                strategy, updated_at=_now(), experiments=(*strategy.experiments, record)
+            # A confirmation the core owns is answered from the core, never from
+            # this record: asking about the same intent again only re-reads the
+            # owner, so a lost receipt is resolved by a query and never by a
+            # second confirmation.
+            if existing.get("owner") == _QUINE_OWNER:
+                return self._refresh_quine(strategy, identity, intent)
+            return strategy
+        if base_revision != strategy.draft.revision:
+            raise UserStrategyStaleError(
+                "the draft revision moved on; preview the experiment again"
             )
-            self._store.save(pending)
-            try:
-                task = self._research.create_owned_experiment(
-                    user_strategy_id=identity,
-                    launch_intent_id=intent,
-                    request_id=cast(str, record["request_id"]),
-                    spec=self._spec(draft),
-                    payload=payload,
-                    budget=budget,
-                )
-            except ResearchTaskError as error:
-                # A validated refusal happened before any child existed.
-                return self._settle_experiment(pending, intent, "failed", None, None, str(error))
-            status, task_id, job_id, message = self._child_outcome(task)
-            return self._settle_experiment(pending, intent, status, task_id, job_id, message)
+        budget = self._approval(approved_budget, model_calls=0, backtests=1)
+        if len(strategy.experiments) >= _MAX_EXPERIMENTS:
+            raise UserStrategyStateError("this strategy has reached its experiment limit")
+        if self._quine is not None:
+            return self._launch_isolated(strategy, identity, intent, preview, budget)
+        # Nothing can be launched while nothing is bound: this refuses before the
+        # admitted input is derived and before any child, reservation or job.
+        draft = _executable(strategy)
+        # The admitted input is re-derived here, before anything durable exists:
+        # a confirmation made against a preview that no longer describes what
+        # would run is refused, and nothing is created or dispatched.
+        admitted = self._admitted_request(draft)
+        if self._preview_identity(draft, admitted) != preview:
+            raise UserStrategyStaleError(
+                "the data, costs or registered scenario behind this experiment "
+                "changed since it was previewed; preview it again and confirm the new one"
+            )
+        source = self._source_identity(admitted)
+        normalized = self._normalized(admitted)
+        payload = {
+            "draft_revision": draft.revision,
+            "strategy_id": draft.strategy_id,
+            "venue": draft.venue,
+            "symbol": draft.symbol,
+            "scenario_id": draft.scenario_id,
+            "dataset_id": source.get("dataset_id"),
+            "source_sha256": source.get("source_sha256"),
+            "initial_cash": draft.initial_cash,
+            "parameters": dict(draft.parameters),
+            "criterion": draft.criterion,
+            "record_count": source.get("record_count"),
+            "data": normalized.get("data"),
+            # The admitted snapshot's own identity and digest, kept so the
+            # confirmed input is still readable after its source disappears,
+            # and the normalized blocks the user saw in the preview.
+            "input_identity": admitted.get("input_identity"),
+            "input_sha256": admitted.get("input_sha256"),
+            # The whole admitted input, exactly as the engine rendered it:
+            # schema, scenario id, source identity, normalized identity, the
+            # full canonical scenario and any research input. The child this
+            # confirmation creates is held to this document, so a later read of
+            # the same scenario can never run in its place.
+            "snapshot": admitted.get("snapshot"),
+            "preview_identity": preview,
+            "normalized": normalized,
+            "approved_budget": budget,
+            "frozen_at": _now(),
+        }
+        record = {
+            "launch_intent_id": intent,
+            "request_id": str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"ea.user-strategy/{identity}/{intent}")
+            ),
+            "payload_sha256": _digest(payload),
+            # The immutable payload itself, so the same intent is always compared
+            # to what it froze, never to today's draft or today's settings.
+            "payload": payload,
+            "task_id": None,
+            "job_id": None,
+            "status": "pending",
+            "message": None,
+            "created_at": _now(),
+        }
+        # Durable before any child exists and before any dispatch.
+        pending = replace(strategy, updated_at=_now(), experiments=(*strategy.experiments, record))
+        self._store.save(pending)
+        try:
+            task = self._research.create_owned_experiment(
+                user_strategy_id=identity,
+                launch_intent_id=intent,
+                request_id=cast(str, record["request_id"]),
+                spec=self._spec(draft),
+                payload=payload,
+                budget=budget,
+            )
+        except ResearchTaskError as error:
+            # A validated refusal happened before any child existed.
+            return self._settle_experiment(pending, intent, "failed", None, None, str(error))
+        status, task_id, job_id, message = self._child_outcome(task)
+        return self._settle_experiment(pending, intent, status, task_id, job_id, message)
 
     @staticmethod
     def _child_outcome(
@@ -3812,3 +4402,1333 @@ class UserStrategyService:
                 "started and no duplicate was created"
             ),
         }
+
+    # -- the conversation graph ---------------------------------------------
+
+    def conversation_turn(
+        self,
+        user_strategy_id: object,
+        *,
+        call_id: object,
+        base_revision: object,
+        text: object,
+        approved_budget: Any = None,
+        evidence_job_ids: Any = None,
+    ) -> Iterator[dict[str, Any]]:
+        """One approved turn, run as the conversation graph, yielding its events.
+
+        The user's own message, the approved budget and this turn's reservation are
+        durable before the first event, exactly as they were before this graph
+        existed, and the events after that are real steps: a provider delta as it
+        arrives, a tool the model asked for, a decision this turn is waiting for, an
+        observed run and a verified reading. The canonical conversation stays the
+        store's, so a lost checkpoint is rebuilt from it rather than from a second
+        copy, and it never causes a second provider call.
+        """
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        with self._lock(identity):
+            admitted = self._admit(
+                self._store.migrate_conversation(identity),
+                call_id=call_id,
+                base_revision=base_revision,
+                text=text,
+                approved_budget=approved_budget,
+                action="message",
+                proposal_id=None,
+                evidence_job_ids=evidence_job_ids,
+                expected_evidence=None,
+            )
+            if isinstance(admitted, UserStrategy):
+                # Nothing to dispatch: a replayed identity, or no provider to reach.
+                yield event(STATE, strategy=admitted.document())
+                yield event(DONE, strategy=admitted.document())
+                return
+            yield from self._drive(
+                identity,
+                admitted.call_id,
+                self._seed(admitted),
+            )
+
+    def conversation_resume(
+        self,
+        user_strategy_id: object,
+        *,
+        turn_id: object,
+        action: object,
+        proposal_id: object = None,
+        base_revision: object = None,
+        launch_intent_id: object = None,
+        preview_identity: object = None,
+    ) -> Iterator[dict[str, Any]]:
+        """One explicit human decision, resumed into the turn that is waiting for it.
+
+        Every identity the decision has to name is checked against the pending record
+        before the graph is reached, so a decision about another proposal, another
+        revision or another preview is refused before it can touch anything.
+        """
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        turn = _identifier(turn_id, "turn_id")
+        with self._lock(identity):
+            strategy = self._store.get(identity)
+            pending = strategy.conversation_confirmation
+            existing = _entry(strategy.experiments, "launch_intent_id", str(launch_intent_id))
+            if action == "confirm" and existing is not None:
+                # The stored request must belong to this turn's retained proposal.
+                proposals = [
+                    item
+                    for item in strategy.proposals
+                    if (call := _entry(strategy.calls, "call_id", str(item.get("call_id"))))
+                    and (call.get("turn_id", call.get("call_id")) == turn)
+                ]
+                valid_intents = {
+                    "int-" + _digest({"turn": turn, "tool": item["call_id"]})[:24]
+                    for item in proposals
+                }
+                if str(launch_intent_id) not in valid_intents:
+                    raise UserStrategyConflictError("this confirmation belongs to another turn")
+                observed = self._launch_experiment_locked(
+                    identity,
+                    launch_intent_id=launch_intent_id,
+                    base_revision=base_revision,
+                    preview_identity=preview_identity,
+                    approved_budget={"max_model_calls": 0, "max_backtests": 1},
+                )
+                self._store.save(observed)
+                yield event(STATE, strategy=observed.document())
+                yield event(DONE, strategy=observed.document())
+                return
+            if not isinstance(pending, dict) or pending.get("turn_id") != turn:
+                raise UserStrategyStateError(
+                    "this conversation is not waiting for a decision of that turn"
+                )
+            payload = self._resume_payload(
+                pending,
+                action=action,
+                proposal_id=proposal_id,
+                base_revision=base_revision,
+                launch_intent_id=launch_intent_id,
+                preview_identity=preview_identity,
+            )
+            yield from self._drive(identity, turn, Command(resume=payload))
+
+    def conversation_state(self, user_strategy_id: object) -> dict[str, Any]:
+        """What a reloaded client needs, without reading a checkpoint itself."""
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        with self._lock(identity):
+            strategy = self._store.migrate_conversation(identity)
+        pending = strategy.conversation_confirmation
+        limit = self._workspace_budget()["max_model_calls"]
+        usage = self._store.model_call_usage()
+        reserved = int(usage["reserved_model_calls"])
+        return {
+            "strategy_id": strategy.user_strategy_id,
+            "revision": strategy.draft.revision,
+            # The one decision this conversation is waiting for, if it is waiting for
+            # one, with the preview it was made against kept beside it.
+            "pending": None
+            if not isinstance(pending, dict)
+            else {key: value for key, value in pending.items() if key != "preview"},
+            "preview": None if not isinstance(pending, dict) else pending.get("preview"),
+            "open_proposals": [
+                str(item.get("proposal_id"))
+                for item in strategy.proposals
+                if item.get("status") == "open"
+            ],
+            "budget": {
+                "max_model_calls": limit,
+                # Only a migrated conversation is counted in this workspace's shared
+                # reservation ledger; a conversation that has not been migrated is
+                # bounded by its own turn approval instead.
+                "reserved_model_calls": reserved,
+                "remaining_model_calls": max(limit - reserved, 0),
+                "max_backtests": self._workspace_budget()["max_backtests"],
+            },
+        }
+
+    def _seed(self, admitted: _AdmittedTurn) -> dict[str, Any]:
+        """The graph state of one new turn: references and identities, no facts.
+
+        Every value is a JSON primitive, so a checkpoint can hold only what the store
+        itself could hold, and the conversation itself is never copied into it.
+        """
+        return {
+            "strategy_id": admitted.strategy.user_strategy_id,
+            "turn_id": admitted.call_id,
+            "message": admitted.message,
+            "base_revision": admitted.base_revision,
+            "approved": dict(admitted.approved_budget),
+            "evidence_job_ids": list(admitted.evidence_job_ids),
+            "step": 0,
+            "call_id": admitted.call_id,
+            "exchange": [],
+            "pending": [],
+            "proposal_id": "",
+            "proposal_call": "",
+            "proposal_revision": 0,
+            "launch_intent_id": "",
+            "preview_identity": "",
+            "job_id": "",
+            "phase": "",
+            "answer": {},
+            "text": "",
+            "refusal": "",
+            "explain": False,
+        }
+
+    # -- nodes ---------------------------------------------------------------
+
+    def _graph_answer(self, state: dict[str, Any]) -> dict[str, Any]:
+        """One provider call of this turn: reserved, streamed, and recorded whole."""
+        identity = state["strategy_id"]
+        strategy = self._store.get(identity)
+        step = int(state["step"])
+        call = state["turn_id"] if step == 0 else _child_call_id(state["turn_id"], step)
+        draft = strategy.draft
+        if isinstance(draft, IntentDraft):
+            # An intent has nothing to describe, change or run, so this turn offers no
+            # tool at all and only states what the user means.
+            registered: tuple[RegisteredPath, ...] = ()
+            system = _INTENT_SYSTEM_PROMPT
+            tools: Tools = []
+            required: tuple[str, ...] = ()
+        else:
+            registered = self._registered_paths(draft)
+            system = _SYSTEM_PROMPT
+            tools = self._conversation_tools(registered)
+            required = ("tool_use",)
+        selection = self._evidence_selection(state["evidence_job_ids"] or None)
+        evidence = None if selection is None else self._evidence_context(strategy, selection)
+        messages = self._answer_messages(strategy, state, registered, evidence)
+        record = _entry(strategy.calls, "call_id", call)
+        if record is None:
+            # A further call of this turn is reserved exactly where the turn's first
+            # one was, before the provider can be reached.
+            try:
+                strategy = self._reserve_child(strategy, call, state)
+            except UserStrategyError as error:
+                # The ceiling refused it: this turn ends on its own already-settled
+                # record, and says why, without reaching any provider.
+                return {
+                    **state,
+                    "call_id": state["turn_id"],
+                    "refusal": str(error),
+                    "skip_settle": True,
+                    "phase": "done",
+                    "pending": [],
+                }
+            record = _entry(strategy.calls, "call_id", call)
+        stored = _response_from((record or {}).get("response"))
+        response: ModelResponse | None
+        if stored is not None:
+            # The answer this identity already recorded is the answer: a replayed node
+            # or a checkpoint rebuilt from nothing never reaches the provider twice.
+            response, status, detail = stored, "observed", None
+        elif (record or {}).get("status") != "pending":
+            return {
+                **state,
+                "call_id": call,
+                "step": step + 1,
+                "pending": [],
+                "text": "",
+                "outcome": "unknown"
+                if (record or {}).get("status") == "dispatched"
+                else str((record or {}).get("status") or "unknown"),
+                "refusal": (
+                    "a model call was interrupted after it may have reached the provider; "
+                    "its answer was never recorded, and it was not sent again"
+                ),
+                "phase": "done",
+            }
+        else:
+            response, status, detail = self._dispatch_call(
+                strategy,
+                call,
+                state,
+                system=system,
+                messages=messages,
+                tools=tools,
+                required=required,
+            )
+        if response is None:
+            return {
+                **state,
+                "call_id": call,
+                "step": step + 1,
+                "pending": [],
+                "text": "",
+                "refusal": detail or "the model provider did not answer",
+                "outcome": status,
+                "phase": "done",
+            }
+        try:
+            text = _bounded(response.text, "response", _MAX_RESPONSE, required=False)
+        except UserStrategyError as error:
+            return {
+                **state,
+                "call_id": call,
+                "step": step + 1,
+                "pending": [],
+                "text": "",
+                "refusal": str(error),
+                "phase": "done",
+            }
+        # Publish validated intermediate text once before another tool/model step.
+        self._settle(
+            self._store.get(identity),
+            call,
+            "observed",
+            None,
+            response,
+            text=text,
+            message_id=f"m-{call}",
+        )
+        # A model that proposes on an unbound intent is refused whole, exactly as the
+        # single-call path refuses it: nothing an intent cannot have is ever created.
+        refusal = self._clarification_refusal(response) if isinstance(draft, IntentDraft) else None
+        if refusal is not None:
+            return {
+                **state,
+                "call_id": call,
+                "step": step + 1,
+                "pending": [],
+                "text": "",
+                "refusal": refusal,
+                "phase": "done",
+            }
+        return {
+            **state,
+            "call_id": call,
+            "step": step + 1,
+            "exchange": [
+                *state["exchange"],
+                {
+                    "role": "assistant",
+                    "text": response.text,
+                    "calls": [
+                        {"id": item.id, "name": item.name, "arguments": item.arguments}
+                        for item in response.tool_calls
+                    ],
+                },
+            ],
+            "pending": [
+                {"id": item.id, "name": item.name, "arguments": item.arguments}
+                for item in response.tool_calls
+            ],
+            "text": response.text,
+            "refusal": "",
+            "phase": "",
+        }
+
+    def _answer_messages(
+        self,
+        strategy: UserStrategy,
+        state: dict[str, Any],
+        registered: tuple[RegisteredPath, ...],
+        evidence: Documents | None,
+    ) -> History:
+        """One request for this step: the recorded context, then what is asked of it.
+
+        The retained exchange comes first and is never edited, so the explanation of
+        a run still carries the proposal receipt this turn recorded before the user
+        applied the change and confirmed a preview. When this step is that
+        explanation, the host's own record of the workflow that has since happened is
+        stated after that exchange and before the instruction to answer, and a
+        workflow that does not join is refused here — before this call is reserved
+        and before any provider could be reached — rather than explained.
+        """
+        # The canonical record includes earlier calls of this turn as they settle.
+        # They are represented once, with their tool relationships, by exchange.
+        turn_start = next(
+            (
+                index
+                for index, item in enumerate(strategy.messages)
+                if item.get("role") == "user" and item.get("call_id") == state["turn_id"]
+            ),
+            len(strategy.messages),
+        )
+        context = replace(strategy, messages=strategy.messages[: turn_start + 1])
+        messages = list(self._conversation(context, state["message"], registered, evidence))
+        messages.extend(self._exchange_messages(state["exchange"]))
+        if state["explain"]:
+            messages.append(
+                ModelMessage(role="user", text=self._applied_update(strategy, state, evidence))
+            )
+            messages.append(ModelMessage(role="user", text=_EXPLAIN_INSTRUCTION))
+        return messages
+
+    def _applied_update(
+        self, strategy: UserStrategy, state: dict[str, Any], evidence: Documents | None
+    ) -> str:
+        """The host's own record of the applied change, its confirmation and its run.
+
+        A turn that proposed a change carries that proposal's own receipt in its
+        retained exchange: at the moment it was written, nothing was applied and no
+        experiment had run, and that is what it still says. This update states, from
+        this strategy's persisted records, the workflow that has happened since, so
+        the explanation that follows reads the receipt as the history it is. Nothing
+        is rewritten or removed, and the model's answer is never edited.
+
+        The graph's own values are lookup references only. The applied revision is
+        read from the persisted proposal and its one apply change, not from today's
+        draft, because a user may have advanced the current draft after confirming
+        the run this turn explains; the launch, the run and the report are read from
+        the already-verified evidence of this turn and joined back to exactly one
+        experiment of this strategy. A binding that does not join is refused whole.
+        """
+        if evidence is None or len(evidence) != 1:
+            raise UserStrategyStateError(
+                "this explanation is not grounded in exactly one verified run of this "
+                "strategy; nothing was asked"
+            )
+        verified = evidence[0]
+        proposal = str(state["proposal_id"])
+        applied = self._applied_revision(strategy, proposal)
+        if applied is None:
+            raise UserStrategyStateError(
+                "this turn's proposal is not recorded as applied to the revision it was "
+                "proposed on, so there is no applied change to explain; nothing was asked"
+            )
+        if verified.get("draft_revision") != applied:
+            raise UserStrategyStateError(
+                "the verified run this turn explains was frozen on another draft revision "
+                "than the one this proposal applied; nothing was asked"
+            )
+        intent = str(state["launch_intent_id"])
+        preview = str(state["preview_identity"])
+        job = str(state["job_id"])
+        if any(
+            not isinstance(verified.get(field), str) or not verified[field]
+            for field in ("job_id", "launch_intent_id", "run_id", "input_sha256", "report_sha256")
+        ):
+            raise UserStrategyStateError(
+                "the verified run this turn explains does not state the identities an "
+                "explanation would name; nothing was asked"
+            )
+        confirmed = [
+            item
+            for item in strategy.experiments
+            if item.get("status") == "created"
+            and item.get("job_id") == job
+            and item.get("job_id") == verified["job_id"]
+            and item.get("launch_intent_id") == intent
+            and item.get("launch_intent_id") == verified["launch_intent_id"]
+            and cast(dict[str, Any], item.get("payload") or {}).get("preview_identity") == preview
+        ]
+        if len(confirmed) != 1:
+            raise UserStrategyStateError(
+                "the launch, its run and the verified report this turn explains are not one "
+                "experiment of this strategy; nothing was asked"
+            )
+        current = strategy.draft.revision
+        draft_move = (
+            ""
+            if current == applied
+            else f" It is a later draft than the frozen revision {applied} this run was made from."
+        )
+        return "\n".join(
+            [
+                "The host's own record of the workflow that has already happened here. The "
+                "proposal receipt in the turns above is the history of the moment it was "
+                "written: it describes the proposal as not applied and no experiment as run, "
+                "and this update is what supersedes it. Nothing above is rewritten or removed.",
+                f"Proposal {proposal} was applied to the revision it was proposed "
+                f"on: this host records one apply change for it, moving draft revision "
+                f"{applied - 1} to the applied revision {applied}.",
+                f"That applied revision {applied} and its exact admitted input were separately "
+                f"confirmed by the user, under the persisted launch intent {intent} and the "
+                f"preview identity {preview}.",
+                f"The one run of this strategy for that confirmation, job {job}, engine run "
+                f"{verified['run_id']}, completed successfully and published the verified "
+                f"report with digest {verified['report_sha256']}, over the confirmed input "
+                f"digest {verified['input_sha256']}.",
+                f"That verified report belongs to this applied change: it is the report of the "
+                f"run launched from the revision this proposal applied, revision {applied}.",
+                f"The current draft revision is {current}.{draft_move}",
+                "These are this host's own records of the workflow and its identities, not a "
+                "second reading of the run: the verified numbers and limitations stated above "
+                "are unchanged, and nothing beyond them may be stated.",
+            ]
+        )
+
+    def _graph_tools(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Run the one tool the model asked for, inside this workspace's own facts.
+
+        The two reads answer from the host's own verified readings and change nothing.
+        The proposal tool is the same typed diff every other path validates: an answer
+        it refuses refuses this turn, so no partial change can ever be created from a
+        malformed one, and the proposal it does accept is recorded once, under an
+        identity derived from this turn and this tool call.
+        """
+        strategy = self._store.get(state["strategy_id"])
+        calls = list(state["pending"])
+        if len(calls) != 1:
+            return {
+                **state,
+                "pending": [],
+                "refusal": ("the model asked for more than one thing at once; nothing was changed"),
+            }
+        item = calls[0]
+        name, tool_id = str(item["name"]), str(item["id"])
+        self._emit(event(TOOL_START, tool=name, tool_id=tool_id, call_id=state["call_id"]))
+        if name in {_DESCRIBE_DATA_TOOL, _EXPERIMENT_STATUS_TOOL}:
+            try:
+                facts = (
+                    self._data_version_facts(_executable(strategy))
+                    if name == _DESCRIBE_DATA_TOOL
+                    else self._experiment_facts(strategy)
+                )
+            except Exception as error:  # noqa: BLE001 — an unreadable fact is stated
+                self._emit(event(TOOL_ERROR, tool=name, tool_id=tool_id, error=str(error)))
+                return {
+                    **state,
+                    "pending": [],
+                    "refusal": (f"{name} could not be read in this workspace: {error}"),
+                }
+            text = "\n".join(facts) or "this workspace states nothing it can verify here"
+            self._emit(event(TOOL_END, tool=name, tool_id=tool_id, text=text))
+            return {
+                **state,
+                "pending": [],
+                "exchange": [
+                    *state["exchange"],
+                    {"role": "tool", "call_id": tool_id, "text": text},
+                ],
+            }
+        if name != _PROPOSE_TOOL_NAME:
+            self._emit(event(TOOL_ERROR, tool=name, tool_id=tool_id, error="unsupported tool"))
+            return {
+                **state,
+                "pending": [],
+                "refusal": (
+                    "the model used a tool this conversation does not offer; nothing was changed"
+                ),
+            }
+        probe = ModelResponse(
+            "", (ToolCall(tool_id, name, dict(item["arguments"])),), "tool_calls", "", None, None
+        )
+        items, refusal = self._diff(strategy, probe)
+        if refusal is not None:
+            self._emit(event(TOOL_ERROR, tool=name, tool_id=tool_id, error=refusal))
+            return {**state, "pending": [], "refusal": refusal}
+        proposal_id = f"prop-{_digest({'turn': state['turn_id'], 'tool': tool_id})[:24]}"
+        revision = strategy.draft.revision
+        existing = _entry(strategy.proposals, "proposal_id", proposal_id)
+        if existing is None:
+            strategy = self._open_proposal(strategy, proposal_id, state["call_id"], items)
+        elif existing.get("status") != "open" or existing.get("items") != items:
+            return {
+                **state,
+                "pending": [],
+                "refusal": ("this turn already proposed something else; nothing was changed again"),
+            }
+        text = (
+            "The proposal was recorded for the user's own decision. It is not applied "
+            "here, and no experiment may be run from it without the user applying it "
+            "and then confirming a preview."
+        )
+        self._emit(event(TOOL_END, tool=name, tool_id=tool_id, text=text))
+        return {
+            **state,
+            "pending": [],
+            "exchange": [
+                *state["exchange"],
+                {"role": "tool", "call_id": tool_id, "text": text},
+            ],
+            "proposal_id": proposal_id,
+            "proposal_call": state["call_id"],
+            "proposal_revision": revision,
+            "phase": "proposed",
+        }
+
+    def _graph_settle(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Write this call's own outcome and message, once, under a stable identity."""
+        if state.get("skip_settle"):
+            self._emit(event(ERROR, kind_reason="budget", error=str(state["refusal"])))
+            return state
+        strategy = self._store.get(state["strategy_id"])
+        call = state["call_id"]
+        refusal = str(state["refusal"])
+        proposal_id = str(state["proposal_id"])
+        self._settle(
+            strategy,
+            call,
+            str(state.get("outcome") or ("refused" if refusal else "observed")),
+            refusal or None,
+            _response_from((_entry(strategy.calls, "call_id", call) or {}).get("response")),
+            text=str(state["text"]),
+            proposal_id=proposal_id if proposal_id and state["proposal_call"] == call else None,
+            record={"turn_id": state["turn_id"], "step": int(state["step"])},
+            message_id=f"m-{call}",
+        )
+        return {**state, "phase": "proposed" if state["phase"] == "proposed" else "done"}
+
+    def _graph_proposal(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Wait for the user's own decision on one recorded proposal."""
+        waiting = {
+            "kind": "proposal",
+            "turn_id": state["turn_id"],
+            "proposal_id": state["proposal_id"],
+            "base_revision": int(state["proposal_revision"]),
+        }
+        self._remember(
+            state["strategy_id"],
+            {
+                "phase": _PHASE_PROPOSAL,
+                "turn_id": state["turn_id"],
+                "proposal_id": state["proposal_id"],
+                "base_revision": int(state["proposal_revision"]),
+                "launch_intent_id": None,
+                "preview_identity": None,
+                "job_id": None,
+                "at": _now(),
+            },
+        )
+        answered = interrupt(waiting)
+        answer = answered if isinstance(answered, dict) else {}
+        strategy = self._store.get(state["strategy_id"])
+        action = answer.get("action")
+        if action == "rejected":
+            proposal = _entry(strategy.proposals, "proposal_id", str(state["proposal_id"]))
+            if proposal is None or proposal.get("status") != "rejected":
+                return self._waiting_decision(
+                    state, "that proposal was not rejected, so nothing was decided"
+                )
+            self._forget(state["strategy_id"])
+            return {**state, "phase": "declined"}
+        if action == "applied":
+            if not self._applied_at(
+                strategy, str(state["proposal_id"]), int(state["proposal_revision"])
+            ):
+                return self._waiting_decision(
+                    state,
+                    "this proposal is not applied to the revision it was proposed on; apply "
+                    "it through the proposal's own operation first",
+                )
+            self._forget(state["strategy_id"])
+            return {**state, "phase": "applied"}
+        return self._waiting_decision(state, "an unknown decision was sent for this proposal")
+
+    def _graph_preview(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Freeze what one confirmation would run, then wait for that confirmation."""
+        identity = state["strategy_id"]
+        strategy = self._store.get(identity)
+        record = strategy.conversation_confirmation
+        if isinstance(record, dict) and record.get("phase") == _PHASE_OBSERVATION:
+            return {
+                **state,
+                "phase": "confirmed",
+                "launch_intent_id": record["launch_intent_id"],
+                "preview_identity": record["preview_identity"],
+                "job_id": str(record.get("job_id") or ""),
+            }
+        if not isinstance(record, dict) or record.get("phase") != _PHASE_CONFIRMATION:
+            if not self._applied_at(
+                strategy, str(state["proposal_id"]), int(state["proposal_revision"])
+            ):
+                return self._refused_decision(state, "the applied draft moved before its preview")
+            draft = _executable(strategy)
+            admitted = self._admitted_request(draft)
+            preview = self._preview_of(strategy, draft, admitted)
+            record = {
+                "phase": _PHASE_CONFIRMATION,
+                "turn_id": state["turn_id"],
+                "proposal_id": state["proposal_id"],
+                "base_revision": draft.revision,
+                # Stable for this turn and this proposal, so a lost reply resolves to
+                # the same intent instead of confirming a second one.
+                "launch_intent_id": "int-"
+                + _digest({"turn": state["turn_id"], "tool": state["proposal_call"]})[:24],
+                "preview_identity": self._preview_identity(draft, admitted),
+                "job_id": None,
+                "preview": preview,
+                "at": _now(),
+            }
+            self._remember(identity, record)
+        waiting = {
+            "kind": "confirmation",
+            "turn_id": state["turn_id"],
+            "launch_intent_id": record["launch_intent_id"],
+            "base_revision": record["base_revision"],
+            "preview_identity": record["preview_identity"],
+            "preview": record["preview"],
+        }
+        answered = interrupt(waiting)
+        answer = answered if isinstance(answered, dict) else {}
+        if answer.get("action") == "declined":
+            self._forget(identity)
+            return {**state, "phase": "declined"}
+        if answer.get("action") != "confirm":
+            return self._waiting_decision(state, "an unknown decision was sent for this preview")
+        # Only this exact confirmation may run: the persisted intent, the revision it
+        # was previewed on and the identity of that preview, and nothing from the
+        # turn's model budget or from anything the model wrote.
+        try:
+            strategy = self._launch_experiment_locked(
+                identity,
+                launch_intent_id=record["launch_intent_id"],
+                base_revision=record["base_revision"],
+                preview_identity=record["preview_identity"],
+                approved_budget={"max_model_calls": 0, "max_backtests": 1},
+            )
+        except UserStrategyError as error:
+            self._forget(identity)
+            return self._refused_decision(state, str(error))
+        experiment = _entry(strategy.experiments, "launch_intent_id", record["launch_intent_id"])
+        job_id = "" if experiment is None else str(experiment.get("job_id") or "")
+        self._remember(
+            identity,
+            {
+                **record,
+                "phase": _PHASE_OBSERVATION,
+                "job_id": job_id or None,
+                "at": _now(),
+            },
+        )
+        return {
+            **state,
+            "phase": "confirmed",
+            "launch_intent_id": record["launch_intent_id"],
+            "preview_identity": record["preview_identity"],
+            "job_id": job_id,
+        }
+
+    def _graph_observe(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Read the one confirmed run's own status, and wait while it is still going.
+
+        Nothing here dispatches anything: the run was started by the user's own
+        confirmation, and a resume of this node only reads its status again.
+        """
+        strategy = self._store.get(state["strategy_id"])
+        experiment = _entry(strategy.experiments, "launch_intent_id", state["launch_intent_id"])
+        if experiment is not None and experiment.get("owner") == _QUINE_OWNER:
+            strategy = self._refresh_quine(
+                strategy, state["strategy_id"], state["launch_intent_id"]
+            )
+            self._store.save(strategy)
+            experiment = _entry(strategy.experiments, "launch_intent_id", state["launch_intent_id"])
+        if experiment is None:
+            return self._refused_decision(state, "this launch has no record of its own")
+        job_id = str(state["job_id"] or experiment.get("job_id") or "")
+        status = experiment.get("status")
+        if status in {"confirmed", "running", "stopping"}:
+            self._emit(event(STATE, job_id=job_id, run_status=status))
+            interrupt(
+                {
+                    "kind": "observation",
+                    "turn_id": state["turn_id"],
+                    "job_id": job_id,
+                    "status": status,
+                }
+            )
+            return {**state, "phase": "observing", "job_id": job_id}
+        if status != "created" or not job_id:
+            message = cast(str | None, experiment.get("message")) or (
+                f"the run this confirmation started is {status}"
+            )
+            self._forget(state["strategy_id"])
+            self._emit(event(ERROR, kind_reason="experiment", error=message))
+            return {**state, "phase": "failed"}
+        try:
+            running = self._service.get_job(job_id).status
+        except Exception as error:  # noqa: BLE001 — an unreadable run is stated, not guessed
+            self._forget(state["strategy_id"])
+            self._emit(event(ERROR, kind_reason="experiment", error=str(error)))
+            return {**state, "phase": "failed"}
+        if running in {"accepted", "running"}:
+            self._emit(event(STATE, job_id=job_id, run_status=running))
+            interrupt(
+                {
+                    "kind": "observation",
+                    "turn_id": state["turn_id"],
+                    "job_id": job_id,
+                    "status": running,
+                }
+            )
+            # The run may still be going; this node is entered again and reads its
+            # status afresh. Nothing was launched twice and nothing was polled here.
+            return {**state, "phase": "observing"}
+        if running != "succeeded":
+            self._forget(state["strategy_id"])
+            self._emit(event(ERROR, kind_reason="experiment", error=f"the run finished {running}"))
+            return {**state, "phase": "failed"}
+        self._forget(state["strategy_id"])
+        return {**state, "phase": "observed", "job_id": job_id}
+
+    def _graph_evidence(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Read the run's formal report through this workspace's verified authority."""
+        job_id = str(state["job_id"])
+        strategy = self._store.get(state["strategy_id"])
+        try:
+            self._evidence_context(strategy, [job_id])
+        except UserStrategyError as error:
+            self._emit(event(ERROR, kind_reason="evidence", error=str(error)))
+            return {**state, "phase": "done", "explain": False}
+        remaining = self._turn_remaining(strategy, state["turn_id"])
+        self._emit(event(STATE, job_id=job_id, verified=True, remaining_model_calls=remaining))
+        if remaining <= 0:
+            # The turn's own approval is spent. The verified reading is still durable
+            # in the run's report; this conversation simply does not spend a call it
+            # was not granted to explain it.
+            self._emit(
+                event(
+                    ERROR,
+                    kind_reason="budget",
+                    error=(
+                        "the run finished and its verified report is available, but this "
+                        "turn has no approved model call left to explain it"
+                    ),
+                )
+            )
+            return {**state, "phase": "done", "explain": False}
+        return {**state, "phase": "evidenced", "explain": True, "evidence_job_ids": [job_id]}
+
+    # -- routing -------------------------------------------------------------
+
+    @staticmethod
+    def _route_after_answer(state: dict[str, Any]) -> str:
+        if state.get("refusal"):
+            return "settle"
+        return "tools" if state.get("pending") else "settle"
+
+    @staticmethod
+    def _route_after_tools(state: dict[str, Any]) -> str:
+        if state.get("refusal") or state.get("phase") == "proposed":
+            return "settle"
+        remaining = int(state["approved"]["max_model_calls"]) - int(state["step"])
+        return "answer" if remaining > 0 else "settle"
+
+    @staticmethod
+    def _route_after_settle(state: dict[str, Any]) -> str:
+        return "proposal" if state.get("phase") == "proposed" else END
+
+    @staticmethod
+    def _route_after_proposal(state: dict[str, Any]) -> str:
+        if state.get("phase") == "applied":
+            return "preview"
+        # A refused decision waits on the same interrupt rather than ending the turn.
+        return "proposal" if state.get("phase") == "waiting" else END
+
+    @staticmethod
+    def _route_after_preview(state: dict[str, Any]) -> str:
+        if state.get("phase") == "confirmed":
+            return "observe"
+        return "preview" if state.get("phase") == "waiting" else END
+
+    @staticmethod
+    def _route_after_observe(state: dict[str, Any]) -> str:
+        if state.get("phase") == "observing":
+            return "observe"
+        return "evidence" if state.get("phase") == "observed" else END
+
+    @staticmethod
+    def _route_after_evidence(state: dict[str, Any]) -> str:
+        if not state.get("explain"):
+            return END
+        remaining = int(state["approved"]["max_model_calls"]) - int(state["step"])
+        return "answer" if remaining > 0 else END
+
+    def _compile_conversation(self, saver: Any) -> Any:
+        """The one graph of a conversation turn, over this workspace's own checkpoints."""
+        builder: Any = StateGraph(dict)
+        builder.add_node("answer", self._graph_answer)
+        builder.add_node("tools", self._graph_tools)
+        builder.add_node("settle", self._graph_settle)
+        builder.add_node("proposal", self._graph_proposal)
+        builder.add_node("preview", self._graph_preview)
+        builder.add_node("observe", self._graph_observe)
+        builder.add_node("evidence", self._graph_evidence)
+        builder.add_conditional_edges(
+            START,
+            lambda state: {
+                "recover_proposal": "proposal",
+                "recover_preview": "preview",
+                "recover_observe": "observe",
+            }.get(state.get("phase"), "answer"),
+            {name: name for name in ("answer", "proposal", "preview", "observe")},
+        )
+        builder.add_conditional_edges(
+            "answer", self._route_after_answer, {"tools": "tools", "settle": "settle"}
+        )
+        builder.add_conditional_edges(
+            "tools",
+            self._route_after_tools,
+            {"answer": "answer", "settle": "settle"},
+        )
+        builder.add_conditional_edges(
+            "settle", self._route_after_settle, {"proposal": "proposal", END: END}
+        )
+        builder.add_conditional_edges(
+            "proposal",
+            self._route_after_proposal,
+            {"proposal": "proposal", "preview": "preview", END: END},
+        )
+        builder.add_conditional_edges(
+            "preview",
+            self._route_after_preview,
+            {"preview": "preview", "observe": "observe", END: END},
+        )
+        builder.add_conditional_edges(
+            "observe",
+            self._route_after_observe,
+            {"observe": "observe", "evidence": "evidence", END: END},
+        )
+        builder.add_conditional_edges(
+            "evidence", self._route_after_evidence, {"answer": "answer", END: END}
+        )
+        return builder.compile(checkpointer=saver)
+
+    def _drive(self, identity: str, turn: str, payload: Any) -> Iterator[dict[str, Any]]:
+        """Run one graph step-set and yield the events it really produced."""
+        config = thread_config(identity, turn)
+        with checkpoints(self._store.conversation_db_path, _CONVERSATION_SCHEMA) as saver:
+            graph = self._compile_conversation(saver)
+            try:
+                # Ambient tracing is explicitly overridden: this workspace never
+                # initializes a tracing client and never sends a conversation anywhere
+                # but the configured model endpoint.
+                with langsmith.tracing_context(enabled=False):
+                    if isinstance(payload, Command) and not graph.get_state(config).values:
+                        recovered = self._recover_decision(identity, turn)
+                        graph.invoke(recovered, config)
+                    for mode, chunk in graph.stream(
+                        payload, config, stream_mode=["custom", "updates"]
+                    ):
+                        if mode == "custom" and isinstance(chunk, dict):
+                            yield chunk
+                    snapshot = graph.get_state(config)
+            except Exception as error:  # noqa: BLE001 — a failed step is reported, not hidden
+                yield event(ERROR, error=str(error)[:400], code=type(error).__name__)
+                return
+        strategy = self._store.get(identity)
+        waiting = [
+            item.value for task in getattr(snapshot, "tasks", ()) for item in task.interrupts
+        ]
+        if waiting:
+            yield event(
+                INTERRUPT,
+                waiting=waiting[0] if len(waiting) == 1 else waiting,
+                strategy=strategy.document(),
+            )
+            return
+        yield event(DONE, strategy=strategy.document())
+
+    # -- the graph's own durable helpers -------------------------------------
+
+    def _recover_decision(self, identity: str, turn: str) -> dict[str, Any]:
+        strategy = self._store.get(identity)
+        pending = strategy.conversation_confirmation
+        root = _entry(strategy.calls, "call_id", turn)
+        if not isinstance(pending, dict) or root is None:
+            raise UserStrategyStateError("no durable decision can restore this checkpoint")
+        request = root["request"]
+        seeded = self._seed(
+            _AdmittedTurn(
+                strategy,
+                turn,
+                request["text"],
+                request["base_revision"],
+                root["approved_budget"],
+                list(request.get("evidence_job_ids") or []),
+            )
+        )
+        proposal = _entry(strategy.proposals, "proposal_id", str(pending.get("proposal_id")))
+        if proposal is None:
+            raise UserStrategyStateError("the pending proposal cannot be read")
+        return {
+            **seeded,
+            "phase": {
+                _PHASE_PROPOSAL: "recover_proposal",
+                _PHASE_CONFIRMATION: "recover_preview",
+                _PHASE_OBSERVATION: "recover_observe",
+            }[pending["phase"]],
+            "proposal_id": proposal["proposal_id"],
+            "proposal_call": proposal["call_id"],
+            "proposal_revision": proposal["base_revision"],
+            "step": sum(
+                1
+                for item in strategy.calls
+                if item.get("call_id") == turn or (item.get("request") or {}).get("turn_id") == turn
+            ),
+            "launch_intent_id": str(pending.get("launch_intent_id") or ""),
+            "preview_identity": str(pending.get("preview_identity") or ""),
+            "job_id": str(pending.get("job_id") or ""),
+        }
+
+    def _resume_payload(
+        self,
+        pending: dict[str, Any],
+        *,
+        action: object,
+        proposal_id: object,
+        base_revision: object,
+        launch_intent_id: object,
+        preview_identity: object,
+    ) -> dict[str, Any]:
+        """One decision, checked against the record this conversation is waiting on."""
+        phase = pending.get("phase")
+        chosen = action if isinstance(action, str) else ""
+        if phase == _PHASE_PROPOSAL:
+            if chosen not in {"applied", "rejected"}:
+                raise UserStrategyStateError(
+                    "this conversation is waiting for its proposal to be applied or rejected"
+                )
+            if proposal_id != pending.get("proposal_id"):
+                raise UserStrategyStateError(
+                    "the decision does not name the proposal this conversation is waiting on"
+                )
+            if base_revision is not None and base_revision != pending.get("base_revision"):
+                raise UserStrategyStateError(
+                    "the decision does not name the revision this proposal was made on"
+                )
+            return {"action": chosen, "proposal_id": str(pending.get("proposal_id"))}
+        if phase == _PHASE_CONFIRMATION:
+            if chosen not in {"confirm", "declined"}:
+                raise UserStrategyStateError(
+                    "this conversation is waiting for its preview to be confirmed or declined"
+                )
+            if chosen == "declined":
+                return {"action": "declined"}
+            # A confirmation names the exact intent, revision and preview it is for.
+            if (
+                launch_intent_id != pending.get("launch_intent_id")
+                or base_revision != pending.get("base_revision")
+                or preview_identity != pending.get("preview_identity")
+            ):
+                raise UserStrategyStateError(
+                    "this confirmation does not name the previewed intent, revision and "
+                    "preview this conversation is waiting on"
+                )
+            return {
+                "action": "confirm",
+                "launch_intent_id": str(pending.get("launch_intent_id")),
+                "base_revision": int(cast(int, pending.get("base_revision"))),
+                "preview_identity": str(pending.get("preview_identity")),
+            }
+        if phase == _PHASE_OBSERVATION:
+            if chosen != "observe":
+                raise UserStrategyStateError(
+                    "this conversation is waiting for its run to be observed"
+                )
+            return {"action": "observe"}
+        raise UserStrategyStateError("this conversation is not waiting for a decision")
+
+    def _conversation_tools(self, paths: tuple[RegisteredPath, ...]) -> Tools:
+        """The three fixed tools of a conversation, and no fourth.
+
+        Two read the host's own verified facts and change nothing; the third is the
+        same typed proposal every other path validates. There is no filesystem, URL,
+        code-execution, live, Paper or broker tool, and none can be added by a
+        conversation.
+        """
+        return [
+            ToolDefinition(
+                _DESCRIBE_DATA_TOOL,
+                "Read this host's own verified description of the data the current draft "
+                "would run on. It changes nothing.",
+                {"type": "object", "properties": {}},
+            ),
+            ToolDefinition(
+                _EXPERIMENT_STATUS_TOOL,
+                "Read the status of this strategy's own experiments, and the host-verified "
+                "readings of any run of this strategy that completed. It changes nothing.",
+                {"type": "object", "properties": {}},
+            ),
+            self._propose_tool(paths),
+        ]
+
+    def _experiment_facts(self, strategy: UserStrategy) -> Paths:
+        """What this strategy's own experiments are, as this host can verify them now."""
+        facts: Paths = []
+        for record in strategy.experiments[-4:]:
+            payload = cast(dict[str, Any], record.get("payload") or {})
+            facts.append(
+                f"Experiment {record.get('launch_intent_id')} on draft revision "
+                f"{payload.get('draft_revision')} is recorded as {record.get('status')}"
+            )
+            job_id = record.get("job_id")
+            if job_id:
+                try:
+                    facts.append(f"  Its run {job_id} is {self._service.get_job(job_id).status}")
+                except Exception:  # noqa: BLE001 — an unreadable run is stated as unreadable
+                    facts.append(f"  Its run {job_id} cannot be read in this workspace now")
+            if record.get("message"):
+                facts.append(f"  This workspace recorded: {record['message']}")
+        facts.extend(self._verified_facts(strategy))
+        if not facts:
+            facts.append("This strategy has no experiment of its own yet.")
+        return facts
+
+    def _exchange_messages(self, exchange: Any) -> History:
+        """This turn's own tool loop, rebuilt with the identities it really carried."""
+        messages: History = []
+        for item in exchange if isinstance(exchange, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") == "assistant":
+                calls = tuple(
+                    ToolCall(str(call["id"]), str(call["name"]), dict(call["arguments"]))
+                    for call in item.get("calls") or []
+                    if isinstance(call, dict)
+                )
+                messages.append(
+                    ModelMessage(
+                        role="assistant", text=str(item.get("text") or ""), tool_calls=calls
+                    )
+                )
+            else:
+                messages.append(
+                    ModelMessage(
+                        role="tool",
+                        text=str(item.get("text") or ""),
+                        call_id=str(item.get("call_id") or "") or None,
+                    )
+                )
+        return messages
+
+    def _dispatch_call(
+        self,
+        strategy: UserStrategy,
+        call: str,
+        state: dict[str, Any],
+        *,
+        system: str,
+        messages: History,
+        tools: Tools,
+        required: tuple[str, ...],
+    ) -> tuple[ModelResponse | None, str, str | None]:
+        """One provider call, dispatched at the exact moment the record allows it.
+
+        A streaming port is read as it really streams — every delta it sends is
+        emitted as it arrives — and a port that cannot stream answers whole, which
+        yields no delta at all rather than a reply cut into pieces afterwards. The
+        answer, its tool identities and their arguments are durable before the graph
+        advances, so a lost checkpoint resumes from this record.
+        """
+        port = self._model_port()
+        strategy = self._mark_dispatched(strategy, call)
+        key = (strategy.user_strategy_id, call)
+        self._active_calls.add(key)
+        response: ModelResponse | None = None
+        try:
+            try:
+                if isinstance(port, StreamingModelPort):
+                    response = self._streamed(
+                        port, call, system=system, messages=messages, tools=tools, required=required
+                    )
+                else:
+                    response = port.complete(
+                        system=system,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=_MAX_TOKENS,
+                        required_capabilities=required,
+                    )
+            except ModelNotConfigured as error:
+                return None, "unconfigured", str(error)
+            except ModelProviderError as error:
+                return None, "unknown", str(error)
+            except Exception as error:  # noqa: BLE001 — an unobserved outcome is unknown
+                return None, "unknown", f"the provider outcome was not observed: {error}"
+        finally:
+            self._active_calls.discard(key)
+        self._settle(
+            strategy,
+            call,
+            "observed",
+            None,
+            response,
+            record={
+                "turn_id": state["turn_id"],
+                "step": int(state["step"]),
+                "response": _response_document(response),
+            },
+        )
+        return response, "observed", None
+
+    def _streamed(
+        self,
+        port: StreamingModelPort,
+        call: str,
+        *,
+        system: str,
+        messages: History,
+        tools: Tools,
+        required: tuple[str, ...],
+    ) -> ModelResponse:
+        final: ModelResponse | None = None
+        for item in port.stream(
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=_MAX_TOKENS,
+            required_capabilities=required,
+        ):
+            if item.kind == TEXT_DELTA and item.text:
+                self._emit(event(TEXT_DELTA, call_id=call, text=item.text))
+            elif item.response is not None:
+                final = item.response
+        if final is None:
+            raise ModelProviderError("model provider returned no final response")
+        return final
+
+    @staticmethod
+    def _turn_remaining(strategy: UserStrategy, turn: str) -> int:
+        root = _entry(strategy.calls, "call_id", turn)
+        if root is None:
+            return 0
+        approved = root.get("approved_budget") or {}
+        used = sum(
+            1
+            for item in strategy.calls
+            if item.get("call_id") == turn or (item.get("request") or {}).get("turn_id") == turn
+        )
+        return max(int(approved.get("max_model_calls", 0)) - used, 0)
+
+    def _reserve_child(
+        self, strategy: UserStrategy, call: str, state: dict[str, Any]
+    ) -> UserStrategy:
+        """Reserve one further model call of this turn, before the provider is reached."""
+        root = _entry(strategy.calls, "call_id", state["turn_id"])
+        if root is None or self._turn_remaining(strategy, state["turn_id"]) <= 0:
+            raise UserStrategyBudgetError("this turn has no approved model calls left")
+        if len(strategy.calls) >= _MAX_CALLS or len(strategy.messages) >= _MAX_MESSAGES:
+            raise UserStrategyStateError("this strategy has reached its recorded call limit")
+        approved = dict(root["approved_budget"])
+        now = _now()
+        request = {
+            "action": "continue",
+            "turn_id": state["turn_id"],
+            "step": int(state["step"]),
+            "text": state["message"],
+            "base_revision": int(state["base_revision"]),
+            "approved_budget": approved,
+        }
+        record = {
+            "call_id": call,
+            "status": "pending",
+            "route": {"provider": None, "model": None, "endpoint": None},
+            "base_revision": int(state["base_revision"]),
+            "approved_budget": approved,
+            "request": request,
+            "payload_sha256": _digest(request),
+            "reserved_at": now,
+            "message": None,
+            "model": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "usage_available": False,
+            "cost": {
+                "amount": None,
+                "available": False,
+                "reason": "no price source is configured in this workspace",
+            },
+        }
+        selection = self._evidence_selection(state["evidence_job_ids"] or None)
+        if selection is not None:
+            record["evidence"] = self._evidence_context(strategy, selection)
+        route = self._safe_route()
+        if route is not None:
+            record["route"] = route
+        pending = replace(strategy, updated_at=now, calls=(*strategy.calls, record))
+        self._publish_call(pending, call, dispatch=route is not None)
+        return pending
+
+    def _open_proposal(
+        self, strategy: UserStrategy, proposal_id: str, call: str, items: Documents
+    ) -> UserStrategy:
+        """Record one new proposal, superseding the one open suggestion it replaces."""
+        retained = strategy.proposals[-_MAX_PROPOSALS:]
+        proposals = (
+            *retained,
+            {
+                "proposal_id": proposal_id,
+                "call_id": call,
+                "base_revision": strategy.draft.revision,
+                "status": "open",
+                "created_at": _now(),
+                "items": items,
+                "applied_paths": [],
+                "stale_paths": [],
+            },
+        )
+        next_strategy = replace(strategy, updated_at=_now(), proposals=proposals)
+        self._store.save(next_strategy)
+        return next_strategy
+
+    @staticmethod
+    def _applied_at(strategy: UserStrategy, proposal_id: str, revision: int) -> bool:
+        """Whether this proposal is applied to exactly the revision it was made on."""
+        proposal = _entry(strategy.proposals, "proposal_id", proposal_id)
+        if proposal is None or proposal.get("status") != "applied":
+            return False
+        change = next(
+            (
+                item
+                for item in strategy.changes
+                if item.get("kind") == "apply" and item.get("proposal_id") == proposal_id
+            ),
+            None,
+        )
+        return (
+            change is not None
+            and change.get("from_revision") == revision
+            and change.get("to_revision") == revision + 1
+            and strategy.draft.revision == revision + 1
+        )
+
+    @staticmethod
+    def _applied_revision(strategy: UserStrategy, proposal_id: str) -> int | None:
+        """The revision one proposal is recorded as applied to, or ``None``.
+
+        The persisted proposal and its own apply change are the authority: exactly
+        one proposal of this identity is applied, exactly one apply change names it,
+        and that change moved the recorded base revision to the revision after it.
+        Today's draft is deliberately not consulted — unlike :meth:`_applied_at` — so
+        a change the user applied and confirmed stays explainable after the draft
+        moved on, while a proposal that was never applied never is.
+        """
+        proposals = [item for item in strategy.proposals if item.get("proposal_id") == proposal_id]
+        if len(proposals) != 1 or proposals[0].get("status") != "applied":
+            return None
+        base = proposals[0].get("base_revision")
+        changes = [
+            item
+            for item in strategy.changes
+            if item.get("kind") == "apply" and item.get("proposal_id") == proposal_id
+        ]
+        if type(base) is not int or len(changes) != 1:
+            return None
+        if changes[0].get("from_revision") != base or changes[0].get("to_revision") != base + 1:
+            return None
+        return base + 1
+
+    def _remember(self, identity: str, record: dict[str, Any]) -> None:
+        """Publish the one decision this conversation is waiting for, through the store."""
+        strategy = self._store.get(identity)
+        self._store.save(replace(strategy, updated_at=_now(), conversation_confirmation=record))
+
+    def _forget(self, identity: str) -> None:
+        """Nothing is left waiting: the decision was made, or it can no longer be made."""
+        strategy = self._store.get(identity)
+        self._store.save(replace(strategy, updated_at=_now(), conversation_confirmation=None))
+
+    def _refused_decision(self, state: dict[str, Any], reason: str) -> dict[str, Any]:
+        """A decision that cannot be carried out ends the turn, with its reason."""
+        self._emit(event(ERROR, kind_reason="decision", error=reason))
+        return {**state, "phase": "refused", "refusal": reason}
+
+    def _waiting_decision(self, state: dict[str, Any], reason: str) -> dict[str, Any]:
+        """A decision this workspace cannot accept is refused and waited on again.
+
+        The turn is left exactly where it was — the same pending record, the same
+        interrupt — so a decision that named the wrong thing, or one that arrived
+        before its own effect was durable, is answered honestly and the user can make
+        it again. Nothing is carried out from a decision that did not check out.
+        """
+        self._emit(event(ERROR, kind_reason="decision", error=reason))
+        return {**state, "phase": "waiting"}
+
+    @staticmethod
+    def _emit(payload: dict[str, Any]) -> None:
+        """Tell the streaming caller what just happened, as it happens."""
+        get_stream_writer()(payload)

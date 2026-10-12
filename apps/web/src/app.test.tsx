@@ -449,7 +449,7 @@ describe('EA Quant local Web backtests', () => {
     await user.click(await screen.findByRole('button', { name: 'Run new backtest' }))
 
     expect(await screen.findByRole('heading', { name: '正式报告' })).toBeTruthy()
-    expect(screen.getByText('run-1')).toBeTruthy()
+    expect(await screen.findByText('run-1')).toBeTruthy()
   })
 
   it('restores immutable parameters, revalidates edits, and submits a new run', async () => {

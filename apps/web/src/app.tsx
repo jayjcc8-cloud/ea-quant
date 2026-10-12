@@ -11,8 +11,11 @@ import {
   userStrategiesApi,
   type ApprovedBudget as UserStrategyApprovedBudget,
   type UserStrategy,
+  type UserStrategyConversation,
+  type UserStrategyConversationEvent,
   type UserStrategyExperimentPayload,
   type UserStrategyPreview,
+  type UserStrategyResumeRequest,
 } from './user-strategies-api'
 import { radianApi } from './radian-api'
 import { researchApi, type AvailabilityPolicy, type DeclarationBody, type DeclarationCatalog, type DeclarationVerdict, type DatasetEntry, type LocalStrategyCapability, type LocalStrategyRegisterRequest, type LocalStrategySlot, type ModelConfigurationStatus, type PluginBinding, type PluginCatalog, type PluginSelection, type RecipeResolution, type ResearchTask, type UploadDeclaration, type UploadPreviewResponse, type UploadPublishRequest, type UploadVersion } from './research-api'
@@ -282,6 +285,30 @@ export type ApiAdapter = {
       evidence_job_ids?: string[]
     },
   ): Promise<UserStrategy>
+  /** The same approved turn, streamed. Absent means this adapter answers whole,
+   * and the panel falls back to the JSON call above — which runs the very same
+   * turn; the stream is only what a reader can watch while it happens. */
+  streamUserStrategyMessage?(
+    userStrategyId: string,
+    input: {
+      call_id: string
+      base_revision: number
+      text: string
+      approved_budget: UserStrategyApprovedBudget
+      evidence_job_ids?: string[]
+    },
+    signal?: AbortSignal,
+  ): Promise<AsyncGenerator<UserStrategyConversationEvent>>
+  /** One decision the turn is waiting for. Applying or rejecting a proposal is
+   * done through the proposal's own operation first; this only records the
+   * decision that already happened, and it starts no run by itself. */
+  resumeUserStrategyConversation?(
+    userStrategyId: string,
+    input: UserStrategyResumeRequest,
+    signal?: AbortSignal,
+  ): Promise<AsyncGenerator<UserStrategyConversationEvent>>
+  /** What this conversation is waiting for, and what it may still spend. */
+  userStrategyConversation?(userStrategyId: string): Promise<UserStrategyConversation>
   applyUserStrategyProposal?(
     userStrategyId: string,
     proposalId: string,
@@ -411,6 +438,11 @@ const browserApi: ApiAdapter = {
     userStrategiesApi.selectDataset(userStrategyId, input),
   sendUserStrategyMessage: (userStrategyId, input) =>
     userStrategiesApi.sendMessage(userStrategyId, input),
+  streamUserStrategyMessage: (userStrategyId, input, signal) =>
+    userStrategiesApi.streamMessage(userStrategyId, input, signal),
+  resumeUserStrategyConversation: (userStrategyId, input, signal) =>
+    userStrategiesApi.resumeConversation(userStrategyId, input, signal),
+  userStrategyConversation: userStrategyId => userStrategiesApi.conversation(userStrategyId),
   applyUserStrategyProposal: (userStrategyId, proposalId, input) =>
     userStrategiesApi.applyProposal(userStrategyId, proposalId, input),
   rejectUserStrategyProposal: (userStrategyId, proposalId) =>
