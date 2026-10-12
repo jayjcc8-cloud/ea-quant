@@ -106,6 +106,20 @@ async function scriptWorkspace(page: Page, strategies: unknown[]) {
       await route.fulfill({ json: documents[id] ?? FIRST })
       return
     }
+    if (route.request().method() === 'GET' && rest === `/${id}/draft/contract`) {
+      const document = documents[id] as typeof FIRST
+      await route.fulfill({ json: {
+        draft_revision: document.draft.revision,
+        scenario_id: document.draft.scenario_id,
+        source: 'scripted visual fixture',
+        fields: [
+          { path: 'initial_cash', kind: 'funding', json_type: 'decimal_string', current: document.draft.initial_cash, minimum: null, maximum: null, editable: true },
+          { path: 'parameters.target_quantity', kind: 'parameter', json_type: 'decimal_string', current: document.draft.parameters.target_quantity, minimum: '0', maximum: null, editable: true },
+          { path: 'parameters.entry_delay_bars', kind: 'parameter', json_type: 'integer', current: document.draft.parameters.entry_delay_bars, minimum: 0, maximum: 2, editable: true },
+        ],
+      } })
+      return
+    }
     // Anything that would write: the workspace refuses it, so the refusal is
     // visible on screen. Nothing here is dispatched anywhere.
     await route.fulfill({
@@ -130,22 +144,31 @@ test('the empty workspace keeps the AI column visible and creates inline', async
   await page.setViewportSize({ width: 1400, height: 1000 })
   await page.goto('/strategies')
 
-  await expect(page.getByRole('heading', { name: '策略' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
   await expect(page.getByText('0 个策略')).toBeVisible()
   await expect(page.getByText('还没有策略。')).toBeVisible()
   // The create flow is directly completable, and the AI column is on screen before
-  // anything exists to talk about.
+  // anything exists to talk about. The form asks for the idea alone: a scenario
+  // belongs to the one explicit binding on the strategy itself.
   await expect(page.getByRole('region', { name: '新建策略' })).toBeVisible()
   await expect(page.getByLabel('策略名称')).toBeVisible()
-  await expect(page.getByLabel('场景')).toBeVisible()
+  await expect(page.getByLabel('意图')).toBeVisible()
+  await expect(page.getByRole('region', { name: '新建策略' }).getByLabel('场景')).toHaveCount(0)
   const ai = page.getByRole('region', { name: 'AI 协作' })
   await expect(ai).toBeVisible()
   await expect(ai.getByText(/先创建或选择一条策略/)).toBeVisible()
-  // Legacy pages stay reachable from the QUINE navigation.
+  // The shell's own navigation, and the legacy pages behind the collection's
+  // history disclosure: neither is offered as a fourth main entry.
   const nav = page.getByRole('navigation', { name: '主导航' })
+  await expect(nav.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/strategies')
   await expect(nav.getByRole('link', { name: '运行' })).toHaveAttribute('href', '/runs')
-  await expect(nav.getByRole('link', { name: '回测' })).toHaveAttribute('href', '/backtests')
-  await expect(nav.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/research')
+  await expect(nav.getByRole('link', { name: '数据' })).toHaveAttribute('href', '/data')
+  const history = page.locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '历史记录' }) }).first()
+  await expect(history).not.toHaveAttribute('open', '')
+  await history.locator('summary').first().click()
+  await expect(history.getByRole('link', { name: '旧研究任务' })).toHaveAttribute('href', '/research')
+  await expect(history.getByRole('link', { name: '独立回测' })).toHaveAttribute('href', '/backtests')
   await page.screenshot({ path: testInfo.outputPath('quine-empty-1400.png'), fullPage: true })
 
   await page.setViewportSize({ width: 420, height: 900 })
@@ -155,36 +178,74 @@ test('the empty workspace keeps the AI column visible and creates inline', async
   await page.screenshot({ path: testInfo.outputPath('quine-empty-420.png'), fullPage: true })
 })
 
-test('the selected strategy shows its diff, its evidence entry and its refusal', async ({ page }, testInfo) => {
+test('the collection shows every strategy\'s frozen evidence, and the selected strategy shows its diff, its evidence entry and its refusal', async ({ page }, testInfo) => {
   await scriptWorkspace(page, [FIRST, SECOND])
   await page.setViewportSize({ width: 1400, height: 1000 })
   await page.goto('/strategies')
 
+  // The collection route owns the table, and the table carries each strategy's own
+  // frozen revision and the run its latest confirmation dispatched — a real page
+  // read from that job, never a claim that a created dispatch succeeded.
+  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
   const table = page.getByRole('navigation', { name: '策略列表' })
-  await table.getByRole('link', { name: '点差假设收紧' }).click()
+  const firstRow = table.locator('tr').filter({ hasText: '点差假设收紧' })
+  await expect(firstRow.getByText('v4 草稿')).toBeVisible()
+  await expect(firstRow.getByText('冻结 v3')).toBeVisible()
+  await expect(firstRow.getByText('bounded-long-v1 · XNAS:AAPL')).toBeVisible()
+  await expect(firstRow.getByRole('link', { name: '运行中' }))
+    .toHaveAttribute('href', '/strategies/fixture-us-1?tab=experiments&evidence_a=fixture-job-1')
+  const secondRow = table.locator('tr').filter({ hasText: '黄金突破观察' })
+  await expect(secondRow.getByText('待实验')).toBeVisible()
+  await expect(secondRow.getByText('未启动')).toBeVisible()
 
-  // The selected strategy: the compact table, the frozen draft's own facts and
-  // the sections behind the workspace's tabs.
+  // The selected strategy opens by its exact identity: the collection table gives
+  // way to that strategy's own detail.
+  await table.getByRole('link', { name: '点差假设收紧' }).click()
+  await expect(page).toHaveURL(/\/strategies\/fixture-us-1$/)
   await expect(page.getByRole('heading', { name: '点差假设收紧' })).toBeVisible()
-  await expect(table.getByText('冻结 v3')).toBeVisible()
-  await expect(table.getByRole('link', { name: '运行已启动' })).toHaveAttribute('href', '/backtests/fixture-job-1')
+  await expect(page.getByRole('navigation', { name: '策略列表' })).toHaveCount(0)
+
+  // The evidence entry on a run of this strategy: the fixture job is not a formal
+  // report, and the page says so instead of printing a figure. The run is live, so
+  // the detail opens on the experiment whose report does not exist yet.
+  const evidence = page.getByRole('region', { name: '证据' })
+  await expect(evidence).toBeVisible()
+  await expect(page.getByRole('tab', { name: '实验' })).toHaveAttribute('aria-selected', 'true')
+  await expect(evidence.getByText(/正式报告只在运行成功之后才存在/)).toBeVisible()
+  await expect(evidence.getByText('期末权益')).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '打开运行页面' })).toHaveCount(0)
+
+  // The strategy tab: the frozen draft's own facts, and the sections the old tabs
+  // named. A rule section is progressive detail behind the shipped disclosure.
+  await page.getByRole('tab', { name: '策略' }).click()
+  await expect(page.getByRole('tab', { name: '策略' })).toHaveAttribute('aria-selected', 'true')
   const facts = page.getByRole('region', { name: '草稿' })
-  await expect(facts.getByText('草稿修订 4')).toBeVisible()
+  await expect(facts.getByText('草稿修订 4', { exact: true })).toBeVisible()
   await expect(facts.getByText('bounded-long-v1 · XNAS:AAPL')).toBeVisible()
   await expect(facts.getByText('10000 USD')).toBeVisible()
-  await expect(page.getByRole('tab', { name: '意图' })).toBeVisible()
-  await expect(page.getByRole('tab', { name: '规则与假设' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '意图' })).toBeVisible()
+  const rules = page.locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '场景规则与来源' }) }).first()
+  await expect(rules).not.toHaveAttribute('open', '')
+  await rules.locator('summary').first().click()
+  await expect(page.getByRole('region', { name: '规则与假设' })).toBeVisible()
 
-  // The typed change is reviewable in the right column: path, before → after,
+  // The typed change is reviewable in the right column: path, both labelled values,
   // reason, proposer, and the caveat that a model's citation is a claim.
   const review = page.getByRole('region', { name: '建议修改' })
   await expect(review.getByText('parameters.target_quantity')).toBeVisible()
-  await expect(review.getByText('3 → 2')).toBeVisible()
+  await expect(review.getByText('之前 3')).toBeVisible()
+  await expect(review.getByText('之后 2')).toBeVisible()
   await expect(review.getByText('更小的仓位让这段样本的成本更可读。')).toBeVisible()
-  await expect(review.getByText('提议者：model').first()).toBeVisible()
-  await expect(review.getByText(/这是它自己的声明，不是已验证的事实/)).toBeVisible()
+  await expect(review.getByText('待处理')).toBeVisible()
   await expect(review.getByRole('button', { name: '应用所选' })).toBeVisible()
   await expect(review.getByRole('button', { name: '撤销最近一次修改' })).toBeVisible()
+  const proposalOrigin = review.locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '来源与标识' }) }).first()
+  await expect(proposalOrigin).not.toHaveAttribute('open', '')
+  await proposalOrigin.locator('summary').first().click()
+  await expect(proposalOrigin.getByText('提议者：model').first()).toBeVisible()
+  await expect(proposalOrigin.getByText(/这是它自己的声明，不是已验证的事实/)).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('quine-detail-1400.png'), fullPage: true })
 
   // A refused write is reported, with the host's own message kept visible, and the
@@ -196,25 +257,25 @@ test('the selected strategy shows its diff, its evidence entry and its refusal',
   await expect(review.getByText('待处理')).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('quine-refusal-1400.png'), fullPage: true })
 
-  // The evidence entry on a real run of this strategy: the fixture job is not a
-  // formal report, and the page says so instead of printing a figure.
-  await page.getByRole('tab', { name: '证据' }).click()
-  const evidence = page.getByRole('region', { name: '证据' })
-  await expect(evidence.getByText(/正式报告只在运行成功之后才存在/)).toBeVisible()
-  await expect(evidence.getByText('期末权益')).toHaveCount(0)
-  await expect(page.getByRole('link', { name: '打开运行页面' })).toHaveCount(0)
-
-  // Switching the open strategy switches every panel with it: the other strategy's
-  // draft, and no change of this one.
-  await page.getByLabel('当前策略').selectOption('fixture-us-2')
+  // Switching the open strategy switches every panel with it: the collection's own
+  // breadcrumb leads back to the table, and the other strategy's draft, evidence
+  // and conversation are the ones on screen after that.
+  await page.getByRole('link', { name: '所有研究' }).click()
+  await expect(page).toHaveURL(/\/strategies$/)
+  await table.getByRole('link', { name: '黄金突破观察' }).click()
+  await expect(page).toHaveURL(/\/strategies\/fixture-us-2$/)
   await expect(page.getByRole('heading', { name: '黄金突破观察' })).toBeVisible()
   // The refusal belonged to the strategy it was made on: the strategy that is now
-  // open shows its own state, not the other one's error.
+  // open shows its own state, not the other one's error. A strategy with no
+  // proposal has no proposal panel at all.
   await expect(page.getByRole('alert')).toHaveCount(0)
   await expect(page.getByRole('region', { name: '建议修改' })).toHaveCount(0)
-  await expect(page.getByRole('region', { name: '草稿' }).getByText('草稿修订 1')).toBeVisible()
+  await expect(page.getByRole('region', { name: '草稿' }).getByText('草稿修订 1', { exact: true })).toBeVisible()
   await expect(page.getByRole('region', { name: '草稿' }).getByText('bounded-long-v1 · XNAS:XAUUSD')).toBeVisible()
-  await expect(page.getByRole('tab', { name: '意图' })).toHaveAttribute('aria-selected', 'true')
+  // A strategy with no frozen run opens on its own draft, so its facts are the
+  // first thing on screen.
+  await expect(page.getByRole('tab', { name: '策略' })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
 
   // The telephone layout: stacked rows, readable sections, the AI column still
   // present, and no sideways document scroll.

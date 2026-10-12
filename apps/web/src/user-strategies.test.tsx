@@ -13,7 +13,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useEffect, useState } from 'react'
-import { BrowserRouter } from 'react-router-dom'
+import { BrowserRouter, Link } from 'react-router-dom'
 import { EvidenceSection } from './user-strategies'
 import { StrategyEvidenceResearch } from './user-strategy-research'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -2189,6 +2189,63 @@ describe('shared evidence selection', () => {
     window.history.pushState({}, '', `/strategies/us-1${search}`)
     render(<EvidenceViews api={api} />)
   }
+
+  function ExplicitReportEntry({ api }: { api: ApiAdapter }) {
+    return <BrowserRouter>
+      <Link to={`/strategies/us-1?tab=experiments&evidence_a=${OLD_JOB}`}>打开原实验报告</Link>
+      <Link to={`/strategies/us-1?tab=experiments&evidence_a=${NEW_JOB}`}>打开另一实验报告</Link>
+      <EvidenceSection api={api} strategy={frozenRuns()} />
+    </BrowserRouter>
+  }
+
+  it('re-reads the same completed job on an explicit report entry without starting anything', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = wired()
+    let complete = false
+    let reads = 0
+    api.getBacktest = async id => {
+      reads += 1
+      return complete ? JOBS[id] : { ...JOBS[id], status: 'running', report_ready: false }
+    }
+    window.history.pushState({}, '', `/strategies/us-1?tab=experiments&evidence_a=${OLD_JOB}`)
+    const mounted = render(<ExplicitReportEntry api={api} />)
+    const card = screen.getByRole('region', { name: '证据' })
+    expect(await within(card).findByText(/当前的状态是 running/)).toBeTruthy()
+    complete = true
+    mounted.rerender(<ExplicitReportEntry api={api} />)
+    expect(reads).toBe(1)
+    await user.click(screen.getByRole('link', { name: '打开原实验报告' }))
+    expect(await within(card).findByText('20.25 USD')).toBeTruthy()
+    expect(within(card).queryByText(/当前的状态是 running/)).toBeNull()
+    expect(within(card).getByText(OLD_JOB)).toBeTruthy()
+    expect(reads).toBe(2)
+    expect(calls.ask).toBe(0)
+    expect(calls.launch).toBe(0)
+  })
+
+  it('isolates a late report response when explicit navigation selects another job', async () => {
+    const user = userEvent.setup()
+    const { api, calls } = wired()
+    const late = deferred<ReturnType<typeof figures>>()
+    let oldReportRequested = false
+    api.getReport = async id => {
+      if (id === OLD_JOB) { oldReportRequested = true; return late.promise }
+      return REPORTS[id as keyof typeof REPORTS]
+    }
+    window.history.pushState({}, '', `/strategies/us-1?tab=experiments&evidence_a=${OLD_JOB}`)
+    render(<ExplicitReportEntry api={api} />)
+    await waitFor(() => expect(oldReportRequested).toBe(true))
+    await user.click(screen.getByRole('link', { name: '打开另一实验报告' }))
+    const card = screen.getByRole('region', { name: '证据' })
+    expect(await within(card).findByText('12.5 USD')).toBeTruthy()
+    await act(async () => { late.resolve(REPORTS[OLD_JOB]); await late.promise })
+    expect(within(card).getByText('12.5 USD')).toBeTruthy()
+    expect(within(card).getByText(NEW_JOB)).toBeTruthy()
+    expect(within(card).queryByText('20.25 USD')).toBeNull()
+    expect(within(card).queryByText(OLD_JOB)).toBeNull()
+    expect(calls.ask).toBe(0)
+    expect(calls.launch).toBe(0)
+  })
 
   it('opens the run the address names, on the card and in the research panel', async () => {
     const { api, calls } = wired()

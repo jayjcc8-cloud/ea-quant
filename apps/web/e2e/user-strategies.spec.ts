@@ -31,7 +31,8 @@ type StrategyDocument = {
   name: string
   draft: { revision: number; strategy_id: string; scenario_id: string; initial_cash: string; parameters: Record<string, string | number>; criterion: { schema: string; field: string; expectation: string } | null }
   binding?: { scenario_id: string; from_revision: number; to_revision: number } | null
-  messages: { message_id: string; role: 'user' | 'model'; text: string }[]
+  messages: { message_id: string; role: 'user' | 'model'; text: string; call_id: string }[]
+  calls: { call_id: string }[]
   experiments: {
     launch_intent_id: string
     request_id: string
@@ -133,7 +134,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // The default entry is the strategy workspace; the legacy pages stay reachable.
   await page.goto('/')
   await expect(page).toHaveURL(/\/strategies$/)
-  await expect(page.getByRole('heading', { name: '策略' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
   await expect(page.getByText('还没有策略。')).toBeVisible()
   await expect(page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '研究' })).toBeVisible()
 
@@ -164,9 +165,9 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // registered scenario is named by its exact id beside its own summary, and the
   // button stays inert until the confirmation is ticked — so a reloaded intent
   // cannot be bound by a stray click.
-  await expect(bindPanel.getByLabel('场景')).toHaveValue('')
+  await expect(bindPanel.getByLabel('场景', { exact: true })).toHaveValue('')
   expect(await bindPanel.getByRole('button', { name: '绑定场景' }).isDisabled()).toBe(true)
-  await bindPanel.getByLabel('场景').selectOption(scenario.scenario_id)
+  await bindPanel.getByLabel('场景', { exact: true }).selectOption(scenario.scenario_id)
   // Selecting a scenario still binds nothing: only the confirmed click does.
   expect((await readIntent(page, firstId)).draft).toEqual({ kind: 'intent', revision: 1, scenario_id: null })
   await bindPanel.getByLabel('准则字段').selectOption('economics.net_pnl.amount')
@@ -197,7 +198,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(page.getByRole('region', { name: '新建策略' })).toBeHidden()
   await expect(page.getByRole('link', { name: '新建策略' })).toBeVisible()
   const draftPanel = page.getByRole('region', { name: '草稿' })
-  await expect(draftPanel.getByText(`草稿修订 ${boundRevision}`)).toBeVisible()
+  await expect(draftPanel.getByText(`草稿修订 ${boundRevision}`, { exact: true })).toBeVisible()
   await expect(draftPanel.getByText(`${first.draft.initial_cash} USD`)).toBeVisible()
   await expect(draftPanel.getByText('净盈亏 预期为正')).toBeVisible()
 
@@ -226,7 +227,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await page.getByRole('tab', { name: '实验' }).click()
   await page.getByRole('button', { name: '预览实验' }).click()
   const secondFacts = page.locator('dl.preview-facts')
-  await expect(secondFacts.getByText('草稿修订 1')).toBeVisible()
+  await expect(secondFacts.getByText('草稿修订 1', { exact: true })).toBeVisible()
   await expect(secondFacts.getByText('未声明准则，因此这次运行无法支持或否定该想法')).toBeVisible()
   // Previewing starts nothing.
   expect((await read(page, second.user_strategy_id)).experiments).toEqual([])
@@ -264,8 +265,9 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
     await expect(facts).toContainText(fingerprint.slice(0, 8))
   }
 
-  await page.getByRole('button', { name: '开始实验' }).click()
-  await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
+  const confirmed = page.waitForResponse(response => new URL(response.url()).pathname === `/api/user-strategies/${firstId}/experiments` && response.request().method() === 'POST')
+  await page.getByRole('button', { name: '确认并运行一次' }).click()
+  expect((await confirmed).ok()).toBe(true)
   const launched = await read(page, firstId)
   const experiment = launched.experiments[0]
   expect(experiment.status).toBe('created')
@@ -282,17 +284,29 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   expect(experiment.payload.approved_budget).toEqual({ max_model_calls: 0, max_backtests: 1 })
   expect(launched.draft.revision).toBe(boundRevision)
   // One started run is not a finished piece of research, and this page says where
-  // the rest of it belongs.
+  // the rest of it belongs. The controls that hold the launch ship folded away
+  // once a run exists, so they are opened before they are read.
   const experimentPanel = page.getByRole('region', { name: '实验' })
+  const experimentControls = page.locator('details.experiment-controls').first()
+  if (await experimentControls.getAttribute('open') === null) await experimentControls.locator('summary').first().click()
+  await expect(experimentControls).toHaveAttribute('open', '')
+  await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   await expect(experimentPanel.locator('p.muted', { hasText: /一次运行只是一个冻结的结果，不是已经完成的研究/ })).toBeVisible()
-  await expect(experimentPanel.getByRole('link', { name: '留出验证' })).toHaveAttribute('href', '/holdouts')
-  await expect(experimentPanel.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/research')
+  await expect(experimentPanel.getByRole('link', { name: '查看这次实验报告' }))
+    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
 
-  // Follow the real run and its formal report on the existing backtest page.
-  await page.getByRole('link', { name: '打开运行以查看它的状态和报告' }).click()
-  await expect(page).toHaveURL(new RegExp(`/backtests/${experiment.job_id}$`))
+  // The run's own outcome is the run's own, read from its persisted record until
+  // it reaches a state its owner will not move on its own.
   const job = await waitForTerminalJob(page, experiment.job_id!)
   expect(job.status, job.message ?? 'the confirmed experiment must run').toBe('succeeded')
+
+  // Follow the current inline evidence entry and its own independent report link.
+  await experimentPanel.getByRole('link', { name: '查看这次实验报告' }).click()
+  const reportDetails = page.getByRole('region', { name: '证据' }).locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '成交与完整报告' }) }).first()
+  await reportDetails.locator('summary').click()
+  await reportDetails.getByRole('link', { name: '独立报告链接' }).click()
+  await expect(page).toHaveURL(new RegExp(`/backtests/${experiment.job_id}$`))
   await expect(page.locator('.page-title .status')).toHaveText('succeeded')
   await expect(page.getByRole('link', { name: 'Download report.json' })).toBeVisible()
   await page.reload()
@@ -323,19 +337,41 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
 
   await page.setViewportSize({ width: 1400, height: 1000 })
   await page.goto(`/strategies/${firstId}`)
-  await expect(page.getByRole('tab', { name: '证据' })).toHaveAttribute('aria-selected', 'true')
+  // A strategy with a frozen run opens on the tab that holds it.
+  await expect(page.getByRole('tab', { name: '实验' })).toHaveAttribute('aria-selected', 'true')
   const evidence = page.getByRole('region', { name: '证据' })
-  await expect(evidence.getByRole('link', { name: '打开运行页面' })).toHaveAttribute('href', `/backtests/${experiment.job_id}`)
   const metrics = evidence.locator('dl.evidence-metrics')
   await expect(metrics).toContainText(`${netPnl.amount} ${netPnl.currency ?? report.economics.currency}`)
   await expect(metrics).toContainText(`${fee.amount} ${fee.currency ?? report.economics.currency}`)
   // The identity this report was read under stays on screen: the web job, the
-  // engine run and the report digest are the persisted ones.
+  // engine run and the report digest are the persisted ones. It is deliberate
+  // detail behind its own summary, so that summary is opened to read it.
   expect(jobDocument.engine_run_id, 'the engine run must have its own id').toBeTruthy()
-  await evidence.getByText('技术细节与来源').click()
   const provenance = evidence.locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '技术细节与来源' }) }).first()
+  await expect(provenance).not.toHaveAttribute('open', '')
+  await provenance.locator('summary').first().click()
+  await expect(provenance).toContainText(jobDocument.job_id)
   await expect(provenance).toContainText(jobDocument.engine_run_id)
   await expect(provenance).toContainText(jobDocument.report_sha256)
+  // The run itself, and its report, are one click from here — and the digest the
+  // link carries is the digest of this run's own persisted report.
+  const trades = evidence.locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '成交与完整报告' }) }).first()
+  await expect(trades).not.toHaveAttribute('open', '')
+  await trades.locator('summary').first().click()
+  await expect(trades.getByRole('link', { name: '独立报告链接' }))
+    .toHaveAttribute('href', `/backtests/${experiment.job_id}`)
+  await expect(trades.getByRole('link', { name: '下载正式报告' }))
+    .toHaveAttribute('href', `/api/backtests/${experiment.job_id}/artifacts/report.json`)
+  // And where the rest of the research belongs: one explicit holdout entry for
+  // this exact frozen run.
+  const holdoutEntry = evidence.locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '留出验证与候选' }) }).first()
+  await expect(holdoutEntry).not.toHaveAttribute('open', '')
+  await holdoutEntry.locator('summary').first().click()
+  await expect(holdoutEntry.getByRole('link', { name: '创建本实验的留出验证' }))
+    .toHaveAttribute('href', `/holdouts/new/${experiment.job_id}`)
   // The curve is shown only because the equity path's own identity is this run's
   // and this report's.
   await expect(evidence.locator('.evidence-curve svg')).toBeVisible()
@@ -362,7 +398,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(createForm.getByRole('button', { name: '保存想法' })).toBeVisible()
   // The form chooses no scenario and states no criterion: both belong to the one
   // explicit binding, on the strategy itself.
-  await expect(createForm.getByLabel('场景')).toHaveCount(0)
+  await expect(createForm.getByLabel('场景', { exact: true })).toHaveCount(0)
   await expect(createForm.getByLabel('准则字段')).toHaveCount(0)
   expect((await read(page, firstId)).experiments).toEqual(launched.experiments)
 
@@ -370,9 +406,12 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // while the second strategy is still untouched.
   await page.goto(`/strategies/${firstId}`)
   await page.getByRole('tab', { name: '实验' }).click()
+  const rereadControls = page.locator('details.experiment-controls').first()
+  if (await rereadControls.getAttribute('open') === null) await rereadControls.locator('summary').first().click()
+  await expect(rereadControls).toHaveAttribute('open', '')
   await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
-  await expect(page.getByRole('link', { name: '打开运行以查看它的状态和报告' }))
-    .toHaveAttribute('href', `/backtests/${experiment.job_id}`)
+  await expect(page.getByRole('region', { name: '实验' }).getByRole('link', { name: '查看这次实验报告' }))
+    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
   const reread = await read(page, firstId)
   expect(reread.experiments).toEqual(launched.experiments)
   expect(reread.draft.revision).toBe(boundRevision)
@@ -389,12 +428,21 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   expect(JSON.stringify(await refusal.json())).toContain('frozen experiment of a user strategy')
 
   // The table carries the frozen run on the strategy's own row, at the revision
-  // that ran rather than at today's head, and it names the launch state without
-  // claiming the run succeeded.
+  // that ran rather than at today's head. The run column is the job's own state,
+  // read from that job, and it leads back to this strategy's evidence for it.
   await page.goto('/strategies')
   const table = page.getByRole('navigation', { name: '策略列表' })
   await expect(table.getByText(`冻结 v${boundRevision}`)).toBeVisible()
-  await expect(table.getByRole('link', { name: '运行已启动' })).toHaveAttribute('href', `/backtests/${experiment.job_id}`)
+  const firstRow = table.locator('tr').filter({ has: page.getByRole('link', { name: 'Trend follow', exact: true }) })
+  await expect(firstRow.getByRole('link', { name: /成功/ }))
+    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
+  // And the legacy research workspace stays one click away on this route, behind
+  // the collection's history disclosure.
+  const history = page.locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '历史记录' }) }).first()
+  await expect(history).not.toHaveAttribute('open', '')
+  await history.locator('summary').first().click()
+  await expect(history.getByRole('link', { name: '旧研究任务' })).toHaveAttribute('href', '/research')
   await page.screenshot({ path: testInfo.outputPath('strategy-workspace.png'), fullPage: true })
 
   // A narrow viewport with the real run and the admitted input on screen: the
@@ -402,6 +450,9 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await page.setViewportSize({ width: 420, height: 900 })
   await page.goto(`/strategies/${firstId}`)
   await page.getByRole('tab', { name: '实验' }).click()
+  const narrowControls = page.locator('details.experiment-controls').first()
+  if (await narrowControls.getAttribute('open') === null) await narrowControls.locator('summary').first().click()
+  await expect(narrowControls).toHaveAttribute('open', '')
   await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   await page.getByRole('button', { name: '预览实验' }).click()
   await expect(page.locator('dl.preview-facts')).toContainText(`草稿修订 ${preview.draft_revision}`)
@@ -416,11 +467,10 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
  * The way back from an already-existing formal report to the persisted strategy
  * that froze it.
  *
- * This test scripts nothing. It reads the real workspace with GET only, follows
- * the link the page itself renders, and re-reads the same documents afterwards.
- * It starts no run, creates no strategy, previews nothing, asks no model and
- * writes no setting: the sample is named by the environment, because it must
- * already exist in the workspace under test.
+ * On a workspace that already holds the sample, the three identifiers come from
+ * the environment and this test scripts nothing: it reads the real workspace with
+ * GET only, follows the link the page itself renders, and re-reads the same
+ * documents afterwards.
  *
  *   EA_REPORT_JOB_ID=<persisted experiment job> \
  *   EA_REPORT_STRATEGY_ID=<the strategy that froze it> \
@@ -428,20 +478,104 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
  *   EA_WEB_BASE_URL=http://127.0.0.1:8765 \
  *   npx playwright test e2e/user-strategies.spec.ts -g 'existing report returns'
  *
- * The recorded call counts, the experiment lists and the two strategy documents
- * are compared with their own baseline before the page is opened, so the claim
- * "the return writes nothing" is checked against this workspace's real state and
- * not against a number this test assumed.
+ * With none of them set — the clean installed harness — this test first creates
+ * its own bounded sample through the product's own local API: two distinct named
+ * strategies on one registered scenario, then one real experiment of the first
+ * one, previewed and explicitly confirmed against exactly that preview, awaited
+ * until its persisted job is terminal and its report readable. The seed runs
+ * *before* the no-write watchers and the baselines are installed, so what the
+ * read-only journey is measured against is the state the seed itself left. No
+ * model is called, no provider is configured, no persisted JSON is edited
+ * directly and no report is fabricated. A partial environment is a mistake and
+ * fails clearly here rather than being guessed at.
+ *
+ * Either way the recorded call counts, the experiment lists and the two strategy
+ * documents are compared with their own baseline before the page is opened, so
+ * the claim "the return writes nothing" is checked against this workspace's real
+ * state and not against a number this test assumed.
  */
+type ReportSample = { jobId: string; strategyId: string; otherStrategyId: string }
+
+/**
+ * One deterministic sample, created through the product's own local API.
+ *
+ * Two distinct named strategies on one registered scenario, then one real
+ * experiment of the first one: a preview of exactly what would run, one explicit
+ * confirmation of that preview, and a bounded read of the persisted job until it
+ * reaches a terminal state. Every identifier this returns is an answer the API
+ * itself gave, and the report it leaves behind is the engine's own.
+ */
+async function seedReportSample(page: Page): Promise<ReportSample> {
+  const catalog = await page.request.get('/api/scenarios').then((response) => response.json())
+  const scenario = catalog.scenarios.find(
+    (item: { valid: boolean; strategy_parameters?: unknown[] }) =>
+      item.valid && (item.strategy_parameters?.length ?? 0) > 0,
+  )
+  expect(scenario, 'the isolated workspace must register one runnable scenario').toBeTruthy()
+
+  const create = async (name: string, intent: string): Promise<StrategyDocument> => {
+    const response = await page.request.post('/api/user-strategies', {
+      headers: sameOrigin,
+      data: { name, intent, scenario_id: scenario.scenario_id },
+    })
+    expect(response.status(), `creating "${name}" must succeed`).toBe(201)
+    return await response.json() as StrategyDocument
+  }
+  const strategy = await create('回归样本策略', '为返回路径冻结一份真实的正式报告')
+  const other = await create('回归样本对照策略', '同一引擎策略上的另一条策略，不拥有这次运行')
+
+  const preview = await page.request
+    .get(`/api/user-strategies/${strategy.user_strategy_id}/experiment/preview`)
+    .then((response) => response.json()) as Preview
+  expect(preview.preview_identity, 'the sample preview must carry the identity a confirmation returns')
+    .toMatch(/^sha256:[0-9a-f]{64}$/)
+  const launched = await page.request.post(`/api/user-strategies/${strategy.user_strategy_id}/experiments`, {
+    headers: sameOrigin,
+    data: {
+      launch_intent_id: 'sample-report-return',
+      base_revision: preview.draft_revision,
+      preview_identity: preview.preview_identity,
+      approved_budget: { max_model_calls: 0, max_backtests: 1 },
+    },
+  })
+  expect(launched.status(), 'the explicit confirmation must be accepted').toBe(200)
+  const experiment = (await read(page, strategy.user_strategy_id)).experiments.at(-1)
+  expect(experiment?.job_id, 'the confirmed experiment must have dispatched its run').toBeTruthy()
+  const job = await waitForTerminalJob(page, experiment!.job_id!)
+  expect(job.status, job.message ?? 'the sample experiment must run').toBe('succeeded')
+  const ready = await page.request.get(`/api/backtests/${experiment!.job_id}`).then((response) => response.json())
+  expect(ready.report_ready, 'the sample must leave a readable formal report').toBe(true)
+  return {
+    jobId: experiment!.job_id!,
+    strategyId: strategy.user_strategy_id,
+    otherStrategyId: other.user_strategy_id,
+  }
+}
+
 test('existing report returns to its persisted strategy without writes', async ({ page, context }, testInfo) => {
-  test.setTimeout(120_000)
-  const jobId = process.env.EA_REPORT_JOB_ID ?? ''
-  const strategyId = process.env.EA_REPORT_STRATEGY_ID ?? ''
-  const otherStrategyId = process.env.EA_REPORT_OTHER_STRATEGY_ID ?? ''
-  expect(jobId, 'EA_REPORT_JOB_ID must name the persisted experiment job').not.toBe('')
-  expect(strategyId, 'EA_REPORT_STRATEGY_ID must name the strategy that froze it').not.toBe('')
-  expect(otherStrategyId, 'EA_REPORT_OTHER_STRATEGY_ID must name a same-engine strategy').not.toBe('')
+  test.setTimeout(180_000)
   await waitForHealth()
+  const suppliedJobId = process.env.EA_REPORT_JOB_ID ?? ''
+  const suppliedStrategyId = process.env.EA_REPORT_STRATEGY_ID ?? ''
+  const suppliedOtherStrategyId = process.env.EA_REPORT_OTHER_STRATEGY_ID ?? ''
+  const supplied = [suppliedJobId, suppliedStrategyId, suppliedOtherStrategyId].filter((value) => value !== '').length
+  expect(supplied === 0 || supplied === 3,
+    'EA_REPORT_JOB_ID, EA_REPORT_STRATEGY_ID and EA_REPORT_OTHER_STRATEGY_ID must be supplied together or not at all')
+    .toBe(true)
+  if (supplied === 0) {
+    expect(process.env.EA_WEB_BIN, 'automatic fixtures require the isolated installed harness').toBeTruthy()
+    expect(process.env.EA_WEB_WORKSPACE, 'automatic fixtures require an isolated workspace').toBeTruthy()
+  }
+  const sample: ReportSample = supplied === 3
+    ? { jobId: suppliedJobId, strategyId: suppliedStrategyId, otherStrategyId: suppliedOtherStrategyId }
+    : await seedReportSample(page)
+  const { jobId, strategyId, otherStrategyId } = sample
+  testInfo.annotations.push({
+    type: 'sample',
+    description: supplied === 3
+      ? `supplied by the environment: job ${jobId}, strategy ${strategyId}`
+      : `created through the local API before the read-only journey: job ${jobId}, strategy ${strategyId}`,
+  })
 
   // Every non-GET the pages themselves attempt, on both pages this test opens.
   const nonGet: string[] = []
@@ -492,6 +626,9 @@ test('existing report returns to its persisted strategy without writes', async (
   // The formal report, opened directly, at the desktop width.
   const association = page.getByRole('region', { name: '策略关联' })
   const returnLink = association.getByRole('link', { name: '返回此策略继续研究' })
+  // The way back names the frozen run this report is about, so the strategy opens
+  // on that run instead of resetting its evidence to the latest one.
+  const returnHref = `/strategies/${strategyId}?evidence_a=${jobId}`
   await page.setViewportSize({ width: 1400, height: 1000 })
   await page.goto(`/backtests/${jobId}`)
   await expect(page.locator('.page-title .status')).toHaveText('succeeded')
@@ -503,7 +640,7 @@ test('existing report returns to its persisted strategy without writes', async (
   } else {
     await expect(association.getByText(other.name, { exact: true })).toHaveCount(0)
   }
-  await expect(returnLink).toHaveAttribute('href', `/strategies/${strategyId}`)
+  await expect(returnLink).toHaveAttribute('href', returnHref)
   // The formal report stays the report: its own evidence and downloads are intact.
   await expect(page.getByRole('link', { name: 'Download report.json' })).toBeVisible()
   expect(await appearanceInForce(), 'opening the report must not disturb the appearance').toEqual(['dark', 'compact'])
@@ -513,13 +650,21 @@ test('existing report returns to its persisted strategy without writes', async (
   // conversation, evidence and AI column intact and the other one never selected.
   const origin = new URL(baseURL).origin
   await returnLink.click()
-  await expect(page).toHaveURL(`${origin}/strategies/${strategyId}`)
+  await expect(page).toHaveURL(`${origin}${returnHref}`)
   await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   await expect(page.getByRole('region', { name: '证据' })).toBeVisible()
-  await expect(page.locator('ol.message-list li')).toHaveCount(strategy.messages.length)
-  if (strategy.messages.length > 0) {
-    await expect(page.locator('ol.message-list li').first()).toContainText(strategy.messages[0].text)
+  // The conversation on screen is this strategy's own: the newest turn keeps its
+  // own prompt and answer in the turn above, and the turns before it stay in the
+  // shared message list. Nothing of the other strategy's conversation is here.
+  const earlierMessages = strategy.messages.filter(
+    (message) => message.call_id !== strategy.calls.at(-1)?.call_id)
+  await expect(page.locator('ol.message-list li')).toHaveCount(earlierMessages.length)
+  if (earlierMessages.length > 0) {
+    await expect(page.locator('ol.message-list li').first()).toContainText(earlierMessages[0].text)
   }
+  const contextLabel = page.getByLabel('AI 当前上下文')
+  await expect(contextLabel).toContainText(strategy.name)
+  await expect(contextLabel).toContainText(`草稿 v${strategy.draft.revision}`)
   await expect(page.getByLabel('当前策略')).toHaveValue(strategyId)
   await expect(page.getByLabel('当前策略')).not.toHaveValue(otherStrategyId)
   await page.screenshot({ path: testInfo.outputPath('report-return-strategy-1400.png'), fullPage: true })
@@ -528,7 +673,7 @@ test('existing report returns to its persisted strategy without writes', async (
   await page.goto(`/backtests/${jobId}`)
   await page.reload()
   await expect(association.getByText(`冻结 v${frozen}`)).toBeVisible()
-  await expect(returnLink).toHaveAttribute('href', `/strategies/${strategyId}`)
+  await expect(returnLink).toHaveAttribute('href', returnHref)
 
   // The narrow width: the same return, still clickable, with no sideways scroll.
   await page.setViewportSize({ width: 420, height: 900 })
@@ -540,7 +685,7 @@ test('existing report returns to its persisted strategy without writes', async (
   expect(narrowOverflow, 'the report with its association must not scroll sideways at 420 px').toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('report-return-420.png'), fullPage: true })
   await returnLink.click()
-  await expect(page).toHaveURL(`${origin}/strategies/${strategyId}`)
+  await expect(page).toHaveURL(`${origin}${returnHref}`)
   await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   expect(await appearanceInForce(), 'the appearance must survive the navigation').toEqual(['dark', 'compact'])
 
@@ -554,14 +699,14 @@ test('existing report returns to its persisted strategy without writes', async (
   await expect(independentAssociation.getByText(strategy.name, { exact: true })).toBeVisible()
   await expect(independentAssociation.getByText(`冻结 v${frozen}`)).toBeVisible()
   await expect(independentAssociation.getByRole('link', { name: '返回此策略继续研究' }))
-    .toHaveAttribute('href', `/strategies/${strategyId}`)
+    .toHaveAttribute('href', returnHref)
   expect(
     await independent.evaluate(() => [document.documentElement.dataset.theme, document.documentElement.dataset.density]),
     'this browser keeps the appearance it saved',
   ).toEqual(['dark', 'compact'])
   await independent.screenshot({ path: testInfo.outputPath('report-return-independent-420.png'), fullPage: true })
   await independent.getByRole('link', { name: '返回此策略继续研究' }).click()
-  await expect(independent).toHaveURL(`${origin}/strategies/${strategyId}`)
+  await expect(independent).toHaveURL(`${origin}${returnHref}`)
   await expect(independent.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   await independent.close()
 

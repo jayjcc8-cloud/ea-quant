@@ -1,5 +1,5 @@
 /**
- * QUINE 自定义设置 — the local appearance this browser owns.
+ * QUINE 设置 — the local appearance this browser owns.
  *
  *   EA_WEB_BASE_URL=http://127.0.0.1:8917 \
  *   npx playwright test e2e/appearance.spec.ts
@@ -15,8 +15,7 @@
  * What is accepted here: the settings entry is reachable from the existing sidebar
  * link; the controls it offers present what is in force and change it immediately;
  * a chosen appearance is applied to real pages and comes back after a refresh; the
- * system theme follows the OS live and an explicit theme does not; the width control
- * really resizes the AI column; compact density changes the desktop layout only; the
+ * system theme follows the OS live and an explicit theme does not; the AI column remains visible with responsive sizing; compact density changes the desktop layout only; the
  * narrow view keeps one column, the AI panel and 44px targets; reduced motion is
  * honoured; and a browser that refuses to store the preference still applies it and
  * says so instead of failing. That last case skips itself, with the reason recorded,
@@ -32,7 +31,7 @@ import { expect, test, type Page } from '@playwright/test'
 /** The one key this feature owns; the panel names the same document in its unit test. */
 const STORAGE_KEY = 'ea.quine.appearance.v1'
 
-type Preferences = { theme: string; density: string; aiWidth: number }
+type Preferences = { theme: string; density: string }
 
 /**
  * Refuses every write to the API. A GET or a HEAD is passed through untouched, so
@@ -74,10 +73,8 @@ const shellBackground = (page: Page) => page.evaluate(() => getComputedStyle(doc
 const overflow = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
 
-/** The settings panel, the width slider and the px value the page prints beside it. */
+/** The local settings panel. */
 const panel = (page: Page) => page.getByRole('region', { name: '本地外观' })
-const slider = (page: Page) => page.getByRole('slider', { name: 'AI 侧栏宽度' })
-const widthValue = (page: Page) => panel(page).locator('[data-appearance="ai-width"]')
 
 /**
  * WCAG relative-luminance contrast of one element's text against the nearest opaque
@@ -138,30 +135,27 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
   await page.goto('/strategies')
 
   // The entry is the existing sidebar link, and it is a real route.
-  await page.getByRole('link', { name: '自定义设置' }).click()
+  await page.getByRole('link', { name: '设置' }).click()
   await expect(page).toHaveURL(/\/settings$/)
-  await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible()
   const settings = panel(page)
   await expect(settings).toBeVisible()
 
   // The model configuration section this page already carried is untouched: the
-  // English status panel is still its own region with its own heading.
-  const model = page.getByRole('region', { name: 'Model provider configuration' })
-  await expect(model.getByRole('heading', { name: 'Model provider' })).toBeVisible()
+  // status panel is still its own region with its own heading.
+  const model = page.getByRole('region', { name: '模型提供方配置' })
+  await expect(model.getByRole('heading', { name: '模型提供方' })).toBeVisible()
 
   // The panel opens on what is in force: the defaults, before anything is chosen.
   await expect(page.getByRole('radio', { name: '跟随系统' })).toBeChecked()
   await expect(page.getByRole('radio', { name: '标准' })).toBeChecked()
   await expect(page.getByRole('group', { name: '主题' })).toBeVisible()
   await expect(page.getByRole('group', { name: '密度' })).toBeVisible()
-  await expect(slider(page)).toHaveAttribute('min', '320')
-  await expect(slider(page)).toHaveAttribute('max', '480')
-  await expect(slider(page)).toHaveAttribute('step', '1')
-  await expect(widthValue(page)).toHaveText('396 px')
+  await expect(panel(page).getByRole('slider')).toHaveCount(0)
   await expect(page.getByRole('button', { name: '恢复默认' })).toBeVisible()
   expect(await theme(page)).toBe('light')
   expect(await density(page)).toBe('normal')
-  expect(await widthToken(page)).toBe('396px')
+  expect(await widthToken(page)).toBe('')
   expect(await stored(page), 'nothing is written until something is chosen').toBeNull()
   await page.screenshot({ path: testInfo.outputPath('appearance-settings-light-1400.png'), fullPage: true })
 
@@ -177,7 +171,7 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
   await page.getByRole('radio', { name: '深色' }).click()
   expect(await theme(page)).toBe('dark')
   expect(await shellBackground(page), 'dark must be a rendered surface, not only an attribute').not.toBe(lightShell)
-  expect(await stored(page)).toEqual({ theme: 'dark', density: 'normal', aiWidth: 396 })
+  expect(await stored(page)).toEqual({ theme: 'dark', density: 'normal' })
   await page.screenshot({ path: testInfo.outputPath('appearance-settings-dark-1400.png'), fullPage: true })
 
   // The same page at a narrow width: the panel stacks, and the document does not
@@ -200,7 +194,7 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
       : 'no real strategy exists here; the empty workspace is the surface',
   })
   await page.goto('/strategies')
-  await expect(page.getByRole('heading', { name: '策略' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
   for (const selector of ['.strategy-heading h1', '.strategy-subtitle']) {
     ratios[selector] = await contrast(page, selector)
   }
@@ -238,7 +232,7 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
     response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/paper/overview')
   await page.goto('/runs')
   const overview = await (await overviewArrived).json() as { available?: boolean; run_id?: string; reason?: string }
-  await expect(page.locator('.paper-status h1')).toHaveText('运行')
+  await expect(page.locator('.paper-status h1')).toHaveText('模拟观测')
   if (overview.available === true && overview.run_id) {
     await expect(page.locator('[data-paper="run_id"]')).toHaveText(overview.run_id)
   } else {
@@ -267,7 +261,7 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
   await page.reload()
   expect(await theme(page)).toBe('dark')
   expect(await density(page)).toBe('normal')
-  expect(await widthToken(page)).toBe('396px')
+  expect(await widthToken(page)).toBe('')
 
   expect(errors()).toEqual([])
   expect(api.writes(), 'changing the local appearance must not write to the API').toEqual([])
@@ -324,7 +318,7 @@ test('the system theme follows the OS live, and an explicit theme stops followin
   await expect.poll(() => theme(page)).toBe('light')
   await page.emulateMedia({ colorScheme: 'dark' })
   await expect.poll(() => theme(page)).toBe('dark')
-  expect(await stored(page)).toEqual({ theme: 'system', density: 'normal', aiWidth: 396 })
+  expect(await stored(page)).toEqual({ theme: 'system', density: 'normal' })
 
   // The other OS preference this page reads is motion. It reads it — the appearance
   // controls still work with motion switched off — and it changes nothing itself.
@@ -342,68 +336,56 @@ test('the system theme follows the OS live, and an explicit theme stops followin
   expect(api.writes()).toEqual([])
 })
 
-test('the width control resizes the real AI column by keyboard, and 恢复默认 restores every value', async ({ page }, testInfo) => {
+test('the AI column remains visible and responsive while obsolete width settings are ignored', async ({ page }, testInfo) => {
   const api = await guardApi(page)
   await page.emulateMedia({ colorScheme: 'light' })
   await page.setViewportSize({ width: 1400, height: 1000 })
-
-  // Before anything is chosen the AI column is the width this workspace already had.
   await page.goto('/strategies')
-  expect(Math.round((await aiColumn(page)).width)).toBe(396)
+  const original = await aiColumn(page)
+  expect(original.width).toBeGreaterThanOrEqual(320)
+  expect(original.width).toBeLessThanOrEqual(384)
+  const strategy = await page.locator('.strategy-column').boundingBox()
+  expect(original.x).toBeGreaterThan((strategy?.x ?? 0) + (strategy?.width ?? 0))
 
-  // The width is a native range, so the keyboard the reader already has operates it:
-  // End and Home are its bounds, and an arrow key moves it one pixel.
+  // A document saved before the layout change keeps its supported preferences;
+  // its obsolete width must neither distort the workspace nor create a control.
+  await page.evaluate(key => localStorage.setItem(key,
+    JSON.stringify({ theme: 'dark', density: 'normal', aiWidth: 480 })), STORAGE_KEY)
+  await page.reload()
+  expect(await theme(page)).toBe('dark')
+  expect(await density(page)).toBe('normal')
+  expect(await widthToken(page)).toBe('')
+  expect(Math.abs((await aiColumn(page)).width - original.width)).toBeLessThanOrEqual(1)
   await page.goto('/settings')
-  await expect(panel(page)).toBeVisible()
-  await slider(page).focus()
-  await page.keyboard.press('End')
-  await expect(widthValue(page)).toHaveText('480 px')
-  expect(await widthToken(page)).toBe('480px')
-  expect((await stored(page))?.aiWidth).toBe(480)
-
-  await page.keyboard.press('ArrowLeft')
-  await expect(widthValue(page)).toHaveText('479 px')
-  expect((await stored(page))?.aiWidth).toBe(479)
-
-  await page.keyboard.press('Home')
-  await expect(widthValue(page)).toHaveText('320 px')
-  expect(await widthToken(page)).toBe('320px')
-  expect((await stored(page))?.aiWidth).toBe(320)
-
-  await page.keyboard.press('ArrowRight')
-  await expect(widthValue(page)).toHaveText('321 px')
-  await page.keyboard.press('End')
-  await expect(widthValue(page)).toHaveText('480 px')
-
-  // The number the reader set is the width the AI column is actually laid out at.
-  await page.goto('/strategies')
-  const wide = await aiColumn(page)
-  expect(Math.abs(wide.width - 480), 'the AI column must be the width that was chosen').toBeLessThanOrEqual(2)
-
-  // It survives a refresh, and so does the density chosen beside it.
-  await page.goto('/settings')
-  await page.getByRole('radio', { name: '深色' }).click()
+  await expect(panel(page).getByRole('slider')).toHaveCount(0)
+  await expect(panel(page).getByText('AI 侧栏宽度')).toHaveCount(0)
   await page.getByRole('radio', { name: '紧凑' }).click()
   await page.reload()
   await expect(page.getByRole('radio', { name: '深色' })).toBeChecked()
   await expect(page.getByRole('radio', { name: '紧凑' })).toBeChecked()
-  await expect(widthValue(page)).toHaveText('480 px')
-  expect(await theme(page)).toBe('dark')
-  expect(await density(page)).toBe('compact')
-  expect(await stored(page)).toEqual({ theme: 'dark', density: 'compact', aiWidth: 480 })
-
-  // One explicit action puts every value back, and the AI column goes back with them.
+  expect(await stored(page)).toEqual({ theme: 'dark', density: 'compact' })
   await page.getByRole('button', { name: '恢复默认' }).click()
   await expect(page.getByRole('radio', { name: '跟随系统' })).toBeChecked()
   await expect(page.getByRole('radio', { name: '标准' })).toBeChecked()
-  await expect(widthValue(page)).toHaveText('396 px')
-  expect(await theme(page)).toBe('light')
-  expect(await density(page)).toBe('normal')
-  expect(await stored(page)).toEqual({ theme: 'system', density: 'normal', aiWidth: 396 })
-  await page.goto('/strategies')
-  expect(Math.abs((await aiColumn(page)).width - 396)).toBeLessThanOrEqual(2)
-  await page.screenshot({ path: testInfo.outputPath('appearance-reset-1400.png'), fullPage: true })
+  expect(await stored(page)).toEqual({ theme: 'system', density: 'normal' })
+  await page.screenshot({ path: testInfo.outputPath('appearance-settings-no-width-1400.png'), fullPage: true })
 
+  for (const width of [1600, 1400, 420, 390]) {
+    await page.setViewportSize({ width, height: 1000 })
+    await page.goto('/strategies')
+    const ai = await aiColumn(page)
+    const column = await page.locator('.strategy-column').boundingBox()
+    if (width >= 1400) {
+      expect(ai.width).toBeGreaterThanOrEqual(320)
+      expect(ai.width).toBeLessThanOrEqual(384)
+      expect(ai.x).toBeGreaterThan((column?.x ?? 0) + (column?.width ?? 0))
+    } else {
+      expect(Math.abs(ai.x - (column?.x ?? 0))).toBeLessThanOrEqual(2)
+      expect(ai.y).toBeGreaterThanOrEqual((column?.y ?? 0) + (column?.height ?? 0))
+    }
+    expect(await overflow(page)).toBeLessThanOrEqual(1)
+    await page.screenshot({ path: testInfo.outputPath(`appearance-responsive-${width}.png`), fullPage: true })
+  }
   expect(api.writes()).toEqual([])
 })
 
@@ -447,8 +429,6 @@ test('compact density tightens the desktop layout only, and the narrow view keep
     const height = await targetHeight(page, `.appearance-choices label:has-text("${choice}")`)
     expect(height, `${choice} must stay a 44px target`).toBeGreaterThanOrEqual(44)
   }
-  expect(await targetHeight(page, '#appearance-ai-width'), 'the width control must stay a 44px target')
-    .toBeGreaterThanOrEqual(44)
   expect(await targetHeight(page, '.appearance-settings button')).toBeGreaterThanOrEqual(44)
 
   // Compact is a desktop treatment: on the phone the layout is the one the page
@@ -502,7 +482,7 @@ test('a browser that refuses to store the appearance still applies it and says i
   // Nothing was readable, so the panel shows the defaults rather than a guessed one,
   // and it does not accuse itself of being unsaved before anything was changed.
   await expect(page.getByRole('radio', { name: '跟随系统' })).toBeChecked()
-  await expect(widthValue(page)).toHaveText('396 px')
+  await expect(panel(page).getByRole('slider')).toHaveCount(0)
   await expect(page.getByRole('alert')).toHaveCount(0)
 
   // The change still applies to this session, the refusal is stated in words, and the

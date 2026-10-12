@@ -1,34 +1,7 @@
-/**
- * QUINE local appearance: one preference model, one runtime, one settings panel.
- *
- * Everything asserted here is this browser's own surface — a preference document
- * in local storage plus three attributes on the document root. No backend, route,
- * provider, model or secret is involved, and no value below is engine evidence.
- *
- * The claims a reader can re-check:
- *   · a saved preference is read back, applied to the root element and persisted,
- *     so a fresh runtime over the same storage comes up with the saved appearance;
- *   · every malformed or illegal stored value falls back to that field's default —
- *     an unknown enum member, an out-of-range, non-finite or non-numeric width —
- *     without discarding the valid fields stored beside it;
- *   · storage that refuses a read or a write never throws into the application,
- *     and a refused write is reported as unsaved rather than as saved;
- *   · the OS colour scheme is consulted only while the theme follows the system,
- *     the media-query listener is released as soon as it stops following, and
- *     disposing the runtime leaves no listener behind;
- *   · the panel presents the saved values, applies a change immediately, keeps the
- *     AI column inside 320–480 px, and restores every default from one action.
- *
- * The width control is a native `input[type=range]`; a change event is what a
- * browser produces when a keyboard adjusts it, so that is what is dispatched here.
- * Real arrow-key operation is accepted in the browser by `e2e/appearance.spec.ts`.
- */
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  AI_WIDTH_MAX,
-  AI_WIDTH_MIN,
   APPEARANCE_DEFAULTS,
   APPEARANCE_STORAGE_KEY,
   applyAppearance,
@@ -91,8 +64,6 @@ function fakeSystem(initialDark = false) {
 }
 
 const root = document.documentElement
-const widthOn = (element: HTMLElement) =>
-  element.querySelector('[data-appearance="ai-width"]')?.textContent ?? null
 const checked = (name: string) => (screen.getByRole('radio', { name }) as HTMLInputElement).checked
 
 /** A runtime over a detached element, so a pure case cannot disturb the document. */
@@ -105,29 +76,27 @@ afterEach(() => {
   cleanup()
   delete root.dataset.theme
   delete root.dataset.density
-  root.style.removeProperty('--quine-ai-width')
 })
 
 describe('the appearance preference model', () => {
-  it('writes the effective theme, the density and the AI width onto the root element', () => {
+  it('writes the effective theme and density onto the root element', () => {
     const element = document.createElement('div')
-    expect(applyAppearance({ theme: 'dark', density: 'compact', aiWidth: 448 }, element, false)).toBe('dark')
+    expect(applyAppearance({ theme: 'dark', density: 'compact' }, element, false)).toBe('dark')
     expect(element.dataset.theme).toBe('dark')
     expect(element.dataset.density).toBe('compact')
-    expect(element.style.getPropertyValue('--quine-ai-width')).toBe('448px')
 
     // The system preference is the only one that reads the OS scheme; an explicit
     // theme is the effective theme whatever the OS reports.
-    expect(applyAppearance({ theme: 'system', density: 'normal', aiWidth: 396 }, element, true)).toBe('dark')
+    expect(applyAppearance({ theme: 'system', density: 'normal' }, element, true)).toBe('dark')
     expect(element.dataset.theme).toBe('dark')
-    expect(applyAppearance({ theme: 'system', density: 'normal', aiWidth: 396 }, element, false)).toBe('light')
+    expect(applyAppearance({ theme: 'system', density: 'normal' }, element, false)).toBe('light')
     expect(element.dataset.theme).toBe('light')
-    expect(applyAppearance({ theme: 'light', density: 'normal', aiWidth: 396 }, element, true)).toBe('light')
+    expect(applyAppearance({ theme: 'light', density: 'normal' }, element, true)).toBe('light')
     expect(element.dataset.theme).toBe('light')
   })
 
   it('falls back on the field that is illegal and keeps the fields that are not', () => {
-    expect(APPEARANCE_DEFAULTS).toEqual({ theme: 'system', density: 'normal', aiWidth: 396 })
+    expect(APPEARANCE_DEFAULTS).toEqual({ theme: 'system', density: 'normal' })
 
     const illegal: [string, unknown][] = [
       ['a string', 'dark'],
@@ -139,35 +108,23 @@ describe('the appearance preference model', () => {
       ['a null theme', { theme: null }],
       ['an unknown density', { density: 'roomy' }],
       ['a non-string density', { density: {} }],
-      ['a numeric string width', { aiWidth: '396' }],
-      ['a null width', { aiWidth: null }],
-      ['a NaN width', { aiWidth: Number.NaN }],
-      ['an infinite width', { aiWidth: Number.POSITIVE_INFINITY }],
-      ['a negative infinite width', { aiWidth: Number.NEGATIVE_INFINITY }],
-      ['a fractional width', { aiWidth: 396.5 }],
-      ['a width below the range', { aiWidth: AI_WIDTH_MIN - 1 }],
-      ['a width above the range', { aiWidth: AI_WIDTH_MAX + 1 }],
-      ['a boolean width', { aiWidth: true }],
     ]
     for (const [label, value] of illegal) {
       const normalized = normalizeAppearance(value)
       expect(normalized, label).toEqual(APPEARANCE_DEFAULTS)
     }
 
-    // One bad field never discards the two good ones beside it.
-    expect(normalizeAppearance({ theme: 'sepia', density: 'compact', aiWidth: 400 }))
-      .toEqual({ theme: 'system', density: 'compact', aiWidth: 400 })
-    expect(normalizeAppearance({ theme: 'dark', density: 'roomy', aiWidth: 'wide' }))
-      .toEqual({ theme: 'dark', density: 'normal', aiWidth: 396 })
+    // One bad field never discards a valid field beside it.
+    expect(normalizeAppearance({ theme: 'sepia', density: 'compact' }))
+      .toEqual({ theme: 'system', density: 'compact' })
+    expect(normalizeAppearance({ theme: 'dark', density: 'roomy' }))
+      .toEqual({ theme: 'dark', density: 'normal' })
 
-    // The bounds themselves are legal values.
-    expect(normalizeAppearance({ theme: 'light', density: 'compact', aiWidth: AI_WIDTH_MIN }).aiWidth).toBe(AI_WIDTH_MIN)
-    expect(normalizeAppearance({ theme: 'light', density: 'compact', aiWidth: AI_WIDTH_MAX }).aiWidth).toBe(AI_WIDTH_MAX)
   })
 
   it('reads, writes and falls back without letting a storage failure escape', () => {
-    const store = storageWith({ theme: 'dark', density: 'compact', aiWidth: 432 })
-    expect(readAppearance(store)).toEqual({ theme: 'dark', density: 'compact', aiWidth: 432 })
+    const store = storageWith({ theme: 'dark', density: 'compact' })
+    expect(readAppearance(store)).toEqual({ theme: 'dark', density: 'compact' })
 
     // A document that is absent, unreadable as JSON, or a JSON value that is not
     // one preference record falls back rather than throwing.
@@ -183,8 +140,8 @@ describe('the appearance preference model', () => {
     expect(() => readAppearance(refused)).not.toThrow()
     expect(readAppearance(refused)).toEqual(APPEARANCE_DEFAULTS)
 
-    expect(writeAppearance({ theme: 'dark', density: 'compact', aiWidth: 432 }, store)).toBe(true)
-    expect(store.stored()).toEqual({ theme: 'dark', density: 'compact', aiWidth: 432 })
+    expect(writeAppearance({ theme: 'dark', density: 'compact' }, store)).toBe(true)
+    expect(store.stored()).toEqual({ theme: 'dark', density: 'compact' })
     expect(store.writes).toBe(1)
 
     // A refused write is reported as not saved, and never as an exception.
@@ -200,27 +157,24 @@ describe('the appearance runtime', () => {
     expect(first.runtime.get()).toEqual(APPEARANCE_DEFAULTS)
     expect(first.element.dataset.theme).toBe('light')
     expect(first.element.dataset.density).toBe('normal')
-    expect(first.element.style.getPropertyValue('--quine-ai-width')).toBe('396px')
 
-    expect(first.runtime.set({ theme: 'dark', density: 'compact', aiWidth: 448 })).toBe(true)
+    expect(first.runtime.set({ theme: 'dark', density: 'compact' })).toBe(true)
     expect(first.element.dataset.theme).toBe('dark')
     expect(first.element.dataset.density).toBe('compact')
-    expect(first.element.style.getPropertyValue('--quine-ai-width')).toBe('448px')
-    expect(first.runtime.get()).toEqual({ theme: 'dark', density: 'compact', aiWidth: 448 })
+    expect(first.runtime.get()).toEqual({ theme: 'dark', density: 'compact' })
     first.runtime.dispose()
 
     // The reload: a new runtime over the same store starts from what was saved.
     const reloaded = detachedRuntime(store)
-    expect(reloaded.runtime.get()).toEqual({ theme: 'dark', density: 'compact', aiWidth: 448 })
+    expect(reloaded.runtime.get()).toEqual({ theme: 'dark', density: 'compact' })
     expect(reloaded.element.dataset.theme).toBe('dark')
     reloaded.runtime.dispose()
 
-    // An illegal stored document is applied per field: the two fields it states
-    // legally are kept, and only the illegal one is replaced by its default.
-    const corrupt = detachedRuntime(storageWith({ theme: 'sepia', density: 'compact', aiWidth: 9000 }))
-    expect(corrupt.runtime.get()).toEqual({ theme: 'system', density: 'compact', aiWidth: 396 })
+    // An illegal stored document is applied per field: a valid density is
+    // kept, and only the illegal theme is replaced by its default.
+    const corrupt = detachedRuntime(storageWith({ theme: 'sepia', density: 'compact' }))
+    expect(corrupt.runtime.get()).toEqual({ theme: 'system', density: 'compact' })
     expect(corrupt.element.dataset.density).toBe('compact')
-    expect(corrupt.element.style.getPropertyValue('--quine-ai-width')).toBe('396px')
     corrupt.runtime.dispose()
   })
 
@@ -236,12 +190,12 @@ describe('the appearance runtime', () => {
     expect(root.dataset.theme).toBe('dark')
 
     // An explicit theme takes over and the OS listener is released, not left behind.
-    runtime.set({ theme: 'dark', density: 'normal', aiWidth: 396 })
+    runtime.set({ theme: 'dark', density: 'normal' })
     expect(system.subscriptions()).toEqual({ adds: 1, removes: 1, listeners: 0 })
     system.setScheme(false)
     expect(root.dataset.theme).toBe('dark')
 
-    runtime.set({ theme: 'light', density: 'normal', aiWidth: 396 })
+    runtime.set({ theme: 'light', density: 'normal' })
     system.setScheme(true)
     expect(root.dataset.theme).toBe('light')
     expect(system.subscriptions().adds).toBe(1)
@@ -249,7 +203,7 @@ describe('the appearance runtime', () => {
     // Going back to the system subscribes once more, and the OS scheme — which the
     // test left reporting dark — takes effect again immediately. Disposing leaves
     // nothing behind, so the scheme cannot reach the document any more.
-    runtime.set({ theme: 'system', density: 'normal', aiWidth: 396 })
+    runtime.set({ theme: 'system', density: 'normal' })
     expect(root.dataset.theme).toBe('dark')
     expect(system.subscriptions()).toEqual({ adds: 2, removes: 1, listeners: 1 })
     runtime.dispose()
@@ -259,7 +213,7 @@ describe('the appearance runtime', () => {
 
     // A workspace with no media query at all still applies and persists.
     const none = detachedRuntime(store, null)
-    expect(none.runtime.set({ theme: 'system', density: 'compact', aiWidth: 400 })).toBe(true)
+    expect(none.runtime.set({ theme: 'system', density: 'compact' })).toBe(true)
     expect(none.element.dataset.density).toBe('compact')
     none.runtime.dispose()
   })
@@ -271,7 +225,7 @@ describe('the local appearance settings panel', () => {
   }
 
   it('presents the saved appearance with labelled, keyboard-operable controls', () => {
-    const store = storageWith({ theme: 'dark', density: 'compact', aiWidth: 420 })
+    const store = storageWith({ theme: 'dark', density: 'compact' })
     const runtime = createAppearanceRuntime({ storage: store, systemQuery: null, root })
     show(runtime)
 
@@ -281,15 +235,7 @@ describe('the local appearance settings panel', () => {
     expect(checked('紧凑')).toBe(true)
     expect(checked('标准')).toBe(false)
 
-    // The width is a native range inside the allowed span, labelled, described, and
-    // showing its value in px.
-    const width = screen.getByRole('slider', { name: 'AI 侧栏宽度' }) as HTMLInputElement
-    expect(width.getAttribute('type')).toBe('range')
-    expect(width.getAttribute('min')).toBe(String(AI_WIDTH_MIN))
-    expect(width.getAttribute('max')).toBe(String(AI_WIDTH_MAX))
-    expect(width.value).toBe('420')
-    expect(width.getAttribute('aria-describedby')).toBeTruthy()
-    expect(widthOn(root)).toBe('420 px')
+    expect(screen.queryByRole('slider', { name: 'AI 侧栏宽度' })).toBeNull()
     runtime.dispose()
   })
 
@@ -302,51 +248,41 @@ describe('the local appearance settings panel', () => {
 
     await user.click(screen.getByRole('radio', { name: '深色' }))
     expect(root.dataset.theme).toBe('dark')
-    expect(store.stored()).toEqual({ theme: 'dark', density: 'normal', aiWidth: 396 })
+    expect(store.stored()).toEqual({ theme: 'dark', density: 'normal' })
 
     await user.click(screen.getByRole('radio', { name: '紧凑' }))
     expect(root.dataset.density).toBe('compact')
     runtime.dispose()
 
     const reloaded = createAppearanceRuntime({ storage: store, systemQuery: null, root })
-    expect(reloaded.get()).toEqual({ theme: 'dark', density: 'compact', aiWidth: 396 })
+    expect(reloaded.get()).toEqual({ theme: 'dark', density: 'compact' })
     expect(root.dataset.theme).toBe('dark')
     expect(root.dataset.density).toBe('compact')
     reloaded.dispose()
   })
 
-  it('keeps the AI width inside its bounds and never shows a value outside them', () => {
-    const store = new FakeStorage()
+  it('ignores an obsolete saved width without discarding theme or density', async () => {
+    const user = userEvent.setup()
+    const legacy = { theme: 'dark', density: 'compact', aiWidth: 480 }
+    const store = storageWith(legacy)
     const runtime = createAppearanceRuntime({ storage: store, systemQuery: null, root })
     show(runtime)
-    const width = screen.getByRole('slider', { name: 'AI 侧栏宽度' })
-
-    fireEvent.change(width, { target: { value: String(AI_WIDTH_MAX) } })
-    expect(widthOn(root)).toBe(`${AI_WIDTH_MAX} px`)
-    expect(root.style.getPropertyValue('--quine-ai-width')).toBe(`${AI_WIDTH_MAX}px`)
-
-    fireEvent.change(width, { target: { value: String(AI_WIDTH_MIN) } })
-    expect(widthOn(root)).toBe(`${AI_WIDTH_MIN} px`)
-
-    // A value outside the span is never applied as it stands.
-    fireEvent.change(width, { target: { value: '9000' } })
-    expect(runtime.get().aiWidth).toBeLessThanOrEqual(AI_WIDTH_MAX)
-    expect(runtime.get().aiWidth).toBeGreaterThanOrEqual(AI_WIDTH_MIN)
-    fireEvent.change(width, { target: { value: '1' } })
-    expect(runtime.get().aiWidth).toBeGreaterThanOrEqual(AI_WIDTH_MIN)
-    expect(runtime.get().aiWidth).toBeLessThanOrEqual(AI_WIDTH_MAX)
-
-    // An unreadable value leaves the applied width alone rather than blanking it.
-    fireEvent.change(width, { target: { value: 'wide' } })
-    expect(runtime.get().aiWidth).toBeGreaterThanOrEqual(AI_WIDTH_MIN)
-    expect(runtime.get().aiWidth).toBeLessThanOrEqual(AI_WIDTH_MAX)
-    expect(store.stored()).toEqual(runtime.get())
+    expect(runtime.get()).toEqual({ theme: 'dark', density: 'compact' })
+    expect(root.dataset.theme).toBe('dark')
+    expect(root.dataset.density).toBe('compact')
+    expect(root.style.getPropertyValue('--quine-ai-width')).toBe('')
+    expect(screen.queryByRole('slider')).toBeNull()
+    expect(screen.queryByText('AI 侧栏宽度')).toBeNull()
+    expect(store.stored()).toEqual(legacy)
+    expect(store.writes).toBe(0)
+    await user.click(screen.getByRole('radio', { name: '浅色' }))
+    expect(store.stored()).toEqual({ theme: 'light', density: 'compact' })
     runtime.dispose()
   })
 
   it('restores every default from the one explicit action', async () => {
     const user = userEvent.setup()
-    const store = storageWith({ theme: 'dark', density: 'compact', aiWidth: 448 })
+    const store = storageWith({ theme: 'dark', density: 'compact' })
     const runtime = createAppearanceRuntime({ storage: store, systemQuery: null, root })
     show(runtime)
     expect(root.dataset.theme).toBe('dark')
@@ -356,7 +292,6 @@ describe('the local appearance settings panel', () => {
     expect(runtime.get()).toEqual(APPEARANCE_DEFAULTS)
     expect(root.dataset.theme).toBe('light')
     expect(root.dataset.density).toBe('normal')
-    expect(widthOn(root)).toBe('396 px')
     expect(store.stored()).toEqual(APPEARANCE_DEFAULTS)
     expect(checked('跟随系统')).toBe(true)
     expect(checked('标准')).toBe(true)
@@ -374,7 +309,6 @@ describe('the local appearance settings panel', () => {
 
     // A refused read falls back to the defaults rather than an empty or guessed panel.
     expect(checked('跟随系统')).toBe(true)
-    expect(widthOn(root)).toBe('396 px')
     expect(screen.queryByRole('alert')).toBeNull()
 
     // The change still takes effect for this session, and it is honestly named unsaved.
@@ -391,7 +325,7 @@ describe('the local appearance settings panel', () => {
     show(saving)
     await user.click(screen.getByRole('radio', { name: '深色' }))
     expect(screen.queryByRole('alert')).toBeNull()
-    expect(store.stored()).toEqual({ theme: 'dark', density: 'normal', aiWidth: 396 })
+    expect(store.stored()).toEqual({ theme: 'dark', density: 'normal' })
     saving.dispose()
   })
 })

@@ -13,7 +13,8 @@
  * running; its temp settings file is removed in `finally`.
  */
 import { expect, test, type Page } from '@playwright/test'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { type ChildProcess } from 'node:child_process'
+import { installedServerPid, spawnInstalledServer, resetInstalledServer } from './installed-server'
 import { createServer, type Server } from 'node:http'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,6 +24,7 @@ const baseURL = process.env.EA_WEB_BASE_URL ?? 'http://127.0.0.1:8765'
 const SCRIPTED_MODEL = 'scripted-proposal-fixture-v1'
 
 test.skip(!process.env.EA_WEB_BIN, 'the installed-engine e2e harness is not running')
+test.afterEach(async () => { if (process.env.EA_WEB_BIN) await resetInstalledServer() })
 
 /** The scripted proposal: a registered strategy, instrument and parameters. */
 const PROPOSAL = {
@@ -161,15 +163,13 @@ async function startScriptedProvider(): Promise<ScriptedProvider> {
 
 /** Replace the harness server with one that reads the scripted settings file. */
 async function startServerWithProvider(settingsPath: string): Promise<ChildProcess> {
-  const current = Number(process.env.EA_WEB_SERVER_PID)
-  if (Number.isSafeInteger(current)) {
+  const current = installedServerPid()
+  if (current !== null) {
     try { process.kill(current, 'SIGTERM') } catch { /* already gone */ }
     await waitForProcessExit(current)
   }
-  const restarted = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS ?? '[]') as string[], {
-    stdio: 'ignore',
-    env: { ...process.env, RADIAN_SETTINGS_FILE: settingsPath },
-  })
+  const restarted = spawnInstalledServer(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS ?? '[]') as string[],
+    { ...process.env, RADIAN_SETTINGS_FILE: settingsPath })
   await waitForHealth()
   return restarted
 }
@@ -180,13 +180,42 @@ async function stopServer(server: ChildProcess): Promise<void> {
   await waitForProcessExit(server.pid)
 }
 
+/**
+ * One draft, driven to the end of the backend's own drafting step.
+ *
+ * Creating a draft records the idea and answers immediately: the host drafts one
+ * specification in the background, so the persisted task is polled until it has
+ * left `drafting`. That wait is bounded and it is a read of the task the create
+ * already produced — never a second create, and never a provider call of this
+ * test's own. A task that failed while drafting reports the host's exact code
+ * here instead of being waited out.
+ */
 async function draftIdea(page: Page, idea: string): Promise<string> {
   await page.goto('/research')
   await page.getByLabel('Research idea').fill(idea)
   await page.getByRole('button', { name: 'Create draft' }).click()
   await expect(page).toHaveURL(/\/research\/[0-9a-f-]{36}$/)
+  const taskURL = page.url()
+  const taskId = new URL(taskURL).pathname.split('/').at(-1)!
+
+  let status = ''
+  await expect.poll(async () => {
+    const document = await page.request.get(`${baseURL}/api/research/tasks/${taskId}`)
+      .then((response) => response.json()) as { status?: string; error?: { code?: string; message?: string } | null }
+    status = String(document.status ?? '')
+    if (status === 'failed') {
+      throw new Error(`the host failed while drafting this idea: ${document.error?.code ?? 'unknown'} · ${document.error?.message ?? ''}`)
+    }
+    return status
+  }, { timeout: 30_000, message: 'the host must finish drafting one specification' }).not.toBe('drafting')
+  expect(status, 'drafting must end in one confirmable specification').toBe('awaiting_confirmation')
+
+  // The page itself re-reads the persisted task while it is drafting, so this
+  // waits for the same terminal outcome on screen rather than assuming that the
+  // first render already saw it.
+  await expect(page.locator('.page-title .status')).toHaveText('awaiting confirmation', { timeout: 30_000 })
   await expect(page.getByRole('heading', { name: 'Draft specification' })).toBeVisible()
-  return page.url()
+  return taskURL
 }
 
 /**
@@ -198,7 +227,8 @@ async function draftIdea(page: Page, idea: string): Promise<string> {
  * the contents, and none of them is weakened by where the panel starts.
  */
 async function openDisclosure(page: Page, title: string): Promise<void> {
-  const panel = page.locator('details.disclosure').filter({ has: page.locator('summary', { hasText: title }) }).first()
+  const panel = page.locator('summary').filter({ hasText: title }).first().locator('..')
+  await expect(panel).toBeAttached()
   if (await panel.getAttribute('open') === null) await panel.locator('summary').first().click()
   await expect(panel).toHaveAttribute('open', '')
 }
@@ -227,12 +257,13 @@ test('research workspace reaches an evaluated candidate from a scripted proposal
     await expect(draft.getByText('Net P&L expected positive · frozen before the run')).toBeVisible()
 
     // Model configuration comes from the backend projection: protocol, endpoint and capabilities.
-    const model = page.locator('section[aria-label="Model provider configuration"]')
+    const model = page.locator('section[aria-label="模型提供方配置"]')
     await openDisclosure(page, 'Provider, protocol and capabilities')
-    await expect(model.getByText('Configured', { exact: true })).toBeVisible()
+    await expect(model.getByText('已配置', { exact: true })).toBeVisible()
+    await openDisclosure(page, '协议、能力声明与配置文件')
     await expect(model.getByText('anthropic-messages')).toBeVisible()
     await expect(model.getByText(SCRIPTED_MODEL)).toBeVisible()
-    await expect(model.getByText('tool_use · declared')).toBeVisible()
+    await expect(model.getByText('tool_use · 已声明')).toBeVisible()
 
     // Frozen budget from the settings file, measured usage from the provider response.
     const usage = page.locator('section[aria-label="Frozen budget and measured usage"]')

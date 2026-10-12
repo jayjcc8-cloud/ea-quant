@@ -13,6 +13,7 @@ const environment = join(temporary, 'environment')
 const outside = join(temporary, 'outside')
 const scenarioRoot = join(temporary, 'scenarios')
 const workspace = join(temporary, 'workspace')
+const serverPidFile = join(temporary, 'server.pid')
 const port = '8765'
 const baseURL = `http://127.0.0.1:${port}`
 let server
@@ -164,6 +165,7 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
 
   const args = ['web', 'serve', '--data-root', dataRoot, '--strategy-root', strategyRoot, '--scenario-root', scenarioRoot, '--workspace', workspace, '--ui-dir', join(webRoot, 'dist'), '--port', port]
   server = spawn(ea, args, { cwd: outside, env: cleanEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] })
+  writeFileSync(serverPidFile, String(server.pid))
   await waitForHealth()
   console.log(`candidate-wheel-sha256=${sha256(wheel)} file=${basename(wheel)}`)
   const distIdentity = createHash('sha256')
@@ -173,7 +175,7 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
   const playwright = join(webRoot, 'node_modules', '.bin', 'playwright')
   const completed = spawn(playwright, ['test', '--config', 'playwright.config.ts', ...(process.env.EA_WEB_E2E_GREP ? ['--grep', process.env.EA_WEB_E2E_GREP] : [])], {
     cwd: webRoot,
-    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact, EA_DATA_ROOT: dataRoot, EA_V2_ARTIFACT: v2Artifact, EA_V2_SOURCE: v2Source, EA_V3_ARTIFACT: v3Artifact, EA_V3_SOURCE: v3Source, EA_SCENARIO_ROOT: scenarioRoot },
+    env: { ...cleanEnvironment(), EA_WEB_BASE_URL: baseURL, EA_WEB_SERVER_PID: String(server.pid), EA_WEB_SERVER_PID_FILE: serverPidFile, EA_WEB_BIN: ea, EA_WEB_ARGS: JSON.stringify(args), EA_WEB_WORKSPACE: workspace, EA_STRATEGY_ARTIFACT: artifact, EA_DATA_ROOT: dataRoot, EA_V2_ARTIFACT: v2Artifact, EA_V2_SOURCE: v2Source, EA_V3_ARTIFACT: v3Artifact, EA_V3_SOURCE: v3Source, EA_SCENARIO_ROOT: scenarioRoot },
     stdio: 'inherit',
   })
   const code = await new Promise((resolveExit) => completed.on('exit', resolveExit))
@@ -182,8 +184,26 @@ for original, name in [('bounded-long.yaml', 'local-threshold.yaml'), ('chronolo
     process.exitCode = typeof code === 'number' ? code : 1
   }
 } finally {
-  if (server?.pid) {
-    try { process.kill(server.pid, 'SIGTERM') } catch {}
+  const lastPid = existsSync(serverPidFile) ? Number(readFileSync(serverPidFile, 'utf8').trim()) : server?.pid
+  if (lastPid && Number.isSafeInteger(lastPid) && lastPid > 1) {
+    try {
+      process.kill(lastPid, 0)
+      const command = execFileSync('ps', ['-p', String(lastPid), '-o', 'command='], { encoding: 'utf8' })
+      if (!command.includes(join(environment, 'bin', 'ea'))) throw new Error('refusing to stop an unrelated process')
+      process.kill(lastPid, 'SIGTERM')
+      let exited = false
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        try { process.kill(lastPid, 0) } catch (error) {
+          if (error.code !== 'ESRCH') throw error
+          exited = true
+          break
+        }
+        await new Promise(resolveDelay => setTimeout(resolveDelay, 50))
+      }
+      if (!exited) throw new Error('installed E2E server did not exit')
+    } catch (error) {
+      if (error.code !== 'ESRCH') throw error
+    }
   }
   if (!process.env.EA_WEB_E2E_KEEP) rmSync(temporary, { recursive: true, force: true })
   else console.log(`EA_WEB_E2E_KEEP=${temporary}`)

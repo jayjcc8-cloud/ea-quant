@@ -30,7 +30,7 @@
  * identical. So must a frozen reference's identity, before and after a
  * selection, a catalog refresh and a trip to the page a reference links to.
  *
- * The page states what it is: 资源查看与兼容校验，不执行研究或交易. It composes
+ * The page states what it is: 本主机已声明资源的只读目录，以及组合授权校验。 It composes
  * nothing, saves nothing, applies nothing to a task and starts no run.
  *
  * What this accepts is the behaviour of the workspace running at that base URL,
@@ -297,7 +297,7 @@ test('资源中心 repeats the real workspace, composes only on the explicit act
     // What the page is: a read of the workspace with one compatibility check. It
     // claims no read-only guarantee beyond that, because reading the task index
     // reconciles operations in this source.
-    await expect(page.locator('.resources-page')).toContainText('资源查看与兼容校验，不执行研究或交易')
+    await expect(page.locator('.resources-page')).toContainText('本主机已声明资源的只读目录，以及组合授权校验。')
     await expect(page.locator('.resources-page')).not.toContainText('全部只读')
 
     // Every directory on the page is the response the workspace just served it:

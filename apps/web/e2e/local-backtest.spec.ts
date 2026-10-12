@@ -1,7 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
-import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process'
 import { readFileSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { installedServerPid, spawnInstalledServer, resetInstalledServer } from './installed-server'
+
+test.afterEach(async () => { await resetInstalledServer() })
 
 const baseURL = process.env.EA_WEB_BASE_URL ?? 'http://127.0.0.1:8765'
 
@@ -36,13 +39,38 @@ function jobId(page: Page): string {
   return match[1]
 }
 
+/**
+ * Opens one named disclosure the product ships closed.
+ *
+ * The run's technical identity and the comparison's secondary tables are
+ * progressive detail in the shipped product, so a test that reads them opens
+ * them first. Opening is the only thing this does: every assertion below is about
+ * the contents, and none of them is weakened by where the panel starts.
+ */
+async function openDisclosure(page: Page, title: string): Promise<void> {
+  const panel = page.locator('summary').filter({ hasText: title }).first().locator('..')
+  await expect(panel).toBeAttached()
+  if (await panel.getAttribute('open') === null) await panel.locator('summary').first().click()
+  await expect(panel).toHaveAttribute('open', '')
+}
+
+/** The job detail page's own technical identity disclosure, which it ships closed. */
+const identityPanel = (page: Page) =>
+  page.locator('details.disclosure').filter({ has: page.locator('summary', { hasText: '技术身份' }) }).first()
+
 async function validateAndRun(page: Page): Promise<{ jobId: string; runId: string; url: string }> {
   await page.getByRole('button', { name: 'Validate input' }).click()
   await expect(page.getByText('Validated input')).toBeVisible()
   await page.getByRole('button', { name: 'Run new backtest' }).click()
   await expect(page).toHaveURL(/\/backtests\/[0-9a-f-]+$/)
   await expect(page.locator('.status')).toHaveText('succeeded', { timeout: 15_000 })
-  const runId = await page.locator('dt', { hasText: 'Engine run_id' }).locator('..').locator('dd').innerText()
+  // The engine's own run identity is a fact of this run, so it is read from the
+  // disclosure that holds it and awaited as the UUID it is: the page keeps that
+  // detail folded away, and a folded-away node is not read as if it had no text.
+  await openDisclosure(page, '技术身份')
+  const engineRun = identityPanel(page).locator('dt', { hasText: 'Engine run_id' }).locator('..').locator('dd')
+  await expect(engineRun).toHaveText(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+  const runId = (await engineRun.innerText()).trim()
   return { jobId: jobId(page), runId, url: page.url() }
 }
 
@@ -133,10 +161,13 @@ test('installed browser completes the bounded local Web research loop', async ({
   await expect(page.getByText('Validated input')).toHaveCount(0)
   const changed = await validateAndRun(page)
   expect(changed.runId).not.toBe(baseline.runId)
-  await expect(page.locator('.metric-card').filter({ hasText: 'Ending cash' })).toContainText('9560 USD')
-  await expect(page.locator('.metric-card').filter({ hasText: 'Equity' })).toContainText('10000 USD')
-  await expect(page.locator('.metric-card').filter({ hasText: 'Net P&L' })).toContainText('0 USD')
-  await expect(page.locator('.metric-card').filter({ hasText: 'Total return' })).toContainText('0')
+  // The run's own figures on the run's own page: the card the report leads with
+  // for the equity, the net P&L and the total return, and the ending cash the
+  // economics panel records beside them.
+  await expect(page.getByText('9560 USD', { exact: true })).toBeVisible()
+  await expect(page.locator('.metric-card').filter({ hasText: '期末权益' })).toContainText('10000 USD')
+  await expect(page.locator('.metric-card').filter({ hasText: '净盈亏' })).toContainText('0 USD')
+  await expect(page.locator('.metric-card').filter({ hasText: '总收益率' })).toContainText(/0(\.0+)?%/)
 
   await page.goto('/backtests')
   await expect(page.locator('.job-card').first()).toContainText(changed.runId)
@@ -146,12 +177,12 @@ test('installed browser completes the bounded local Web research loop', async ({
   await expect(page).toHaveURL(`/backtests/compare/${baseline.jobId}/${changed.jobId}`)
   await expect(page.getByRole('row', { name: /target_quantity 2 4 \+2/i })).toBeVisible()
   await expect(page.getByRole('row', { name: /entry_delay_bars 0 2 \+2/i })).toBeVisible()
-    await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Net P&L 17 USD 0 USD -17 USD/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /期末权益 10017 USD 10000 USD -17 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /净盈亏 17 USD 0 USD -17 USD/i })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('success-success-comparison.png'), fullPage: true })
   const successComparisonURL = page.url()
   await page.reload()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /期末权益 10017 USD 10000 USD -17 USD/i })).toBeVisible()
 
   await page.goto('/batches/new')
   await expect(page.getByRole('heading', { name: 'New Experiment Batch' })).toBeVisible()
@@ -201,7 +232,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.getByRole('button', { name: 'Compare selected runs' }).click()
   await expect(page.getByRole('row', { name: /target_quantity 2 4 \+2/i })).toBeVisible()
   await expect(page.getByRole('row', { name: /entry_delay_bars 0 2 \+2/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Net P&L 17 USD 0 USD -17 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /净盈亏 17 USD 0 USD -17 USD/i })).toBeVisible()
 
   await useParameters(page, baseline.jobId)
   await page.getByLabel('Initial cash').fill('50')
@@ -215,9 +246,10 @@ test('installed browser completes the bounded local Web research loop', async ({
   await expect(page.getByText('No success report is available.')).toBeVisible()
 
   await page.goto(`/backtests/compare/${baseline.jobId}/${rejectedJobId}`)
+  await openDisclosure(page, '运行身份与技术细节')
   await expect(page.getByText('risk.rejected')).toBeVisible()
-  await expect(page.getByRole('row', { name: /Final Equity 10017 USD No report —/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Net P&L 17 USD No report —/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /期末权益 10017 USD No report —/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /净盈亏 17 USD No report —/i })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('success-risk-rejected-comparison.png'), fullPage: true })
 
   await page.goto(baseline.url)
@@ -241,8 +273,8 @@ test('installed browser completes the bounded local Web research loop', async ({
   await testInfo.attach('commission-report', { body: JSON.stringify(commissionedReport, null, 2), contentType: 'application/json' })
   const commissionComparison = `/backtests/compare/${baseline.jobId}/${commissioned.jobId}`
   await page.goto(commissionComparison)
-  await expect(page.getByRole('row', { name: /Net P&L 17 USD 14.97 USD -2.03 USD/i })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Fees 0 USD 2.03 USD \+2.03 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /净盈亏 17 USD 14.97 USD -2.03 USD/i })).toBeVisible()
+  await expect(page.getByRole('row', { name: /手续费 0 USD 2.03 USD \+2.03 USD/i })).toBeVisible()
   await page.goto('/batches/new')
   await page.getByLabel('Scenario').selectOption('bounded-long-commission.yaml')
   await page.getByLabel('Run 2 entry_delay_bars').fill('2')
@@ -265,7 +297,26 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.screenshot({ path: testInfo.outputPath('holdout-frozen.png'), fullPage: true })
   const holdoutRequest = page.waitForRequest(request => request.url().endsWith('/api/holdouts') && request.method() === 'POST')
   await page.getByRole('button', { name: 'Run chronological holdout' }).click()
-  expect((await holdoutRequest).postDataJSON()).toEqual({ source_job_id: selectedSource, scenario_id: 'chronological-holdout.yaml' })
+  const holdoutBody = (await holdoutRequest).postDataJSON() as {
+    source_job_id: string
+    scenario_id: string
+    input_identity: { scenario_sha256: string }
+  }
+  // The confirmation carries back the exact identity of the target that was on
+  // screen — the same document this page was offered the candidate from — so a
+  // target that changed between the selection and the click would be refused
+  // instead of run. Nothing else is added to the request.
+  const holdoutCandidates = await page.request
+    .get(`/api/backtests/${selectedSource}/holdout-scenarios`).then(r => r.json()) as {
+      scenarios: { scenario_id: string; input_identity: { scenario_sha256: string } }[]
+    }
+  const holdoutTarget = holdoutCandidates.scenarios.find(item => item.scenario_id === 'chronological-holdout.yaml')
+  expect(holdoutBody).toEqual({
+    source_job_id: selectedSource,
+    scenario_id: 'chronological-holdout.yaml',
+    input_identity: holdoutTarget!.input_identity,
+  })
+  expect(holdoutBody.input_identity.scenario_sha256).toMatch(/^[0-9a-f]{64}$/)
   await expect(page).toHaveURL(/\/holdouts\/[0-9a-f-]+$/)
   const holdoutURL = page.url()
   const validationId = new URL(holdoutURL).pathname.split('/').at(-1)!
@@ -285,11 +336,11 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.screenshot({ path: testInfo.outputPath('holdout-detail.png'), fullPage: true })
   await testInfo.attach('chronological-holdout-evidence', { body: JSON.stringify({ relation, sourceJob, oosJob, oosReport }, null, 2), contentType: 'application/json' })
   await page.getByRole('link', { name: 'Open IS formal run' }).click()
-  await expect(page.getByRole('heading', { name: 'Backtest Result' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '正式报告' })).toBeVisible()
   await expect(page.locator('.metrics').getByText('2.03 USD', { exact: true })).toBeVisible()
   await page.goto(holdoutURL)
   await page.getByRole('link', { name: 'Open OOS formal run' }).click()
-  await expect(page.getByRole('heading', { name: 'Backtest Result' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '正式报告' })).toBeVisible()
   await expect(page.getByText('14.97 USD', { exact: true })).toBeVisible()
   await page.goto(batchURL)
   await page.goto('/backtests')
@@ -421,6 +472,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   await page.getByLabel('Research dataset').selectOption('research.csv')
   const pathRun = await validateAndRun(page)
   await expect(page.getByRole('img', { name: 'Equity curve' })).toBeVisible()
+  await openDisclosure(page, '曲线数据与回撤明细')
   await expect(page.getByRole('heading', { name: 'Maximum Drawdown' })).toBeVisible()
   const pathBytes = await page.request.get(`/api/backtests/${pathRun.jobId}/artifacts/equity-path.json`).then(r => r.text())
   const pathAnalysis = JSON.parse(pathBytes)
@@ -444,8 +496,11 @@ test('installed browser completes the bounded local Web research loop', async ({
   await expect(page.getByRole('row', { name: /Run 1/ })).toContainText('0%')
   const pathComparison = `/backtests/compare/${pathBatch.member_job_ids[0]}/${pathBatch.member_job_ids[1]}`
   await page.goto(pathComparison)
-  await expect(page.getByRole('row', { name: /Maximum Drawdown Amount 0 USD 0 USD 0 USD/ })).toBeVisible()
-  await expect(page.getByRole('row', { name: /Maximum Drawdown Ratio 0 0 0/ })).toBeVisible()
+  // The drawdown rows are the comparison's own secondary evidence, folded away
+  // under a summary that names them; their contents are asserted unchanged.
+  await openDisclosure(page, '其他结果指标')
+  await expect(page.getByRole('row', { name: /最大回撤金额 0 USD 0 USD 0 USD/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /最大回撤比率 0 0 0/ })).toBeVisible()
   await page.goto(pathRun.url)
   await page.getByRole('link', { name: 'Evaluate chronological holdout' }).click()
   await page.getByLabel('Holdout scenario').selectOption('local-threshold.yaml|later.csv')
@@ -462,7 +517,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   rmSync(join(process.env.EA_DATA_ROOT!, 'later.csv'))
   rmSync(process.env.EA_STRATEGY_ARTIFACT!)
   await page.goto(batchURL)
-  const serverPid = Number(process.env.EA_WEB_SERVER_PID)
+  const serverPid = installedServerPid()!
   expect(Number.isSafeInteger(serverPid)).toBe(true)
   process.kill(serverPid, 'SIGTERM')
   await waitForProcessExit(serverPid)
@@ -472,7 +527,7 @@ test('installed browser completes the bounded local Web research loop', async ({
   expect(executable).toBeTruthy()
   let restarted: ChildProcess | undefined
   try {
-    restarted = spawn(executable!, args, { stdio: 'ignore' })
+    restarted = spawnInstalledServer(executable!, args)
     await waitForHealth()
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Experiment Batch' })).toBeVisible()
@@ -482,14 +537,14 @@ test('installed browser completes the bounded local Web research loop', async ({
     await expect(page.getByRole('row', { name: /Run 3 100 0 succeeded No report (Unavailable ){6}View/i })).toBeVisible()
     await expect(page.locator('dd[data-summary="reports"]')).toHaveText('2')
     await page.goto(successComparisonURL)
-    await expect(page.getByRole('row', { name: /Final Equity 10017 USD 10000 USD -17 USD/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /期末权益 10017 USD 10000 USD -17 USD/i })).toBeVisible()
     await page.goto(commissionBatchURL)
     await expect(page.getByRole('row', { name: /Run 1 2 0 succeeded 10014.97 USD 14.97 USD/i })).toBeVisible()
     await page.goto(commissioned.url)
     await expect(page.locator('.metrics').getByText('2.03 USD', { exact: true })).toBeVisible()
     expect(await page.request.get(`/api/backtests/${commissioned.jobId}/report`).then(r => r.json())).toEqual(commissionedReport)
     await page.goto(commissionComparison)
-    await expect(page.getByRole('row', { name: /Net P&L 17 USD 14.97 USD -2.03 USD/i })).toBeVisible()
+    await expect(page.getByRole('row', { name: /净盈亏 17 USD 14.97 USD -2.03 USD/i })).toBeVisible()
     await page.goto('/holdouts')
     await page.getByRole('link', { name: validationId, exact: true }).click()
     await expect(page).toHaveURL(holdoutURL)
@@ -519,7 +574,8 @@ test('installed browser completes the bounded local Web research loop', async ({
     await page.getByLabel('Sort by').selectOption('max_drawdown_ratio')
     await expect(page.getByRole('row', { name: /Run 1/ })).toContainText('0%')
     await page.goto(pathComparison)
-    await expect(page.getByRole('row', { name: /Maximum Drawdown Ratio 0 0 0/ })).toBeVisible()
+    await openDisclosure(page, '其他结果指标')
+    await expect(page.getByRole('row', { name: /最大回撤比率 0 0 0/ })).toBeVisible()
     await page.goto(pathHoldoutURL)
     for (const role of ['IS', 'OOS']) {
       const panel = page.locator('section').filter({ has: page.getByRole('heading', { name: role, exact: true }) })
@@ -528,7 +584,7 @@ test('installed browser completes the bounded local Web research loop', async ({
     await testInfo.attach('equity-path-evidence', { body: pathBytes, contentType: 'application/json' })
     await useParameters(page, research.jobId)
     await page.getByRole('button', { name: 'Validate input' }).click()
-    await expect(page.getByText('dataset changed; explicitly select and validate it again')).toBeVisible()
+    await expect(page.getByText('Dataset content changed since selection. Explicitly select and validate it again.')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Run new backtest' })).toBeDisabled()
     await testInfo.attach('registered-input-evidence', { body: JSON.stringify({ research, researchReplay, researchJob, researchBatch, researchRelation, researchHoldoutReport }, null, 2), contentType: 'application/json' })
     await page.goto(localHoldoutURL)
@@ -548,9 +604,9 @@ test('installed browser completes the bounded local Web research loop', async ({
 
 test('installed round trip research completes and reopens immutable evidence', async ({ page }, testInfo) => {
   test.setTimeout(120_000)
-  let currentPid = Number(process.env.EA_WEB_SERVER_PID)
+  let currentPid = installedServerPid()!
   try { process.kill(currentPid, 0) } catch {
-    const initial = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!), { stdio: 'ignore' })
+    const initial = spawnInstalledServer(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!))
     currentPid = initial.pid!
     await waitForHealth()
   }
@@ -627,7 +683,7 @@ test('installed round trip research completes and reopens immutable evidence', a
   process.kill(pid, 'SIGTERM')
   await waitForProcessExit(pid)
   rmSync(join(process.env.EA_DATA_ROOT!, 'roundtrip.csv'))
-  const restarted = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!), { stdio: 'ignore' })
+  const restarted = spawnInstalledServer(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!))
   try {
     await waitForHealth()
     await page.goto(closed.url)
@@ -648,9 +704,9 @@ test('installed round trip research completes and reopens immutable evidence', a
 test('installed bounded local Action V2 package freezes multi-round-trip research evidence', async ({ page }, testInfo) => {
   test.setTimeout(900_000)
   // Real 50-bar multi-leg evidence needs a larger bounded wait on shared CI runners.
-  let currentPid = Number(process.env.EA_WEB_SERVER_PID)
+  let currentPid = installedServerPid()!
   try { process.kill(currentPid, 0) } catch {
-    const initial = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!), { stdio: 'ignore' })
+    const initial = spawnInstalledServer(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!))
     currentPid = initial.pid!
     await waitForHealth()
   }
@@ -662,7 +718,10 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   await page.getByRole('button', { name: 'Run new backtest' }).click()
   await expect(page).toHaveURL(/\/backtests\/[0-9a-f-]+$/)
   await expect(page.locator('.status')).toHaveText('succeeded', { timeout: 240_000 })
-  const closed = { jobId: jobId(page), url: page.url(), runId: await page.locator('dt', { hasText: 'Engine run_id' }).locator('..').locator('dd').innerText() }
+  await openDisclosure(page, '技术身份')
+  const runIdentity = identityPanel(page).locator('dt', { hasText: 'Engine run_id' }).locator('..').locator('dd')
+  await expect(runIdentity).toHaveText(/^[0-9a-f-]{36}$/)
+  const closed = { jobId: jobId(page), url: page.url(), runId: await runIdentity.innerText() }
   await expect(page.locator('dt', { hasText: /^Position outcome$/ }).locator('..')).toContainText(/FLAT_AFTER_TRADES|OPEN_AT_END/)
   await expect(page.getByRole('columnheader', { name: 'Realized P&L', exact: true })).toBeVisible()
   await expect(page.getByRole('img', { name: 'Equity curve' })).toBeVisible()
@@ -693,7 +752,7 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   }
   process.kill(currentPid, 'SIGTERM')
   await waitForProcessExit(currentPid)
-  const reopened = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!), { stdio: 'ignore' })
+  const reopened = spawnInstalledServer(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!))
   currentPid = reopened.pid!
   await waitForHealth()
   await page.goto(closed.url)
@@ -715,6 +774,10 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   const comparison = `/backtests/compare/${batch.member_job_ids[0]}/${batch.member_job_ids[1]}`
   await page.goto(comparison)
   await expect(page.getByRole('row', { name: /quantity 1 2 \+1/ })).toBeVisible()
+  // The trade analytics are the comparison's own secondary table, folded away
+  // under a summary that names them; the figures inside it are read back from the
+  // analytics each member run itself served.
+  await openDisclosure(page, '分析指标明细')
   await expect(page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'Closed trades', exact: true }) }).locator('td').nth(0)).toHaveText(String(batchStats[0].closed_trades))
   await expect(page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'Closed trades', exact: true }) }).locator('td').nth(1)).toHaveText(String(batchStats[1].closed_trades))
   await page.goto(closed.url)
@@ -788,7 +851,7 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
   rmSync(join(process.env.EA_DATA_ROOT!, 'local-v3.csv'))
   rmSync(join(process.env.EA_DATA_ROOT!, 'local-v3-later.csv'))
   rmSync(join(process.env.EA_SCENARIO_ROOT!, 'local-v3.csv'))
-  const restarted = spawn(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!), { stdio: 'ignore' })
+  const restarted = spawnInstalledServer(process.env.EA_WEB_BIN!, JSON.parse(process.env.EA_WEB_ARGS!))
   try {
     await waitForHealth()
     await page.goto(closed.url)
@@ -807,6 +870,7 @@ test('installed bounded local Action V2 package freezes multi-round-trip researc
     await expect(page.locator('.page-title .status')).toHaveText('complete')
     await page.goto(comparison)
     await expect(page.getByRole('row', { name: /quantity 1 2 \+1/ })).toBeVisible()
+    await openDisclosure(page, '分析指标明细')
   await expect(page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'Closed trades', exact: true }) }).locator('td').nth(0)).toHaveText(String(batchStats[0].closed_trades))
   await expect(page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'Closed trades', exact: true }) }).locator('td').nth(1)).toHaveText(String(batchStats[1].closed_trades))
     await page.goto(holdoutURL)

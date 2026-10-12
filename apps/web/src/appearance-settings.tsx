@@ -1,7 +1,7 @@
 /**
  * The local appearance controls on the Settings page.
  *
- * Three choices, one restore action, and an honest line when this browser refused
+ * Two choices, one restore action, and an honest line when this browser refused
  * to save them. Every value is read from, and written through, the one appearance
  * runtime: this panel holds no preference state of its own, so a change made here
  * is applied to the whole app immediately and survives a refresh.
@@ -14,8 +14,6 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  AI_WIDTH_MAX,
-  AI_WIDTH_MIN,
   APPEARANCE_DEFAULTS,
   getAppearanceRuntime,
   type AppearancePreferences,
@@ -34,13 +32,6 @@ const DENSITY_CHOICES: { value: DensityPreference; label: string }[] = [
   { value: 'normal', label: '标准' },
   { value: 'compact', label: '紧凑' },
 ]
-
-/** A typed width, or the value already in force when it cannot be read. */
-function widthFrom(raw: string, current: number): number {
-  const parsed = Number(raw)
-  if (!Number.isFinite(parsed)) return current
-  return Math.min(AI_WIDTH_MAX, Math.max(AI_WIDTH_MIN, Math.round(parsed)))
-}
 
 export function AppearanceSettings({ runtime }: { runtime?: AppearanceRuntime } = {}) {
   const [appearance] = useState(() => runtime ?? getAppearanceRuntime())
@@ -73,18 +64,8 @@ export function AppearanceSettings({ runtime }: { runtime?: AppearanceRuntime } 
         </label>)}</div>
         <small>紧凑会减小桌面端的留白与行高；窄屏下的可点按目标仍不小于 44px。</small>
       </fieldset>
-      <div className="appearance-field">
-        <label htmlFor="appearance-ai-width">AI 侧栏宽度</label>
-        <div className="appearance-width">
-          <input id="appearance-ai-width" type="range" min={AI_WIDTH_MIN} max={AI_WIDTH_MAX} step={1}
-            value={preferences.aiWidth} aria-describedby="appearance-ai-width-help"
-            onChange={event => apply({ ...preferences, aiWidth: widthFrom(event.target.value, preferences.aiWidth) })} />
-          <output data-appearance="ai-width" htmlFor="appearance-ai-width">{preferences.aiWidth} px</output>
-        </div>
-        <small id="appearance-ai-width-help">取值范围 {AI_WIDTH_MIN}–{AI_WIDTH_MAX} px，可用方向键调整。仅影响桌面端的 AI 栏；窄屏下 AI 栏仍然显示，并折叠为单列。</small>
-      </div>
     </div>
-    <div className="actions"><button type="button" onClick={() => apply(APPEARANCE_DEFAULTS)}>恢复默认</button><span className="muted">跟随系统 · 标准 · {APPEARANCE_DEFAULTS.aiWidth} px</span></div>
+    <div className="actions"><button type="button" onClick={() => apply(APPEARANCE_DEFAULTS)}>恢复默认</button><span className="muted">跟随系统 · 标准</span></div>
     {unsaved && <p role="alert" className="notice error">外观已应用于当前页面，但未能保存到本地存储；刷新后可能会回到上次保存的外观。</p>}
   </section>
 }

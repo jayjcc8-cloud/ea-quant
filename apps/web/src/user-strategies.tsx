@@ -632,6 +632,7 @@ function EvidenceMetrics({ report }: { report: BacktestReport }) {
  */
 export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: UserStrategy }) {
   const [searchParams, setSearchParams] = useSearchParams()
+  const visit = useLocation().key
   const runs = useMemo(() => selectableRuns(strategy), [strategy])
   // This card and the research panel below are two views of one selection, so both
   // read the address instead of keeping a choice of their own: the run a return link
@@ -641,6 +642,9 @@ export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: 
   const invalid = selection.kind === 'invalid'
   const { a: experiment, b: selectedB } = selectedRuns(selection, runs)
   const jobId = experiment?.job_id ?? null
+  // Explicit navigation re-reads this selected report, including the same job.
+  // Ordinary renders do not refresh, and nothing is dispatched by this read.
+  const readKey = `${strategy.user_strategy_id}|${jobId ?? ""}|${visit}`
   // What was read is kept with the run it was read for. Nothing of another run is
   // ever shown as this one's — not even for the moment a new read is in flight —
   // so changing the selected frozen run shows that run's own load, never the
@@ -648,7 +652,7 @@ export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: 
   const [loaded, setLoaded] = useState<{ key: string; state: EvidenceState } | null>(null)
   const state: EvidenceState = jobId === null
     ? { kind: 'empty' }
-    : loaded && loaded.key === jobId
+    : loaded && loaded.key === readKey
       ? loaded.state
       : { kind: 'loading' }
 
@@ -663,7 +667,7 @@ export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: 
       if (job.job_id !== jobId) throw new Error('读取到的任务与所选实验不一致')
       if (job.status !== 'succeeded' || !job.report_ready) {
         setLoaded({
-          key: jobId,
+          key: readKey,
           state: {
             kind: 'unavailable',
             note: job.status === 'succeeded'
@@ -678,7 +682,7 @@ export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: 
       // The report is the authority only for the run it belongs to.
       if (!job.engine_run_id || report.run_id !== job.engine_run_id) {
         setLoaded({
-          key: jobId,
+          key: readKey,
           state: { kind: 'unavailable', note: '报告的身份与该运行的 engine run id 不一致，因此这里不显示任何结果。' },
         })
         return
@@ -700,13 +704,13 @@ export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: 
           && value.report_sha256 === job.report_sha256) analytics = value
       } catch { /* Unavailable stays absent. */ }
       if (!active) return
-      setLoaded({ key: jobId, state: { kind: 'ready', job, report, path, pathNote, analytics } })
+      setLoaded({ key: readKey, state: { kind: 'ready', job, report, path, pathNote, analytics } })
     }
     load().catch(error => {
-      if (active) setLoaded({ key: jobId, state: { kind: 'unavailable', note: explain(error) } })
+      if (active) setLoaded({ key: readKey, state: { kind: 'unavailable', note: explain(error) } })
     })
     return () => { active = false }
-  }, [api, jobId])
+  }, [api, jobId, readKey])
 
   // The criterion of the revision this run froze, read from that revision's own
   // document when it is still retained. A revision this page cannot read is said

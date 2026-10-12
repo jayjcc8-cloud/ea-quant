@@ -2,16 +2,15 @@
  * QUINE local appearance: one small preference document, applied to the document
  * root and kept in this browser's own local storage.
  *
- * The whole mechanism is three values — a theme, a density and the width of the AI
- * column — carried as `data-theme`, `data-density` and `--quine-ai-width` on the
- * root element, so every stylesheet reads them without a second theming system and
+ * The preferences are a theme and density, carried as `data-theme` and
+ * `data-density` on the root element. Stylesheets read those attributes, and
  * nothing has to be threaded through the component tree.
  *
  * The rules this module is the authority for:
  *
- *   · Every stored value is validated field by field. An unknown enum member, a
- *     width that is not an integer, not finite, or outside 320–480 px falls back to
- *     that one field's default; the fields beside it are kept exactly as stored.
+ *   · Every stored value is validated field by field. An unknown enum member
+ *     falls back to that field's default. Obsolete fields, including aiWidth,
+ *     are ignored; valid theme and density preferences are retained.
  *   · Storage is untrusted: a read or a write that throws is contained here. A
  *     refused write is reported as `false` — unsaved — and never as an exception,
  *     because a preference that did not persist must not take the app down with it.
@@ -28,8 +27,6 @@ export type DensityPreference = 'normal' | 'compact'
 export type AppearancePreferences = {
   readonly theme: ThemePreference
   readonly density: DensityPreference
-  /** The desktop AI column width in whole px, inside [AI_WIDTH_MIN, AI_WIDTH_MAX]. */
-  readonly aiWidth: number
 }
 
 /** The two storage calls this module makes; `localStorage` satisfies it as-is. */
@@ -51,10 +48,7 @@ export type MediaQueryLike = {
 }
 
 export const APPEARANCE_STORAGE_KEY = 'ea.quine.appearance.v1'
-export const AI_WIDTH_MIN = 320
-export const AI_WIDTH_MAX = 480
-/** The width the workspace already had, so an untouched install looks unchanged. */
-export const APPEARANCE_DEFAULTS: AppearancePreferences = { theme: 'system', density: 'normal', aiWidth: 396 }
+export const APPEARANCE_DEFAULTS: AppearancePreferences = { theme: 'system', density: 'normal' }
 
 const SYSTEM_SCHEME_QUERY = '(prefers-color-scheme: dark)'
 
@@ -62,11 +56,6 @@ const isTheme = (value: unknown): value is ThemePreference =>
   value === 'light' || value === 'dark' || value === 'system'
 const isDensity = (value: unknown): value is DensityPreference =>
   value === 'normal' || value === 'compact'
-// Number.isInteger is false for NaN and for both infinities, which covers every
-// non-finite width as well as the out-of-range and non-numeric ones.
-const isWidth = (value: unknown): value is number =>
-  typeof value === 'number' && Number.isInteger(value) && value >= AI_WIDTH_MIN && value <= AI_WIDTH_MAX
-
 /** One stored document, validated field by field against the defaults. */
 export function normalizeAppearance(value: unknown): AppearancePreferences {
   const record: Record<string, unknown> = typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -75,7 +64,6 @@ export function normalizeAppearance(value: unknown): AppearancePreferences {
   return {
     theme: isTheme(record.theme) ? record.theme : APPEARANCE_DEFAULTS.theme,
     density: isDensity(record.density) ? record.density : APPEARANCE_DEFAULTS.density,
-    aiWidth: isWidth(record.aiWidth) ? record.aiWidth : APPEARANCE_DEFAULTS.aiWidth,
   }
 }
 
@@ -139,7 +127,6 @@ export function applyAppearance(
   const theme = preferences.theme === 'system' ? (systemDark ? 'dark' : 'light') : preferences.theme
   root.dataset.theme = theme
   root.dataset.density = preferences.density
-  root.style.setProperty('--quine-ai-width', `${preferences.aiWidth}px`)
   return theme
 }
 

@@ -444,19 +444,13 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
   .sidebar .sidebar-footer { display: none; }
 }
 
-/* The local appearance panel on Settings. Three grouped choices and one restore
-   action; every control keeps a 44px target and the width slider carries its own
-   value in px beside it. */
-.appearance-settings .appearance-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+/* The local appearance panel: theme, density and restore, with 44px targets. */
+.appearance-settings .appearance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
 .appearance-field { min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 6px; }
 .appearance-field legend { padding: 0 6px; color: var(--muted); font-size: 13px; font-weight: 650; }
-.appearance-settings .appearance-field > label { margin: 0; }
 .appearance-choices { display: flex; flex-wrap: wrap; gap: 0 18px; }
 .appearance-choices label { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; margin: 0; color: var(--ink); font-size: 14px; font-weight: 400; }
 .appearance-choices input { accent-color: var(--accent); }
-.appearance-settings .appearance-width { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
-.appearance-settings input[type="range"] { flex: 1 1 auto; min-width: 0; padding: 0; accent-color: var(--accent); }
-.appearance-settings output { flex: 0 0 auto; min-width: 66px; color: var(--ink); font-size: 14px; font-variant-numeric: tabular-nums; }
 .appearance-settings small { display: block; margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .appearance-settings .actions { align-items: center; }
 .appearance-settings .actions .muted { margin: 0; }

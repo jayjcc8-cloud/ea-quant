@@ -1,5 +1,5 @@
 /**
- * QUINE 运行 — the observation page against the real, already-running local Paper run.
+ * QUINE 模拟观测 — the observation page against the real, already-running local Paper run.
  *
  * There is no `page.route` interception here and no second, independently fetched
  * expectation: every displayed value is compared against the exact
@@ -159,7 +159,7 @@ test('the page shows the run its own /api documents describe, field for field', 
   // Identity first: the run this page is about is the run the document named.
   await expect(page.locator('[data-paper="run_id"]')).toHaveText(runId)
   await expect(page.locator('[data-paper="state"]')).toHaveText(text(first.overview.state))
-  await expect(page.locator('.paper-status h1')).toHaveText('运行')
+  await expect(page.locator('.paper-status h1')).toHaveText('模拟观测')
   await expect(page.locator('.paper-snapshot-notice')).toContainText('不会自动更新')
 
   // An explicit refresh is one read, so its documents are unambiguously the ones on
@@ -275,7 +275,7 @@ test('the page shows the run its own /api documents describe, field for field', 
 
   // Model interaction lives in the strategy workspace, and this page says so.
   await expect(page.getByRole('link', { name: /AI/ })).toHaveAttribute('href', '/strategies')
-  await expect(page.locator('.paper-status-model')).toContainText('不调用模型')
+  await expect(page.locator('.paper-status-model')).toContainText('模型交互请进入策略工作区')
 
   // While observing, the page only reads: GET only, these two endpoints only.
   expect([...new Set(traffic.paths().filter(entry => entry.startsWith('/api/')))].sort())
@@ -302,7 +302,7 @@ test('with no readable run the page states the reason instead of inventing facts
   // it is not evidence that a real run was read.
   test.skip(read.overview.available, 'a supervised run is readable; its observation is asserted by the sibling test')
 
-  await expect(page.locator('.paper-status h1')).toHaveText('运行')
+  await expect(page.locator('.paper-status h1')).toHaveText('模拟观测')
   await expect(page.locator('.paper-unavailable code')).toHaveText(text(read.overview.reason))
   await expect(page.getByRole('region', { name: '运行经济事实' })).toHaveCount(0)
   await expect(page.getByRole('region', { name: '运行标识' })).toHaveCount(0)
@@ -324,7 +324,7 @@ test('the observation page stays readable at 420 without scrolling sideways', as
   const read = await mount()
 
   test.skip(!read.overview.available, 'no supervised Paper run is currently readable')
-  await expect(page.locator('.paper-status h1')).toHaveText('运行')
+  await expect(page.locator('.paper-status h1')).toHaveText('模拟观测')
   await expect(page.getByRole('region', { name: '运行标识' })).toBeVisible()
   await expect(page.getByRole('region', { name: '运行经济事实' })).toBeVisible()
   await expect(page.getByRole('region', { name: '运行事件' })).toBeVisible()
@@ -334,24 +334,36 @@ test('the observation page stays readable at 420 without scrolling sideways', as
   await page.screenshot({ path: testInfo.outputPath('paper-status-420.png'), fullPage: true })
 })
 
-test('运行 and 回测 are two independent entries, and the backtest entry only reads', async ({ page }) => {
+test('模拟观测 and 独立回测 are two separate entries, and the backtest entry only reads', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 1000 })
   const traffic = record(page)
   await page.goto('/runs')
 
+  // The main navigation has three entries and no fourth one: the independent
+  // backtest area is not a destination of its own here.
   const nav = page.getByRole('navigation', { name: '主导航' })
+  await expect(nav.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/strategies')
   await expect(nav.getByRole('link', { name: '运行' })).toHaveAttribute('href', '/runs')
-  await expect(nav.getByRole('link', { name: '回测' })).toHaveAttribute('href', '/backtests')
+  await expect(nav.getByRole('link', { name: '数据' })).toHaveAttribute('href', '/data')
+  await expect(nav.getByRole('link', { name: '回测' })).toHaveCount(0)
 
-  // The backtest area is a separate destination; visiting it creates nothing.
-  await nav.getByRole('link', { name: '回测' }).click()
+  // The backtest area is reached from the research workspace's own history
+  // disclosure; visiting it creates nothing, and it is a separate destination.
+  await nav.getByRole('link', { name: '研究' }).click()
+  await expect(page).toHaveURL(/\/strategies$/)
+  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
+  const history = page.locator('details.provenance')
+    .filter({ has: page.locator('summary', { hasText: '历史记录' }) }).first()
+  await expect(history).not.toHaveAttribute('open', '')
+  await history.locator('summary').first().click()
+  await history.getByRole('link', { name: '独立回测' }).click()
   await expect(page).toHaveURL(/\/backtests$/)
   await expect(page.getByRole('heading', { name: 'Offline Backtests' })).toBeVisible()
   expect(traffic.methods().filter(method => method !== 'GET')).toEqual([])
 
   await nav.getByRole('link', { name: '运行' }).click()
   await expect(page).toHaveURL(/\/runs$/)
-  await expect(page.locator('.paper-status h1')).toHaveText('运行')
+  await expect(page.locator('.paper-status h1')).toHaveText('模拟观测')
   expect(traffic.methods().filter(method => method !== 'GET')).toEqual([])
   expect(traffic.errors()).toEqual([])
 })
