@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
@@ -24,6 +25,8 @@ from ea.web.llm import ModelCapabilities, ModelResponse, ModelRoute, ModelStream
 from ea.web.research import ResearchOrchestrator, ResearchStore
 from ea.web.service import WebService
 from ea.web.user_strategies import (
+    _EXPLAIN_INSTRUCTION,
+    StrategyDraft,
     UserStrategy,
     UserStrategyService,
     UserStrategyStateError,
@@ -847,3 +850,227 @@ def test_usage_trailer_settles_and_replays_without_a_new_budget_reservation(
     assert strategies.get(created.user_strategy_id) == settled
     assert len(network.requests) == 1
     assert _store(tmp_path).model_call_usage()["reserved_model_calls"] == 1
+
+
+# -- the explanation's own request context ---------------------------------
+
+
+#: The identities the applied workflow joins: the launch that confirmed the change,
+#: and the run whose verified report an explanation states.
+APPLIED_INTENT = "int-applied"
+APPLIED_PREVIEW = "sha256:" + "1" * 64
+APPLIED_JOB = "job-applied"
+APPLIED_RUN = "run-applied"
+APPLIED_INPUT = "2" * 64
+APPLIED_REPORT = "3" * 64
+APPLIED_QUESTION = "raise the quantity and run it"
+
+
+def _applied_workflow(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, started: list[WebService], provider: Any
+) -> tuple[UserStrategyService, UserStrategy, dict[str, Any], list[dict[str, Any]]]:
+    """One strategy whose proposal this workspace really applied, with its run provided.
+
+    The turn, its proposal receipt, the apply the user made and the apply change are
+    the product's own records. The completed experiment that confirmation created is
+    provided here as the already-verified evidence this projection is given, so the
+    request-building seam is tested without a second backtest, without the core owner
+    and without a real provider.
+    """
+    strategies = _stack(tmp_path, monkeypatch, started, provider, budget=WIDE_BUDGET)
+    created = _create(strategies)
+    events = _events(
+        strategies.conversation_turn(
+            created.user_strategy_id,
+            call_id="turn-1",
+            base_revision=1,
+            text=APPLIED_QUESTION,
+            approved_budget={"max_model_calls": 1, "max_backtests": 0},
+        )
+    )
+    proposal_id = events[-1]["waiting"]["proposal_id"]
+    strategies.apply_proposal(
+        created.user_strategy_id, proposal_id=proposal_id, operation_id="op-1"
+    )
+    applied = strategies.get(created.user_strategy_id)
+    strategies._store.save(
+        replace(
+            applied,
+            experiments=(
+                {
+                    "launch_intent_id": APPLIED_INTENT,
+                    "request_id": "request-applied",
+                    "payload_sha256": "0" * 64,
+                    "payload": {
+                        "draft_revision": applied.draft.revision,
+                        "preview_identity": APPLIED_PREVIEW,
+                        "input_sha256": APPLIED_INPUT,
+                    },
+                    "task_id": "task-applied",
+                    "job_id": APPLIED_JOB,
+                    "status": "created",
+                    "message": None,
+                    "created_at": "2026-10-12T00:00:00Z",
+                },
+            ),
+        )
+    )
+    applied = strategies.get(created.user_strategy_id)
+    receipt = next(
+        item["text"]
+        for item in events
+        if item["kind"] == "tool_end" and item["tool"] == "propose_change"
+    )
+    state: dict[str, Any] = {
+        "turn_id": "turn-1",
+        "message": APPLIED_QUESTION,
+        "explain": True,
+        "exchange": [
+            {
+                "role": "assistant",
+                "text": "I would change one registered field.",
+                "calls": [
+                    {
+                        "id": "propose-1",
+                        "name": "propose_change",
+                        "arguments": {
+                            "items": [
+                                {
+                                    "path": "parameters.target_quantity",
+                                    "value": "3",
+                                    "reason": "the user asked for it",
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "call_id": "propose-1", "text": receipt},
+        ],
+        "proposal_id": proposal_id,
+        "launch_intent_id": APPLIED_INTENT,
+        "preview_identity": APPLIED_PREVIEW,
+        "job_id": APPLIED_JOB,
+    }
+    evidence: list[dict[str, Any]] = [
+        {
+            "job_id": APPLIED_JOB,
+            "launch_intent_id": APPLIED_INTENT,
+            "draft_revision": applied.draft.revision,
+            "run_id": APPLIED_RUN,
+            "report_sha256": APPLIED_REPORT,
+            "input_sha256": APPLIED_INPUT,
+        }
+    ]
+    return strategies, applied, state, evidence
+
+
+def _explanation(
+    strategies: UserStrategyService,
+    strategy: UserStrategy,
+    state: dict[str, Any],
+    evidence: list[dict[str, Any]],
+) -> list[str]:
+    """The one request an explanation of this workflow would send, as its own texts."""
+    return [
+        message.text
+        for message in strategies._answer_messages(
+            strategy,
+            state,
+            strategies._registered_paths(cast(StrategyDraft, strategy.draft)),
+            evidence,
+        )
+    ]
+
+
+def test_the_explanation_states_the_applied_workflow_after_the_retained_receipt(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, _started: list[WebService]
+) -> None:
+    strategies, applied, state, evidence = _applied_workflow(
+        tmp_path,
+        monkeypatch,
+        _started,
+        Routed([_change("parameters.target_quantity", "3", tool_id="propose-1")]),
+    )
+    proposal = applied.proposals[0]
+    base = proposal["base_revision"]
+    assert (proposal["status"], applied.draft.revision) == ("applied", base + 1)
+
+    texts = _explanation(strategies, applied, state, evidence)
+    receipt, update = texts[-3], texts[-2]
+
+    # The receipt this turn recorded is retained exactly as it was written, and it
+    # still says what was true when the model first proposed: nothing was applied.
+    assert receipt == state["exchange"][1]["text"]
+    assert "not applied" in receipt
+    assert "no experiment may be run" in receipt
+    # The host's own update comes after that retained history and immediately before
+    # the instruction to answer, and it names the exact identities of the workflow.
+    assert texts[-4] == "I would change one registered field."
+    assert texts[-1] == _EXPLAIN_INSTRUCTION
+    assert f"Proposal {proposal['proposal_id']} was applied" in update
+    assert f"draft revision {base} to the applied revision {base + 1}" in update
+    assert f"launch intent {APPLIED_INTENT}" in update
+    assert f"preview identity {APPLIED_PREVIEW}" in update
+    assert f"job {APPLIED_JOB}" in update
+    assert f"engine run {APPLIED_RUN}" in update
+    assert f"confirmed input digest {APPLIED_INPUT}" in update
+    assert f"report with digest {APPLIED_REPORT}" in update
+    assert "completed successfully" in update
+    assert "belongs to this applied change" in update
+    assert "supersedes it" in update
+    assert f"current draft revision is {base + 1}." in update
+
+    # The user then advances the draft, so today's draft is no longer the applied
+    # revision. The update still states the revision the report belongs to, and the
+    # current draft revision separately, instead of re-reading today's draft.
+    strategies.undo(
+        applied.user_strategy_id,
+        operation_id="op-2",
+        head_revision=base + 1,
+        target_operation_id="op-1",
+    )
+    later = strategies.get(applied.user_strategy_id)
+    assert later.draft.revision == base + 2
+    moved = _explanation(strategies, later, state, evidence)[-2]
+    assert f"applied revision {base + 1}" in moved
+    assert f"current draft revision is {base + 2}." in moved
+    assert f"later draft than the frozen revision {base + 1}" in moved
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["launch intent", "job", "preview", "report identity", "applied revision"],
+)
+def test_a_workflow_that_does_not_join_is_refused_instead_of_explained(
+    mutation: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    _started: list[WebService],
+) -> None:
+    strategies, applied, state, evidence = _applied_workflow(
+        tmp_path,
+        monkeypatch,
+        _started,
+        Routed([_change("parameters.target_quantity", "3", tool_id="propose-1")]),
+    )
+    if mutation == "launch intent":
+        state["launch_intent_id"] = "int-somewhere-else"
+    elif mutation == "job":
+        state["job_id"] = "job-somewhere-else"
+    elif mutation == "preview":
+        state["preview_identity"] = "sha256:" + "0" * 64
+    elif mutation == "report identity":
+        evidence[0]["report_sha256"] = None
+    else:
+        evidence[0]["draft_revision"] = applied.draft.revision - 1
+
+    # No explanation is built from a workflow that does not join, so this turn never
+    # reaches a provider, and nothing in the strategy's own record is added or
+    # rewritten to claim a completion the records do not support.
+    before = strategies.get(applied.user_strategy_id)
+    with pytest.raises(UserStrategyStateError):
+        _explanation(strategies, before, state, evidence)
+    after = strategies.get(applied.user_strategy_id)
+    assert after == before
+    assert len(after.calls) == len(applied.calls)

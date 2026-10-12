@@ -4598,21 +4598,7 @@ class UserStrategyService:
             required = ("tool_use",)
         selection = self._evidence_selection(state["evidence_job_ids"] or None)
         evidence = None if selection is None else self._evidence_context(strategy, selection)
-        # The canonical record includes earlier calls of this turn as they settle.
-        # They are represented once, with their tool relationships, by exchange.
-        turn_start = next(
-            (
-                index
-                for index, item in enumerate(strategy.messages)
-                if item.get("role") == "user" and item.get("call_id") == state["turn_id"]
-            ),
-            len(strategy.messages),
-        )
-        context = replace(strategy, messages=strategy.messages[: turn_start + 1])
-        messages = list(self._conversation(context, state["message"], registered, evidence))
-        messages.extend(self._exchange_messages(state["exchange"]))
-        if state["explain"]:
-            messages.append(ModelMessage(role="user", text=_EXPLAIN_INSTRUCTION))
+        messages = self._answer_messages(strategy, state, registered, evidence)
         record = _entry(strategy.calls, "call_id", call)
         if record is None:
             # A further call of this turn is reserved exactly where the turn's first
@@ -4732,6 +4718,137 @@ class UserStrategyService:
             "refusal": "",
             "phase": "",
         }
+
+    def _answer_messages(
+        self,
+        strategy: UserStrategy,
+        state: dict[str, Any],
+        registered: tuple[RegisteredPath, ...],
+        evidence: Documents | None,
+    ) -> History:
+        """One request for this step: the recorded context, then what is asked of it.
+
+        The retained exchange comes first and is never edited, so the explanation of
+        a run still carries the proposal receipt this turn recorded before the user
+        applied the change and confirmed a preview. When this step is that
+        explanation, the host's own record of the workflow that has since happened is
+        stated after that exchange and before the instruction to answer, and a
+        workflow that does not join is refused here — before this call is reserved
+        and before any provider could be reached — rather than explained.
+        """
+        # The canonical record includes earlier calls of this turn as they settle.
+        # They are represented once, with their tool relationships, by exchange.
+        turn_start = next(
+            (
+                index
+                for index, item in enumerate(strategy.messages)
+                if item.get("role") == "user" and item.get("call_id") == state["turn_id"]
+            ),
+            len(strategy.messages),
+        )
+        context = replace(strategy, messages=strategy.messages[: turn_start + 1])
+        messages = list(self._conversation(context, state["message"], registered, evidence))
+        messages.extend(self._exchange_messages(state["exchange"]))
+        if state["explain"]:
+            messages.append(
+                ModelMessage(role="user", text=self._applied_update(strategy, state, evidence))
+            )
+            messages.append(ModelMessage(role="user", text=_EXPLAIN_INSTRUCTION))
+        return messages
+
+    def _applied_update(
+        self, strategy: UserStrategy, state: dict[str, Any], evidence: Documents | None
+    ) -> str:
+        """The host's own record of the applied change, its confirmation and its run.
+
+        A turn that proposed a change carries that proposal's own receipt in its
+        retained exchange: at the moment it was written, nothing was applied and no
+        experiment had run, and that is what it still says. This update states, from
+        this strategy's persisted records, the workflow that has happened since, so
+        the explanation that follows reads the receipt as the history it is. Nothing
+        is rewritten or removed, and the model's answer is never edited.
+
+        The graph's own values are lookup references only. The applied revision is
+        read from the persisted proposal and its one apply change, not from today's
+        draft, because a user may have advanced the current draft after confirming
+        the run this turn explains; the launch, the run and the report are read from
+        the already-verified evidence of this turn and joined back to exactly one
+        experiment of this strategy. A binding that does not join is refused whole.
+        """
+        if evidence is None or len(evidence) != 1:
+            raise UserStrategyStateError(
+                "this explanation is not grounded in exactly one verified run of this "
+                "strategy; nothing was asked"
+            )
+        verified = evidence[0]
+        proposal = str(state["proposal_id"])
+        applied = self._applied_revision(strategy, proposal)
+        if applied is None:
+            raise UserStrategyStateError(
+                "this turn's proposal is not recorded as applied to the revision it was "
+                "proposed on, so there is no applied change to explain; nothing was asked"
+            )
+        if verified.get("draft_revision") != applied:
+            raise UserStrategyStateError(
+                "the verified run this turn explains was frozen on another draft revision "
+                "than the one this proposal applied; nothing was asked"
+            )
+        intent = str(state["launch_intent_id"])
+        preview = str(state["preview_identity"])
+        job = str(state["job_id"])
+        if any(
+            not isinstance(verified.get(field), str) or not verified[field]
+            for field in ("job_id", "launch_intent_id", "run_id", "input_sha256", "report_sha256")
+        ):
+            raise UserStrategyStateError(
+                "the verified run this turn explains does not state the identities an "
+                "explanation would name; nothing was asked"
+            )
+        confirmed = [
+            item
+            for item in strategy.experiments
+            if item.get("status") == "created"
+            and item.get("job_id") == job
+            and item.get("job_id") == verified["job_id"]
+            and item.get("launch_intent_id") == intent
+            and item.get("launch_intent_id") == verified["launch_intent_id"]
+            and cast(dict[str, Any], item.get("payload") or {}).get("preview_identity") == preview
+        ]
+        if len(confirmed) != 1:
+            raise UserStrategyStateError(
+                "the launch, its run and the verified report this turn explains are not one "
+                "experiment of this strategy; nothing was asked"
+            )
+        current = strategy.draft.revision
+        draft_move = (
+            ""
+            if current == applied
+            else f" It is a later draft than the frozen revision {applied} this run was made from."
+        )
+        return "\n".join(
+            [
+                "The host's own record of the workflow that has already happened here. The "
+                "proposal receipt in the turns above is the history of the moment it was "
+                "written: it describes the proposal as not applied and no experiment as run, "
+                "and this update is what supersedes it. Nothing above is rewritten or removed.",
+                f"Proposal {proposal} was applied to the revision it was proposed "
+                f"on: this host records one apply change for it, moving draft revision "
+                f"{applied - 1} to the applied revision {applied}.",
+                f"That applied revision {applied} and its exact admitted input were separately "
+                f"confirmed by the user, under the persisted launch intent {intent} and the "
+                f"preview identity {preview}.",
+                f"The one run of this strategy for that confirmation, job {job}, engine run "
+                f"{verified['run_id']}, completed successfully and published the verified "
+                f"report with digest {verified['report_sha256']}, over the confirmed input "
+                f"digest {verified['input_sha256']}.",
+                f"That verified report belongs to this applied change: it is the report of the "
+                f"run launched from the revision this proposal applied, revision {applied}.",
+                f"The current draft revision is {current}.{draft_move}",
+                "These are this host's own records of the workflow and its identities, not a "
+                "second reading of the run: the verified numbers and limitations stated above "
+                "are unchanged, and nothing beyond them may be stated.",
+            ]
+        )
 
     def _graph_tools(self, state: dict[str, Any]) -> dict[str, Any]:
         """Run the one tool the model asked for, inside this workspace's own facts.
@@ -5558,6 +5675,32 @@ class UserStrategyService:
             and change.get("to_revision") == revision + 1
             and strategy.draft.revision == revision + 1
         )
+
+    @staticmethod
+    def _applied_revision(strategy: UserStrategy, proposal_id: str) -> int | None:
+        """The revision one proposal is recorded as applied to, or ``None``.
+
+        The persisted proposal and its own apply change are the authority: exactly
+        one proposal of this identity is applied, exactly one apply change names it,
+        and that change moved the recorded base revision to the revision after it.
+        Today's draft is deliberately not consulted — unlike :meth:`_applied_at` — so
+        a change the user applied and confirmed stays explainable after the draft
+        moved on, while a proposal that was never applied never is.
+        """
+        proposals = [item for item in strategy.proposals if item.get("proposal_id") == proposal_id]
+        if len(proposals) != 1 or proposals[0].get("status") != "applied":
+            return None
+        base = proposals[0].get("base_revision")
+        changes = [
+            item
+            for item in strategy.changes
+            if item.get("kind") == "apply" and item.get("proposal_id") == proposal_id
+        ]
+        if type(base) is not int or len(changes) != 1:
+            return None
+        if changes[0].get("from_revision") != base or changes[0].get("to_revision") != base + 1:
+            return None
+        return base + 1
 
     def _remember(self, identity: str, record: dict[str, Any]) -> None:
         """Publish the one decision this conversation is waiting for, through the store."""
