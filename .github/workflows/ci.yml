@@ -97,7 +97,8 @@ jobs:
       github.event_name == 'pull_request' &&
       (needs.classify.outputs.python == 'true' || needs.classify.outputs.ci == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Hosted pytest reached 96% after 17m; retain time for setup and completion.
+    timeout-minutes: 30
     env:
       UV_PROJECT_ENVIRONMENT: venv
     steps:

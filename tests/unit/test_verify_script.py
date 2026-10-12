@@ -140,18 +140,18 @@ def test_added_modules_only_skip_browser_when_outside_installed_imports(tmp_path
     )
 
 
-def test_real_installed_graph_skips_independent_added_order_module(tmp_path: Path) -> None:
+def test_real_installed_graph_keeps_browser_e2e_when_the_graph_is_unknown(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "src"
     shutil.copytree(PROJECT_ROOT / "src" / "ea", source / "ea")
     module = source / "ea" / "execution" / "order_lifecycle_probe.py"
     module.write_text("from ea.core import OrderId\n", encoding="utf-8")
     path = "src/ea/execution/order_lifecycle_probe.py"
 
-    reachable = ci_routes.installed_python_modules(source)
-    assert reachable is not None
-    assert "ea.execution.authority" in reachable
-    assert "ea.core.execution_messages" in reachable
-    assert "ea.execution.order_lifecycle_probe" not in reachable
+    # The real server resolves its runtime imports dynamically, so this graph is
+    # unknown: an added module cannot be proven unreachable from the installed path.
+    assert ci_routes.installed_python_modules(source) is None
     routes = ci_routes.classify(
         [path, "tests/unit/test_order_lifecycle_probe.py", "docs/STATUS.md"],
         added_paths=frozenset({path, "tests/unit/test_order_lifecycle_probe.py"}),
@@ -159,7 +159,7 @@ def test_real_installed_graph_skips_independent_added_order_module(tmp_path: Pat
     )
     assert routes.python is True
     assert routes.governance is True
-    assert routes.web_e2e is False
+    assert routes.web_e2e is True
 
 
 def test_route_parser_uses_git_status_not_path_name() -> None:

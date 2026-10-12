@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,21 @@ from ea.product.equity_path import generate_equity_path_analysis
 from ea.strategy.package import pack_strategy
 from unit.test_bounded_round_trips_v1 import bounded_scenario
 from unit.test_local_action_v2_package import set_prices
+
+
+def _await_success(service: Any, job_id: str, bound: float = 60.0) -> Any:
+    """A stopped attempt is not a completed one: wait for the persisted success."""
+    deadline = time.monotonic() + bound
+    while time.monotonic() < deadline:
+        job = service.get_job(job_id)
+        if job.status == "succeeded":
+            return job
+        if job.status not in {"accepted", "running", "stopping"}:
+            raise AssertionError(
+                f"job {job_id} became {job.status!r}: {job.error_code} {job.message}"
+            )
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} did not succeed within {bound}s")
 
 
 def local_v3(tmp_path: Path, *, varying: bool = False) -> tuple[Path, Path, Any]:
@@ -171,7 +187,10 @@ def test_builtin_v5_web_uses_v5_job_and_v3_evidence(tmp_path: Path) -> None:
     job, _ = service.create_job(
         scenario_id=path.name, input_identity=summary["input_identity"], request_id="v5"
     )
-    service.stop()
+    try:
+        _await_success(service, job.job_id)
+    finally:
+        service.stop()
     completed = service.get_job(job.job_id)
     assert completed.status == "succeeded"
     assert completed.schema == "ea.local-web-job.v5"

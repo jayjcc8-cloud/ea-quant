@@ -59,6 +59,7 @@ from ea.product.paper_run import (
     run_local_paper,
 )
 from ea.product.paper_session import request_paper_stop
+from ea.web.candidate_evidence import CandidateEvidenceReader
 from unit.test_bounded_round_trips_v1 import bounded_scenario
 from unit.test_streaming import RUN_ID, SOURCE, ControlledClock
 
@@ -150,11 +151,19 @@ def accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str
     )
     from ea.product import paper_run as paper_run_module
 
-    monkeypatch.setattr(
-        paper_run_module,
-        "inspect_candidate_binding",
-        lambda _workspace, _candidate_id: candidate,
-    )
+    def inspect_binding(
+        inspected_workspace: Path,
+        inspected_candidate_id: str,
+        *,
+        reader: CandidateEvidenceReader | None = None,
+    ) -> _AcceptedCandidate:
+        assert reader is None
+        # The production entry resolves the workspace before the boundary read.
+        assert inspected_workspace == workspace.resolve()
+        assert inspected_candidate_id == candidate_id
+        return candidate
+
+    monkeypatch.setattr(paper_run_module, "inspect_candidate_binding", inspect_binding)
     monkeypatch.setattr(paper_run_module, "_load_binding", lambda binding: binding)
     return workspace, candidate_id, scenario, document["strategy"]["max_round_trips"]
 

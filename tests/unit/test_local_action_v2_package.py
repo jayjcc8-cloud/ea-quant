@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +15,21 @@ import yaml
 from ea.product import generate_backtest_report, load_backtest_scenario, run_backtest_scenario
 from ea.strategy.package import _container, canonical_json, pack_strategy, validate_package
 from unit.test_single_round_trip_v1 import closed_scenario
+
+
+def _await_success(service: Any, job_id: str, bound: float = 60.0) -> Any:
+    """A stopped attempt is not a completed one: wait for the persisted success."""
+    deadline = time.monotonic() + bound
+    while time.monotonic() < deadline:
+        job = service.get_job(job_id)
+        if job.status == "succeeded":
+            return job
+        if job.status not in {"accepted", "running", "stopping"}:
+            raise AssertionError(
+                f"job {job_id} became {job.status!r}: {job.error_code} {job.message}"
+            )
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} did not succeed within {bound}s")
 
 
 def local_v2(tmp_path: Path) -> tuple[Path, Path, Any]:
@@ -178,7 +194,10 @@ def test_local_v2_web_batch_holdout_frozen_reopen(tmp_path: Path) -> None:
     job, _ = service.create_job(
         scenario_id=path.name, input_identity=summary["input_identity"], request_id="v2"
     )
-    service.stop()
+    try:
+        _await_success(service, job.job_id)
+    finally:
+        service.stop()
     assert service.get_job(job.job_id).status == "succeeded"
     assert (
         cast(dict[str, Any], service.get_job(job.job_id).document(presentation=True)["parameters"])[
@@ -194,7 +213,11 @@ def test_local_v2_web_batch_holdout_frozen_reopen(tmp_path: Path) -> None:
         initial_cash="10000",
         runs=[{"fast_window": 1, "slow_window": 2, "quantity": q} for q in ("2", "3")],
     )
-    service.stop()
+    try:
+        for member in cast(list[str], batch["member_job_ids"]):
+            _await_success(service, member)
+    finally:
+        service.stop()
     assert all(
         service.get_job(j).status == "succeeded" for j in cast(list[str], batch["member_job_ids"])
     )
@@ -202,7 +225,10 @@ def test_local_v2_web_batch_holdout_frozen_reopen(tmp_path: Path) -> None:
     service = WebService(path.parent, tmp_path / "workspace", strategy_root=root)
     service.start()
     relation = service.create_holdout(source_job_id=job.job_id, scenario_id=target.name)
-    service.stop()
+    try:
+        _await_success(service, relation["holdout_job_id"])
+    finally:
+        service.stop()
     holdout = service.get_job(relation["holdout_job_id"])
     assert holdout.status == "succeeded"
     frozen = json.loads(holdout.input_snapshot_bytes or b"{}")["scenario"]["strategy"]
