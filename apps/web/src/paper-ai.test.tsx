@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -16,7 +16,7 @@ function response(events: object[]): Response {
 function panel(id: string, api: PaperExplanationApi) {
   return <MemoryRouter><PaperAi key={id} runId={id} instanceName={`实例 ${id === A ? 'A' : 'B'}`} sourceJobId="source" api={api} /></MemoryRouter>
 }
-afterEach(() => { cleanup(); sessionStorage.clear() })
+afterEach(() => { cleanup(); sessionStorage.clear(); vi.restoreAllMocks() })
 
 it('switches A/B without leaking late replies or unsent input, and never sends on selection', async () => {
   const api = { conversation: vi.fn(async (id: string) => state(id)), explain: vi.fn() }
@@ -88,4 +88,79 @@ it('a failed stream can be queried and a new explicit turn is not permanently di
   await waitFor(() => expect(sessionStorage.getItem(paperExplanationPendingKey(A))).toBeNull())
   expect((screen.getByRole('button', { name: /发送提问/ }) as HTMLButtonElement).disabled).toBe(false)
   expect(api.explain).toHaveBeenCalledTimes(1)
+})
+
+
+function scrollGeometry() {
+  vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1500)
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300)
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const top = this.classList.contains('message') ? 900 : 100
+    return { top, bottom: top + 30, left: 0, right: 300, width: 300, height: 30, x: 0, y: top, toJSON() {} }
+  })
+}
+
+it('opens the latest retained turn without scrolling the page, respects history reading, and resets per instance', async () => {
+  scrollGeometry()
+  const history = (id: string) => {
+    const value = state(id, `${id} 最新回答`)
+    value.messages.unshift({ ...value.messages[0], message_id: 'old', call_id: 'old', text: '早前回答' })
+    return value
+  }
+  const api = { conversation: vi.fn(async (id: string) => history(id)), explain: vi.fn() }
+  const mounted = render(panel(A, api))
+  await screen.findByText(`${A} 最新回答`)
+  let scroller = screen.getByRole('region', { name: '运行解释会话' })
+  expect(scroller.scrollTop).toBe(800)
+  scroller.scrollTop = 160
+  fireEvent.scroll(scroller)
+  await userEvent.click(screen.getByRole('button', { name: '刷新证据' }))
+  await waitFor(() => expect(api.conversation).toHaveBeenCalledTimes(2))
+  expect(scroller.scrollTop).toBe(160)
+  mounted.rerender(panel(B, api))
+  await screen.findByText(`${B} 最新回答`)
+  scroller = screen.getByRole('region', { name: '运行解释会话' })
+  expect(scroller.scrollTop).toBe(800)
+  expect(screen.queryByText(`${A} 最新回答`)).toBeNull()
+  mounted.rerender(panel(A, api))
+  await screen.findByText(`${A} 最新回答`)
+  expect(screen.getByRole('region', { name: '运行解释会话' }).scrollTop).toBe(800)
+  expect(api.explain).not.toHaveBeenCalled()
+})
+
+it('follows streamed text only while at the end and keeps manual history position through completion', async () => {
+  scrollGeometry()
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+  const body = new ReadableStream<Uint8Array>({ start(value) { controller = value } })
+  const api = { conversation: vi.fn().mockResolvedValueOnce(state(A, '旧回答')).mockResolvedValue(state(A, '完整新回答')), explain: vi.fn().mockResolvedValue({ ok: true, body }) }
+  render(panel(A, api))
+  await screen.findByText('旧回答')
+  const scroller = screen.getByRole('region', { name: '运行解释会话' })
+  await userEvent.type(screen.getByRole('textbox'), '新问题')
+  await userEvent.click(screen.getByRole('button', { name: /发送提问/ }))
+  const delta = async (text: string) => act(async () => { controller!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ kind: 'text_delta', text })}\n\n`)) })
+  await delta('第一段')
+  expect(scroller.scrollTop).toBe(1200)
+  scroller.scrollTop = 120
+  fireEvent.scroll(scroller)
+  await delta('第二段')
+  expect(scroller.scrollTop).toBe(120)
+  await act(async () => { controller!.enqueue(new TextEncoder().encode('data: {"kind":"done"}\n\n')); controller!.close() })
+  await screen.findByText('完整新回答')
+  expect(scroller.scrollTop).toBe(120)
+  await userEvent.click(screen.getByRole('button', { name: '回到最新' }))
+  expect(scroller.scrollTop).toBe(1200)
+})
+
+it('preserves literal model evidence and exposes full source time through a disclosure', async () => {
+  const answer = '结论\n<script>alert(1)</script> javascript:alert(1)\nsource_job_id 33333333-3333-4333-8333-333333333333'
+  render(panel(A, { conversation: vi.fn().mockResolvedValue(state(A, answer)), explain: vi.fn() }))
+  await screen.findByText(/source_job_id/)
+  expect(document.querySelector('.paper-ai-answer-text')?.textContent).toBe(answer)
+  expect(document.querySelector('.paper-ai-answer-text script')).toBeNull()
+  const details = screen.getByText('本轮证据来源').closest('details') as HTMLDetailsElement
+  expect(details.open).toBe(false)
+  await userEvent.click(screen.getByText('本轮证据来源'))
+  expect(details.open).toBe(true)
+  expect(details.textContent).toContain('2026-10-13T01:00:00Z')
 })

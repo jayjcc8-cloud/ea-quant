@@ -202,3 +202,18 @@ it('distinguishes unavailable economic evidence from a historical snapshot witho
   expect(region('.paper-facts')).toContain('尚无可读取的经济快照')
   expect(document.querySelector('.paper-facts table')).toBeNull()
 })
+
+
+it('offers keyboard-focusable AI and overview navigation and foregrounds stale scope before readings and equity', async () => {
+  const user = userEvent.setup()
+  mount(adapter({ list: vi.fn().mockResolvedValue(served(fixtureRow({ health: { projection_stale: true } }))) }))
+  const jump = await screen.findByRole('button', { name: '查看 AI 解释' })
+  await user.click(jump)
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'AI 运行解释' }))
+  await user.click(screen.getByRole('button', { name: '返回概览' }))
+  expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }))
+  const status = screen.getByRole('region', { name: '运行观测' })
+  expect(status.firstElementChild?.textContent).toContain('观测陈旧')
+  const account = document.querySelector('.paper-account')!
+  expect(account.textContent?.indexOf('不代表当前权益')).toBeLessThan(account.textContent!.indexOf('9999.8'))
+})

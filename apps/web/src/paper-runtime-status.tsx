@@ -15,7 +15,8 @@ export function PaperRuntimeStatus({ observation }: { observation: PaperObservat
       </span>
     </div>
   )
-  return <section className="paper-runtime-status" aria-label="运行观测">
+  return <section className="paper-runtime-status" aria-label="运行观测" data-scope={observation.kind}>
+    <p className="paper-runtime-context">{observation.context}</p>
     <div className="paper-runtime-readings">
       <div>
         <span className="paper-runtime-label">运行状态</span>
@@ -29,7 +30,6 @@ export function PaperRuntimeStatus({ observation }: { observation: PaperObservat
       {reading('操作性许可', observation.permission)}
     </div>
     <div className="paper-runtime-body">
-      <p className="paper-runtime-context">{observation.context}</p>
       <div className="paper-runtime-times">
         <span>本次读取：{observation.observedAt}</span>
         <span>健康投影：{observation.healthAt}</span>

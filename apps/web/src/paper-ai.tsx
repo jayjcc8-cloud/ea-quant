@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ConversationInput } from './conversation-input'
 import { conversationEvents } from './user-strategies-api'
@@ -21,8 +21,8 @@ const saved = (key: string) => { try { return sessionStorage.getItem(key) ?? '' 
 const text = (value: unknown) => value === undefined || value === null || value === '' ? '未提供' : String(value)
 
 /** The parent keys this panel by run ID; subscriptions, input and saved calls share that identity. */
-export function PaperAi({ runId, instanceName, sourceJobId, api = paperApi }: {
-  runId: string; instanceName: string; sourceJobId: string; api?: PaperExplanationApi
+export function PaperAi({ runId, instanceName, sourceJobId, onOverview, api = paperApi }: {
+  runId: string; instanceName: string; sourceJobId: string; onOverview?: () => void; api?: PaperExplanationApi
 }) {
   const [conversation, setConversation] = useState<PaperExplanationConversation | null>(null)
   const [draft, setDraft] = useState(() => saved(paperExplanationDraftKey(runId)))
@@ -35,6 +35,39 @@ export function PaperAi({ runId, instanceName, sourceJobId, api = paperApi }: {
   const alive = useRef(false)
   const epoch = useRef(0)
   const abort = useRef<AbortController | null>(null)
+
+  const scroller = useRef<HTMLDivElement | null>(null)
+  const latestRound = useRef<HTMLLIElement | null>(null)
+  const positioned = useRef(false)
+  const followEnd = useRef(false)
+  const scrollToEnd = () => {
+    const node = scroller.current
+    if (node) node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight)
+  }
+  const readScrollPosition = () => {
+    const node = scroller.current
+    if (node) followEnd.current = node.scrollHeight - node.clientHeight - node.scrollTop <= 32
+  }
+  // Only the panel scrolls. A keyed remount starts each instance at its latest
+  // retained turn; subsequent reads/deltas respect the reader's position.
+  useLayoutEffect(() => {
+    const node = scroller.current
+    if (!node || !conversation) return
+    if (!positioned.current) {
+      positioned.current = true
+      const target = latestRound.current
+      if (target) node.scrollTop = Math.max(0, Math.min(node.scrollHeight - node.clientHeight,
+        node.scrollTop + target.getBoundingClientRect().top - node.getBoundingClientRect().top))
+      readScrollPosition()
+    } else if (followEnd.current) scrollToEnd()
+  }, [conversation, streaming, busy])
+  useEffect(() => {
+    const node = scroller.current
+    if (!node || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => { if (positioned.current && followEnd.current) scrollToEnd() })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
 
   const forgetPending = useCallback(() => {
     try { sessionStorage.removeItem(paperExplanationPendingKey(runId)) } catch { /* Query remains safe after reload. */ }
@@ -71,6 +104,7 @@ export function PaperAi({ runId, instanceName, sourceJobId, api = paperApi }: {
     try { sessionStorage.setItem(paperExplanationPendingKey(runId), callId) }
     catch { setNotice('无法保存本次提问身份，尚未发送。'); return }
     pending.current = callId; setPendingCall(callId)
+    followEnd.current = true
     busyRef.current = true; setBusy(true); setNotice(''); setStreaming(''); epoch.current++
     const controller = new AbortController(); abort.current = controller
     try {
@@ -97,10 +131,16 @@ export function PaperAi({ runId, instanceName, sourceJobId, api = paperApi }: {
   }
   const context = conversation?.context
   const latest = conversation?.calls.at(-1)
+  const latestCallId = latest?.call_id ?? conversation?.messages.at(-1)?.call_id
+  const latestRoundIndex = conversation?.messages.findIndex(message => message.call_id === latestCallId)
   return <aside className="paper-ai strategy-chat" aria-label="AI 运行解释">
-    <header className="chat-head"><h2>AI 运行解释</h2><button onClick={() => void read()} disabled={busy}>刷新证据</button></header>
+    <header className="chat-head"><h2 id="paper-ai-heading" tabIndex={-1}>AI 运行解释</h2><button onClick={() => void read()} disabled={busy}>刷新证据</button></header>
     <p className="paper-ai-context">只读解释：{instanceName}</p>
-    <div className="chat-body">
+    <nav className="paper-ai-navigation" aria-label="解释会话导航">
+      {onOverview && <button className="paper-ai-back" onClick={onOverview}>返回概览</button>}
+      <button onClick={() => { followEnd.current = true; scrollToEnd() }}>回到最新</button>
+    </nav>
+    <div className="chat-body" ref={scroller} role="region" aria-label="运行解释会话" tabIndex={0} onScroll={readScrollPosition}>
       {context && <div className="paper-ai-evidence">
         <p><strong>{paperStateLabels[context.state] ?? '状态未知'}</strong> · {scopeLabel[context.state_scope]}</p>
         <p>证据观测时间：{observationTime(context.observed_at)}</p>
@@ -111,10 +151,11 @@ export function PaperAi({ runId, instanceName, sourceJobId, api = paperApi }: {
       {!context && <p>当前证据不可用。已保存的回答仍保留原观测范围。<Link to={`/backtests/${encodeURIComponent(sourceJobId)}`}>来源研究 ↗</Link></p>}
       {!conversation?.messages.length && <p className="chat-empty-guidance">可以询问当前状态、阻断原因或经济快照。解释仅使用这次读取到的运行证据。</p>}
       <ol className="message-list paper-ai-thread">
-        {conversation?.messages.map(message => <li key={message.message_id} className={`message message-${message.role}`}>
+        {conversation?.messages.map((message, index) => <li ref={index === latestRoundIndex ? latestRound : undefined} key={message.message_id} className={`message message-${message.role}`}>
           <p className="message-role">{message.role === 'user' ? '你' : 'QUINE · 模型解释'}</p>
+          {message.role === 'assistant' && <p className="paper-ai-message-scope">{scopeLabel[message.evidence_scope ?? 'unknown'] ?? scopeLabel.unknown}</p>}
           <p className="paper-ai-answer-text">{message.text}</p>
-          {message.role === 'assistant' && <p className="paper-ai-message-source">依据证据观测于 {observationTime(message.evidence_observed_at)}（{scopeLabel[message.evidence_scope ?? 'unknown'] ?? scopeLabel.unknown}）</p>}
+          {message.role === 'assistant' && <details className="paper-ai-message-source"><summary>本轮证据来源</summary><p>依据证据观测于 {observationTime(message.evidence_observed_at)}</p><p>原始观测时间：<time dateTime={message.evidence_observed_at ?? undefined}>{text(message.evidence_observed_at)}</time></p></details>}
         </li>)}
       </ol>
       {busy && <div className="turn-answer live-answer" role="status" aria-live="polite"><p>{streaming || '正在读取证据并请求解释…'}</p></div>}
