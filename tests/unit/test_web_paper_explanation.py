@@ -8,7 +8,7 @@ before anything durable, and a recorded turn that is queried rather than re-sent
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -99,14 +99,14 @@ class FakeDesktop:
 class Port:
     """A streaming port whose answers are supplied whole per call."""
 
-    def __init__(self, answers: list[Any] | None = None) -> None:
+    def __init__(self, answers: list[ModelResponse | BaseException] | None = None) -> None:
         self.answers = list(answers or [])
         self.calls: list[dict[str, Any]] = []
 
-    def route(self) -> ModelRoute:
+    def route(self) -> ModelRoute | None:
         return ROUTE
 
-    def _next(self, kwargs: dict[str, Any]) -> Any:
+    def _next(self, kwargs: dict[str, Any]) -> ModelResponse:
         self.calls.append(kwargs)
         answer = self.answers.pop(0)
         if isinstance(answer, BaseException):
@@ -358,6 +358,7 @@ def test_interrupted_stream_recovers_unknown_without_repeating_dispatch(tmp_path
     desktop, port = FakeDesktop(), Port([response("一段尚未完成的解释")])
     explanation = service(tmp_path, desktop, port)
     stream = explanation.turn(RUN_A, call_id="lost", text="问题", approved_budget=BUDGET)
+    assert isinstance(stream, Generator)
     assert next(stream)["kind"] == "state"
     assert next(stream)["kind"] == "text_delta"
     assert explanation.state(RUN_A)["calls"][0]["status"] == "dispatched"
