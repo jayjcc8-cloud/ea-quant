@@ -189,3 +189,16 @@ it('【fixture】a discarded older list response cannot replace the selected run
   expect(screen.queryByText('恢复依赖未就绪（readiness.recovery）')).toBeNull()
   expect(screen.getByText('健康投影身份不匹配或格式不支持，已隔离')).toBeTruthy()
 })
+
+it('distinguishes unavailable economic evidence from a historical snapshot without invented placeholder balances', async () => {
+  mount(adapter({ list: vi.fn().mockResolvedValue(served(fixtureRow({ health: null, overview: { available: false } }))) }))
+  await screen.findByText('经济快照不可用')
+  expect(region('.paper-account')).toContain('尚无可读取的经济快照')
+  expect(region('.paper-account')).not.toContain('未提供')
+  expect(screen.queryByText('历史经济快照')).toBeNull()
+  expect(document.querySelector('.paper-equity')).toBeNull()
+  expect(screen.queryByRole('heading', { name: '当前持仓' })).toBeNull()
+  await userEvent.click(screen.getByRole('button', { name: '持仓与成交' }))
+  expect(region('.paper-facts')).toContain('尚无可读取的经济快照')
+  expect(document.querySelector('.paper-facts table')).toBeNull()
+})
