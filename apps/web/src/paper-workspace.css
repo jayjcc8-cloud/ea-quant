@@ -568,9 +568,9 @@
 }
 
 
-/* The host overview and the model's verbatim answer have separate, explicit owners. */
-.paper-ai .paper-ai-overview { margin: 8px 0 12px; font-size: 14px; line-height: 1.7; }
-.paper-ai .paper-ai-overview h3 { margin: 0; color: var(--paper-ink); font-size: 14px; font-weight: 650; }
+/* Frozen host evidence supports the primary, verbatim AI answer. */
+.paper-ai .paper-ai-overview { margin: 14px 0 12px; padding-top: 12px; border-top: 1px solid var(--paper-line); color: var(--paper-ink-soft); font-size: 13px; line-height: 1.6; }
+.paper-ai .paper-ai-overview h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .paper-ai .paper-ai-overview-caption { margin: 2px 0 10px; color: var(--paper-ink-soft); font-size: 12px; }
 .paper-ai .paper-ai-overview dl { display: grid; gap: 10px; margin: 0; }
 .paper-ai .paper-ai-overview dl > div { display: grid; grid-template-columns: 2em minmax(0, 1fr); gap: 10px; }

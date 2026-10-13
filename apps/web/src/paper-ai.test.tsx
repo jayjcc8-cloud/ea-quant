@@ -182,7 +182,7 @@ it('summarizes only the matching frozen host evidence, retaining stale limits an
   const value = withEvidence('stale')
   const api = { conversation: vi.fn().mockResolvedValue(value), explain: vi.fn() }
   render(panel(A, api))
-  const overview = await screen.findByRole('region', { name: '宿主证据概览' })
+  const overview = await screen.findByRole('region', { name: '本轮运行证据' })
   expect(overview.textContent).toContain('非 AI 摘要')
   expect(overview.textContent).toContain('观测陈旧')
   expect(overview.textContent).toContain('当前就绪与许可未知')
@@ -193,10 +193,8 @@ it('summarizes only the matching frozen host evidence, retaining stale limits an
   expect(overview.textContent).not.toContain('source_job_id')
   const answer = screen.getByText('完整 AI 回答（原文）').closest('details') as HTMLDetailsElement
   const source = screen.getByText('本轮证据来源').closest('details') as HTMLDetailsElement
-  expect(answer.open).toBe(false)
-  expect(source.open).toBe(false)
-  await userEvent.click(screen.getByText('完整 AI 回答（原文）'))
   expect(answer.open).toBe(true)
+  expect(source.open).toBe(false)
   expect(answer.querySelector('.paper-ai-answer-text')?.textContent).toBe(value.messages[0].text)
   await userEvent.click(screen.getByText('本轮证据来源'))
   expect(source.open).toBe(true)
@@ -206,7 +204,7 @@ it('summarizes only the matching frozen host evidence, retaining stale limits an
 
 it.each(['unknown', 'historical', 'current'] as const)('keeps %s evidence bounded without filling unknown permission or missing economics', async scope => {
   render(panel(A, { conversation: vi.fn().mockResolvedValue(withEvidence(scope, false)), explain: vi.fn() }))
-  const overview = await screen.findByRole('region', { name: '宿主证据概览' })
+  const overview = await screen.findByRole('region', { name: '本轮运行证据' })
   expect(overview.textContent).toContain('经济快照不可用')
   expect(overview.textContent).not.toContain('123.45')
   expect(overview.textContent).not.toContain('读取时未阻断')
@@ -218,7 +216,7 @@ it('never substitutes current or another instance evidence when this answer has 
   const value = withEvidence('stale')
   value.calls[0].evidence!.run_id = B
   render(panel(A, { conversation: vi.fn().mockResolvedValue(value), explain: vi.fn() }))
-  const overview = await screen.findByRole('region', { name: '宿主证据概览' })
+  const overview = await screen.findByRole('region', { name: '本轮运行证据' })
   expect(within(overview).getByText(/本轮结构化证据未确认/)).toBeTruthy()
   expect(overview.textContent).not.toContain('123.45')
   expect(overview.textContent).not.toContain('99999')
@@ -230,8 +228,44 @@ it.each([true, false])('quotes backend read-time readiness/permission %s without
   const value = withEvidence('current')
   value.calls[0].evidence!.health = { available: true, runtime_ready: flag, trade_permitted: flag, permission_scope: 'observed' }
   render(panel(A, { conversation: vi.fn().mockResolvedValue(value), explain: vi.fn() }))
-  const overview = await screen.findByRole('region', { name: '宿主证据概览' })
+  const overview = await screen.findByRole('region', { name: '本轮运行证据' })
   expect(overview.textContent).toContain(flag ? '读取时就绪，读取时未阻断' : '读取时未就绪，读取时受阻')
   expect(overview.textContent).toContain('不代表当前权益')
   if (flag) expect(overview.textContent).toContain('具体订单仍须独立检查')
+})
+
+
+it('defaults the latest AI answer open before auxiliary evidence and preserves manual disclosure choices through refresh and streaming', async () => {
+  const value = withEvidence('stale')
+  value.messages.unshift({ ...value.messages[0], message_id: 'old', call_id: 'old', text: '早前 AI 原文' })
+  value.calls.unshift({ ...value.calls[0], call_id: 'old' })
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+  const body = new ReadableStream<Uint8Array>({ start(next) { controller = next } })
+  const api = { conversation: vi.fn().mockResolvedValue(value), explain: vi.fn().mockResolvedValue({ ok: true, body }) }
+  render(panel(A, api))
+  await screen.findByText('早前 AI 原文')
+  const answers = Array.from(document.querySelectorAll<HTMLDetailsElement>('.paper-ai-original'))
+  expect(answers[0].open).toBe(false)
+  expect(answers[1].open).toBe(true)
+  const auxiliary = screen.getAllByRole('region', { name: '本轮运行证据' }).at(-1)!
+  expect(answers[1].compareDocumentPosition(auxiliary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(Array.from(document.querySelectorAll<HTMLDetailsElement>('.paper-ai-message-source')).every(node => !node.open)).toBe(true)
+  await userEvent.click(answers[1].querySelector('summary')!)
+  await userEvent.click(answers[0].querySelector('summary')!)
+  await userEvent.click(screen.getByRole('button', { name: '刷新证据' }))
+  await waitFor(() => expect(api.conversation).toHaveBeenCalledTimes(2))
+  expect(answers[0].open).toBe(true)
+  expect(answers[1].open).toBe(false)
+  await userEvent.type(screen.getByRole('textbox'), '下一轮')
+  await userEvent.click(screen.getByRole('button', { name: /发送提问/ }))
+  await act(async () => { controller!.enqueue(new TextEncoder().encode('data: {"kind":"text_delta","text":"新的增量"}\n\n')) })
+  expect(answers[0].open).toBe(true)
+  expect(answers[1].open).toBe(false)
+  const completed = { ...value, calls: [...value.calls, { ...value.calls[1], call_id: 'new' }], messages: [...value.messages, { ...value.messages[1], message_id: 'new', call_id: 'new', text: '新的完整回答' }] }
+  api.conversation.mockResolvedValue(completed)
+  await act(async () => { controller!.enqueue(new TextEncoder().encode('data: {"kind":"done"}\n\n')); controller!.close() })
+  await screen.findByText('新的完整回答')
+  expect(answers[0].open).toBe(true)
+  expect(answers[1].open).toBe(false)
+  expect(document.querySelector<HTMLDetailsElement>('.message-assistant:last-child .paper-ai-original')?.open).toBe(true)
 })

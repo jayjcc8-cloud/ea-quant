@@ -21,10 +21,10 @@ const saved = (key: string) => { try { return sessionStorage.getItem(key) ?? '' 
 const text = (value: unknown) => value === undefined || value === null || value === '' ? '未提供' : String(value)
 
 /** Deterministic presentation of this call's frozen host evidence, never an AI summary. */
-function HostEvidenceOverview({ evidence, scope }: { evidence: PaperExplanationEvidence | null; scope?: string | null }) {
-  if (!evidence) return <section className="paper-ai-overview" aria-label="宿主证据概览">
-    <h3>宿主证据概览</h3><p className="paper-ai-overview-caption">本轮冻结证据 · 非 AI 摘要</p>
-    <p>本轮结构化证据未确认，无法生成概览；请查看已保存的 AI 原文。</p>
+function RunEvidence({ evidence, scope }: { evidence: PaperExplanationEvidence | null; scope?: string | null }) {
+  if (!evidence) return <section className="paper-ai-overview" aria-label="本轮运行证据">
+    <h3>本轮运行证据</h3><p className="paper-ai-overview-caption">本轮冻结证据 · 非 AI 摘要</p>
+    <p>本轮结构化证据未确认；仅保留已记录的观测范围。</p>
     <p>{scopeLabel[scope ?? 'unknown'] ?? scopeLabel.unknown}</p>
   </section>
   const health = evidence.health
@@ -43,14 +43,23 @@ function HostEvidenceOverview({ evidence, scope }: { evidence: PaperExplanationE
   const economics = evidence.economics.available !== true ? '经济快照不可用。'
     : equity === null ? '经济快照未提供权益数值；不代表当前权益。'
     : `已保存快照权益 ${equity} ${currency}，不代表当前权益。`
-  return <section className="paper-ai-overview" aria-label="宿主证据概览">
-    <h3>宿主证据概览</h3><p className="paper-ai-overview-caption">本轮冻结证据 · 非 AI 摘要</p>
+  return <section className="paper-ai-overview" aria-label="本轮运行证据">
+    <h3>本轮运行证据</h3><p className="paper-ai-overview-caption">本轮冻结证据 · 非 AI 摘要</p>
     <dl>
       <div><dt>状态</dt><dd>记录为{paperStateLabels[evidence.state] ?? '状态未知'}（{shortScope}）{current ? `；${readiness}，${permission}` : ''}。</dd></div>
       <div><dt>原因</dt><dd>{reason}</dd></div>
       <div><dt>限制</dt><dd>{economics}{evidence.market.kind === 'local_synthetic_feed' ? '合成行情；' : '行情来源未确认；'}无收益历史，不能推断盈利或业绩。</dd></div>
     </dl>
   </section>
+}
+
+/** Initial expansion is per message; subsequent renders keep the reader's choice. */
+function AiAnswer({ text, initialOpen, onExpand }: { text: string; initialOpen: boolean; onExpand: () => void }) {
+  const [open, setOpen] = useState(initialOpen)
+  return <details className="paper-ai-original" open={open} onToggle={event => {
+    const next = event.currentTarget.open
+    if (next !== open) { setOpen(next); if (next) onExpand() }
+  }}><summary>完整 AI 回答（原文）</summary><p className="paper-ai-answer-text">{text}</p></details>
 }
 
 /** The parent keys this panel by run ID; subscriptions, input and saved calls share that identity. */
@@ -195,8 +204,9 @@ export function PaperAi({ runId, instanceName, sourceJobId, onOverview, api = pa
           return <li ref={index === latestRoundIndex ? latestRound : undefined} key={message.message_id} className={`message message-${message.role}`}>
             <p className="message-role">{message.role === 'user' ? '你' : 'QUINE · 运行解释'}</p>
             {message.role === 'user' ? <p className="paper-ai-answer-text">{message.text}</p> : <>
-              <HostEvidenceOverview evidence={evidence} scope={message.evidence_scope} />
-              <details className="paper-ai-original" onToggle={pauseForDetails}><summary>完整 AI 回答（原文）</summary><p className="paper-ai-answer-text">{message.text}</p></details>
+              <p className="paper-ai-message-scope">{scopeLabel[message.evidence_scope ?? 'unknown'] ?? scopeLabel.unknown}</p>
+              <AiAnswer text={message.text} initialOpen={message.call_id === latestCallId} onExpand={() => { followEnd.current = false }} />
+              <RunEvidence evidence={evidence} scope={message.evidence_scope} />
               <details className="paper-ai-message-source" onToggle={pauseForDetails}><summary>本轮证据来源</summary>
                 <p>依据证据观测于 {observationTime(message.evidence_observed_at)}</p>
                 <p>原始观测时间：<time dateTime={message.evidence_observed_at ?? undefined}>{text(message.evidence_observed_at)}</time></p>
