@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -163,4 +163,75 @@ it('preserves literal model evidence and exposes full source time through a disc
   await userEvent.click(screen.getByText('本轮证据来源'))
   expect(details.open).toBe(true)
   expect(details.textContent).toContain('2026-10-13T01:00:00Z')
+})
+
+
+function withEvidence(scope: 'current' | 'stale' | 'unknown' | 'historical', available = true) {
+  const value = state(A, '原文保留：source_job_id 33333333-3333-4333-8333-333333333333，projection_stale=true。')
+  const frozen = { ...value.context!, state: 'running', state_scope: scope,
+    economics: { available, equity: '123.45', currency: 'USD' },
+    health: { available, runtime_ready: null, trade_permitted: null, permission_scope: 'unknown' } }
+  value.calls[0].evidence = frozen
+  value.messages[0].evidence_scope = scope
+  // A refreshed context must never rewrite the source of this retained answer.
+  value.context = { ...frozen, state_scope: 'current', economics: { available: true, equity: '99999', currency: 'USD' } }
+  return value
+}
+
+it('summarizes only the matching frozen host evidence, retaining stale limits and verbatim expandable records', async () => {
+  const value = withEvidence('stale')
+  const api = { conversation: vi.fn().mockResolvedValue(value), explain: vi.fn() }
+  render(panel(A, api))
+  const overview = await screen.findByRole('region', { name: '宿主证据概览' })
+  expect(overview.textContent).toContain('非 AI 摘要')
+  expect(overview.textContent).toContain('观测陈旧')
+  expect(overview.textContent).toContain('当前就绪与许可未知')
+  expect(overview.textContent).toContain('123.45 USD')
+  expect(overview.textContent).toContain('不代表当前权益')
+  expect(overview.textContent).toContain('不能推断盈利')
+  expect(overview.textContent).not.toContain('99999')
+  expect(overview.textContent).not.toContain('source_job_id')
+  const answer = screen.getByText('完整 AI 回答（原文）').closest('details') as HTMLDetailsElement
+  const source = screen.getByText('本轮证据来源').closest('details') as HTMLDetailsElement
+  expect(answer.open).toBe(false)
+  expect(source.open).toBe(false)
+  await userEvent.click(screen.getByText('完整 AI 回答（原文）'))
+  expect(answer.open).toBe(true)
+  expect(answer.querySelector('.paper-ai-answer-text')?.textContent).toBe(value.messages[0].text)
+  await userEvent.click(screen.getByText('本轮证据来源'))
+  expect(source.open).toBe(true)
+  expect(source.querySelector('pre')?.textContent).toBe(JSON.stringify(value.calls[0].evidence, null, 2))
+  expect(api.explain).not.toHaveBeenCalled()
+})
+
+it.each(['unknown', 'historical', 'current'] as const)('keeps %s evidence bounded without filling unknown permission or missing economics', async scope => {
+  render(panel(A, { conversation: vi.fn().mockResolvedValue(withEvidence(scope, false)), explain: vi.fn() }))
+  const overview = await screen.findByRole('region', { name: '宿主证据概览' })
+  expect(overview.textContent).toContain('经济快照不可用')
+  expect(overview.textContent).not.toContain('123.45')
+  expect(overview.textContent).not.toContain('读取时未阻断')
+  expect(overview.textContent).not.toContain('读取时就绪')
+  expect(overview.textContent).toContain(scope === 'historical' ? '历史观测' : '未知')
+})
+
+it('never substitutes current or another instance evidence when this answer has no matching frozen record', async () => {
+  const value = withEvidence('stale')
+  value.calls[0].evidence!.run_id = B
+  render(panel(A, { conversation: vi.fn().mockResolvedValue(value), explain: vi.fn() }))
+  const overview = await screen.findByRole('region', { name: '宿主证据概览' })
+  expect(within(overview).getByText(/本轮结构化证据未确认/)).toBeTruthy()
+  expect(overview.textContent).not.toContain('123.45')
+  expect(overview.textContent).not.toContain('99999')
+  expect(overview.textContent).toContain('当前就绪与许可未知')
+})
+
+
+it.each([true, false])('quotes backend read-time readiness/permission %s without treating snapshot equity as current', async flag => {
+  const value = withEvidence('current')
+  value.calls[0].evidence!.health = { available: true, runtime_ready: flag, trade_permitted: flag, permission_scope: 'observed' }
+  render(panel(A, { conversation: vi.fn().mockResolvedValue(value), explain: vi.fn() }))
+  const overview = await screen.findByRole('region', { name: '宿主证据概览' })
+  expect(overview.textContent).toContain(flag ? '读取时就绪，读取时未阻断' : '读取时未就绪，读取时受阻')
+  expect(overview.textContent).toContain('不代表当前权益')
+  if (flag) expect(overview.textContent).toContain('具体订单仍须独立检查')
 })

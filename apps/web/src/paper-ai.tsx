@@ -4,7 +4,7 @@ import { ConversationInput } from './conversation-input'
 import { conversationEvents } from './user-strategies-api'
 import {
   paperApi, paperExplanationBudget, paperExplanationDraftKey, paperExplanationPendingKey,
-  type PaperApi, type PaperExplanationConversation,
+  type PaperApi, type PaperExplanationConversation, type PaperExplanationEvidence,
 } from './paper-api'
 import { observationTime, paperStateLabels } from './paper-observation'
 
@@ -19,6 +19,39 @@ const callLabel: Record<string, string> = {
 }
 const saved = (key: string) => { try { return sessionStorage.getItem(key) ?? '' } catch { return '' } }
 const text = (value: unknown) => value === undefined || value === null || value === '' ? '未提供' : String(value)
+
+/** Deterministic presentation of this call's frozen host evidence, never an AI summary. */
+function HostEvidenceOverview({ evidence, scope }: { evidence: PaperExplanationEvidence | null; scope?: string | null }) {
+  if (!evidence) return <section className="paper-ai-overview" aria-label="宿主证据概览">
+    <h3>宿主证据概览</h3><p className="paper-ai-overview-caption">本轮冻结证据 · 非 AI 摘要</p>
+    <p>本轮结构化证据未确认，无法生成概览；请查看已保存的 AI 原文。</p>
+    <p>{scopeLabel[scope ?? 'unknown'] ?? scopeLabel.unknown}</p>
+  </section>
+  const health = evidence.health
+  const current = evidence.state_scope === 'current' && health.available === true && health.permission_scope === 'observed'
+  const shortScope = { current: '读取时观测', historical: '历史观测', stale: '观测陈旧', unknown: '观测未确认' }[evidence.state_scope] ?? '观测未确认'
+  const readiness = current && typeof health.runtime_ready === 'boolean' ? health.runtime_ready ? '读取时就绪' : '读取时未就绪' : '就绪未知'
+  const permission = current && typeof health.trade_permitted === 'boolean' ? health.trade_permitted ? '读取时未阻断' : '读取时受阻' : '许可未知'
+  const reason = evidence.state_scope === 'stale' ? '观测已陈旧，当前就绪与许可未知。'
+    : evidence.state_scope === 'historical' ? '历史记录不能作为当前就绪或许可。'
+    : !current ? '缺少已确认的当前观测，就绪与许可未知。'
+    : health.runtime_ready === false || health.trade_permitted === false ? '后端记录了未就绪或受阻状态；具体原因见本轮证据来源。'
+    : health.runtime_ready === true && health.trade_permitted === true ? '本轮未报告就绪或许可阻断；具体订单仍须独立检查。'
+    : '本轮未提供完整就绪与许可字段，缺失项保持未知。'
+  const equity = typeof evidence.economics.equity === 'string' && evidence.economics.equity.trim() ? evidence.economics.equity : null
+  const currency = typeof evidence.economics.currency === 'string' ? evidence.economics.currency : '币种未提供'
+  const economics = evidence.economics.available !== true ? '经济快照不可用。'
+    : equity === null ? '经济快照未提供权益数值；不代表当前权益。'
+    : `已保存快照权益 ${equity} ${currency}，不代表当前权益。`
+  return <section className="paper-ai-overview" aria-label="宿主证据概览">
+    <h3>宿主证据概览</h3><p className="paper-ai-overview-caption">本轮冻结证据 · 非 AI 摘要</p>
+    <dl>
+      <div><dt>状态</dt><dd>记录为{paperStateLabels[evidence.state] ?? '状态未知'}（{shortScope}）{current ? `；${readiness}，${permission}` : ''}。</dd></div>
+      <div><dt>原因</dt><dd>{reason}</dd></div>
+      <div><dt>限制</dt><dd>{economics}{evidence.market.kind === 'local_synthetic_feed' ? '合成行情；' : '行情来源未确认；'}无收益历史，不能推断盈利或业绩。</dd></div>
+    </dl>
+  </section>
+}
 
 /** The parent keys this panel by run ID; subscriptions, input and saved calls share that identity. */
 export function PaperAi({ runId, instanceName, sourceJobId, onOverview, api = paperApi }: {
@@ -47,6 +80,9 @@ export function PaperAi({ runId, instanceName, sourceJobId, onOverview, api = pa
   const readScrollPosition = () => {
     const node = scroller.current
     if (node) followEnd.current = node.scrollHeight - node.clientHeight - node.scrollTop <= 32
+  }
+  const pauseForDetails = (event: React.SyntheticEvent<HTMLDetailsElement>) => {
+    if (event.currentTarget.open) followEnd.current = false
   }
   // Only the panel scrolls. A keyed remount starts each instance at its latest
   // retained turn; subsequent reads/deltas respect the reader's position.
@@ -151,12 +187,24 @@ export function PaperAi({ runId, instanceName, sourceJobId, onOverview, api = pa
       {!context && <p>当前证据不可用。已保存的回答仍保留原观测范围。<Link to={`/backtests/${encodeURIComponent(sourceJobId)}`}>来源研究 ↗</Link></p>}
       {!conversation?.messages.length && <p className="chat-empty-guidance">可以询问当前状态、阻断原因或经济快照。解释仅使用这次读取到的运行证据。</p>}
       <ol className="message-list paper-ai-thread">
-        {conversation?.messages.map((message, index) => <li ref={index === latestRoundIndex ? latestRound : undefined} key={message.message_id} className={`message message-${message.role}`}>
-          <p className="message-role">{message.role === 'user' ? '你' : 'QUINE · 模型解释'}</p>
-          {message.role === 'assistant' && <p className="paper-ai-message-scope">{scopeLabel[message.evidence_scope ?? 'unknown'] ?? scopeLabel.unknown}</p>}
-          <p className="paper-ai-answer-text">{message.text}</p>
-          {message.role === 'assistant' && <details className="paper-ai-message-source"><summary>本轮证据来源</summary><p>依据证据观测于 {observationTime(message.evidence_observed_at)}</p><p>原始观测时间：<time dateTime={message.evidence_observed_at ?? undefined}>{text(message.evidence_observed_at)}</time></p></details>}
-        </li>)}
+        {conversation?.messages.map((message, index) => {
+          const recorded = conversation.calls.find(call => call.call_id === message.call_id)?.evidence
+          // Never borrow refreshed context or a different call/instance for an old answer.
+          const evidence = recorded?.schema === 'ea.paper-explanation-evidence.v1' && recorded.run_id === runId
+            && recorded.observed_at === message.evidence_observed_at && recorded.state_scope === message.evidence_scope ? recorded : null
+          return <li ref={index === latestRoundIndex ? latestRound : undefined} key={message.message_id} className={`message message-${message.role}`}>
+            <p className="message-role">{message.role === 'user' ? '你' : 'QUINE · 运行解释'}</p>
+            {message.role === 'user' ? <p className="paper-ai-answer-text">{message.text}</p> : <>
+              <HostEvidenceOverview evidence={evidence} scope={message.evidence_scope} />
+              <details className="paper-ai-original" onToggle={pauseForDetails}><summary>完整 AI 回答（原文）</summary><p className="paper-ai-answer-text">{message.text}</p></details>
+              <details className="paper-ai-message-source" onToggle={pauseForDetails}><summary>本轮证据来源</summary>
+                <p>依据证据观测于 {observationTime(message.evidence_observed_at)}</p>
+                <p>原始观测时间：<time dateTime={message.evidence_observed_at ?? undefined}>{text(message.evidence_observed_at)}</time></p>
+                {evidence && <><p>本轮技术依据（完整记录）</p><pre className="paper-ai-technical">{JSON.stringify(evidence, null, 2)}</pre></>}
+              </details>
+            </>}
+          </li>
+        })}
       </ol>
       {busy && <div className="turn-answer live-answer" role="status" aria-live="polite"><p>{streaming || '正在读取证据并请求解释…'}</p></div>}
       {latest && <p className="paper-ai-message-source">{callLabel[latest.status] ?? '调用状态未知'}</p>}
