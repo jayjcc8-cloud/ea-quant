@@ -44,7 +44,7 @@ ROUTE = ModelRoute(
     capabilities=ModelCapabilities(tool_use=True, structured_output=False, usage=True),
 )
 #: Enough approved model calls for one loop that reads, proposes and explains.
-WIDE_BUDGET = {"max_model_calls": 6, "max_backtests": 2}
+WIDE_BUDGET = {"max_model_calls": 4, "max_backtests": 2}
 #: A workspace grant that also covers the calls a migration imports as reserved.
 LONG_BUDGET = {"max_model_calls": 20, "max_backtests": 2}
 RUN_BUDGET = {"max_model_calls": 0, "max_backtests": 1}
@@ -166,7 +166,7 @@ def test_a_retained_conversation_keeps_its_records_across_migration_and_a_turn(
     # offers a new authorization; the first send cannot reveal a smaller allowance.
     opened = strategies.conversation_state(created.user_strategy_id)
     assert opened["budget"]["reserved_model_calls"] == 7
-    assert opened["budget"]["remaining_model_calls"] == 13
+    assert opened["budget"]["max_model_calls_per_turn"] == 4
     assert len(before.messages) == 14
     identifiers = [item["message_id"] for item in before.messages]
 
@@ -557,7 +557,7 @@ def test_pending_state_and_tool_failures_survive_a_reload(
     assert state["pending"]["proposal_id"] == proposal_id
     assert state["pending"]["turn_id"] == "turn-1"
     assert state["budget"]["reserved_model_calls"] >= 1
-    assert state["budget"]["remaining_model_calls"] >= 0
+    assert state["budget"]["max_model_calls_per_turn"] == 4
 
     # A tool this conversation does not offer is refused honestly, with no change.
     provider.responses.append(_read_tool("delete_everything", "bad-1"))
@@ -726,12 +726,15 @@ def test_lost_confirmation_checkpoint_recovers_the_frozen_preview_without_a_new_
     assert len(_started[0].list_jobs()) == 1
 
 
-def test_cumulative_budget_cannot_be_refreshed_by_a_new_turn_or_strategy(
+def test_new_turns_keep_cumulative_usage_without_a_lifetime_stop(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch, _started: list[WebService]
 ) -> None:
-    from ea.web.user_strategies import UserStrategyBudgetError
-
-    provider = Streaming([_read_tool("describe_data", "read-1"), _response([], text="clarify")])
+    provider = Streaming(
+        [
+            _read_tool("describe_data", "read-1"),
+            *[_response([], text="clarify") for _ in range(3)],
+        ]
+    )
     strategies = _stack(
         tmp_path, monkeypatch, _started, provider, budget={"max_model_calls": 2, "max_backtests": 1}
     )
@@ -746,17 +749,16 @@ def test_cumulative_budget_cannot_be_refreshed_by_a_new_turn_or_strategy(
         )
     )
     for identity in (first.user_strategy_id, other.user_strategy_id):
-        with pytest.raises(UserStrategyBudgetError):
-            list(
-                strategies.conversation_turn(
-                    identity,
-                    call_id="turn-2",
-                    base_revision=1,
-                    text="again",
-                    approved_budget={"max_model_calls": 1, "max_backtests": 0},
-                )
+        list(
+            strategies.conversation_turn(
+                identity,
+                call_id="turn-2",
+                base_revision=1,
+                text="again",
+                approved_budget={"max_model_calls": 1, "max_backtests": 0},
             )
-    assert len(provider.calls) == _store(tmp_path).model_call_usage()["reserved_model_calls"] == 2
+        )
+    assert len(provider.calls) == _store(tmp_path).model_call_usage()["reserved_model_calls"] == 4
     calls = strategies.get(first.user_strategy_id).calls
     assert all(call["usage_available"] and call["input_tokens"] == 11 for call in calls)
 
@@ -983,8 +985,9 @@ def _explanation(
     ]
 
 
+@pytest.mark.parametrize("long_history", [False, True])
 def test_the_explanation_states_the_applied_workflow_after_the_retained_receipt(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, _started: list[WebService]
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, _started: list[WebService], long_history: bool
 ) -> None:
     strategies, applied, state, evidence = _applied_workflow(
         tmp_path,
@@ -996,7 +999,27 @@ def test_the_explanation_states_the_applied_workflow_after_the_retained_receipt(
     base = proposal["base_revision"]
     assert (proposal["status"], applied.draft.revision) == ("applied", base + 1)
 
-    texts = _explanation(strategies, applied, state, evidence)
+    if long_history:
+        from unit.test_web_conversation_store import _call, _message
+
+        old = _call("old-turn")
+        old_messages = (
+            _message(0, role="user", text="old question", call_id="old-turn"),
+            _message(1, role="model", text="old answer " * 3000, call_id="old-turn"),
+        )
+        applied = replace(
+            applied, calls=(old, *applied.calls), messages=(*old_messages, *applied.messages)
+        )
+        # Even a long current tool result stays outside the historical window.
+        state["exchange"][1]["text"] += " retained tool evidence" * 1200
+    wire = strategies._answer_messages(
+        applied, state, strategies._registered_paths(cast(StrategyDraft, applied.draft)), evidence
+    )
+    assert wire[-4].tool_calls[0].id == wire[-3].call_id == "propose-1"
+    texts = [message.text for message in wire]
+    if long_history:
+        assert "old question" not in texts
+        assert "omitted" in texts[0]
     receipt, update = texts[-3], texts[-2]
 
     # The receipt this turn recorded is retained exactly as it was written, and it

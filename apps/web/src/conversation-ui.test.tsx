@@ -105,7 +105,7 @@ const conversation = (overrides: Partial<UserStrategyConversation> = {}): UserSt
   pending: null,
   preview: null,
   open_proposals: [],
-  budget: { max_model_calls: 10, reserved_model_calls: 1, remaining_model_calls: 9, max_backtests: 5 },
+  budget: { max_model_calls_per_turn: 4, reserved_model_calls: 1, max_backtests: 5 },
   ...overrides,
 })
 
@@ -493,26 +493,28 @@ describe('the streamed conversation panel', () => {
     expect(within(reopened).getByText('更早的对话（2）')).toBeTruthy()
   })
 
-  it('disables the product send button when the workspace has no call left', async () => {
+  it('allows a new bounded turn after more than 200 recorded calls', async () => {
     const user = userEvent.setup()
+    const stream = queue()
     const api = scripted({
       strategies: [strategy()],
       conversation: () => conversation({
-        budget: { max_model_calls: 10, reserved_model_calls: 10, remaining_model_calls: 0, max_backtests: 5 },
+        budget: { max_model_calls_per_turn: 4, reserved_model_calls: 220, max_backtests: 5 },
       }),
-      send: () => queue().source(),
+      send: () => stream.source(),
     })
     mount(api)
-
     const panel = await chat()
-    await user.type(within(panel).getByLabelText('消息'), '还能问吗？')
-    await user.click(within(panel).getByLabelText(/批准本轮最多 0 次模型调用/))
-
-    // The bound is the workspace's own remaining grant, and there is none: the
-    // button is disabled and the panel says why rather than promising a call.
-    expect((within(panel).getByRole('button', { name: '询问模型' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(within(panel).getByText(/剩余的模型调用额度为 0/)).toBeTruthy()
-    expect(sent).toEqual([])
+    await user.type(within(panel).getByLabelText('消息'), '继续研究')
+    await user.click(within(panel).getByLabelText(/批准本轮最多 4 次模型调用/))
+    expect(within(panel).getByText('工作区累计预留 220 次模型调用')).toBeTruthy()
+    const send = within(panel).getByRole('button', { name: '询问模型' }) as HTMLButtonElement
+    expect(send.disabled).toBe(false)
+    await user.click(send)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].approved).toEqual({ max_model_calls: 4, max_backtests: 0 })
+    stream.push({ kind: 'done', strategy: strategy() })
+    stream.end()
   })
 
   it('aborts a stream when the reader leaves, so another strategy is never written to', async () => {

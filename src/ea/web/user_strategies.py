@@ -126,16 +126,32 @@ _MAX_EVIDENCE = 8
 #: the widest reading this product makes, and a third run would stop being a pair.
 _MAX_EVIDENCE_RUNS = 2
 _MAX_ITEMS = 20
+#: Legacy JSON record bounds; migrated conversations retain their complete history.
 _MAX_MESSAGES = 200
 _MAX_CALLS = 200
 _MAX_PROPOSALS = 100
 _MAX_CHANGES = 200
 _MAX_EXPERIMENTS = 50
 _MAX_HISTORY = 20
+#: How much recorded conversation one request may carry: a deterministic suffix of
+#: complete prior turns, bounded by both a turn count and a character budget. Older
+#: turns are dropped from the request only; every stored record survives.
+_MAX_HISTORY_TURNS = 8
+_MAX_HISTORY_CHARS = 24000
 _MAX_TOKENS = 1200
-#: One approval is exactly one call; a hidden second call is never spent.
+#: One refinement approval is exactly one call; a hidden second call is never spent.
 _CALL_APPROVAL = 1
+#: The most model calls one explicitly initiated new conversation turn may make.
+#: This is a per-turn bound, not a workspace-lifetime one: a workspace that has
+#: made many calls still admits the next turn up to this many, and no further.
+_TURN_MAX_CALLS = 4
 _DEFAULT_BUDGET = {"max_model_calls": 10, "max_backtests": 5}
+#: What a request says when the bounded history dropped older turns from it.
+_OMITTED_HISTORY_NOTE = (
+    "Earlier turns of this conversation were omitted from this request so it stays "
+    "bounded. This workspace still records every one of them; only the most recent "
+    "complete turns are stated here."
+)
 #: The one conversation database per workspace. It is created lazily by the first
 #: migrated write; a workspace that never migrates keeps one JSON record per
 #: strategy and no database at all.
@@ -845,18 +861,23 @@ class UserStrategyStore:
         return strategy
 
     def reserve_model_call(
-        self, strategy: UserStrategy, call_id: str, max_model_calls: int
+        self, strategy: UserStrategy, call_id: str, max_model_calls: int | None = None
     ) -> dict[str, Any]:
         """Reserve one workspace model call, and publish the strategy, atomically.
 
         ``strategy`` carries the pending record of this call, so the reservation and
         that record are committed together or not at all: a call that may reach the
         provider is never accounted for without being recorded, and never recorded
-        without being accounted for. The ceiling counts every reservation this
-        workspace has ever made — including the ones a migration imported — so a
-        bounded call ledger, a new conversation or a reopened database never resets
-        it. An identity that is already reserved is compared against its stored
-        canonical request: a different request is a conflict, and the same one
+        without being accounted for. The count of reservations is the workspace's
+        recorded usage, kept for accounting and exact replay.
+
+        ``max_model_calls`` is an optional caller-owned ceiling for a legacy or
+        bounded caller, counting every reservation this workspace has ever made —
+        including the ones a migration imported. The interactive conversation path
+        passes none: a user conversation is bounded per turn, never by the
+        workspace's all-time count, so a recorded history can never permanently stop
+        a new turn. An identity that is already reserved is compared against its
+        stored canonical request: a different request is a conflict, and the same one
         returns the stored reservation unchanged rather than spending again.
         """
         if not self.conversation_db_path.exists():
@@ -892,11 +913,15 @@ class UserStrategyStore:
                     "reserved_at": str(stored[3]),
                     "replayed": True,
                 }
-            counted = connection.execute("SELECT COUNT(*) FROM model_call_reservations").fetchone()
-            if counted is None or int(counted[0]) >= max_model_calls:
-                raise UserStrategyBudgetError(
-                    f"this workspace has reached its granted model call budget ({max_model_calls})"
-                )
+            if max_model_calls is not None:
+                counted = connection.execute(
+                    "SELECT COUNT(*) FROM model_call_reservations"
+                ).fetchone()
+                if counted is None or int(counted[0]) >= max_model_calls:
+                    raise UserStrategyBudgetError(
+                        "this workspace has reached its granted model call budget "
+                        f"({max_model_calls})"
+                    )
             reserved_at = str(record.get("reserved_at") or strategy.updated_at)
             digest = str(record.get("payload_sha256") or _digest(request))
             status = str(record.get("status") or "pending")
@@ -1076,19 +1101,35 @@ class UserStrategyService:
         }
 
     def _approval(
-        self, approved_budget: Any, *, model_calls: int, backtests: int
+        self,
+        approved_budget: Any,
+        *,
+        model_calls: int,
+        backtests: int,
+        ceiling: int | None = None,
     ) -> dict[str, int]:
+        """One explicit approval, checked against the bound that applies to it.
+
+        ``ceiling`` is the most model calls this approval may name: a new
+        conversation turn is bounded per turn; other actions keep the workspace's
+        own grant. It defaults to the
+        workspace grant so an existing caller is unchanged. The backtest grant is
+        always the workspace's, because a run is an execution cost rather than a
+        conversation cost.
+        """
         granted = _requested_budget(approved_budget)
         limit = self._workspace_budget()
+        if ceiling is None:
+            ceiling = limit["max_model_calls"]
         if (
             granted["max_model_calls"] < model_calls
             or granted["max_backtests"] < backtests
-            or granted["max_model_calls"] > limit["max_model_calls"]
+            or granted["max_model_calls"] > ceiling
             or granted["max_backtests"] > limit["max_backtests"]
         ):
             raise UserStrategyBudgetError(
                 "the approved budget is outside what this workspace grants "
-                f"({limit['max_model_calls']} model calls, {limit['max_backtests']} backtests)"
+                f"({ceiling} model calls, {limit['max_backtests']} backtests)"
             )
         return granted
 
@@ -1991,7 +2032,13 @@ class UserStrategyService:
             raise UserStrategyStaleError(
                 "the draft revision moved on; reload the strategy before asking again"
             )
-        if len(strategy.calls) >= _MAX_CALLS or len(strategy.messages) + 1 >= _MAX_MESSAGES:
+        # The record cap is a bound on a pre-migration JSON conversation, which has
+        # no database to hold an unbounded ledger. A migrated conversation is the
+        # workspace's canonical store and is never capped: an ordinary interactive
+        # conversation must not permanently exhaust from its own recorded count.
+        if not self._store.is_conversation_migrated(strategy.user_strategy_id) and (
+            len(strategy.calls) >= _MAX_CALLS or len(strategy.messages) + 1 >= _MAX_MESSAGES
+        ):
             raise UserStrategyStateError("this strategy has reached its recorded call limit")
         unresolved = self._unresolved_call(strategy)
         if unresolved is not None:
@@ -2001,7 +2048,14 @@ class UserStrategyService:
                 "an earlier call was never observed; reload the strategy so it is "
                 "classified before another call is started"
             )
-        budget = self._approval(approved_budget, model_calls=_CALL_APPROVAL, backtests=0)
+        # New messages authorize one bounded turn, independently of lifetime usage.
+        # Replay returned above, so retained calls keep their original approval.
+        budget = self._approval(
+            approved_budget,
+            model_calls=_CALL_APPROVAL,
+            backtests=0,
+            ceiling=_TURN_MAX_CALLS if action == "message" else None,
+        )
         # The selected runs are read, verified and frozen here: after the approval,
         # before the durable reservation and before the provider can be reached, so a
         # selection this workspace cannot verify leaves no call record and no
@@ -2086,17 +2140,17 @@ class UserStrategyService:
         """Publish one call record through the one authority this strategy has.
 
         A call that may reach the provider of a migrated conversation is reserved
-        through the conversation database, where the workspace ceiling and this call's
-        record are committed together, so it is counted exactly once for the whole
-        workspace. A call that proves no network — no provider is configured — is
-        never counted, and every other conversation keeps its JSON record as its one
-        authority, where the record is durable before dispatch and the ceiling is the
-        turn's own approval.
+        through the conversation database, where this call's record and the
+        workspace's recorded usage are committed together, so it is counted exactly
+        once for the whole workspace. The reservation carries no cumulative ceiling:
+        the interactive conversation is bounded per turn, and its recorded history is
+        accounting and replay evidence rather than a permanent stop. A call that
+        proves no network — no provider is configured — is never counted, and every
+        other conversation keeps its JSON record as its one authority, where the
+        record is durable before dispatch and the ceiling is the turn's own approval.
         """
         if dispatch and self._store.is_conversation_migrated(strategy.user_strategy_id):
-            self._store.reserve_model_call(
-                strategy, call, self._workspace_budget()["max_model_calls"]
-            )
+            self._store.reserve_model_call(strategy, call)
         else:
             self._store.save(strategy)
 
@@ -2302,9 +2356,12 @@ class UserStrategyService:
             )
         facts.extend(self._data_version_facts(draft))
         facts.extend(self._selected_facts(evidence) if evidence else self._verified_facts(strategy))
+        history, omitted = self._recorded_turns(strategy, message)
+        if omitted:
+            facts.append(_OMITTED_HISTORY_NOTE)
         return [
             ModelMessage(role="user", text="\n".join(facts)),
-            *self._recorded_turns(strategy, message),
+            *history,
         ]
 
     def _data_version_facts(self, draft: StrategyDraft) -> Paths:
@@ -2394,26 +2451,76 @@ class UserStrategyService:
             "Intent revision " + str(strategy.draft.revision),
         ]
         facts.extend(self._verified_facts(strategy))
-        return [
-            ModelMessage(role="user", text="\n".join(facts)),
-            *self._recorded_turns(strategy, message),
-        ]
+        history, omitted = self._recorded_turns(strategy, message)
+        if omitted:
+            facts.append(_OMITTED_HISTORY_NOTE)
+        return [ModelMessage(role="user", text="\n".join(facts)), *history]
 
     @staticmethod
-    def _recorded_turns(strategy: UserStrategy, message: str) -> History:
-        """The recorded conversation, once each, then the question asked here.
+    def _turn_of(strategy: UserStrategy) -> dict[str, str]:
+        """The root turn each recorded call belongs to, read from the calls themselves.
 
-        The user's own message is already persisted on this strategy and is the
-        question being asked, so it is sent exactly once, as the last turn.
+        A call whose request names a ``turn_id`` is one further call of that turn; a
+        call that names none is the root of its own turn. Grouping by this record — a
+        root call and its children, or a legacy ordinary exchange whose message
+        carries only its own call identity — means a multi-call turn and a legacy
+        turn are bounded by exactly the same rule.
         """
-        turns: History = []
+        mapping: dict[str, str] = {}
+        for call in strategy.calls:
+            call_id = str(call.get("call_id") or "")
+            if not call_id:
+                continue
+            request = call.get("request")
+            turn = request.get("turn_id") if isinstance(request, dict) else None
+            mapping[call_id] = str(turn) if isinstance(turn, str) and turn else call_id
+        return mapping
+
+    @classmethod
+    def _recorded_turns(cls, strategy: UserStrategy, message: str) -> tuple[History, bool]:
+        """The bounded suffix of complete prior turns, then the question asked here.
+
+        History is grouped into complete turns by the persisted call identity each
+        message carries, so a root call with its children and a legacy ordinary
+        exchange are each one turn and are never split. Only a deterministic suffix
+        of the newest complete turns is carried, within both a turn count and a
+        character budget; the suffix stops at the first turn that would exceed either
+        bound, so an oversized turn is dropped whole rather than truncated. This
+        bounds the *request* only — every stored message and call survives — and the
+        second value reports whether older history was omitted. The current question
+        is always carried whole and is never part of the bounded suffix.
+        """
+        turns = cls._turn_of(strategy)
+        # A paused proposal may resume after other turns. Collect every message
+        # of its root, ordered by last activity, before applying either bound.
+        grouped: dict[str, Documents] = {}
         for entry in strategy.messages[:-1]:
+            call_id = str(entry.get("call_id") or "")
+            key = turns.get(call_id, call_id)
+            group = grouped.pop(key, [])
+            group.append(entry)
+            grouped[key] = group
+        selected: set[str] = set()
+        used = 0
+        for key, group in reversed(grouped.items()):
+            size = sum(len(str(entry.get("text") or "")) for entry in group)
+            if len(selected) >= _MAX_HISTORY_TURNS or used + size > _MAX_HISTORY_CHARS:
+                break
+            selected.add(key)
+            used += size
+        omitted = len(selected) < len(grouped)
+        history: History = []
+        # Keep the original message chronology even when selected turns interleave.
+        for entry in strategy.messages[:-1]:
+            call_id = str(entry.get("call_id") or "")
+            if turns.get(call_id, call_id) not in selected:
+                continue
             role = "user" if entry.get("role") == "user" else "assistant"
             text = str(entry.get("text") or "")
             if text:
-                turns.append(ModelMessage(role=cast(Any, role), text=text))
-        turns.append(ModelMessage(role="user", text=message))
-        return turns
+                history.append(ModelMessage(role=cast(Any, role), text=text))
+        history.append(ModelMessage(role="user", text=message))
+        return history, omitted
 
     def _verified_facts(self, strategy: UserStrategy) -> Paths:
         """Bounded facts about this strategy's own frozen runs, or an honest absence.
@@ -4517,9 +4624,7 @@ class UserStrategyService:
         with self._lock(identity):
             strategy = self._store.migrate_conversation(identity)
         pending = strategy.conversation_confirmation
-        limit = self._workspace_budget()["max_model_calls"]
-        usage = self._store.model_call_usage()
-        reserved = int(usage["reserved_model_calls"])
+        reserved = int(self._store.model_call_usage()["reserved_model_calls"])
         return {
             "strategy_id": strategy.user_strategy_id,
             "revision": strategy.draft.revision,
@@ -4535,12 +4640,14 @@ class UserStrategyService:
                 if item.get("status") == "open"
             ],
             "budget": {
-                "max_model_calls": limit,
-                # Only a migrated conversation is counted in this workspace's shared
-                # reservation ledger; a conversation that has not been migrated is
-                # bounded by its own turn approval instead.
+                # The most calls one explicitly initiated new turn may spend. It is a
+                # per-turn bound, deliberately separate from the recorded usage below,
+                # so a client can never read a lifetime balance out of this and disable
+                # a user's next turn.
+                "max_model_calls_per_turn": _TURN_MAX_CALLS,
+                # The model calls this workspace has recorded, as recorded usage — an
+                # accounting figure, not a remaining balance or a provider credit.
                 "reserved_model_calls": reserved,
-                "remaining_model_calls": max(limit - reserved, 0),
                 "max_backtests": self._workspace_budget()["max_backtests"],
             },
         }
@@ -5591,8 +5698,6 @@ class UserStrategyService:
         root = _entry(strategy.calls, "call_id", state["turn_id"])
         if root is None or self._turn_remaining(strategy, state["turn_id"]) <= 0:
             raise UserStrategyBudgetError("this turn has no approved model calls left")
-        if len(strategy.calls) >= _MAX_CALLS or len(strategy.messages) >= _MAX_MESSAGES:
-            raise UserStrategyStateError("this strategy has reached its recorded call limit")
         approved = dict(root["approved_budget"])
         now = _now()
         request = {

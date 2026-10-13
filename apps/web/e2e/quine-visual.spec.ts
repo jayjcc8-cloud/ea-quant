@@ -135,9 +135,8 @@ async function scriptWorkspace(page: Page, strategies: unknown[]) {
           .filter(proposal => proposal.status === 'open')
           .map(proposal => proposal.proposal_id),
         budget: {
-          max_model_calls: 6,
+          max_model_calls_per_turn: 4,
           reserved_model_calls: 0,
-          remaining_model_calls: 6,
           max_backtests: 1,
         },
       } })

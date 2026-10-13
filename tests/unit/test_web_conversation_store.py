@@ -556,7 +556,7 @@ def test_each_conversation_migrates_before_reserving_its_model_call(
     assert (tmp_path / "workspace" / "user-strategies" / f"{legacy.user_strategy_id}.json").exists()
 
 
-def test_the_workspace_ceiling_refuses_the_next_turn_and_publishes_nothing(
+def test_a_new_turn_preserves_usage_and_can_continue_after_the_old_ceiling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _started: list[WebService]
 ) -> None:
     strategies, provider = _service(
@@ -575,17 +575,17 @@ def test_the_workspace_ceiling_refuses_the_next_turn_and_publishes_nothing(
     )
 
     assert answered.calls[-1]["status"] == "observed"
-    # A second turn has no reservation left, so it is refused before it is recorded.
-    with pytest.raises(UserStrategyBudgetError):
-        strategies.send_message(
-            created.user_strategy_id,
-            call_id="call-2",
-            base_revision=1,
-            text="A second question",
-            approved_budget=dict(CALL_BUDGET),
-        )
-
+    provider.responses.append(_response([], text="The second answer"))
+    next_request = dict(
+        call_id="call-2",
+        base_revision=1,
+        text="A second question",
+        approved_budget=dict(CALL_BUDGET),
+    )
+    continued = strategies.send_message(created.user_strategy_id, **next_request)
+    assert strategies.send_message(created.user_strategy_id, **next_request) == continued
     reopened = UserStrategyStore(tmp_path / "workspace")
-    assert reopened.model_call_usage()["reserved_model_calls"] == 1
-    assert reopened.get(created.user_strategy_id) == answered
-    assert len(provider.calls) == 1
+    assert reopened.model_call_usage()["reserved_model_calls"] == 2
+    assert reopened.get(created.user_strategy_id) == continued
+    assert continued.messages[: len(answered.messages)] == answered.messages
+    assert len(provider.calls) == 2

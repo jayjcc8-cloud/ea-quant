@@ -1406,11 +1406,10 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
     call.status === 'pending' || call.status === 'dispatched')
   const streaming = Boolean(api.streamUserStrategyMessage)
 
-  // The bound is the workspace's own remaining grant, never a promise this page
-  // made: at most four calls in one turn, and none at all when nothing is left.
-  const remaining = conversation?.budget.remaining_model_calls ?? null
-  const turnBound = remaining === null ? 0 : Math.max(0, Math.min(TURN_CALL_CEILING, remaining))
-  const turnBudget: ApprovedBudget = streaming && remaining !== null
+  // Each explicit send approves a bounded turn; accumulated usage never disables it.
+  const turnLimit = conversation?.budget.max_model_calls_per_turn ?? null
+  const turnBound = turnLimit === null ? 0 : Math.max(0, Math.min(TURN_CALL_CEILING, turnLimit))
+  const turnBudget: ApprovedBudget = streaming && turnLimit !== null
     ? { max_model_calls: turnBound, max_backtests: 0 }
     : CALL_APPROVAL
   const awaitingRunDecision = conversation?.pending?.phase === 'awaiting_confirmation'
@@ -1620,7 +1619,7 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
       if (streaming) {
         const send = api.streamUserStrategyMessage!
         if (!canSend) {
-          setNote('这个工作区剩余的模型调用额度为 0，无法开始新的一轮。')
+          setNote('请等待本轮权限读取完成，并处理当前待确认的实验。')
           return
         }
         await runStream(async signal => {
@@ -1839,14 +1838,12 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
         <p className="muted">{streaming ? '仅讨论与提案；运行需单独确认。' : isIntentDraft(strategy.draft)
           ? `${streaming ? `本轮最多 ${turnBudget.max_model_calls} 次模型调用` : '一次模型调用'} · 澄清当前想法。`
           : `${streaming ? `本轮最多 ${turnBudget.max_model_calls} 次模型调用` : '一次模型调用'} · 不应用修改，不启动实验。`}</p>
-        {streaming && remaining !== null && <p className="muted" title={`上限 ${conversation?.budget.max_model_calls ?? 0}，已预留 ${conversation?.budget.reserved_model_calls ?? 0}；模型额度不是运行许可。`}>
-          {`工作区剩余模型调用 ${remaining} / ${conversation?.budget.max_model_calls ?? 0} 次`}
+        {streaming && conversation && <p className="muted" title="包含结果未知的预留；这是累计记录，不是模型服务余额，也不是运行许可。">
+          {`工作区累计预留 ${conversation.budget.reserved_model_calls} 次模型调用`}
         </p>}
         <button type="button" className="primary" onClick={ask} disabled={busy || unresolved || !approved || !message.trim() || modelSendBlock !== null || !evidenceReady || !canSend}>询问模型</button>
       </div>
-      {streaming && remaining === 0 && <p className="notice" role="status">
-        这个工作区剩余的模型调用额度为 0，本轮无法发送。
-      </p>}
+      {streaming && turnLimit === null && <p className="notice" role="status">正在读取本轮调用权限…</p>}
       {awaitingRunDecision && <p className="notice" role="status">先确认或暂不运行当前实验；运行完成后可在这里继续追问。</p>}
       {modelSendBlock !== null && <p className="notice" role="status">
         {modelSendBlock} <Link to="/settings">检查模型设置</Link>，完成后在<a href="#research-preparation">研究准备</a>中重新检查。
