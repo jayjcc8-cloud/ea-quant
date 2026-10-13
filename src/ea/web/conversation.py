@@ -93,3 +93,60 @@ def checkpoints(path: Path, schema: str) -> Iterator[SqliteSaver]:
         yield saver
     finally:
         connection.close()
+
+
+class ReservationConflict(ValueError):
+    """A call identity already names a different approved request."""
+
+
+class ReservationLimit(ValueError):
+    """A legacy caller's explicit workspace ceiling was reached."""
+
+
+def reserve_call(
+    connection: sqlite3.Connection,
+    identity: str,
+    call_id: str,
+    canonical: str,
+    digest: str,
+    status: str,
+    reserved_at: str,
+    *,
+    ceiling: int | None = None,
+) -> dict[str, Any]:
+    """Reserve once inside the caller's existing document transaction.
+
+    Research and Paper explanations use the same ledger, comparison and optional
+    legacy ceiling. The caller commits its own conversation in this transaction.
+    """
+    stored = connection.execute(
+        "SELECT request, payload_sha256, status, reserved_at FROM model_call_reservations "
+        "WHERE strategy_id = ? AND call_id = ?",
+        (identity, call_id),
+    ).fetchone()
+    if stored is not None:
+        if str(stored[0]) != canonical:
+            raise ReservationConflict("call_id is already bound to a different request")
+        digest, status, reserved_at = map(str, stored[1:])
+    else:
+        if ceiling is not None:
+            count = connection.execute("SELECT COUNT(*) FROM model_call_reservations").fetchone()
+            if count is None or int(count[0]) >= ceiling:
+                raise ReservationLimit(
+                    f"this workspace has reached its granted model call budget ({ceiling})"
+                )
+        connection.execute(
+            "INSERT INTO model_call_reservations "
+            "(strategy_id, call_id, request, payload_sha256, status, reserved_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (identity, call_id, canonical, digest, status, reserved_at),
+        )
+    return {
+        "strategy_id": identity,
+        "call_id": call_id,
+        "request": json.loads(canonical),
+        "payload_sha256": digest,
+        "status": status,
+        "reserved_at": reserved_at,
+        "replayed": stored is not None,
+    }

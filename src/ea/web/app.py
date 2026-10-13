@@ -352,6 +352,20 @@ class UserStrategyMessageRequest(BaseModel):
     evidence_job_ids: list[str] | None = Field(default=None, max_length=2)
 
 
+class PaperExplanationMessageRequest(BaseModel):
+    """One explicitly approved explanation turn for one Paper instance.
+
+    It names the instance in the path, one exact call identity, the user's own
+    text and the budget they approved. It carries no evidence: the frozen snapshot
+    is read by the host from the instance's own files, never supplied by a browser.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    call_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    text: str = Field(min_length=1, max_length=4000)
+    approved_budget: ApprovedBudgetRequest
+
+
 class UserStrategyReviseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     call_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
@@ -569,6 +583,28 @@ def create_app(settings: WebSettings) -> Any:
         service,
         RadianSettings(RadianSettings.default_path()),
         quine=quine_bridge,
+    )
+
+    # A Paper explanation exists only where a desktop-owned Paper session does. It
+    # shares this workspace's one conversation database and model-call ledger, and
+    # owns no business write of any kind.
+    from ea.web.paper_explanation import (
+        PaperExplanationBudgetError,
+        PaperExplanationConflictError,
+        PaperExplanationError,
+        PaperExplanationNotFoundError,
+        PaperExplanationService,
+        PaperExplanationStateError,
+    )
+
+    paper_explanation_service = (
+        None
+        if settings.desktop_paper is None
+        else PaperExplanationService(
+            settings.desktop_paper,
+            workspace_root,
+            settings=RadianSettings(RadianSettings.default_path()),
+        )
     )
 
     @asynccontextmanager
@@ -1440,6 +1476,60 @@ def create_app(settings: WebSettings) -> Any:
         except (OSError, ValueError, RuntimeError) as caught:
             return error(409, "paper_stop_unconfirmed", str(caught))
 
+    def paper_explanation_refusal(caught: Exception) -> JSONResponse:
+        """One explanation owner's own refusal, mapped without being reinterpreted."""
+        if isinstance(caught, PaperExplanationNotFoundError):
+            return error(404, "paper_conversation_not_found", str(caught))
+        if isinstance(caught, PaperExplanationConflictError):
+            return error(409, "paper_conversation_conflict", str(caught))
+        if isinstance(caught, PaperExplanationBudgetError):
+            return error(422, "paper_budget_refused", str(caught))
+        if isinstance(caught, PaperExplanationStateError):
+            return error(409, "paper_conversation_unavailable", str(caught))
+        return error(422, "paper_explanation_refused", str(caught))
+
+    @app.get("/api/paper/instances/{request_id}/conversation")
+    def paper_explanation_conversation(request_id: str) -> object:
+        """The frozen evidence and recorded turns of one instance. No dispatch."""
+        if paper_explanation_service is None:
+            return error(
+                409, "desktop_session_required", "Start local simulation in the desktop app."
+            )
+        try:
+            retained = paper_explanation_service.state(request_id)
+            try:
+                context = paper_explanation_service.context(request_id)
+            except PaperExplanationError:
+                if not retained["calls"]:
+                    raise
+                return {
+                    **retained,
+                    "context": None,
+                    "context_error": "当前证据不可读；保留原回答的观测时间与范围。",
+                }
+            return {**retained, "context": context}
+        except (PaperExplanationError, OSError) as caught:
+            return paper_explanation_refusal(caught)
+
+    @app.post("/api/paper/instances/{request_id}/messages/stream")
+    def stream_paper_explanation_message(
+        request_id: str, request: PaperExplanationMessageRequest
+    ) -> object:
+        if paper_explanation_service is None:
+            return error(
+                409, "desktop_session_required", "Start local simulation in the desktop app."
+            )
+        return _conversation_stream(
+            paper_explanation_service.turn(
+                request_id,
+                call_id=request.call_id,
+                text=request.text,
+                approved_budget=request.approved_budget.model_dump(),
+            ),
+            failures=(PaperExplanationError, OSError),
+            refusal=paper_explanation_refusal,
+        )
+
     @app.get("/api/paper/overview")
     def paper_overview_route(run_id: str | None = None) -> object:
         try:
@@ -1771,7 +1861,12 @@ def create_app(settings: WebSettings) -> Any:
         except (UserStrategyError, OSError) as caught:
             return strategy_refusal(caught)
 
-    def _conversation_stream(source: Iterator[dict[str, Any]]) -> object:
+    def _conversation_stream(
+        source: Iterator[dict[str, Any]],
+        *,
+        failures: tuple[type[Exception], ...] = strategy_failures,
+        refusal: Callable[[Exception], JSONResponse] = strategy_refusal,
+    ) -> object:
         """One SSE response over a conversation turn, validated before it starts.
 
         The source's own first step is taken here, so every refusal this owner can
@@ -1784,8 +1879,8 @@ def create_app(settings: WebSettings) -> Any:
             first = next(source)
         except StopIteration:
             first = None
-        except strategy_failures as caught:
-            return strategy_refusal(caught)
+        except failures as caught:
+            return refusal(caught)
 
         def frames() -> Iterator[str]:
             try:
@@ -1793,7 +1888,7 @@ def create_app(settings: WebSettings) -> Any:
                     yield conversation_frame(first)
                 for item in source:
                     yield conversation_frame(item)
-            except strategy_failures as caught:
+            except failures as caught:
                 yield conversation_frame({"kind": "error", "error": str(caught)})
             finally:
                 close = getattr(source, "close", None)

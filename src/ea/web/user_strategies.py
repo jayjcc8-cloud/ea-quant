@@ -57,8 +57,11 @@ from ea.web.conversation import (
     TOOL_END,
     TOOL_ERROR,
     TOOL_START,
+    ReservationConflict,
+    ReservationLimit,
     checkpoints,
     event,
+    reserve_call,
     thread_config,
 )
 from ea.web.llm import (
@@ -894,53 +897,24 @@ class UserStrategyStore:
                 raise UserStrategyStateError(
                     "this conversation has not been migrated to the conversation database"
                 )
-            stored = connection.execute(
-                "SELECT request, payload_sha256, status, reserved_at "
-                "FROM model_call_reservations WHERE strategy_id = ? AND call_id = ?",
-                (strategy.user_strategy_id, call_id),
-            ).fetchone()
-            if stored is not None:
-                if str(stored[0]) != canonical:
-                    raise UserStrategyConflictError(
-                        "call_id is already bound to a different request"
-                    )
-                return {
-                    "strategy_id": strategy.user_strategy_id,
-                    "call_id": call_id,
-                    "request": request,
-                    "payload_sha256": str(stored[1]),
-                    "status": str(stored[2]),
-                    "reserved_at": str(stored[3]),
-                    "replayed": True,
-                }
-            if max_model_calls is not None:
-                counted = connection.execute(
-                    "SELECT COUNT(*) FROM model_call_reservations"
-                ).fetchone()
-                if counted is None or int(counted[0]) >= max_model_calls:
-                    raise UserStrategyBudgetError(
-                        "this workspace has reached its granted model call budget "
-                        f"({max_model_calls})"
-                    )
-            reserved_at = str(record.get("reserved_at") or strategy.updated_at)
-            digest = str(record.get("payload_sha256") or _digest(request))
-            status = str(record.get("status") or "pending")
-            connection.execute(
-                "INSERT INTO model_call_reservations "
-                "(strategy_id, call_id, request, payload_sha256, status, reserved_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (strategy.user_strategy_id, call_id, canonical, digest, status, reserved_at),
-            )
-            self._publish(connection, strategy)
-        return {
-            "strategy_id": strategy.user_strategy_id,
-            "call_id": call_id,
-            "request": request,
-            "payload_sha256": digest,
-            "status": status,
-            "reserved_at": reserved_at,
-            "replayed": False,
-        }
+            try:
+                result = reserve_call(
+                    connection,
+                    strategy.user_strategy_id,
+                    call_id,
+                    canonical,
+                    str(record.get("payload_sha256") or _digest(request)),
+                    str(record.get("status") or "pending"),
+                    str(record.get("reserved_at") or strategy.updated_at),
+                    ceiling=max_model_calls,
+                )
+            except ReservationConflict as error:
+                raise UserStrategyConflictError(str(error)) from None
+            except ReservationLimit as error:
+                raise UserStrategyBudgetError(str(error)) from None
+            if not result["replayed"]:
+                self._publish(connection, strategy)
+        return result
 
     def model_call_usage(self) -> dict[str, Any]:
         """Read-only: the model calls this workspace has reserved, and where."""

@@ -1,3 +1,4 @@
+import { ConversationInput } from './conversation-input'
 import { DraftEditor } from './draft-editor'
 /**
  * QUINE: one durable user strategy, the AI work the user approved, and its frozen runs.
@@ -1823,12 +1824,8 @@ function ChatPanel({ api, strategy, strategies, changed, proposalSlot, modelSend
       </details>}
     </div>
     <div className={`composer${awaitingRunDecision ? ' composer-paused' : ''}`}>
-      <div className="field">
-        <label htmlFor="strategy-message">消息</label>
-        <textarea id="strategy-message" rows={2} value={message} maxLength={4000}
-          placeholder="描述你想验证的问题…"
-          onChange={event => setMessage(event.target.value)} />
-      </div>
+      <ConversationInput id="strategy-message" label="消息" value={message} onChange={setMessage}
+        placeholder="描述你想验证的问题…" />
       <label className="check" htmlFor="strategy-approve">
         <input id="strategy-approve" type="checkbox" checked={approved}
           onChange={event => { setApproved(event.target.checked); setNote('') }} />
