@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ea.product.candidate import _configuration
+from ea.product.paper_health import is_paper_health_unavailable
 from ea.product.paper_run import resume_local_paper
 from ea.product.paper_session import read_paper_binding, read_paper_status, request_paper_stop
 from ea.strategy.package import read_regular
@@ -26,6 +27,62 @@ from ea.web.candidates import _uuid
 from ea.web.quine import QuineBridge
 from ea.web.settings import atomic_private_json
 from ea.web.simulation import prepare_simulation
+
+
+class PaperEvidenceConflictError(ValueError):
+    """The persisted binding does not prove this receipt's attempt. Fails closed."""
+
+
+#: The economic fields an explanation may be grounded in. Everything the engine
+#: publishes beyond this list — internal sequences, dispatch counters, raw reasons
+#: — is an implementation detail rather than evidence a reader may be told.
+_EXPLANATION_ECONOMICS = (
+    "cash",
+    "equity",
+    "position",
+    "currency",
+    "symbol",
+    "valuation_price",
+    "valuation_time",
+    "orders",
+    "fills",
+    "observed_fills",
+    "ledger_sequence",
+    "completed_round_trips",
+    "duplicate_facts",
+    "pending_facts",
+    "pending_orders",
+    "incomplete",
+    "risk_halted",
+    "kill_switch_halted",
+)
+#: The health fields an explanation may be told. ``trade_*`` is included only
+#: while the projection is current; a stale projection's permission is unknown.
+_EXPLANATION_HEALTH = (
+    "runtime_state",
+    "runtime_ready",
+    "recovery_state",
+    "reconciliation_state",
+    "market_state",
+    "broker_state",
+    "strategy_heartbeat_state",
+    "storage_state",
+    "kill_switch_state",
+    "operator_halt",
+    "reason_codes",
+    "process_alive",
+    "projection_stale",
+    "trade_blocking_guard",
+    "trade_reason",
+    "trade_permission_basis",
+    "trade_permission_unexercised_guards",
+)
+#: What a bounded explanation snapshot may never claim about one local run.
+_EXPLANATION_LIMITS = (
+    "行情来自本机生成的合成价格序列，不是外部或真实市场行情。",
+    "仅有读取时的经济快照：没有历史权益曲线、收益率、胜率或已实现盈亏。",
+    "AI 解释不是回测报告，也不是策略建议；不提供任何应用、实验或交易工具。",
+)
 
 
 class DesktopPaper:
@@ -238,6 +295,129 @@ class DesktopPaper:
             except (OSError, ValueError, RuntimeError, KeyError) as error:
                 result["detail"] = str(error)[:240]
             return result
+
+    def explanation_context(self, request_id: str) -> dict[str, Any]:
+        """One bounded, read-only evidence snapshot of a persisted local attempt.
+
+        This path never publishes, never signals, never resumes and never reaches
+        the AI path's ``get``: the receipt is read directly, the manifest must
+        prove this exact receipt, and the status/health are read through their own
+        verified readers. A conflict in that evidence fails closed; a missing
+        attempt or projection is stated as unavailable rather than guessed. Only
+        whitelisted scalars leave here, so no workspace path, log or credential can
+        reach a model.
+        """
+        with self._mutex:
+            self._check_directories()
+            record = self._record(request_id)
+            request = record["request"]
+            _uuid(record["source_job_id"])
+            context: dict[str, Any] = {
+                "schema": "ea.paper-explanation-evidence.v1",
+                "candidate_fingerprint": request["fingerprint"],
+                "lifetime": "application-open-only",
+                "stop_requested": record.get("stop_requested") is True,
+                "run_id": request_id,
+                "instance_name": request["name"],
+                "candidate_id": request["candidate_id"],
+                "source_job_id": record["source_job_id"],
+                "strategy": {
+                    "id": record["strategy"]["id"],
+                    "version": record["strategy"].get("version", 1),
+                },
+                "configuration_sha256": record["configuration_sha256"],
+                "market": {
+                    "kind": "local_synthetic_feed",
+                    "interval_seconds": request["interval_seconds"],
+                    "bounded_prices": len(request["prices"]),
+                },
+                "observed_at": datetime.now(UTC).isoformat(),
+                "state": "unknown",
+                "state_scope": "unknown",
+                "historical": False,
+                "terminal_durable": False,
+                "economics": {"available": False, "reason": "attempt_not_observed"},
+                "health": {"available": False, "reason": "attempt_not_observed"},
+                "limits": list(_EXPLANATION_LIMITS),
+            }
+            attempt = self.runs / request_id
+            if not attempt.exists() and not attempt.is_symlink():
+                return context
+            _, payload = read_paper_binding(attempt)
+            manifest = json.loads(payload)
+            candidate = manifest["candidate"]
+            if (
+                manifest["operation"] != "paper.start"
+                or candidate["candidate_id"] != request["candidate_id"]
+                or candidate["fingerprint"] != request["fingerprint"]
+                or manifest["prices"] != request["prices"]
+                or manifest["interval_seconds"] != request["interval_seconds"]
+                or candidate["configuration_sha256"] != record["configuration_sha256"]
+                or candidate["strategy_id"] != record["strategy"]["id"]
+                or candidate["strategy_version"] != record["strategy"].get("version", 1)
+            ):
+                raise PaperEvidenceConflictError(
+                    "runtime evidence does not prove this startup request"
+                )
+            try:
+                status = read_paper_status(self.runs / request_id)
+            except (OSError, ValueError, RuntimeError):
+                context["economics"]["reason"] = "status_unavailable"
+                context["health"]["reason"] = "status_unavailable"
+                return context
+            held = bool(status.get("lease_held"))
+            terminal_durable = status.get("terminal_durable") is True
+            historical = status.get("state") in {"stopped", "failed"}
+            context["state"] = status.get("state", "unknown")
+            context["terminal_durable"] = terminal_durable
+            context["historical"] = historical
+            health = self._explanation_health(status.get("health"), held=held and not historical)
+            context["state_scope"] = (
+                "historical"
+                if historical
+                else "current"
+                if health.get("permission_scope") == "observed"
+                else "stale"
+                if health.get("projection_stale") is True
+                else "unknown"
+            )
+            context["economics"] = {
+                "available": True,
+                "reason": None if held or historical else "observation_not_current",
+                "observed_at": status.get("updated_at"),
+                **{key: status.get(key) for key in _EXPLANATION_ECONOMICS if key in status},
+            }
+            context["health"] = health
+            return context
+
+    @staticmethod
+    def _explanation_health(slot: Any, *, held: bool) -> dict[str, Any]:
+        """Whitelist one health projection, never inferring permission from bytes."""
+        if slot is None:
+            return {"available": False, "reason": "health_not_published"}
+        if is_paper_health_unavailable(slot):
+            return {"available": False, "reason": "health_projection_unavailable"}
+        if type(slot) is not dict:
+            return {"available": False, "reason": "health_projection_unavailable"}
+        stale = (
+            slot.get("projection_stale") is not False
+            or not held
+            or slot.get("process_alive") is not True
+        )
+        document: dict[str, Any] = {
+            "available": True,
+            "reason": None if not stale else "projection_not_current",
+            "observed_at": slot.get("observed_at"),
+            **{key: slot.get(key) for key in _EXPLANATION_HEALTH if key in slot},
+        }
+        if not stale and "trade_permitted" in slot:
+            document["trade_permitted"] = slot["trade_permitted"]
+            document["permission_scope"] = "observed"
+        else:
+            document["runtime_ready"] = None
+            document["trade_permitted"] = None
+            document["permission_scope"] = "unknown"
+        return document
 
     def start(self, supplied: dict[str, Any]) -> dict[str, Any]:
         with self._mutex:

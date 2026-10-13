@@ -10,7 +10,8 @@ const id = '9fdc8d75-146c-4459-8772-02d6b5c15739'
 const prepared = { eligible: true, start_available: true, fingerprint: 'a'.repeat(64), blockers: [], source_job_id: id, configuration: { strategy: { id: 'bounded-long', version: 1 }, instrument: { venue: 'XNAS', symbol: 'AAPL' }, funding: { initial_cash: '10000', currency: 'USD' }, risk: {}, execution: {} } } as unknown as PaperPreparation
 const intent: PaperRequest = { request_id: id, candidate_id: id, fingerprint: 'a'.repeat(64), name: '测试实例', prices: [100], interval_seconds: 1 }
 const row: PaperInstance = { run_id: id, request: intent, source_job_id: id, state: 'running', terminal_confirmed: false, stop_requested: false, observed_at: '2026-01-02T00:00:00Z', created_at: '2026-01-02T00:00:00Z', overview: { available: true, run_id: id, state: 'running', cash: '9999.8', equity: '9999.8', fills: 2, position: '0', currency: 'USD', lease_held: true, health: { schema: 'ea.paper-health.v1', run_id: id, observed_at: '2026-01-02T00:00:00Z', process_alive: true, projection_stale: false, reconciliation_state: 'clean' } } }
-function adapter(overrides: Partial<PaperApi> = {}): PaperApi { return { list: vi.fn().mockResolvedValue({ available: true, instances: [] }), candidates: vi.fn().mockResolvedValue({ candidates: [{ candidate_id: id, status: 'ACCEPTED', projection: { strategy: { id: 'bounded-long' } } }] }), prepare: vi.fn().mockResolvedValue(prepared), start: vi.fn().mockResolvedValue(row), get: vi.fn().mockResolvedValue(row), stop: vi.fn().mockResolvedValue(row), events: vi.fn().mockResolvedValue({ available: true, run_id: id, events: [] }), ...overrides } }
+const explanationContext = { schema: 'ea.paper-explanation-evidence.v1', run_id: id, instance_name: '测试实例', candidate_id: id, source_job_id: id, strategy: { id: 'bounded-long', version: 1 }, configuration_sha256: 'a'.repeat(64), market: { kind: 'local_synthetic_feed', interval_seconds: 1, bounded_prices: 1 }, observed_at: '2026-01-02T00:00:00Z', state: 'running', state_scope: 'live' as const, historical: false, terminal_durable: false, economics: { available: true, reason: null }, health: { available: true, reason: null }, limits: [] }
+function adapter(overrides: Partial<PaperApi> = {}): PaperApi { return { list: vi.fn().mockResolvedValue({ available: true, instances: [] }), candidates: vi.fn().mockResolvedValue({ candidates: [{ candidate_id: id, status: 'ACCEPTED', projection: { strategy: { id: 'bounded-long' } } }] }), prepare: vi.fn().mockResolvedValue(prepared), start: vi.fn().mockResolvedValue(row), get: vi.fn().mockResolvedValue(row), stop: vi.fn().mockResolvedValue(row), events: vi.fn().mockResolvedValue({ available: true, run_id: id, events: [] }), conversation: vi.fn().mockResolvedValue({ run_id: id, context: explanationContext, messages: [], calls: [], budget: { max_model_calls: 1, max_backtests: 0 }, route: null }), explain: vi.fn(), ...overrides } }
 function mount(api: PaperApi) { render(<MemoryRouter initialEntries={[`/runs?candidate=${id}`]}><PaperWorkspace api={api} /></MemoryRouter>) }
 afterEach(() => { cleanup(); sessionStorage.clear() })
 
@@ -54,8 +55,8 @@ it('keeps an unconfirmed stop and missing economic metrics explicit', async () =
   expect((screen.getByRole('button', { name: '配置新实例' }) as HTMLButtonElement).disabled).toBe(true)
   expect(screen.getByText('均价、已实现 / 浮动盈亏与费用拆分未提供。')).toBeTruthy()
   expect(screen.getByText('clean', { selector: '.paper-metrics strong' })).toBeTruthy()
-  expect(screen.getByRole('complementary', { name: 'AI 运行助手' }).textContent).toContain('运行证据解释暂未接入')
-  expect(screen.queryByRole('textbox', { name: /提问/ })).toBeNull()
+  expect(screen.getByRole('complementary', { name: 'AI 运行解释' }).textContent).toContain('只读解释')
+  expect(screen.getByRole('textbox', { name: /提问/ })).toBeTruthy()
 })
 
 it('shows a disconnected observation as unknown and never retries start on mount', async () => {

@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import type { Candidate } from './candidates'
 import { PaperApiError, paperApi, type PaperApi, type PaperInstance, type PaperPreparation, type PaperRequest } from './paper-api'
 import { observationTime, paperObservation, paperStateLabels } from './paper-observation'
+import { PaperAi } from './paper-ai'
 import { PaperRuntimeStatus } from './paper-runtime-status'
 import type { PaperEvents, PaperOverview } from './radian-api'
 import { PaperStatus } from './paper-status'
@@ -21,9 +22,9 @@ function pendingRequest(): PaperRequest | null {
 }
 
 export function PaperWorkspace({ api = paperApi }: { api?: PaperApi }) {
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
   const [instances, setInstances] = useState<PaperInstance[]>([])
-  const [selected, setSelected] = useState('')
+  const [selected, setSelected] = useState(params.get('instance') ?? '')
   const [available, setAvailable] = useState<boolean | null>(null)
   const [disconnected, setDisconnected] = useState(false)
   const [error, setError] = useState('')
@@ -133,7 +134,7 @@ export function PaperWorkspace({ api = paperApi }: { api?: PaperApi }) {
       {disconnected && <p role="alert" className="notice error">{OFFLINE}</p>}
       {error && <p role="alert" className="notice error">{error}</p>}
       {pending && <div className="paper-unknown" role="status"><strong>启动结果尚未确认</strong><p>保留同一请求身份；不会自动重发，也不会新建第二个实例。</p><button onClick={() => void queryPending()}>查询原启动请求</button></div>}
-      {!!instances.length && <label className="paper-history">运行实例<select aria-label="运行实例" value={row?.run_id ?? ''} onChange={event => { setSelected(event.target.value); setTab('overview') }}>{instances.map(item => <option key={item.run_id} value={item.run_id}>{item.request.name} · {paperStateLabels[item.state] ?? '状态未知'} · {observationTime(item.created_at)}</option>)}</select></label>}
+      {!!instances.length && <label className="paper-history">运行实例<select aria-label="运行实例" value={row?.run_id ?? ''} onChange={event => { setSelected(event.target.value); setTab('overview'); setParams(previous => { const next = new URLSearchParams(previous); next.set('instance', event.target.value); return next }, { replace: true }) }}>{instances.map(item => <option key={item.run_id} value={item.run_id}>{item.request.name} · {paperStateLabels[item.state] ?? '状态未知'} · {observationTime(item.created_at)}</option>)}</select></label>}
       {(configure || !instances.length) && !pending && <section className="paper-setup" aria-label="本地模拟配置"><header><h2>从研究候选开始</h2><Link to="/candidates">查看候选与人工决定 ↗</Link></header><p>先完成成功来源研究和后续时间窗验证，再人工接受候选。启动始终需要单独确认。</p><label>选择研究候选<select aria-label="选择研究候选" disabled={busy || active} value={candidateId} onChange={event => { setCandidateId(event.target.value); setConfirmed(false); setError('') }}><option value="">请选择已保存的候选</option>{candidates.map(item => <option key={item.candidate_id} value={item.candidate_id}>{item.projection?.strategy.id ?? '证据不可用'} · {item.status} · {item.candidate_id.slice(0, 8)}</option>)}</select></label>{!candidates.length && <p>还没有候选。<Link to="/strategies">返回研究</Link>，完成 source 与 holdout 后创建候选。</p>}
         {preparation && <><div className="paper-fixed"><h3>固定研究配置</h3><dl><div><dt>策略版本</dt><dd>{preparation.configuration.strategy.id} v{preparation.configuration.strategy.version ?? 1}</dd></div><div><dt>模拟标的</dt><dd>{preparation.configuration.instrument.venue}:{preparation.configuration.instrument.symbol}</dd></div><div><dt>初始模拟资金</dt><dd>{preparation.configuration.funding.initial_cash} {preparation.configuration.funding.currency}</dd></div><div><dt>来源报告</dt><dd><Link to={`/backtests/${preparation.source_job_id}`}>打开正式研究报告 ↗</Link></dd></div></dl><details><summary>策略参数、成本与风险配置</summary><pre>{JSON.stringify({ parameters: preparation.configuration.strategy.parameters, execution: preparation.configuration.execution, risk: preparation.configuration.risk }, null, 2)}</pre></details></div>{!preparation.eligible && <p role="alert">{preparation.blockers.map(item => blockers[item] ?? item).join('；')}</p>}{preparation.small_sample_warning && <p className="paper-caution">证据为短样本，仅可验证流程，不代表策略稳健性。</p>}<div className="paper-fields"><label>实例名<input value={name} maxLength={80} onChange={event => setName(event.target.value)} /></label><label>生成价格序列<input value={prices} onChange={event => setPrices(event.target.value)} placeholder="例如 100, 101, 99" /><small>本机循环生成，非外部实时行情</small></label><label>行情间隔（秒）<input type="number" min="0.01" max="10" step="0.01" value={interval} onChange={event => setInterval(event.target.value)} /></label></div><label className="paper-confirm"><input type="checkbox" checked={confirmed} disabled={!preparation.eligible || active} onChange={event => setConfirmed(event.target.checked)} />我确认以以上固定版本与生成行情启动本地模拟；停止不代表平仓。</label><button className="paper-primary" disabled={busy || active || !confirmed || !preparation.eligible || !preparation.start_available || disconnected} onClick={() => void start()}>确认启动本地模拟</button></>}
       </section>}
@@ -146,7 +147,9 @@ export function PaperWorkspace({ api = paperApi }: { api?: PaperApi }) {
         <footer className="paper-footnote"><span>{row.terminal_confirmed ? '终态与租约释放已确认；保留原实例历史。' : '停止请求不等于停止确认；未确认时禁止启动另一实例。'}</span><span>停止仅截断新决策并排空已发出事实，不平仓。</span>{row.detail && <details><summary>运行诊断</summary><p>{row.detail}</p></details>}</footer>
       </>}
     </div>
-    <aside className="paper-ai" aria-label="AI 运行助手"><header><span className="paper-ai-spark">✦</span><h2>AI 运行助手</h2></header><p className="paper-ai-context">{row ? `当前上下文：${row.request.name}` : '当前上下文：尚未启动本地模拟'}</p><div className="paper-ai-note"><h3>运行证据解释暂未接入</h3><p>这里可以查看真实状态与已有事件。当前尚不能围绕持续运行证据发问、诊断或提出操作建议。</p><p>来源研究报告仅解释已完成的研究结果。</p>{row ? <Link to={`/backtests/${row.source_job_id}`}>返回来源研究 ↗</Link> : <Link to="/strategies">继续研究 ↗</Link>}</div><div className="paper-ai-boundary"><strong>此运行的边界</strong><p>本地生成行情、模拟资金、固定候选版本。应用退出前请求停止并等待确认。</p><p>没有外部账户、后台续跑、平仓或实时 AI 诊断。</p></div></aside>
+    {row
+      ? <PaperAi key={row.run_id} runId={row.run_id} instanceName={row.request.name} sourceJobId={row.source_job_id} api={api} />
+      : <aside className="paper-ai" aria-label="AI 运行助手"><header><span className="paper-ai-spark">✦</span><h2>AI 运行助手</h2></header><p className="paper-ai-context">当前上下文：尚未启动本地模拟</p><div className="paper-ai-note"><h3>选择已存在的实例后可用</h3><p>解释只针对一个已经存在的本地模拟实例，并基于后端冻结的运行证据快照。</p><Link to="/strategies">继续研究 ↗</Link></div></aside>}
   </div>
 }
 function Position({ overview }: { overview?: PaperOverview }) {

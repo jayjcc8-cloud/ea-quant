@@ -22,9 +22,8 @@
  * rather than widening the page. Nothing in this file draws a chart: the numbers
  * are the data, and there is no fabricated series behind them.
  *
- * The AI column is deliberately not a chat. Its text says what it cannot do, so
- * it is styled as one quiet card with its own boundary note — there is no
- * composer, no suggestion chip and no empty message list to imply otherwise.
+ * The AI column explains one selected instance using the shared conversation
+ * input and stream. Its evidence scope and observation times remain visible.
  */
 
 .paper-workspace {
@@ -527,3 +526,23 @@
 
 .paper-workspace .paper-runtime-details > summary::before { content: "›"; display: inline-block; margin-right: 7px; font-size: 16px; line-height: 1; }
 .paper-workspace .paper-runtime-details[open] > summary::before { transform: rotate(90deg); }
+
+/* Runtime explanation uses the same header / scroller / composer structure as research. */
+.paper-workspace .paper-ai.strategy-chat { display: flex; flex-direction: column; padding: 0; position: sticky; top: 16px; max-height: calc(100dvh - 80px); }
+.paper-ai .chat-head { padding: 12px 14px; display: flex; justify-content: space-between; border-bottom: 1px solid var(--paper-line); }
+.paper-ai .chat-head button { padding: 4px 7px; font-size: 12px; min-height: 28px; }
+.paper-ai .paper-ai-context { margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--paper-line); }
+.paper-ai .chat-body { overflow: auto; min-height: 0; padding: 12px 14px; }
+.paper-ai .paper-ai-evidence { margin-bottom: 14px; font-size: 12px; color: var(--paper-ink-soft); }
+.paper-ai .paper-ai-evidence p { margin: 4px 0; }
+.paper-ai .paper-ai-thread { list-style: none; margin: 0; padding: 0; }
+.paper-ai .message { margin: 12px 0; overflow-wrap: anywhere; }
+.paper-ai .message-role { font-size: 12px; font-weight: 600; color: var(--paper-ink-soft); }
+.paper-ai .message-assistant { padding-left: 10px; border-left: 2px solid var(--paper-accent); }
+.paper-ai .paper-ai-answer-text, .paper-ai .live-answer { white-space: pre-wrap; font-size: 13px; line-height: 1.65; }
+.paper-ai .paper-ai-message-source { margin-top: 8px; font-size: 11px; color: var(--paper-ink-soft); }
+.paper-ai .composer { flex: 0 0 auto; padding: 12px 14px; border-top: 1px solid var(--paper-line); }
+.paper-ai .composer textarea { display: block; resize: vertical; width: 100%; min-height: 68px; max-height: 180px; margin: 6px 0 10px; padding: 8px; background: var(--paper-surface); color: var(--paper-ink); border: 1px solid var(--paper-field-line); border-radius: 6px; font: inherit; font-size: 13px; }
+.paper-ai .composer label, .paper-ai .composer .paper-caution { font-size: 12px; }
+.paper-ai .composer .paper-caution { margin: 8px 0 0; }
+@media (max-width: 1100px) { .paper-workspace .paper-ai.strategy-chat { position: static; max-height: 680px; } }
