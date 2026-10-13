@@ -181,3 +181,33 @@ def test_a_saved_old_turn_keeps_its_original_approval_on_replay(
     )
     assert replayed == strategy
     assert service._turn_remaining(replayed, "old-turn") == 5
+
+
+def test_resumed_turn_is_selected_whole_across_intervening_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: list[WebService]
+) -> None:
+    service = _stack(tmp_path, monkeypatch, started, Streaming([]))
+    strategy = _create(service)
+    root, child = _call("A"), _call("A-child")
+    child["request"]["turn_id"] = "A"
+    intervening = tuple(_call(f"B-{i}") for i in range(8))
+    messages = tuple(
+        _message(
+            i * 2 + offset, role=role, text=f"{role} {call['call_id']}", call_id=call["call_id"]
+        )
+        for i, call in enumerate((root, *intervening))
+        for offset, role in enumerate(("user", "model"))
+    )
+    messages = (
+        *messages,
+        _message(18, role="model", text="A explanation", call_id="A-child"),
+        _message(19, role="user", text="current", call_id="current"),
+    )
+    strategy = replace(strategy, calls=(root, *intervening, child), messages=messages)
+    history, omitted = service._recorded_turns(strategy, "current")
+    texts = [item.text for item in history]
+    assert omitted
+    assert "user B-0" not in texts and "model B-0" not in texts
+    # The most recently continued turn includes its original prompt and answer;
+    # selected messages also retain their actual persisted chronological order.
+    assert texts == [entry["text"] for entry in messages if entry["call_id"] != "B-0"]

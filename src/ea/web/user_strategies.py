@@ -2491,33 +2491,34 @@ class UserStrategyService:
         is always carried whole and is never part of the bounded suffix.
         """
         turns = cls._turn_of(strategy)
-        grouped: list[list[dict[str, Any]]] = []
-        keys: list[str] = []
+        # A paused proposal may resume after other turns. Collect every message
+        # of its root, ordered by last activity, before applying either bound.
+        grouped: dict[str, Documents] = {}
         for entry in strategy.messages[:-1]:
-            resolved = str(entry.get("call_id") or "")
-            key = turns.get(resolved, resolved)
-            if grouped and keys[-1] == key:
-                grouped[-1].append(entry)
-            else:
-                keys.append(key)
-                grouped.append([entry])
-        selected: list[list[dict[str, Any]]] = []
+            call_id = str(entry.get("call_id") or "")
+            key = turns.get(call_id, call_id)
+            group = grouped.pop(key, [])
+            group.append(entry)
+            grouped[key] = group
+        selected: set[str] = set()
         used = 0
-        for group in reversed(grouped):
+        for key, group in reversed(grouped.items()):
             size = sum(len(str(entry.get("text") or "")) for entry in group)
             if len(selected) >= _MAX_HISTORY_TURNS or used + size > _MAX_HISTORY_CHARS:
                 break
-            selected.append(group)
+            selected.add(key)
             used += size
-        selected.reverse()
         omitted = len(selected) < len(grouped)
         history: History = []
-        for group in selected:
-            for entry in group:
-                role = "user" if entry.get("role") == "user" else "assistant"
-                text = str(entry.get("text") or "")
-                if text:
-                    history.append(ModelMessage(role=cast(Any, role), text=text))
+        # Keep the original message chronology even when selected turns interleave.
+        for entry in strategy.messages[:-1]:
+            call_id = str(entry.get("call_id") or "")
+            if turns.get(call_id, call_id) not in selected:
+                continue
+            role = "user" if entry.get("role") == "user" else "assistant"
+            text = str(entry.get("text") or "")
+            if text:
+                history.append(ModelMessage(role=cast(Any, role), text=text))
         history.append(ModelMessage(role="user", text=message))
         return history, omitted
 
