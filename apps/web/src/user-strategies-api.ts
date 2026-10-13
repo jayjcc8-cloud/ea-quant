@@ -401,10 +401,8 @@ export type UserStrategyConversationPending = {
 }
 
 /**
- * What one conversation is waiting for and what it may still spend, read from the
- * host rather than from a checkpoint: a reloaded page restores exactly this.
- * `remaining_model_calls` counts the workspace's own shared reservation ledger, so
- * it is the same bound every other conversation in this workspace is held to.
+ * Host-owned pending state, new-turn limit and cumulative recorded reservations.
+ * The cumulative count is usage evidence, not a remaining provider balance.
  */
 export type UserStrategyConversation = {
   strategy_id: string
@@ -413,9 +411,8 @@ export type UserStrategyConversation = {
   preview: UserStrategyPreview | null
   open_proposals: string[]
   budget: {
-    max_model_calls: number
+    max_model_calls_per_turn: number
     reserved_model_calls: number
-    remaining_model_calls: number
     max_backtests: number
   }
 }
