@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -58,9 +59,16 @@ def install(bundle: Path, root: Path) -> tuple[Path, dict[str, Any]]:
     return release, manifest
 
 
-def package_bytes(release: Path) -> dict[str, bytes]:
-    with zipfile.ZipFile(next(release.glob("*.whl"))) as wheel:
-        return {name: wheel.read(name) for name in wheel.namelist() if name.startswith("ea/")}
+def assert_reports(request: Callable[[str], bytes], reports: Mapping[str, bytes]) -> None:
+    """Both installed readers must expose each completed writer's exact formal evidence."""
+    for job, expected in reports.items():
+        document = json.loads(request(f"/api/backtests/{job}"))
+        assert document["job_id"] == job and document["status"] == "succeeded"
+        assert document["report_ready"] is True
+        assert document["report_sha256"] == hashlib.sha256(expected).hexdigest()
+        assert request(f"/api/backtests/{job}/report") == expected
+        assert request(f"/api/backtests/{job}/artifacts/report.json") == expected
+        assert b"<html" in request(f"/backtests/{job}").lower()
 
 
 def snapshot(workspace: Path) -> dict[str, str]:
@@ -76,8 +84,9 @@ def accept(old_bundle: Path, new_bundle: Path, root: Path, systemd: bool) -> Non
     root.mkdir(parents=True)
     old, old_manifest = install(old_bundle, root)
     new, new_manifest = install(new_bundle, root)
-    # This specific rollback is safe because PPV-02 does not change any installed EA state owner.
-    assert package_bytes(old) == package_bytes(new), "rollback requires unchanged EA state code"
+    # Probe only synthetic state in this new isolated root. Whole-package byte equality was
+    # sufficient for the original PPV-01/02 pair, but is not a persistent-format contract.
+    # The old baseline stays pinned; both real readers must accept both writers below.
     shutil.copyfile(new / "runtime.py", root / "runtime.py")
     shutil.copytree(new / "scenarios", root / "inputs/scenarios")
     (root / "workspace").mkdir()
@@ -176,10 +185,29 @@ def accept(old_bundle: Path, new_bundle: Path, root: Path, systemd: bool) -> Non
         assert process is not None
         return process.pid
 
-    def report_equal(job: str, expected: bytes) -> None:
-        assert request(f"/api/backtests/{job}/report") == expected
-        assert request(f"/api/backtests/{job}/artifacts/report.json") == expected
-        assert b"<html" in request(f"/backtests/{job}").lower()
+    def run_job(request_id: str) -> tuple[str, bytes]:
+        validated = json.loads(request("/api/scenarios/bounded-long.yaml/validate", {}))
+        job = json.loads(
+            request(
+                "/api/backtests",
+                {
+                    "scenario_id": "bounded-long.yaml",
+                    "input_identity": validated["input_identity"],
+                    "request_id": request_id,
+                },
+            )
+        )["job_id"]
+
+        def completed() -> bool:
+            document = json.loads(request(f"/api/backtests/{job}"))
+            (root / "last-job.json").write_text(json.dumps(document, indent=2) + "\n")
+            assert document["status"] not in {"failed", "interrupted", "cancelled", "unknown"}, (
+                document
+            )
+            return bool(document["status"] == "succeeded")
+
+        wait_for(completed)
+        return job, request(f"/api/backtests/{job}/report")
 
     evidence: dict[str, Any] = {
         "old_commit": old_manifest["commit"],
@@ -210,43 +238,42 @@ def accept(old_bundle: Path, new_bundle: Path, root: Path, systemd: bool) -> Non
         initial_pid = pid()
         health = json.loads(request("/api/health"))
         assert health["offline_only"] is True
-        validated = json.loads(request("/api/scenarios/bounded-long.yaml/validate", {}))
-        job = json.loads(
-            request(
-                "/api/backtests",
-                {
-                    "scenario_id": "bounded-long.yaml",
-                    "input_identity": validated["input_identity"],
-                    "request_id": "ppv02-installed-acceptance",
-                },
-            )
-        )["job_id"]
-
-        def completed() -> bool:
-            document = json.loads(request(f"/api/backtests/{job}"))
-            (root / "last-job.json").write_text(json.dumps(document, indent=2) + "\n")
-            assert document["status"] not in {"failed", "interrupted"}, document
-            return bool(document["status"] == "succeeded")
-
-        wait_for(completed)
-        report = request(f"/api/backtests/{job}/report")
-        report_equal(job, report)
+        job, report = run_job("ppv02-installed-acceptance-old-writer")
+        reports = {job: report}
+        assert_reports(request, reports)
         stop()
         state = snapshot(root / "workspace")
         start()
         assert pid() != initial_pid
-        report_equal(job, report)
+        assert_reports(request, reports)
         stop()
         assert snapshot(root / "workspace") == state
         select(new, new_manifest)
         start()
-        report_equal(job, report)
+        assert_reports(request, reports)
         stop()
         assert snapshot(root / "workspace") == state
+        # Exercise the new writer as well: reading old output alone proves no downgrade
+        # guarantee for writes made after activation. Keep the old files byte-identical.
+        start()
+        new_job, new_report = run_job("ppv02-installed-acceptance-new-writer")
+        assert new_job != job
+        reports[new_job] = new_report
+        assert_reports(request, reports)
+        stop()
+        written_state = snapshot(root / "workspace")
+        assert all(written_state.get(path) == digest for path, digest in state.items())
+        state = written_state
         select(old, old_manifest)
         start()
-        report_equal(job, report)
+        assert_reports(request, reports)
         evidence["installed_restart_activation_rollback"] = "VERIFIED"
+        evidence["compatibility_scope"] = (
+            "completed bounded-long.yaml jobs written by both pinned releases; "
+            "not arbitrary new research formats or migrated state"
+        )
+        evidence["new_writer_job_id"] = new_job
+        evidence["new_writer_report_sha256"] = hashlib.sha256(new_report).hexdigest()
         evidence["job_id"] = job
         evidence["report_sha256"] = hashlib.sha256(report).hexdigest()
         if systemd:
@@ -257,7 +284,7 @@ def accept(old_bundle: Path, new_bundle: Path, root: Path, systemd: bool) -> Non
             ctl("kill", "--kill-whom=main", "--signal=SIGKILL")
             wait_for(lambda: pid() not in (0, before) and available())
             assert int(ctl("show", "--property=NRestarts", "--value")) >= 1
-            report_equal(job, report)
+            assert_reports(request, reports)
 
             # systemd versions may retain Result=signal when the next start is rate-limited.
             # Require the actual terminal state and exhausted restart count, not that label.
@@ -296,7 +323,7 @@ def accept(old_bundle: Path, new_bundle: Path, root: Path, systemd: bool) -> Non
             os.kill(process.pid, signal.SIGKILL)
             process.wait(timeout=10)
             start()
-            report_equal(job, report)
+            assert_reports(request, reports)
             stop()
             evidence["systemd_supervision"] = "NOT_YET_HOST_VERIFIED (direct-process mode)"
         assert snapshot(root / "workspace") == state

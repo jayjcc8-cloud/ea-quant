@@ -306,6 +306,9 @@ def test_full_quality_path_runs_one_coverage_pytest(
     assert len(pytest_commands) == 1
     assert "--cov=ea" in pytest_commands[0]
     assert "--cov-branch" in pytest_commands[0]
+    assert "-vv" in pytest_commands[0]
+    assert "--durations=25" in pytest_commands[0]
+    assert "faulthandler_timeout=120" in pytest_commands[0]
     assert reports and reports[0].name == "coverage.json"
 
 
