@@ -468,30 +468,33 @@ def resume_local_paper(run_dir: Path) -> dict[str, Any]:
     try:
         verified = store.verify_recovery_attempt(manifest)
         if type(verified) is VerifiedTerminalRecoveryBinding:
-            store.recover_terminal_attempt(verified)
-            reason, pending_orders, pending_facts = _paper_terminal_counts(
-                verified.terminal_record.canonical_payload
-            )
-            # A capacity stop closes the attempt durably, but an unresolved pending
-            # order or fact is an operator attention item, never a recovered
-            # economic state: nothing here continues or rewrites the attempt.
-            document: dict[str, Any] = {
-                "state": "terminal",
-                "run_id": binding.reference.run_id.value,
-                "reconciliation_required": (
-                    reason == PAPER_CAPACITY_EXHAUSTED_REASON
-                    and (pending_orders > 0 or pending_facts > 0)
-                ),
-                "outbound_intents": [],
-                "incomplete_outbound_intents": [],
-            }
-            if reason == PAPER_CAPACITY_EXHAUSTED_REASON:
-                document.update(
-                    reason=reason,
-                    pending_orders=pending_orders,
-                    pending_facts=pending_facts,
+            recovered_terminal = store.recover_terminal_attempt(verified)
+            try:
+                reason, pending_orders, pending_facts = _paper_terminal_counts(
+                    verified.terminal_record.canonical_payload
                 )
-            return document
+                # A capacity stop closes the attempt durably, but an unresolved pending
+                # order or fact is an operator attention item, never a recovered
+                # economic state: nothing here continues or rewrites the attempt.
+                document: dict[str, Any] = {
+                    "state": "terminal",
+                    "run_id": binding.reference.run_id.value,
+                    "reconciliation_required": (
+                        reason == PAPER_CAPACITY_EXHAUSTED_REASON
+                        and (pending_orders > 0 or pending_facts > 0)
+                    ),
+                    "outbound_intents": [],
+                    "incomplete_outbound_intents": [],
+                }
+                if reason == PAPER_CAPACITY_EXHAUSTED_REASON:
+                    document.update(
+                        reason=reason,
+                        pending_orders=pending_orders,
+                        pending_facts=pending_facts,
+                    )
+                return document
+            finally:
+                recovered_terminal._finish()
         if type(verified) is VerifiedIncompleteRecoveryBinding:
             recovered = store.recover_incomplete_attempt(verified)
             journal = reopen_posix_audit_journal(recovered.audit)

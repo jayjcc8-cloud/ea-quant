@@ -37,7 +37,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -147,7 +147,11 @@ _CALL_APPROVAL = 1
 #: The most model calls one explicitly initiated new conversation turn may make.
 #: This is a per-turn bound, not a workspace-lifetime one: a workspace that has
 #: made many calls still admits the next turn up to this many, and no further.
-_TURN_MAX_CALLS = 4
+_TURN_MAX_CALLS = 4  # Legacy explicit approvals only.
+# Reuse the existing HTTP task ceiling as a defensive continuous-dispatch bound.
+# It is not completion or a user-entered allowance. Reaching it pauses; an explicit
+# continuation can proceed from saved tool results, never resend unknown calls.
+_INTERACTIVE_MAX_DISPATCHES = 100
 _DEFAULT_BUDGET = {"max_model_calls": 10, "max_backtests": 5}
 #: What a request says when the bounded history dropped older turns from it.
 _OMITTED_HISTORY_NOTE = (
@@ -210,20 +214,20 @@ _SYSTEM_PROMPT = (
     "user explicitly asks for one in this message; never ask for a separate confirmation of "
     "your own. You never propose changes to strategy identity, instruments, permissions, "
     "model routing, budgets, data or frozen history. You cannot run anything, and nothing "
-    "you say is a verified result: say plainly that a run is needed."
+    "you say is a verified result: say plainly that a run is needed. Use discover_resources "
+    "and inspect_research_input to check available inputs before proposing changes. "
+    "Read only the selected official experiments with read_experiments; model-generated "
+    "comparisons or statistics are not host evidence."
 )
 #: What a conversation is told when the strategy has no scenario yet. There is no
 #: draft to describe and nothing to change, so this turn clarifies the intent only.
 _INTENT_SYSTEM_PROMPT = (
-    "You are the research assistant inside one local backtest workspace. This user "
-    "strategy is an idea that has no scenario bound to it yet, so nothing about it is "
-    "executable: there is no strategy, instrument, funding, parameter, dataset or "
-    "registered scenario to describe, and nothing can be run. Answer in plain text and "
-    "help the user say what they mean, which market and data the idea needs, which "
-    "assumptions matter and what is still missing before it could be tested. You have no "
-    "tool here and cannot propose, apply or run anything; never suggest that a change was "
-    "made. Say plainly that the user must choose a scenario before anything can be "
-    "prepared or run."
+    "You are the research assistant inside one local backtest workspace. This strategy "
+    "is an unbound idea. Use discover_resources to find supported templates and actual "
+    "catalogued data, and inspect_research_input to validate a specific pairing. These "
+    "are read-only tools: they never bind a scenario, import data, edit or run anything. "
+    "Do not substitute built-in sample data for missing data. Explain missing inputs "
+    "and ask the user to choose a binding through the workspace before proposing changes."
 )
 #: The one discriminator a stored draft carries when it is not executable.
 _INTENT_KIND = "intent"
@@ -354,6 +358,10 @@ def _entry(items: tuple[dict[str, Any], ...], key: str, value: str) -> dict[str,
 #: no live, Paper or broker tool, and no tool a conversation can add.
 _DESCRIBE_DATA_TOOL = "describe_data"
 _EXPERIMENT_STATUS_TOOL = "experiment_status"
+_DISCOVER_TOOL = "discover_resources"
+_INSPECT_INPUT_TOOL = "inspect_research_input"
+_READ_EXPERIMENTS_TOOL = "read_experiments"
+_DOMAIN_READ_TOOLS = {_DISCOVER_TOOL, _INSPECT_INPUT_TOOL, _READ_EXPERIMENTS_TOOL}
 #: The one instruction that turns verified readings into an answer. It grants nothing:
 #: the readings it names are the host's own, and the model is told to state no more.
 _EXPLAIN_INSTRUCTION = (
@@ -436,6 +444,15 @@ def _is_canonical_conversation(legacy: Any, strategy: UserStrategy) -> bool:
     return all(
         canonical[field] == legacy.get(field)
         for field in ("user_strategy_id", "messages", "calls", "proposals")
+    )
+
+
+def _task_usage(strategy: UserStrategy, turn: str) -> int:
+    return sum(
+        1
+        for item in strategy.calls
+        if (item.get("call_id") == turn or (item.get("request") or {}).get("turn_id") == turn)
+        and item.get("status") in _RESERVED_CALL_STATUSES
     )
 
 
@@ -611,6 +628,7 @@ class UserStrategy:
     #: one a reloaded workspace reads — a checkpoint is never the only copy of a
     #: decision the user still has to make.
     conversation_confirmation: dict[str, Any] | None = None
+    model_profile_id: str | None = None
 
     def document(self) -> dict[str, Any]:
         return {
@@ -620,6 +638,7 @@ class UserStrategy:
             "updated_at": self.updated_at,
             "name": self.name,
             "intent": self.intent,
+            **({"model_profile_id": self.model_profile_id} if self.model_profile_id else {}),
             "draft": self.draft.document(),
             "history": [item.document() for item in self.history],
             "messages": [dict(item) for item in self.messages],
@@ -651,6 +670,7 @@ class UserStrategy:
             updated_at=str(document["updated_at"]),
             name=str(document["name"]),
             intent=str(document["intent"]),
+            model_profile_id=document.get("model_profile_id"),
             draft=_decode_draft(document["draft"]),
             history=tuple(_decode_draft(item) for item in document.get("history") or []),
             messages=tuple(dict(item) for item in document.get("messages") or []),
@@ -897,6 +917,24 @@ class UserStrategyStore:
                 raise UserStrategyStateError(
                     "this conversation has not been migrated to the conversation database"
                 )
+            current = self._document(connection, strategy.user_strategy_id)
+            assert current is not None
+            turn = str((request or {}).get("turn_id") or call_id)
+            root = _entry(current.calls, "call_id", turn) or record
+            task = root.get("task")
+            if task and _entry(current.calls, "call_id", call_id) is None:
+                if (
+                    task["stop_reason"] == "cancelled"
+                    or _task_usage(current, turn) >= task["limit"]
+                ):
+                    raise UserStrategyBudgetError(
+                        "task has no approved requests left or was cancelled"
+                    )
+                if any(
+                    item["call_id"] not in {c["call_id"] for c in strategy.calls}
+                    for item in current.calls
+                ):
+                    raise UserStrategyConflictError("conversation changed before reservation")
             try:
                 result = reserve_call(
                     connection,
@@ -949,14 +987,137 @@ class UserStrategyStore:
         finally:
             os.close(directory)
 
+    def update_task(
+        self,
+        identity: str,
+        turn: str,
+        *,
+        status: str | None = None,
+        reason: str | None = None,
+        grant_id: str | None = None,
+        total: int | None = None,
+        continue_execution: bool = False,
+    ) -> UserStrategy:
+        """Change a root-call grant/status in the existing document transaction."""
+        with self._write() as connection:
+            strategy = self._document(connection, identity)
+            if strategy is None:
+                raise UserStrategyStateError("conversation not found")
+            root = _entry(strategy.calls, "call_id", turn)
+            if root is None or not isinstance(root.get("task"), dict):
+                raise UserStrategyBudgetError(
+                    "legacy approval cannot be upgraded silently; start a new task"
+                )
+            task = dict(root["task"])
+            if grant_id is not None:
+                grants = list(task["grants"])
+                existing = _entry(tuple(grants), "grant_id", grant_id)
+                if existing is not None:
+                    if (continue_execution and existing.get("action") != "continue") or (
+                        not continue_execution and existing["total"] != total
+                    ):
+                        raise UserStrategyConflictError("grant_id is bound to a different total")
+                    return strategy
+                if task["status"] != "awaiting_budget":
+                    raise UserStrategyBudgetError(
+                        "only an exhausted task can receive additional requests"
+                    )
+                if continue_execution:
+                    members = [
+                        c
+                        for c in strategy.calls
+                        if c["call_id"] == turn or (c.get("request") or {}).get("turn_id") == turn
+                    ]
+                    if any(c["status"] in {"unknown", "dispatched", "pending"} for c in members):
+                        raise UserStrategyStateError("an unresolved dispatch cannot be continued")
+                    total = _task_usage(strategy, turn) + _INTERACTIVE_MAX_DISPATCHES
+                    task["mode"] = "interactive"
+                if (
+                    type(total) is not int
+                    or total <= task["limit"]
+                    or (not continue_execution and total > 100)
+                ):
+                    raise UserStrategyBudgetError(
+                        "choose a larger explicit task total, at most 100 requests"
+                    )
+                task.update(
+                    limit=total,
+                    grants=[
+                        *grants,
+                        {
+                            "grant_id": grant_id,
+                            "total": total,
+                            "at": _now(),
+                            **({"action": "continue"} if continue_execution else {}),
+                        },
+                    ],
+                )
+            elif task["stop_reason"] == "cancelled":
+                return strategy
+            if status is not None:
+                task.update(status=status, stop_reason=reason)
+            calls = tuple(
+                {**item, "task": task} if item["call_id"] == turn else item
+                for item in strategy.calls
+            )
+            pending = strategy.conversation_confirmation
+            if task["stop_reason"] == "cancelled" and pending and pending.get("turn_id") == turn:
+                pending = None
+            updated = replace(
+                strategy, calls=calls, conversation_confirmation=pending, updated_at=_now()
+            )
+            self._publish(connection, updated)
+            return updated
+
+    def dispatch_task_call(self, identity: str, call: str) -> UserStrategy:
+        """Cancellation and dispatch serialize on the same SQLite transaction."""
+        with self._write() as connection:
+            strategy = self._document(connection, identity)
+            if strategy is None:
+                raise UserStrategyStateError("conversation not found")
+            record = _entry(strategy.calls, "call_id", call) or {}
+            turn = str((record.get("request") or {}).get("turn_id") or call)
+            root = _entry(strategy.calls, "call_id", turn) or {}
+            if (root.get("task") or {}).get("stop_reason") == "cancelled":
+                raise UserStrategyBudgetError("task cancelled before dispatch")
+            if record.get("status") != "pending":
+                raise UserStrategyStateError("call already dispatched; it cannot be sent again")
+            updated = replace(
+                strategy,
+                updated_at=_now(),
+                calls=tuple(
+                    {**item, "status": "dispatched", "dispatched_at": _now()}
+                    if item["call_id"] == call
+                    else item
+                    for item in strategy.calls
+                ),
+            )
+            self._publish(connection, updated)
+            return updated
+
     def _update_conversation(self, strategy: UserStrategy) -> bool:
         """Write the committed row, or report that this strategy has none."""
         if not self.conversation_db_path.exists():
             return False
         with self._write() as connection:
-            if self._document(connection, strategy.user_strategy_id) is None:
+            current = self._document(connection, strategy.user_strategy_id)
+            if current is None:
                 return False
-            self._publish(connection, strategy)
+            # A late provider result may not overwrite a concurrent cancel/topup.
+            tasks = {item["call_id"]: item["task"] for item in current.calls if "task" in item}
+            calls = tuple(
+                {**item, "task": tasks[item["call_id"]]} if item["call_id"] in tasks else item
+                for item in strategy.calls
+            )
+            pending = strategy.conversation_confirmation
+            if (
+                pending
+                and (tasks.get(pending.get("turn_id")) or {}).get("stop_reason") == "cancelled"
+            ):
+                pending = None
+            self._publish(
+                connection, replace(strategy, calls=calls, conversation_confirmation=pending)
+            )
         return True
 
     def save(self, strategy: UserStrategy) -> None:
@@ -1108,9 +1269,44 @@ class UserStrategyService:
         return granted
 
     def _model_port(self) -> ModelPort:
-        if self._provider is None:
-            self._provider = create_model_port(self._settings)
-        return self._provider
+        return self._provider if self._provider is not None else create_model_port(self._settings)
+
+    def _port_for_call(self, strategy: UserStrategy, call: str) -> ModelPort:
+        if self._provider is not None:
+            return self._provider
+        record = _entry(strategy.calls, "call_id", call) or {}
+        reference = record.get("model_profile")
+        try:
+            source = RadianSettings(self._settings.path, self._settings.load())
+            identity = reference.get("id") if isinstance(reference, dict) else None
+            if reference is not None and source.profile_ref(identity) != reference:
+                raise ModelNotConfigured(
+                    "the approved model connection changed; approve a new turn"
+                )
+            port = create_model_port(source.snapshot(identity))
+            if self._safe_route(port) != record.get("route"):
+                raise ModelNotConfigured("the approved model route is no longer available")
+            return port
+        except RadianSettingsError as error:
+            raise ModelNotConfigured("the approved model connection is unavailable") from error
+
+    def select_model_profile(self, user_strategy_id: object, profile_id: object) -> UserStrategy:
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        selected = None if profile_id is None else _identifier(profile_id, "model_profile_id")
+        lock = self._lock(identity)
+        if not lock.acquire(blocking=False):
+            raise UserStrategyStateError("wait for the current turn before changing its connection")
+        try:
+            strategy = self._store.get(identity)
+            try:
+                self._settings.profile(selected)
+            except RadianSettingsError as error:
+                raise UserStrategyStateError(str(error)) from None
+            updated = replace(strategy, model_profile_id=selected, updated_at=_now())
+            self._store.save(updated)
+            return updated
+        finally:
+            lock.release()
 
     def _safe_route(self, port: ModelPort | None = None) -> dict[str, Any] | None:
         """The exact non-secret route, or ``None`` when no provider is configured.
@@ -1132,7 +1328,7 @@ class UserStrategyService:
                 "model": described.model,
                 "endpoint": described.endpoint,
             }
-        if port is not None or self._provider is not None:
+        if self._provider is not None:
             # A port exists but cannot describe itself: read the safe status instead.
             try:
                 status = self._settings.status()
@@ -1543,6 +1739,7 @@ class UserStrategyService:
         base_revision: object,
         scenario_id: object,
         criterion: Any = None,
+        dataset_id: object = None,
     ) -> UserStrategy:
         """Bind one explicitly chosen scenario to one saved intent: one revision, once.
 
@@ -1567,6 +1764,9 @@ class UserStrategyService:
         if type(base_revision) is not int:
             raise UserStrategyStateError("base_revision must be an integer")
         scenario = _bounded(scenario_id, "scenario_id", _MAX_SCENARIO_ID)
+        dataset = None if dataset_id is None else _bounded(dataset_id, "dataset_id", 128)
+        if scenario.startswith("template:") and dataset is None:
+            raise UserStrategyStateError("choose a published CSV dataset for this template")
         try:
             frozen_criterion = validate_criterion(criterion)
         except CriterionRejectedError as error:
@@ -1578,6 +1778,7 @@ class UserStrategyService:
             "base_revision": base_revision,
             "scenario_id": scenario,
             "criterion": frozen_criterion,
+            **({"dataset_id": dataset} if dataset is not None else {}),
         }
         lock = self._lock(identity)
         if not lock.acquire(blocking=False):
@@ -1616,6 +1817,14 @@ class UserStrategyService:
                     "classified before a scenario is bound"
                 )
             draft = self._scenario_draft(scenario, frozen_criterion, strategy.draft.revision + 1)
+            if dataset is not None:
+                document = self._validated(
+                    draft, dict(draft.parameters), draft.initial_cash, dataset_id=dataset
+                )
+                source = self._source_identity(document)
+                if source.get("dataset_id") != dataset or source.get("source_sha256") is None:
+                    raise UserStrategyStateError("the selected dataset cannot be bound")
+                draft = replace(draft, dataset_id=dataset, source_sha256=source["source_sha256"])
             now = _now()
             change: dict[str, Any] = {
                 "operation_id": operation,
@@ -1968,6 +2177,7 @@ class UserStrategyService:
         proposal_id: str | None,
         evidence_job_ids: Any,
         expected_evidence: Documents | None,
+        task_budget: Any = None,
     ) -> UserStrategy | _AdmittedTurn:
         """Every check and every durable record a turn needs before it may dispatch.
 
@@ -1993,6 +2203,20 @@ class UserStrategyService:
             "proposal_id": proposal_id,
             "approved_budget": _requested_budget(approved_budget),
         }
+        interactive = task_budget == "interactive"
+        if interactive:
+            task_budget = _INTERACTIVE_MAX_DISPATCHES
+            request["execution"] = "interactive"
+        if task_budget is not None:
+            if type(task_budget) is not int or not 1 <= task_budget <= 100:
+                raise UserStrategyBudgetError(
+                    "choose an explicit task total between 1 and 100 requests"
+                )
+            if request["approved_budget"] != {"max_model_calls": task_budget, "max_backtests": 0}:
+                raise UserStrategyBudgetError(
+                    "task total must match the explicit approval; experiments are separate"
+                )
+            request["task_budget"] = task_budget
         if selection is not None:
             request["evidence_job_ids"] = selection
         existing = _entry(strategy.calls, "call_id", call)
@@ -2022,13 +2246,23 @@ class UserStrategyService:
                 "an earlier call was never observed; reload the strategy so it is "
                 "classified before another call is started"
             )
+        if any(
+            (item.get("task") or {}).get("status")
+            in {"running", "awaiting_budget", "awaiting_decision"}
+            for item in strategy.calls
+        ):
+            raise UserStrategyStateError(
+                "finish or cancel the current task before starting another objective"
+            )
         # New messages authorize one bounded turn, independently of lifetime usage.
         # Replay returned above, so retained calls keep their original approval.
         budget = self._approval(
             approved_budget,
             model_calls=_CALL_APPROVAL,
             backtests=0,
-            ceiling=_TURN_MAX_CALLS if action == "message" else None,
+            ceiling=task_budget
+            if task_budget is not None
+            else (_TURN_MAX_CALLS if action == "message" else None),
         )
         # The selected runs are read, verified and frozen here: after the approval,
         # before the durable reservation and before the provider can be reached, so a
@@ -2049,8 +2283,18 @@ class UserStrategyService:
                 "the runs this proposal was made over are no longer the runs it recorded; "
                 "nothing was asked"
             )
-        self._model_port()
-        route = self._safe_route()
+        profile = None
+        if self._provider is not None:
+            route = self._safe_route()
+        else:
+            try:
+                source = RadianSettings(self._settings.path, self._settings.load())
+                profile = source.profile_ref(strategy.model_profile_id)
+                route = self._safe_route(
+                    create_model_port(source.snapshot(strategy.model_profile_id))
+                )
+            except RadianSettingsError:
+                route = None
         now = _now()
         record: dict[str, Any] = {
             "call_id": call,
@@ -2058,6 +2302,7 @@ class UserStrategyService:
             # nothing was sent, which a single "dispatched" status could not.
             "status": "pending" if route is not None else "unconfigured",
             "route": route or {"provider": None, "model": None, "endpoint": None},
+            **({"model_profile": profile} if profile is not None else {}),
             # The public projection of this call's own request: the same validated
             # canonical base revision the request froze, never today's mutable
             # draft, so a stored call reads back unchanged after a reload.
@@ -2079,6 +2324,14 @@ class UserStrategyService:
                 "reason": "no price source is configured in this workspace",
             },
         }
+        if task_budget is not None:
+            record["task"] = {
+                **({"mode": "interactive"} if interactive else {}),
+                "limit": task_budget,
+                "grants": [],
+                "status": "running",
+                "stop_reason": None,
+            }
         if evidence is not None:
             # The provenance of this turn, kept on the call it belongs to: the runs
             # the user selected and the host-verified context each of them was read
@@ -2131,7 +2384,10 @@ class UserStrategyService:
     def _observe(
         self, strategy: UserStrategy, call: str, message: str, base_revision: int
     ) -> UserStrategy:
-        port = self._model_port()
+        try:
+            port = self._port_for_call(strategy, call)
+        except ModelNotConfigured as error:
+            return self._settle(strategy, call, "unconfigured", str(error), None)
         draft = strategy.draft
         if isinstance(draft, IntentDraft):
             return self._clarify(strategy, call, message)
@@ -2236,7 +2492,10 @@ class UserStrategyService:
         usage and zero proposals. An answer recorded here is a message: it can
         never become a proposal later, when a scenario has been bound.
         """
-        port = self._model_port()
+        try:
+            port = self._port_for_call(strategy, call)
+        except ModelNotConfigured as error:
+            return self._settle(strategy, call, "unconfigured", str(error), None)
         strategy = self._mark_dispatched(strategy, call)
         key = (strategy.user_strategy_id, call)
         self._active_calls.add(key)
@@ -2418,10 +2677,9 @@ class UserStrategyService:
             "No scenario is bound to this strategy yet, so there is no strategy, "
             "instrument, funding, parameter, dataset or run to describe, and nothing "
             "here can be changed, previewed or run.",
-            "This turn can only clarify the intent: what the user means, which market "
-            "and data the idea needs, which assumptions matter and what is still "
-            "missing. No change to a draft can be proposed until the user chooses a "
-            "scenario.",
+            "This turn may discover actual catalog resources and inspect a supported "
+            "template/data pairing. Neither tool binds the idea or creates a run. No "
+            "change to a draft can be proposed until the user chooses a scenario.",
             "Intent revision " + str(strategy.draft.revision),
         ]
         facts.extend(self._verified_facts(strategy))
@@ -3213,6 +3471,7 @@ class UserStrategyService:
         text: object,
         approved_budget: Any = None,
         evidence_job_ids: Any = None,
+        task_budget: Any = None,
     ) -> UserStrategy:
         """One approved turn, optionally grounded in this strategy's own frozen runs.
 
@@ -3239,6 +3498,7 @@ class UserStrategyService:
             text=text,
             approved_budget=approved_budget,
             evidence_job_ids=evidence_job_ids,
+            task_budget=task_budget,
         ):
             if item.get("kind") == ERROR and item.get("code") in {
                 "UserStrategyError",
@@ -3802,14 +4062,26 @@ class UserStrategyService:
             return "failed", task.task_id, None, message
         return "interrupted_before_dispatch", task.task_id, None, message
 
-    @staticmethod
-    def _spec(draft: StrategyDraft) -> ResearchSpec:
+    def _spec(self, draft: StrategyDraft) -> ResearchSpec:
+        binding = self._binding_for(draft)
+        selection = (
+            None
+            if binding is None
+            else {
+                item["layer"]: {
+                    "plugin_id": item["plugin_id"],
+                    "package_version": item["package_version"],
+                }
+                for item in binding["components"]
+            }
+        )
         return ResearchSpec(
             strategy_id=draft.strategy_id,
             instrument_venue=draft.venue,
             instrument_symbol=draft.symbol,
             initial_cash=draft.initial_cash,
             rationale="Confirmed draft of one user strategy.",
+            selection=selection,
             scenario_id=draft.scenario_id,
             dataset_id=draft.dataset_id,
             source_sha256=draft.source_sha256,
@@ -3866,6 +4138,7 @@ class UserStrategyService:
         try:
             request: dict[str, Any] = {
                 "scenario_path": str(self._service.registered_scenario_file(draft.scenario_id)),
+                "scenario_id": draft.scenario_id,
                 "parameters": self._parameters(draft),
             }
             if draft.dataset_id is not None:
@@ -4260,10 +4533,27 @@ class UserStrategyService:
                 settled_call = self._reconciled_call(identity, call)
                 changed = changed or settled_call != call
                 calls.append(settled_call)
-            if not changed:
-                return restored
             next_strategy = replace(restored, experiments=tuple(experiments), calls=tuple(calls))
-            self._store.save(next_strategy)
+            if changed:
+                self._store.save(next_strategy)
+            for root in next_strategy.calls:
+                task = root.get("task") or {}
+                if task.get("status") != "running":
+                    continue
+                turn = root["call_id"]
+                members = [
+                    c
+                    for c in next_strategy.calls
+                    if c["call_id"] == turn or (c.get("request") or {}).get("turn_id") == turn
+                ]
+                if any((identity, c["call_id"]) in self._active_calls for c in members):
+                    continue
+                reason = (
+                    "unknown" if any(c["status"] == "unknown" for c in members) else "interrupted"
+                )
+                next_strategy = self._store.update_task(
+                    identity, turn, status="stopped", reason=reason
+                )
             return next_strategy
 
     def reconcile_all(self) -> Strategies:
@@ -4495,6 +4785,7 @@ class UserStrategyService:
         text: object,
         approved_budget: Any = None,
         evidence_job_ids: Any = None,
+        task_budget: Any = None,
     ) -> Iterator[dict[str, Any]]:
         """One approved turn, run as the conversation graph, yielding its events.
 
@@ -4507,6 +4798,9 @@ class UserStrategyService:
         copy, and it never causes a second provider call.
         """
         identity = _identifier(user_strategy_id, "user_strategy_id")
+        if approved_budget is None and task_budget is None:
+            approved_budget = {"max_model_calls": _INTERACTIVE_MAX_DISPATCHES, "max_backtests": 0}
+            task_budget = "interactive"
         with self._lock(identity):
             admitted = self._admit(
                 self._store.migrate_conversation(identity),
@@ -4518,9 +4812,15 @@ class UserStrategyService:
                 proposal_id=None,
                 evidence_job_ids=evidence_job_ids,
                 expected_evidence=None,
+                task_budget=task_budget,
             )
             if isinstance(admitted, UserStrategy):
                 # Nothing to dispatch: a replayed identity, or no provider to reach.
+                root = _entry(admitted.calls, "call_id", str(call_id)) or {}
+                if root.get("task") and root.get("status") == "unconfigured":
+                    admitted = self._store.update_task(
+                        identity, str(call_id), status="stopped", reason="unconfigured"
+                    )
                 yield event(STATE, strategy=admitted.document())
                 yield event(DONE, strategy=admitted.document())
                 return
@@ -4529,6 +4829,66 @@ class UserStrategyService:
                 admitted.call_id,
                 self._seed(admitted),
             )
+
+    def cancel_conversation_task(
+        self, user_strategy_id: object, *, turn_id: object
+    ) -> UserStrategy:
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        turn = _identifier(turn_id, "turn_id")
+        return self._store.update_task(identity, turn, status="stopped", reason="cancelled")
+
+    def conversation_budget(
+        self, user_strategy_id: object, *, turn_id: object, grant_id: object, total_model_calls: Any
+    ) -> Iterator[dict[str, Any]]:
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        turn = _identifier(turn_id, "turn_id")
+        grant = _identifier(grant_id, "grant_id")
+        with self._lock(identity):
+            strategy = self._store.update_task(
+                identity, turn, grant_id=grant, total=total_model_calls
+            )
+            pending = strategy.conversation_confirmation
+            if (
+                not pending
+                or pending.get("turn_id") != turn
+                or pending.get("phase") != "awaiting_budget"
+            ):
+                yield event(DONE, strategy=strategy.document())
+                return
+            if self._turn_remaining(strategy, turn) <= 0:
+                # A lost topup reply can be retried after its entire grant was spent.
+                # Replaying it changes nothing and must not consume the interrupt.
+                yield event(
+                    INTERRUPT,
+                    waiting={"kind": "budget", "turn_id": turn, "reason": "budget_exhausted"},
+                    strategy=strategy.document(),
+                )
+                return
+            yield from self._drive(identity, turn, Command(resume={"action": "budget"}))
+
+    def conversation_continue(
+        self, user_strategy_id: object, *, turn_id: object, grant_id: object
+    ) -> Iterator[dict[str, Any]]:
+        """Explicit continuation of a saved pause; no caller counts or silent retries."""
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        turn = _identifier(turn_id, "turn_id")
+        grant = _identifier(grant_id, "grant_id")
+        with self._lock(identity):
+            strategy = self._store.update_task(
+                identity, turn, grant_id=grant, continue_execution=True
+            )
+            pending = strategy.conversation_confirmation or {}
+            if pending.get("turn_id") != turn or pending.get("phase") != "awaiting_budget":
+                yield event(DONE, strategy=strategy.document())
+                return
+            if self._turn_remaining(strategy, turn) <= 0:
+                yield event(
+                    INTERRUPT,
+                    waiting={"kind": "budget", "turn_id": turn, "reason": "execution_limit"},
+                    strategy=strategy.document(),
+                )
+                return
+            yield from self._drive(identity, turn, Command(resume={"action": "continue"}))
 
     def conversation_resume(
         self,
@@ -4540,6 +4900,8 @@ class UserStrategyService:
         base_revision: object = None,
         launch_intent_id: object = None,
         preview_identity: object = None,
+        grant_id: object = None,
+        total_model_calls: Any = None,
     ) -> Iterator[dict[str, Any]]:
         """One explicit human decision, resumed into the turn that is waiting for it.
 
@@ -4549,8 +4911,24 @@ class UserStrategyService:
         """
         identity = _identifier(user_strategy_id, "user_strategy_id")
         turn = _identifier(turn_id, "turn_id")
+        if action == "cancel":
+            yield event(
+                DONE, strategy=self.cancel_conversation_task(identity, turn_id=turn).document()
+            )
+            return
+        if action == "continue":
+            yield from self.conversation_continue(identity, turn_id=turn, grant_id=grant_id)
+            return
+        if action == "budget":
+            yield from self.conversation_budget(
+                identity, turn_id=turn, grant_id=grant_id, total_model_calls=total_model_calls
+            )
+            return
         with self._lock(identity):
             strategy = self._store.get(identity)
+            root = _entry(strategy.calls, "call_id", turn) or {}
+            if (root.get("task") or {}).get("stop_reason") == "cancelled":
+                raise UserStrategyStateError("this task was cancelled")
             pending = strategy.conversation_confirmation
             existing = _entry(strategy.experiments, "launch_intent_id", str(launch_intent_id))
             if action == "confirm" and existing is not None:
@@ -4595,8 +4973,7 @@ class UserStrategyService:
     def conversation_state(self, user_strategy_id: object) -> dict[str, Any]:
         """What a reloaded client needs, without reading a checkpoint itself."""
         identity = _identifier(user_strategy_id, "user_strategy_id")
-        with self._lock(identity):
-            strategy = self._store.migrate_conversation(identity)
+        strategy = self._store.migrate_conversation(identity)
         pending = strategy.conversation_confirmation
         reserved = int(self._store.model_call_usage()["reserved_model_calls"])
         return {
@@ -4613,7 +4990,10 @@ class UserStrategyService:
                 for item in strategy.proposals
                 if item.get("status") == "open"
             ],
+            "task": self._task_projection(strategy),
             "budget": {
+                "task_budget_required": False,
+                "max_task_requests": 100,
                 # The most calls one explicitly initiated new turn may spend. It is a
                 # per-turn bound, deliberately separate from the recorded usage below,
                 # so a client can never read a lifetime balance out of this and disable
@@ -4626,6 +5006,84 @@ class UserStrategyService:
             },
         }
 
+    @staticmethod
+    def _task_projection(strategy: UserStrategy) -> dict[str, Any] | None:
+        roots = [item for item in strategy.calls if "task" in item]
+        if not roots:
+            return None
+        root = roots[-1]
+        task = root["task"]
+        used = _task_usage(strategy, root["call_id"])
+        return {
+            **task,
+            "turn_id": root["call_id"],
+            "used": used,
+            "remaining": max(task["limit"] - used, 0),
+        }
+
+    def _task_cancelled(self, state: dict[str, Any]) -> bool:
+        root = (
+            _entry(self._store.get(state["strategy_id"]).calls, "call_id", state["turn_id"]) or {}
+        )
+        return (root.get("task") or {}).get("stop_reason") == "cancelled"
+
+    def _graph_budget(self, state: dict[str, Any]) -> dict[str, Any]:
+        if not state.get("task_budget"):
+            return state
+        if self._task_cancelled(state):
+            return {**state, "phase": "cancelled", "stop_reason": "cancelled"}
+        strategy = self._store.get(state["strategy_id"])
+        call = (
+            state["turn_id"]
+            if state["step"] == 0
+            else _child_call_id(state["turn_id"], state["step"])
+        )
+        waiting = strategy.conversation_confirmation or {}
+        if (
+            state.get("phase") != "recover_budget"
+            and waiting.get("phase") != "awaiting_budget"
+            and (
+                _entry(strategy.calls, "call_id", call)
+                or self._turn_remaining(strategy, state["turn_id"]) > 0
+            )
+        ):
+            return {**state, "phase": "ready"}
+        root = _entry(strategy.calls, "call_id", state["turn_id"]) or {}
+        pause_reason = (
+            "execution_limit"
+            if (root.get("task") or {}).get("mode") == "interactive"
+            else "budget_exhausted"
+        )
+        self._store.update_task(
+            state["strategy_id"],
+            state["turn_id"],
+            status="awaiting_budget",
+            reason=pause_reason,
+        )
+        self._remember(
+            state["strategy_id"],
+            {
+                "phase": "awaiting_budget",
+                "turn_id": state["turn_id"],
+                "proposal_id": state["proposal_id"],
+                "base_revision": state["base_revision"],
+                "launch_intent_id": state["launch_intent_id"],
+                "preview_identity": state["preview_identity"],
+                "job_id": state["job_id"],
+                "at": _now(),
+            },
+        )
+        interrupt({"kind": "budget", "turn_id": state["turn_id"], "reason": pause_reason})
+        if self._task_cancelled(state):
+            return {**state, "phase": "cancelled", "stop_reason": "cancelled"}
+        if self._turn_remaining(self._store.get(state["strategy_id"]), state["turn_id"]) <= 0:
+            raise UserStrategyBudgetError("additional explicit authorization is required")
+        self._forget(state["strategy_id"])
+        self._store.update_task(
+            state["strategy_id"], state["turn_id"], status="running", reason=None
+        )
+        return {**state, "phase": "ready"}
+
     def _seed(self, admitted: _AdmittedTurn) -> dict[str, Any]:
         """The graph state of one new turn: references and identities, no facts.
 
@@ -4634,6 +5092,10 @@ class UserStrategyService:
         """
         return {
             "strategy_id": admitted.strategy.user_strategy_id,
+            "task_budget": bool(
+                (_entry(admitted.strategy.calls, "call_id", admitted.call_id) or {}).get("task")
+            ),
+            "consecutive_failures": 0,
             "turn_id": admitted.call_id,
             "message": admitted.message,
             "base_revision": admitted.base_revision,
@@ -4666,12 +5128,11 @@ class UserStrategyService:
         call = state["turn_id"] if step == 0 else _child_call_id(state["turn_id"], step)
         draft = strategy.draft
         if isinstance(draft, IntentDraft):
-            # An intent has nothing to describe, change or run, so this turn offers no
-            # tool at all and only states what the user means.
+            # An intent may inspect resources but cannot bind, propose or run.
             registered: tuple[RegisteredPath, ...] = ()
             system = _INTENT_SYSTEM_PROMPT
-            tools: Tools = []
-            required: tuple[str, ...] = ()
+            tools: Tools = self._domain_tools(intent=True)
+            required: tuple[str, ...] = ("tool_use",)
         else:
             registered = self._registered_paths(draft)
             system = _SYSTEM_PROMPT
@@ -4733,6 +5194,7 @@ class UserStrategyService:
         if response is None:
             return {
                 **state,
+                "stop_reason": status,
                 "call_id": call,
                 "step": step + 1,
                 "pending": [],
@@ -4765,7 +5227,15 @@ class UserStrategyService:
         )
         # A model that proposes on an unbound intent is refused whole, exactly as the
         # single-call path refuses it: nothing an intent cannot have is ever created.
-        refusal = self._clarification_refusal(response) if isinstance(draft, IntentDraft) else None
+        refusal = (
+            self._clarification_refusal(response)
+            if isinstance(draft, IntentDraft)
+            and any(
+                call.name not in {_DISCOVER_TOOL, _INSPECT_INPUT_TOOL}
+                for call in response.tool_calls
+            )
+            else None
+        )
         if refusal is not None:
             return {
                 **state,
@@ -4941,6 +5411,8 @@ class UserStrategyService:
         identity derived from this turn and this tool call.
         """
         strategy = self._store.get(state["strategy_id"])
+        if self._task_cancelled(state):
+            return {**state, "pending": [], "refusal": "task cancelled", "stop_reason": "cancelled"}
         calls = list(state["pending"])
         if len(calls) != 1:
             return {
@@ -4951,6 +5423,56 @@ class UserStrategyService:
         item = calls[0]
         name, tool_id = str(item["name"]), str(item["id"])
         self._emit(event(TOOL_START, tool=name, tool_id=tool_id, call_id=state["call_id"]))
+        if name in _DOMAIN_READ_TOOLS:
+            record = _entry(strategy.calls, "call_id", state["call_id"]) or {}
+            receipt = _entry(tuple(record.get("tool_results", [])), "tool_id", tool_id)
+            if receipt is None:
+                try:
+                    read_facts = self._domain_read(strategy, name, item["arguments"], state)
+                except Exception as error:  # noqa: BLE001 — failed reads remain explicit
+                    read_facts = {"ok": False, "error": str(error)}
+                receipt = {
+                    "tool": name,
+                    "tool_id": tool_id,
+                    "status": "done" if read_facts.get("ok") else "failed",
+                    "text": json.dumps(read_facts, ensure_ascii=False),
+                }
+                recorded_calls = tuple(
+                    {**call, "tool_results": [*call.get("tool_results", []), receipt]}
+                    if call["call_id"] == state["call_id"]
+                    else call
+                    for call in strategy.calls
+                )
+                self._store.save(replace(strategy, calls=recorded_calls, updated_at=_now()))
+            text = str(receipt["text"])
+            if receipt["status"] == "failed":
+                self._emit(
+                    event(
+                        TOOL_ERROR, tool=name, tool_id=tool_id, error=str(json.loads(text)["error"])
+                    )
+                )
+            else:
+                self._emit(event(TOOL_END, tool=name, tool_id=tool_id, text=text))
+            failures = (
+                int(state.get("consecutive_failures", 0)) + 1
+                if receipt["status"] == "failed"
+                else 0
+            )
+            return {
+                **state,
+                "consecutive_failures": failures,
+                "refusal": "consecutive tool failures" if failures >= 2 else "",
+                "stop_reason": "consecutive_failures" if failures >= 2 else None,
+                "pending": [],
+                "exchange": [
+                    *state["exchange"],
+                    {
+                        "role": "tool",
+                        "call_id": tool_id,
+                        "text": text,
+                    },
+                ],
+            }
         if name in {_DESCRIBE_DATA_TOOL, _EXPERIMENT_STATUS_TOOL}:
             try:
                 facts = (
@@ -4966,9 +5488,23 @@ class UserStrategyService:
                     "refusal": (f"{name} could not be read in this workspace: {error}"),
                 }
             text = "\n".join(facts) or "this workspace states nothing it can verify here"
+            # The receipt also restores failure accounting if a checkpoint is lost.
+            recorded_reads = tuple(
+                {
+                    **call,
+                    "tool_results": [
+                        {"tool": name, "tool_id": tool_id, "status": "done", "text": text}
+                    ],
+                }
+                if call["call_id"] == state["call_id"]
+                else call
+                for call in strategy.calls
+            )
+            self._store.save(replace(strategy, calls=recorded_reads, updated_at=_now()))
             self._emit(event(TOOL_END, tool=name, tool_id=tool_id, text=text))
             return {
                 **state,
+                "consecutive_failures": 0,
                 "pending": [],
                 "exchange": [
                     *state["exchange"],
@@ -4984,6 +5520,12 @@ class UserStrategyService:
                     "the model used a tool this conversation does not offer; nothing was changed"
                 ),
             }
+        if strategy.draft.revision != state["base_revision"]:
+            stale_refusal = (
+                "the draft revision changed while this answer was pending; nothing was proposed"
+            )
+            self._emit(event(TOOL_ERROR, tool=name, tool_id=tool_id, error=stale_refusal))
+            return {**state, "pending": [], "refusal": stale_refusal}
         probe = ModelResponse(
             "", (ToolCall(tool_id, name, dict(item["arguments"])),), "tool_calls", "", None, None
         )
@@ -5246,7 +5788,7 @@ class UserStrategyService:
             return {**state, "phase": "done", "explain": False}
         remaining = self._turn_remaining(strategy, state["turn_id"])
         self._emit(event(STATE, job_id=job_id, verified=True, remaining_model_calls=remaining))
-        if remaining <= 0:
+        if remaining <= 0 and not state.get("task_budget"):
             # The turn's own approval is spent. The verified reading is still durable
             # in the run's report; this conversation simply does not spend a call it
             # was not granted to explain it.
@@ -5275,6 +5817,8 @@ class UserStrategyService:
     def _route_after_tools(state: dict[str, Any]) -> str:
         if state.get("refusal") or state.get("phase") == "proposed":
             return "settle"
+        if state.get("task_budget"):
+            return "budget"
         remaining = int(state["approved"]["max_model_calls"]) - int(state["step"])
         return "answer" if remaining > 0 else "settle"
 
@@ -5305,12 +5849,15 @@ class UserStrategyService:
     def _route_after_evidence(state: dict[str, Any]) -> str:
         if not state.get("explain"):
             return END
+        if state.get("task_budget"):
+            return "budget"
         remaining = int(state["approved"]["max_model_calls"]) - int(state["step"])
         return "answer" if remaining > 0 else END
 
     def _compile_conversation(self, saver: Any) -> Any:
         """The one graph of a conversation turn, over this workspace's own checkpoints."""
         builder: Any = StateGraph(dict)
+        builder.add_node("budget", self._graph_budget)
         builder.add_node("answer", self._graph_answer)
         builder.add_node("tools", self._graph_tools)
         builder.add_node("settle", self._graph_settle)
@@ -5324,8 +5871,14 @@ class UserStrategyService:
                 "recover_proposal": "proposal",
                 "recover_preview": "preview",
                 "recover_observe": "observe",
-            }.get(state.get("phase"), "answer"),
-            {name: name for name in ("answer", "proposal", "preview", "observe")},
+                "recover_budget": "budget",
+            }.get(state.get("phase"), "budget" if state.get("task_budget") else "answer"),
+            {name: name for name in ("answer", "proposal", "preview", "observe", "budget")},
+        )
+        builder.add_conditional_edges(
+            "budget",
+            lambda state: END if state.get("phase") == "cancelled" else "answer",
+            {END: END, "answer": "answer"},
         )
         builder.add_conditional_edges(
             "answer", self._route_after_answer, {"tools": "tools", "settle": "settle"}
@@ -5333,7 +5886,7 @@ class UserStrategyService:
         builder.add_conditional_edges(
             "tools",
             self._route_after_tools,
-            {"answer": "answer", "settle": "settle"},
+            {"answer": "answer", "settle": "settle", "budget": "budget"},
         )
         builder.add_conditional_edges(
             "settle", self._route_after_settle, {"proposal": "proposal", END: END}
@@ -5354,13 +5907,19 @@ class UserStrategyService:
             {"observe": "observe", "evidence": "evidence", END: END},
         )
         builder.add_conditional_edges(
-            "evidence", self._route_after_evidence, {"answer": "answer", END: END}
+            "evidence",
+            self._route_after_evidence,
+            {"answer": "answer", "budget": "budget", END: END},
         )
         return builder.compile(checkpointer=saver)
 
     def _drive(self, identity: str, turn: str, payload: Any) -> Iterator[dict[str, Any]]:
         """Run one graph step-set and yield the events it really produced."""
         config = thread_config(identity, turn)
+        root = _entry(self._store.get(identity).calls, "call_id", turn) or {}
+        config["recursion_limit"] = 32 + 4 * int(
+            (root.get("task") or {}).get("limit", _TURN_MAX_CALLS)
+        )
         with checkpoints(self._store.conversation_db_path, _CONVERSATION_SCHEMA) as saver:
             graph = self._compile_conversation(saver)
             try:
@@ -5378,12 +5937,44 @@ class UserStrategyService:
                             yield chunk
                     snapshot = graph.get_state(config)
             except Exception as error:  # noqa: BLE001 — a failed step is reported, not hidden
+                if root.get("task"):
+                    self._store.update_task(identity, turn, status="stopped", reason="interrupted")
                 yield event(ERROR, error=str(error)[:400], code=type(error).__name__)
                 return
         strategy = self._store.get(identity)
         waiting = [
             item.value for task in getattr(snapshot, "tasks", ()) for item in task.interrupts
         ]
+        if root.get("task"):
+            values = snapshot.values or {}
+            reason = values.get("stop_reason") or (
+                "scope_decision"
+                if values.get("refusal")
+                else "declined"
+                if values.get("phase") == "declined"
+                else "experiment_failed"
+                if values.get("phase") == "failed"
+                else "completed"
+            )
+            if waiting:
+                phase = (strategy.conversation_confirmation or {}).get("phase")
+                strategy = self._store.update_task(
+                    identity,
+                    turn,
+                    status="awaiting_budget" if phase == "awaiting_budget" else "awaiting_decision",
+                    reason=(self._task_projection(strategy) or {}).get(
+                        "stop_reason", "budget_exhausted"
+                    )
+                    if phase == "awaiting_budget"
+                    else "decision_required",
+                )
+            else:
+                strategy = self._store.update_task(
+                    identity,
+                    turn,
+                    status="completed" if reason == "completed" else "stopped",
+                    reason=reason,
+                )
         if waiting:
             yield event(
                 INTERRUPT,
@@ -5413,6 +6004,59 @@ class UserStrategyService:
             )
         )
         proposal = _entry(strategy.proposals, "proposal_id", str(pending.get("proposal_id")))
+        if pending.get("phase") == "awaiting_budget":
+            calls = [
+                item
+                for item in strategy.calls
+                if item["call_id"] == turn or (item.get("request") or {}).get("turn_id") == turn
+            ]
+            exchange = []
+            failures = 0
+            for call in calls:
+                for receipt in call.get("tool_results", []):
+                    failures = failures + 1 if receipt["status"] == "failed" else 0
+                response = _response_from(call.get("response"))
+                if response is not None:
+                    # Older successful read records predate persisted read receipts.
+                    if (
+                        not call.get("tool_results")
+                        and call.get("status") == "observed"
+                        and any(
+                            t.name in {_DESCRIBE_DATA_TOOL, _EXPERIMENT_STATUS_TOOL}
+                            for t in response.tool_calls
+                        )
+                    ):
+                        failures = 0
+                    exchange.append(
+                        {
+                            "role": "assistant",
+                            "text": response.text,
+                            "calls": [
+                                {"id": t.id, "name": t.name, "arguments": t.arguments}
+                                for t in response.tool_calls
+                            ],
+                        }
+                    )
+                    exchange.extend(
+                        {"role": "tool", "call_id": t["tool_id"], "text": t["text"]}
+                        for t in call.get("tool_results", [])
+                    )
+            job = str(pending.get("job_id") or "")
+            return {
+                **seeded,
+                "phase": "recover_budget",
+                "step": len(calls),
+                "exchange": exchange,
+                "consecutive_failures": failures,
+                "proposal_id": str(pending.get("proposal_id") or ""),
+                "proposal_call": str((proposal or {}).get("call_id") or ""),
+                "proposal_revision": int((proposal or {}).get("base_revision") or 0),
+                "launch_intent_id": str(pending.get("launch_intent_id") or ""),
+                "preview_identity": str(pending.get("preview_identity") or ""),
+                "job_id": job,
+                "explain": bool(job),
+                "evidence_job_ids": [job] if job else seeded["evidence_job_ids"],
+            }
         if proposal is None:
             raise UserStrategyStateError("the pending proposal cannot be read")
         return {
@@ -5494,7 +6138,7 @@ class UserStrategyService:
         raise UserStrategyStateError("this conversation is not waiting for a decision")
 
     def _conversation_tools(self, paths: tuple[RegisteredPath, ...]) -> Tools:
-        """The three fixed tools of a conversation, and no fourth.
+        """The bounded domain tools and the existing typed proposal.
 
         Two read the host's own verified facts and change nothing; the third is the
         same typed proposal every other path validates. There is no filesystem, URL,
@@ -5502,6 +6146,7 @@ class UserStrategyService:
         conversation.
         """
         return [
+            *self._domain_tools(intent=False),
             ToolDefinition(
                 _DESCRIBE_DATA_TOOL,
                 "Read this host's own verified description of the data the current draft "
@@ -5516,6 +6161,177 @@ class UserStrategyService:
             ),
             self._propose_tool(paths),
         ]
+
+    @staticmethod
+    def _domain_tools(*, intent: bool) -> Tools:
+        tools = [
+            ToolDefinition(
+                _DISCOVER_TOOL,
+                "List supported built-in templates and actual catalogued datasets, optionally "
+                "filtered by exact symbol. Missing data stays missing. No import or binding.",
+                {
+                    "type": "object",
+                    "properties": {"symbol": {"type": "string", "maxLength": 128}},
+                    "additionalProperties": False,
+                },
+            ),
+            ToolDefinition(
+                _INSPECT_INPUT_TOOL,
+                "Validate the current bound draft, or a supported template with a named "
+                "catalogued dataset before user binding. Return actual constraints and input "
+                "identity. This neither changes the draft nor authorizes a run.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "base_revision": {"type": "integer", "minimum": 1},
+                        "scenario_id": {"type": "string", "maxLength": 128},
+                        "dataset_id": {"type": "string", "maxLength": 160},
+                    },
+                    "required": ["base_revision"],
+                    "additionalProperties": False,
+                },
+            ),
+        ]
+        if not intent:
+            tools.append(
+                ToolDefinition(
+                    _READ_EXPERIMENTS_TOOL,
+                    "Read one or two official reports selected for this conversation, in their "
+                    "selected order. Verify frozen inputs and report digests. Two reports return "
+                    "the existing comparison view; no new statistics are computed by this tool.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "job_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                                "maxItems": 2,
+                                "uniqueItems": True,
+                            }
+                        },
+                        "required": ["job_ids"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+        return tools
+
+    def _domain_read(
+        self, strategy: UserStrategy, name: str, arguments: Any, state: dict[str, Any]
+    ) -> dict[str, Any]:
+        allowed = {
+            _DISCOVER_TOOL: {"symbol"},
+            _INSPECT_INPUT_TOOL: {"base_revision", "scenario_id", "dataset_id"},
+            _READ_EXPERIMENTS_TOOL: {"job_ids"},
+        }
+        if type(arguments) is not dict or set(arguments) - allowed[name]:
+            raise UserStrategyStateError("invalid read-tool arguments")
+        if name == _DISCOVER_TOOL:
+            symbol = arguments.get("symbol")
+            if symbol is not None:
+                symbol = _bounded(symbol, "symbol", 128)
+            templates = [
+                {
+                    "scenario_id": item["scenario_id"],
+                    "name": item["name"],
+                    "strategy_parameters": item["strategy_parameters"],
+                    "template_assumptions": item["template_assumptions"],
+                    "dataset_required": True,
+                }
+                for item in self._service.registry.templates()
+                if symbol is None or cast(dict[str, Any], item["summary"])["symbol"] == symbol
+            ]
+            # Only catalog metadata is exposed, never paths or raw capture rows.
+            fields = {
+                "dataset_id",
+                "origin",
+                "valid",
+                "profile",
+                "symbol",
+                "venue",
+                "source_sha256",
+                "data_sha256",
+                "record_count",
+                "bar_count",
+                "bar_durations_seconds",
+                "bar_start_utc",
+                "bar_end_utc",
+                "observed_gap_count",
+            }
+            datasets = [
+                {key: value for key, value in item.items() if key in fields}
+                for item in self._service.dataset_catalog.list()
+                if item.get("valid") is True and (symbol is None or item.get("symbol") == symbol)
+            ]
+            return {
+                "ok": True,
+                "scope": "supported built-in templates and catalogued data",
+                "templates": templates,
+                "datasets": datasets,
+                "binding_required": isinstance(strategy.draft, IntentDraft),
+            }
+        if name == _INSPECT_INPUT_TOOL:
+            revision = arguments.get("base_revision")
+            if type(revision) is not int or revision != strategy.draft.revision:
+                raise UserStrategyStateError(
+                    "base_revision does not match the current draft revision"
+                )
+            scenario_id = arguments.get("scenario_id")
+            dataset_id = arguments.get("dataset_id")
+            if scenario_id is not None or dataset_id is not None:
+                scenario_id = _bounded(scenario_id, "scenario_id", 128)
+                dataset_id = _bounded(dataset_id, "dataset_id", 160)
+                if scenario_id not in {
+                    str(item["scenario_id"]) for item in self._service.registry.templates()
+                }:
+                    raise UserStrategyStateError(
+                        "only a supported built-in template may be inspected before binding"
+                    )
+                # Resolve a catalog ID before validation; no caller-supplied filesystem path.
+                dataset = self._service.dataset_catalog.inspect(dataset_id)
+                if dataset.get("valid") is not True:
+                    raise UserStrategyStateError("the selected dataset is not valid")
+                checked = self._service.validate_scenario(scenario_id, dataset_id=dataset_id)
+                return {
+                    "ok": True,
+                    "base_revision": revision,
+                    "dataset_id": dataset_id,
+                    "input": checked,
+                    "binding_required": True,
+                    "run_authorized": False,
+                }
+            draft = _executable(strategy)
+            checked = self._validated(draft, draft.parameters, draft.initial_cash)
+            preview = self._preview_of(strategy, draft, self._admitted_request(draft))
+            return {
+                "ok": True,
+                "base_revision": revision,
+                "dataset_id": draft.dataset_id,
+                "input": checked,
+                "constraints": [asdict(p) for p in self._registered_paths(draft)],
+                "preview": preview,
+                "binding_required": False,
+                "run_authorized": False,
+            }
+        if isinstance(strategy.draft, IntentDraft):
+            raise UserStrategyStateError("an unbound intent has no selected experiment reports")
+        selected = self._evidence_selection(arguments.get("job_ids"))
+        if selected is None or selected != state["evidence_job_ids"]:
+            raise UserStrategyStateError(
+                "select these exact reports in the workspace before reading them"
+            )
+        evidence = self._evidence_context(strategy, selected)
+        return {
+            "ok": True,
+            "reports": evidence,
+            "comparison_url": (
+                f"/backtests/compare/{selected[0]}/{selected[1]}" if len(selected) == 2 else None
+            ),
+            "comparison_computed": False,
+            "limitation": "The existing comparison view computes supported deltas. "
+            "This tool supplies verified reports only; no statistical conclusion is computed.",
+        }
 
     def _experiment_facts(self, strategy: UserStrategy) -> Paths:
         """What this strategy's own experiments are, as this host can verify them now."""
@@ -5585,8 +6401,17 @@ class UserStrategyService:
         answer, its tool identities and their arguments are durable before the graph
         advances, so a lost checkpoint resumes from this record.
         """
-        port = self._model_port()
-        strategy = self._mark_dispatched(strategy, call)
+        try:
+            port = self._port_for_call(strategy, call)
+        except ModelNotConfigured as error:
+            return None, "unconfigured", str(error)
+        if state.get("task_budget"):
+            try:
+                strategy = self._store.dispatch_task_call(strategy.user_strategy_id, call)
+            except UserStrategyBudgetError as error:
+                return None, "interrupted_before_dispatch", str(error)
+        else:
+            strategy = self._mark_dispatched(strategy, call)
         key = (strategy.user_strategy_id, call)
         self._active_calls.add(key)
         response: ModelResponse | None = None
@@ -5594,7 +6419,13 @@ class UserStrategyService:
             try:
                 if isinstance(port, StreamingModelPort):
                     response = self._streamed(
-                        port, call, system=system, messages=messages, tools=tools, required=required
+                        port,
+                        call,
+                        state=state,
+                        system=system,
+                        messages=messages,
+                        tools=tools,
+                        required=required,
                     )
                 else:
                     response = port.complete(
@@ -5613,7 +6444,7 @@ class UserStrategyService:
         finally:
             self._active_calls.discard(key)
         self._settle(
-            strategy,
+            self._store.get(strategy.user_strategy_id),
             call,
             "observed",
             None,
@@ -5631,6 +6462,7 @@ class UserStrategyService:
         port: StreamingModelPort,
         call: str,
         *,
+        state: dict[str, Any],
         system: str,
         messages: History,
         tools: Tools,
@@ -5645,6 +6477,12 @@ class UserStrategyService:
             required_capabilities=required,
         ):
             if item.kind == TEXT_DELTA and item.text:
+                if state.get("task_budget") and self._task_cancelled(state):
+                    # Closing a partially read stream cannot prove provider billing or
+                    # completion. Keep an unknown receipt, and do not dispatch again.
+                    raise ModelProviderError(
+                        "generation stopped before its final response was observed"
+                    )
                 self._emit(event(TEXT_DELTA, call_id=call, text=item.text))
             elif item.response is not None:
                 final = item.response
@@ -5657,6 +6495,8 @@ class UserStrategyService:
         root = _entry(strategy.calls, "call_id", turn)
         if root is None:
             return 0
+        if root.get("task"):
+            return max(int(root["task"]["limit"]) - _task_usage(strategy, turn), 0)
         approved = root.get("approved_budget") or {}
         used = sum(
             1
@@ -5704,10 +6544,14 @@ class UserStrategyService:
         }
         selection = self._evidence_selection(state["evidence_job_ids"] or None)
         if selection is not None:
+            request["evidence_job_ids"] = selection
+            record["payload_sha256"] = _digest(request)
             record["evidence"] = self._evidence_context(strategy, selection)
-        route = self._safe_route()
+        route = root.get("route")
         if route is not None:
             record["route"] = route
+        if root.get("model_profile") is not None:
+            record["model_profile"] = dict(root["model_profile"])
         pending = replace(strategy, updated_at=now, calls=(*strategy.calls, record))
         self._publish_call(pending, call, dispatch=route is not None)
         return pending

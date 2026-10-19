@@ -124,6 +124,8 @@ export type UserStrategyEvidenceRun = {
  * only thing such a call was told about them.
  */
 export type UserStrategyCall = {
+  tool_results?: { tool: string; tool_id: string; status: 'done' | 'failed'; text: string }[]
+  model_profile?: { id: string; name: string; revision: number; route_version: string }
   call_id: string
   /**
    * The turn this call belongs to. The root call of a turn is its own id; a call
@@ -134,6 +136,7 @@ export type UserStrategyCall = {
   base_revision: number
   status: UserStrategyCallStatus
   route: UserStrategyRoute
+  task?: { mode?: string; limit: number; status: string; stop_reason: string | null }
   approved_budget: { max_model_calls: number; max_backtests: number }
   reserved_at: string
   message: string | null
@@ -325,6 +328,7 @@ export type UserStrategyExperiment = {
 }
 
 export type UserStrategy = {
+  model_profile_id?: string | null
   schema: 'ea.user-strategy.v1'
   user_strategy_id: string
   created_at: string
@@ -388,6 +392,7 @@ export type UserStrategyConversationPhase =
   | 'awaiting_proposal'
   | 'awaiting_confirmation'
   | 'awaiting_observation'
+  | 'awaiting_budget'
 
 export type UserStrategyConversationPending = {
   phase: UserStrategyConversationPhase
@@ -410,7 +415,10 @@ export type UserStrategyConversation = {
   pending: UserStrategyConversationPending | null
   preview: UserStrategyPreview | null
   open_proposals: string[]
+  task?: { turn_id: string; limit: number; used: number; remaining: number; status: string; stop_reason: string | null } | null
   budget: {
+    task_budget_required?: boolean
+    max_task_requests?: number
     max_model_calls_per_turn: number
     reserved_model_calls: number
     max_backtests: number
@@ -420,7 +428,9 @@ export type UserStrategyConversation = {
 /** One decision, naming the identities the pending record already holds. */
 export type UserStrategyResumeRequest = {
   turn_id: string
-  action: 'applied' | 'rejected' | 'confirm' | 'declined' | 'observe'
+  action: 'applied' | 'rejected' | 'confirm' | 'declined' | 'observe' | 'budget' | 'cancel' | 'continue'
+  grant_id?: string
+  total_model_calls?: number
   proposal_id?: string | null
   base_revision?: number | null
   launch_intent_id?: string | null
@@ -429,6 +439,7 @@ export type UserStrategyResumeRequest = {
 
 /** What one turn is waiting on, as the interrupt itself states it. */
 export type UserStrategyConversationWaiting =
+  | { kind: 'budget'; turn_id: string; reason: string }
   | { kind: 'proposal'; turn_id: string; proposal_id: string; base_revision: number }
   | {
       kind: 'confirmation'
@@ -628,6 +639,8 @@ async function streamRequest(
 }
 
 export const userStrategiesApi = {
+  selectModelProfile: (id: string, profileId: string | null) =>
+    write<UserStrategy>(`${base(id)}/model-profile`, { profile_id: profileId }),
   async list(): Promise<UserStrategy[]> {
     return (await apiRequest<{ strategies: UserStrategy[] }>('/api/user-strategies')).strategies
   },
@@ -653,6 +666,7 @@ export const userStrategiesApi = {
       operation_id: string
       base_revision: number
       scenario_id: string
+      dataset_id?: string
       criterion?: UserStrategyCriterionInput | null
     },
   ) => write<UserStrategy>(`${base(userStrategyId)}/bind-scenario`, input),
@@ -698,7 +712,8 @@ export const userStrategiesApi = {
       call_id: string
       base_revision: number
       text: string
-      approved_budget: ApprovedBudget
+      task_budget?: number
+      approved_budget?: ApprovedBudget
       evidence_job_ids?: string[]
     },
     signal?: AbortSignal,

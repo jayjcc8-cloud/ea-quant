@@ -1,5 +1,10 @@
 # QUINE local Mac desktop
 
+The desktop is QUINE's sole supported user entry point, release artifact and final product
+acceptance target ([ADR 0050](adr/0050-desktop-only-product-delivery.md)). This is an unpublished
+local candidate; no public desktop download is available. Independent browser/server/mobile
+products are outside support. Shared Web code and internal test tools remain in use.
+
 This bounded desktop candidate supports **Apple Silicon macOS**. It is a Tauri 2 window over the
 existing React application, with a bundled CPython 3.12.13 distribution, locked Web dependencies,
 the current installed EA wheel, and a freshly compiled Rust experiment owner. Python, Node, Cargo,
@@ -24,7 +29,7 @@ The stable data root is `~/Library/Application Support/QUINE`:
 - `core/` contains the existing Rust SQLite owner and its confirmed inputs and official reports.
 - `scenarios/` contains user-editable registered scenarios. First use seeds the two synthetic
   sample files once; an upgrade never overwrites them.
-- `settings.json` is the existing model settings format. It starts absent. The settings screen
+- `settings.json` is the existing model settings format. It starts absent. Resources → Model connections
   shows its exact path and provides provider, model ID, Base URL and write-only API key inputs.
   Save checks local format only; it never authenticates or calls a provider. Credentials are
   stored in this existing file with mode 0600, not in WebView storage. Blank key retains the
@@ -76,7 +81,7 @@ From the selected source checkout, with the repository's local Rust toolchain an
 build environment available:
 
 ```sh
-venv/bin/python scripts/build_desktop.py --output "$PWD/.local/desktop-settings"
+venv/bin/python scripts/build_desktop.py --output "$PWD/.local/desktop"
 ```
 
 Build outputs live under the explicitly selected output root (default `<checkout>/.local/desktop/`). The resulting app is at
@@ -102,8 +107,11 @@ venv/bin/python scripts/accept_desktop.py \
 It uses an empty HOME and `/usr/bin:/bin` PATH, launches the installed interpreter, refuses a
 second session, checks foreign-Origin rejection, confirms a synthetic strategy through the Rust
 owner, reads the real official report, closes/reopens and compares persisted evidence, then checks
-owned-core failure and recovery. It makes zero model requests. Native window/first-use/quit
-verification is additional to this API-level acceptance, not implied by it.
+owned-core failure and recovery. It makes zero model requests. Final installed-desktop acceptance owns native window/first-use/quit, workspace ownership,
+WebView navigation, focus/keyboard, IME and text scaling. Shared business/component/API checks
+are reused according to risk, not duplicated into a second desktop business suite. The installed
+API check does not imply native success. Native narrow-window, full keyboard and Chinese IME
+acceptance remain unverified; use the [first-use card](first-use-acceptance.md).
 
 The desktop grants no shell/filesystem Tauri plugins or frontend IPC capabilities, denies popup
 windows and navigation outside its own session origin, and retains the existing Host/Origin/

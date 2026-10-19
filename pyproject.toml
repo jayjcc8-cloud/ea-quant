@@ -48,7 +48,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "ea.product" = ["phase1_demo_ohlcv_v1.csv"]
-"ea.web" = ["event_samples/*.json"]
+"ea.web" = ["event_samples/*.json", "templates/*.yaml", "templates/*.csv"]
 
 [tool.ruff]
 line-length = 100

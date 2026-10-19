@@ -6,7 +6,12 @@ still gates a public release of this candidate (§2). It is a planning note unde
 architecture contract. Where this note and the merged code disagree, the merged code and its tests
 are authoritative.
 
-No publication, tag, registry upload, or deployment has been performed.
+QUINE's sole current user entry, release artifact and final acceptance target is the
+[Mac desktop candidate](desktop-macos.md), not an independent browser/server product
+([ADR 0050](adr/0050-desktop-only-product-delivery.md)). Sections below retain historical shared
+engine/API evidence. Browser checks are internal regression evidence, not native acceptance.
+The desktop remains unpublished; native narrow-window, full keyboard and Chinese IME are unverified.
+No publication, tag, registry upload, or deployment has been performed for this candidate.
 
 ## 1. Implemented and tested (inherited evidence)
 
@@ -34,7 +39,7 @@ installed Web E2E, both recorded in §2.
   verified reports.
 - Installed-wheel execution outside a Git checkout for the fixed offline slice.
 
-### Local Web research loop
+### Shared local research adapter (inherited internal browser evidence)
 
 - `ea web serve` fixes the listener to `127.0.0.1`, serves the production React build and the
   same-origin API, and keeps scenario, workspace, strategy/data, and UI roots separate.
@@ -99,7 +104,7 @@ None of the following gates is satisfied. Each is a prerequisite, not a formalit
   claim.
 - **Full exact-head release verification.** Two verifications are recorded. The **isolated UI
   verification** was completed against a copied, safe historical report: no new provider calls, no
-  new backtests, no overflow at desktop or mobile widths, and a stable state across GET refresh. The
+  new backtests, no overflow at wide or narrow content widths, and a stable state across GET refresh. The
   **formal installed Web E2E** run passed **8** checks, covering a scripted model write, confirm, a
   real engine run, report, conclusion, refresh, restart, and cancel — with **no real provider key**.
   Full exact-head release verification is **required before publication**: interim formatter and type
@@ -141,12 +146,14 @@ note, and each would need its own bounded Issue and acceptance criteria.
   recorded yet.
 - **Autonomous optimization or trading.** Continuous research means repeated independent,
   explicitly confirmed experiments by a user — never autonomous background optimization or trading.
-- **Host deployment.** VPS deployment and reboot acceptance remain not host-verified, and host
-  verification would cover host attributes only, never product logic.
+- **Historical host deployment.** VPS/reboot evidence remains unverified; server delivery is
+  outside the new QUINE product scope, not a pending desktop release path.
 
 ## 5. Entry points and contributor setup
 
-CLI and documentation entry points:
+User entry: [QUINE desktop](desktop-macos.md) and [first-use acceptance](first-use-acceptance.md).
+
+Internal contributor tools and historical contract references (not parallel user entry points):
 
 - Backtest CLI: `ea backtest validate|run|report|resume`, `ea data inspect` —
   [local-strategy-package-v1.md](local-strategy-package-v1.md)
@@ -154,7 +161,7 @@ CLI and documentation entry points:
   [local-strategy-package-v2.md](local-strategy-package-v2.md)
 - Candidate lifecycle: [candidate-lifecycle.md](candidate-lifecycle.md)
 - AI-native local product surface: [radian-local-product.md](radian-local-product.md)
-- Web app details and supported checks: [apps/web/README.md](../apps/web/README.md)
+- Shared frontend and internal browser checks: [apps/web/README.md](../apps/web/README.md)
 - Static project page: [site/index.html](site/index.html)
 - Durable state and delivery rules: [STATUS](STATUS.md), [WORKFLOW](governance/WORKFLOW.md),
   [CONTRIBUTING](../CONTRIBUTING.md)
@@ -175,7 +182,7 @@ uv run --no-project --python 3.12 python scripts/verify.py --profile full
   inherited project evidence; they are not a fresh re-verification of every capability on this
   candidate.
 - **Candidate-specific verification (§2).** The isolated UI verification used a copied, safe
-  historical report: no new provider calls, no new backtests, no overflow at desktop or mobile
+  historical report: no new provider calls, no new backtests, no overflow at wide or narrow content
   widths, and a stable state across GET refresh. The formal installed Web E2E run passed 8 checks
   with no real provider key. Full exact-head release verification is required before publication and
   is recorded with the candidate SHA.

@@ -772,7 +772,13 @@ def test_http_stream_and_reload_preserve_the_separate_confirmation(
     from unit.test_web_api import ORIGIN, WRITE_HEADERS, _settings
 
     provider = Streaming([_change("parameters.target_quantity", "3")])
-    monkeypatch.setattr(UserStrategyService, "_model_port", lambda self: provider)
+    original_init = UserStrategyService.__init__
+
+    def inject_provider(self: UserStrategyService, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        self._provider = provider
+
+    monkeypatch.setattr(UserStrategyService, "__init__", inject_provider)
     with TestClient(create_app(_settings(tmp_path)), base_url=ORIGIN) as client:
         created = client.post(
             "/api/user-strategies",

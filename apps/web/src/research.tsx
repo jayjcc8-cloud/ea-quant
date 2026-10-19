@@ -1,8 +1,12 @@
+import { SourceLink as Link } from './workspace-navigation'
 import { importTarget, ResearchUploadBinding, type ImportTarget } from './research-upload-binding'
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport, ChronologicalHoldout, ScenarioSummary } from './app'
+import { ResourcesPage } from './resources'
 import { DesktopSettings } from './desktop-settings'
+import { DesktopAbout, WorkspaceRecoveryGuide } from './desktop-about'
+import { SYNTHETIC_CSV, SYNTHETIC_SOURCE, SYNTHETIC_LICENSE, SYNTHETIC_NOTICE } from './import-example'
 import { GuidedMappingFields, readGuidedDeclaration } from './csv-mapping-form'
 import { pathPercent } from './equity-path'
 import {
@@ -282,7 +286,7 @@ function ModelConfigurationPanel({ status, error }: { status: ModelConfiguration
     <header><h2>模型提供方</h2><span>{status.configured ? '已配置' : '配置不可用'}</span></header>
     <p className={status.configured ? 'muted' : 'notice error'}>{status.configured
       ? '起草会把想法发送给已配置的提供方；不使用任何默认提供方。'
-      : `研究无法起草规范：${status.configuration_error ?? '模型提供方未配置'}。请在设置中配置模型；本页不会回退到默认提供方。`}</p>
+      : `研究无法起草规范：${status.configuration_error ?? '模型提供方未配置'}。请在模型连接中完成配置。`}</p>
     <dl className="summary-list">
       <div><dt>是否已配置</dt><dd>{status.configuration_present === undefined ? '未知' : status.configuration_present ? '是' : '否'}</dd></div>
       <div><dt>凭据是否可用</dt><dd>{status.credential_available === undefined ? '未知' : status.credential_available ? '是' : '否'}</dd></div>
@@ -841,7 +845,7 @@ function base64Of(bytes: ArrayBuffer): string {
  * preview of the exact declaration on screen, so the digest the preview reports is
  * the digest the sealed version carries.
  */
-function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: ImportTarget | null }) {
+function DataUploadPanel({ api, target = null, onPublished }: { api: ApiAdapter; target?: ImportTarget | null; onPublished?: () => void }) {
   const cacheKey = `quine.csv-input.${target?.id ?? 'unscoped'}.${target?.revision ?? 0}`
   const [cached] = useState(() => {
     try { return JSON.parse(sessionStorage.getItem(cacheKey) ?? '{}') as Record<string, unknown> }
@@ -857,6 +861,7 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
     try { return cached.unknownPublish === true || sessionStorage.getItem(publicationKey) === 'unknown' }
     catch { return cached.unknownPublish === true }
   })
+  const [stashed, setStashed] = useState(cached.stashed === true)
   const [bufferError, setBufferError] = useState(false)
   useEffect(() => { alive.current = true; return () => { alive.current = false; fileRead.current += 1 } }, [])
   const [content, setContent] = useState(cachedText('content'))
@@ -869,8 +874,8 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
   const [latency, setLatency] = useState(cachedText('latency', '0'))
   const [sourceReference, setSourceReference] = useState(cachedText('sourceReference'))
   const [licenseReference, setLicenseReference] = useState(cachedText('licenseReference'))
-  const [preview, setPreview] = useState<UploadPreviewResponse | null>(null)
-  const [previewedFor, setPreviewedFor] = useState<string | null>(null)
+  const [preview, setPreview] = useState<UploadPreviewResponse | null>((cached.preview as UploadPreviewResponse | null) ?? null)
+  const [previewedFor, setPreviewedFor] = useState<string | null>(cachedText('previewedFor') || null)
   const [published, setPublished] = useState<UploadVersion | null>(() => cached.published && typeof cached.published === 'object' && 'dataset_id' in cached.published ? cached.published as UploadVersion : null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<'preview' | 'publish' | null>(null)
@@ -882,12 +887,12 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
   useEffect(() => {
     let failed = false
     try {
-      sessionStorage.setItem(cacheKey, JSON.stringify({ content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, published, unknownPublish }))
+      sessionStorage.setItem(cacheKey, JSON.stringify({ content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, published, unknownPublish, preview, previewedFor, stashed }))
     } catch { failed = true }
     let active = true
     void Promise.resolve().then(() => { if (active) setBufferError(failed) })
     return () => { active = false }
-  }, [cacheKey, content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, published, unknownPublish])
+  }, [cacheKey, content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, published, unknownPublish, preview, previewedFor, stashed])
   useEffect(() => {
     if (!bufferError) return
     const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
@@ -917,8 +922,8 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
   const mappedVerified = mapped && preview !== null && previewFresh && preview.valid
   const mappedBlocked = mapped && !mappedVerified
     ? previewFresh
-      ? 'This declaration does not verify the whole source: a refused preview is never published. Correct the declaration and preview it again.'
-      : 'A mapped version is published only from a preview of this exact declaration: preview it, and publish while that preview is still current. Changing the file, the mapping, the time declaration or the policy clears it.'
+      ? '检查未通过，请按行号和字段修正后重新检查。'
+      : '自定义映射须先通过检查。更换文件、映射、时间或策略后请重新检查。'
     : null
 
   const reset = () => { setPreview(null); setPreviewedFor(null); setPublished(null); setError(null) }
@@ -936,7 +941,7 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
   const tooLarge = fileBase64 === null && content.length > MAX_UPLOAD_CHARACTERS
 
   const declarationOf = (): UploadDeclaration | null => {
-    if (!policy) { setError('A mapped source states how it became available; no policy is assumed.'); return null }
+    if (!policy) { setError('请先选择可用时间策略；系统不会代选。'); return null }
     const mapping = parseDeclaration(mappingText, 'The mapping declaration')
     if ('error' in mapping) { setError(mapping.error); return null }
     const time = parseDeclaration(timeText, 'The time declaration')
@@ -994,7 +999,7 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
       })
       sessionStorage.removeItem(publicationKey)
       if (!alive.current) return
-      setUnknownPublish(false); setPreview(null); setPreviewedFor(null); setPublished(version)
+      setUnknownPublish(false); setPreview(null); setPreviewedFor(null); setPublished(version); onPublished?.()
     } catch (caught) {
       if (!alive.current) return
       if (caught instanceof ResearchRequestError && ([400, 413, 422].includes(caught.status ?? 0) || ['upload_invalid', 'invalid_upload', 'invalid_request', 'upload_refused'].includes(caught.code))) {
@@ -1009,17 +1014,43 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
   const mappedPreview = preview && isMappedPreview(preview) ? preview : null
   const columns = strictPreview ? (strictPreview.header.length ? strictPreview.header : Object.keys(strictPreview.rows[0] ?? {}).filter(name => name !== 'record_number')) : []
   const mappedColumns = mappedPreview?.preview ? Object.keys(mappedPreview.preview.rows[0] ?? {}).filter(name => name !== 'record_number') : []
+  const discard = () => { fileRead.current += 1; setFileBusy(false); setContent(''); setFileBase64(null); setFileName(''); setMappingText(''); setTimeText(''); setPolicy(''); setLatency('0'); setSourceReference(''); setLicenseReference(''); setMode('strict'); reset(); setStashed(false) }
+  const draftActions = <div className="actions"><button disabled={busy !== null || fileBusy || bufferError} onClick={() => setStashed(!stashed)}>{stashed ? '继续导入' : '本次会话暂存'}</button><button disabled={busy !== null || unknownPublish} onClick={discard}>丢弃导入</button><span className="muted">只丢弃导入草稿，不删除已入库数据。</span></div>
+  const sessionNotice = <p className="muted">仅本次会话暂存：页面切换或刷新可继续；退出应用后不保证保留。退出前请发布数据，或保留原 CSV 并复制下方导入记录。</p>
+  const draftCopy = <details><summary>查看并复制导入记录</summary><p>在下方全选、复制到本地文本文件。重开后选择原 CSV，按记录填写映射、时间和声明；不要放入密钥。</p><textarea aria-label="可复制的导入记录" rows={6} readOnly value={JSON.stringify({ fileName, mode, mapping: mappingText, time: timeText, policy, latency, sourceReference, licenseReference, csv: fileBase64 === null ? content : '请保留所选原 CSV 文件' }, null, 2)} onFocus={event => event.currentTarget.select()} /></details>
+  const example = (mappedExample: boolean) => {
+    fileRead.current += 1; setFileBusy(false); reset(); setFileBase64(null); setStashed(false)
+    setContent(mappedExample ? SYNTHETIC_CSV.replace(SYNTHETIC_CSV.split('\n')[0], 'v,mic,ticker,bar_start,bar_end,adj,o,h,lo,c,vlm,feed,seq,rev,seen') : SYNTHETIC_CSV)
+    setFileName(mappedExample ? 'quine-synthetic-aapl-mapped.csv' : 'quine-synthetic-aapl.csv')
+    setMode(mappedExample ? 'explicit-mapping' : 'strict'); setMappingText(mappedExample ? MAPPING_EXAMPLE : ''); setTimeText(mappedExample ? TIME_EXAMPLE : '')
+    setPolicy(AVAILABILITY_PROVIDED); setLatency('0'); setSourceReference(SYNTHETIC_SOURCE); setLicenseReference(SYNTHETIC_LICENSE)
+  }
+  if (stashed) return <div className="upload-panel"><h3>导入草稿已在本次会话暂存</h3><p>{fileName || '粘贴的 CSV'} · {content.length} 字符 · {preview ? preview.valid ? '上次解析通过' : '上次解析有错误' : '尚未解析'}</p>{sessionNotice}{draftCopy}{draftActions}</div>
   return <div className="upload-panel">
-    {target && <p className="muted">导入完成后可用于指定研究；发布不会自动绑定。<Link to={target.returnTo}>取消导入并返回当前研究</Link></p>}
+    {draftActions}
+    {sessionNotice}{draftCopy}
+    {target && <p className="muted">导入完成后可用于指定研究；发布不会自动绑定。<Link to={target.returnTo}>返回当前研究（保留导入草稿）</Link></p>}
     {bufferError && <p role="alert">CSV 输入无法完整缓冲，离开前请完成发布或保留原文件。</p>}
     {unknownPublish && <p role="alert">发布结果尚未确认，不会自动重发。输入已保留，请在数据目录核对已发布版本。</p>}
-    <p className="muted">An uploaded file is decoded by the same strict Phase 1 OHLCV decoder the read-only registered root uses, and published as one immutable version. Either the file already has that fixed 15-column UTC interval profile, or you declare, field by field, how your own columns and timestamps become it. Nothing is inferred from the data in either case.</p>
-    <label htmlFor="upload-mode">Upload mode</label>
+    <p className="muted">先选择或粘贴 CSV → 核对列与时间 → 检查数据 → 发布版本 → 用于研究。发布会保存一个不可变数据版本，不会自动绑定或运行回测。</p>
+    <details className="provenance" open><summary>支持范围与必要字段</summary>
+      <p>首版两个内置模板支持 XNAS:AAPL、USD、整数股，价格步长 0.01。其他已注册场景须与所选数据的标的和规格兼容；导入成功不等于可绑定任意策略。</p>
+      <p>需提供开高低收、成交量、开始/结束时间、来源及序号；并声明版本、交易所、标的、复权方式与修订号。标准格式还需 available_at。自定义列名可逐项映射；不补价格、不猜时区。时间须使用支持的精确格式；均线模板使用 raw、revision=0 的 K 线。</p>
+      <p>教学文件是 8 行原创合成数字，非真实行情；允许无条件复制、修改和使用。示例时间仅为演示声明，PIT 未验证。</p>
+      <div className="actions"><button type="button" disabled={busy !== null || !!content || unknownPublish} onClick={() => example(false)}>填入合成 CSV 示例</button><button type="button" disabled={busy !== null || !!content || unknownPublish} onClick={() => example(true)}>填入合成映射示例</button></div>
+      <details><summary>查看并复制合成示例与许可</summary>
+        <p>点击下方只读内容全选，用系统「编辑 → 复制」保存到你选择的本地文本文件；不会离开页面、覆盖导入草稿或自动写入文件。</p>
+        <label htmlFor="synthetic-csv-copy">合成示例 CSV（只读）</label><textarea id="synthetic-csv-copy" rows={5} readOnly value={SYNTHETIC_CSV} onFocus={event => event.currentTarget.select()} onClick={event => event.currentTarget.select()} />
+        <label htmlFor="synthetic-notice-copy">示例来源与完整许可（只读）</label><textarea id="synthetic-notice-copy" rows={5} readOnly value={SYNTHETIC_NOTICE} onFocus={event => event.currentTarget.select()} onClick={event => event.currentTarget.select()} />
+      </details>
+      <p className="muted">已有输入时先复制或丢弃草稿，再填入示例。示例只验证流程，研究效果须用有权使用的真实数据检验。</p>
+    </details>
+    <label htmlFor="upload-mode">导入方式</label>
     <select id="upload-mode" value={mode} disabled={busy !== null} onChange={event => { setMode(event.target.value === 'explicit-mapping' ? 'explicit-mapping' : 'strict'); reset() }}>
-      <option value="strict">Strict profile, unchanged</option>
-      <option value="explicit-mapping">Explicit mapping of my own file</option>
+      <option value="strict">标准 15 列 CSV</option>
+      <option value="explicit-mapping">自定义列映射</option>
     </select>
-    <label htmlFor="upload-file">CSV file</label>
+    <label htmlFor="upload-file">选择 CSV 文件</label>
     <input id="upload-file" type="file" accept=".csv,text/csv" disabled={busy !== null} onChange={event => {
       const file = event.target.files?.[0]
       if (!file) return
@@ -1035,8 +1066,8 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
       }).catch(() => { if (alive.current && ticket === fileRead.current) setError('The selected file could not be read in this browser. Previous inputs retained.') }).finally(() => { if (alive.current && ticket === fileRead.current) setFileBusy(false) })
     }} />
     {fileBusy && <p role="status">正在读取所选文件，原输入保留至读取完成。</p>}
-    {fileBase64 !== null && <p className="muted">This file is sent as its own bytes (base64), not as re-encoded text: a byte-order mark, a CRLF ending or a non-ASCII column stays exactly as the file has it.</p>}
-    <label htmlFor="upload-content">{fileBase64 !== null ? 'CSV content (a readable view; editing it sends this text instead)' : 'CSV content'}</label>
+    {fileBase64 !== null && <p className="muted">发布保留所选文件原始字节；编辑下方内容后改用编辑后的文本。</p>}
+    <label htmlFor="upload-content">{fileBase64 !== null ? 'CSV 内容（编辑后以此文本替换所选文件）' : 'CSV 内容'}</label>
     <textarea id="upload-content" rows={6} spellCheck={false} value={content} disabled={busy !== null}
       onChange={event => { fileRead.current += 1; setFileBusy(false); setContent(event.target.value); setFileBase64(null); reset() }} />
     {tooLarge && <p className="notice error">This content is above the {MAX_UPLOAD_CHARACTERS}-character ceiling this host accepts; it would be refused before anything is parsed.</p>}
@@ -1045,16 +1076,16 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
           controls are read from the JSON fields, so neither editor can overwrite
           the other's declaration. */}
       <fieldset className="declaration-editor">
-        <legend>How to declare this mapping</legend>
+        <legend>填写列映射</legend>
         <label>
           <input type="radio" name="upload-declaration-editor" checked={declarationEditor === 'guided'}
             disabled={busy !== null || !guided.ok} onChange={() => setDeclarationEditor('guided')} />
-          Guided controls
+          表单映射
         </label>
         <label>
           <input type="radio" name="upload-declaration-editor" checked={declarationEditor === 'advanced'}
             disabled={busy !== null} onChange={() => setDeclarationEditor('advanced')} />
-          Advanced JSON
+          高级 JSON
         </label>
       </fieldset>
       {!guided.ok && <p className="notice error" role="alert">
@@ -1065,69 +1096,70 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
         ? <GuidedMappingFields content={content} policy={policy} disabled={busy !== null}
             state={guided.state} onChange={applyGuidedDeclaration} />
         : <div className="advanced-declaration">
-          <p className="muted">This is the same declaration, written as JSON. Nothing on this page decides whether it is acceptable: it is sent as it stands, and the host is the authority that accepts or refuses it. Switching back to the guided controls reads exactly what is here.</p>
-          <label htmlFor="upload-mapping">Mapping declaration (JSON, every strict field declared)</label>
+          <p className="muted">高级 JSON 与表单使用同一份声明。切换编辑方式不会另建映射，最终以完整数据检查结果为准。</p>
+          <label htmlFor="upload-mapping">列映射声明（JSON）</label>
           <textarea id="upload-mapping" rows={5} spellCheck={false} placeholder={MAPPING_EXAMPLE} value={mappingText} disabled={busy !== null}
             onChange={event => { setMappingText(event.target.value); reset() }} />
-          <label htmlFor="upload-time">Time declaration (JSON, exact formats and timezone)</label>
+          <label htmlFor="upload-time">时间声明（JSON）</label>
           <textarea id="upload-time" rows={3} spellCheck={false} placeholder={TIME_EXAMPLE} value={timeText} disabled={busy !== null}
             onChange={event => { setTimeText(event.target.value); reset() }} />
           <p className="muted">Each destination is one of the strict profile's own field names, and each timestamp names one exact form from {TIME_FORMAT_IDS.join(', ')}. A field you do not declare, a column this file does not have, and a format the values do not match are all refusals rather than guesses. Under the simulated policy the host derives available_at itself, so a declaration that also states it is refused.</p>
         </div>}
     </>}
     <div className="parameter-grid">
-      <div><label htmlFor="upload-source">Source reference (your assertion)</label><input id="upload-source" maxLength={300} value={sourceReference} disabled={busy !== null} onChange={event => { setSourceReference(event.target.value); setPublished(null) }} /></div>
-      <div><label htmlFor="upload-license">Licence reference</label><input id="upload-license" maxLength={300} value={licenseReference} disabled={busy !== null} onChange={event => { setLicenseReference(event.target.value); setPublished(null) }} /></div>
-      <div><label htmlFor="upload-policy">Availability policy</label>
+      <div><label htmlFor="upload-source">数据来源（用户声明）</label><input id="upload-source" maxLength={300} value={sourceReference} disabled={busy !== null} onChange={event => { setSourceReference(event.target.value); setPublished(null) }} /></div>
+      <div><label htmlFor="upload-license">使用许可（用户声明）</label><input id="upload-license" maxLength={300} value={licenseReference} disabled={busy !== null} onChange={event => { setLicenseReference(event.target.value); setPublished(null) }} /></div>
+      <div><label htmlFor="upload-policy">可用时间策略</label>
         <select id="upload-policy" value={policy} disabled={busy !== null} onChange={event => { setPolicy(event.target.value); setPreview(null); setPreviewedFor(null); setPublished(null); setError(null) }}>
-          <option value="">Choose explicitly…</option>
-          <option value={AVAILABILITY_PROVIDED}>Provided in the capture (uploader assertion)</option>
-          <option value={AVAILABILITY_SIMULATED}>Simulated: interval end + latency</option>
+          <option value="">请选择…</option>
+          <option value={AVAILABILITY_PROVIDED}>文件已提供 available_at（用户声明）</option>
+          <option value={AVAILABILITY_SIMULATED}>模拟可用时间：K 线结束 + 延迟</option>
         </select></div>
-      {policy === AVAILABILITY_SIMULATED && <div><label htmlFor="upload-latency">Simulated latency (seconds)</label><input id="upload-latency" inputMode="numeric" value={latency} disabled={busy !== null} onChange={event => { setLatency(event.target.value); setPreview(null); setPreviewedFor(null); setPublished(null) }} /></div>}
+      {policy === AVAILABILITY_SIMULATED && <div><label htmlFor="upload-latency">模拟延迟（秒）</label><input id="upload-latency" inputMode="numeric" value={latency} disabled={busy !== null} onChange={event => { setLatency(event.target.value); setPreview(null); setPreviewedFor(null); setPublished(null) }} /></div>}
     </div>
-    <p className="muted">There is no default policy: an upload that does not state how the capture became available is refused rather than recorded as if you had asserted it. Neither policy is ever reported as verified point-in-time availability, and the source and licence strings are your assertion, not a legal verification.</p>
+    <p className="muted">请明确选择可用时间策略。文件时间或模拟延迟都不代表 PIT（当时可获得性）已核验；来源与许可仅记录你的声明。</p>
     <div className="actions">
-      <button type="button" disabled={fileBusy || busy !== null || (!content && fileBase64 === null) || tooLarge || !previewUpload} onClick={() => { void run('preview') }}>{busy === 'preview' ? 'Previewing…' : 'Preview sample'}</button>
-      <button type="button" className="primary" disabled={fileBusy || unknownPublish || busy !== null || (!content && fileBase64 === null) || tooLarge || !policy || !api.publishUpload || (mapped && !mappedVerified)} onClick={() => { void run('publish') }}>{busy === 'publish' ? 'Publishing…' : 'Publish version'}</button>
+      <button type="button" disabled={fileBusy || busy !== null || (!content && fileBase64 === null) || tooLarge || !previewUpload} onClick={() => { void run('preview') }}>{busy === 'preview' ? '检查中…' : '检查数据'}</button>
+      <button type="button" className="primary" disabled={fileBusy || unknownPublish || busy !== null || (!content && fileBase64 === null) || tooLarge || !policy || !api.publishUpload || (mapped && !mappedVerified)} onClick={() => { void run('publish') }}>{busy === 'publish' ? '发布中…' : '发布数据版本'}</button>
     </div>
     {mappedBlocked && <p className="muted">{mappedBlocked}</p>}
     {error && <p className="notice error">{error}</p>}
+    {(preview?.first_error) && <p><a href={mapped ? '#upload-mapping' : '#upload-content'} onClick={event => { event.preventDefault(); const field = preview.first_error?.field_name; const control = (mapped && field ? document.getElementById(`guided-${field}`) ?? document.getElementById(`guided-${field.replace('time_declaration.', '')}`) : null) ?? document.getElementById(mapped && declarationEditor === 'advanced' ? 'upload-mapping' : 'upload-content'); control?.focus(); control?.scrollIntoView?.({ block: 'center' }) }}>返回修正 {preview.first_error.field_name ?? 'CSV 内容'}，然后重新检查</a></p>}
     {strictPreview && <section className="upload-preview" aria-label="Upload preview">
       <dl className="summary-list">
-        <div><dt>Bytes / profile</dt><dd>{strictPreview.byte_count} · {strictPreview.profile}</dd></div>
-        <div><dt>Sampled rows</dt><dd>{strictPreview.row_count_sampled}{strictPreview.truncated ? ' · sample truncated' : ''}</dd></div>
-        <div><dt>Header</dt><dd>{strictPreview.header_ok ? 'Matches the strict profile' : `Expected: ${strictPreview.expected_header.join(', ')}`}</dd></div>
-        <div><dt>Full validation</dt><dd>{strictPreview.full_validation}{strictPreview.valid ? ' · verified' : ''}</dd></div>
+        <div><dt>字节 / 格式</dt><dd>{strictPreview.byte_count} · {strictPreview.profile}</dd></div>
+        <div><dt>预览行数</dt><dd>{strictPreview.row_count_sampled}{strictPreview.truncated ? ' · sample truncated' : ''}</dd></div>
+        <div><dt>列名</dt><dd>{strictPreview.header_ok ? '符合标准列名' : `Expected: ${strictPreview.expected_header.join(', ')}`}</dd></div>
+        <div><dt>完整检查</dt><dd>{strictPreview.full_validation}{strictPreview.valid ? ' · verified' : ''}</dd></div>
       </dl>
-      {strictPreview.first_error && <p className="notice error">{strictPreview.first_error.code}: {strictPreview.first_error.message}{strictPreview.first_error.record_number ? ` · CSV record ${strictPreview.first_error.record_number}` : ''}{strictPreview.first_error.field_name ? ` · field ${strictPreview.first_error.field_name}` : ''}</p>}
+      {strictPreview.first_error && <p className="notice error">{strictPreview.first_error.code}: {strictPreview.first_error.message}{strictPreview.first_error.record_number ? ` · CSV 行号（含表头） ${strictPreview.first_error.record_number}` : ''}{strictPreview.first_error.field_name ? ` · 字段 ${strictPreview.first_error.field_name}` : ''}</p>}
       {strictPreview.quality && <dl className="summary-list">
-        <div><dt>Bars / revisions</dt><dd>{strictPreview.quality.bar_count} / {strictPreview.quality.revision_count}</dd></div>
-        <div><dt>Observed gaps</dt><dd>{strictPreview.quality.observed_gap_count}{strictPreview.quality.largest_gap_seconds ? ` · largest ${strictPreview.quality.largest_gap_seconds}s` : ''}</dd></div>
-        <div><dt>Bar coverage (UTC)</dt><dd>{strictPreview.quality.bar_start_utc} — {strictPreview.quality.bar_end_utc}</dd></div>
-        <div><dt>Bar durations</dt><dd>{strictPreview.quality.bar_durations_seconds.map(value => `${value}s`).join(', ') || 'Unavailable'}</dd></div>
+        <div><dt>K 线 / 修订</dt><dd>{strictPreview.quality.bar_count} / {strictPreview.quality.revision_count}</dd></div>
+        <div><dt>已观察到的间隔缺口</dt><dd>{strictPreview.quality.observed_gap_count}{strictPreview.quality.largest_gap_seconds ? ` · largest ${strictPreview.quality.largest_gap_seconds}s` : ''}</dd></div>
+        <div><dt>K 线覆盖（UTC）</dt><dd>{strictPreview.quality.bar_start_utc} — {strictPreview.quality.bar_end_utc}</dd></div>
+        <div><dt>K 线长度</dt><dd>{strictPreview.quality.bar_durations_seconds.map(value => `${value}s`).join(', ') || 'Unavailable'}</dd></div>
       </dl>}
       {columns.length > 0 && strictPreview.rows.length > 0 && <table><thead><tr><th>Record</th>{columns.map(name => <th key={name}>{name}</th>)}</tr></thead>
         <tbody>{strictPreview.rows.map(row => <tr key={String(row.record_number)}><th scope="row">{String(row.record_number)}</th>{columns.map(name => <td key={name}>{String(row[name] ?? '')}</td>)}</tr>)}</tbody></table>}
-      {strictPreview.limitations.length > 0 && <details><summary>What a preview cannot show</summary>
+      {strictPreview.limitations.length > 0 && <details><summary>检查范围与限制</summary>
         <ul className="assumption-list">{strictPreview.limitations.map(item => <li key={item}>{item}</li>)}</ul>
       </details>}
     </section>}
     {mappedPreview && <section className="upload-preview" aria-label="Mapped upload preview">
       <dl className="summary-list">
-        <div><dt>Mapped bytes / profile</dt><dd>{mappedPreview.capture?.byte_count ?? mappedPreview.byte_count} · {mappedPreview.profile ?? 'strict Phase 1 OHLCV'}</dd></div>
-        <div><dt>Sampled rows</dt><dd>{mappedPreview.preview?.row_count_sampled ?? 0}{mappedPreview.preview?.truncated ? ' · sample truncated' : ''}</dd></div>
-        <div><dt>Whole file mapped</dt><dd>{mappedPreview.valid ? 'verified — the whole source normalizes and re-decodes' : 'refused'}</dd></div>
+        <div><dt>映射字节 / 格式</dt><dd>{mappedPreview.capture?.byte_count ?? mappedPreview.byte_count} · {mappedPreview.profile ?? 'strict Phase 1 OHLCV'}</dd></div>
+        <div><dt>预览行数</dt><dd>{mappedPreview.preview?.row_count_sampled ?? 0}{mappedPreview.preview?.truncated ? ' · sample truncated' : ''}</dd></div>
+        <div><dt>完整映射检查</dt><dd>{mappedPreview.valid ? '通过：全文件转换与重新解码成功' : 'refused'}</dd></div>
         <div><dt>Raw source SHA-256 (not the capture)</dt><dd>{mappedPreview.source?.sha256 ?? 'Unavailable'} · {mappedPreview.source?.byte_count ?? 0} source bytes; retained only after publication</dd></div>
         <div><dt>Mapped capture SHA-256</dt><dd>{mappedPreview.capture?.sha256 ?? 'Unavailable'} · {mappedPreview.capture?.record_count ?? 0} records</dd></div>
         <div><dt>Mapping evidence SHA-256</dt><dd>{mappedPreview.mapping_evidence_sha256 ?? 'Unavailable'}</dd></div>
-        <div><dt>Declared timezone / formats</dt><dd>{mappedPreview.time?.timezone ?? 'Unavailable'} · {Object.entries(mappedPreview.time?.formats ?? {}).map(([field, format]) => `${field}: ${format}`).join(' · ') || 'Unavailable'}</dd></div>
+        <div><dt>声明时区 / 格式</dt><dd>{mappedPreview.time?.timezone ?? 'Unavailable'} · {Object.entries(mappedPreview.time?.formats ?? {}).map(([field, format]) => `${field}: ${format}`).join(' · ') || 'Unavailable'}</dd></div>
       </dl>
-      {mappedPreview.first_error && <p className="notice error" role="alert">{mappedPreview.first_error.code}: {mappedPreview.first_error.message}{mappedPreview.first_error.record_number ? ` · CSV record ${mappedPreview.first_error.record_number}` : ''}{mappedPreview.first_error.field_name ? ` · field ${mappedPreview.first_error.field_name}` : ''}</p>}
+      {mappedPreview.first_error && <p className="notice error" role="alert">{mappedPreview.first_error.code}: {mappedPreview.first_error.message}{mappedPreview.first_error.record_number ? ` · CSV 行号（含表头） ${mappedPreview.first_error.record_number}` : ''}{mappedPreview.first_error.field_name ? ` · 字段 ${mappedPreview.first_error.field_name}` : ''}</p>}
       {mappedPreview.quality && <dl className="summary-list">
-        <div><dt>Bars / revisions</dt><dd>{mappedPreview.quality.bar_count} / {mappedPreview.quality.revision_count}</dd></div>
-        <div><dt>Observed gaps</dt><dd>{mappedPreview.quality.observed_gap_count}{mappedPreview.quality.largest_gap_seconds ? ` · largest ${mappedPreview.quality.largest_gap_seconds}s` : ''}</dd></div>
-        <div><dt>Bar coverage (UTC)</dt><dd>{mappedPreview.quality.bar_start_utc} — {mappedPreview.quality.bar_end_utc}</dd></div>
+        <div><dt>K 线 / 修订</dt><dd>{mappedPreview.quality.bar_count} / {mappedPreview.quality.revision_count}</dd></div>
+        <div><dt>已观察到的间隔缺口</dt><dd>{mappedPreview.quality.observed_gap_count}{mappedPreview.quality.largest_gap_seconds ? ` · largest ${mappedPreview.quality.largest_gap_seconds}s` : ''}</dd></div>
+        <div><dt>K 线覆盖（UTC）</dt><dd>{mappedPreview.quality.bar_start_utc} — {mappedPreview.quality.bar_end_utc}</dd></div>
       </dl>}
       {mappedPreview.mapping && <details><summary>Declared mapping, as the host resolved it</summary>
         <ul className="assumption-list">
@@ -1137,7 +1169,7 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
       </details>}
       {mappedColumns.length > 0 && (mappedPreview.preview?.rows.length ?? 0) > 0 && <table><thead><tr><th>Record</th>{mappedColumns.map(name => <th key={name}>{name}</th>)}</tr></thead>
         <tbody>{mappedPreview.preview?.rows.map(row => <tr key={String(row.record_number)}><th scope="row">{String(row.record_number)}</th>{mappedColumns.map(name => <td key={name}>{String(row[name] ?? '')}</td>)}</tr>)}</tbody></table>}
-      {mappedPreview.limitations.length > 0 && <details><summary>What a preview cannot show</summary>
+      {mappedPreview.limitations.length > 0 && <details><summary>检查范围与限制</summary>
         <ul className="assumption-list">{mappedPreview.limitations.map(item => <li key={item}>{item}</li>)}</ul>
       </details>}
     </section>}
@@ -1152,7 +1184,7 @@ function DataUploadPanel({ api, target = null }: { api: ApiAdapter; target?: Imp
       <details className="provenance"><summary>版本身份、文件哈希与声明</summary><dl className="summary-list">
         <div><dt>Dataset version</dt><dd>{published.dataset_id} · v{published.version} · {published.published_at}</dd></div>
         <div><dt>Instrument / records</dt><dd>{published.instrument.venue}:{published.instrument.symbol} · {published.record_count}</dd></div>
-        <div><dt>Availability policy</dt><dd>{published.availability_policy.id} · {published.availability_policy.evidence} · point-in-time verified: {String(published.availability_policy.pit_verified)}</dd></div>
+        <div><dt>可用时间策略</dt><dd>{published.availability_policy.id} · {published.availability_policy.evidence} · point-in-time verified: {String(published.availability_policy.pit_verified)}</dd></div>
         <div><dt>Source assertion</dt><dd>{published.source.reference ?? 'No reference given'} · asserted by {published.source.declared_by}, not legally verified</dd></div>
         <div><dt>Capture SHA-256</dt><dd>{published.capture_sha256}</dd></div>
         <div><dt>Canonical data SHA-256</dt><dd>{published.data_sha256}</dd></div>
@@ -1491,6 +1523,7 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
   // so it is not state this page keeps or re-applies: a later render, a refresh
   // or a return to this route does not put the idea back.
   const [prepared] = useState(() => preparedExperiment(location.state))
+  const legacyCreate = location.pathname === "/research/new" || prepared !== null
   const [tasks, setTasks] = useState<ResearchTask[] | null>(null)
   const [idea, setIdea] = useState(prepared?.idea ?? '')
   const [selection, setSelection] = useState<Partial<Record<LayerName, string>>>({})
@@ -1539,8 +1572,12 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
   }
 
   const advancedOffered = Boolean(api.previewUpload || api.publishUpload || api.listDeclarations || offlineOffered || api.localStrategySlot || api.inspectLocalStrategy)
+  if (location.pathname === '/research' && location.hash === '#data-upload') {
+    return <Navigate to={`/resources/data${location.search}${location.hash}`} replace />
+  }
   return <>
-    <PageHeading title="Research Workspace" subtitle="Persisted ideas, registered restrictive specs, and the real installed backtests they start." />
+    <PageHeading title={legacyCreate ? "旧版独立任务" : "历史研究任务"} subtitle="保留已有任务、运行与恢复入口。新的研究请从研究工作区开始。" />
+    <p><Link to="/strategies" state={{ createStrategy: true }}>新建研究</Link> · <Link to="/strategies">返回研究工作区</Link></p>
     {error && <p role="alert" className="notice error">{error}</p>}
     {unavailable && <p className="notice error">This client cannot reach the local research API.</p>}
     {/* Reachable without scrolling past the workspace: the evidence pages this
@@ -1550,7 +1587,7 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
       <Link to="/batches/new">Run batch</Link>
       <Link to="/holdouts">Chronological holdouts</Link>
     </nav>
-    <div className="research-list-layout"><section className="panel idea-panel">
+    <div className={legacyCreate ? "research-list-layout" : undefined}>{legacyCreate && <section className="panel idea-panel">
       <header><h2>New research idea</h2><span>One active task per idea</span></header>
       {prepared && <p role="note" aria-label="Prepared from a task" className="notice">
         This idea was copied from task <code>{prepared.sourceTaskId}</code>, which is left exactly as it is. Only your own words came across: no specification, run, report, budget, capability selection or confirmation did. Review the capability selection again below — leaving it empty uses the host default route. Nothing is created or confirmed until you press the button yourself.
@@ -1564,12 +1601,12 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
       </Disclosure>}
       <div className="actions"><button className="primary" disabled={busy || !idea.trim() || unavailable} onClick={() => { void create() }}>{busy ? 'Creating draft…' : 'Create draft'}</button></div>
       <p className="muted">Creating the draft records the selected capabilities on it; the host verifies that exact identity again and freezes it when you confirm. No selection means the host default route, and the model can never change it.</p>
-    </section>
+    </section>}
     <section className="panel research-history">
       <header><h2>Persisted research tasks</h2><span>Refresh-safe list</span></header>
       <div className="result-toolbar"><button onClick={() => { void load() }}>Refresh</button></div>
       {tasks === null && !error && !unavailable && <p className="muted">Loading persisted tasks…</p>}
-      {tasks?.length === 0 && <p className="muted">No research tasks yet. Create a draft from an idea above.</p>}
+      {tasks?.length === 0 && <p className="muted">暂无旧版研究任务。可在研究工作区保存新的想法。</p>}
       <ul className="job-list">{tasks?.map(task => {
         const spec = latestSpec(task)
         // The registered identity a reader recognizes leads the card; the idea it
@@ -1586,7 +1623,7 @@ export function ResearchTasks({ api }: { api: ApiAdapter }) {
     </section></div>
     {/* Everything that changes what this workspace can research with. Nothing
         here is applied by opening it: each panel keeps its own explicit action. */}
-    {advancedOffered && <section className="panel advanced-panel" aria-label="Data, declarations and local packages">
+    {legacyCreate && advancedOffered && <section className="panel advanced-panel" aria-label="Data, declarations and local packages">
       <header><h2>Data, declarations and local packages</h2><span>Advanced · nothing is selected or run from here</span></header>
       <p className="muted">These controls change what this workspace can research with. Opening one applies nothing: every version published, declaration registered and package trusted below is a separate explicit decision, and each panel states its own effect before its action.</p>
       {(api.previewUpload || api.publishUpload) && <Disclosure id="data-upload" open={location.hash === '#data-upload' ? true : undefined} title="Controlled data upload" subtitle="Preview, then publish one version">
@@ -1731,7 +1768,7 @@ function TaskRecoveryPanel({ task, readyReports }: { task: ResearchTask; readyRe
     {needsCancelFirst && <p className="notice">To start a separate experiment with the same idea, cancel this task first using <strong>Cancel task</strong>. Stored runs/reports remain; this does not undo any dispatched work.</p>}
     <div className="actions">
       <button className="primary" disabled={needsCancelFirst}
-        onClick={() => { navigate('/research', { state: { recovery: { task_id: task.task_id, idea: task.raw_idea } } }) }}>
+        onClick={() => { navigate('/research/new', { state: { recovery: { task_id: task.task_id, idea: task.raw_idea } } }) }}>
         Prepare a new experiment
       </button>
     </div>
@@ -2244,7 +2281,7 @@ function PageHeading({ title, subtitle, status }: { title: string; subtitle?: st
   return <header className="page-title"><div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>{status && <span className={`status status-${status}`}>{STATUS_LABELS[status as ResearchTaskStatus] ?? status}</span>}</header>
 }
 
-export function ResearchSettings({ api }: { api: ApiAdapter }) {
+export function ModelConnections({ api }: { api: ApiAdapter }) {
   const [check, setCheck] = useState(0)
   const [read, setRead] = useState<{
     api: ApiAdapter; check: number; status: ModelConfigurationStatus | null; error: string | null
@@ -2264,47 +2301,71 @@ export function ResearchSettings({ api }: { api: ApiAdapter }) {
     void load()
     return () => { current = false }
   }, [api, check])
-  return <><PageHeading title="设置" subtitle="当前模型配置、本地外观与本地研究限制。" />
-    <div className="actions"><button type="button" disabled={!currentRead} onClick={() => setCheck(value => value + 1)}>重新检查模型配置</button><Link to="/strategies">返回策略</Link></div>
-    <DesktopSettings api={api} onSaved={() => setCheck(value => value + 1)} />
-    <ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} /></>
+  return <><PageHeading title="模型连接" subtitle="管理当前工作区共享的模型连接配置。" />
+    <DesktopSettings api={api} section="model" onSaved={() => setCheck(value => value + 1)} />
+    <details className="model-diagnostics"><summary>模型连接诊断</summary><button type="button" disabled={!currentRead} onClick={() => setCheck(value => value + 1)}>重新检查模型配置</button><ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} /></details></>
 }
 
+
+export function ResearchSettings({ api }: { api: ApiAdapter }) {
+  const location = useLocation()
+  const requested = new URLSearchParams(location.search).get('section')
+  const section = requested === 'workspace' || requested === 'diagnostics' || requested === 'about' ? requested : 'appearance'
+  return <><PageHeading title="设置" subtitle="应用外观、工作区与诊断" />
+    <div className="settings-layout"><nav aria-label="设置分类">{[['appearance', '外观'], ['workspace', '工作区'], ['diagnostics', '应用诊断'], ['about', '关于']].map(([key, name]) => <Link key={key} className={section === key ? 'active' : ''} to={`/settings?section=${key}`}>{name}</Link>)}</nav><div>
+      {(section === 'appearance' || section === 'workspace') && <DesktopSettings key={section} api={api} section={section} onSaved={() => {}} />}
+      {section === 'workspace' && <WorkspaceRecoveryGuide />}
+      {section === 'diagnostics' && <><DesktopAbout api={api} /><DiagnosticTools api={api} /><ResourcesPage api={api} /></>}
+      {section === 'about' && <DesktopAbout api={api} />}
+      <p className="muted">模型是当前工作区的共享资源。<Link to="/resources/models">管理模型连接</Link></p>
+    </div></div></>
+}
 
 /** The existing explicit import controls, reached without creating a legacy task. */
 export function DataWorkspace({ api }: { api: ApiAdapter }) {
   const location = useLocation()
   const target = importTarget(location.search)
+  const [selectedDataset, setSelectedDataset] = useState('')
+  const [searchData, setSearchData] = useState('')
+  const [showImport, setShowImport] = useState(() => !!target || location.hash === '#data-upload')
+  const [catalogRefresh, setCatalogRefresh] = useState(0)
   const [datasets, setDatasets] = useState<Awaited<ReturnType<NonNullable<ApiAdapter['listDatasets']>>> | null>(null)
   const [error, setError] = useState('')
   useEffect(() => {
     let active = true
-    api.listDatasets?.().then(items => { if (active) setDatasets(items) })
+    api.listDatasets?.().then(items => { if (active) { setDatasets(items); setError('') } })
       .catch(() => { if (active) setError('数据目录读取失败，请刷新重试。') })
     return () => { active = false }
-  }, [api])
-  return <>
-    <PageHeading title="数据" subtitle="本地数据版本与导入。发布后，在具体研究中选择数据。" />
-    <section className="panel" aria-label="数据目录"><h2>数据目录</h2>
+  }, [api, catalogRefresh])
+  const selected = datasets?.find(item => item.dataset_id === selectedDataset)
+  const visible = datasets?.filter(item => `${item.dataset_id} ${item.symbol ?? ''}`.toLowerCase().includes(searchData.toLowerCase()))
+  return <div className="data-resource">
+    <div className="data-toolbar"><input type="search" aria-label="搜索数据" placeholder="搜索数据名称或标的" value={searchData} onChange={e => setSearchData(e.target.value)} /><button className="primary" onClick={() => setShowImport(value => !value)} aria-expanded={showImport}>导入 CSV</button><button aria-label="刷新目录" title="刷新目录" disabled={!api.listDatasets} onClick={() => setCatalogRefresh(value => value + 1)}>↻</button></div>
+    <div className="data-master-detail"><section className="data-directory" aria-label="数据目录">
       {error && <p role="alert" className="notice error">{error}</p>}
       {!api.listDatasets && <p>此工作区未接入数据目录。</p>}
       {api.listDatasets && !datasets && !error && <p role="status">正在读取数据…</p>}
-      {datasets?.length === 0 && <p>暂无独立数据版本。已有场景仍使用其注册数据。</p>}
+      {datasets?.length === 0 && <p className="resource-empty">暂无独立数据版本。已有场景仍使用其注册数据。</p>}
       {datasets && datasets.length > 0 && <div className="table-scroll"><table><thead><tr><th>数据版本</th><th>标的</th><th>记录</th><th>状态</th></tr></thead>
-        <tbody>{datasets.map(item => <tr key={item.dataset_id}><td>{item.dataset_id}</td><td>{item.symbol ? `${item.venue ?? ''}:${item.symbol}` : '未记录'}</td><td>{item.record_count ?? '未记录'}</td><td>{item.valid ? '可读取' : item.message ?? '不可用'}</td></tr>)}</tbody></table></div>}
-    </section>
-    <p><Link to={target?.returnTo ?? "/strategies"}>{target ? "返回当前研究" : "返回研究"}</Link></p>
-    <details id="data-upload" className="panel" open><summary>导入 CSV 数据</summary><DataUploadPanel key={`${target?.id ?? "unscoped"}.${target?.revision ?? 0}`} api={api} target={target} /></details>
-    <details className="panel"><summary>历史数据导入</summary><OfflineHistoryPanel api={api} /></details>
-  </>
+        <tbody>{visible?.map(item => <tr className={item.dataset_id === selectedDataset ? 'selected' : undefined} key={item.dataset_id}><td><button className="text-button" aria-pressed={item.dataset_id === selectedDataset} onClick={() => setSelectedDataset(item.dataset_id)}>{item.dataset_id}</button></td><td>{item.symbol ? `${item.venue ?? ''}:${item.symbol}` : '未记录'}</td><td>{item.record_count ?? '未记录'}</td><td><span className={`data-state ${item.valid ? 'ready' : ''}`}>{item.valid ? '可读取' : '不可用'}</span></td></tr>)}</tbody></table></div>}
+    </section><aside className="data-inspector" aria-label="数据详情"><h2>数据详情</h2>{selected ? <><dl className="inspector-facts"><div><dt>名称</dt><dd>{selected.dataset_id}</dd></div><div><dt>标的</dt><dd>{selected.symbol ? `${selected.venue ?? ''}:${selected.symbol}` : '未记录'}</dd></div><div><dt>市场类型</dt><dd>未记录</dd></div><div><dt>记录数</dt><dd>{selected.record_count ?? '未记录'}</dd></div><div><dt>状态</dt><dd>{selected.valid ? '可读取' : selected.message ?? '不可用'}</dd></div><div><dt>数据来源</dt><dd>{selected.origin === 'upload' ? '本地导入' : '注册数据'}</dd></div></dl>{selected.valid && <ResearchUploadBinding key={selectedDataset} api={api} target={target} datasetId={selectedDataset} />}</> : <p className="muted">选择一个数据版本，查看事实与可绑定的研究。</p>}</aside></div>
+    <details id="data-upload" className="import-drawer" open={showImport} onToggle={event => setShowImport(event.currentTarget.open)}><summary>导入 CSV 数据 · 草稿与暂存</summary><DataUploadPanel key={`${target?.id ?? "unscoped"}.${target?.revision ?? 0}`} api={api} target={target} onPublished={() => setCatalogRefresh(value => value + 1)} /></details>
+    <details className="resource-history"><summary>历史数据导入</summary><OfflineHistoryPanel api={api} /></details>
+  </div>
 }
 
 /** Declarations and validation retain their original, explicit effects. */
 export function ExtensionWorkspace({ api }: { api: ApiAdapter }) {
   return <section className="panel" aria-label="扩展工具"><h1>扩展</h1>
-    <p className="muted">管理本地能力与校验工具。</p>
+    <p className="muted">检查与选择本地策略包；在研究中明确绑定后使用。</p>
+    {(api.localStrategySlot || api.inspectLocalStrategy) && <details><summary>本地策略包</summary><LocalStrategyPanel api={api} /></details>}
+    <p><Link to="/settings?section=diagnostics">资源声明与校验工具</Link></p>
+  </section>
+}
+
+export function DiagnosticTools({ api }: { api: ApiAdapter }) {
+  return <section className="panel" aria-label="诊断工具"><h2>诊断工具</h2>
     <div className="actions"><Link to="/events">事件校验</Link></div>
     {api.listDeclarations && <details><summary>资源声明</summary><DeclarationCatalogPanel api={api} /></details>}
-    {(api.localStrategySlot || api.inspectLocalStrategy) && <details><summary>本地策略包</summary><LocalStrategyPanel api={api} /></details>}
   </section>
 }

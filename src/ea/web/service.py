@@ -424,7 +424,31 @@ class ScenarioRegistry:
         self.strategy_root = strategy_root
         self.root = _directory(root, label="scenario root", create=False)
 
+    def _template_registry(self, scenario_id: str) -> tuple[ScenarioRegistry, str] | None:
+        if not scenario_id.startswith("template:"):
+            return None
+        name = scenario_id.removeprefix("template:")
+        if name not in {"bounded-long.yaml", "moving-average-entry.yaml"}:
+            raise ScenarioNotFoundError("template is not supported")
+        return ScenarioRegistry(Path(__file__).parent / "templates"), name
+
+    def templates(self) -> list[dict[str, object]]:
+        result = []
+        for name in ("bounded-long.yaml", "moving-average-entry.yaml"):
+            identity = "template:" + name
+            entry = self.validate(identity)
+            source = self.source_document(identity)
+            entry["template_assumptions"] = {
+                key: source[key] for key in ("instrument", "risk", "execution")
+            }
+            result.append(entry)
+        return result
+
     def _path(self, scenario_id: str) -> Path:
+        template = self._template_registry(scenario_id)
+        if template is not None:
+            registry, name = template
+            return registry._path(name)
         if (
             not 1 <= len(scenario_id) <= 128
             or any(character not in _SCENARIO_ID for character in scenario_id)
@@ -448,6 +472,10 @@ class ScenarioRegistry:
     def load(
         self, scenario_id: str, *, catalog: ResearchStrategyCatalogV1 | None = None
     ) -> LoadedBacktestScenario:
+        template = self._template_registry(scenario_id)
+        if template is not None:
+            registry, name = template
+            return registry.load(name, catalog=catalog)
         scenario = load_backtest_scenario(
             self._path(scenario_id), strategy_root=self.strategy_root, catalog=catalog
         )
@@ -465,6 +493,10 @@ class ScenarioRegistry:
         before loading it can do so without giving the loader the chance to pull a
         strategy source in first.
         """
+        template = self._template_registry(scenario_id)
+        if template is not None:
+            registry, name = template
+            return registry.source_document(name)
         path = self._path(scenario_id)
         try:
             payload = read_regular(path, self.root, limit=_MAX_SCENARIO_BYTES)
@@ -1279,6 +1311,21 @@ class WebService:
                 handle.flush()
                 os.fsync(handle.fileno())
             package_path.chmod(0o444)
+        if scenario.research_input_bytes is not None:
+            # Published captures may have a catalog hard link. Preserve the exact
+            # admitted bytes in this attempt's own single-link input, which the
+            # existing formal-report verifier can safely read without weakening it.
+            self._check_dataset(scenario)
+            data = scenario.data_path.read_bytes()
+            if sha256(data).hexdigest() != scenario.dataset.source_bytes_sha256.value:
+                raise InputChangedError("dataset changed before input capture")
+            data_path = self.inputs_dir / f"{job_id}.csv"
+            with data_path.open("xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            data_path.chmod(0o400)
+            scenario = replace(scenario, data_path=data_path)
         payload = self._frozen_scenario_bytes(scenario)
         path = self.inputs_dir / f"{job_id}.json"
         descriptor: int | None = None

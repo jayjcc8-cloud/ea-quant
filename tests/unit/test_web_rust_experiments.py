@@ -71,7 +71,7 @@ CRATE = ROOT / "crates" / "quine-core"
 #: One private bound local socket needs a short path (``SUN_LEN`` is 104 bytes on
 #: macOS), so each core gets a short directory of its own under ``.local`` instead
 #: of the deeper ``--basetemp`` tree. It is removed when the test that made it ends.
-CORE_ROOT = ROOT / ".local" / "quine-integration"
+CORE_ROOT = ROOT / ".local" / "qit"
 SHORT_WORKSPACES: list[Path] = []
 SCENARIO = "bounded-long.yaml"
 RUN_BUDGET = {"max_model_calls": 0, "max_backtests": 1}
@@ -1858,3 +1858,33 @@ def test_conversation_closes_the_loop_through_the_real_rust_owner(
     )
     assert stack.strategies.get(identity).messages[-1]["text"].endswith("limitations next.")
     assert len(provider.calls) == 6
+
+
+def test_template_and_uploaded_csv_run_through_the_real_core(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The application template keeps its identity through the desktop owner."""
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    stack = _stack(tmp_path, core.socket)
+    counts = _no_python_owner(monkeypatch)
+    dataset_id, _content = _publish_upload(stack.service, 8)
+    strategy = stack.strategies.create(name="Template CSV", intent="Explicit local input")
+    bound = stack.strategies.bind_scenario(
+        strategy.user_strategy_id,
+        operation_id="bind-template",
+        base_revision=1,
+        scenario_id="template:bounded-long.yaml",
+        dataset_id=dataset_id,
+    )
+    assert bound.draft.revision == 2
+    launched = _launch(stack.strategies, strategy.user_strategy_id)
+    assert _row(launched, "li-1")["owner"] == "quine"
+    settled = _wait(stack.strategies, strategy.user_strategy_id)
+    assert settled["status"] == "created", settled
+    assert settled["report_ready"] is True
+    assert counts == {"children": 0, "owners": 0}
+    report = json.loads(stack.service.report(settled["job_id"]))
+    assert report["run_id"] == settled["attempt_id"]
+    assert report["completion"]["terminal_outcome"] == "success"
+    assert stack.service.list_jobs() == []

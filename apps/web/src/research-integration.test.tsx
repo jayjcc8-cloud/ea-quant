@@ -184,27 +184,27 @@ describe('explicitly mapped upload', () => {
   it('requires a preview of the exact declaration and drops it when the declaration changes', async () => {
     const user = userEvent.setup()
     const { api, calls } = adapter()
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={api} />)
 
-    const content = await screen.findByLabelText('CSV content')
+    const content = await screen.findByLabelText('CSV 内容')
     fireEvent.change(content, { target: { value: 'seq,c\n1,100.5' } })
-    await user.selectOptions(screen.getByLabelText('Upload mode'), 'explicit-mapping')
+    await user.selectOptions(screen.getByLabelText('导入方式'), 'explicit-mapping')
     // The guided controls are the default editor; this file is about the
     // declaration written as JSON, so it chooses that editor explicitly.
-    await user.click(screen.getByLabelText('Advanced JSON'))
-    fireEvent.change(screen.getByLabelText(/^Mapping declaration/), { target: { value: MAPPING } })
-    fireEvent.change(screen.getByLabelText(/^Time declaration/), { target: { value: TIME } })
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    await user.click(screen.getByLabelText('高级 JSON'))
+    fireEvent.change(screen.getByLabelText(/^列映射声明/), { target: { value: MAPPING } })
+    fireEvent.change(screen.getByLabelText(/^时间声明/), { target: { value: TIME } })
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
 
     // A declaration and a policy are not a verification: without a preview the
     // panel offers no way to publish the mapping.
-    const publish = screen.getByRole('button', { name: 'Publish version' }) as HTMLButtonElement
+    const publish = screen.getByRole('button', { name: '发布数据版本' }) as HTMLButtonElement
     expect(publish.disabled).toBe(true)
-    expect(screen.getByText(/published only from a preview of this exact declaration/)).toBeTruthy()
+    expect(screen.getByText(/自定义映射须先通过检查/)).toBeTruthy()
     expect(calls.publishes).toBe(0)
 
-    await user.click(screen.getByRole('button', { name: 'Preview sample' }))
+    await user.click(screen.getByRole('button', { name: '检查数据' }))
     await waitFor(() => expect(calls.previews).toBe(1))
     // The declaration reaches the host whole; the panel computes no evidence of
     // its own and sends no digest.
@@ -225,23 +225,23 @@ describe('explicitly mapped upload', () => {
     expect(within(verifiedPreview).getAllByText(new RegExp(DIGEST)).length).toBeGreaterThan(0)
     expect(within(verifiedPreview).getByRole('cell', { name: '100.5' })).toBeTruthy()
 
-    const fresh = screen.getByRole('button', { name: 'Publish version' }) as HTMLButtonElement
+    const fresh = screen.getByRole('button', { name: '发布数据版本' }) as HTMLButtonElement
     expect(fresh.disabled).toBe(false)
 
     // Editing the mapping makes the previewed declaration a different one, so the
     // preview stops authorizing a publication.
-    fireEvent.change(screen.getByLabelText(/^Mapping declaration/), {
+    fireEvent.change(screen.getByLabelText(/^列映射声明/), {
       target: { value: '{"columns":{"close":"not_a_column"},"constants":{}}' },
     })
-    expect((screen.getByRole('button', { name: 'Publish version' }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: 'Publish version' }))
+    expect((screen.getByRole('button', { name: '发布数据版本' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '发布数据版本' }))
     expect(calls.publishes).toBe(0)
 
     // Restoring the exact declaration and previewing it again authorizes it.
-    fireEvent.change(screen.getByLabelText(/^Mapping declaration/), { target: { value: MAPPING } })
-    await user.click(screen.getByRole('button', { name: 'Preview sample' }))
+    fireEvent.change(screen.getByLabelText(/^列映射声明/), { target: { value: MAPPING } })
+    await user.click(screen.getByRole('button', { name: '检查数据' }))
     await waitFor(() => expect(calls.previews).toBe(2))
-    await user.click(screen.getByRole('button', { name: 'Publish version' }))
+    await user.click(screen.getByRole('button', { name: '发布数据版本' }))
     await waitFor(() => expect(calls.publishes).toBe(1))
     expect(calls.publishRequest).toMatchObject({
       content: 'seq,c\n1,100.5',
@@ -276,17 +276,17 @@ describe('explicitly mapped upload', () => {
         }
       },
     })
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={api} />)
 
-    fireEvent.change(await screen.findByLabelText('CSV content'), { target: { value: 'seq,c\n1,100.5' } })
-    await user.selectOptions(screen.getByLabelText('Upload mode'), 'explicit-mapping')
-    await user.click(screen.getByLabelText('Advanced JSON'))
-    fireEvent.change(screen.getByLabelText(/^Mapping declaration/), { target: { value: MAPPING } })
-    fireEvent.change(screen.getByLabelText(/^Time declaration/), { target: { value: TIME } })
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    fireEvent.change(await screen.findByLabelText('CSV 内容'), { target: { value: 'seq,c\n1,100.5' } })
+    await user.selectOptions(screen.getByLabelText('导入方式'), 'explicit-mapping')
+    await user.click(screen.getByLabelText('高级 JSON'))
+    fireEvent.change(screen.getByLabelText(/^列映射声明/), { target: { value: MAPPING } })
+    fireEvent.change(screen.getByLabelText(/^时间声明/), { target: { value: TIME } })
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
 
-    await user.click(screen.getByRole('button', { name: 'Preview sample' }))
+    await user.click(screen.getByRole('button', { name: '检查数据' }))
     await waitFor(() => expect(calls.previews).toBe(1))
 
     // The refusal is shown, and a fresh preview of a refused declaration is still
@@ -294,9 +294,9 @@ describe('explicitly mapped upload', () => {
     const refusedPreview = await screen.findByRole('region', { name: 'Mapped upload preview' })
     expect(within(refusedPreview).getByText(/refused/)).toBeTruthy()
     expect(await screen.findByText(/mapping_column_missing/)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Publish version' }))
+    fireEvent.click(screen.getByRole('button', { name: '发布数据版本' }))
     expect(calls.publishes).toBe(0)
-    expect(screen.getByText(/a refused preview is never published/)).toBeTruthy()
+    expect(screen.getByText(/检查未通过/)).toBeTruthy()
   })
 })
 
@@ -318,7 +318,7 @@ describe('local strategy package', () => {
         { scenario_id: 'invalid.yaml', name: 'invalid', valid: false },
       ],
     })
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={api} />)
 
     // A File-shaped object: the panel's own read path is exercised, and the

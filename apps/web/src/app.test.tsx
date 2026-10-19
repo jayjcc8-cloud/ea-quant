@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type InputSnapshot } from './app'
 import type { Candidate } from './candidates'
 import type { UserStrategy, UserStrategyDraft, UserStrategyExperiment } from './user-strategies-api'
@@ -437,7 +437,7 @@ describe('EA Quant local Web backtests', () => {
     window.history.pushState({}, '', '/backtests')
     render(<App api={adapter()} />)
 
-    expect(await screen.findByRole('heading', { name: 'Offline Backtests' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '回测记录' })).toBeTruthy()
     await user.selectOptions(screen.getByLabelText('Scenario'), 'bounded-long.yaml')
     await user.click(screen.getByRole('button', { name: 'Validate input' }))
     expect(await screen.findByText('Validated input')).toBeTruthy()
@@ -612,10 +612,10 @@ describe('EA Quant local Web backtests', () => {
     render(<App api={adapter()} />)
 
     expect(await screen.findByText('10017 USD')).toBeTruthy()
-    ;['9797 USD', '101.5', '110', '17 USD', '0.17%', 'Orders 1', 'Fills 1'].forEach((value) => {
-      expect(screen.getByText(value)).toBeTruthy()
+    ;['9797 USD', '101.5', '110', '17 USD', '0.1700%', 'Orders 1', 'Fills 1'].forEach((value) => {
+      expect(screen.getAllByText(value).length).toBeGreaterThan(0)
     })
-    expect(screen.getAllByText('2')).toHaveLength(2)
+    expect(within(screen.getByRole('region', { name: '执行与经济事实', hidden: true })).getAllByText('2')).toHaveLength(2)
     expect(screen.getByRole('link', { name: 'Download report.json' }).getAttribute('href')).toBe('/api/backtests/job-1/artifacts/report.json')
     expect(screen.getByRole('link', { name: 'Download summary.txt' }).getAttribute('href')).toBe('/api/backtests/job-1/artifacts/summary.txt')
     expect(screen.getByText(/may include open-position valuation/i)).toBeTruthy()
@@ -661,7 +661,7 @@ it('announces a refused validation where the action was and moves focus to it', 
   expect(screen.getByRole('button', { name: 'Run new backtest' }).hasAttribute('disabled')).toBe(true)
 })
 
-it('states what one result does not show before the curve, execution detail and downloads', async () => {
+it('puts frozen results and curve before expandable raw provenance and limitations', async () => {
   window.history.pushState({}, '', '/backtests/job-1')
   render(<App api={adapter({
     getBacktest: async () => ({ ...job, schema: 'ea.local-web-job.v3', equity_path_sha256: '7'.repeat(64) }),
@@ -676,8 +676,9 @@ it('states what one result does not show before the curve, execution detail and 
   const limits = await screen.findByRole('region', { name: '本结果不展示什么' })
   const precedes = (first: Element | null, second: Element) =>
     Boolean(first && first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING)
-  expect(precedes(document.querySelector('.metrics'), limits)).toBe(true)
-  expect(precedes(limits, screen.getByRole('heading', { name: 'Equity Curve' }))).toBe(true)
+  expect(precedes(screen.getByRole('region', { name: '正式报告关键结果' }), limits)).toBe(true)
+  expect(precedes(screen.getByRole('heading', { name: '权益曲线' }), screen.getByText(/历史冻结报告 · 一次确定性回测/))).toBe(true)
+  expect(precedes(screen.getByRole('heading', { name: '权益曲线' }), limits)).toBe(true)
   expect(precedes(limits, screen.getByRole('heading', { name: 'Execution' }))).toBe(true)
   expect(precedes(limits, screen.getByRole('link', { name: 'Download report.json' }))).toBe(true)
   // A run this small says so, and no statistic is claimed from it.
@@ -723,7 +724,7 @@ it('states what one result does not show before the curve, execution detail and 
     })} />)
 
     expect(await screen.findByText('run-1')).toBeTruthy()
-    await user.click(screen.getByRole('link', { name: '回测列表' }))
+    await user.click(screen.getByRole('link', { name: '返回回测列表' }))
     const flatJobLink = (await screen.findByText('flat.yaml')).closest('a')
     expect(flatJobLink).toBeTruthy()
     await user.click(flatJobLink!)
@@ -747,7 +748,7 @@ it('shows persisted commission assumptions and formal report fees', async () => 
   window.history.pushState({}, '', `/backtests/${job.job_id}`)
   render(<App api={adapter({ getBacktest: async () => feeJob, getReport: async () => feeReport })} />)
   expect(await screen.findByText('deterministic-commission-v1 · 100 bps')).toBeTruthy()
-  expect(await screen.findByText('2.03 USD')).toBeTruthy()
+  expect((await screen.findAllByText('2.03 USD')).length).toBeGreaterThan(0)
   expect(await screen.findByText('25 bps adverse slippage')).toBeTruthy()
   expect(await screen.findByText('60000 ms execution latency')).toBeTruthy()
   expect(screen.queryByLabelText('Commission bps')).toBeNull()
@@ -852,20 +853,20 @@ it('shows backend path evidence and sampled equity curve without replacing termi
       max_drawdown: { amount: '30', ratio: '0.003', peak_index: 0, peak_time: '2026-01-01', peak_equity: '10000', trough_index: 1, trough_time: '2026-01-02', trough_equity: '9970' },
     }),
   })} />)
-  await screen.findByRole('heading', { name: 'Equity Curve' })
+  await screen.findByRole('heading', { name: '权益曲线' })
   const curve = screen.getByRole('img', { name: 'Equity curve' })
   // The extrema and the window are HTML at the reading size, not SVG text the
   // 750x260 viewBox would scale down, and the drawing points at that description.
-  const axes = [...document.querySelectorAll('.curve-axis')]
+  const axes = [...document.querySelectorAll('.curve-scale, .curve-axis')]
   expect(axes.map(axis => axis.tagName)).toEqual(['DIV', 'DIV'])
-  expect(axes[0].textContent).toBe('High 10017 USDLow 10000 USD')
-  expect(axes[1].textContent).toBe('First 2026-01-01Last 2026-01-02')
+  expect(axes[0].textContent).toBe('最高 10017 USD最低 10000 USD')
+  expect(axes[1].textContent).toBe('2026-01-012026-01-02')
   expect(curve.querySelector('text')).toBeNull()
   expect(document.getElementById(curve.getAttribute('aria-describedby')!)?.textContent)
     .toContain('Equity in USD over the displayed observations')
   expect(screen.getByText('30 USD')).toBeTruthy()
   expect(screen.getByText('0.3% / 0.003')).toBeTruthy()
-  expect(screen.getByText('最大回撤 30 USD · 0.3%')).toBeTruthy()
+  expect(screen.getByText('曲线数据与回撤原值')).toBeTruthy()
   expect(screen.getByText(/sampled display/)).toBeTruthy()
   expect(screen.getByText('10017 USD')).toBeTruthy()
 })
@@ -887,12 +888,12 @@ it('names a report currency that was not recorded instead of assuming USD', asyn
   }
   window.history.pushState({}, '', '/backtests/job-1')
   render(<App api={adapter({ getReport: async () => unrecorded })} />)
-  await screen.findByText('10017 · currency not recorded by the report')
-  const metrics = document.querySelector('.metrics')!.textContent ?? ''
+  await screen.findByText('10017.00 币种未提供')
+  const metrics = screen.getByRole('region', { name: '正式报告关键结果' })!.textContent ?? ''
   const economicsText = document.querySelector('.report-economics')!.textContent ?? ''
   expect(economicsText).toContain('10000 · currency not recorded by the report')
   expect(economicsText).toContain('9797 · currency not recorded by the report')
-  expect(`${metrics}${economicsText}`).toContain('17 · currency not recorded by the report')
+  expect(metrics).toContain('17.00 币种未提供')
   expect(metrics).not.toContain('USD')
   expect(economicsText).not.toContain('USD')
 })
@@ -927,6 +928,7 @@ it('shows evidence-bound trade statistics and unavailable denominators', async (
     average_loss: null, payoff_ratio: null, average_holding_seconds: '120', has_open_position: true,
     trades: [{ realized_pnl: '10', holding_seconds: '120' }],
   }) })} />)
+  await userEvent.setup().click(await screen.findByRole('button', { name: '完整交易' }))
   const panel = await screen.findByRole('region', { name: 'Trade analytics' })
   await waitFor(() => expect(within(panel).getByText('100%')).toBeTruthy())
   expect(within(panel).getByText('120 seconds')).toBeTruthy()
@@ -1053,16 +1055,16 @@ describe('QUINE shell navigation', () => {
     window.history.pushState({}, '', '/backtests')
     render(<App api={adapter()} />)
     const nav = within(screen.getByRole('navigation', { name: '主导航' }))
-    expect(nav.getByRole('link', { name: '运行' }).getAttribute('href')).toBe('/runs')
+    expect(nav.getByRole('link', { name: '模拟运行' }).getAttribute('href')).toBe('/runs')
     expect(nav.getByRole('link', { name: '研究' }).getAttribute('href')).toBe('/strategies')
 
     // The resource center is one more destination under its own plain group label,
     // and every research and validation child keeps its own route.
-    expect(nav.getByRole('link', { name: '数据' }).getAttribute('href')).toBe('/data')
+    expect(screen.getByRole('link', { name: '资源' }).getAttribute('href')).toBe('/resources/data')
     for (const label of ['研究任务', '留出验证', '候选', '事件校验']) {
       expect(nav.queryByRole('link', { name: label })).toBeNull()
     }
-    expect(screen.getByRole('link', { name: '扩展' }).getAttribute('href')).toBe('/extensions')
+    expect(nav.queryByRole('link', { name: '扩展' })).toBeNull()
 
     // The backtest destination keeps every route it already had.
     await user.click(nav.getByRole('link', { name: '研究' }))
@@ -1323,7 +1325,7 @@ describe('report to strategy return', () => {
     const association = await associationPanel()
     expect(within(association).getByText('正在读取冻结了这个运行的已保存策略……')).toBeTruthy()
 
-    await user.click(screen.getByRole('link', { name: '回测列表' }))
+    await user.click(screen.getByRole('link', { name: '返回回测列表' }))
     const flatJobLink = (await screen.findByText('flat.yaml')).closest('a')
     expect(flatJobLink).toBeTruthy()
     await user.click(flatJobLink!)
@@ -1579,7 +1581,7 @@ describe('maturity round 2', () => {
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={compareAdapter({ getBacktest: async (jobId) => (jobId === 'job-1' ? pendingRun : compareRight) })} />)
     expect(await screen.findByRole('heading', { name: '回测对比' })).toBeTruthy()
-    expect(screen.getByRole('link', { name: /回测列表/ }).getAttribute('href')).toBe('/backtests')
+    expect(screen.getByRole('link', { name: '返回回测列表' }).getAttribute('href')).toBe('/backtests')
     settleRun?.(job)
 
     // Failure: the pair cannot be read at all, and the way back survives it.
@@ -1587,7 +1589,7 @@ describe('maturity round 2', () => {
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={compareAdapter({ getBacktest: async () => { throw new Error('run unavailable') } })} />)
     expect(await screen.findByText('run unavailable')).toBeTruthy()
-    expect(screen.getByRole('link', { name: /回测列表/ }).getAttribute('href')).toBe('/backtests')
+    expect(screen.getByRole('link', { name: '返回回测列表' }).getAttribute('href')).toBe('/backtests')
 
     // Generation guard: a late association answer for the first pair must never
     // reach the page after the route pair changes.
@@ -1600,8 +1602,8 @@ describe('maturity round 2', () => {
     const reading = await screen.findByRole('region', { name: '对比策略关联' })
     expect(within(reading).getByText(/正在读取/)).toBeTruthy()
 
-    await user.click(screen.getByRole('link', { name: /回测列表/ }))
-    await screen.findByRole('heading', { name: 'Offline Backtests' })
+    await user.click(screen.getByRole('link', { name: '返回回测列表' }))
+    await screen.findByRole('heading', { name: '回测记录' })
     await user.click(screen.getByRole('checkbox', { name: 'Select job-2 for comparison' }))
     await user.click(screen.getByRole('checkbox', { name: 'Select job-3 for comparison' }))
     await user.click(screen.getByRole('button', { name: 'Compare selected runs' }))
@@ -1693,7 +1695,7 @@ describe('maturity round 2', () => {
     expect(await screen.findByText('Loaded run identity does not match the requested run')).toBeTruthy()
     expect(screen.queryByRole('region', { name: '对比策略关联' })).toBeNull()
     expect(screen.queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
-    expect(screen.getByRole('link', { name: '回测列表' }).getAttribute('href')).toBe('/backtests')
+    expect(screen.getByRole('link', { name: '返回回测列表' }).getAttribute('href')).toBe('/backtests')
 
     // One run compared with itself is not two distinct experiments, so no owner is
     // claimed for it and the way back is still offered.
@@ -1703,6 +1705,43 @@ describe('maturity round 2', () => {
     expect(await screen.findByText('同一个运行不能与它自己对比：请选择两个不同的已持久化运行。')).toBeTruthy()
     expect(screen.queryByRole('region', { name: '对比策略关联' })).toBeNull()
     expect(screen.queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
-    expect(screen.getByRole('link', { name: '回测列表' }).getAttribute('href')).toBe('/backtests')
+    expect(screen.getByRole('link', { name: '返回回测列表' }).getAttribute('href')).toBe('/backtests')
   })
+})
+
+
+describe('validation retains research ownership', () => {
+  it.each(['/holdouts/new/job-1', '/holdouts/holdout-1', '/candidates/candidate-1'])(
+    'returns %s to its source experiment without granting a new action', async route => {
+      window.history.pushState({}, '', route)
+      const writes = vi.fn()
+      render(<App api={adapter({
+        listUserStrategies: async () => [ownerStrategy, otherStrategy],
+        getCandidate: async () => evaluatedCandidate(),
+        getHoldout: async () => ({ schema: 'ea.chronological-holdout.v1', validation_id: 'holdout-1', created_at: '', source_job_id: 'job-1', holdout_job_id: 'job-2' }),
+        createHoldout: writes, decideCandidate: writes, createCandidate: writes,
+      })} />)
+      const region = await screen.findByRole('region', { name: '策略关联' })
+      const back = await within(region).findByRole('link', { name: '返回此策略继续研究' })
+      expect(back.getAttribute('href')).toBe('/strategies/us-1?evidence_a=job-1')
+      expect(within(region).getByText('冻结 v2')).toBeTruthy()
+      expect(writes).not.toHaveBeenCalled()
+    },
+  )
+})
+
+it('returns through the actual report association to the same source report view without writing', async () => {
+  const user = userEvent.setup()
+  const writes = vi.fn(async () => { throw new Error('navigation must not write') })
+  window.history.replaceState({}, '', '/backtests/job-1?report=complete')
+  render(<App api={adapter({ listUserStrategies: async () => [ownerStrategy], getUserStrategy: async () => ownerStrategy, launchUserStrategyExperiment: writes, sendUserStrategyMessage: writes })} />)
+  await user.click(await screen.findByRole('link', { name: '返回此策略继续研究' }))
+  expect(window.location.pathname + window.location.search).toBe('/strategies/us-1?evidence_a=job-1')
+  const back = screen.getByRole('link', { name: '返回实验报告' })
+  expect(back.getAttribute('href')).toBe('/backtests/job-1?report=complete')
+  await user.click(back)
+  await screen.findByRole('heading', { name: '正式报告' })
+  expect(window.location.pathname + window.location.search).toBe('/backtests/job-1?report=complete')
+  expect(screen.getByRole('button', { name: '完整交易' }).getAttribute('aria-pressed')).toBe('true')
+  expect(writes).not.toHaveBeenCalled()
 })

@@ -28,7 +28,17 @@ import type { SettingsStatus } from './radian-api'
  * constant of its own and never treats a custom endpoint as a different
  * protocol.
  */
+export type ModelProfileStatus = Omit<ModelConfigurationStatus, 'profiles'> & {
+  id: string
+  name: string
+  revision: number
+  route_version: string
+}
+
 export type ModelConfigurationStatus = SettingsStatus & {
+  profile_id?: string
+  default_profile_id?: string
+  profiles?: ModelProfileStatus[]
   configuration_present?: boolean
   credential_available?: boolean
   request_validation?: 'not_verified'

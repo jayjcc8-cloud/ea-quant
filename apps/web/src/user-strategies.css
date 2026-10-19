@@ -13,8 +13,7 @@
  * The desktop layout is two columns: the strategy and its detail on the left, the
  * conversation pinned beside it on the right. The conversation bounds itself, and
  * the one thing inside it that scrolls is its body — its composer and every notice
- * beside the composer stay on screen at every width. Below 1100px the two columns
- * stack and the jump links appear; there the conversation takes a bound of its own.
+ * beside the composer stay on screen at every width. Below 1100px a view switch keeps both panels mounted while showing one at a time.
  *
  * The global stylesheet styles bare `nav`, `table` and `button` elements for the
  * rest of the shell, so this workspace resets the ones it lays out itself.
@@ -51,13 +50,7 @@
   --q-field-line: var(--field-line, #d3dae2);
   --q-amber: var(--amber, #876625);
   display: grid;
-  /* The strategy takes the room; the conversation takes at most a third of it and
-     never more than 384px, so a wide monitor grows the strategy rather than the
-     chat. Below 1100px the two are stacked instead. No local appearance setting
-     decides this width. */
-  grid-template-columns: minmax(0, 1fr) minmax(320px, min(384px, 34%));
-  gap: 20px;
-  align-items: start;
+  gap: 0;
   color: var(--q-ink);
 }
 
@@ -66,7 +59,7 @@
 /* Heading, count and the one creation action */
 .strategy-heading { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .strategy-heading h1 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -.02em; }
-.strategy-count { color: var(--q-ink-soft); font-size: 14px; }
+.strategy-count { color: var(--q-ink-soft); }
 .strategy-subtitle { margin: -8px 0 0; color: var(--q-ink-soft); font-size: 13.5px; }
 
 .strategy-workspace .create-cta {
@@ -89,9 +82,8 @@ table.strategy-table {
   border-collapse: separate; border-spacing: 0; overflow: hidden; background: var(--q-surface); font-size: 13.5px;
 }
 .strategy-table th, .strategy-table td { text-align: left; }
-.strategy-table thead th {
-  padding: 9px 14px; border-bottom: 1px solid var(--q-line); background: var(--q-surface-soft);
-  color: var(--q-ink-soft); font-size: 12px; font-weight: 600; letter-spacing: .02em;
+.strategy-table thead th { border-bottom: 1px solid var(--q-line); background: var(--q-surface-soft);
+  color: var(--q-ink-soft); font-weight: 600; letter-spacing: .02em;
 }
 .strategy-table tbody th { padding: 11px 14px; border-bottom: 1px solid var(--q-line-soft); font-weight: 400; }
 .strategy-table td { padding: 11px 14px; border-top: 0; border-bottom: 1px solid var(--q-line-soft); vertical-align: middle; }
@@ -168,10 +160,9 @@ table.strategy-table {
 /* One line between that scope and the tabs: where the strategy stands on the
    left, what is still waiting for a decision on the right. */
 .strategy-workspace .research-status-line {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
-  padding: 0 16px; border-bottom: 1px solid var(--q-line);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; border-bottom: 1px solid var(--q-line);
 }
-.strategy-workspace .pending-changes { margin-left: auto; color: var(--q-ink-soft); font-size: 12.5px; font-weight: 650; }
+.strategy-workspace .pending-changes { margin-left: auto; color: var(--q-ink-soft); font-weight: 650; }
 .strategy-workspace .pending-changes.has-pending { color: var(--q-amber); }
 .strategy-workspace .pending-changes:hover { color: var(--q-red); text-decoration: underline; }
 
@@ -179,19 +170,16 @@ table.strategy-table {
 .strategy-workspace .workspace-breadcrumb { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--q-ink-soft); font-size: 12px; }
 .strategy-workspace .workspace-breadcrumb a { color: var(--q-ink-soft); }
 .strategy-workspace .workspace-breadcrumb a:hover { color: var(--q-red); text-decoration: underline; }
-
-.strategy-workspace .draft-facts { padding: 10px 16px; background: var(--q-surface-soft); }
-.strategy-workspace .draft-facts dl { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 0; }
-.strategy-workspace .draft-facts div { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.strategy-workspace .draft-facts dl { display: flex; flex-wrap: wrap; margin: 0; }
+.strategy-workspace .draft-facts div { align-items: baseline; gap: 7px; min-width: 0; }
 .strategy-workspace .draft-facts dt { color: var(--q-ink-soft); font-size: 12px; }
-.strategy-workspace .draft-facts dd { margin: 0; color: var(--q-ink); font-size: 13.5px; overflow-wrap: anywhere; }
+.strategy-workspace .draft-facts dd { margin: 0; color: var(--q-ink); overflow-wrap: anywhere; }
 
 /* The strip that says where this strategy stands and what the next step is: the
    last revision that was really frozen, and one obvious way onward. It is flat —
    its place and its bottom rule belong to the status line it sits in. */
 .strategy-workspace .next-step {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px;
-  padding: 10px 0; background: transparent;
 }
 .strategy-workspace .next-step dl { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; }
 .strategy-workspace .next-step div { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
@@ -209,18 +197,10 @@ table.strategy-table {
 .strategy-workspace .next-step dd a:focus-visible { color: var(--q-red-ink); text-decoration: underline; }
 
 /* The way back into the most recently updated work, on the collection route. */
-.strategy-workspace .continuation {
-  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
-  padding: 10px 14px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface-soft);
-}
-.strategy-workspace .continuation-link { color: var(--q-ink); font-size: 14px; font-weight: 650; }
-.strategy-workspace .continuation-link:hover, .strategy-workspace .continuation-link:focus-visible { color: var(--q-red); }
-.strategy-workspace .continuation .muted { margin: 0; }
-.strategy-workspace .continuation p.muted { flex: 1 1 100%; }
 
 /* The three tabs are fine rules, not a segmented control: one hairline under the
    whole bar, one accent underline under the section that is open. */
-.strategy-workspace .detail-tabs { display: flex; flex-wrap: wrap; gap: 0 2px; padding: 0 4px; border-bottom: 1px solid var(--q-line); }
+.strategy-workspace .detail-tabs { display: flex; flex-wrap: wrap; gap: 0 2px; border-bottom: 1px solid var(--q-line); }
 .strategy-workspace .detail-tabs [role="tab"] {
   min-height: 40px; padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
   background: transparent; color: var(--q-ink-soft); font-size: 13.5px; font-weight: 500;
@@ -243,7 +223,7 @@ table.strategy-table {
 /* The figures on this page are read against each other — revisions, counts,
    prices, digests — so the surfaces that carry them use tabular figures. */
 .strategy-workspace .strategy-count, .strategy-workspace .draft-facts dd,
-.strategy-workspace .next-step dd, .strategy-workspace .evidence-metrics dd,
+.strategy-workspace .next-step dd,
 .strategy-workspace .preview-facts dd, .strategy-workspace time { font-variant-numeric: tabular-nums; }
 .strategy-workspace .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .strategy-workspace .panel-head h2 { margin: 0; }
@@ -286,20 +266,15 @@ table.strategy-table {
 .strategy-workspace .experiment-controls > summary { min-height: 28px; padding: 12px 0; color: var(--q-ink); font-size: 13.5px; font-weight: 650; cursor: pointer; }
 
 /* Evidence: the frozen run's real job, report and equity path */
-.strategy-workspace .evidence-origin { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.strategy-workspace .evidence-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px 16px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; background: var(--q-surface-soft); }
-.strategy-workspace .evidence-metrics dt { color: var(--q-ink-soft); font-size: 12px; }
-.strategy-workspace .evidence-metrics dd { margin: 3px 0 0; color: var(--q-ink); font-size: 17px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
 /* The limits sit with the figures they qualify, not in a footnote elsewhere. */
 .strategy-workspace .evidence-limits { margin: 0 0 12px; }
 .strategy-workspace .artifact-links { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; }
 .strategy-workspace .artifact-links a { color: var(--q-red); font-size: 12.5px; }
 .strategy-workspace .artifact-links a:hover { color: var(--q-red-ink); text-decoration: underline; }
 .strategy-workspace .evidence-curve { margin-top: 14px; }
-.strategy-workspace .equity-path { padding: 14px; border: 1px solid var(--q-line-soft); border-radius: 8px; margin: 0; }
-.strategy-workspace .equity-path h2 { font-size: 14px; }
+.strategy-workspace .equity-path { border: 1px solid var(--q-line-soft); }
 .strategy-workspace .equity-path h3 { margin-top: 10px; font-size: 13px; }
-.strategy-workspace .equity-path svg { width: 100%; height: auto; color: var(--q-ink-soft); }
+.strategy-workspace .equity-path svg { width: 100%; color: var(--q-ink-soft); }
 .strategy-workspace .equity-path .summary-list { margin-top: 8px; }
 
 /* Proposal review and experiment list */
@@ -344,8 +319,8 @@ table.strategy-table {
    1100px it stops being pinned and takes a bound of its own instead. */
 .strategy-ai {
   position: sticky; top: 16px; align-self: start; display: flex; flex-direction: column;
-  gap: 12px; min-width: 0; min-height: 0; height: calc(100dvh - 80px); max-height: calc(100dvh - 80px);
-  padding-left: 20px; border-left: 1px solid var(--q-line);
+  gap: 12px; min-width: 0; min-height: 0; height: var(--agent-height, calc(100dvh - 80px)); max-height: var(--agent-height, calc(100dvh - 80px));
+  padding-left: 0; border-left: 0;
 }
 /* The conversation card is a column: header, scope line, scroller, composer. Only
    its own card frame is drawn here — nothing clips its children. */
@@ -354,11 +329,10 @@ table.strategy-table {
   border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface);
 }
 .strategy-workspace .chat-head {
-  flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
-  padding: 12px 14px; border-bottom: 1px solid var(--q-line-soft);
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--q-line-soft);
 }
-.strategy-workspace .chat-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
-.strategy-workspace .chat-head select { width: auto; max-width: 190px; min-height: 32px; padding: 4px 8px; font-size: 13px; }
+.strategy-workspace .chat-head h2 { margin: 0; font-weight: 650; }
+.strategy-workspace .chat-head select { width: auto; min-height: 32px; padding: 4px 8px; }
 /* What this conversation is grounded in, in one compact row under the header, so
    the scroller below begins with the conversation itself. */
 .strategy-workspace .strategy-chat .ai-context {
@@ -374,7 +348,7 @@ table.strategy-table {
    labelled as inference, and its prompt behind a disclosure. The earlier
    conversation is a disclosure of its own below, so what the reader acts on — the
    composer, the approval and the ask — is never inside it. */
-.strategy-workspace .turn { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--q-line-soft); border-radius: 8px; }
+.strategy-workspace .turn { margin: 0 0 18px; padding: 0 0 18px; border-bottom: 1px solid var(--q-line); }
 .strategy-workspace .turn-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
 .strategy-workspace .turn-head .muted { font-size: 12px; overflow-wrap: anywhere; }
 .strategy-workspace .turn-prompt { margin-top: 6px; }
@@ -408,14 +382,11 @@ table.strategy-table {
 .strategy-workspace .call-note p { margin: 3px 0; font-size: 12.5px; }
 /* The change waiting for a decision keeps its own box inside the conversation, so
    it reads as the one thing to act on rather than as more transcript. */
-.strategy-chat .chat-body > .proposal-panel {
+.strategy-chat .proposal-panel {
   margin-top: 12px; padding: 12px 14px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface);
 }
 /* The empty column says what it will hold and keeps its natural height: an empty
    conversation is not stretched to the height of a full one. */
-.strategy-workspace .strategy-chat-empty { display: block; padding: 14px 16px; }
-.strategy-workspace .strategy-chat-empty .chat-head { padding: 0 0 10px; border-bottom: 1px solid var(--q-line-soft); }
-.strategy-chat-empty p { margin-top: 10px; font-size: 13.5px; }
 
 /* Every state is written out in words; this marks the label, not the meaning. */
 .strategy-workspace .status { display: inline-block; padding: 1px 8px; border: 1px solid var(--q-line); border-radius: 999px; background: var(--q-surface); font-size: 12px; font-weight: 650; text-transform: none; letter-spacing: 0; }
@@ -423,25 +394,41 @@ table.strategy-table {
 .strategy-workspace .notice { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--q-field-line); border-radius: 8px; background: var(--q-surface-soft); font-size: 13px; }
 .strategy-workspace .notice.error { border-color: var(--q-red-line); background: var(--q-red-soft); color: var(--q-red-ink); }
 
-/* Preparation is a small read-only checkpoint above the strategy list: a card of
-   its own, one compact disclosure line, and the checks inside it. */
-.strategy-workspace .first-use-preparation {
-  margin-bottom: 16px; border: 1px solid var(--q-line); border-radius: 8px; background: var(--q-surface);
+/* Configuration stays secondary to saved work; facts and their actions share a row. */
+.strategy-workspace .research-history-entry { margin: 2px 0 12px; font-size: 12px; }
+.strategy-workspace .research-history-entry a { color: var(--q-ink-soft); }
+.strategy-workspace .first-use-preparation { background: var(--q-surface); }
+.strategy-workspace .first-use-preparation > summary { min-height: 28px; cursor: pointer; }
+.strategy-workspace .preparation-summary { margin-left: 8px; color: var(--q-ink-soft); font-weight: 400; }
+.strategy-workspace .preparation-content { padding-top: 6px; }
+.strategy-workspace .preparation-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: baseline; gap: 12px; padding: 7px 0; font-size: 12px; }
+.strategy-workspace .preparation-label { color: var(--q-ink-soft); }
+.strategy-workspace .preparation-row a { font-size: 12px; }
+.strategy-workspace .preparation-help { margin-top: 7px; font-size: 12px; color: var(--q-ink-soft); }
+.strategy-workspace .preparation-help > summary { cursor: pointer; width: fit-content; }
+.strategy-workspace .preparation-help p { margin: 8px 0; }
+.strategy-workspace .preparation-help button, .strategy-workspace .preparation-error button { min-height: 28px; padding: 3px 8px; font-size: 12px; }
+.strategy-workspace .preparation-error { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 6px 0; color: var(--q-red-ink); font-size: 12px; }
+.strategy-workspace .preparation-warning { margin: 6px 0; color: var(--q-ink-soft); font-size: 12px; }
+@media (max-width: 600px) {
+  .strategy-workspace .preparation-row { grid-template-columns: 32px minmax(0, 1fr); gap: 6px; }
+  .strategy-workspace .preparation-row a { grid-column: 2; justify-self: start; }
 }
-.strategy-workspace .first-use-preparation > summary { min-height: 28px; color: var(--q-ink); font-size: 13.5px; font-weight: 650; cursor: pointer; }
-.strategy-workspace .first-use-preparation .preparation-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
-.strategy-workspace .first-use-preparation .preparation-note { font-size: 12px; margin-bottom: 0; }
 
 /* Narrower columns: the table keeps its density until the phone layout. Below the
-   two-column width the strategy and its conversation are stacked, so the
-   conversation stops being pinned and takes a bound of its own, and the two jump
-   links appear — plain text links, not another control competing with the page. */
+   two-column width a view switch selects the strategy or conversation without
+   remounting it, losing its input or interrupting an active read. */
 @media (max-width: 1100px) {
   .strategy-workspace { grid-template-columns: minmax(0, 1fr); }
+  .strategy-workspace .workspace-resizer { display: none; }
+  .strategy-workspace .workspace-view-switch { display: flex; }
+  .strategy-workspace[data-workspace-view="work"] > .strategy-ai,
+  .strategy-workspace[data-workspace-view="ai"] > .strategy-column { display: none; }
   .strategy-ai {
-    position: static; height: min(680px, 85dvh); max-height: min(680px, 85dvh);
-    padding-left: 0; padding-top: 14px; border-left: 0; border-top: 1px solid var(--q-line);
+    position: sticky; top: 66px; height: var(--agent-height, calc(100dvh - 228px)); max-height: var(--agent-height, calc(100dvh - 228px));
+    padding: 0; border: 0;
   }
+  .strategy-ai > .jump-to-details { display: none !important; }
   .strategy-workspace .jump-link {
     display: inline-flex; align-items: center; min-height: 32px; color: var(--q-ink-soft);
     font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px;
@@ -492,8 +479,6 @@ table.strategy-table {
 
 .strategy-chat .chat-suggestions { display: flex; gap: 8px; flex-wrap: wrap; }
 .strategy-chat .chat-suggestions button { min-height: 32px; font-size: 12px; text-align: left; }
-.strategy-chat-empty { padding-bottom: 14px; }
-.strategy-chat-empty > p { padding: 0 14px; }
 
 /* The manual draft editor. It is one flat block of the tab it is opened in: fine
    rules, no card, no shadow, no settings screen. Two fields to a row while the
@@ -536,3 +521,358 @@ table.strategy-table {
   .draft-editor-fields { grid-template-columns: minmax(0, 1fr); }
   .draft-editor-actions button { flex: 1 1 auto; }
 }
+
+/* Agent panel: one chronological feed, a stable context header and a fixed composer. */
+.workspace-view-switch { display: none; gap: 6px; padding: 6px 0 12px; position: sticky; top: 0; z-index: 2; background: var(--q-surface-soft); }
+.workspace-view-switch button { flex: 1; }
+.workspace-view-switch button[aria-pressed="true"] { background: var(--q-red-soft); color: var(--q-red-ink); border-color: var(--q-red-line); }
+.workspace-resizer { position: sticky; top: 16px; height: calc(100dvh - 80px); cursor: col-resize; touch-action: none; display: flex; justify-content: center; align-items: center; }
+.workspace-resizer::before { content: ''; height: 48px; width: 3px; border-radius: 3px; background: var(--q-line); }
+.workspace-resizer:hover::before, .workspace-resizer:focus-visible::before { background: var(--q-red); }
+.workspace-resizer:focus-visible { outline: 2px solid var(--q-red); outline-offset: -3px; }
+.strategy-workspace .agent-context { flex: 0 0 auto; border-bottom: 1px solid var(--q-line-soft); font-size: 12px; }
+.strategy-workspace .agent-context .ai-context { padding: 4px 0; border: 0; }
+.agent-context-links { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.agent-context select { width: 100%; min-width: 0; }
+.agent-context label { display: grid; gap: 6px; margin: 8px 0; }
+.agent-model-settings summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+.strategy-workspace .agent-model-label { margin: 0; }
+.strategy-workspace .agent-state { flex: 0 0 auto; margin: 0; color: var(--q-ink-soft); }
+.strategy-chat .chat-body { overscroll-behavior: contain; overflow-anchor: none; scrollbar-gutter: stable; }
+.strategy-workspace .feed-latest { flex: 0 0 auto; align-self: center; min-height: 28px; margin: 4px; padding: 3px 12px; font-size: 12px; }
+.strategy-workspace .turn > .message-user { margin-top: 10px; background: var(--q-red-soft); border: 0; }
+.strategy-workspace .turn .proposal-panel { margin-top: 12px; padding: 10px; }
+.strategy-workspace .tool-list { padding-left: 18px; font-size: 12px; }
+.strategy-workspace .tool-list summary { cursor: pointer; }
+.strategy-workspace .tool-list p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.strategy-workspace .composer .field { margin: 0 0 8px; }
+.strategy-workspace .composer textarea { resize: vertical; min-height: 54px; max-height: 140px; }
+.strategy-workspace .composer .check { font-size: 12px; }
+.strategy-workspace .composer-actions > .muted { font-size: 11px; }
+
+/* The research workspace is an application surface: two independent panes. */
+main > .content:has(.strategy-workspace) { padding: 0; }
+.strategy-workspace { height: var(--workspace-height, calc(100dvh - 55px)); align-items: stretch; overflow: hidden; }
+.strategy-workspace > .strategy-column { overflow: auto; min-height: 0; align-content: start; grid-auto-rows: max-content; }
+.strategy-workspace > .strategy-ai { position: relative; top: auto; height: 100%; max-height: none; align-self: stretch; }
+.strategy-workspace .workspace-resizer { position: relative; top: auto; height: 100%; border-left: 1px solid var(--q-line); }
+.strategy-workspace .workspace-resizer::before { height: 100%; width: 2px; border-radius: 0; background: transparent; }
+.strategy-workspace .strategy-chat { border: 0; border-radius: 0; background: var(--q-surface); }
+.strategy-workspace .chat-head { min-height: 44px; padding: 6px 16px; flex-wrap: nowrap; background: var(--q-surface-soft); }
+.strategy-workspace .chat-head h2 { font-size: 13px; white-space: nowrap; }
+.strategy-workspace .chat-head .inline-field { font-size: 0; min-width: 0; }
+.strategy-workspace .chat-head select { max-width: 190px; font-size: 12px; border: 0; background: transparent; }
+.strategy-workspace .agent-context { display: flex; align-items: flex-start; }
+.strategy-workspace .agent-context > * { min-width: 0; }
+.strategy-workspace .agent-context summary { font-size: 11px; cursor: pointer; }
+.strategy-workspace .agent-context .ai-context { font-size: 11px; }
+.strategy-workspace .agent-context-links { font-size: 11px; }
+.strategy-workspace .agent-state { padding: 5px 16px; border-top: 1px solid var(--q-line-soft); border-bottom: 0; background: transparent; font-size: 11px; }
+.strategy-workspace .strategy-chat .turn { border: 0; }
+.strategy-workspace .strategy-chat .turn-answer,
+.strategy-workspace .strategy-chat .message { border: 0; border-radius: 0; padding: 7px 0; background: transparent; }
+.strategy-workspace .strategy-chat .message-user { margin: 0 0 13px; }
+.strategy-workspace .strategy-chat .turn-answer > p { font-size: 13px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.strategy-workspace .strategy-chat .inference-label { font-size: 10px; color: var(--q-ink-soft); }
+.strategy-workspace .strategy-chat .provenance { font-size: 11px; }
+.strategy-workspace .strategy-chat .turn-details { margin-top: 8px; }
+.strategy-workspace .strategy-chat .agent-tool-step { margin: 5px 0; padding: 4px 0; font-size: 12px; color: var(--q-ink-soft); }
+.strategy-workspace .strategy-chat .agent-tool-step pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 260px; overflow: auto; }
+.strategy-workspace .strategy-chat .tool { padding: 4px 0; border: 0; border-radius: 0; }
+.strategy-workspace .strategy-chat .proposal-panel { border-radius: 3px; padding: 12px; }
+.strategy-workspace .strategy-chat .proposal-history { border: 0; padding: 2px 0; background: transparent; }
+.strategy-workspace .strategy-chat .proposal-history .panel-head:empty { display: none; }
+.strategy-workspace .strategy-chat .composer .field > label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.strategy-workspace .strategy-chat .composer textarea { min-height: 58px; max-height: 120px; border-radius: 3px; font-size: 13px; }
+.strategy-workspace .strategy-chat .composer .check { margin: 3px 0; font-size: 11px; }
+.strategy-workspace .strategy-chat .composer-actions { align-items: center; gap: 5px 10px; }
+.strategy-workspace .strategy-chat .composer-actions button { min-height: 30px; font-size: 12px; padding: 5px 12px; }
+.strategy-workspace .strategy-detail { border: 0; border-radius: 0; }
+@media (max-width: 1100px) {
+  .strategy-workspace { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .strategy-workspace .workspace-view-switch { padding: 6px 12px; }
+  .strategy-workspace > .strategy-column { padding: 16px; }
+  .strategy-workspace > .strategy-ai { height: 100%; max-height: none; }
+}
+
+/* Compact research console: identity, transcript, composer. */
+.strategy-workspace .agent-identity { padding:14px 16px 10px; gap:12px; align-items:center; justify-content:flex-start; background:transparent; border-bottom:0; }
+.agent-mark { color:var(--q-primary); font:700 30px/1 ui-monospace,monospace; }
+.strategy-workspace .agent-identity > div {min-width:0;}
+.strategy-workspace .agent-identity h2 { margin:0;}
+.strategy-workspace .agent-identity h2 span {font:400 11px/1.4 var(--font-sans, sans-serif);}
+.agent-identity p {margin:2px 0 0;color:var(--q-ink-soft);font:12px/1.4 ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.strategy-workspace .agent-context {gap:12px;}
+.strategy-workspace .agent-context > * {flex:0 1 auto;font-size:11px;color:var(--q-ink-soft);}
+.strategy-workspace .strategy-chat .turn {border-bottom:0;margin:0 0 14px;padding:0;}
+.strategy-workspace .strategy-chat .message-user {padding:8px 10px;border-radius:6px;background:var(--q-surface-soft);}
+.strategy-workspace .agent-inline-note {margin:4px 16px;font-size:11px;color:var(--q-ink-soft);}
+.strategy-workspace .agent-pause {display:flex;align-items:center;gap:8px;margin:4px 14px;font-size:12px;}
+.research-composer {position:relative;flex:0 0 auto;margin:12px 16px 14px;min-width:0;}
+.research-composer .sr-only {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);}
+.composer-entry {display:flex;align-items:flex-end;gap:8px;border:1px solid var(--q-field-line);border-radius:10px;padding:8px;background:var(--q-surface-soft);}
+.composer-entry:focus-within {border-color:var(--q-primary);}
+.strategy-workspace .composer-entry textarea {flex:1;width:0;min-width:0;max-height:130px;resize:vertical;border:0;background:transparent;box-shadow:none;outline:none;padding:6px;font:14px/1.6 var(--font-sans,sans-serif);}
+.strategy-workspace .composer-entry .composer-send {min-width:32px;min-height:32px;height:32px;padding:0;border-radius:8px;flex:0 0 32px;font-size:20px;background:var(--q-primary);color:var(--q-primary-ink);border:0;}
+.strategy-workspace .composer-entry .composer-send:disabled {background:var(--q-line-soft);color:var(--q-ink-soft);}
+.composer-bar {display:flex;align-items:center;gap:7px;color:var(--q-ink-soft);font-size:11px;padding-top:4px;min-width:0;}
+.composer-bar [role=status] {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.composer-shortcut {margin-left:auto;white-space:nowrap;}
+.strategy-workspace .composer-bar .command-trigger {background:transparent;border:0;min-height:25px;min-width:25px;padding:0;font:14px ui-monospace,monospace;}
+.command-menu {position:absolute;z-index:5;bottom:100%;left:0;right:0;margin-bottom:5px;background:var(--q-surface);border:1px solid var(--q-field-line);border-radius:8px;box-shadow:0 8px 28px #0003;max-height:240px;overflow:auto;padding:6px;}
+.command-scope {margin:4px 6px 8px;font-size:11px;color:var(--q-ink-soft);}
+.strategy-workspace .command-menu [role=option] {display:block;width:100%;text-align:left;min-height:32px;border:0;background:transparent;border-radius:4px;padding:7px 10px;font-size:12px;}
+.strategy-workspace .command-menu [aria-selected=true] {background:var(--q-red-soft);color:var(--q-red-ink);}
+@media (max-width:640px) {
+  .strategy-workspace .composer-entry .composer-send {min-width:44px;min-height:44px;flex-basis:44px;}
+  .strategy-workspace .command-menu [role=option] {min-height:44px;}
+  .composer-shortcut {display:none;}
+  .strategy-workspace .agent-identity {padding:10px 12px 6px;}
+  .strategy-workspace .agent-context {padding:3px 12px 6px;}
+}
+
+/* Workbench chrome belongs to the main pane; AI spans the full window height. */
+.strategy-workspace { position:relative; grid-template-columns:minmax(0,1fr) 5px minmax(320px,var(--agent-width,32%)); grid-template-rows:48px minmax(0,1fr); background:var(--q-surface); }
+.canvas-chrome { grid-column:1; grid-row:1; display:flex; align-items:center; min-width:0; border-bottom:1px solid var(--q-line); background:var(--q-surface); }
+.canvas-chrome:empty { height:0; }
+.strategy-workspace > .strategy-column { grid-column:1; grid-row:2; padding:26px 28px 30px; background:var(--q-surface); }
+.strategy-workspace > .strategy-ai { grid-column:3; grid-row:1 / 3; min-width:0; border-left:0; background:var(--q-surface); }
+.strategy-workspace > .workspace-resizer { grid-column:2; grid-row:1 / 3; }
+.ai-dock-controls { position:absolute; top:7px; right:10px; z-index:5; display:flex; gap:3px; }
+.ai-dock-controls button { border:0; background:transparent; padding:2px 6px; min-height:28px; min-width:26px; font-size:16px; color:var(--q-ink-soft); }
+.strategy-workspace[data-ai-dock="closed"], .strategy-workspace[data-ai-dock="expanded"] { grid-template-columns:minmax(0,1fr); }
+.strategy-workspace[data-ai-dock="closed"] > .strategy-ai, .strategy-workspace[data-ai-dock="closed"] > .workspace-resizer,
+.strategy-workspace[data-ai-dock="expanded"] > .strategy-column, .strategy-workspace[data-ai-dock="expanded"] > .workspace-resizer { display:none; }
+.strategy-workspace[data-ai-dock="expanded"] > .strategy-ai { grid-column:1; grid-row:2; }
+.strategy-workspace[data-ai-dock="expanded"] .ai-dock-controls { top:51px; }
+.strategy-workspace[data-ai-dock="closed"] .canvas-chrome { padding-right:70px; }
+.workspace-commandbar { order:2; display:flex; align-items:center; min-width:0; }
+.canvas-chrome .workspace-navigation { order:1; padding:0 5px 0 12px; border:0; min-height:40px; white-space:nowrap; }
+.canvas-chrome .workspace-navigation a { padding:0 7px; min-height:30px; font-size:13px; }
+.canvas-chrome .business-navigation { border:0; padding:0; gap:0; min-height:44px; }
+.canvas-chrome .business-navigation a { min-height:44px; padding:10px 14px; border-radius:0; font-size:13px; white-space:nowrap; background:transparent; }
+.strategy-workspace .strategy-heading h1, .strategy-workspace .strategy-title h1 { font-size:26px; }
+.strategy-workspace .strategy-heading { margin-bottom:8px; }
+.strategy-count { font-size:12px; font-weight:400; }
+.research-scope-row { display:flex; align-items:center; gap:14px; }
+.research-scope-row > p { font-size:12px; }
+.scope-switch { flex:0 0 auto; }
+.strategy-workspace .scope-switch button { min-height:38px; padding:7px 20px; font-size:13px; }
+.strategy-workspace .list-search input, .strategy-workspace .list-search select { min-height:40px; font-size:13px; padding:9px 12px; }
+.strategy-workspace .research-list-controls { gap:14px; }
+.strategy-table { table-layout:fixed; }
+.strategy-table thead th { padding:10px 8px; font-size:12px; }
+.strategy-table tbody th, .strategy-table td { padding:16px 10px; font-size:12px; }
+.strategy-table thead th:first-child { width:35%; padding-left:14px; }
+.strategy-table tbody th { padding-left:13px; }
+.strategy-table th:nth-child(2) { width:13%; }
+.strategy-table th:nth-child(3) { width:14%; }
+.strategy-table th:nth-child(4) { width:10%; }
+.strategy-table th:nth-child(5) { width:15%; }
+.strategy-table .strategy-name { font-size:14px; line-height:1.5; font-weight:650; }
+.strategy-table .strategy-instrument { font-size:12px; }
+.research-intent-excerpt { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.strategy-table .chip { font-size:12px; padding:1px 5px; white-space:nowrap; }
+.strategy-workspace .first-use-preparation { border:0; border-top:1px solid var(--q-line-soft); border-radius:0; padding:10px 0; margin:0; }
+.strategy-workspace .first-use-preparation > summary { font-size:12px; font-weight:400; color:var(--q-ink-soft); }
+.strategy-workspace .strategy-title { padding:0 0 6px; gap:8px; }
+.strategy-workspace .strategy-detail .research-context { padding:0 0 12px; font-size:13px; }
+.strategy-workspace .research-status-line { padding:0 0 10px; border:0; }
+.strategy-workspace .next-step { border:0; background:transparent; padding:0; }
+.strategy-workspace .next-step dl { font-size:12px; }
+.strategy-workspace .next-step dt { display:none; }
+.strategy-workspace .pending-changes { font-size:12px; }
+.strategy-workspace .detail-tabs { padding:0; margin:0 0 12px; }
+.strategy-workspace .detail-tabs [role=tab] { min-height:38px; padding:8px 18px; font-size:13px; }
+.strategy-workspace .strategy-tabpanel { padding:0; }
+.strategy-workspace .strategy-evidence { padding:0; border:0; }
+.strategy-workspace .strategy-evidence > .panel-head { margin:0 0 8px; }
+.strategy-workspace .strategy-evidence > .panel-head h2 { font-size:16px; }
+.strategy-workspace .evidence-curve { margin:10px 0; }
+.strategy-workspace .equity-path { margin:0; padding:16px; border-radius:7px; }
+.strategy-workspace .equity-path header { margin-bottom:2px; }
+.strategy-workspace .equity-path h2 { font-size:14px; }
+.strategy-workspace .equity-path svg { height:196px; }
+.strategy-workspace .curve-axis, .strategy-workspace .curve-readout { font-size:12px; }
+.strategy-workspace .curve-controls { font-size:12px; gap:4px; }
+.strategy-workspace .curve-controls label { margin:3px 0; font-size:12px; }
+.strategy-workspace .curve-controls select { min-height:24px; padding:2px 5px; font-size:12px; }
+.strategy-workspace .curve-cursor { margin:0; font-size:12px; }
+.strategy-workspace .curve-cursor input { min-height:20px; padding:0; }
+.strategy-workspace .curve-readout { padding:0; }
+.strategy-workspace .curve-drawdown { font-size:12px; margin:2px 0; }
+.report-tabs { display:flex; gap:4px; border-bottom:1px solid var(--q-line); margin:10px 0 12px; }
+.report-tabs button { border:0; border-radius:0; background:transparent; padding:7px 12px; min-height:34px; font-size:13px; color:var(--q-ink-soft); }
+.report-tabs button[aria-pressed=true] { color:var(--q-ink); box-shadow:inset 0 -2px var(--q-primary); font-weight:650; }
+.strategy-evidence > [hidden] { display:none; }
+.strategy-workspace .report-trades, .strategy-workspace .report-assumptions { border:0; background:transparent; padding:0; }
+.strategy-workspace .report-trade-section h3 { font-size:14px; margin-top:12px; }
+.strategy-workspace .report-trade-section p, .strategy-workspace .evidence-limits { font-size:12px; }
+.strategy-workspace .report-trade-section table { margin:8px 0; font-size:12px; }
+.strategy-workspace .strategy-chat .agent-identity { min-height:48px; height:48px; flex-shrink:0; padding:10px 72px 10px 18px; border-bottom:1px solid var(--q-line); gap:7px; }
+.strategy-workspace .agent-identity .agent-mark { font-size:17px; width:21px; height:21px; }
+.strategy-workspace .agent-identity h2 { font:650 14px/1.4 var(--font-sans,sans-serif); }
+.strategy-workspace .agent-identity h2 span { font-size:13px; color:var(--q-ink); }
+.strategy-workspace .agent-identity p { display:none; }
+.agent-object { display:flex; align-items:center; gap:10px; margin:12px 16px 0; padding:10px 12px; border:1px solid var(--q-line); border-radius:5px; background:var(--q-surface-soft); font-size:12px; }
+.agent-object strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; font-weight:600; }
+.agent-object > span:last-child { color:var(--q-ink-soft); white-space:nowrap; }
+.strategy-workspace .agent-context { padding:6px 16px; min-height:28px; border:0; }
+.strategy-workspace .agent-context a { min-height:23px; padding:3px 5px; font-size:12px; }
+.strategy-workspace .strategy-chat .chat-body { padding:16px; }
+.strategy-chat div.chat-empty-guidance { padding:16px 0 0; text-align:left; }
+.chat-guidance-heading { display:flex; align-items:center; gap:12px; }
+.assistant-empty-mark { display:grid; place-items:center; flex:0 0 36px; width:36px; height:36px; border-radius:9px; background:var(--q-surface-soft); color:var(--q-primary); font-size:22px; }
+.strategy-workspace .chat-guidance-heading h3 { margin:0; font-size:16px; line-height:1.5; }
+.strategy-workspace .chat-guidance-heading .muted { font-size:12px; margin:3px 0 0; }
+.chat-suggestions { display:grid; gap:10px; margin-top:20px; }
+.strategy-workspace .chat-suggestions button { display:grid; grid-template-columns:22px minmax(0,1fr) 10px; align-items:center; gap:12px; min-height:72px; text-align:left; padding:13px; font-size:13px; background:var(--q-surface); }
+.chat-suggestions svg { width:22px; height:22px; color:var(--q-primary); }
+.chat-suggestions strong { display:block; font-size:13px; font-weight:600; }
+.chat-suggestions small { display:block; margin-top:4px; color:var(--q-ink-soft); font-size:12px; line-height:1.5; font-weight:400; }
+.chat-suggestions button::after { content:'›'; color:var(--q-ink-soft); }
+.strategy-workspace .strategy-chat .composer { border-top:1px solid var(--q-line-soft); padding:10px 12px; }
+.strategy-workspace .composer-entry textarea { min-height:62px; }
+@media(max-width:1100px) {
+  .strategy-workspace { grid-template-columns:minmax(0,1fr); grid-template-rows:44px 36px minmax(0,1fr); }
+  .strategy-workspace .canvas-chrome { grid-column:1; grid-row:1; }
+  .strategy-workspace .workspace-view-switch { position:static; display:flex; grid-column:1; grid-row:2; padding:3px 12px; margin:0; border-bottom:1px solid var(--q-line); }
+  .strategy-workspace .workspace-view-switch button { min-height:28px; padding:3px 10px; font-size:12px; flex:0 1 auto; }
+  .strategy-workspace > .strategy-column, .strategy-workspace > .strategy-ai { grid-column:1; grid-row:3; }
+  .strategy-workspace .ai-dock-controls { top:48px; }
+  .strategy-workspace .ai-dock-controls button:first-child:not(:only-child) { display:none; }
+  .strategy-workspace > .strategy-column { padding:18px; }
+  .strategy-workspace[data-ai-dock="expanded"] > .strategy-ai { grid-row:3; }
+  .strategy-workspace[data-ai-dock="closed"] .canvas-chrome { padding-right:0; }
+}
+@media(max-width:640px) {
+  .strategy-workspace { grid-template-rows:auto 42px minmax(0,1fr); }
+  .canvas-chrome { flex-wrap:wrap; }
+  .canvas-chrome .business-navigation a { padding:8px; min-height:38px; }
+  .research-scope-row { flex-wrap:wrap; gap:6px; }
+  .strategy-table { table-layout:auto; }
+  .strategy-table th:first-child, .strategy-table th:nth-child(n) { width:100%; }
+  .strategy-workspace .ai-dock-controls { top:48px; }
+}
+
+.draft-edit-toggle { margin-left:auto; font-size:13px; min-height:32px; padding:5px 10px; }
+.strategy-workspace .draft-overview { margin:18px 0; }
+.strategy-workspace .draft-overview h2, .strategy-workspace .strategy-panel > h2 { font-size:15px; margin-bottom:12px; }
+.strategy-workspace .draft-overview .inspector-facts > div { grid-template-columns:140px minmax(0,1fr); font-size:14px; }
+.strategy-workspace .strategy-panel:has(> .strategy-intent) { padding:14px 0; border:0; }
+.strategy-workspace .draft-facts { border:1px solid var(--q-line); border-radius:5px; background:var(--q-surface); padding:12px; }
+.strategy-workspace .draft-facts dl { gap:10px 22px; }
+.strategy-workspace .draft-facts div { display:block; }
+.strategy-workspace .draft-facts dd { font-size:13px; margin-top:4px; }
+.strategy-workspace .live-main .panel { padding:14px; margin-bottom:12px; border-radius:5px; }
+.strategy-workspace .live-main .panel h2 { font-size:15px; }
+.strategy-workspace .live-main .preview-banner { font-size:13px; padding:8px 12px; margin:0; }
+.strategy-workspace .live-main .page-title { margin-bottom:0; }
+.strategy-workspace .live-main h1 { font-size:23px; }
+.strategy-workspace .live-main table { font-size:13px; margin-top:12px; }
+.strategy-workspace .live-main .live-metrics { margin:12px 0 0; gap:12px; }
+.strategy-workspace .live-main .live-metrics dd { font-size:21px; }
+.strategy-workspace .live-main p { font-size:13px; }
+.strategy-workspace .preview-assistant { padding:0; gap:0; }
+.strategy-workspace .preview-assistant > header { min-height:44px; padding:12px 74px 12px 15px; border-bottom:1px solid var(--q-line); }
+.strategy-workspace .preview-assistant > header h2 { font-size:13px; }
+.strategy-workspace .preview-assistant > header p { font-size:12px; }
+.strategy-workspace .preview-assistant > div { margin:14px; padding:14px; border:1px solid var(--q-line); border-radius:5px; background:var(--q-surface-soft); }
+.strategy-workspace .preview-assistant h3 { font-size:14px; }
+.strategy-workspace .preview-assistant p { font-size:13px; }
+.strategy-workspace .preview-assistant footer { margin: auto 14px 14px; padding:12px; border:1px solid var(--q-line); border-radius:5px; font-size:13px; }
+.strategy-workspace .paper-heading { gap:8px; padding-bottom:12px; }
+.strategy-workspace .paper-eyebrow { display:none; }
+.strategy-workspace .paper-heading h1 { font-size:22px; }
+.strategy-workspace .paper-main { gap:12px; }
+.strategy-workspace .paper-ai .chat-head { min-height:44px; padding:10px 74px 10px 14px; }
+.strategy-workspace .paper-ai h2 { font-size:14px; }
+.strategy-workspace .report-page > .metrics { gap:0; border:1px solid var(--q-line); border-radius:5px; margin:12px 0; }
+.strategy-workspace .report-page > .metrics .metric-card { min-height:78px; padding:12px; border:0; }
+.strategy-workspace .report-page > .metrics strong { font-size:20px; margin:5px 0 0; }
+.strategy-workspace .report-page > .metrics span { font-size:12px; }
+
+.strategy-workspace .report-page > .page-title h1 { font-size:26px; }
+.strategy-workspace .report-page > .page-title { margin-bottom:10px; }
+.strategy-workspace .report-page .result-toolbar { margin:0 0 12px; }
+.strategy-workspace .report-page .result-toolbar button { font-size:13px; min-height:30px; padding:4px 10px; }
+.strategy-workspace .report-page .result-limits { border:0; padding:0; margin:10px 0; }
+.strategy-workspace .report-page .result-limits header h2 { font-size:14px; }
+.strategy-workspace .report-page .result-limits .summary-list { margin-top:0; gap:10px; grid-template-columns:repeat(3,minmax(0,1fr)); }
+.strategy-workspace .report-page .result-limits dt, .strategy-workspace .report-page .result-limits dd { font-size:12px; }
+.strategy-workspace .report-page .equity-path { margin-top:10px; }
+
+.strategy-workspace [hidden] { display:none !important; }
+.strategy-workspace .equity-path > .provenance { font-size:12px; padding:0; border:0; }
+.strategy-workspace .chat-suggestions { display:grid; grid-template-columns:1fr; }
+.strategy-workspace .chat-suggestions button { width:100%; }
+@media(max-height:700px) {
+  .strategy-chat div.chat-empty-guidance { padding-top:0; }
+  .strategy-workspace .chat-suggestions { margin-top:12px; gap:8px; }
+  .strategy-workspace .chat-suggestions button { min-height:64px; padding:9px 13px; }
+}
+
+/* Frozen report: source, outcome band, curve, then optional raw detail. */
+.report-source-line { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px; padding:0 0 10px; color:var(--muted); font-size:13px; line-height:1.5; }
+.report-source-line strong { color:var(--ink); }
+.report-key-results { container-type:inline-size; margin:0 0 12px; }
+.report-key-results dl { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; margin:0; padding:18px 0; border:1px solid var(--line); border-radius:7px; font-variant-numeric:tabular-nums; }
+.report-key-results dl > div { min-width:0; padding:0 16px; border-right:1px solid var(--line-soft); }
+.report-key-results dl > div:last-child { border-right:0; }
+.report-key-results dt { font-size:13px; color:var(--muted); }
+.report-key-results dd { margin:6px 0 0; font-size:clamp(18px,2.8cqw,23px); font-weight:650; letter-spacing:-.025em; overflow-wrap:anywhere; line-height:1.3; }
+.report-key-results small { display:block; color:var(--muted); font-size:12px; margin-top:5px; }
+.report-raw-values { margin:8px 0 12px; }
+.report-raw-values summary { font-size:13px; }
+@container (max-width:540px) { .report-key-results dl { grid-template-columns:repeat(2,minmax(0,1fr)); row-gap:18px; } }
+@container (max-width:360px) { .report-key-results dl { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+.strategy-workspace .strategy-chat-empty { height:100%; padding:0; background:var(--q-surface); }
+.strategy-workspace .strategy-chat-empty .chat-head { min-height:44px; padding:12px 70px 12px 15px; border-bottom:1px solid var(--q-line-soft); }
+.strategy-workspace .strategy-chat-empty .chat-head h2 { font-size:13px; }
+.chat-empty-start { display:flex; flex-direction:column; align-items:center; padding:64px 20px 24px; text-align:center; }
+.chat-empty-symbol { font-size:28px; color:var(--accent); }
+.strategy-workspace .chat-empty-start h3 { margin:16px 0 4px; font-size:16px; }
+.strategy-workspace .chat-empty-start p, .chat-empty-status { color:var(--q-ink-soft); font-size:13px; }
+.chat-empty-status { padding:18px; }
+.chat-empty-actions { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:18px; }
+.chat-empty-actions button { min-height:34px; padding:6px 12px; }
+
+/* Compact chart: controls in the header and one inspect row beneath the plot. */
+.strategy-workspace .equity-path .curve-header { display:flex; flex-wrap:wrap; align-items:center; gap:4px 16px; margin:0 0 5px; }
+.strategy-workspace .equity-path .curve-header h2 { margin:0; white-space:nowrap; }
+.curve-header small { margin-left:0; color:var(--muted); font-weight:400; font-size:12px; }
+.curve-header .curve-controls { margin-left:auto; }
+.strategy-workspace .curve-controls .muted { max-width:145px; font-size:11px; line-height:1.3; }
+.curve-plot { display:grid; grid-template-columns:fit-content(40%) minmax(0,1fr); gap:8px; align-items:stretch; }
+.curve-plot > svg { min-width:0; }
+.curve-scale { display:flex; flex-direction:column; justify-content:space-between; align-items:flex-end; min-width:0; padding:14px 0 30px; font-size:12px; font-variant-numeric:tabular-nums; color:var(--muted); white-space:nowrap; overflow-x:auto; scrollbar-width:thin; }
+.curve-inspect { display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; margin:3px 0; }
+.strategy-workspace .curve-inspect .curve-cursor { flex:1; min-width:120px; }
+.strategy-workspace .curve-inspect .curve-readout { font-size:11px; }
+.strategy-workspace .equity-path .curve-axis { font-size:11px; margin:0; }
+.strategy-workspace .equity-path > .provenance { margin:3px 0 0; }
+@media (max-width:767px) {
+  .curve-inspect { display:block; }
+}
+
+.strategy-workspace .report-page .association-compact { display:flex; flex-wrap:wrap; align-items:center; gap:4px 14px; border:0; border-bottom:1px solid var(--q-line-soft); padding:0 0 8px; margin:0 0 8px; border-radius:0; min-height:0; background:transparent; }
+.association-compact > header { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.strategy-workspace .association-compact p { margin:0; font-size:12px; }
+.strategy-workspace .association-compact p:last-child { margin-left:auto; }
+.strategy-workspace .report-page > .page-title { display:flex; align-items:center; }
+.strategy-workspace .report-page > .page-title p { font-size:12px; }
+
+.report-title-actions { display:flex; align-items:center; gap:12px; }
+.report-title-actions button { min-height:30px; padding:4px 10px; font-size:13px; }
+.strategy-workspace > .strategy-column { container-type:inline-size; }
+@container (max-width:620px) {
+}
+
+/* A research selection changes only the adjacent conversation context. */
+.research-row-identity { display:flex; align-items:flex-start; gap:12px; }
+.research-row-identity > div { min-width:0; }
+.strategy-workspace .research-row-select { flex:0 0 36px; width:36px; min-height:36px; padding:7px; border:1px solid var(--q-line); border-radius:7px; background:var(--q-surface); color:var(--q-primary); }
+.strategy-workspace .research-row-select[aria-pressed=true] { border-color:var(--q-red-line); background:var(--q-red-soft); }
+.report-supporting-results { display:flex; flex-wrap:wrap; gap:8px 24px; padding:12px 2px 2px; font-size:12px; color:var(--muted); }
+.report-supporting-results strong { color:var(--ink); font-weight:500; margin-left:5px; }
+@media(max-width:767px) { .research-row-identity { gap:10px; } .report-key-results dd { font-size:21px; } }

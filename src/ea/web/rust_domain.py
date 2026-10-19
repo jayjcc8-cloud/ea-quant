@@ -862,6 +862,23 @@ def _mode_snapshot(request: dict[str, Any]) -> dict[str, Any]:
             "the selected dataset version is not the capability binding this input carries",
         )
     scenario_id = LOCAL_SCENARIO_ID if local_workspace is not None else path.name
+    requested_id = request.get("scenario_id", scenario_id)
+    if type(requested_id) is str and requested_id.startswith("template:"):
+        from ea.web.service import ScenarioRegistry
+
+        try:
+            templates = ScenarioRegistry(Path(__file__).parent / "templates")
+            expected_path = templates._path(requested_id)
+        except (OSError, ValueError) as error:
+            raise DomainRefusal("invalid_request", str(error)) from None
+        _require(
+            local_workspace is None and path == expected_path,
+            "invalid_request",
+            "the template identity must name its installed source",
+        )
+        scenario_id = requested_id
+    else:
+        _require(requested_id == scenario_id, "invalid_request", "scenario identity conflicts")
     source_identity = _scenario_identity(source)
     parameters = request.get("parameters")
     if parameters is None:

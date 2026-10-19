@@ -240,7 +240,7 @@ function adapter(overrides: Partial<ApiAdapter> = {}) {
 }
 
 function workspace(api: ApiAdapter) {
-  window.history.pushState({}, '', '/research')
+  window.history.pushState({}, '', '/research/new')
   render(<App api={api} />)
 }
 
@@ -334,20 +334,20 @@ describe('controlled upload', () => {
     const { api, calls } = adapter()
     workspace(api)
 
-    const content = await screen.findByLabelText('CSV content')
+    const content = await screen.findByLabelText('CSV 内容')
     fireEvent.change(content, { target: { value: 'venue,symbol\nXNAS,AAPL' } })
-    await user.click(screen.getByRole('button', { name: 'Preview sample' }))
+    await user.click(screen.getByRole('button', { name: '检查数据' }))
 
     expect(await screen.findByText(/header_mismatch: the header does not match the strict Phase 1 profile/)).toBeTruthy()
     expect(calls.publish).toBe(0)
 
-    const publish = screen.getByRole('button', { name: 'Publish version' })
+    const publish = screen.getByRole('button', { name: '发布数据版本' })
     // No policy is assumed: the host refuses an upload that does not state one.
     expect((publish as HTMLButtonElement).disabled).toBe(true)
 
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_SIMULATED)
-    fireEvent.change(screen.getByLabelText('Simulated latency (seconds)'), { target: { value: '2' } })
-    await user.click(screen.getByRole('button', { name: 'Publish version' }))
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_SIMULATED)
+    fireEvent.change(screen.getByLabelText('模拟延迟（秒）'), { target: { value: '2' } })
+    await user.click(screen.getByRole('button', { name: '发布数据版本' }))
 
     await waitFor(() => expect(calls.publish).toBe(1))
     expect(calls.publishRequest).toMatchObject({ availability_policy: AVAILABILITY_SIMULATED, latency_seconds: 2 })

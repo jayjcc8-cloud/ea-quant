@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useNavigate } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import { PaperWorkspace } from './paper-workspace'
 import { PaperApiError, type PaperApi, type PaperInstance, type PaperPreparation, type PaperRequest } from './paper-api'
@@ -12,7 +12,7 @@ const intent: PaperRequest = { request_id: id, candidate_id: id, fingerprint: 'a
 const row: PaperInstance = { run_id: id, request: intent, source_job_id: id, state: 'running', terminal_confirmed: false, stop_requested: false, observed_at: '2026-01-02T00:00:00Z', created_at: '2026-01-02T00:00:00Z', overview: { available: true, run_id: id, state: 'running', cash: '9999.8', equity: '9999.8', fills: 2, position: '0', currency: 'USD', lease_held: true, health: { schema: 'ea.paper-health.v1', run_id: id, observed_at: '2026-01-02T00:00:00Z', process_alive: true, projection_stale: false, reconciliation_state: 'clean' } } }
 const explanationContext = { schema: 'ea.paper-explanation-evidence.v1', run_id: id, instance_name: '测试实例', candidate_id: id, source_job_id: id, strategy: { id: 'bounded-long', version: 1 }, configuration_sha256: 'a'.repeat(64), market: { kind: 'local_synthetic_feed', interval_seconds: 1, bounded_prices: 1 }, observed_at: '2026-01-02T00:00:00Z', state: 'running', state_scope: 'live' as const, historical: false, terminal_durable: false, economics: { available: true, reason: null }, health: { available: true, reason: null }, limits: [] }
 function adapter(overrides: Partial<PaperApi> = {}): PaperApi { return { list: vi.fn().mockResolvedValue({ available: true, instances: [] }), candidates: vi.fn().mockResolvedValue({ candidates: [{ candidate_id: id, status: 'ACCEPTED', projection: { strategy: { id: 'bounded-long' } } }] }), prepare: vi.fn().mockResolvedValue(prepared), start: vi.fn().mockResolvedValue(row), get: vi.fn().mockResolvedValue(row), stop: vi.fn().mockResolvedValue(row), events: vi.fn().mockResolvedValue({ available: true, run_id: id, events: [] }), conversation: vi.fn().mockResolvedValue({ run_id: id, context: explanationContext, messages: [], calls: [], budget: { max_model_calls: 1, max_backtests: 0 }, route: null }), explain: vi.fn(), ...overrides } }
-function mount(api: PaperApi) { render(<MemoryRouter initialEntries={[`/runs?candidate=${id}`]}><PaperWorkspace api={api} /></MemoryRouter>) }
+function mount(api: PaperApi, instance = id) { render(<MemoryRouter initialEntries={[`/runs?candidate=${id}&instance=${instance}`]}><PaperWorkspace api={api} /></MemoryRouter>) }
 afterEach(() => { cleanup(); sessionStorage.clear() })
 
 /*
@@ -175,7 +175,7 @@ it('【fixture】a discarded older list response cannot replace the selected run
   let release: (value: { available: boolean; instances: PaperInstance[] }) => void = () => {}
   const older = new Promise<{ available: boolean; instances: PaperInstance[] }>(resolve => { release = resolve })
   const list = vi.fn().mockReturnValueOnce(older).mockResolvedValue(served(a, b, c))
-  mount(adapter({ list }))
+  mount(adapter({ list }), runA)
   await user.click(await screen.findByRole('button', { name: '刷新状态' }))
   const select = await screen.findByLabelText('运行实例') as HTMLSelectElement
   await user.selectOptions(select, runB)
@@ -216,4 +216,55 @@ it('offers keyboard-focusable AI and overview navigation and foregrounds stale s
   expect(status.firstElementChild?.textContent).toContain('观测陈旧')
   const account = document.querySelector('.paper-account')!
   expect(account.textContent?.indexOf('不代表当前权益')).toBeLessThan(account.textContent!.indexOf('9999.8'))
+})
+
+
+it('offers an instance list before detail and restores selection with history', async () => {
+  const user = userEvent.setup()
+  function HistoryButtons() { const navigate = useNavigate(); return <><button onClick={() => navigate(-1)}>test back</button><button onClick={() => navigate(1)}>test forward</button></> }
+  const api = adapter({ list: vi.fn().mockResolvedValue(served(row)) })
+  render(<MemoryRouter initialEntries={['/runs']}><HistoryButtons /><PaperWorkspace api={api} /></MemoryRouter>)
+  await screen.findByRole('heading', { name: '模拟运行' })
+  await user.click(await screen.findByRole('link', { name: '测试实例' }))
+  await screen.findByRole('heading', { name: '测试实例' })
+  await user.click(screen.getByRole('button', { name: 'test back' }))
+  await screen.findByRole('heading', { name: '模拟运行' })
+  expect(screen.queryByRole('region', { name: '运行观测' })).toBeNull()
+  await user.click(screen.getByRole('button', { name: 'test forward' }))
+  await screen.findByRole('heading', { name: '测试实例' })
+  expect(api.start).not.toHaveBeenCalled()
+})
+
+it('cancels empty-workspace setup without starting or losing its inputs', async () => {
+  const user = userEvent.setup()
+  const api = adapter()
+  render(<MemoryRouter initialEntries={['/runs']}><PaperWorkspace api={api} /></MemoryRouter>)
+  await user.click(await screen.findByRole('button', { name: '配置新实例' }))
+  await user.selectOptions(await screen.findByRole('combobox', { name: '选择研究候选' }), id)
+  await user.clear(await screen.findByLabelText('实例名'))
+  await user.type(screen.getByLabelText('实例名'), '未启动草稿')
+  await user.click(screen.getByRole('link', { name: '取消配置并返回列表' }))
+  expect(screen.queryByRole('region', { name: '本地模拟配置' })).toBeNull()
+  await user.click(screen.getByRole('button', { name: '配置新实例' }))
+  expect((await screen.findByLabelText('实例名') as HTMLInputElement).value).toBe('未启动草稿')
+  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false)
+  expect(api.start).not.toHaveBeenCalled()
+})
+
+
+it('invalidates startup confirmation after input changes or a history round trip', async () => {
+  const user = userEvent.setup()
+  const api = adapter()
+  function HistoryButtons() { const navigate = useNavigate(); return <><button onClick={() => navigate('/runs')}>leave setup</button><button onClick={() => navigate(-1)}>back to setup</button></> }
+  render(<MemoryRouter initialEntries={[`/runs?candidate=${id}`]}><HistoryButtons /><PaperWorkspace api={api} /></MemoryRouter>)
+  const check = await screen.findByRole('checkbox') as HTMLInputElement
+  await user.click(check)
+  await user.type(screen.getByLabelText('实例名'), ' changed')
+  expect(check.checked).toBe(false)
+  await user.click(check)
+  await user.click(screen.getByRole('button', { name: 'leave setup' }))
+  await user.click(screen.getByRole('button', { name: 'back to setup' }))
+  expect((await screen.findByRole('checkbox') as HTMLInputElement).checked).toBe(false)
+  expect((screen.getByRole('button', { name: '确认启动本地模拟' }) as HTMLButtonElement).disabled).toBe(true)
+  expect(api.start).not.toHaveBeenCalled()
 })

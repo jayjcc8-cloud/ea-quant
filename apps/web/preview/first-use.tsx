@@ -40,7 +40,7 @@ function sealNetwork(): void {
 /**
  * This page, which is where every control in the banner navigates to.
  *
- * The application itself is mounted on `/research`, so setting only the search
+ * The application itself is mounted on `/resources/data`, so setting only the search
  * there would leave the harness and load the ordinary preview instead.
  */
 const PAGE = '/first-use.html'
@@ -127,8 +127,8 @@ function mount(): void {
   const width = Number(parameters.get('width')) || null
 
   // The application reads the location it is mounted at, so this preview always
-  // opens on the research workspace, where the upload panel lives.
-  window.history.pushState({}, '', '/research')
+  // opens on the data resources section, where the upload panel lives.
+  window.history.pushState({}, '', '/resources/data')
 
   const shell = document.createElement('div')
   document.body.replaceChildren(shell)

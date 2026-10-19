@@ -591,7 +591,7 @@ describe('QUINE 资源中心 directory', () => {
     // An empty directory of standalone datasets is stated as exactly that, and
     // never as scenarios without data.
     expect(datasetRegion.textContent).toContain('数据集为空不代表场景没有数据')
-    expect(within(datasetRegion).getByRole('link', { name: '导入与声明' }).getAttribute('href')).toBe('/research')
+    expect(within(datasetRegion).getByRole('link', { name: '导入数据' }).getAttribute('href')).toBe('/resources/data')
 
     const scenarioRegion = await findRegion('场景')
     await waitFor(() => expect(entries('scenario')).toEqual(['ma-cross.yaml']))
@@ -647,9 +647,9 @@ describe('QUINE 资源中心 directory', () => {
     const region = await findRegion('组合选择')
     await waitFor(() => expect(within(region).getByRole('link', { name: '策略工作区' })).toBeTruthy())
     expect(within(region).getByRole('link', { name: '策略工作区' }).getAttribute('href')).toBe('/strategies')
-    expect(within(region).getByRole('link', { name: '研究工作区' }).getAttribute('href')).toBe('/research')
+    expect(within(region).getByRole('link', { name: '历史研究任务' }).getAttribute('href')).toBe('/research')
     // Following the entry is navigation; nothing on this page answers as a model.
-    await user.click(within(region).getByRole('link', { name: '研究工作区' }))
+    await user.click(within(region).getByRole('link', { name: '历史研究任务' }))
     expect(calls.resolve).toEqual([])
     expect(calls.settings).toBe(1)
   })

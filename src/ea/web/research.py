@@ -699,7 +699,7 @@ class ResearchOrchestrator:
         self._store = store
         self._service = service
         self._settings = settings
-        self._provider: ModelPort = create_model_port(settings)
+        self._provider: ModelPort | None = None
         self._lock = threading.Lock()
         # Reentrant per task: one public request may re-enter its own lock while
         # composing helpers, but never another task's.
@@ -717,10 +717,13 @@ class ResearchOrchestrator:
 
     # -- catalog and validation --------------------------------------------
 
-    def _catalog(self) -> list[dict[str, Any]]:
+    def _catalog(self, *, include_templates: bool = False) -> list[dict[str, Any]]:
         local = self._local_scenario_facts()
         entries: list[dict[str, Any]] = []
-        for scenario in (cast(dict[str, Any], item) for item in self._service.registry.list()):
+        scenarios = self._service.registry.list()
+        if include_templates:
+            scenarios += self._service.registry.templates()
+        for scenario in (cast(dict[str, Any], item) for item in scenarios):
             descriptor = scenario.get("strategy_descriptor") or {}
             if descriptor.get("research_visible") is False:
                 continue
@@ -770,13 +773,26 @@ class ResearchOrchestrator:
 
     # -- capability catalog and recipe --------------------------------------
 
-    def _model_route(self) -> dict[str, Any]:
+    def _model_route(self, port: ModelPort | None = None) -> dict[str, Any]:
         """The non-secret facts of the route this host is configured for.
 
-        Only what the settings status already projects: provider, model and
-        endpoint. No credential, key reference or resolution value is read, and
-        nothing here creates a provider, a client or a request.
+        A supplied adapter projects the same snapshot its request will use.
+        The catalog and injected test adapters retain the settings projection.
+        Only provider, model and endpoint are exposed; never credentials.
         """
+        if port is not None:
+            resolver = getattr(port, "route", None)
+            if callable(resolver):
+                route = resolver()
+                return (
+                    {}
+                    if route is None
+                    else {
+                        "provider": route.provider,
+                        "model": route.model,
+                        "endpoint": route.endpoint,
+                    }
+                )
         try:
             status = self._settings.status()
         except (RadianSettingsError, ValueError):
@@ -1270,7 +1286,11 @@ class ResearchOrchestrator:
         """Fill unset parameters from the registered contract defaults."""
         matching = [
             entry
-            for entry in self._catalog()
+            for entry in self._catalog(
+                include_templates=bool(
+                    spec.scenario_id and spec.scenario_id.startswith("template:")
+                )
+            )
             if entry["strategy_id"] == spec.strategy_id
             and entry["instrument"]
             and entry["instrument"]["venue"] == spec.instrument_venue
@@ -1315,7 +1335,9 @@ class ResearchOrchestrator:
             # A selected capability is verified before the spec surface, so an
             # unusable selection is reported as itself and never dispatched.
             self._check_selection(spec)
-        catalog = self._catalog()
+        catalog = self._catalog(
+            include_templates=bool(spec.scenario_id and spec.scenario_id.startswith("template:"))
+        )
         strategies = {entry["strategy_id"] for entry in catalog if entry["strategy_id"]}
         if spec.strategy_id not in strategies:
             raise InvalidSpecError(
@@ -1987,6 +2009,9 @@ class ResearchOrchestrator:
             return self._view(task_id)
         task = self._store.get(task_id)
         messages = [ModelMessage("user", task.raw_idea)]
+        # All tool rounds of this admitted operation use one connection snapshot.
+        # A later explicit operation may resolve the workspace default anew.
+        port = self._provider or create_model_port(self._settings)
         for _round in range(_MAX_TOOL_ROUNDS + 1):
             try:
                 task = self._transition(
@@ -2017,7 +2042,7 @@ class ResearchOrchestrator:
                     task_id, generation, "model_pending_release", finish=True, seq=seq
                 )
             try:
-                response = self._provider.complete(
+                response = port.complete(
                     system=self._system_prompt(task), messages=messages, tools=self._tools()
                 )
             except ModelNotConfigured as error:
@@ -3159,9 +3184,10 @@ class ResearchOrchestrator:
             return self._stop_conclusion(task_id, generation, task)
         if _conclusion_closed(task):
             return self._stop_conclusion(task_id, generation, task)
-        route = self._model_route()
+        port = self._provider or create_model_port(self._settings)
+        route = self._model_route(port)
         try:
-            response = self._provider.complete(
+            response = port.complete(
                 system=self._interpretation_prompt(packet),
                 messages=[
                     ModelMessage(
@@ -3517,6 +3543,7 @@ class ResearchOrchestrator:
         self._validate_spec(spec)
         frozen = self._with_defaults(spec)
         scenario_id = frozen.scenario_id or self._resolve_scenario_id(frozen)
+        binding = None if frozen.selection is None else self._resolve_binding(frozen.selection)
         try:
             prepared = self._service.prepare_input_snapshot(
                 scenario_id,
@@ -3528,6 +3555,7 @@ class ResearchOrchestrator:
                 },
                 dataset_id=frozen.dataset_id,
                 source_sha256=frozen.source_sha256,
+                plugin_binding=None if binding is None else binding.document(),
             )
         except Exception as error:  # noqa: BLE001 — nothing was created or dispatched
             raise InvalidSpecError(str(error)) from None
@@ -3580,6 +3608,8 @@ class ResearchOrchestrator:
             error=None,
             cancel_note=None,
             last_model=None,
+            selection=frozen.selection,
+            pinned_binding=None if binding is None else binding.document(),
             owner_user_strategy_id=user_strategy_id,
             owner_launch_intent_id=launch_intent_id,
             # The frozen expectation every later read of this child is held to:

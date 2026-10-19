@@ -191,7 +191,7 @@ async function stopServer(server: ChildProcess): Promise<void> {
  * here instead of being waited out.
  */
 async function draftIdea(page: Page, idea: string): Promise<string> {
-  await page.goto('/research')
+  await page.goto('/research/new')
   await page.getByLabel('Research idea').fill(idea)
   await page.getByRole('button', { name: 'Create draft' }).click()
   await expect(page).toHaveURL(/\/research\/[0-9a-f-]{36}$/)

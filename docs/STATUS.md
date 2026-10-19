@@ -1,5 +1,15 @@
 # Project Status
 
+## QUINE delivery direction (local candidate)
+
+Under [ADR 0050](adr/0050-desktop-only-product-delivery.md), the Mac desktop is the sole QUINE user
+entry, release artifact and final product acceptance target. It remains an unpublished candidate;
+native narrow-window, full keyboard and Chinese IME acceptance are unverified. Shared React/WebView,
+embedded loopback HTTP and the `web` dependency group remain. `ea web serve` and historical server
+tools are internal development/integration/compatibility entry points, not supported independent
+browser/server/mobile products. Existing Mac Paper operations and all safety boundaries remain.
+The completed capabilities and release evidence below retain their original historical scope.
+
 ## Current Phase
 
 **Mac-local continuous simulated Paper.**

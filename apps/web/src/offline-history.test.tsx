@@ -197,7 +197,7 @@ describe('offline history import', () => {
   it('loads the built-in example as synthetic and clears that mark when the response is edited', async () => {
     const user = userEvent.setup()
     const calls: Calls = { example: 0, previews: 0, publishes: 0 }
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={adapter(calls)} />)
 
     await user.click(await openPanel())
@@ -229,7 +229,7 @@ describe('offline history import', () => {
   it('publishes only the exact bytes and declarations a preview verified', async () => {
     const user = userEvent.setup()
     const calls: Calls = { example: 0, previews: 0, publishes: 0 }
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={adapter(calls)} />)
 
     await user.click(await openPanel())
@@ -306,7 +306,7 @@ describe('offline history import', () => {
         })
       },
     })
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={refused} />)
 
     await user.click(await openPanel())
@@ -333,7 +333,7 @@ describe('offline history import', () => {
         })
       },
     })
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={delayed} />)
 
     await user.click(await openPanel())

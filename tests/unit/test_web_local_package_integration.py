@@ -611,7 +611,12 @@ def test_a_mapped_version_and_a_trusted_local_strategy_run_the_real_engine(
         assert sentinel.exists()
         report = service.report(job_id).decode("utf-8")
         assert PACKAGE_ID in report
-        assert dataset_id in report
+        # The report uses the frozen capture path, not the mutable upload name.
+        assert record.dataset_version is not None
+        assert record.dataset_version["dataset_id"] == dataset_id
+        source = json.loads(report)["source"]["data"]
+        assert source["source_file_sha256"] == record.dataset_version["capture_sha256"]
+        assert source["fingerprint"]["sha256"] == record.dataset_version["data_sha256"]
     finally:
         service.stop()
 

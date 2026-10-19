@@ -309,6 +309,7 @@ class UserStrategyBindRequest(BaseModel):
     operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
     base_revision: int = Field(ge=1, le=1000000)
     scenario_id: str = Field(min_length=1, max_length=200)
+    dataset_id: str | None = Field(default=None, min_length=1, max_length=128)
     # The user's own criterion in the report's registered vocabulary, or none.
     criterion: dict[str, Any] | None = None
 
@@ -336,12 +337,17 @@ class UserStrategySaveDraftRequest(BaseModel):
     values: dict[str, str | int] = Field(min_length=1, max_length=64)
 
 
-class UserStrategyMessageRequest(BaseModel):
+class UserStrategyModelProfileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    profile_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class UserStrategyMessageFields(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     call_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
     base_revision: int = Field(ge=1, le=1000000)
     text: str = Field(min_length=1, max_length=4000)
-    approved_budget: ApprovedBudgetRequest
+    task_budget: int | None = Field(default=None, ge=1, le=100)
     # The frozen runs this turn is grounded in: one, or two ordered A then B, and
     # each one of this strategy's own created runs. Absent means an ordinary
     # conversation, which is exactly what every request made before this field
@@ -350,6 +356,16 @@ class UserStrategyMessageRequest(BaseModel):
     # run of this strategy is decided by the owner, which refuses the request whole
     # before anything is written or sent.
     evidence_job_ids: list[str] | None = Field(default=None, max_length=2)
+
+
+class UserStrategyMessageRequest(UserStrategyMessageFields):
+    approved_budget: ApprovedBudgetRequest
+
+
+class UserStrategyConversationMessageRequest(UserStrategyMessageFields):
+    # Sending an interactive message starts bounded host-managed execution.
+    # Old bodies retain their explicit grant and exact replay semantics.
+    approved_budget: ApprovedBudgetRequest | None = None
 
 
 class PaperExplanationMessageRequest(BaseModel):
@@ -401,7 +417,11 @@ class UserStrategyResumeRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
     turn_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
-    action: Literal["applied", "rejected", "confirm", "declined", "observe"]
+    action: Literal[
+        "applied", "rejected", "confirm", "declined", "observe", "budget", "cancel", "continue"
+    ]
+    grant_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    total_model_calls: int | None = Field(default=None, ge=1, le=100)
     proposal_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
     base_revision: int | None = Field(default=None, ge=1, le=1000000)
     launch_intent_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
@@ -1180,9 +1200,11 @@ def create_app(settings: WebSettings) -> Any:
             return error(409, "revocation_failed", str(caught))
 
     @app.get("/api/scenarios")
-    def list_scenarios(include_local: bool = False) -> object:
+    def list_scenarios(include_local: bool = False, include_templates: bool = False) -> object:
         try:
             scenarios = service.registry.list()
+            if include_templates:
+                scenarios.extend(service.registry.templates())
             if include_local:
                 # Only the strategy binding UI requests the trusted virtual slot.
                 # Its directory facts are static; listing must not run Python.
@@ -1583,6 +1605,10 @@ def create_app(settings: WebSettings) -> Any:
             body = json.loads(raw)
             if not isinstance(body, dict):
                 raise ValueError("设置格式无效。")
+            if "next_workspace" in body:
+                if len(body) != 1:
+                    raise ValueError("请选择一个设置保存。")
+                settings.desktop_settings.validate_next_workspace(body["next_workspace"])
             if (
                 "next_workspace" in body
                 and body["next_workspace"] != str(settings.desktop_settings.root)
@@ -1783,6 +1809,17 @@ def create_app(settings: WebSettings) -> Any:
         except (UserStrategyError, OSError) as caught:
             return strategy_refusal(caught)
 
+    @app.post("/api/user-strategies/{user_strategy_id}/model-profile")
+    def select_user_strategy_model_profile(
+        user_strategy_id: str, request: UserStrategyModelProfileRequest
+    ) -> object:
+        try:
+            return user_strategy_service.select_model_profile(
+                user_strategy_id, request.profile_id
+            ).document()
+        except (UserStrategyError, OSError) as caught:
+            return strategy_refusal(caught)
+
     @app.post("/api/user-strategies/{user_strategy_id}/bind-scenario")
     def bind_user_strategy_scenario(
         user_strategy_id: str, request: UserStrategyBindRequest
@@ -1796,6 +1833,7 @@ def create_app(settings: WebSettings) -> Any:
                 base_revision=request.base_revision,
                 scenario_id=request.scenario_id,
                 criterion=request.criterion,
+                dataset_id=request.dataset_id,
             )
             return strategy.document()
         except (UserStrategyError, OSError) as caught:
@@ -1856,6 +1894,7 @@ def create_app(settings: WebSettings) -> Any:
                 text=request.text,
                 approved_budget=request.approved_budget.model_dump(),
                 evidence_job_ids=request.evidence_job_ids,
+                task_budget=request.task_budget,
             )
             return strategy.document()
         except (UserStrategyError, OSError) as caught:
@@ -1903,7 +1942,7 @@ def create_app(settings: WebSettings) -> Any:
 
     @app.post("/api/user-strategies/{user_strategy_id}/messages/stream")
     def stream_user_strategy_message(
-        user_strategy_id: str, request: UserStrategyMessageRequest
+        user_strategy_id: str, request: UserStrategyConversationMessageRequest
     ) -> object:
         return _conversation_stream(
             user_strategy_service.conversation_turn(
@@ -1911,8 +1950,11 @@ def create_app(settings: WebSettings) -> Any:
                 call_id=request.call_id,
                 base_revision=request.base_revision,
                 text=request.text,
-                approved_budget=request.approved_budget.model_dump(),
+                approved_budget=request.approved_budget.model_dump()
+                if request.approved_budget
+                else None,
                 evidence_job_ids=request.evidence_job_ids,
+                task_budget=request.task_budget,
             )
         )
 
@@ -1929,6 +1971,8 @@ def create_app(settings: WebSettings) -> Any:
                 base_revision=request.base_revision,
                 launch_intent_id=request.launch_intent_id,
                 preview_identity=request.preview_identity,
+                grant_id=request.grant_id,
+                total_model_calls=request.total_model_calls,
             )
         )
 

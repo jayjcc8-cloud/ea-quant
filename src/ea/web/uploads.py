@@ -133,7 +133,6 @@ MAX_PROVIDER_MANIFEST_BYTES = 48 * 1024
 MAX_SWEEP_ENTRIES = 4096
 
 _DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
-_REFERENCE_PATTERN = re.compile(r"[\x20-\x7e]{0,300}\Z")
 _HOST_FILE_PATTERN = re.compile(r"[0-9a-f]{32}\.csv\Z")
 _DIRECTORY_NAMES = ("staging", "raw", "captures", "versions")
 _TIME_SEMANTICS = {
@@ -257,10 +256,14 @@ def _strict_failure(error: HistoricalMarketDataError) -> UploadError:
 def _bounded_reference(value: object, *, field: str) -> str | None:
     if value is None:
         return None
-    if type(value) is not str or _REFERENCE_PATTERN.fullmatch(value) is None:
+    if (
+        type(value) is not str
+        or (value != "" and not value.isprintable())
+        or len(value.encode("utf-8")) > MAX_REFERENCE_BYTES
+    ):
         raise UploadError(
             "upload_metadata",
-            f"{field} must be at most {MAX_REFERENCE_BYTES} printable characters",
+            f"{field} must be printable text of at most {MAX_REFERENCE_BYTES} UTF-8 bytes",
         )
     return value
 

@@ -5,7 +5,7 @@ import type { ObservationReading, PaperObservation } from './paper-observation'
  * observation rendered as given; this component reads no clock, holds no state and
  * decides nothing about readiness, permission or freshness.
  */
-export function PaperRuntimeStatus({ observation }: { observation: PaperObservation }) {
+export function PaperRuntimeStatus({ observation, compact = false }: { observation: PaperObservation; compact?: boolean }) {
   const reading = (title: string, value: ObservationReading) => (
     <div>
       <span className="paper-runtime-label">{title}</span>
@@ -15,8 +15,7 @@ export function PaperRuntimeStatus({ observation }: { observation: PaperObservat
       </span>
     </div>
   )
-  return <section className="paper-runtime-status" aria-label="运行观测" data-scope={observation.kind}>
-    <p className="paper-runtime-context">{observation.context}</p>
+  const detail = <>
     <div className="paper-runtime-readings">
       <div>
         <span className="paper-runtime-label">运行状态</span>
@@ -46,5 +45,9 @@ export function PaperRuntimeStatus({ observation }: { observation: PaperObservat
         <dl>{observation.diagnostics.map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>
       </details>
     </div>
+  </>
+  return <section className={`paper-runtime-status${compact ? " paper-runtime-compact" : ""}`} aria-label="运行观测" data-scope={observation.kind}>
+    <p className="paper-runtime-context">{compact && <strong>{observation.stateLabel} · </strong>}{observation.context}</p>
+    {compact ? <details className="paper-runtime-expanded"><summary>进程、许可与观测详情</summary>{detail}</details> : detail}
   </section>
 }

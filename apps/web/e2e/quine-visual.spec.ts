@@ -167,35 +167,34 @@ test('the empty workspace keeps the AI column visible and creates inline', async
   await page.goto('/strategies')
 
   await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
-  await expect(page.getByText('0 个策略')).toBeVisible()
+  await expect(page.getByText('0 项研究')).toBeVisible()
   await expect(page.getByText('还没有策略。')).toBeVisible()
   // The create flow is directly completable, and the AI column is on screen before
   // anything exists to talk about. The form asks for the idea alone: a scenario
   // belongs to the one explicit binding on the strategy itself.
-  await expect(page.getByRole('region', { name: '新建策略' })).toBeVisible()
+  await page.getByRole('button', { name: '新建研究', exact: true }).click()
+  await expect(page.getByRole('region', { name: '新建研究' })).toBeVisible()
   await expect(page.getByLabel('策略名称')).toBeVisible()
   await expect(page.getByLabel('意图')).toBeVisible()
-  await expect(page.getByRole('region', { name: '新建策略' }).getByLabel('场景')).toHaveCount(0)
+  await expect(page.getByRole('region', { name: '新建研究' }).getByLabel('场景')).toHaveCount(0)
   const ai = page.getByRole('region', { name: 'AI 协作' })
   await expect(ai).toBeVisible()
-  await expect(ai.getByText(/先创建或选择一条策略/)).toBeVisible()
-  // The shell's own navigation, and the legacy pages behind the collection's
-  // history disclosure: neither is offered as a fourth main entry.
+  await expect(ai.getByText(/选择或新建研究，继续它自己的对话/)).toBeVisible()
+  // The shell and the single history entry match the desktop workspace routes.
   const nav = page.getByRole('navigation', { name: '主导航' })
   await expect(nav.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/strategies')
-  await expect(nav.getByRole('link', { name: '运行' })).toHaveAttribute('href', '/runs')
-  await expect(nav.getByRole('link', { name: '数据' })).toHaveAttribute('href', '/data')
-  const history = page.locator('details.provenance')
-    .filter({ has: page.locator('summary', { hasText: '历史记录' }) }).first()
-  await expect(history).not.toHaveAttribute('open', '')
-  await history.locator('summary').first().click()
-  await expect(history.getByRole('link', { name: '旧研究任务' })).toHaveAttribute('href', '/research')
-  await expect(history.getByRole('link', { name: '独立回测' })).toHaveAttribute('href', '/backtests')
+  await expect(nav.getByRole('link', { name: '模拟运行' })).toHaveAttribute('href', '/runs')
+  await expect(page.getByRole('complementary', { name: '工作区侧栏' }).getByRole('link', { name: '资源' })).toHaveAttribute('href', '/resources/data')
+  await expect(nav.getByRole('link', { name: '回测记录' })).toHaveAttribute('href', '/backtests')
+  await expect(page.getByRole('link', { name: '历史记录' })).toHaveAttribute('href', '/backtests#history-records')
+  await expect(page.getByRole('link', { name: '历史记录' })).toHaveCount(1)
   await page.screenshot({ path: testInfo.outputPath('quine-empty-1400.png'), fullPage: true })
 
   await page.setViewportSize({ width: 420, height: 900 })
+  await expect(page.getByRole('region', { name: '新建研究' })).toBeVisible()
+  await page.getByRole('group', { name: '工作区视图' }).getByRole('button', { name: 'AI 协作', exact: true }).click()
   await expect(ai).toBeVisible()
-  await expect(page.getByRole('region', { name: '新建策略' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '新建研究' })).toBeHidden()
   expect(await horizontalOverflow(page), 'the empty workspace must not scroll sideways').toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('quine-empty-420.png'), fullPage: true })
 })
@@ -213,11 +212,12 @@ test('the collection shows every strategy\'s frozen evidence, and the selected s
   const firstRow = table.locator('tr').filter({ hasText: '点差假设收紧' })
   await expect(firstRow.getByText('v4 草稿')).toBeVisible()
   await expect(firstRow.getByText('冻结 v3')).toBeVisible()
-  await expect(firstRow.getByText('bounded-long-v1 · XNAS:AAPL')).toBeVisible()
+  await expect(firstRow.getByText('XNAS:AAPL', { exact: true })).toBeVisible()
   await expect(firstRow.getByRole('link', { name: '运行中' }))
     .toHaveAttribute('href', '/strategies/fixture-us-1?tab=experiments&evidence_a=fixture-job-1')
   const secondRow = table.locator('tr').filter({ hasText: '黄金突破观察' })
-  await expect(secondRow.getByText('待实验')).toBeVisible()
+  await expect(secondRow.getByText('v1 草稿')).toBeVisible()
+  await expect(secondRow.getByText(/冻结/)).toHaveCount(0)
   await expect(secondRow.getByText('未启动')).toBeVisible()
 
   // The selected strategy opens by its exact identity: the collection table gives
@@ -261,7 +261,8 @@ test('the collection shows every strategy\'s frozen evidence, and the selected s
   await expect(review.getByText('更小的仓位让这段样本的成本更可读。')).toBeVisible()
   await expect(review.getByText('待处理')).toBeVisible()
   await expect(review.getByRole('button', { name: '应用所选' })).toBeVisible()
-  await expect(review.getByRole('button', { name: '撤销最近一次修改' })).toBeVisible()
+  // This open proposal has not been applied; another proposal's undo must not act here.
+  await expect(review.getByRole('button', { name: '撤销最近一次修改' })).toHaveCount(0)
   const proposalOrigin = review.locator('details.provenance')
     .filter({ has: page.locator('summary', { hasText: '来源与标识' }) }).first()
   await expect(proposalOrigin).not.toHaveAttribute('open', '')
@@ -282,7 +283,7 @@ test('the collection shows every strategy\'s frozen evidence, and the selected s
   // Switching the open strategy switches every panel with it: the collection's own
   // breadcrumb leads back to the table, and the other strategy's draft, evidence
   // and conversation are the ones on screen after that.
-  await page.getByRole('link', { name: '所有研究' }).click()
+  await page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '研究', exact: true }).click()
   await expect(page).toHaveURL(/\/strategies$/)
   await table.getByRole('link', { name: '黄金突破观察' }).click()
   await expect(page).toHaveURL(/\/strategies\/fixture-us-2$/)
@@ -299,10 +300,10 @@ test('the collection shows every strategy\'s frozen evidence, and the selected s
   await expect(page.getByRole('tab', { name: '策略' })).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
 
-  // The telephone layout: stacked rows, readable sections, the AI column still
-  // present, and no sideways document scroll.
+  // The narrow layout exposes each panel through the workspace switch, without overflow.
   await page.setViewportSize({ width: 420, height: 900 })
   await expect(page.getByRole('heading', { name: '黄金突破观察' })).toBeVisible()
+  await page.getByRole('group', { name: '工作区视图' }).getByRole('button', { name: 'AI 协作', exact: true }).click()
   await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   expect(await horizontalOverflow(page), 'the workspace must not scroll sideways at 420px').toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('quine-detail-420.png'), fullPage: true })

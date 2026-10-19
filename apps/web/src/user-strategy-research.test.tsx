@@ -9,9 +9,10 @@
  * the selected ids and starts nothing. No test here starts a run, applies a change
  * on its own, or lets a missing value pass as a zero.
  */
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, renderHook, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
+import { useRunRead } from './user-strategy-research'
 import { App, type ApiAdapter, type BacktestJob, type BacktestReport, type ScenarioSummary } from './app'
 import {
   type UserStrategy,
@@ -262,6 +263,7 @@ function scripted(script: Script = {}) {
     getHoldout: async () => { throw new Error('unused') },
     listHoldouts: async () => [],
     listScenarios: async () => [scenario],
+    listDatasets: async () => [],
     settingsStatus: async () => ({ schema: 'radian.settings-status.v1', configured: true, settings_file: '/fixture/settings.json', provider: 'fixture', model: 'fixture', base_url: null, api_key_env: null }),
     validateScenario: async () => { throw new Error('unused') },
     createBacktest: async () => { throw new Error('unused') },
@@ -574,8 +576,7 @@ describe('user strategy evidence comparison', () => {
     // one: the approval given for the old revision is not an approval for this one.
     const chat = within(await screen.findByRole('region', { name: 'AI 协作' }))
     await user.type(chat.getByLabelText('消息'), '随便问一句')
-    await user.click(chat.getByLabelText('批准一次模型调用'))
-    await user.click(chat.getByRole('button', { name: '询问模型' }))
+    await user.click(chat.getByRole('button', { name: '发送消息' }))
 
     await waitFor(() => expect(disabled(within(screen.getByRole('region', { name: '证据对比' }))
       .getByRole('button', { name: '解释所选证据' }))).toBe(true))
@@ -624,8 +625,7 @@ describe('user strategy evidence comparison', () => {
     // it: the approval given for the old revision is not an approval for this one.
     const chat = within(await screen.findByRole('region', { name: 'AI 协作' }))
     await user.type(chat.getByLabelText('消息'), '把草稿推进一个修订')
-    await user.click(chat.getByLabelText('批准一次模型调用'))
-    await user.click(chat.getByRole('button', { name: '询问模型' }))
+    await user.click(chat.getByRole('button', { name: '发送消息' }))
     await screen.findByText('草稿已推进到修订 3')
     expect((region.getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
 
@@ -995,7 +995,7 @@ describe('research workspace batch 1', () => {
     expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['策略', '实验', '比较'])
     expect(await screen.findByRole('heading', { name: '运行 A · 正式报告' })).toBeTruthy()
     expect(screen.getByRole('region', { name: 'AI 协作' })).toBeTruthy()
-    expect(within(screen.getByRole('navigation', { name: '主导航' })).getAllByRole('link').map(a => a.textContent)).toEqual(['研究', '运行', '数据'])
+    expect(within(screen.getByRole('navigation', { name: '主导航' })).getAllByRole('link').map(a => a.textContent)).toEqual(['研究', '模拟运行', '实盘运行', '回测记录'])
     await user.click(screen.getByRole('tab', { name: '比较' }))
     expect(new URLSearchParams(window.location.search).get('tab')).toBe('compare')
     cleanup()
@@ -1011,15 +1011,35 @@ describe('research workspace batch 1', () => {
     await screen.findByLabelText('消息')
     const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
     await user.type(chat.getByLabelText('消息'), '比较这两次实验的成本')
-    await user.click(chat.getByLabelText('批准一次模型调用'))
-    await waitFor(() => expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(false))
-    await user.dblClick(chat.getByRole('button', { name: '询问模型' }))
+    await waitFor(() => expect(disabled(chat.getByRole('button', { name: '发送消息' }))).toBe(false))
+    await user.dblClick(chat.getByRole('button', { name: '发送消息' }))
     expect(calls.ask).toBe(1)
     expect(sent[0].evidenceJobIds).toEqual(['job-1', 'job-2'])
     expect(sent[0].approvedBudget).toEqual({ max_model_calls: 1, max_backtests: 0 })
   })
 })
 
+
+describe('research composer context commands', () => {
+  it('selects the current draft without silently using the latest frozen run', async () => {
+    const user = userEvent.setup()
+    const { api, sent, calls } = scripted({ ask: async () => strategy() })
+    detailAt(api, '?evidence_a=job-1&evidence_b=job-2')
+    const input = await screen.findByLabelText('消息')
+    await user.type(input, '/context ')
+    await user.click(screen.getByRole('option', { name: '当前草稿 v2' }))
+    expect(new URLSearchParams(window.location.search).get('context')).toBe('draft')
+    expect(window.location.search).not.toContain('evidence_')
+    expect(screen.getByText(/当前选择的是草稿，未选择实验报告/)).toBeTruthy()
+    expect(calls.ask).toBe(0)
+    await user.type(input, '只核查当前草稿')
+    await user.keyboard('{Enter}')
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0].evidenceJobIds).toBeUndefined()
+    expect(calls.launch).toBe(0)
+    expect(calls.apply).toBe(0)
+  })
+})
 
 describe('research composer visit ownership', () => {
   it('drops an old completion after leaving and returning to the same selected pair', async () => {
@@ -1031,18 +1051,17 @@ describe('research composer visit ownership', () => {
     await screen.findByLabelText('消息')
     const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
     await user.type(chat.getByLabelText('消息'), 'Explain this pair')
-    await user.click(chat.getByLabelText('批准一次模型调用'))
-    await waitFor(() => expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(false))
+    await waitFor(() => expect(disabled(chat.getByRole('button', { name: '发送消息' }))).toBe(false))
     const originalState = window.history.state
-    await user.click(chat.getByRole('button', { name: '询问模型' }))
+    await user.click(chat.getByRole('button', { name: '发送消息' }))
     expect(calls.ask).toBe(1)
     const originalUrl = window.location.href
     act(() => {
       window.history.pushState({ ...originalState, key: 'different-pair' }, '', '/strategies/us-1?tab=compare&evidence_a=job-2&evidence_b=job-1')
       window.dispatchEvent(new PopStateEvent('popstate'))
     })
-    expect((chat.getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
-    expect(chat.getByLabelText('AI 当前上下文').textContent).toContain('A：修订 2 / B：修订 1')
+    expect(chat.queryByLabelText('批准一次模型调用')).toBeNull()
+    expect(chat.getByLabelText('AI 当前上下文').textContent).toContain('证据 A · v2证据 B · v1')
     act(() => {
       window.history.pushState(originalState, '', originalUrl)
       window.dispatchEvent(new PopStateEvent('popstate'))
@@ -1051,8 +1070,8 @@ describe('research composer visit ownership', () => {
     expect(screen.queryByRole('heading', { name: 'Obsolete completion' })).toBeNull()
     expect(screen.getByRole('heading', { name: 'Bold entry' })).toBeTruthy()
     expect((chat.getByLabelText('消息') as HTMLTextAreaElement).value).toBe('Explain this pair')
-    expect((chat.getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
-    expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(true)
+    expect(chat.queryByLabelText('批准一次模型调用')).toBeNull()
+    expect(disabled(chat.getByRole('button', { name: '发送消息' }))).toBe(false)
     expect(sent[0].evidenceJobIds).toEqual(['job-1', 'job-2'])
     expect(calls.ask).toBe(1)
   })
@@ -1067,9 +1086,8 @@ describe('research composer visit ownership', () => {
     await screen.findByLabelText('消息')
     const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
     await user.type(chat.getByLabelText('消息'), 'Explain this report')
-    await user.click(chat.getByLabelText('批准一次模型调用'))
-    expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(true)
-    expect(chat.getByText('所选证据尚未就绪，请检查实验或比较标签。')).toBeTruthy()
+    expect(disabled(chat.getByRole('button', { name: '发送消息' }))).toBe(true)
+    expect(chat.getByText(/所选证据尚未就绪/)).toBeTruthy()
     expect(calls.ask).toBe(0)
   })
 
@@ -1081,8 +1099,8 @@ describe('research composer visit ownership', () => {
     const chat = within(screen.getByRole('region', { name: 'AI 协作' }))
     await user.click(chat.getByRole('button', { name: '解读所选实验' }))
     expect((chat.getByLabelText('消息') as HTMLTextAreaElement).value).toContain('当前所选实验')
-    expect((chat.getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
-    expect(disabled(chat.getByRole('button', { name: '询问模型' }))).toBe(true)
+    expect(chat.queryByLabelText('批准一次模型调用')).toBeNull()
+    expect(disabled(chat.getByRole('button', { name: '发送消息' }))).toBe(false)
     expect(calls.ask).toBe(0)
   })
 })
@@ -1098,8 +1116,74 @@ it('does not show trade analytics belonging to another report in the inline repo
   })
   detail(api)
   await screen.findByRole('heading', { name: '运行 A · 正式报告' })
-  await user.click(await screen.findByText('成交与完整报告'))
+  await user.click(await screen.findByRole('button', { name: '完整交易' }))
   const analytics = within(screen.getByRole('region', { name: 'Trade analytics' }))
   expect(analytics.getByText('Complete-trade analytics unavailable for this report.')).toBeTruthy()
   expect(analytics.queryByText('999 USD')).toBeNull()
 })
+
+
+it('discards a late evidence read after a scoped refresh and after changing the selected job', async () => {
+  const pending: { id: string; resolve: (value: BacktestJob) => void }[] = []
+  const api = {
+    getBacktest: (id: string) => new Promise<BacktestJob>(resolve => { pending.push({ id, resolve }) }),
+    getReport: async (id: string) => REPORTS[id],
+  } as ApiAdapter
+  const { result, rerender } = renderHook(({ id, token }) => useRunRead(api, id, token), {
+    initialProps: { id: EARLIER_JOB, token: '' },
+  })
+  expect(pending).toHaveLength(1)
+  rerender({ id: EARLIER_JOB, token: 'completed-turn-1' })
+  expect(pending).toHaveLength(2)
+  await act(async () => { pending[1].resolve(job(EARLIER_JOB)) })
+  expect(result.current?.kind).toBe('ready')
+  await act(async () => { pending[0].resolve(job(EARLIER_JOB, { status: 'running', report_ready: false })) })
+  expect(result.current?.kind).toBe('ready')
+  rerender({ id: EARLIER_JOB, token: 'completed-turn-2' })
+  expect(result.current?.kind).toBe('loading')
+  rerender({ id: LATEST_JOB, token: '' })
+  await act(async () => { pending[2].resolve(job(EARLIER_JOB)) })
+  expect(result.current?.kind).toBe('loading')
+  await act(async () => { pending[3].resolve(job(LATEST_JOB)) })
+  expect(result.current).toMatchObject({ kind: 'ready', job: { job_id: LATEST_JOB } })
+})
+
+
+it('rereads the same completed job in AI when following its evidence link', async () => {
+  const user = userEvent.setup()
+  let terminal = false
+  const { api, calls } = scripted({ backtest: async id => job(id, terminal ? {} : { status: 'running', report_ready: false }) })
+  detail(api)
+  const field = await screen.findByLabelText('消息')
+  const panel = field.closest('section') as HTMLElement
+  await within(panel).findByText(/所选证据尚未就绪/)
+  terminal = true
+  await user.click(within(panel).getByRole('link', { name: '证据 A · v2' }))
+  await waitFor(() => expect(within(panel).queryByText(/所选证据尚未就绪/)).toBeNull())
+  expect(screen.getByRole('heading', { name: '运行 A · 正式报告' })).toBeTruthy()
+  await user.click(screen.getByRole('tab', { name: '策略' }))
+  const strip = screen.getByRole('region', { name: '下一步' })
+  expect(await within(strip).findByRole('link', { name: '成功 · 报告可读' })).toBeTruthy()
+  expect(strip.textContent).toContain('v2')
+  expect(calls.ask).toBe(0)
+  expect(calls.launch).toBe(0)
+})
+
+it('refreshes a manual running experiment and AI evidence without navigation', async () => {
+  const user = userEvent.setup()
+  let terminal = false
+  const { api, calls } = scripted({backtest:async id=>job(id,terminal?{}:{status:'running',report_ready:false})})
+  detail(api)
+  const field = await screen.findByLabelText('消息')
+  const panel = field.closest('section') as HTMLElement
+  await within(panel).findByText(/所选证据尚未就绪/)
+  await user.click(screen.getByRole('tab', { name: '策略' }))
+  const strip = screen.getByRole('region',{name:'下一步'})
+  await within(strip).findByRole('link',{name:'运行中'})
+  terminal = true
+  await waitFor(()=>expect(within(panel).queryByText(/所选证据尚未就绪/)).toBeNull(),{timeout:6000})
+  expect(await within(strip).findByRole('link',{name:'成功 · 报告可读'})).toBeTruthy()
+  expect(within(panel).getByRole('link', { name: '证据 A · v2' }).getAttribute('href')).toContain(`evidence_a=${LATEST_JOB}`)
+  expect(calls.ask).toBe(0)
+  expect(calls.launch).toBe(0)
+},8000)

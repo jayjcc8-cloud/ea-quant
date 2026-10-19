@@ -1,5 +1,11 @@
 # Production Runtime Profile V1 (PPV-02)
 
+Historical compatibility documentation. This Linux/server profile, `build_distribution.py`,
+`production_runtime.py` and `deploy/*` are outside new QUINE product releases under
+[ADR 0050](adr/0050-desktop-only-product-delivery.md). The procedures below are retained for
+existing authorized installations and internal compatibility checks; they are not QUINE startup
+instructions. No existing service is uninstalled, and Mac Paper tools/drills remain available.
+
 This profile runs the existing **offline research Web service**, not a trading daemon. Linux
 with systemd is the canonical single-server target. It adds no feed, broker, Paper/Live,
 readiness, monitoring, backups or runtime recovery semantics. Deployment to a real server

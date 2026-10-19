@@ -109,17 +109,45 @@ function contrast(page: Page, selector: string): Promise<number | null> {
   }, selector)
 }
 
+/** Narrow workspaces expose the mounted AI panel through an explicit view switch. */
+async function showAi(page: Page) {
+  const views = page.getByRole('group', { name: '工作区视图' })
+  if (await views.isVisible()) await views.getByRole('button', { name: 'AI 协作', exact: true }).click()
+}
+
+async function narrowPanels(page: Page) {
+  const views = page.getByRole('group', { name: '工作区视图' })
+  await views.getByRole('button', { name: '主内容', exact: true }).click()
+  const work = await page.locator('.strategy-column').boundingBox()
+  expect(work).not.toBeNull()
+  await showAi(page)
+  await expect(page.locator('.strategy-column')).toBeHidden()
+  const ai = await aiColumn(page)
+  expect(Math.abs(ai.x - work!.x)).toBeLessThanOrEqual(2)
+  expect(Math.abs(ai.width - work!.width)).toBeLessThanOrEqual(2)
+  return ai
+}
+
+/** Desktop AI defaults to 32% with a 320px minimum; the accessible separator states it. */
+async function defaultAiWidth(page: Page, actual: number) {
+  const workspace = await page.locator('.strategy-workspace').boundingBox()
+  expect(workspace).not.toBeNull()
+  await expect(page.getByRole('separator', { name: '调整 AI 面板宽度' })).toHaveAttribute('aria-valuenow', '32')
+  expect(Math.abs(actual - Math.max(320, workspace!.width * .32))).toBeLessThanOrEqual(1)
+}
+
 /** The AI column of the strategy workspace, as it is actually laid out. */
 async function aiColumn(page: Page) {
+  await showAi(page)
   const region = page.getByRole('region', { name: 'AI 协作' })
   await expect(region).toBeVisible()
   const box = await region.boundingBox()
   return box ?? { x: 0, width: 0, height: 0, y: 0 }
 }
 
-/** The panel's own padding, which is what compact density changes at desktop widths. */
+/** Measure the settings fields; their enclosing section remains flush in both densities. */
 const panelPaddingTop = (page: Page) =>
-  page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.appearance-settings')!).paddingTop))
+  page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.appearance-settings .appearance-field')!).paddingTop))
 
 const targetHeight = async (page: Page, selector: string) => {
   const box = await page.locator(selector).boundingBox()
@@ -141,10 +169,8 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
   const settings = panel(page)
   await expect(settings).toBeVisible()
 
-  // The model configuration section this page already carried is untouched: the
-  // status panel is still its own region with its own heading.
-  const model = page.getByRole('region', { name: '模型提供方配置' })
-  await expect(model.getByRole('heading', { name: '模型提供方' })).toBeVisible()
+  // Model configuration is a shared resource reached from settings.
+  await expect(page.getByRole('link', { name: '管理模型连接' })).toHaveAttribute('href', '/resources/models')
 
   // The panel opens on what is in force: the defaults, before anything is chosen.
   await expect(page.getByRole('radio', { name: '跟随系统' })).toBeChecked()
@@ -207,19 +233,22 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
       .getByRole('link', { name: selected.name, exact: true }).click()
     await expect(page).toHaveURL(new RegExp(`/strategies/${selected.user_strategy_id}$`))
     await expect(page.getByRole('heading', { name: selected.name, exact: true })).toBeVisible()
-    await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
+    await showAi(page)
+  await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
     const inside = await contrast(page, '.strategy-panel p')
     if (inside !== null) ratios['.strategy-panel p'] = inside
   } else {
     // Stated, not synthesized: no real strategy exists here, so the empty workspace
     // is what is accepted, and no fixture stands in for one.
     await expect(page.getByText('还没有策略。')).toBeVisible()
-    await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
+    await showAi(page)
+  await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   }
   expect(await overflow(page)).toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('appearance-workspace-dark-1400.png'), fullPage: true })
 
   await page.setViewportSize({ width: 420, height: 900 })
+  await showAi(page)
   await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   expect(await overflow(page), 'the workspace must not scroll sideways at 420px').toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('appearance-workspace-dark-420.png'), fullPage: true })
@@ -323,7 +352,7 @@ test('the system theme follows the OS live, and an explicit theme stops followin
   // The other OS preference this page reads is motion. It reads it — the appearance
   // controls still work with motion switched off — and it changes nothing itself.
   const navTransition = () =>
-    page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.sidebar nav a')!).transitionDuration))
+    page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.settings-layout > nav a')!).transitionDuration))
   await page.emulateMedia({ reducedMotion: 'no-preference' })
   expect(await navTransition(), 'the shell has one transition to switch off').toBeGreaterThan(0.01)
   await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -342,8 +371,7 @@ test('the AI column remains visible and responsive while obsolete width settings
   await page.setViewportSize({ width: 1400, height: 1000 })
   await page.goto('/strategies')
   const original = await aiColumn(page)
-  expect(original.width).toBeGreaterThanOrEqual(320)
-  expect(original.width).toBeLessThanOrEqual(384)
+  await defaultAiWidth(page, original.width)
   const strategy = await page.locator('.strategy-column').boundingBox()
   expect(original.x).toBeGreaterThan((strategy?.x ?? 0) + (strategy?.width ?? 0))
 
@@ -376,12 +404,10 @@ test('the AI column remains visible and responsive while obsolete width settings
     const ai = await aiColumn(page)
     const column = await page.locator('.strategy-column').boundingBox()
     if (width >= 1400) {
-      expect(ai.width).toBeGreaterThanOrEqual(320)
-      expect(ai.width).toBeLessThanOrEqual(384)
+      await defaultAiWidth(page, ai.width)
       expect(ai.x).toBeGreaterThan((column?.x ?? 0) + (column?.width ?? 0))
     } else {
-      expect(Math.abs(ai.x - (column?.x ?? 0))).toBeLessThanOrEqual(2)
-      expect(ai.y).toBeGreaterThanOrEqual((column?.y ?? 0) + (column?.height ?? 0))
+      await narrowPanels(page)
     }
     expect(await overflow(page)).toBeLessThanOrEqual(1)
     await page.screenshot({ path: testInfo.outputPath(`appearance-responsive-${width}.png`), fullPage: true })
@@ -389,7 +415,7 @@ test('the AI column remains visible and responsive while obsolete width settings
   expect(api.writes()).toEqual([])
 })
 
-test('compact density tightens the desktop layout only, and the narrow view keeps one column and its targets', async ({ page }, testInfo) => {
+test('compact density tightens the desktop layout only, and the narrow view switches panels and retains its targets', async ({ page }, testInfo) => {
   const api = await guardApi(page)
   await page.emulateMedia({ colorScheme: 'light' })
   await page.setViewportSize({ width: 1400, height: 1000 })
@@ -398,6 +424,7 @@ test('compact density tightens the desktop layout only, and the narrow view keep
   // At a desktop width, compact really is tighter: the same panel is less padded.
   await page.getByRole('radio', { name: '紧凑' }).click()
   const compactDesktop = await panelPaddingTop(page)
+  expect(await panel(page).evaluate(node => getComputedStyle(node).paddingTop)).toBe('0px')
   await page.getByRole('radio', { name: '标准' }).click()
   const normalDesktop = await panelPaddingTop(page)
   expect(compactDesktop, 'compact must be measurably tighter than normal at a desktop width')
@@ -406,6 +433,7 @@ test('compact density tightens the desktop layout only, and the narrow view keep
 
   // The workspace keeps its own layout, still two columns, still inside the viewport.
   await page.goto('/strategies')
+  await showAi(page)
   await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   const wide = await aiColumn(page)
   const wideColumn = await page.locator('.strategy-column').boundingBox()
@@ -416,10 +444,9 @@ test('compact density tightens the desktop layout only, and the narrow view keep
   // The phone layout: one column, the AI panel still on screen, nothing scrolling
   // sideways, and every appearance control still at least 44px tall.
   await page.setViewportSize({ width: 420, height: 900 })
+  await showAi(page)
   await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
-  const narrow = await aiColumn(page)
-  const narrowColumn = await page.locator('.strategy-column').boundingBox()
-  expect(Math.abs(narrow.x - (narrowColumn?.x ?? 0)), 'the narrow view is one column').toBeLessThanOrEqual(2)
+  await narrowPanels(page)
   expect(await overflow(page), 'the workspace must not scroll sideways at 420px').toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('appearance-compact-420.png'), fullPage: true })
 
