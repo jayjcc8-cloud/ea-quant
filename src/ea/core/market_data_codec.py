@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import struct
-from datetime import datetime
+from datetime import UTC, datetime
 
 from ea.core.market_data import MarketDataEnvelope
 from ea.core.run import RunContractError
 
 
 def _utc_text(value: datetime) -> str:
+    if type(value) is datetime and value.tzinfo is UTC and value.year >= 1000:
+        return value.replace(tzinfo=None).isoformat(timespec="microseconds") + "Z"
     return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 

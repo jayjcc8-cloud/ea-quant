@@ -173,6 +173,8 @@ def _utc_text(value: object) -> str:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "canonical time must be UTC")
     if offset.total_seconds() != 0:
         raise _fail(OutcomeCode.OUT_OF_RANGE, "canonical time must be UTC")
+    if type(value) is datetime and value.tzinfo is UTC and value.year >= 1000:
+        return value.replace(tzinfo=None).isoformat(timespec="microseconds") + "Z"
     return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
