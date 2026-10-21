@@ -26,8 +26,9 @@ and reuse acceptance evidence. No new feature, framework integration or release 
   native exit and window/text-scaling fixes. Unknown requests are not blindly resent.
 - **Technical acceptance:** one clean source and installed package were identified together.
   Exact-source PR CI, unchanged local Full, installed lifecycle checks and scoped native
-  input/window/report/quit/reopen checks passed. Hosted Full and final integration CI have their
-  authoritative results in [PR #261](https://github.com/jayjcc8-cloud/ea-quant/pull/261).
+  input/window/report/quit/reopen checks passed. Hosted Full and integration CI are tracked
+  separately in [PR #261](https://github.com/jayjcc8-cloud/ea-quant/pull/261); only completed,
+  successful runs establish a pass and satisfy the merge gate.
 - **Local simulated Paper:** M1 recovery, M2 risk guards and M3 health/backup/alerts are delivered.
   M4 fault-campaign and gate-preparation tooling exist; see [Paper operations](local-paper-runtime.md).
 - **Cleanup:** #259/#260 were closed after containment was verified. Redundant branches and old
@@ -84,8 +85,8 @@ Checked **2026-10-21 (Asia/Shanghai)**. The frozen technical source is
 `37bfc0f2ecb1507f1121f0292b108e01608aa22f`; its installed package was built clean from that commit.
 [Candidate PR CI](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/39588177248) passed.
 [Hosted Full](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/39608960827) checks that exact
-source from trusted main. Package identity, native scope, final integration commit and CI results
-are recorded in [#261](https://github.com/jayjcc8-cloud/ea-quant/pull/261).
+source from trusted main. Package identity, native scope and CI history are maintained in
+[#261](https://github.com/jayjcc8-cloud/ea-quant/pull/261).
 Documentation and ignore-rule reconciliation do not change the frozen production source.
 For merged behavior, the containing `main` commit and its CI are the durable checkpoint.
 A later commit does not silently change the tested application's identity.
@@ -93,7 +94,7 @@ A later commit does not silently change the tested application's identity.
 ## Phase Completion Conditions
 
 - [x] Technical source, installed artifact and completed scoped acceptance are identified together.
-- [x] CI, Full and bounded review have one linked evidence entry in the product PR.
+- [x] Technical evidence has one linked entry; any outstanding required CI remains a merge gate.
 - [x] Obsolete development branches/checkouts are retired with unique history preserved.
 - [ ] Remaining independent-user/native journeys are performed or explicitly excluded from a release claim.
 - [ ] Public version, signing, notarization and publication receive explicit authorization.
