@@ -13,10 +13,22 @@ pub struct Envelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Request {
-    Confirm { params: ConfirmParams },
-    Cancel { params: CancelParams },
-    Query { params: QueryParams },
-    List { params: ListParams },
+    Confirm {
+        params: ConfirmParams,
+    },
+    Cancel {
+        params: CancelParams,
+    },
+    Query {
+        params: QueryParams,
+    },
+    List {
+        params: ListParams,
+    },
+    /// Close dispatch admission and drain only work owned by this core session.
+    Quiesce {
+        params: ListParams,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,6 +8,65 @@ from ea.desktop import install_samples, prepare_root
 from ea.desktop_settings import DesktopSettings
 
 
+@pytest.mark.parametrize("first", ["lost_receipt", "pending"])
+def test_research_exit_retries_only_the_idempotent_drain(first: str) -> None:
+    import asyncio
+
+    from ea.desktop import drain_research
+    from ea.web.quine import QuineUnavailable
+
+    class Client:
+        calls: list[str] = []
+
+        def call(self, method: str, params: dict, *, timeout: float) -> dict:
+            self.calls.append(method)
+            assert params == {}
+            assert 0 < timeout <= 1
+            if len(self.calls) == 1:
+                if first == "lost_receipt":
+                    raise QuineUnavailable("receipt lost")
+                return {"drained": False, "pending": 1}
+            return {"drained": True, "pending": 0}
+
+    client = Client()
+    assert asyncio.run(drain_research(client, timeout=1))
+    assert client.calls == ["quiesce", "quiesce"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {},
+        {"drained": True, "pending": 1},
+        {"drained": 1, "pending": 0},
+        {"drained": True, "pending": False},
+    ],
+)
+def test_research_exit_requires_an_explicit_complete_core_receipt(reply: dict) -> None:
+    import asyncio
+
+    from ea.desktop import drain_research
+
+    class Client:
+        def call(self, method: str, params: dict, *, timeout: float) -> dict:
+            return reply
+
+    assert not asyncio.run(drain_research(Client(), timeout=0.01))
+
+
+def test_research_exit_unavailable_does_not_become_success() -> None:
+    import asyncio
+
+    from ea.desktop import drain_research
+    from ea.web.quine import QuineUnavailable
+
+    class Client:
+        def call(self, method: str, params: dict, *, timeout: float) -> dict:
+            raise QuineUnavailable("unreachable")
+
+    assert not asyncio.run(drain_research(Client(), timeout=0.01))
+
+
 def test_desktop_upgrade_preserves_user_scenes_and_settings(tmp_path: Path) -> None:
     runtime = tmp_path / "bundle"
     samples = runtime / "samples"

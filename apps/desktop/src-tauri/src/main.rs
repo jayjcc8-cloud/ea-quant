@@ -282,7 +282,7 @@ fn main() {
                                 if value["status"] == "close_blocked" {
                                     state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
                                 state.quit_confirmed.store(false, std::sync::atomic::Ordering::SeqCst);
-                                    notify_shutdown_problem(window.app_handle(), "本地模拟停止尚未确认。QUINE 保持打开，请查看运行状态后重试退出。");
+                                    notify_shutdown_problem(window.app_handle(), "研究任务或本地模拟停止尚未确认。QUINE 保持打开并继续收尾，请稍后重试退出；不会重新派发研究任务。");
                                 }
                                 if value["status"] == "ready" {
                                     if let Some(url) = value["url"]
@@ -361,7 +361,7 @@ fn main() {
                             } else {
                                 state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
                                 state.quit_confirmed.store(false, std::sync::atomic::Ordering::SeqCst);
-                                notify_shutdown_problem(&handle, "后端已退出，但本地模拟终态未获确认。请保留工作区证据，重新打开后查看原实例；不会自动续跑。");
+                                notify_shutdown_problem(&handle, "后端已退出，但研究任务或本地模拟终态未获确认。请保留工作区证据，重新打开后查看原实例；不会自动续跑。");
                             }
                             break;
                         }
@@ -371,7 +371,7 @@ fn main() {
                         if Instant::now() >= deadline {
                             state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
                             state.quit_confirmed.store(false, std::sync::atomic::Ordering::SeqCst);
-                            notify_shutdown_problem(&handle, "退出超时：本地模拟停止尚未确认。窗口保持打开，不会强制结束或另开实例。");
+                            notify_shutdown_problem(&handle, "退出超时：研究任务或本地模拟的收尾尚未确认。窗口保持打开，请稍后重试退出；不会强制结束或另开实例。");
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(50));

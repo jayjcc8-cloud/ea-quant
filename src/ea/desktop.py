@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from uvicorn import Server
 
+    from ea.web.quine import QuineClient
+
 
 def prepare_root(root: Path, runtime: Path) -> None:
     if not root.is_absolute() or root.is_symlink():
@@ -86,6 +88,34 @@ async def serve_web(
         # Close the readiness race even if the server exits before our poll runs.
         if server.started or server.should_exit:
             startup_finished.set()
+
+
+async def drain_research(client: QuineClient, *, timeout: float = 10.0) -> bool:
+    """Ask the owner to close admission and prove its own work durably settled.
+
+    Polling this lifecycle request is idempotent, including after a lost reply.
+    It never repeats a confirmation, releases historical unknown, or asserts
+    that a missing process/socket is evidence of a completed experiment.
+    """
+    from ea.web.quine import QuineError
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while (remaining := deadline - loop.time()) > 0:
+        try:
+            receipt = await asyncio.to_thread(
+                client.call, "quiesce", {}, timeout=min(1.0, remaining)
+            )
+            if (
+                receipt.get("drained") is True
+                and type(receipt.get("pending")) is int
+                and receipt["pending"] == 0
+            ):
+                return True
+        except QuineError:
+            pass  # A failed read/write/receipt is not a completed drain.
+        await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
+    return False
 
 
 async def session(root: Path, runtime: Path) -> None:
@@ -176,6 +206,7 @@ async def workspace_session(
                         if key in os.environ
                     },
                 )
+                research_drained = False
                 try:
                     for _ in range(200):
                         if core.poll() is not None:
@@ -225,23 +256,30 @@ async def workspace_session(
                         loop = asyncio.get_running_loop()
                         parent_gone = asyncio.Event()
 
-                        stopping_paper = False
+                        stopping = False
 
                         async def request_exit(parent_lost: bool) -> None:
-                            nonlocal stopping_paper
-                            if stopping_paper:
+                            nonlocal stopping, research_drained
+                            if stopping:
                                 return
-                            stopping_paper = True
+                            stopping = True
                             try:
-                                confirmed = await asyncio.to_thread(paper.shutdown)
-                                if confirmed:
+                                research_drained, paper_stopped = await asyncio.gather(
+                                    drain_research(QuineClient(ipc)),
+                                    asyncio.to_thread(paper.shutdown),
+                                )
+                                if research_drained and paper_stopped:
                                     parent_gone.set()
                                     server.should_exit = True
                                 else:
                                     emit(
                                         {
                                             "status": "close_blocked",
-                                            "code": "paper_stop_unconfirmed",
+                                            "code": (
+                                                "research_stop_unconfirmed"
+                                                if not research_drained
+                                                else "paper_stop_unconfirmed"
+                                            ),
                                         }
                                     )
                                     if parent_lost:
@@ -255,7 +293,7 @@ async def workspace_session(
                                             }
                                         )
                             finally:
-                                stopping_paper = False
+                                stopping = False
 
                         def parent_message() -> None:
                             startup_finished.set()
@@ -305,8 +343,8 @@ async def workspace_session(
                                 startup_finished.set()  # Do not recover from uncertain cleanup.
                                 raise RuntimeError("web_shutdown_timeout") from None
                 finally:
-                    # Closing core's parent pipe triggers its existing owner-loss path.
-                    # We do not synthesize cancellation or claim worker completion.
+                    # Only a completed owner-side drain turns EOF into a clean
+                    # core exit. Unexpected owner loss retains the crash path.
                     try:
                         if core.stdin is not None:
                             core.stdin.close()
@@ -320,11 +358,16 @@ async def workspace_session(
                         raise
                     emit(
                         {
-                            "status": "closed",
+                            "status": "closed"
+                            if research_drained and core.returncode == 0
+                            else "interrupted",
                             "core_exit": core.returncode,
                             "research_state": "read_from_owner_on_reopen",
                         }
                     )
+                    if research_drained and core.returncode != 0:
+                        startup_finished.set()
+                        raise RuntimeError("research_core_exit_unconfirmed")
 
 
 def main() -> int:

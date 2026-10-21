@@ -68,12 +68,16 @@ connect to, replace or stop the first session. Quit the extra window. Startup/ru
 an error page with a log location; quit and reopen after correcting the problem. There is no silent
 fallback to another service or experiment owner.
 
-Quit with Command-Q or close the last window. The desktop closes its session pipe and waits for
-its backend; backend exit closes the core's liveness pipe. Interrupted experiments retain the
-existing owner recovery/unknown semantics on reopen. Exiting is not an assertion that an active
-research job succeeded or was durably cancelled. A crash uses the same owner-loss boundary; work
-is never automatically resent. Python strategy plugins remain trusted executable local code,
-not sandboxed untrusted code.
+Quit with Command-Q or close the last window, then confirm. The research core first closes new
+dispatch admission and cancels its own unfinished work through the existing stop barrier. The
+desktop waits for whole-process-group stop proof, durable terminal readback and local Paper
+shutdown before closing the core's liveness pipe. Unconfirmed stop or persistence keeps the
+window open for an explicit retry; it never reports successful shutdown or redispatches work.
+Completed results remain completed. Existing historical unknown records remain frozen and do
+not prevent an otherwise idle session from closing; quitting does not recover or release them.
+A crash before this handshake retains the owner-loss/unknown boundary on reopen. Work is never
+automatically resent. Python strategy plugins remain trusted executable local code, not
+sandboxed untrusted code.
 
 ## Local build and acceptance
 
