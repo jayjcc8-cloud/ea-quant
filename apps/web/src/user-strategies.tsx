@@ -757,7 +757,9 @@ export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: 
     </p>}
     {!invalid && state.kind === 'empty' && <p className="muted">
       {selection.kind === 'draft' ? '当前选择的是草稿，未选择实验报告。用 /context 选择已冻结实验，或在运行记录中打开报告。'
-        : '还没有冻结运行。在「实验」里确认一次实验之后，这里会显示那次运行自己的正式报告——只有运行成功，报告才存在。'}
+        : strategy.experiments.some(item => item.owner === 'quine' && item.frozen_sha256)
+          ? '已有冻结的实验，但还没有可读取的正式报告。请查看下方运行记录；未确认的结果不会被当作成功，也不会自动重跑。'
+          : '还没有冻结运行。在「实验」里确认一次实验之后，这里会显示那次运行自己的正式报告——只有运行成功，报告才存在。'}
     </p>}
     {!invalid && state.kind === 'loading' && <p className="muted">正在读取该运行的状态与正式报告……</p>}
     {!invalid && state.kind === 'unavailable' && <p className="notice error">{state.note}</p>}
@@ -1163,9 +1165,10 @@ function NextStep({ api, strategy, openExperiments, completedReads }: {
   const visit = useLocation().key
   const latest = strategy.experiments.at(-1)
   const draft = strategy.draft
-  // A preview is still wanted while no created run covers the revision on screen.
+  // A core-owned frozen input remains frozen even without a successful result.
   const covered = strategy.experiments.some(item =>
-    item.status === 'created' && item.payload.draft_revision === draft.revision)
+    (item.status === 'created' || (item.owner === 'quine' && Boolean(item.frozen_sha256)))
+      && item.payload.draft_revision === draft.revision)
   const needsPreview = !isIntentDraft(draft) && !covered
   // A created experiment has a real job; its state is that job's own, never the
   // dispatch record's. An outcome this page has not read is not claimed here.
@@ -2554,6 +2557,13 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
         {item.status !== 'created' && <p className="notice">
           {EXPERIMENT_NOTES[item.status] ?? '这次实验没有已确认的运行。'}
           {item.message ? ` ${item.message}` : ''}
+        </p>}
+        {item.owner === 'quine' && item.status === 'unknown' && <p className="notice">
+          这条未知运行仍占用本工作区唯一的运行名额，其他研究也暂时不能启动新实验。
+          重新打开应用不会解除占用。当前版本没有自动恢复或安全释放入口；
+          请保留工作区和运行诊断，联系维护者核对，不要删除记录或修改数据库来解锁。
+          已保存的草稿和报告仍可查看。
+          {' '}<Link to="/settings?section=about">查看脱敏诊断与备份说明</Link>
         </p>}
       </li>)}
     </ul>}

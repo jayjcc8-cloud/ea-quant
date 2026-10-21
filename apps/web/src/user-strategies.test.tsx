@@ -1728,6 +1728,46 @@ describe('user strategy workspace', () => {
     expect(fallback.getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
   })
 
+  it('keeps a frozen unknown owner run visible and explains the workspace hold without redispatch', async () => {
+    const user = userEvent.setup()
+    const frozen = strategy({ experiments: [createdExperiment({
+      owner: 'quine', status: 'unknown', frozen_sha256: 'b'.repeat(64),
+      attempt_id: 'attempt-unknown', report_ready: false,
+    })] })
+    const { api, calls } = scripted({ strategies: [frozen], current: () => frozen })
+    detail(api)
+    const next = await screen.findByRole('region', { name: '下一步' })
+    expect(next.textContent).toContain('结果未知')
+    expect(next.textContent).not.toContain('本草稿尚未冻结为实验')
+    expect(within(next).queryByRole('button', { name: '去预览这个草稿' })).toBeNull()
+
+    const panel = await openSection(user, '实验')
+    const evidence = screen.getByRole('region', { name: '证据' })
+    expect(evidence.textContent).toContain('已有冻结的实验，但还没有可读取的正式报告')
+    expect(evidence.textContent).not.toContain('还没有冻结运行')
+    expect(panel.textContent).toContain('仍占用本工作区唯一的运行名额')
+    expect(panel.textContent).toContain('其他研究也暂时不能启动新实验')
+    expect(panel.textContent).toContain('重新打开应用不会解除占用')
+    expect(panel.textContent).toContain('当前版本没有自动恢复或安全释放入口')
+    expect(within(panel).getByRole('link', { name: '查看脱敏诊断与备份说明' }).getAttribute('href'))
+      .toBe('/settings?section=about')
+    expect(within(panel).queryByRole('button', { name: '停止这次运行' })).toBeNull()
+    expect(calls.launch).toBe(0)
+    expect(calls.preview).toBe(0)
+    expect(calls.ask).toBe(0)
+  })
+
+  it('does not infer a core workspace hold from an older unknown dispatch alone', async () => {
+    const user = userEvent.setup()
+    const uncertain = strategy({ experiments: [createdExperiment({ status: 'unknown', job_id: null })] })
+    const { api, calls } = scripted({ strategies: [uncertain], current: () => uncertain })
+    detail(api)
+    const panel = await openSection(user, '实验')
+    expect(panel.textContent).not.toContain('仍占用本工作区唯一的运行名额')
+    expect(screen.getByRole('region', { name: '证据' }).textContent).not.toContain('已有冻结的实验')
+    expect(calls.launch).toBe(0)
+  })
+
   it('opens the experiment tab from the next step, and runs nothing', async () => {
     const user = userEvent.setup()
     const { api, calls } = scripted({ strategies: [strategy()], current: () => strategy() })
