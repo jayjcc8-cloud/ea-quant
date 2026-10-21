@@ -1747,13 +1747,34 @@ describe('user strategy workspace', () => {
     expect(evidence.textContent).not.toContain('还没有冻结运行')
     expect(panel.textContent).toContain('仍占用本工作区唯一的运行名额')
     expect(panel.textContent).toContain('其他研究也暂时不能启动新实验')
-    expect(panel.textContent).toContain('重新打开应用不会解除占用')
-    expect(panel.textContent).toContain('当前版本没有自动恢复或安全释放入口')
+    expect(panel.textContent).toContain('重新打开应用不会自动释放该名额')
+    expect(panel.textContent).toContain('当前版本没有安全释放未知运行的入口')
     expect(within(panel).getByRole('link', { name: '查看脱敏诊断与备份说明' }).getAttribute('href'))
       .toBe('/settings?section=about')
     expect(within(panel).queryByRole('button', { name: '停止这次运行' })).toBeNull()
     expect(calls.launch).toBe(0)
     expect(calls.preview).toBe(0)
+    expect(calls.ask).toBe(0)
+  })
+
+  it('does not assert an occupied slot when a completed core run is temporarily unreadable', async () => {
+    const user = userEvent.setup()
+    // A previously completed record retains its frozen identity when the API
+    // cannot reach the core; unknown here is not proof of an active reservation.
+    const unreadable = strategy({ experiments: [createdExperiment({
+      owner: 'quine', status: 'unknown', frozen_sha256: 'c'.repeat(64),
+      attempt_id: 'completed-attempt', report_ready: false,
+      message: 'the core that owns this experiment could not be reached, so its state cannot be read here; nothing was re-sent and no cached result is served',
+    })] })
+    const { api, calls } = scripted({ strategies: [unreadable], current: () => unreadable })
+    detail(api)
+    const panel = await openSection(user, '实验')
+    expect(panel.textContent).not.toContain('这条未知运行仍占用')
+    expect(panel.textContent).toContain('不能仅凭“结果未知”判断运行名额是否占用')
+    expect(panel.textContent).toContain('若核心确认是中断后保留的未知运行')
+    expect(panel.textContent).toContain('若只是核心暂时不可达，请恢复连接后重新读取状态')
+    expect(screen.getByRole('region', { name: '证据' }).textContent).toContain('已有冻结的实验')
+    expect(calls.launch).toBe(0)
     expect(calls.ask).toBe(0)
   })
 
