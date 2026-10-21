@@ -4,6 +4,36 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
+// Window-local page zoom uses WKWebView pageZoom on macOS. It does not
+// claim to follow the system preferred reading size or change workspace data.
+struct PageZoom {
+    percent: Mutex<u16>,
+    status: tauri::menu::MenuItem<tauri::Wry>,
+    increase: tauri::menu::MenuItem<tauri::Wry>,
+    decrease: tauri::menu::MenuItem<tauri::Wry>,
+    reset: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+impl PageZoom {
+    fn change(&self, window: &tauri::WebviewWindow, action: &str) {
+        let mut percent = self.percent.lock().unwrap();
+        let next = match action {
+            "page-zoom-in" => (*percent + 25).min(200),
+            "page-zoom-out" => percent.saturating_sub(25).max(100),
+            "page-zoom-reset" => 100,
+            _ => return,
+        };
+        // Do not advance the menu if the WebView rejects the request.
+        if window.set_zoom(f64::from(next) / 100.0).is_ok() {
+            *percent = next;
+            let _ = self.status.set_text(format!("页面缩放：{next}%（本次窗口）"));
+            let _ = self.increase.set_enabled(next < 200);
+            let _ = self.decrease.set_enabled(next > 100);
+            let _ = self.reset.set_enabled(next != 100);
+        }
+    }
+}
+
 struct Session {
     child: Mutex<Option<Child>>,
     log: Mutex<Option<std::fs::File>>,
@@ -102,6 +132,10 @@ fn main() {
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "quit-session" {
                 app.exit(0);
+            } else if let (Some(window), Some(zoom)) =
+                (app.get_webview_window("main"), app.try_state::<PageZoom>())
+            {
+                zoom.change(&window, event.id().as_ref());
             }
         })
         .setup(move |app| {
@@ -124,7 +158,45 @@ fn main() {
                     &PredefinedMenuItem::select_all(app, None)?,
                 ],
             )?;
-            app.set_menu(Menu::with_items(app, &[&application_menu, &edit])?)?;
+            let zoom = PageZoom {
+                percent: Mutex::new(100),
+                status: MenuItem::with_id(
+                    app,
+                    "page-zoom-status",
+                    "页面缩放：100%（本次窗口）",
+                    false,
+                    None::<&str>,
+                )?,
+                increase: MenuItem::with_id(
+                    app,
+                    "page-zoom-in",
+                    "放大页面",
+                    true,
+                    Some("CmdOrCtrl+Shift+Equal"),
+                )?,
+                decrease: MenuItem::with_id(
+                    app,
+                    "page-zoom-out",
+                    "缩小页面",
+                    false,
+                    Some("CmdOrCtrl+-"),
+                )?,
+                reset: MenuItem::with_id(
+                    app,
+                    "page-zoom-reset",
+                    "恢复 100%",
+                    false,
+                    Some("CmdOrCtrl+0"),
+                )?,
+            };
+            let view = Submenu::with_items(
+                app,
+                "显示",
+                true,
+                &[&zoom.status, &zoom.increase, &zoom.decrease, &zoom.reset],
+            )?;
+            app.set_menu(Menu::with_items(app, &[&application_menu, &edit, &view])?)?;
+            app.manage(zoom);
             let allowed = Arc::new(Mutex::new(None::<String>));
             let navigate_allowed = allowed.clone();
             let window =
